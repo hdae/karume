@@ -198,6 +198,11 @@ export type SweepSettings = {
   readonly rounds: number;
   /** The candidate set ({@link CandidateSet} in geometries.ts). */
   readonly candidateSet: CandidateSet;
+  /**
+   * The candidate geometries to measure, by name, in this order ({@link selectedCandidates} —
+   * absent: every candidate of the set). The default geometry's row is measured either way.
+   */
+  readonly geometries?: readonly string[];
   /** The unit when timestamp-query is enabled (Chrome = `ns`, Deno = `deno-raw-tick`). */
   readonly timestampUnit: "ns" | "deno-raw-tick";
 };
@@ -828,6 +833,31 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
     case "i8a8-conv3d":
       return i8a8CandidatesIn(set);
   }
+};
+
+/**
+ * The candidates one case measures: every candidate of `set` ({@link candidatesFor}) when
+ * `geometries` is absent, else those geometries by name, in the order given (ADR 0117 addendum
+ * 2026-11-12, "the `geometries` option"). A name that is not a candidate of the case throws — the
+ * sweep entry point checks every planned case before it touches the GPU. The default geometry is
+ * not chosen here: {@link sweepCase} always measures it first.
+ */
+export const selectedCandidates = (
+  sweepCase: SweepCase,
+  set: CandidateSet,
+  geometries: readonly string[] | undefined,
+): GeometryCandidate[] => {
+  const candidates = candidatesFor(sweepCase, set);
+  if (geometries === undefined) return candidates;
+  return geometries.map((name) => {
+    const found = candidates.find((candidate) => candidate.name === name);
+    if (found === undefined) {
+      throw new Error(
+        `Geometry ${name} is not a candidate of case ${sweepCase.id} in candidate set ${set}`,
+      );
+    }
+    return found;
+  });
 };
 
 const sortedList = (values: Iterable<number>): string =>
@@ -1725,7 +1755,7 @@ export const runSweep = async (
     const result = await sweepCase(
       context,
       target,
-      candidatesFor(target, settings.candidateSet),
+      selectedCandidates(target, settings.candidateSet, settings.geometries),
       settings,
       hooks,
     );

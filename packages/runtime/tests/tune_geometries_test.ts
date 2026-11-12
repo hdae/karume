@@ -50,7 +50,7 @@ import {
   quickPlusI8a8Candidates,
 } from "../src/tune/geometries.ts";
 import { SWEEP_CASES } from "../src/tune/cases.ts";
-import { candidatesFor } from "../src/tune/harness.ts";
+import { candidatesFor, selectedCandidates } from "../src/tune/harness.ts";
 
 const names = (items: readonly { readonly name: string }[]): string[] =>
   items.map((item) => item.name);
@@ -219,6 +219,30 @@ describe("the i8a8 linear's full grid (ADR 0115 addendum decision 14)", () => {
         assert(!("skeleton" in geometry) && geometry.tileK <= 32, `${set}: ${name}`);
       }
     }
+  });
+});
+
+describe("selectedCandidates: the candidates one case measures under the geometries option (ADR 0117 addendum 2026-11-12)", () => {
+  const sweepCase = SWEEP_CASES.find((entry) => entry.op === "i8a8-linear");
+  assert(sweepCase !== undefined);
+
+  it("is every candidate of the set when absent, and the named ones in the order given otherwise", () => {
+    assertEquals(
+      names(selectedCandidates(sweepCase, "full", undefined)),
+      names(candidatesFor(sweepCase, "full")),
+    );
+    const [first, second, third] = candidatesFor(sweepCase, "full").slice(-3);
+    const picked = selectedCandidates(sweepCase, "full", [third.name, first.name, second.name]);
+    assertEquals(names(picked), [third.name, first.name, second.name]);
+    assertEquals(picked[0].geometry, third.geometry);
+  });
+
+  it("throws on a name that is not a candidate of the case in the set", () => {
+    assertThrows(
+      () => selectedCandidates(sweepCase, "quick", ["tile64x64r8x4w16x8k64s"]),
+      Error,
+      `Geometry tile64x64r8x4w16x8k64s is not a candidate of case ${sweepCase.id} in candidate set quick`,
+    );
   });
 });
 

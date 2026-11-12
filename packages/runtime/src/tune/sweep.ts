@@ -28,7 +28,13 @@ import {
   candidateSetDefaultKernelsIds,
   sweepCandidateKernelsId,
 } from "./fingerprint.ts";
-import { createSweepContext, destroySweepContext, runSweep, SWEEP_MAX_REPS } from "./harness.ts";
+import {
+  createSweepContext,
+  destroySweepContext,
+  runSweep,
+  selectedCandidates,
+  SWEEP_MAX_REPS,
+} from "./harness.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import {
   type CaseSummary,
@@ -93,6 +99,17 @@ export type GeometrySweepOptions = {
    */
   readonly cases?: readonly string[];
   /**
+   * The candidate geometries to measure, by the name a record's rows carry (`geometry` — e.g.
+   * `"tile64x64r8x4w16x8k64s"`), in the order given (default: every candidate of the set — an
+   * empty list is the default too, as for `cases`). The default geometry's row is always measured.
+   * A name that is not a candidate of every selected case, or a name given twice, throws before
+   * the GPU is touched. Recorded in `settings.geometries`. A record taken with it is an ordinary
+   * derivation input: each row stands for itself, and a candidate it did not measure is "not
+   * measured" there, as with narrowed `cases`. Its purpose: a machine that heats within one case
+   * measures that case in chunks with a cool-down between calls (ADR 0117 addendum 2026-11-12).
+   */
+  readonly geometries?: readonly string[];
+  /**
    * The number of measurement rounds per geometry (default 5 — the representative value is their
    * min).
    */
@@ -117,6 +134,8 @@ type SweepPlan = {
   readonly candidateSet: CandidateSet;
   readonly ops: readonly SweepOp[];
   readonly caseIds: readonly string[];
+  /** The `geometries` option (absent when omitted or empty). */
+  readonly geometries?: readonly string[];
   readonly rounds: number;
   readonly cases: readonly SweepCase[];
 };
@@ -128,7 +147,7 @@ const isSweepOp = (value: string): value is SweepOp =>
  * Checks the options and chooses the cases (before touching the GPU — a misspelled set, op or case
  * is never run as the default). The cases are those of the candidate set's case table
  * (`sweepCasesFor`) matching both op and id (every case of the op when no id is given), in the
- * order of that table.
+ * order of that table. Every name of `geometries` must be a candidate of every chosen case.
  */
 const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   const candidateSet = options.candidateSet ?? DEFAULT_CANDIDATE_SET;
@@ -159,7 +178,22 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   if (cases.length === 0) {
     throw new Error(`No case matches op [${ops.join(", ")}] and cases [${caseIds.join(", ")}]`);
   }
-  return { candidateSet, ops, caseIds, rounds, cases };
+  const names = options.geometries ?? [];
+  const twice = names.find((name, index) => names.indexOf(name) !== index);
+  if (twice !== undefined) {
+    throw new Error(`Geometry ${twice} is given twice in geometries (each is measured once)`);
+  }
+  const geometries = names.length === 0 ? undefined : names;
+  // Throws on a name that is not a candidate of a chosen case (the same selection as the sweep's)
+  for (const sweepCase of cases) selectedCandidates(sweepCase, candidateSet, geometries);
+  return {
+    candidateSet,
+    ops,
+    caseIds,
+    ...(geometries === undefined ? {} : { geometries }),
+    rounds,
+    cases,
+  };
 };
 
 /**
@@ -238,6 +272,7 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
         {
           rounds: plan.rounds,
           candidateSet: plan.candidateSet,
+          ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
           timestampUnit,
         },
         {
@@ -281,6 +316,7 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
         quick: plan.candidateSet === "quick",
         ops: plan.ops,
         ...(plan.caseIds.length === 0 ? {} : { cases: plan.caseIds }),
+        ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
         rounds: plan.rounds,
         targetPassMs: TARGET_PASS_MS,
         maxReps: SWEEP_MAX_REPS,

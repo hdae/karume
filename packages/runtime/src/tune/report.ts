@@ -239,6 +239,13 @@ export type Report = {
      * case of the op).
      */
     readonly cases?: readonly string[];
+    /**
+     * When narrowed with the `geometries` option: the candidate geometries measured, by name, in
+     * that order (absent = every candidate of the set; the default geometry's row is there either
+     * way — ADR 0117 addendum 2026-11-12). The generator does not read it: each row stands for
+     * itself.
+     */
+    readonly geometries?: readonly string[];
     readonly rounds: number;
     readonly targetPassMs: number;
     /**

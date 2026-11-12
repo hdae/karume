@@ -24,6 +24,8 @@ import {
 } from "../src/tune/derive.ts";
 import { timestampUnitFor } from "../src/tune/sweep.ts";
 import { sweepCaseEntries } from "../src/tune/cases.ts";
+import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
+import { i8a8Candidate, i8a8LinearCandidates } from "../src/tune/geometries.ts";
 import { familiesOf } from "../src/tune/families.ts";
 import {
   candidateSetCaseSetIds,
@@ -166,6 +168,45 @@ describe("runGeometrySweep: options validation (before touching the GPU)", () =>
   });
 });
 
+describe("runGeometrySweep: the geometries option (options validation, before touching the GPU — ADR 0117 addendum 2026-11-12)", () => {
+  const linear = { candidateSet: "full", ops: ["i8a8-linear"] } as const;
+  const skeleton = i8a8LinearCandidates().find(({ geometry }) => geometry.skeleton === "vec4");
+
+  it("throws on a name that is not a candidate of a chosen case, naming the name, the case and the set", async () => {
+    await assertRejects(
+      () => runGeometrySweep({ ...linear, geometries: ["tile1x1r1x1w1x1k1"] }),
+      Error,
+      "Geometry tile1x1r1x1w1x1k1 is not a candidate of case i8a8-linear-m1024-n2048-k2048 in candidate set full",
+    );
+    // A skeleton geometry is a candidate of the i8a8 linear's full only
+    assert(skeleton !== undefined);
+    await assertRejects(
+      () => runGeometrySweep({ ...linear, candidateSet: "quick+", geometries: [skeleton.name] }),
+      Error,
+      `Geometry ${skeleton.name} is not a candidate of case i8a8-linear-m1024-n2048-k2048 in candidate set quick+`,
+    );
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          candidateSet: "full",
+          ops: ["i8a8-linear", "i8a8-attention"],
+          geometries: [skeleton.name],
+        }),
+      Error,
+      `Geometry ${skeleton.name} is not a candidate of case i8a8-attention-qk-self-m1024-n1024`,
+    );
+  });
+
+  it("throws on a name given twice", async () => {
+    assert(skeleton !== undefined);
+    await assertRejects(
+      () => runGeometrySweep({ ...linear, geometries: [skeleton.name, skeleton.name] }),
+      Error,
+      `Geometry ${skeleton.name} is given twice in geometries`,
+    );
+  });
+});
+
 describe("timestampUnitFor", () => {
   it("is deno-raw-tick for Deno (wgpu does not convert raw ticks) and ns otherwise (Chrome / Dawn)", () => {
     assertEquals(timestampUnitFor("Deno/2.9.6"), "deno-raw-tick");
@@ -248,6 +289,50 @@ describe("runGeometrySweep: real GPU", () => {
       assertRecordFields(swept);
       // The notified case and the record's cases[] hold the same values (elapsedMs included)
       assertEquals(summaries, swept.cases);
+    },
+  );
+});
+
+describe("runGeometrySweep: real GPU — the geometries option (ADR 0117 addendum 2026-11-12)", () => {
+  it.skipIf(adapter === null)(
+    "measures the default first, then exactly the named geometries in the order given, records them in settings.geometries, and the record derives a table",
+    async () => {
+      const id = "i8a8-linear-m256-n1280-k1280";
+      const skeleton = i8a8LinearCandidates().find(
+        ({ geometry }) => geometry.skeleton === "vec4" && geometry.tileK === 64,
+      );
+      assert(skeleton !== undefined);
+      const { skeleton: _vec4, ...word } = skeleton.geometry;
+      const names = [skeleton.name, i8a8Candidate(word).name];
+      const swept = await runGeometrySweep({
+        candidateSet: "full",
+        cases: [id],
+        geometries: names,
+        rounds: 1,
+      });
+      assertEquals(swept.settings.geometries, names);
+      assertEquals(
+        swept.rows.map((row) => [row.geometry, row.isDefault]),
+        [
+          [i8a8Candidate(defaultI8a8Geometry("linear")).name, true],
+          [names[0], false],
+          [names[1], false],
+        ],
+      );
+      for (const row of swept.rows) assertEquals(row.error, undefined, row.error);
+      for (const row of swept.rows.slice(1)) {
+        assertEquals(row.identicalToDefault, true, row.geometry);
+      }
+      assertRecordFields(swept);
+      // An ordinary derivation input (a wall-clock record is refused for its timing, not its
+      // narrowing)
+      if (timestampQuery) {
+        const { profile } = deriveGeometryProfile(
+          [{ report: swept, path: "chunk.json", sha256: "chunk" }],
+          { id: "chunk", optIn: true },
+        );
+        assertEquals(profile.i8a8.linear.length, 3);
+      }
     },
   );
 });
