@@ -25,6 +25,7 @@ import {
   type GeometryProfile,
   type GeometryProfileFamily,
 } from "../src/kernels/geometry-profile.ts";
+import { ATTENTION_BENCH_SHAPES } from "../src/tune/attention-shapes.ts";
 import { caseShape, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
 import { infinityJson } from "../src/tune/derive.ts";
 import { familyEntries } from "../src/tune/families.ts";
@@ -231,6 +232,25 @@ describe("deriveGeometryProfile with a base table", () => {
     );
   });
 
+  it("refuses a base whose vendor, architecture or device differs from the records', naming the field", () => {
+    const records = [input("new-attention.json", familyRows("attention"))];
+    const from = base();
+    for (const field of ["vendor", "architecture", "device"] as const) {
+      const other: GeometryProfile = {
+        ...from,
+        provenance: {
+          ...provenanceOf(from),
+          adapter: { ...provenanceOf(from).adapter, [field]: "other" },
+        },
+      };
+      assertThrows(
+        () => derive(records, { base: other }),
+        Error,
+        `Base table 'base-gpu': adapter ${field} "other" differs from the sweep records'`,
+      );
+    }
+  });
+
   it("refuses a base saved in the earlier shape (provenance without per-family entries)", () => {
     const { families: _families, ...earlier } = provenanceOf(base());
     const text = infinityJson({
@@ -244,6 +264,39 @@ describe("deriveGeometryProfile with a base table", () => {
       Error,
       "Base table 'base-gpu': its provenance has no per-family entries",
     );
+  });
+
+  it("refuses a base whose fields of a family the records do not cover cannot build the sweep shapes' kernels, naming the family", () => {
+    const from = base();
+    // conv2d rows32 with tileN 4: the N = 262144 of conv2d 512² becomes 65536 workgroups
+    const narrow: GeometryProfile = {
+      ...from,
+      conv2d: { ...from.conv2d, rows32: { regM: 1, regN: 4, wgX: 1, wgY: 16 } },
+    };
+    const error = assertThrows(
+      () => derive([input("new-attention.json", familyRows("attention"))], { base: narrow }),
+      Error,
+      "Base table 'base-gpu', family conv2d: its geometry cannot build the kernels of the sweep shapes",
+    );
+    assertStringIncludes(error.message, "sweep this family again");
+  });
+
+  it("ignores a stale base entry of a family the records cover (the family is derived from them)", () => {
+    const from = base();
+    const provenance = provenanceOf(from);
+    const conv2d = provenance.families.conv2d;
+    assert(conv2d !== undefined);
+    const stale: GeometryProfile = {
+      ...from,
+      provenance: {
+        ...provenance,
+        families: { ...provenance.families, conv2d: { ...conv2d, kernels: "0000000000000000" } },
+      },
+    };
+    const { profile } = derive([input("new-conv2d.json", familyRows("conv2d"))], { base: stale });
+    assertEquals(profile.conv2d, DEFAULT_GEOMETRY_PROFILE.conv2d);
+    assertEquals(provenanceOf(profile).families.conv2d?.sweep, "new-conv2d.json");
+    assertEquals(geometryProfileMismatch(profile, ADAPTER), undefined);
   });
 });
 
@@ -357,5 +410,40 @@ describe("the attention-bench block carried over from the base", () => {
       "Base table 'base-gpu': its provenance.attentionBench names the online attention's kernels but the table chooses no form",
     );
     assertStringIncludes(error.message, "measure the attention bench again");
+  });
+
+  it("carries a block without kernels from a base that kept the form N gives, with a verdict line saying so", () => {
+    const [first] = ATTENTION_BENCH_SHAPES;
+    assert(first !== undefined);
+    // The first shape gains nothing: the verdict keeps the form N gives, the block has no kernels
+    const kept = derive(BASE_INPUTS, {
+      id: "base-gpu",
+      attentionBench: [
+        {
+          report: benchRecord({
+            timings: { [first.id]: { kernel: { a: 100_000_000, b: 100_000_000 } } },
+          }),
+          path: "run1.json",
+          sha256: "sha-run1.json",
+        },
+      ],
+    }).profile;
+    assertEquals(kept.attentionOnline, undefined);
+    assertEquals(provenanceOf(kept).attentionBench?.kernels, undefined);
+    const { profile, verdicts } = derive([input("new-attention.json", familyRows("attention"))], {
+      base: kept,
+    });
+    assertEquals(profile.attentionOnline, undefined);
+    assertEquals(provenanceOf(profile).attentionBench, provenanceOf(kept).attentionBench);
+    assertEquals(geometryProfileMismatch(profile, BENCH_ADAPTER), undefined);
+    assert(
+      verdicts.some(
+        (line) =>
+          line.startsWith("- attentionOnline (") &&
+          line.includes("carried over from table 'base-gpu' (the form N gives") &&
+          line.includes("run1.json"),
+      ),
+      verdicts.join("\n"),
+    );
   });
 });

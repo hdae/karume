@@ -9,9 +9,9 @@
 // case-set version are each returned with wording that names that field and the family ③ the
 // matching order (only the first mismatch is returned; families in the fixed order) ④ a family
 // without an entry matches only when its fields are the default ⑤ it does not throw (a table whose
-// geometry cannot build the kernels of the sweep shapes, and a table saved in the earlier shape
-// without per-family entries, are also returned as a message) ⑥ every built-in table matches its own
-// adapter.
+// geometry cannot build the kernels of the sweep shapes, with or without the family's entry, and a
+// table saved in the earlier shape without per-family entries are also returned as a message) ⑥
+// every built-in table matches its own adapter.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -258,6 +258,20 @@ describe("geometryProfileMismatch", () => {
     };
     const message = mismatchOf({ ...narrow, provenance: stored().provenance }, ADAPTER);
     assertStringIncludes(message, "family conv2d");
+    assertStringIncludes(message, "cannot build the kernels");
+    assertStringIncludes(message, "conv2d-c96-512x512");
+  });
+
+  it("returns the cannot-build reason, naming the family, for a family without an entry whose geometry cannot build the sweep shapes' kernels", () => {
+    const { conv2d: _conv2d, ...others } = stored().provenance.families;
+    const narrow: GeometryProfile = {
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id: "stored",
+      conv2d: { ...DEFAULT_GEOMETRY_PROFILE.conv2d, rows32: { regM: 1, regN: 4, wgX: 1, wgY: 16 } },
+      provenance: { adapter: ADAPTER, families: others },
+    };
+    const message = mismatchOf(narrow, ADAPTER);
+    assertStringIncludes(message, "Table 'stored', family conv2d");
     assertStringIncludes(message, "cannot build the kernels");
     assertStringIncludes(message, "conv2d-c96-512x512");
   });
