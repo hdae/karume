@@ -54,6 +54,7 @@ import {
   deriveProfile,
   geometryProfileJson,
   parseSweepReport,
+  i8a8LinearSegments,
   profileRowsSegments,
   type SlotVerdict,
   type SweepSource,
@@ -1184,6 +1185,48 @@ describe("profileRowsSegments: validation of the gemmRows segment boundaries", (
       [16.5, 64, 512, Infinity],
     ]) {
       assertThrows(() => profileRowsSegments(bounds), Error, "must be positive integers");
+    }
+  });
+});
+
+describe("i8a8LinearSegments: the i8a8.linear buckets (ADR 0115 addendum decision 14)", () => {
+  it("the generator's bounds (I8A8_LINEAR_ROWS_BOUNDS) are 3 buckets named by range, each defaulting to the default profile's one rule", () => {
+    const segments = i8a8LinearSegments(I8A8_LINEAR_ROWS_BOUNDS);
+    assertEquals(
+      segments.map((segment) => segment.maxRows),
+      [256, 512, Infinity],
+    );
+    assertEquals(
+      segments.map((segment) => segment.slot),
+      [...I8A8_LINEAR_SLOT_NAMES],
+    );
+    assertEquals(
+      segments.map((segment) => segment.scope),
+      [
+        "i8a8 linear row count ≤ 256",
+        "i8a8 linear row count 257〜512",
+        "i8a8 linear row count > 512",
+      ],
+    );
+    for (const segment of segments) {
+      assertEquals(segment.fallback, defaultI8a8Geometry("linear"), segment.slot);
+    }
+  });
+
+  it("refuses bounds without a trailing Infinity, out of order or not positive integers, naming i8a8.linear", () => {
+    const cases: readonly (readonly [readonly number[], string])[] = [
+      [[256, 512], "i8a8.linear bucket bounds [256, 512]: the last bound is not Infinity"],
+      [
+        [512, 256, Infinity],
+        "i8a8.linear bucket bounds [512, 256, Infinity]: not strictly ascending",
+      ],
+      [
+        [0, Infinity],
+        "i8a8.linear bucket bounds [0, Infinity]: bounds other than the last must be positive integers",
+      ],
+    ];
+    for (const [bounds, message] of cases) {
+      assertThrows(() => i8a8LinearSegments(bounds), Error, message);
     }
   });
 });
