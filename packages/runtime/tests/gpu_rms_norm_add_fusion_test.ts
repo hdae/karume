@@ -95,6 +95,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
     try {
       const x = fill([rows, dim], (i) => Math.sin(i * 0.713 + 0.19) * 4),
         w = fill([dim], () => 1),
+        weight = fill([dim], (i) => 1 + 0.37 * Math.sin(i * 1.3 + 0.4)),
         r = fill([rows, dim], () => 0);
       const reference = await createSessionFromContainer(
         gpu,
@@ -102,11 +103,24 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
         GRAPH_NAME,
       );
       try {
-        const expected = words((await reference.run({ x, w, r })).y);
+        // With a weight of 1 and a residual of 0 the reference writes the words of x · inv. The
+        // kernel's mask goes through two XORs: on x · inv (the prefetch form's rounding barrier,
+        // ADR 0017 addendum 3) and on the weighted value (the add's barrier). Under a weight that is
+        // not 1 each one changes the output, and one correctly rounded f32 product between them makes
+        // the expected words exact.
+        const scaled = words((await reference.run({ x, w, r })).y);
+        const product = new Float32Array(1);
+        const productWords = new Uint32Array(product.buffer);
+        const expectedFor = (mask: number): Uint32Array<ArrayBuffer> =>
+          scaled.map((bits, i) => {
+            productWords[0] = (bits ^ mask) >>> 0;
+            product[0] = product[0] * weight.data[i % dim];
+            return (productWords[0] ^ mask) >>> 0;
+          });
         const params = make(rmsNormParams(rows, dim, 1e-6), U.UNIFORM | U.COPY_DST);
         const buffers = [
           params,
-          ...[x, w, r].map((t) => make(t.data, U.STORAGE | U.COPY_DST)),
+          ...[x, weight, r].map((t) => make(t.data, U.STORAGE | U.COPY_DST)),
           make(rows * dim * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST),
         ];
         const stage = make(rows * dim * 4, U.COPY_DST | U.MAP_READ);
@@ -135,12 +149,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
           await stage.mapAsync(MAP_MODE.READ);
           const actual = new Uint32Array(stage.getMappedRange().slice(0));
           stage.unmap();
-          assertWordIdentity(
-            actual,
-            expected.map((v) => (v ^ mask) >>> 0),
-            "class",
-            `mask=${mask}`,
-          );
+          assertWordIdentity(actual, expectedFor(mask), "class", `mask=${mask}`);
         }
       } finally {
         await reference.dispose();
