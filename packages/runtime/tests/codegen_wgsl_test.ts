@@ -5565,11 +5565,18 @@ test("the fused kernels are separate from the existing kernels and generate the 
   // other width keeps v1's key and text, and the add form (which has no v1 path left) refuses them.
   for (const dim of [256, 768, 1280, 1536, 2560, 3072, 4096]) {
     assertEquals(rmsNormPrefetchTrip(dim), dim / 256, `trip ${dim}`);
-    assertEquals(rmsNormWorkgroupKey(dim), `rms_norm:v2:f32:lastdim:wg256:trip${dim / 256}`);
+    assertEquals(rmsNormWorkgroupKey(dim), `rms_norm:v3:f32:lastdim:wg256:trip${dim / 256}`);
     const v2 = rmsNormWorkgroupWgsl(dim);
-    // the reduction is v1's text, the value v1's expression on the prefetched words
+    // the reduction is v1's text, the value v1's product order on the prefetched words, with the
+    // rounding barrier on x · inv that keeps Metal from multiplying x · weight first
     assertEquals(v2.includes(rmsNormInvWgsl(256)), true, `reduction ${dim}`);
-    assertEquals(v2.split("out[base + o] = xv[t] * inv * wv[t];").length, 2, `value ${dim}`);
+    assertEquals(
+      v2.split(
+        "out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t];",
+      ).length,
+      2,
+      `value ${dim}`,
+    );
     assertEquals(v2.includes(`array<f32, ${dim / 256}>`), true, `registers ${dim}`);
   }
   for (const dim of [1, 128, 129, 255, 257, 1000, 4352, 5120]) {
@@ -5584,13 +5591,13 @@ test("the fused kernels are separate from the existing kernels and generate the 
   // the add forms keep the rounding barrier on the prefetched words and read the residual register
   assertEquals(
     rmsNormAddWgsl("norm-residual", 1536).includes(
-      "out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask) + rv[t];",
+      "out[base + o] = bitcast<f32>(bitcast<u32>(bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t]) ^ params.rounding_mask) + rv[t];",
     ),
     true,
   );
   assertEquals(
     rmsNormAddWgsl("residual-norm", 1536).includes(
-      "out[base + o] = rv[t] + bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask);",
+      "out[base + o] = rv[t] + bitcast<f32>(bitcast<u32>(bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t]) ^ params.rounding_mask);",
     ),
     true,
   );

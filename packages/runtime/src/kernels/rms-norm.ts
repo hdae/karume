@@ -33,9 +33,10 @@
  * loaded before its reduction. v1's output loop re-read them after the reduction behind a runtime
  * trip count, which made a lone row latency-bound (RTX 3080 Ti, dependent chain, M = 1: 5.0 → 2.8 µs
  * at dim 1536, 9.9 → 3.8 µs at 4096). Only the source of each operand changes: the reduction is the
- * same text and the value is {@link rmsNormValueWgsl} with the registers as its operands, so v2
- * writes v1's words (checked word for word against v1 on the GPU — gpu_rms_norm_prefetch_test.ts).
- * Other widths keep v1's text and key.
+ * same text and the value is {@link rmsNormValueWgsl} with the registers as its operands and the
+ * rounding barrier on `x · inv` (the key's v3; v2 had no barrier and Metal reassociated it), so the
+ * prefetch form writes v1's words (checked word for word against v1 on the GPU —
+ * gpu_rms_norm_prefetch_test.ts). Other widths keep v1's text and key.
  *
  * MUST: params are passed as a uniform. There is a workgroupBarrier inside the row loop, and the
  * loop condition must be uniform within the workgroup (loads from storage are not proven uniform by
@@ -93,13 +94,26 @@ export const rmsNormInvWgsl = (workgroupSize: 128 | 256): string => `    // sum 
  * The normalised value of element `index` of the row (`x · inv · weight`, left to right) — shared by
  * every form that writes or uses it, under the MUST of {@link rmsNormInvWgsl}. `registers` names
  * the registers that already hold the element's x and weight words (the prefetch form); only the
- * operands' source changes, never the expression.
+ * operands' source changes, never the order of the products.
+ *
+ * `roundingMask` (a uniform that is 0 at run time) puts an integer XOR on `x · inv` before the
+ * weight multiplies it. MUST for operands that are known before `inv`: with x and weight already in
+ * registers, Metal computes `(x · weight) · inv` (Chrome on Apple M2, 2026-11-13 — the failing
+ * words of the kernel check reproduce exactly), which rounds differently and turns `x · weight`
+ * that overflows to inf times an `inv` of 0 into NaN. The XOR rounds `x · inv` first on every
+ * backend; where no backend reassociates (v1, which loads the operands after `inv`) it is left out.
  */
 export const rmsNormValueWgsl = (
   index: string,
   registers: { readonly x?: string; readonly weight?: string } = {},
-): string =>
-  `${registers.x ?? `x[base + ${index}]`} * inv * ${registers.weight ?? `weight[${index}]`}`;
+  roundingMask?: string,
+): string => {
+  const scaled = `${registers.x ?? `x[base + ${index}]`} * inv`;
+  const weight = registers.weight ?? `weight[${index}]`;
+  return roundingMask === undefined
+    ? `${scaled} * ${weight}`
+    : `bitcast<f32>(bitcast<u32>(${scaled}) ^ ${roundingMask}) * ${weight}`;
+};
 
 const rmsNormWgsl = (workgroupSize: 128 | 256): string =>
   `// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
@@ -171,7 +185,7 @@ export const rmsNormPrefetchTrip = (dim: number): number | undefined =>
  * every index is in bounds and the loops are workgroup-uniform.
  */
 const rmsNormPrefetchWgsl = (trip: number, addOrder?: RmsNormAddOrder): string => {
-  const value = rmsNormValueWgsl("o", { x: "xv[t]", weight: "wv[t]" });
+  const value = rmsNormValueWgsl("o", { x: "xv[t]", weight: "wv[t]" }, "params.rounding_mask");
   const store =
     addOrder === undefined
       ? `out[base + o] = ${value};`
@@ -184,7 +198,8 @@ const rmsNormPrefetchWgsl = (trip: number, addOrder?: RmsNormAddOrder): string =
 struct Params {
   rows: u32,
   dim: u32,
-  eps: f32,${addOrder === undefined ? "" : "\n  rounding_mask: u32,"}
+  eps: f32,
+  rounding_mask: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -241,14 +256,14 @@ const requirePrefetchTrip = (dim: number, where: string): number => {
 
 /**
  * The key of the 256-wide rms_norm for rows of `dim` elements: the prefetch form's
- * (`rms_norm:v2:…:trip<dim / 256>` — the trip count is in the WGSL) where
+ * (`rms_norm:v3:…:trip<dim / 256>` — the trip count is in the WGSL) where
  * {@link rmsNormPrefetchTrip} has one, else v1's {@link RMS_NORM_KEY}.
  */
 export const rmsNormWorkgroupKey = (dim: number): string => {
   const trip = rmsNormPrefetchTrip(dim);
   return trip === undefined
     ? RMS_NORM_KEY
-    : `rms_norm:v2:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}:trip${trip}`;
+    : `rms_norm:v3:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}:trip${trip}`;
 };
 
 /** The WGSL of {@link rmsNormWorkgroupKey}. */
@@ -297,7 +312,7 @@ export const rmsNormAddWgsl = (order: RmsNormAddOrder, dim: number): string => {
 export const rmsNormAddKey = (order: RmsNormAddOrder, dim: number): string => {
   assertRmsNormAddOrder(order);
   requirePrefetchTrip(dim, "rms_norm_add");
-  return `rms_norm_add:v2:${rmsNormWorkgroupKey(dim)}:${order}:xor-round`;
+  return `rms_norm_add:v3:${rmsNormWorkgroupKey(dim)}:${order}:xor-round`;
 };
 
 const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {

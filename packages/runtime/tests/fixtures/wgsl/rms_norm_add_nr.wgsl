@@ -56,7 +56,7 @@ fn main(
 
     for (var t = 0u; t < 6u; t = t + 1u) {
       let o = lid + t * 256u;
-      out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask) + rv[t];
+      out[base + o] = bitcast<f32>(bitcast<u32>(bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t]) ^ params.rounding_mask) + rv[t];
     }
     row = row + nwg.x;
   }

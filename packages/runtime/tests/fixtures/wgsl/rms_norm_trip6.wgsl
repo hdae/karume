@@ -3,6 +3,7 @@ struct Params {
   rows: u32,
   dim: u32,
   eps: f32,
+  rounding_mask: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -52,7 +53,7 @@ fn main(
 
     for (var t = 0u; t < 6u; t = t + 1u) {
       let o = lid + t * 256u;
-      out[base + o] = xv[t] * inv * wv[t];
+      out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t];
     }
     row = row + nwg.x;
   }
