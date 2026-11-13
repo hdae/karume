@@ -126,4 +126,6 @@ fix the order where the operands are known before `inv`.
 - On Node + Dawn (RTX 3080 Ti, Vulkan) v3 writes v1's words on the adversarial check, and the sha256 rows of the
   core, gemma4, gemma4-qat-mobile, wan and moss lanes are unchanged (the other lanes were not re-run). The RMS → add
   test that the barrier executes now checks both XORs under a weight that is not 1 (with a weight of 1 they cancel). The dependent-chain timing against v2 is ×0.998–1.006 (dims 256 / 1536 / 2560 / 4096, rows 1
-  and 768, cold and warm; `outputs/diag/rms-barrier-2026-11-13/`, untracked). The Metal re-run is pending.
+  and 768, cold and warm; `outputs/diag/rms-barrier-2026-11-13/`, untracked). On Chrome / Metal (Apple M2 and M5) the
+  prefetch check and the `rmsNormRope` twin now pass (`outputs/bench-browser/kernel-check_2026-11-13T21-22-18.json` /
+  `…T20-59-22.json`, untracked).
