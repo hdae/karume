@@ -95,3 +95,9 @@ The rule's widths are now 256 / 1536 / 2560 / 2816 / 3840. 2816 (11 × 256) is a
 and it is covered by the same u32 check against the unfused pair. On 26B it fuses 90 pairs per decode forward, about
 0.5 ms of GPU time on the RTX 3080 Ti ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md) §5). It is part
 of 26B's `i4-fast`.
+
+## Addendum (2026-11-13) — the value inside the barrier rounds `x · inv` first (v3)
+
+The fused kernel's value now carries the rounding barrier of ADR [0017](0017-rms-norm-conv2d-clamp-min.md)
+addendum 3 on `x · inv`, inside the add's own barrier, because Metal reassociated the prefetched product chain. The
+key is `rms_norm_add:v3:rms_norm:v3:f32:lastdim:wg256:trip<n>:<order>:xor-round`.

@@ -166,6 +166,10 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime`: the prefetch form of `rms_norm` and of the RMS → add fusion (rows of a multiple of 256 up to
+  4096) rounds `x · inv` before the weight multiplies it. On Metal the form wrote words other than the plain kernel's,
+  because the compiler multiplied `x · weight` first. Its keys are `rms_norm:v3:…` and `rms_norm_add:v3:…`; outputs
+  on Vulkan are unchanged (ADR 0017 addendum 3).
 - `@karume/runtime/tune`: the sweep's `i8a8-linear` cases gain the five Wan2.2 TI2V-5B DiT linear shapes at 33
   frames, an Irodori v4-small small-M guard (M 185) and the same shape at M 256 (13 cases, with the ordinary
   `i8a8-linear-m…` ids), and the `full` set gives that family a grid of its own: the 48 geometries of the other i8a8

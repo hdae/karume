@@ -149,13 +149,14 @@ The playground's `/kernel-check` page (Run all) on **Apple M2 and Apple M5 (the 
 checks below; on Chrome / D3D12 (RTX 5070 Ti) and on Node + Dawn / Vulkan (RTX 3080 Ti) the same cases are
 word-identical (D3D12 keeps its one known FAIL, the K-95 classes of the states-attention check). Each check compares
 two WGSL texts of the same arithmetic as u32 words; every one that FAILs has a sum over many terms in it, and the
-differences are 1–2 ULP of finite values. The order-only mutants of the states-attention check are all detected
+differences are 1–2 ULP of finite values, except in `rms-norm-prefetch`, where a weight of ±f32 max next to an
+`inv` of 0 gives NaN against 0 (the cause is in its row). The order-only mutants of the states-attention check are all detected
 on Metal too, so the harness is not blind there.
 
 | Check (part) | Compared | Failing cases on Metal |
 | --- | --- | --- |
-| `rms-norm-prefetch` (3 parts) | the prefetch form of `rms_norm` and of both RMS → add orders (perf-ledger K-99) vs the runtime-trip text | 96 of 118 in each part (about 10% of the words of the plain kernel at 33 rows, about 3.5% of the add forms); the 22 that pass hold only rows that are all zero or have a non-finite element |
-| `fusion-twins` (`fusion-rms-norm-rope`) | the fused rmsNormRope vs `rms_norm` → pair RoPE | 4 of 8: exactly the row widths where the plain side's `rms_norm` is the prefetch form (256, 512, 1536, 3072); the widths on the runtime-trip text (384, 1664, 3200) are identical, so the fused kernel writes the runtime-trip form's words |
+| `rms-norm-prefetch` (3 parts) | the prefetch form of `rms_norm` and of both RMS → add orders (perf-ledger K-99) vs the runtime-trip text | 96 of 118 in each part (about 10% of the words of the plain kernel at 33 rows, about 3.5% of the add forms); the 22 that pass hold only rows that are all zero or have a non-finite element. Cause found (2026-11-13, M2 record `kernel-check_2026-11-13T18-47-16.json`, untracked): Metal computes the prefetch form's `x · inv · weight` as `(x · weight) · inv` (both operands sit in registers before `inv` exists). Recomputing both orders in f32 reproduces the record exactly: 92 and 168 failing words at dim 256 and 512 × 8 rows, with the first index and both words. From dim 768 the weights include ±f32 max, so `x · weight` overflows and times an `inv` of 0 gives NaN. The key's v3 puts the XOR rounding barrier on `x · inv`; the Metal re-run is pending |
+| `fusion-twins` (`fusion-rms-norm-rope`) | the fused rmsNormRope vs `rms_norm` → pair RoPE | 4 of 8: exactly the row widths where the plain side's `rms_norm` is the prefetch form (256, 512, 1536, 3072); the widths on the runtime-trip text (384, 1664, 3200) are identical, so the fused kernel writes the runtime-trip form's words. The same cause as the row above (the plain side reassociates); expected to pass with v3, the Metal re-run is pending |
 | `state-attention-rewrites` (`state-qk-fold`) | folded ①′ vs ①′ | 252 of 252, the F = 8 classes the product folds included |
 | `state-attention-rewrites` (`state-pv-unroll`, `state-stats-pv-unroll`) | the unrolled forms (perf-ledger K-91) vs their v1 WGSL | 532 of 546 and 476 of 490 |
 | `state-kv16` (`state-kv16-readers`) | f16 full-slot readers vs their f32 forms over a rounded slot | 31 of 246, the read-only reader's O words only |
@@ -171,6 +172,8 @@ reductions, the integer and byte-plane GEMVs, the f16 score store, the bidirecti
   models), the decode attention of the Gemma 4 and MiniCPM5 lines, and Wan's q / k prologues.
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
+  Confirmed for `rms-norm-prefetch` only (a product chain reassociated, the row above); the other rows are not
+  analysed.
 - **Ruling (2026-11-11, provisional)**: recorded and accepted — bit identity across forms was never guaranteed on
   Metal. A release reads the Metal page against this table (release runbook). What to do about Metal beyond that is
   undecided.

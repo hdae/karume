@@ -110,3 +110,20 @@ barrier or a wrong prefetch stride each fail it. The degenerate-shape harness ca
 family lane's sha256 rows are unchanged. End to end (Node + Dawn, Gemma 4 E2B `i4-fast`, greedy, v1
 substituted back): GPU busy 5.79 → 5.42 ms per token regular, 5.99 → 5.64 QAT; the text is identical.
 Not checked on D3D12 or Metal.
+
+## Addendum 3 (2026-11-13) — a rounding barrier on `x · inv` in the prefetch form (v3)
+
+On Chrome / Metal (Apple M2) the prefetch form did not write v1's words: with x and the weight already in registers
+before `inv` exists, Metal computes `x · inv · weight` as `(x · weight) · inv`. Recomputing both orders in f32
+reproduces the M2 kernel-check record exactly (known-issues, the Metal section). The same text therefore does not
+fix the order where the operands are known before `inv`.
+
+- The prefetch form's value is `bitcast<f32>(bitcast<u32>(xv[t] * inv) ^ params.rounding_mask) * wv[t]`. The
+  rounding mask is the fourth word of `rmsNormParams` (already 0, now read by the plain kernel too), so `x · inv` is
+  rounded before the weight multiplies it on every backend. The add forms keep their outer barrier around this value.
+  v1 and the `rmsNormRope` kernel load their operands after `inv` and keep their text.
+- Keys: `rms_norm:v3:f32:lastdim:wg256:trip<n>` and `rms_norm_add:v3:rms_norm:v3:…:<order>:xor-round`.
+- On Node + Dawn (RTX 3080 Ti, Vulkan) v3 writes v1's words on the adversarial check, and the sha256 rows of the
+  core, gemma4, gemma4-qat-mobile, wan and moss lanes are unchanged (the other lanes were not re-run). The RMS → add
+  test that the barrier executes now checks both XORs under a weight that is not 1 (with a weight of 1 they cancel). The dependent-chain timing against v2 is ×0.998–1.006 (dims 256 / 1536 / 2560 / 4096, rows 1
+  and 768, cold and warm; `outputs/diag/rms-barrier-2026-11-13/`, untracked). The Metal re-run is pending.
