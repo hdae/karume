@@ -791,3 +791,22 @@ The maintainer decided this design on 2026-11-12 (K-85's second slice).
   bucket alone; a skeleton row is read and adopted); `tune_fingerprint_test.ts` (the bounds enter the i8a8-linear
   family's case-set version only); `tune_geometries_test.ts` (the grid); `tune_mismatch_test.ts` (every embedded table
   against its own adapter).
+- **The NVIDIA sweeps, registered (2026-11-13).** `nvidia-blackwell` and `nvidia-ampere` each take two `full` sweeps
+  of `i8a8-linear` alone (the 13 cases), derived with the table as `base`, so every other family's fields and
+  provenance entries are carried over unchanged. The RTX 5070 Ti swept in Chrome 157 on `/geometry-sweep` (two
+  records, default re-measurement drift ≤ ×1.029); the RTX 3080 Ti swept in Node + Dawn in chunks of 8 candidates
+  with a cool-down before each call (the `geometries` option), each chunk's per-case records merged into one record
+  (29 per sweep; 3 of the 754 calls were not kept because their drift stayed above ×1.05 after three tries, and the
+  other sweep's rows stand alone there). Each adopted geometry was checked, per case, to be no slower than the
+  geometry the table held for that bucket in the same records:
+
+  | Table | ≤ 256 | 257〜512 | > 512 | > 512 vs the geometry it held |
+  | --- | --- | --- | --- | --- |
+  | `nvidia-blackwell` | `tile32x64r4x4w16x8k32` ×2.326 | `tile128x64r16x4w16x8k64s` ×1.190 | `tile128x64r8x8w8x16k64s` ×1.195 | ×1.031–×1.072 per case |
+  | `nvidia-ampere` | `tile32x32r8x4w8x4k64s` ×3.377 | `tile64x64r8x4w16x8k64s` ×1.571 | `tile128x64r16x4w16x8k64s` ×1.406 | ×1.120–×1.603 per case |
+
+  (ratios to the default geometry, the geometric mean over the bucket's cases; `s` = the vec4 skeleton.) This ends the
+  interim default geometry of the small buckets on both NVIDIA tables. A w4a8 linear whose group length the K64 tile
+  does not divide (group 32) runs the default geometry by the fallback above. On the RTX 3080 Ti the sha256 rows of
+  the `wan`, `wan-ti2v`, `anima`, `irodori`, `sbv2` and `moss` lanes stayed unchanged after the registration.
+  `apple-metal-3` stays in the interim state: no sweep of the family has been taken on an M2.

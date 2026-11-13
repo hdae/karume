@@ -522,7 +522,7 @@ valid taps in i32).
 Without the developer flag (`chrome://flags/#enable-webgpu-developer-features`), Chrome leaves the
 adapter's `description` empty, so `apple-metal-3` (matched by `description: "Apple M2"`) does not
 apply automatically and Apple gets the default geometry (the M2 DiT loses its ×1.75; on M5 the default
-is the best). Applications can take it from `BUILTIN_GEOMETRY_PROFILES` and inject it with
+is the best, except for the i8a8 linear at small row counts — perf-ledger K-85, 2026-11-13). Applications can take it from `BUILTIN_GEOMETRY_PROFILES` and inject it with
 `acquireGpu({ geometryProfile })` ([decisions/0115](decisions/0115-geometry-profiles.md) addendum decision 7).
 
 ## The BiRefNet family's distribution has 2 models, 1024² and 2048² (model name = resolution, default 1024²)

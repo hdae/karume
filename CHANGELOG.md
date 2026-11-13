@@ -173,18 +173,15 @@ measurements in `docs/research/`.
   skeleton) within 16,384 B of workgroup storage — 230 geometries. `deriveGeometryProfile` reads the skeleton in a
   row's `geometryParams` and can adopt it (ADR 0115 addendum decision 14).
 - `@karume/runtime`: the embedded tables `nvidia-ampere`, `nvidia-blackwell` and `apple-metal-3` hold
-  `i8a8.linear` as three row-count rules, regenerated from their own sweep records: rows > 512 keep each table's
-  geometry, and rows ≤ 512 run the default geometry until a sweep of the family is registered. On the two NVIDIA
-  GPUs that is a measured slowdown for the small-M i8a8 linears (Irodori's M = 185, for one): in the K-85 evaluation
-  records the geometry the table held was faster than the default per dispatch — on the RTX 5070 Ti
-  (`nvidia-blackwell`, `tile128x64r8x4w16x16k16`; record
-  `outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_k85_2026-11-12T02-04-54.json`) ×1.338 at M 185,
-  ×1.117 at M 1 and ×1.122 at M 512 (default re-measurement drift ×1.000 / ×1.013 / ×1.011), on the RTX 3080 Ti
-  (`nvidia-ampere`, `tile64x64r8x4w16x8k16`; records `outputs/diag/k85-linear-2026-11-11/geometry-sweep_k85_*.json`)
-  ×2.013, ×1.991 and ×1.412 (drift ×1.089 / ×1.194 / ×1.171 — the last two outside the 0.9–1.1 range the derivation
-  accepts, as for five of that run's six cases, so these are evaluation figures). No such record exists for the Apple
-  M2 (`apple-metal-3`). Outputs are unchanged, the i8a8 geometries being bit-identical. Every other field of the
-  tables is unchanged.
+  `i8a8.linear` as three row-count rules (≤ 256, 257〜512, > 512). `nvidia-blackwell` and `nvidia-ampere` take
+  them from `full` sweeps of the `i8a8-linear` family on the RTX 5070 Ti and the RTX 3080 Ti (every rule but Blackwell's
+  ≤ 256 has the vec4 skeleton and a K64 tile): per bucket ×2.326 / ×1.190 / ×1.195 (Blackwell) and
+  ×3.377 / ×1.571 / ×1.406 (Ampere) over the default geometry, and on every case > 512 faster than the geometry each
+  table held before (×1.031–×1.072 and ×1.120–×1.603). `apple-metal-3` was regenerated from its own records: rows
+  above 512 keep its geometry and rows ≤ 512 run the default geometry until a sweep of the family is taken on an M2 (the
+  effect there is not measured). A w4a8 linear whose group length a K64 rule does not divide runs the default
+  geometry. Outputs are unchanged, the i8a8 geometries being bit-identical. Every other field of the tables is
+  unchanged (ADR 0115 addendum decision 14).
 - `@karume/runtime/tune`: `runAttentionRouteBench` measures `ATTENTION_BENCH_SHAPES` by default (MOSS-Image's
   1024² attention added to Wan2.2's three shapes). Its `online` row times the online kernel in the key-axis form the
   route takes on the device and reports it (`keyWords`); with `onlineTiled`, the pair's first arm and the
