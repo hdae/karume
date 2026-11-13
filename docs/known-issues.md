@@ -175,11 +175,25 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
-  Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above); the rows of the table are
-  not analysed.
+  Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above). Analysis of the table's
+  rows (2026-11-13, M2 record `kernel-check_2026-11-13T21-22-18.json`, untracked):
+  - `state-qk-fold`, the ①′ side: Metal computes the term `(q · scale) · (k · scale)` as
+    `fma((scale · scale) · q, k, acc)`. Recomputed in f32 this reproduces the ①′ word at the first failure of every
+    one of the 36 failing decode cases (M = Q = 1). The folded side matched no simple grouping or accumulator split
+    tried, so its form is unknown.
+  - `state-pv-unroll` and `state-stats-pv-unroll`: cases where each lane takes one column (none reaches the batched
+    loop) fail too, so the difference is in the term `exp(s − amax) · inv · v`, not in the order of the sum. v1
+    computes `p` before the branch that loads `v`; the unrolled forms write the whole product in one expression.
+    Not reproduced word for word (`exp` is not correctly rounded).
+  - `state-kv16-readers`: the f16 and f32 read-only readers differ only in how `v` is read, with `p` and the
+    product in one expression in both; the sequential and parallel readers, which compute `p` before the branch,
+    are identical.
+
+  Inferred, not measured: a rounding barrier on the factors (as in the `rms_norm` fix) would fix the grouping in
+  each of these forms.
 - **Ruling (2026-11-11, provisional)**: recorded and accepted — bit identity across forms was never guaranteed on
   Metal. A release reads the Metal page against this table (release runbook). What to do about Metal beyond that is
-  undecided.
+  undecided. 2026-11-13: the state-attention rows stay recorded; a barrier spike is filed under later in the backlog.
 
 ## On Metal, the VAE fusion rule `models/vae_rms_silu` may differ from the unfused plan (not measured; recorded by the ruling of 2026-11-12)
 

@@ -488,6 +488,12 @@ maintainer's ruling of 2026-11-06).
   ([limitations](limitations.md)). Revival = real demand at the 26B A4B class. The first unit is one design memo on "whether sequential reads of phase 2 alone
   work with a source that has no CacheStorage".
 - Pinning down the cause of the Metal numeric difference (known-issues); lifting the diagnostics / measurement constraints of the resident path.
+- **Spike, if needed: rounding barriers in the states-form attention for Metal** (known-issues, the Metal kernel-check
+  section; ruling 2026-11-13: record first, spike later). Put the XOR rounding barrier on `q · scale` / `k · scale`
+  in ①′ and the folded ①′, then on `p` in the unrolled PV forms and the read-only reader. Check that the NVIDIA words
+  and sha rows do not change, measure the Gemma 4 decode speed (drop it if it costs speed), and run `/kernel-check`
+  on the M2 and the RTX 5070 Ti. The folded side's Metal form is unknown, so it may still differ. If D3D12's F = 4
+  difference (perf-ledger K-95) has the same cause, E4B could take the folded form.
 - **MoE page-fault**: PoC done in a spike outside the repository (2026-09-01) — the mechanism works (the readback of a miss
   can ride on the round trip that decode already pays, with zero extra synchronization; output bit-identical to direct binding), but **practical
   viability is uncertain** (the PoC's miss cost was dominated by one re-execution fence of about 11 ms, which came from Deno's 10 ms
