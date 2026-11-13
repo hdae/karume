@@ -474,19 +474,38 @@ export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
 };
 
 /**
- * The set for the i8a8 linear: `full` is its own grid ({@link i8a8LinearCandidates}), every other
- * set the i8a8 family's ({@link i8a8CandidatesIn}).
+ * The set for the i8a8 linear: `full` is its own grid ({@link i8a8LinearCandidates}), `quick+` the
+ * whole {@link quickPlusI8a8Candidates}, `quick` the i8a8 family's ({@link i8a8CandidatesIn}).
  */
-export const i8a8LinearCandidatesIn = (set: CandidateSet): I8a8Candidate[] =>
-  set === "full" ? i8a8LinearCandidates() : i8a8CandidatesIn(set);
+export const i8a8LinearCandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
+  switch (set) {
+    case "full":
+      return i8a8LinearCandidates();
+    case "quick+":
+      // Every geometry the tables hold, the linear-only forms included: a quick+ sweep that rebuilds
+      // a table MUST measure the table's own i8a8.linear rules (quickPlusI8a8Candidates)
+      return quickPlusI8a8Candidates();
+    default:
+      return i8a8CandidatesIn(set);
+  }
+};
 
-/** The set for the i8a8 family (the i8a8 attention and conv3d — the linear's `full` differs). */
+/**
+ * Whether a geometry has the shape of the i8a8 family's grid ({@link i8a8Candidates}): no vec4
+ * skeleton and tileK ≤ 32. The skeleton and the K64 tiles are the i8a8 linear's alone (its `full`
+ * grid, perf-ledger K-85), so a table's i8a8.linear rule of that form stays out of the attention's
+ * and conv3d's quick+.
+ */
+const inI8a8FamilyGrid = ({ geometry }: I8a8Candidate): boolean =>
+  geometry.skeleton === undefined && geometry.tileK <= 32;
+
+/** The set for the i8a8 family (the i8a8 attention and conv3d — the linear's `full` and `quick+` differ). */
 export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
   switch (set) {
     case "quick":
       return quickI8a8Candidates();
     case "quick+":
-      return quickPlusI8a8Candidates();
+      return quickPlusI8a8Candidates().filter(inI8a8FamilyGrid);
     case "full":
       return i8a8Candidates();
     case "k88":

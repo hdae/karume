@@ -197,11 +197,18 @@ describe("the i8a8 linear's full grid (ADR 0115 addendum decision 14)", () => {
     }
   });
 
-  it("is what the i8a8 linear sweeps under full; quick / quick+ and the i8a8 attention and conv3d keep the i8a8 family's set", () => {
+  it("is what the i8a8 linear sweeps under full; its quick+ adds the tables' linear-only forms; quick and the i8a8 attention and conv3d keep the i8a8 family's set", () => {
     assertEquals(names(i8a8LinearCandidatesIn("full")), listed);
-    for (const set of ["quick", "quick+"] as const) {
-      assertEquals(names(i8a8LinearCandidatesIn(set)), names(i8a8CandidatesIn(set)), set);
-    }
+    assertEquals(names(i8a8LinearCandidatesIn("quick")), names(i8a8CandidatesIn("quick")));
+    // quick+: the linear measures every table geometry; the attention and conv3d leave out the
+    // linear-only forms (a table's skeleton / K64 i8a8.linear rule)
+    const familyForm = ({ geometry }: { readonly geometry: I8a8Geometry }) =>
+      !("skeleton" in geometry) && geometry.tileK <= 32;
+    assertEquals(names(i8a8LinearCandidatesIn("quick+")), names(quickPlusI8a8Candidates()));
+    assertEquals(
+      names(i8a8CandidatesIn("quick+")),
+      names(quickPlusI8a8Candidates().filter(familyForm)),
+    );
     assertEquals(names(i8a8CandidatesIn("full")), names(i8a8Candidates()));
     for (const op of ["i8a8-linear", "i8a8-attention", "i8a8-conv3d"] as const) {
       const sweepCase = SWEEP_CASES.find((entry) => entry.op === op);
@@ -211,9 +218,15 @@ describe("the i8a8 linear's full grid (ADR 0115 addendum decision 14)", () => {
         op === "i8a8-linear" ? listed : names(i8a8Candidates()),
         op,
       );
-      assertEquals(names(candidatesFor(sweepCase, "quick+")), names(quickPlusI8a8Candidates()), op);
+      assertEquals(
+        names(candidatesFor(sweepCase, "quick+")),
+        op === "i8a8-linear"
+          ? names(quickPlusI8a8Candidates())
+          : names(quickPlusI8a8Candidates().filter(familyForm)),
+        op,
+      );
     }
-    // The table-deriving sets other than the linear's full hold no skeleton and no K64 tile
+    // The i8a8 family's sets (the attention's and conv3d's) hold no skeleton and no K64 tile
     for (const set of ["quick", "quick+", "full"] as const) {
       for (const { name, geometry } of i8a8CandidatesIn(set)) {
         assert(!("skeleton" in geometry) && geometry.tileK <= 32, `${set}: ${name}`);
@@ -349,7 +362,14 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
     assertEquals(names(conv2dCandidatesIn("quick+")), names(quickPlusConv2dCandidates()));
     assertEquals(names(conv2dCandidatesIn("full")), names(conv2dCandidates()));
     assertEquals(names(i8a8CandidatesIn("quick")), names(quickI8a8Candidates()));
-    assertEquals(names(i8a8CandidatesIn("quick+")), names(quickPlusI8a8Candidates()));
+    assertEquals(
+      names(i8a8CandidatesIn("quick+")),
+      names(
+        quickPlusI8a8Candidates().filter(
+          ({ geometry }) => !("skeleton" in geometry) && geometry.tileK <= 32,
+        ),
+      ),
+    );
     assertEquals(names(i8a8CandidatesIn("full")), names(i8a8Candidates()));
   });
 });
