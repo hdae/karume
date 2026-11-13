@@ -80,10 +80,17 @@ test.skipIf(!GPU_AVAILABLE)(
           try {
             await fused.run({ x });
             await primitive.run({ x });
+            const geometry = expectedI8a8LinearGeometry(profile, rows);
+            // The vec4 fill (`:fill16`) comes with a vec4-skeleton geometry on i8 weights at
+            // K % 16 == 0 (perf-ledger K-85); these weights are i8
+            const vecFill = geometry.skeleton === "vec4" && k % 16 === 0;
             const gemm = linearI8a8Key(
               linearI8a8UsesVec4(n),
               dot === "dp4a",
-              expectedI8a8LinearGeometry(profile, rows),
+              geometry,
+              "i8",
+              undefined,
+              vecFill,
             );
             assertEquals(
               requireCensus(fused.diagnostics().lastRunPipelines, label)
