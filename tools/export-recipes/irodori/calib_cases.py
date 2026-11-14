@@ -42,9 +42,10 @@ the muffling was attributed to the corpus.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
-from .pipeline_ref import PIPELINE_CASES, PipelineCase, ReferenceSpec
+from .pipeline_ref import PIPELINE_CASES, PipelineCase, ReferenceSpec, pipeline_cases
 
 #: The calibration input cases (all are used, in this order).
 #:
@@ -152,17 +153,21 @@ CALIB_CASES: tuple[PipelineCase, ...] = (
 )
 
 
-def evaluation_cases() -> tuple[PipelineCase, ...]:
+def evaluation_cases(text_config: Mapping[str, Any] | None = None) -> tuple[PipelineCase, ...]:
     """All the evaluation inputs that **must be kept disjoint** from calibration (read directly
     from the single source of truth).
 
-    Irodori's evaluation inputs are confined to `irodori.pipeline_ref.PIPELINE_CASES` — the
-    full-loop golden (`meta.json` / `case.*.safetensors`), the LSD / SNR of
+    Irodori's evaluation inputs are confined to the full-loop golden's case table of
+    `irodori.pipeline_ref` — the golden (`meta.json` / `case.*.safetensors`), the LSD / SNR of
     `irodori.measure_quant` and the Deno-side E2E all follow this golden, so no copy is needed
     (anima extracts them from the actual TS files because its evaluation inputs also have a
     separate source of truth on the Deno side).
+
+    `text_config` (the checkpoint's embedded text-encoder config) picks that table the way the
+    golden picks it (`irodori.pipeline_ref.pipeline_cases` — a T5Gemma2 checkpoint, v4-Large, adds
+    `caption-window`). Without it this is `PIPELINE_CASES`, the small models' table.
     """
-    return PIPELINE_CASES
+    return PIPELINE_CASES if text_config is None else pipeline_cases(text_config)
 
 
 def _bodies(case: PipelineCase) -> tuple[str, ...]:
@@ -215,14 +220,18 @@ def assert_calib_disjoint(cases: Sequence[PipelineCase], evaluated: Sequence[Pip
         )
 
 
-def calibration_cases() -> tuple[PipelineCase, ...]:
+def calibration_cases(text_config: Mapping[str, Any] | None = None) -> tuple[PipelineCase, ...]:
     """Return all the calibration cases, with the disjointness check (the only entry point of the
     calibration path).
 
     MUST: go through here instead of reading the constant directly — a path that skips the check
     would let disjointness silently break while the constant alone stays green.
+
+    MUST: the export passes the checkpoint's `text_config`, so the check covers that checkpoint's
+    own evaluation table ({@link evaluation_cases}) — the T5Gemma2 table has a case the small
+    models' table does not.
     """
     if not CALIB_CASES:
         raise AssertionError("no calibration cases (calibrated i4 cannot work with zero inputs)")
-    assert_calib_disjoint(CALIB_CASES, evaluation_cases())
+    assert_calib_disjoint(CALIB_CASES, evaluation_cases(text_config))
     return CALIB_CASES

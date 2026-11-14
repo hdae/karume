@@ -18,13 +18,14 @@ from __future__ import annotations
 import pytest
 
 from irodori import calib_cases
+from irodori import export as ir
 from irodori.calib_cases import (
     CALIB_CASES,
     assert_calib_disjoint,
     calibration_cases,
     evaluation_cases,
 )
-from irodori.pipeline_ref import PIPELINE_CASES
+from irodori.pipeline_ref import PIPELINE_CASES, T5GEMMA2_PIPELINE_CASES
 
 
 class TestCorpus:
@@ -119,3 +120,41 @@ class TestDisjointness:
 
         with pytest.raises(AssertionError, match="no calibration cases"):
             calibration_cases()
+
+
+#: The embedded text-encoder config of a T5Gemma2 checkpoint (v4-Large), as far as the case
+#: tables read it.
+T5GEMMA2_TEXT_CONFIG = {"model_type": "t5gemma2"}
+
+
+class TestT5Gemma2EvaluationTable:
+    """A T5Gemma2 checkpoint (v4-Large) has its own full-loop table with a case the small models'
+    table lacks (`caption-window`); the calibration corpus must be disjoint from it too."""
+
+    def test_the_checkpoint_config_picks_the_golden_table(self):
+        assert evaluation_cases(T5GEMMA2_TEXT_CONFIG) == T5GEMMA2_PIPELINE_CASES
+        assert evaluation_cases({"model_type": "modernbert"}) == PIPELINE_CASES
+
+    def test_the_shipped_corpus_is_disjoint_from_the_t5gemma2_table(self):
+        assert_calib_disjoint(calibration_cases(T5GEMMA2_TEXT_CONFIG), T5GEMMA2_PIPELINE_CASES)
+
+    def test_a_clash_with_the_t5gemma2_only_case_is_caught(self, monkeypatch):
+        """Fault injection: a caption inside `caption-window`'s caption passes the small models'
+        table but not the T5Gemma2 one."""
+        window = T5GEMMA2_PIPELINE_CASES[-1]
+        assert window.name not in {case.name for case in PIPELINE_CASES}
+        clashing = CALIB_CASES[0]._replace(caption=window.caption[: len(window.caption) // 2])
+        monkeypatch.setattr(calib_cases, "CALIB_CASES", (clashing,))
+
+        assert calibration_cases() == (clashing,)
+        with pytest.raises(AssertionError, match="bodies overlap the evaluation inputs"):
+            calibration_cases(T5GEMMA2_TEXT_CONFIG)
+
+    def test_the_export_checks_against_the_checkpoints_own_table(self, monkeypatch, tmp_path):
+        """The i4 export's calibration scaffolding passes the checkpoint's text config through."""
+        window = T5GEMMA2_PIPELINE_CASES[-1]
+        clashing = CALIB_CASES[0]._replace(caption=window.caption)
+        monkeypatch.setattr(calib_cases, "CALIB_CASES", (clashing,))
+
+        with pytest.raises(AssertionError, match="bodies overlap the evaluation inputs"):
+            ir._calib_plan(tmp_path, None, None, T5GEMMA2_TEXT_CONFIG, {}, None, False)

@@ -336,7 +336,7 @@ from karume.quantize import (
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
 from . import patch
-from .card import IRODORI_LICENSE
+from .card import IRODORI_LARGE_LICENSE, IRODORI_LICENSE
 from .distribution import (
     CALIB_PROVENANCE_FILE,
     IRODORI_CONTEXT_INPUTS,
@@ -420,6 +420,19 @@ def is_t5gemma2(text_config: Mapping[str, Any]) -> bool:
     """Whether the checkpoint's text backbone is T5Gemma2's text encoder — the same test upstream
     makes (`model_type`, lower-cased) on the same embedded config."""
     return str(text_config.get("model_type", "")).lower() == T5GEMMA2_MODEL_TYPE
+
+
+#: The provenance of a checkpoint whose text backbone is T5Gemma2 (the v4-Large line): upstream
+#: tags that checkpoint `gemma`, not `mit` ({@link irodori.card.IRODORI_LARGE_LICENSE} — the card's
+#: source of truth, which `irodori.distribution.assert_irodori_container_licenses` checks every
+#: container of the line against).
+LARGE_PROVENANCE = Provenance(license=IRODORI_LARGE_LICENSE, notice=NOTICE_FILENAME)
+
+
+def provenance_of(text_config: Mapping[str, Any]) -> Provenance:
+    """The provenance baked into the containers of a checkpoint — picked by the same fact that
+    picks its licence upstream, the text backbone it embeds ({@link is_t5gemma2})."""
+    return LARGE_PROVENANCE if is_t5gemma2(text_config) else PROVENANCE
 
 
 #: state_dict prefixes (the attribute names in `irodori_tts/model.py`).
@@ -3168,7 +3181,7 @@ def _calib_plan(
             text_config=text_config,
             model_config=model_config,
         ),
-        cases=calibration_cases(),
+        cases=calibration_cases(text_config),
         steps=loop_steps if steps is None else steps,
         calibrated=not no_calib,
     )
@@ -3407,6 +3420,57 @@ def _fake_quant_i4(
     return reports, scales, {TARGET_DIT: overrides}
 
 
+def t5gemma2_f32_buffers(module: nn.Module) -> dict[str, torch.Tensor]:
+    """The non-persistent buffers of every **T5Gemma2** text backbone inside `module` (FQN in
+    `module` → the buffer itself): `embed_scale` and the four RoPE `inv_freq` buffers.
+
+    These are not in the checkpoint; transformers computes them in f32 at init, and the RoPE tables
+    are folded from the frequencies. Rounding the frequencies to f16 would move the rotation itself
+    (the linear-scaled full-attention frequencies fall into f16's subnormal range: up to 15%
+    relative error) — an error upstream does not have, beyond storing the result as f16 (the same
+    reasoning as `round_weights_to_bf16`'s rule in the exporter core). So {@link fake_quant} keeps
+    them at f32 under f16. Measured on v4-Large's f16 backbone against the f32 one (2026-11-14):
+    caption-window SNR 61.3 → 68.6 dB, caption-long 61.2 → 68.6 dB — almost all of it from the
+    frequencies (`embed_scale` alone moves less than 0.01 dB).
+
+    The family comes from the holder's embedded config (`config_dict`, the same test as
+    {@link BackboneGraph}), so the inner copy of the backbone inside the whole DiT is found too —
+    the full-loop golden's upstream path encodes through that copy. MUST: ModernBERT's buffers are
+    not picked (its `inv_freq` is rounded as before — the small models' published bytes).
+    """
+    picked: dict[str, torch.Tensor] = {}
+    for holder_name, holder in module.named_modules():
+        config_dict = getattr(holder, "config_dict", None)
+        if not isinstance(config_dict, Mapping) or not is_t5gemma2(config_dict):
+            continue
+        for owner_name, owner in holder.named_modules(prefix=holder_name):
+            for buffer_name in sorted(owner._non_persistent_buffers_set):
+                buffer = owner._buffers.get(buffer_name)
+                if buffer is not None:
+                    picked[f"{owner_name}.{buffer_name}" if owner_name else buffer_name] = buffer
+    return picked
+
+
+def _round_to_f16_keeping(module: nn.Module) -> tuple[Any, int]:
+    """`round_weights_to_f16` on `module`, with {@link t5gemma2_f32_buffers} left at f32.
+
+    Returns `(the report counting only what was really rounded, the number of buffers kept)`.
+    """
+    kept = t5gemma2_f32_buffers(module)
+    saved = {name: buffer.clone() for name, buffer in kept.items()}
+    report = round_weights_to_f16(module)
+    with torch.no_grad():
+        for name, buffer in kept.items():
+            buffer.copy_(saved[name])
+    rounded_kept = [buffer for buffer in kept.values() if buffer.dtype is torch.float32]
+    report = dataclasses.replace(
+        report,
+        buffers=report.buffers - len(rounded_kept),
+        elements=report.elements - sum(buffer.numel() for buffer in rounded_kept),
+    )
+    return report, len(kept)
+
+
 def fake_quant(
     dtype: str, modules: Mapping[str, nn.Module], *, calib_plan: CalibPlan | None = None
 ) -> FakeQuantResult:
@@ -3431,9 +3495,11 @@ def fake_quant(
     values of an upstream target as the next target's inputs) is preserved. Missing even one would
     put values computed with the original weights on that side alone into the golden.
 
-    NOTE: f16 rounds only the f32 parameters / buffers (`round_weights_to_f16`). The graph constants
-    (band mask, RoPE tables, the index tables of `sym_prefix_slice`) are not module weights, so they
-    are left alone, and the emit's eligibility check keeps them in f32 storage too.
+    NOTE: f16 rounds only the f32 parameters / buffers (`round_weights_to_f16`), except the
+    non-persistent buffers of a T5Gemma2 backbone ({@link t5gemma2_f32_buffers}). The graph
+    constants (band mask, RoPE tables, the index tables of `sym_prefix_slice`) are not module
+    weights, so they are left alone, and the emit's eligibility check keeps them in f32 storage
+    too.
 
     NOTE: i8 touches only the `weight` of the `QUANT_CHANNEL_AXES` types (Linear / Conv /
     Embedding) (ADR 0019). Neither biases nor norm weights are **rounded** — the emit's eligibility
@@ -3457,9 +3523,11 @@ def fake_quant(
     rounded = 0
     for name, module in sorted(modules.items()):
         if dtype != "i8":
-            report = round_weights_to_f16(module)
+            report, kept = _round_to_f16_keeping(module)
             rounded += report.parameters + report.buffers
-            reports[name] = f"rounded to storage f16 — {report.describe()}"
+            reports[name] = f"rounded to storage f16 — {report.describe()}" + (
+                f" (kept at f32: {kept} non-persistent T5Gemma2 buffers)" if kept else ""
+            )
         elif _has_quantizable_weights(module):
             int8 = fake_quant_int8(module)
             scales[name] = int8.scales
@@ -3810,7 +3878,7 @@ def export_series(
                 staged / MODEL_FILE,
                 exported,
                 tensors,
-                provenance=PROVENANCE,
+                provenance=provenance_of(text_config),
                 # The graph name is **the component name** (= the key in the weights of
                 # karume.json). It is spelled differently from the directory name (`caption-proj`
                 # → `caption_proj`), so it goes through the reverse lookup table (container-v1
