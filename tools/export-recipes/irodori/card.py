@@ -9,7 +9,10 @@ card says.
 There is a single attribution profile (the set of main model + bundled text backbone + codec
 (+ its original Apache 2.0 weights) is the same for every model; only the main model's upstream
 repository changes) — unlike SBV2 there is no axis along which the origin splits by voice family,
-so {@link irodori.distribution.PIPELINE} puts a single slot in `card_profiles`.
+so {@link irodori.distribution.PIPELINE} puts a single slot in `card_profiles`. The v4-Large line
+is the exception that has its own Pipeline ({@link irodori.distribution.LARGE_PIPELINE}): another
+license (the Gemma Terms of Use), another text encoder (T5Gemma 2), its own attribution
+({@link render_irodori_large_model_card}).
 
 MUST: **every number, download size, quant table and dtype label is derived from the manifest**
 (the same MUST of `karume.modelcard` applies as is). The only constants allowed here are facts that
@@ -88,6 +91,38 @@ IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     ),
 }
 
+#: The models of the **v4-Large line** — their own repositories and their own Pipeline
+#: (`irodori.distribution.LARGE_PIPELINE`), apart from {@link IRODORI_UPSTREAMS}: upstream tags
+#: them `license: gemma`, so the legal texts at the repository root differ from the MIT line's, and
+#: `root_files` is one fixed set per Pipeline. A model name of one table is refused by the other
+#: line's card ({@link irodori_large_upstream}).
+#: License read at the source (2026-11-14): `license: gemma` in the frontmatter of upstream's
+#: `README.md` at the revision below (the snapshot in `inputs/irodori/v4-large/` — its download
+#: records name this commit for `README.md`, `GEMMA_TERMS_OF_USE.md` and `NOTICE`).
+IRODORI_LARGE_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
+    "v4-large": IrodoriUpstream(
+        repo="Aratako/Irodori-TTS-v4-Large",
+        display="Irodori-TTS v4 Large",
+        revision="2e0c55428ce97268a507f1feeb2478f8d9148e8b",
+    ),
+}
+
+#: The origin of v4-Large's text encoder and tokenizer (upstream's model card: "the fine-tuned text
+#: encoder from google/t5gemma-2-1b-1b"; the checkpoint's `config_json` names it in
+#: `text_tokenizer_repo` / `caption_tokenizer_repo`). It is redistributed (the `backbone` component
+#: and the tokenizer asset), so it is listed in `base_model` and in the attribution.
+IRODORI_LARGE_TEXT_ENCODER_MODEL = "google/t5gemma-2-1b-1b"
+
+#: License identifier of the v4-Large line (the HF tag in the card's frontmatter — upstream's own
+#: tag). The same value is the license every container a v4-Large model exports must carry
+#: (`irodori.distribution.assert_irodori_container_licenses`).
+IRODORI_LARGE_LICENSE = "gemma"
+
+#: The two Gemma documents upstream's model card links (its "License" section) — the card links the
+#: same URLs; their verbatim texts are in the repository's `LICENSE.md`.
+GEMMA_TERMS_URL = "https://ai.google.dev/gemma/terms"
+GEMMA_PROHIBITED_USE_POLICY_URL = "https://ai.google.dev/gemma/prohibited_use_policy"
+
 #: The `flowParameterization` value of a MeanFlow model in `pipelineConfig` (the spelling of
 #: `irodori.distribution.IRODORI_FLOW_MEANFLOW`, which imports this module — kept as a literal
 #: here to avoid the cycle; `tests/test_card.py` pins that the two agree).
@@ -117,6 +152,19 @@ def irodori_upstream(model_name: str) -> IrodoriUpstream:
             " first"
         )
     return IRODORI_UPSTREAMS[model_name]
+
+
+def irodori_large_upstream(model_name: str) -> IrodoriUpstream:
+    """Look up the upstream facts of a v4-Large-line model ({@link IRODORI_LARGE_UPSTREAMS}; any
+    other name fails loudly — an MIT-line model never gets this line's Gemma attribution)."""
+    if model_name not in IRODORI_LARGE_UPSTREAMS:
+        known = " / ".join(sorted(IRODORI_LARGE_UPSTREAMS))
+        raise ValueError(
+            f"model name '{model_name}' has no upstream in {__name__}.IRODORI_LARGE_UPSTREAMS"
+            f" (known: {known}) — the models of the MIT line are in IRODORI_UPSTREAMS and build"
+            " with `--pipeline irodori`"
+        )
+    return IRODORI_LARGE_UPSTREAMS[model_name]
 
 
 #: The codec that turns latents into a waveform (a separate repository with separate weights
@@ -186,7 +234,12 @@ IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
 IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧に話している。"
 
 
-def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) -> list[str]:
+def _irodori_overview(
+    manifest: Mapping[str, Any],
+    upstream: IrodoriUpstream,
+    backbone: str = "a shared Japanese ModernBERT `backbone`",
+) -> list[str]:
+    """The overview section (`backbone` names the text encoder the line's checkpoints carry)."""
     model = default_model(manifest)
     sample_rate = model["pipelineConfig"]["sampleRate"]
     meanflow = _is_meanflow(model)
@@ -210,7 +263,7 @@ def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) ->
         "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
         "browser and in Deno.",
         "",
-        "- Nine graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
+        f"- Nine graphs make up the chain: {backbone}, the",
         "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
         "  encoder, the `duration` predictor, the DiT split in two — `dit_context` (the",
         f"  conditioning keys / values, once per generation) and `dit` ({step[0]}",
@@ -290,11 +343,17 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
     ]
 
 
-def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+def _irodori_usage(
+    manifest: Mapping[str, Any], repo: str, rare_token_split: bool = True
+) -> list[str]:
     """Policy of the usage example: keep the minimal working form, and **list the optional
     arguments an ordinary use case is likely to need, commented out** (the selectable values are
     listed in a comment on the same line — derived from the manifest, so the list follows when
     series are added). The reader takes the next step just by uncommenting.
+
+    `rare_token_split` is whether the line's tokenizer asset carries the rare-token split table
+    (ADR 0149 — the MIT line's does; v4-Large's Gemma tokenizer does not, as upstream applies no
+    split to it). Without the table `splitRareTokens` has nothing to turn off, so it is not offered.
 
     NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). It can read the split
     distribution too (X2-101), but it is a surface for local debugging that assumes you hold the
@@ -339,7 +398,11 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "",
         "  seed: 42, // same seed + same inputs → same audio",
         "  // durationSeconds: 5, // override the predicted utterance length (seconds)",
-        "  // splitRareTokens: false, // keep rare long words as single tokens (see Defaults)",
+        *(
+            ["  // splitRareTokens: false, // keep rare long words as single tokens (see Defaults)"]
+            if rare_token_split
+            else []
+        ),
         "});",
         "",
         "await Deno.writeFile(",
@@ -402,9 +465,28 @@ def _irodori_sampler_lines(config: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
-    """Runtime knobs (the side that fills in what was not passed to `generate()`)."""
+def _irodori_defaults(model: Mapping[str, Any], rare_token_split: bool = True) -> list[str]:
+    """Runtime knobs (the side that fills in what was not passed to `generate()`).
+    `rare_token_split`: as in {@link _irodori_usage}."""
     config = model["pipelineConfig"]
+    split = (
+        [
+            "`splitRareTokens` follows the tokenizer asset: when it carries the rare-token split",
+            "table (upstream's default for this tokenizer), the text — never the caption — is"
+            " encoded",
+            "without the rare long tokens the model tends to misread, falling back to shorter"
+            " pieces;",
+            "`false` turns that off. A tokenizer without the table encodes unsplit, and asking it"
+            " for",
+            "the split is refused.",
+        ]
+        if rare_token_split
+        else [
+            "The tokenizer asset carries no rare-token split table (upstream splits no tokens for",
+            "this tokenizer), so the text is encoded unsplit, and asking for the split",
+            "(`splitRareTokens: true`) is refused.",
+        ]
+    )
     return [
         "### Defaults",
         "",
@@ -417,11 +499,7 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
         "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same",
         "seed with the same request gives the same audio.",
         "",
-        "`splitRareTokens` follows the tokenizer asset: when it carries the rare-token split",
-        "table (upstream's default for this tokenizer), the text — never the caption — is encoded",
-        "without the rare long tokens the model tends to misread, falling back to shorter pieces;",
-        "`false` turns that off. A tokenizer without the table encodes unsplit, and asking it for",
-        "the split is refused.",
+        *split,
     ]
 
 
@@ -447,6 +525,184 @@ def render_irodori_model_card(
             *model_sections(
                 manifest,
                 (partial(quants, host_assets=host_assets), _irodori_shape, _irodori_defaults),
+            ),
+        )
+    )
+
+
+#: The codec's two components (the keys of `irodori.distribution.IRODORI_CODEC_DIRS`, which imports
+#: this module — kept as literals here to avoid the cycle; `tests/test_card.py` pins that the two
+#: agree).
+IRODORI_CODEC_COMPONENTS: tuple[str, ...] = ("codec_decoder", "codec_encoder")
+
+#: The DiT pair (`irodori.distribution.IRODORI_DIT_ROLES`, the same cycle and the same pin).
+IRODORI_DIT_COMPONENTS: tuple[str, ...] = ("dit", "dit_context")
+
+
+def _irodori_large_metadata(upstream: IrodoriUpstream) -> CardMetadata:
+    return CardMetadata(
+        pipeline_tag=IRODORI_PIPELINE_TAG,
+        base_model=(upstream.repo, IRODORI_LARGE_TEXT_ENCODER_MODEL, IRODORI_CODEC_MODEL),
+        # Every preset stores the weights in another form (f16 / int8 / int4 — no f32 preset), so
+        # `quantized` is declared, as for the MIT line.
+        base_model_relation="quantized",
+        # Upstream's own tag (no `license_name` / `license_link`: HF reads those with `other`
+        # only, and upstream's frontmatter has neither).
+        license=IRODORI_LARGE_LICENSE,
+        tags=("text-to-speech", "webgpu", "japanese"),
+    )
+
+
+def irodori_storage_series(model: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """`(the storage labels every component has, the labels only the DiT pair adds)`, in
+    declaration order — what the attribution's list of changes says, read from the manifest.
+
+    A label that neither every component nor exactly the DiT pair has fails: the sentence could not
+    describe it.
+    """
+    weights = model["weights"]
+    labels = list(dict.fromkeys(label for entry in weights.values() for label in entry))
+    common = [label for label in labels if all(label in entry for entry in weights.values())]
+    dit = [
+        label
+        for label in labels
+        if label not in common
+        and {name for name, entry in weights.items() if label in entry}
+        == set(IRODORI_DIT_COMPONENTS)
+    ]
+    stray = [label for label in labels if label not in common and label not in dit]
+    if stray:
+        raise ValueError(
+            f"storage labels {stray} are neither on every component nor exactly on the DiT pair"
+            " — the card's list of changes cannot describe them"
+        )
+    return common, dit
+
+
+def _codec_holders(model: Mapping[str, Any]) -> set[str | None]:
+    """The repositories the codec components' parts live in (`None` = this repository) — read from
+    the manifest's part references (ADR 0038 §7)."""
+    return {
+        part.get("repo")
+        for role in IRODORI_CODEC_COMPONENTS
+        for entry in model["weights"][role].values()
+        for part in entry["container"]["parts"]
+    }
+
+
+def _irodori_large_codec_line(model: Mapping[str, Any]) -> str:
+    """Where the codec components live: referenced in another repository, or stored here."""
+    holders = _codec_holders(model)
+    if holders == {None}:
+        return "  (as of retrieval). It is redistributed here in the container format as the"
+    if len(holders) == 1 and None not in holders:
+        (holder,) = holders
+        return (
+            f"  (as of retrieval). This repository does not store it: the manifest references the"
+            f" containers `{holder}` ships as"
+        )
+    raise ValueError(
+        f"the codec components are split across {sorted(map(str, holders))} — a component lives"
+        " in one place"
+    )
+
+
+def _irodori_large_base_weights(
+    manifest: Mapping[str, Any], upstream: IrodoriUpstream
+) -> list[str]:
+    """The attribution section of the v4-Large line. Every license statement repeats what upstream
+    states (its model card and tags) — it claims conversion + quantization, no retraining."""
+    model = default_model(manifest)
+    common, dit = irodori_storage_series(model)
+    if dit not in ([], ["i4"]):
+        raise ValueError(
+            f"the DiT pair adds {dit} — the card says only an `i4` series rounded with GPTQ"
+            " calibration (the rounding `irodori.distribution` requires of it)"
+        )
+    at = "" if upstream.revision is None else f" at revision `{upstream.revision}`"
+    stored = " / ".join(f"`{label}`" for label in common)
+    series = f"every component is stored as {stored} series" + (
+        ", and the DiT (`dit` / `dit_context`) adds an `i4` series rounded with GPTQ calibration"
+        if dit
+        else ""
+    )
+    selects = "selects" if "f32" in common else "selects; no `f32` series is distributed"
+    return [
+        "## Base weights and attribution",
+        "",
+        "Converted into the container format — the original checkpoint is not distributed here.",
+        "",
+        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},",
+        f"  tagged `license: {IRODORI_LARGE_LICENSE}` (as of retrieval). Upstream's model card"
+        " states that the model is",
+        f"  subject to the [Gemma Terms of Use]({GEMMA_TERMS_URL}) because its shared text /"
+        " caption encoder is",
+        "  derived from"
+        f" [{IRODORI_LARGE_TEXT_ENCODER_MODEL}](https://huggingface.co/{IRODORI_LARGE_TEXT_ENCODER_MODEL}),"
+        " and that use and",
+        "  redistribution must comply with those terms, including the"
+        f" [Gemma Prohibited Use Policy]({GEMMA_PROHIBITED_USE_POLICY_URL}),",
+        "  as well as the additional ethical restrictions listed on that model card. Both Gemma",
+        "  texts are included in `LICENSE.md`, and the notice upstream ships with the model is in",
+        "  `NOTICE.md`. The training / inference implementation it comes with",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT;",
+        "  Karume's runtime contains none of that code — it is an independent implementation that",
+        "  reads these weights from its own container format.",
+        "- **Text encoder**: the `backbone` component is the checkpoint's fine-tuned text encoder",
+        f"  of [{IRODORI_LARGE_TEXT_ENCODER_MODEL}](https://huggingface.co/{IRODORI_LARGE_TEXT_ENCODER_MODEL}),"
+        " redistributed here in the container",
+        "  format; the tokenizer asset is upstream's tokenizer of the same model, converted into",
+        "  Karume's tokenizer format.",
+        f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
+        " licensed **MIT**",
+        _irodori_large_codec_line(model),
+        "  the `codec_decoder` / `codec_encoder` components so that text-to-audio runs from this",
+        "  distribution. Its weights derive from"
+        f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
+        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
+        "  the MIT and Apache License 2.0 texts are included in `LICENSE.md` for the codec",
+        "  components.",
+        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        f"  container format and **quantization** of the weights — {series}",
+        f"  (the quant table below says which storage each quant {selects}).",
+        "  The text encoder's sliding-window attention mask is precomputed as one constant, and",
+        "  its embedding's end-of-image row is selected elementwise. The codec stores its",
+        "  weight-normalized convolutions as effective weights, keeps only the mean half of",
+        "  `quantizer.in_proj` in `codec_encoder`, and bypasses the watermarking branch in",
+        "  `codec_decoder`; constant sub-expressions are precomputed. No retraining, no",
+        "  fine-tuning.",
+    ]
+
+
+def render_irodori_large_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
+) -> str:
+    """Assemble the `README.md` body of a v4-Large-line distribution (pure function, trailing
+    newline included). The same template as {@link render_irodori_model_card} except the text
+    encoder, the attribution section and the absent rare-token split."""
+    require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
+    upstream = irodori_large_upstream(manifest["defaultModel"])
+    metadata = _irodori_large_metadata(upstream)
+    return render(
+        (
+            frontmatter(metadata),
+            introduction(f"{upstream.display} — Karume", hf_upstreams(metadata.base_model)),
+            _irodori_overview(
+                manifest, upstream, backbone="the shared T5Gemma 2 text encoder `backbone`"
+            ),
+            [""],
+            _irodori_large_base_weights(manifest, upstream),
+            [""],
+            models(manifest),
+            [""],
+            _irodori_usage(manifest, repo, rare_token_split=False),
+            *model_sections(
+                manifest,
+                (
+                    partial(quants, host_assets=host_assets),
+                    _irodori_shape,
+                    partial(_irodori_defaults, rare_token_split=False),
+                ),
             ),
         )
     )

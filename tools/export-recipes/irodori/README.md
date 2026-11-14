@@ -186,8 +186,12 @@ uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir ../../
   `caption-eoi` (the end-of-image id).
 - Measured on 2026-11-14 (CPU): 134.6 s wall, 30.0 GiB peak RSS for the f32 series (13.2 GB checkpoint). Step 2 still
   reads the codec's real latent (`dacvae-32dim/host`, step 5), which is model-independent.
-- Only the f32 series exists so far (the graphs here, the tokenizer asset and the full-loop goldens — the two
-  sections at the end of this file). The f16 / i8 / i4 series and the distribution of this model are later steps.
+- The f16 series keeps the five non-persistent buffers of the T5Gemma2 backbone at f32 through the rounding
+  (`embed_scale` and the four RoPE `inv_freq` — `t5gemma2_f32_buffers`), so the folded RoPE tables are upstream's own
+  values: rounded to f16, the full layers' scaled frequencies lose up to 15% (they fall into f16's subnormal range).
+  Measured on the backbone alone against f32 (2026-11-14): 61.3 → 68.6 dB on the two long caption cases. ModernBERT's
+  buffers are rounded as before (its published bytes do not change).
+- The containers of this model carry the provenance licence `gemma` (`provenance_of`), the small models `mit`.
 
 ## Rare-token split (ADR 0149)
 
@@ -256,3 +260,39 @@ uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --model-dir 
   final z from upstream 1.96e-5 (`full`), 1.90e-5 (`no-ref`) and 8.13e-5 (`caption-window`); 543 s wall, 30.0 GiB
   peak RSS.
 - Only the f32 goldens exist so far; the f16 / i8 / i4 series follow their graphs.
+
+## The distribution of v4-Large (step 7)
+
+v4-Large has its own repository line, `karume-irodori-v4-large`, on its own Pipeline: upstream tags the model
+`license: gemma`, so the legal texts at the repository root are not the MIT line's (`root_files` is one set per
+Pipeline). `--pipeline irodori` refuses `v4-large`, and `--pipeline irodori-large` refuses every other model.
+
+- **Presets**: `f16` / `i8` / `i8-a8` / `i8+dit4` — no `f32` (the f32 DiT alone is 6.2 GB; the f32 series stays the
+  recipe's reference series). The default is `i8`, provisional until the maintainer has listened to it. The list is a
+  per-model fact (`IRODORI_MODEL_PRESETS`), and the build reads and lays out only the series those presets select
+  (`irodori_dtype_roles`): every graph in f16 and i8, the DiT pair in i4.
+- **Components**: the seven text-side graphs come from v4-Large's own series; the codec pair is the published
+  v4-small container in f16 and i8 (`IRODORI_PUBLISHED`), referenced across repositories at `karume-irodori-v4-small`;
+  the tokenizer asset is v4-Large's own Gemma-format asset (no rare-token split table), read from the plain series
+  (`outputs/series/irodori-v4-large/tokenizer/tokenizer.json` — no other file of the f32 series is read).
+- **Legal texts**: `LICENSE.md` holds the Gemma Terms of Use and the Gemma Prohibited Use Policy verbatim (copies of
+  the files upstream ships, in `licenses/`), then the codec's MIT and Apache 2.0 texts; `NOTICE.md` opens with
+  upstream's `NOTICE` line and lists the changes. The card repeats upstream's license statement and links the two
+  Gemma documents.
+
+Inputs: the series `irodori-v4-large-f16` and `-i8` (seven graphs each), `-i4` (`dit`, `dit-context` and their
+`calib_provenance.json`), the tokenizer asset of step 3, the checkpoint config (`inputs/irodori/v4-large/`), the
+codec metadata (`inputs/irodori/dacvae-32dim/`) and the v4-small mirror (`models/karume-irodori-v4-small/`):
+
+```sh
+uv run python dist.py --pipeline irodori-large --allow-placeholder-ref   # development mirror (placeholder revision)
+uv run python dist.py --pipeline irodori-large --resolve-refs hf         # publication rebuild (v4-small's main)
+```
+
+Before a byte is written the build checks: that the codec containers in the v4-small mirror are the published bytes
+(part 0 against the pin, every other part against part 0's descriptor); that the i4 series was GPTQ-calibrated with at
+least the export's default budget; each role's storage vocabulary (required and forbidden); every shipped graph's input
+names, order, output count and static dimensions against the `pipelineConfig` derived from the checkpoint config, and
+the DiT pair's boundary, for each of f16, i8 and i4; that every container the model exports carries `license: gemma`
+in its provenance; and, with `--resolve-refs hf`, that every borrowed file is in v4-small's main with the local
+bytes. A local reader (`nodeDirectory`) needs the v4-small mirror too, mapped through `crossRepo`.

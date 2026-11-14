@@ -13,7 +13,9 @@ is the source of truth of the accepted set.
     uv run python dist.py --pipeline irodori               # v4-small (self-contained)
     uv run python dist.py --pipeline irodori --model v4.1-small \\
         --resolve-refs hf                                  # references karume-irodori-v4-small
-    uv run python dist.py --pipeline sbv2-fn               # the FN line (HF publication on hold)
+    uv run python dist.py --pipeline irodori-large \\
+        --resolve-refs hf                                  # v4-large (codec at v4-small)
+    uv run python dist.py --pipeline sbv2-fn              # the FN line (HF publication on hold)
     uv run python dist.py --pipeline sbv2 \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
     uv run python dist.py --pipeline siglip2 \\
@@ -131,6 +133,9 @@ PIPELINES: Mapping[str, Pipeline] = {
     # terms), so they are separate entries.
     "sbv2-fn": sbv2_distribution.FN_PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
+    # The v4-Large line is tagged `license: gemma` upstream, so its repository root carries other
+    # legal texts than the MIT line's — a separate entry.
+    "irodori-large": irodori_distribution.LARGE_PIPELINE,
     "siglip2": siglip2_distribution.PIPELINE,
     "birefnet": birefnet_distribution.PIPELINE,
     # The derivative is its own repository (ADR 0092 decision 1) — the copyright notice at the

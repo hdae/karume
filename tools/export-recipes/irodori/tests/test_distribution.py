@@ -35,12 +35,17 @@ from irodori.card import (
     IRODORI_CODEC_MODEL,
     IRODORI_CODEC_ORIGIN_MODEL,
     IRODORI_CODEC_PARENT_MODEL,
+    IRODORI_LARGE_TEXT_ENCODER_MODEL,
+    IRODORI_LARGE_UPSTREAMS,
     IRODORI_TEXT_BACKBONE_MODEL,
     IRODORI_UPSTREAMS,
 )
 from irodori.distribution import (
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
+    GEMMA_NOTICE_PATH,
+    GEMMA_PROHIBITED_USE_POLICY_PATH,
+    GEMMA_TERMS_OF_USE_PATH,
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
@@ -50,8 +55,11 @@ from irodori.distribution import (
     IRODORI_DTYPE_ROLES,
     IRODORI_FLOW_MEANFLOW,
     IRODORI_GRAPH_ROLES,
+    IRODORI_LARGE_COPYRIGHTS,
+    IRODORI_LARGE_NOTICE_MARKDOWN,
     IRODORI_MEANFLOW_SAMPLING_DEFAULTS,
     IRODORI_MODEL_SEAT_DESCRIPTIONS,
+    IRODORI_MODEL_SEAT_LABELS,
     IRODORI_NOTICE_MARKDOWN,
     IRODORI_OUTPUT_PATHS,
     IRODORI_PUBLISHED,
@@ -62,25 +70,37 @@ from irodori.distribution import (
     IRODORI_SERIES_DIRS,
     IRODORI_STORAGE_FORBIDDEN,
     IRODORI_STORAGE_REQUIREMENTS,
+    IRODORI_V4_LARGE_MODEL,
     IRODORI_V4_MODEL,
     IRODORI_V41_MF_MODEL,
     IRODORI_V41_MODEL,
     IRODORI_V41_SHARED_ROLES,
     IRODORI_WEIGHT_DTYPES,
     IRODORI_WEIGHTS,
+    LARGE_PIPELINE,
     PIPELINE,
     IrodoriSources,
     PublishedContainer,
+    gemma_notice,
+    gemma_prohibited_use_policy,
+    gemma_terms_of_use,
     irodori_calib_floor,
+    irodori_default_quant,
+    irodori_dtype_roles,
     irodori_flow_parameterization,
+    irodori_large_license_markdown,
+    irodori_large_repo_name,
     irodori_license_markdown,
+    irodori_mit_repo_name,
     irodori_plan,
+    irodori_presets,
     irodori_published_sources,
     irodori_quants,
     irodori_references,
     irodori_repo_name,
     irodori_series_name,
     irodori_sources,
+    irodori_weights,
 )
 from karume.dist import (
     LEGAL_PATHS,
@@ -2005,9 +2025,15 @@ class TestIrodoriMeanFlow:
         )
 
     def test_only_the_student_exports_a_graph_role(self) -> None:
-        """The RF models take every graph role as published; the student exports the DiT pair."""
+        """The RF models take every graph role as published; the student exports the DiT pair;
+        v4-Large exports everything but the codec, in the series its presets select."""
         exported = {
-            model: set(IRODORI_OUTPUT_PATHS) - set(IRODORI_PUBLISHED[model]) - {"tokenizer"}
+            model: {
+                f"{role}_{dtype}"
+                for dtype, roles in irodori_dtype_roles(model).items()
+                for role in roles
+            }
+            - set(IRODORI_PUBLISHED[model])
             for model in IRODORI_PUBLISHED
         }
 
@@ -2019,6 +2045,11 @@ class TestIrodoriMeanFlow:
                 for role in ("dit", "dit_context")
                 for dtype in IRODORI_WEIGHT_DTYPES
             },
+            IRODORI_V4_LARGE_MODEL: {
+                *(f"{role}_{dtype}" for role in IRODORI_SERIES_DIRS for dtype in ("f16", "i8")),
+                "dit_i4",
+                "dit_context_i4",
+            },
         }
 
     def test_its_default_preset_is_int8_by_the_listening_ruling(self) -> None:
@@ -2026,7 +2057,11 @@ class TestIrodoriMeanFlow:
         family's default."""
         from irodori.distribution import IRODORI_MODEL_DEFAULT_QUANTS
 
-        assert IRODORI_MODEL_DEFAULT_QUANTS == {IRODORI_V41_MF_MODEL: "i8"}
+        assert IRODORI_MODEL_DEFAULT_QUANTS == {
+            IRODORI_V41_MF_MODEL: "i8",
+            # Provisional until the maintainer's listening (2026-11-14).
+            IRODORI_V4_LARGE_MODEL: "i8",
+        }
         assert IRODORI_DEFAULT_QUANT == "i8-a8"
 
     def test_its_preset_descriptions_claim_only_what_was_judged_for_it(self) -> None:
@@ -2153,3 +2188,383 @@ class TestIrodoriMeanFlow:
     def test_an_unknown_flow_is_refused(self, value) -> None:
         with pytest.raises(DistError, match="flow_parameterization"):
             irodori_flow_parameterization({"flow_parameterization": value})
+
+
+#: The sha256 of the three Gemma files upstream ships with the v4-Large checkpoint
+#: (`inputs/irodori/v4-large/` at `2e0c5542…` — `GEMMA_TERMS_OF_USE.md`,
+#: `GEMMA_PROHIBITED_USE_POLICY.md`, `NOTICE`, measured 2026-11-14). The recipe's copies must stay
+#: these bytes: a reformatted copy is no longer "a copy of this Agreement", and it still reads as
+#: valid prose, so only the digest notices.
+_GEMMA_TEXT_SHA256: Mapping[Path, str] = {
+    GEMMA_TERMS_OF_USE_PATH: "3b65bc46747423037f7ca57af25b885a7be421948d7a81ca02b0cb038177ec3d",
+    GEMMA_PROHIBITED_USE_POLICY_PATH: (
+        "c9c86ddd3ac3a39236a72ee644421b07fa3b56e77c2a8e381818e5ec06dca1e2"
+    ),
+    GEMMA_NOTICE_PATH: "cebce9f0aafbf8cbcaf2e5b5bbbce4c1fe36a8407acdf4865e2305441da05409",
+}
+
+#: The four presets v4-Large ships (no `f32` — its f32 DiT alone is 6.2 GB), spelled out.
+_LARGE_PRESETS = ("f16", "i8", "i8-a8", "i8+dit4")
+
+#: The codec containers v4-Large takes as published by v4-small (its presets select f16 / i8).
+_LARGE_BORROWED = frozenset(
+    f"{role}_{dtype}" for role in ("codec_decoder", "codec_encoder") for dtype in ("f16", "i8")
+)
+
+
+def _gemma_licensed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the synthetic containers carry `license: gemma` — what v4-Large's export must bake
+    (the fixtures default to `apache-2.0`)."""
+    import ir_fixtures
+
+    from karume.container import Provenance
+
+    monkeypatch.setattr(
+        ir_fixtures, "FIXTURE_PROVENANCE", Provenance(license="gemma", writer="karume-fixture")
+    )
+
+
+#: v4-Large's synthetic checkpoint config: the family's synthetic numbers (the graphs' shapes are
+#: built from them) plus keys v4-small's checkpoint does not have — the two configs differ, as the
+#: real ones do (another text encoder, other dimensions).
+_LARGE_CONFIG: Mapping[str, Any] = {
+    **_IRODORI_CONFIG,
+    "text_tokenizer_repo": IRODORI_LARGE_TEXT_ENCODER_MODEL,
+    "model_dim": 2048,
+}
+
+
+def _large_sources(tmp_path: Path, **kwargs: Any) -> IrodoriSources:
+    """v4-Large's sources with v4-small's mirror to borrow the codec from (no driver involved).
+    Its checkpoint holds other tensors than v4-small's, as the real one does."""
+    _build_holder_mirrors(tmp_path)
+    sources = _build_irodori_sources(
+        tmp_path,
+        model=IRODORI_V4_LARGE_MODEL,
+        config=kwargs.pop("config", _LARGE_CONFIG),
+        published=_published_from_mirrors(IRODORI_V4_LARGE_MODEL, tmp_path),
+        **kwargs,
+    )
+    other = {name: tensor + 100 for name, tensor in _CHECKPOINT_TENSORS.items()}
+    _write(
+        sources.model / "model.safetensors",
+        _fake_checkpoint({"config_json": json.dumps(_LARGE_CONFIG)}, other),
+    )
+    return sources
+
+
+class TestIrodoriPresetsPerModel:
+    """Which presets a model ships is a per-model fact (`irodori_presets`), and the series it reads
+    and lays out are exactly the ones its presets select (`irodori_dtype_roles`) — the MIT line's
+    models keep all five and every table of the family as it was."""
+
+    @pytest.mark.parametrize("model", sorted(IRODORI_UPSTREAMS))
+    def test_the_mit_line_keeps_the_five_presets_and_every_series(self, model: str) -> None:
+        assert irodori_presets(model) == tuple(IRODORI_QUANT_SEATS)
+        assert irodori_dtype_roles(model) == dict(IRODORI_DTYPE_ROLES)
+        assert irodori_weights(model) == IRODORI_WEIGHTS
+
+    def test_v4_large_ships_four_presets_without_f32(self) -> None:
+        assert irodori_presets(IRODORI_V4_LARGE_MODEL) == _LARGE_PRESETS
+        assert list(irodori_quants(IRODORI_V4_LARGE_MODEL)) == list(_LARGE_PRESETS)
+
+    def test_v4_large_reads_only_the_series_its_presets_select(self) -> None:
+        assert irodori_dtype_roles(IRODORI_V4_LARGE_MODEL) == {
+            "f16": IRODORI_GRAPH_ROLES,
+            "i8": IRODORI_GRAPH_ROLES,
+            "i4": ("dit", "dit_context"),
+        }
+        assert all(
+            set(labels)
+            == ({"f16", "i8", "i4"} if role in ("dit", "dit_context") else {"f16", "i8"})
+            for role, labels in irodori_weights(IRODORI_V4_LARGE_MODEL).items()
+        )
+
+    def test_its_presets_keep_the_familys_storage_and_knobs(self) -> None:
+        family = irodori_quants(IRODORI_V4_MODEL)
+        large = irodori_quants(IRODORI_V4_LARGE_MODEL)
+
+        for name, quant in large.items():
+            assert quant["weights"] == family[name]["weights"], name
+            assert quant["session"] == family[name]["session"], name
+            assert_quant_presentation(name, quant)
+
+    def test_its_preset_texts_claim_no_measurement_and_no_f32_size(self) -> None:
+        """Nothing was listened to or timed for v4-Large, and it has no f32 preset to be half or a
+        quarter of — its labels and descriptions state storage facts only."""
+        large = irodori_quants(IRODORI_V4_LARGE_MODEL)
+
+        for name, quant in large.items():
+            text = f"{quant['label']} {quant['description']}"
+            for claim in ("listening", "faster", "f32 download", "Half size", "Quarter size"):
+                assert claim not in text, (name, claim)
+        assert set(IRODORI_MODEL_SEAT_LABELS[IRODORI_V4_LARGE_MODEL]) == {"f16", "i8"}
+
+    def test_its_default_is_the_provisional_int8(self) -> None:
+        assert irodori_default_quant(IRODORI_V4_LARGE_MODEL) == "i8"
+
+    def test_a_default_outside_the_models_presets_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from irodori import distribution
+
+        monkeypatch.setattr(
+            distribution, "IRODORI_MODEL_DEFAULT_QUANTS", {IRODORI_V4_LARGE_MODEL: "f32"}
+        )
+
+        with pytest.raises(DistError, match="is not one of its presets"):
+            irodori_default_quant(IRODORI_V4_LARGE_MODEL)
+
+    @pytest.mark.parametrize("presets", [(), ("f16", "i4")])
+    def test_a_preset_list_outside_the_seat_table_fails(
+        self, monkeypatch: pytest.MonkeyPatch, presets: tuple[str, ...]
+    ) -> None:
+        from irodori import distribution
+
+        monkeypatch.setattr(distribution, "IRODORI_MODEL_PRESETS", {"v9-small": presets})
+
+        with pytest.raises(DistError, match="IRODORI_QUANT_SEATS"):
+            irodori_presets("v9-small")
+
+
+class TestIrodoriV4Large:
+    """v4-Large — its own repository on its own Pipeline (`--pipeline irodori-large`): it exports
+    its seven graphs, borrows the codec pair from v4-small and carries its own tokenizer."""
+
+    @staticmethod
+    def _assemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict]:
+        from irodori import distribution
+
+        _gemma_licensed(monkeypatch)
+        sources = _build_irodori_sources(
+            tmp_path, model=IRODORI_V4_LARGE_MODEL, config=_LARGE_CONFIG
+        )
+        flags = _mirrors_for(IRODORI_V4_LARGE_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                "irodori-large",
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+                *flags,
+            ]
+        )
+        return out_dir, json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+    def test_it_borrows_only_the_codec_pair_from_v4_small(self) -> None:
+        borrowed = IRODORI_PUBLISHED[IRODORI_V4_LARGE_MODEL]
+
+        assert set(borrowed) == _LARGE_BORROWED
+        assert set(borrowed.values()) == {IRODORI_V4_MODEL}
+
+    def test_it_declares_one_reference_without_the_tokenizer(self) -> None:
+        (reference,) = irodori_references(IRODORI_V4_LARGE_MODEL)
+
+        assert (reference.repo, reference.model, set(reference.roles)) == (
+            "hdae/karume-irodori-v4-small",
+            IRODORI_V4_MODEL,
+            set(_LARGE_BORROWED),
+        )
+        assert LARGE_PIPELINE.references is irodori_references
+
+    def test_the_lines_refuse_each_others_models(self) -> None:
+        """The legal texts are per Pipeline, so a model built under the other line's Pipeline would
+        ship the other line's license — both the repository name and the plan refuse it."""
+        assert irodori_large_repo_name(IRODORI_V4_LARGE_MODEL) == "karume-irodori-v4-large"
+        assert irodori_mit_repo_name(IRODORI_V4_MODEL) == "karume-irodori-v4-small"
+        with pytest.raises(DistError, match="--pipeline irodori-large"):
+            irodori_mit_repo_name(IRODORI_V4_LARGE_MODEL)
+        with pytest.raises(DistError, match="--pipeline irodori`"):
+            irodori_large_repo_name(IRODORI_V41_MODEL)
+        with pytest.raises(DistError, match="--pipeline irodori-large"):
+            PIPELINE.plan(Path("unused"), IRODORI_V4_LARGE_MODEL)
+        with pytest.raises(DistError, match="--pipeline irodori`"):
+            LARGE_PIPELINE.plan(Path("unused"), IRODORI_V4_MODEL)
+
+    def test_it_assembles_four_presets_and_stores_only_its_own_graphs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_dir, manifest = self._assemble(tmp_path, monkeypatch)
+        model = manifest["models"][IRODORI_V4_LARGE_MODEL]
+
+        assert list(model["quants"]) == list(_LARGE_PRESETS)
+        assert model["defaultQuant"] == "i8"
+        assert all("f32" not in labels for labels in model["weights"].values())
+        for name, labels in model["weights"].items():
+            for label, entry in labels.items():
+                repos = {ref.get("repo") for ref in entry["container"]["parts"]}
+                borrowed = f"{name}_{label}" in _LARGE_BORROWED
+                assert repos == ({"hdae/karume-irodori-v4-small"} if borrowed else {None}), name
+        assert model["assets"]["tokenizer"].get("repo") is None
+        stored_roles = {
+            f"{role}_{dtype}"
+            for dtype, roles in irodori_dtype_roles(IRODORI_V4_LARGE_MODEL).items()
+            for role in roles
+        } - _LARGE_BORROWED | {"tokenizer"}
+        expected = placed_paths(
+            {role: IRODORI_OUTPUT_PATHS[role] for role in stored_roles},
+            irodori_weights(IRODORI_V4_LARGE_MODEL),
+        )
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(IRODORI_V4_LARGE_MODEL, expected))
+
+    def test_its_repository_carries_the_gemma_legal_texts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_dir, _ = self._assemble(tmp_path, monkeypatch)
+
+        assert (out_dir / "LICENSE.md").read_bytes().decode("utf-8") == (
+            irodori_large_license_markdown()
+        )
+        assert (out_dir / "NOTICE.md").read_bytes().decode("utf-8") == (
+            IRODORI_LARGE_NOTICE_MARKDOWN
+        )
+
+    def test_its_card_states_the_gemma_terms_and_the_borrowed_codec(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_dir, _ = self._assemble(tmp_path, monkeypatch)
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+
+        assert "license: gemma" in card
+        assert "license: mit" not in card
+        assert f"  - {IRODORI_LARGE_TEXT_ENCODER_MODEL}" in card
+        assert "# Irodori-TTS v4 Large — Karume" in card
+        assert "the shared T5Gemma 2 text encoder `backbone`" in card
+        assert "ModernBERT" not in card
+        assert "references the containers `hdae/karume-irodori-v4-small` ships as" in card
+        assert "every component is stored as `f16` / `i8` series" in card
+        assert "no `f32` series is distributed" in card
+        assert "splitRareTokens: false" not in card
+        assert '// quant: "i8", // default — available: f16 / i8 / i8+dit4 / i8-a8' in card
+        assert '  repo: "hdae/karume-irodori-v4-large",' in card
+
+    def test_its_borrowing_of_the_codec_needs_no_equal_config(self, tmp_path: Path) -> None:
+        """The codec is built from no tensor of either checkpoint, so v4-Large's other config and
+        other tensors do not stand in the way (the MIT line's borrowers are still compared)."""
+        sources = _large_sources(tmp_path)
+
+        plan = irodori_plan(sources, IRODORI_V4_LARGE_MODEL)
+
+        assert plan.default_quant == "i8"
+        assert {role for role in plan.artifacts if role in sources.published} == _LARGE_BORROWED
+
+    def test_it_needs_no_f32_series(self, tmp_path: Path) -> None:
+        sources = _large_sources(tmp_path)
+        for path in sources.series_by_dtype["f32"].rglob("model*.krm"):
+            path.unlink()
+
+        assert "backbone_f32" not in irodori_plan(sources, IRODORI_V4_LARGE_MODEL).artifacts
+
+    def test_a_container_that_does_not_carry_the_gemma_license_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUST: a component taken out alone states its own terms — a v4-Large container calling
+        itself `mit` is refused before a byte is written."""
+        import ir_fixtures
+
+        from irodori import distribution
+        from karume.container import Provenance
+
+        _gemma_licensed(monkeypatch)
+        sources = _build_irodori_sources(
+            tmp_path, model=IRODORI_V4_LARGE_MODEL, config=_LARGE_CONFIG
+        )
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        _mirrors_for(IRODORI_V4_LARGE_MODEL, tmp_path, monkeypatch)
+        # One container of the series written as the export writes it today (`mit`).
+        monkeypatch.setattr(ir_fixtures, "FIXTURE_PROVENANCE", Provenance(license="mit"))
+        replace_component(
+            sources.series_by_dtype["i8"] / "duration" / "model.krm",
+            ir_container(
+                mark="mit-duration",
+                named="duration",
+                storage="i8",
+                inputs=tuple(_irodori_specs()["duration"][0]),
+            ),
+        )
+
+        with pytest.raises(DistError, match="carries the license 'mit'"):
+            LARGE_PIPELINE.plan(sources.series.parent, IRODORI_V4_LARGE_MODEL)
+
+
+class TestIrodoriLargeLegalText:
+    """The legal texts of the v4-Large line (upstream tagged `license: gemma`): the Gemma texts
+    verbatim, the upstream notice, and the codec's MIT + Apache 2.0 texts with their scope."""
+
+    @pytest.mark.parametrize("path", sorted(_GEMMA_TEXT_SHA256))
+    def test_the_gemma_texts_are_upstreams_bytes(self, path: Path) -> None:
+        assert sha256_file(path) == _GEMMA_TEXT_SHA256[path]
+
+    def test_the_license_opens_with_the_terms_of_use_verbatim(self) -> None:
+        license_text = LARGE_PIPELINE.root_files["LICENSE.md"]
+
+        assert license_text.startswith(gemma_terms_of_use())
+        assert license_text.count(gemma_prohibited_use_policy()) == 1
+        assert license_text.index(gemma_prohibited_use_policy()) >= len(gemma_terms_of_use())
+
+    def test_the_codec_texts_follow_with_a_heading_naming_only_the_codec(self) -> None:
+        license_text = LARGE_PIPELINE.root_files["LICENSE.md"]
+        mit = mit_license(IRODORI_LARGE_COPYRIGHTS)
+        apache = apache_license_2_0()
+
+        assert license_text.count(mit) == 1
+        assert license_text.count(apache) == 1
+        assert license_text.index(gemma_prohibited_use_policy()) < license_text.index(mit)
+        assert license_text.index(mit) < license_text.index(apache)
+        headings = [line for line in license_text.splitlines() if line.startswith("## MIT License")]
+        headings += [
+            line for line in license_text.splitlines() if line.startswith("## Apache License 2.0")
+        ]
+        assert len(headings) == 2
+        for heading in headings:
+            for role in IRODORI_GRAPH_ROLES:
+                assert (f"`{role}`" in heading) == (role in IRODORI_CODEC_DIRS), (heading, role)
+
+    def test_the_codec_keeps_only_its_authors_copyright(self) -> None:
+        """The SB Intuitions line is the ModernBERT backbone's — v4-Large has none."""
+        license_text = LARGE_PIPELINE.root_files["LICENSE.md"]
+
+        assert IRODORI_LARGE_COPYRIGHTS == ("Copyright (c) 2026 Aratako",)
+        assert "SB Intuitions" not in license_text
+
+    def test_the_notice_opens_with_upstreams_notice_verbatim(self) -> None:
+        """Gemma Terms of Use §3.1(4) — the "Notice" text upstream ships, as the first
+        paragraph."""
+        assert gemma_notice() == (
+            "Gemma is provided under and subject to the Gemma Terms of Use found at"
+            " ai.google.dev/gemma/terms"
+        )
+        assert IRODORI_LARGE_NOTICE_MARKDOWN.startswith(f"# NOTICE\n\n{gemma_notice()}\n\n")
+
+    def test_the_notice_names_every_component_and_the_storage_shipped(self) -> None:
+        notice = IRODORI_LARGE_NOTICE_MARKDOWN
+
+        for component in irodori_weights(IRODORI_V4_LARGE_MODEL):
+            assert f"`{component}`" in notice, component
+        assert "every graph is stored as `f16` and `i8`" in notice
+        assert "No `f32`\n  series is distributed." in notice
+        assert IRODORI_LARGE_TEXT_ENCODER_MODEL in notice
+        assert f"https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}" in notice
+        assert "licensed under the Apache License, Version 2.0" in notice
+
+    def test_the_notice_lists_the_same_codec_changes_as_the_mit_lines(self) -> None:
+        """The codec containers are v4-small's own, so both notices list one set of changes."""
+        from irodori.distribution import _IRODORI_CODEC_CHANGES
+
+        assert _IRODORI_CODEC_CHANGES in IRODORI_LARGE_NOTICE_MARKDOWN
+        assert _IRODORI_CODEC_CHANGES in IRODORI_NOTICE_MARKDOWN
+
+    def test_the_notice_does_not_name_the_models_repository(self) -> None:
+        """As in the MIT line's notice: `root_files` is fixed per Pipeline; the card names the
+        model from the manifest."""
+        for upstream in IRODORI_LARGE_UPSTREAMS.values():
+            assert upstream.repo not in IRODORI_LARGE_NOTICE_MARKDOWN
+        assert "the Irodori-TTS checkpoint listed in `README.md`" in IRODORI_LARGE_NOTICE_MARKDOWN
+
+    def test_the_mit_lines_legal_texts_carry_nothing_of_gemma(self) -> None:
+        for text in PIPELINE.root_files.values():
+            assert "Gemma" not in text

@@ -35,6 +35,7 @@ from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
+from irodori.distribution import LARGE_PIPELINE as IRODORI_LARGE_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -64,6 +65,7 @@ RECIPE_PIPELINES = {
     "sbv2": SBV2_PIPELINE,
     "sbv2-fn": SBV2_FN_PIPELINE,
     "irodori": IRODORI_PIPELINE,
+    "irodori-large": IRODORI_LARGE_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
     "birefnet": BIREFNET_PIPELINE,
     "lucida": LUCIDA_PIPELINE,
@@ -173,6 +175,7 @@ class TestRegistry:
             "anima-extra",
             "sbv2",
             "irodori",
+            "irodori-large",
             "gemma4",
             "gemma4-qat",
             "gemma4-qat-mobile",

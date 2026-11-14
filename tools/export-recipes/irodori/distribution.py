@@ -13,7 +13,9 @@ comes in 3 series, f32 / f16 / i8 (only the DiT's two graphs have **a 4th, i4**)
 quant presets (`f32` / `f16` / `i8` / `i8-a8` / `i8+dit4`). `i8` and `i8-a8` **share the same i8
 bytes** and differ only in the execution knobs. `i8+dit4` takes only the DiT's two graphs (`dit` /
 `dit_context`) from the i4 series and shares the same i8 bytes as `i8` for the other 7 roles (the
-only mixed preset — the ruling in {@link IRODORI_QUANT_SEATS}).
+only mixed preset — the ruling in {@link IRODORI_QUANT_SEATS}). Which of the five presets a model
+ships is a per-model fact ({@link irodori_presets} — v4-Large ships no `f32`), and the series a
+model reads and lays out are exactly the ones its presets select ({@link irodori_dtype_roles}).
 
 `pipelineConfig` splits into two kinds: **model-specific numbers** (the declared length of the
 condition states, the speaker row count, the latent width, the t_embed width) are derived from the
@@ -27,8 +29,10 @@ The two codec graphs come from a **separate series** written by {@link irodori.d
 on the `--model` axis). It is a separate script, but the distribution bundles both in one
 repository, so this table lays out both.
 
-The public surface is one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist driver
-(`tools/export-recipes/dist.py`) merges it into core's PIPELINES.
+The public surface is two `karume.dist.Pipeline`s — {@link PIPELINE} for the MIT line (v4-small,
+v4.1-small, v4.1-small-mf) and {@link LARGE_PIPELINE} for the v4-Large line, whose upstream is
+tagged `license: gemma` (the legal texts at the repository root are one fixed set per Pipeline). The
+repository's dist driver (`tools/export-recipes/dist.py`) merges both into core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ from typing import Any, NamedTuple
 from safetensors import safe_open
 
 from _shared.calib_provenance import calib_complaint
+from _shared.container_read import read_provenance
 from _shared.licenses import apache_license_2_0, mit_license
 from _shared.paths import DIST_ROOT, INPUTS_ROOT
 from karume.container import ContainerFormatError
@@ -66,10 +71,15 @@ from karume.dist import (
 from karume.verify import ContainerError, verify_container
 
 from .card import (
+    IRODORI_CODEC_LICENSE,
     IRODORI_CODEC_MODEL,
     IRODORI_CODEC_ORIGIN_MODEL,
     IRODORI_CODEC_PARENT_MODEL,
+    IRODORI_LARGE_LICENSE,
+    IRODORI_LARGE_TEXT_ENCODER_MODEL,
+    IRODORI_LARGE_UPSTREAMS,
     IRODORI_TEXT_BACKBONE_MODEL,
+    render_irodori_large_model_card,
     render_irodori_model_card,
 )
 
@@ -394,20 +404,88 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
 }
 
 
-def irodori_quants(model: str) -> dict[str, Any]:
-    """The manifest's quant table of one model: {@link IRODORI_QUANT_SEATS}, with the descriptions
-    of {@link IRODORI_MODEL_SEAT_DESCRIPTIONS} in place of the family's where the model has its
-    own (the storage, the knobs and the labels are the same for every model)."""
-    descriptions = IRODORI_MODEL_SEAT_DESCRIPTIONS.get(model, {})
+def irodori_presets(model: str) -> tuple[str, ...]:
+    """The quant presets one model ships: {@link IRODORI_MODEL_PRESETS}, else every seat of
+    {@link IRODORI_QUANT_SEATS} (in that table's order either way).
+
+    MUST: a declared preset outside the seat table, or an empty list, fails — the storage and the
+    knobs of a preset are spelled only in the seat table.
+    """
+    presets = IRODORI_MODEL_PRESETS.get(model, tuple(IRODORI_QUANT_SEATS))
+    unknown = [name for name in presets if name not in IRODORI_QUANT_SEATS]
+    if unknown or not presets:
+        raise DistError(
+            f"{model}: the presets {list(presets)} are not a non-empty list of"
+            f" IRODORI_QUANT_SEATS (unknown: {unknown})"
+        )
+    return tuple(name for name in IRODORI_QUANT_SEATS if name in presets)
+
+
+def irodori_dtype_roles(model: str) -> dict[str, tuple[str, ...]]:
+    """Storage dtype → the roles one model ships in it: **exactly the (role, dtype) pairs its
+    presets select** ({@link irodori_presets}), in the order of {@link IRODORI_DTYPE_ROLES}.
+
+    For a model with all five presets this is {@link IRODORI_DTYPE_ROLES} itself; v4-Large, without
+    `f32`, reads and lays out no f32 series. The placements, the weights declarations, the graph
+    checks and the published-container table all take the series from here, so a series no preset
+    selects is never assembled (and a preset never points at a series that was not).
+    """
+    selected = {
+        (role, IRODORI_QUANT_SEATS[name].roles.get(role, IRODORI_QUANT_SEATS[name].dtype))
+        for name in irodori_presets(model)
+        for role in IRODORI_GRAPH_ROLES
+    }
+    shipped = {
+        dtype: tuple(role for role in roles if (role, dtype) in selected)
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+    }
+    return {dtype: roles for dtype, roles in shipped.items() if roles}
+
+
+def irodori_weights(model: str) -> dict[str, dict[str, WeightFiles]]:
+    """The weights declarations of one model ({@link IRODORI_WEIGHTS} restricted to the series its
+    presets select — {@link irodori_dtype_roles})."""
+    dtype_roles = irodori_dtype_roles(model)
     return {
-        name: {
+        role: {
+            dtype: WeightFiles(irodori_role(role, dtype))
+            for dtype, roles in dtype_roles.items()
+            if role in roles
+        }
+        for role in IRODORI_GRAPH_ROLES
+    }
+
+
+def irodori_quants(model: str) -> dict[str, Any]:
+    """The manifest's quant table of one model: its presets ({@link irodori_presets}) from
+    {@link IRODORI_QUANT_SEATS}, with the labels of {@link IRODORI_MODEL_SEAT_LABELS} and the
+    descriptions of {@link IRODORI_MODEL_SEAT_DESCRIPTIONS} in place of the family's where the
+    model has its own (the storage and the knobs are the same for every model)."""
+    labels = IRODORI_MODEL_SEAT_LABELS.get(model, {})
+    descriptions = IRODORI_MODEL_SEAT_DESCRIPTIONS.get(model, {})
+    quants: dict[str, Any] = {}
+    for name in irodori_presets(model):
+        seat = IRODORI_QUANT_SEATS[name]
+        quants[name] = {
             "weights": {role: seat.roles.get(role, seat.dtype) for role in IRODORI_GRAPH_ROLES},
             "session": dict(seat.session),
-            "label": seat.label,
+            "label": labels.get(name, seat.label),
             "description": descriptions.get(name, seat.description),
         }
-        for name, seat in IRODORI_QUANT_SEATS.items()
-    }
+    return quants
+
+
+def irodori_default_quant(model: str) -> str:
+    """The default preset of one model ({@link IRODORI_MODEL_DEFAULT_QUANTS}, else the family's
+    {@link IRODORI_DEFAULT_QUANT}). MUST: it is one of the model's own presets — otherwise the
+    manifest would point its default at a preset it does not carry."""
+    default = IRODORI_MODEL_DEFAULT_QUANTS.get(model, IRODORI_DEFAULT_QUANT)
+    if default not in irodori_presets(model):
+        raise DistError(
+            f"{model}: the default preset '{default}' is not one of its presets"
+            f" {list(irodori_presets(model))}"
+        )
+    return default
 
 
 #: The family's default is `i8-a8` (the maintainer's listening ruling of 2026-08-12 — the 4
@@ -699,14 +777,15 @@ def irodori_sources(
     )
 
 
-def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
-    """Role name → source file. The output paths are held by {@link IRODORI_OUTPUT_PATHS}.
+def irodori_placements(sources: IrodoriSources, model: str) -> dict[str, Path]:
+    """Role name → source file, for the series `model`'s presets select
+    ({@link irodori_dtype_roles}). The output paths are held by {@link IRODORI_OUTPUT_PATHS}.
 
     Anything not in this table does not go into the output (`io.*.safetensors` and the 3 tokenizer
     golden files are dropped this way).
     """
     placements = {"tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE}
-    for dtype, roles in IRODORI_DTYPE_ROLES.items():
+    for dtype, roles in irodori_dtype_roles(model).items():
         for role in roles:
             name = irodori_role(role, dtype)
             if name in sources.published:
@@ -885,7 +964,7 @@ def irodori_pipeline_config(
 
 
 def assert_irodori_graphs(
-    placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
+    placements: Mapping[str, Path], pipeline_config: Mapping[str, Any], model: str
 ) -> None:
     """Check that the 9 graphs **can be read** and that their input order, output count and static
     dimensions are as declared.
@@ -900,9 +979,10 @@ def assert_irodori_graphs(
     by a process separate from f32, so checking only one lets "f32 is as declared but only f16 is
     another version" through (agreement of the storage dtype is checked by {@link assert_storage},
     but that one never looks at graph declarations). The i4 series has only the DiT's two graphs
-    ({@link IRODORI_DTYPE_ROLES}), so only **the roles present** in that series are checked.
+    ({@link IRODORI_DTYPE_ROLES}), so only **the roles present** in that series are checked. The
+    series are the ones `model` ships ({@link irodori_dtype_roles}).
     """
-    for dtype, roles in IRODORI_DTYPE_ROLES.items():
+    for dtype, roles in irodori_dtype_roles(model).items():
         _assert_irodori_graph_set(
             {role: placements[irodori_role(role, dtype)] for role in roles},
             pipeline_config,
@@ -1132,7 +1212,7 @@ def assert_irodori_calib_provenance(sources: IrodoriSources, flow: str = IRODORI
 def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) -> ModelPlan:
     """Build the plan of one Irodori model (every check and the config reading are done here)."""
     assert_model_name(model)
-    placements = irodori_placements(sources)
+    placements = irodori_placements(sources, model)
     config = irodori_model_config(sources.model)
     pipeline_config = irodori_pipeline_config(config, irodori_codec_numbers(sources.codec_model))
     assert_irodori_calib_provenance(sources, irodori_flow_parameterization(config))
@@ -1141,7 +1221,8 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)
-    assert_irodori_graphs(placements, pipeline_config)
+    assert_irodori_graphs(placements, pipeline_config, model)
+    weights = irodori_weights(model)
     return ModelPlan(
         name=model,
         pipeline=IRODORI_PIPELINE,
@@ -1149,18 +1230,92 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
             role: Artifact(IRODORI_OUTPUT_PATHS[role], source=source)
             for role, source in placements.items()
         },
-        weights=IRODORI_WEIGHTS,
+        weights=weights,
         assets=IRODORI_ASSETS,
-        quants=complete_quant_weights(IRODORI_WEIGHTS, irodori_quants(model)),
-        default_quant=IRODORI_MODEL_DEFAULT_QUANTS.get(model, IRODORI_DEFAULT_QUANT),
+        quants=complete_quant_weights(weights, irodori_quants(model)),
+        default_quant=irodori_default_quant(model),
         pipeline_config=pipeline_config,
     )
 
 
+def _refuse_large(model: str) -> None:
+    """The MIT line's entry points refuse a v4-Large-line model (its legal texts are another
+    Pipeline's — {@link LARGE_PIPELINE})."""
+    if model in IRODORI_LARGE_UPSTREAMS:
+        raise DistError(
+            f"{model} is a model of the v4-Large line (Gemma Terms of Use) — build it with"
+            " `--pipeline irodori-large`, whose repository carries that line's legal texts"
+        )
+
+
+def _require_large(model: str) -> None:
+    """The v4-Large line's entry points refuse any other model (the MIT line's legal texts are
+    another Pipeline's — {@link PIPELINE})."""
+    if model not in IRODORI_LARGE_UPSTREAMS:
+        raise DistError(
+            f"{model} is not a model of the v4-Large line ({sorted(IRODORI_LARGE_UPSTREAMS)}) —"
+            " the MIT-licensed models build with `--pipeline irodori`"
+        )
+
+
+def irodori_mit_repo_name(model: str) -> str:
+    """{@link irodori_repo_name} for the MIT line's Pipeline (a v4-Large model is refused)."""
+    _refuse_large(model)
+    return irodori_repo_name(model)
+
+
+def irodori_large_repo_name(model: str) -> str:
+    """{@link irodori_repo_name} for the v4-Large line's Pipeline (any other model is refused)."""
+    _require_large(model)
+    return irodori_repo_name(model)
+
+
 def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """Build the plan of one Irodori model from the parent of `--series` (the CLI's dispatch
-    target)."""
+    """Build the plan of one Irodori model of the MIT line from the parent of `--series` (the CLI's
+    dispatch target)."""
+    _refuse_large(model)
     return irodori_plan(irodori_sources(series_dir, model), model)
+
+
+def irodori_large_dist_plan(series_dir: Path, model: str) -> ModelPlan:
+    """Build the plan of one v4-Large-line model from the parent of `--series` (the CLI's dispatch
+    target of {@link LARGE_PIPELINE}): {@link irodori_plan}, plus the license every container the
+    model exports must carry ({@link assert_irodori_container_licenses})."""
+    _require_large(model)
+    sources = irodori_sources(series_dir, model)
+    plan = irodori_plan(sources, model)
+    assert_irodori_container_licenses(sources, model, IRODORI_LARGE_LICENSE)
+    return plan
+
+
+def assert_irodori_container_licenses(
+    sources: IrodoriSources, model: str, line_license: str
+) -> None:
+    """Check that every container `model` exports itself (not one taken as published) carries the
+    license identifier of its line in its provenance (container-v1 §2.3 — `provenance.license`):
+    `line_license` for its own graphs, {@link IRODORI_CODEC_LICENSE} for a codec container (a
+    separate upstream with its own chain of licenses).
+
+    MUST: a component can be taken out of the distribution on its own (the `components` slot of
+    `fromPretrained`), and then the container alone states its terms — a v4-Large container that
+    called itself `mit` would hand Gemma-licensed weights on under another license. The writer
+    (`irodori.export`) bakes the identifier; nothing else compares it with the line's license, and
+    every other check passes either way. A published container keeps the provenance it was
+    published with (its bytes are pinned — {@link assert_irodori_published_containers}).
+    """
+    for role, source in irodori_placements(sources, model).items():
+        if role in IRODORI_ASSETS.values() or role in sources.published:
+            continue
+        # `<graph role>_<dtype>` — the dtype never contains `_` ({@link IRODORI_WEIGHT_DTYPES}).
+        in_codec = role.rsplit("_", 1)[0] in IRODORI_CODEC_DIRS
+        expected = IRODORI_CODEC_LICENSE if in_codec else line_license
+        claimed = read_provenance(source).license
+        if claimed != expected:
+            raise DistError(
+                f"{role}: {source} carries the license '{claimed}' in its provenance, not"
+                f" '{expected}' — re-export the container with the identifier of its upstream"
+                f" ({model}'s own graphs: `license: {line_license}`)"
+            )
 
 
 #: The two rectified-flow models, one repository each (ADR 0092 decision 1).
@@ -1170,10 +1325,36 @@ IRODORI_V41_MODEL = "v4.1-small"
 #: The MeanFlow student distilled from v4.1-small by upstream (ADR 0150) — its own repository.
 IRODORI_V41_MF_MODEL = "v4.1-small-mf"
 
+#: Upstream's 3.29B model with the T5Gemma 2 text encoder — the v4-Large line, its own repository
+#: and its own Pipeline ({@link LARGE_PIPELINE}; upstream is tagged `license: gemma`).
+IRODORI_V4_LARGE_MODEL = "v4-large"
+
+#: Model → its quant presets (names of {@link IRODORI_QUANT_SEATS}), for a model that does not ship
+#: all five ({@link irodori_presets}). v4-Large ships no `f32`: its f32 DiT alone is 6.2 GB, and the
+#: f32 series exists only as the recipe's reference series (the goldens are baked from it) — the
+#: working assumption agreed with the maintainer on 2026-11-14.
+IRODORI_MODEL_PRESETS: Mapping[str, tuple[str, ...]] = {
+    IRODORI_V4_LARGE_MODEL: ("f16", "i8", "i8-a8", "i8+dit4"),
+}
+
 #: Model → its default quant preset, for a model whose default is not the family's
 #: {@link IRODORI_DEFAULT_QUANT}. v4.1-small-mf: `i8` by the maintainer's listening of 2026-11-14
-#: (`i8` was fine; `i8-a8` showed no audible degradation either — ADR 0150).
-IRODORI_MODEL_DEFAULT_QUANTS: Mapping[str, str] = {IRODORI_V41_MF_MODEL: "i8"}
+#: (`i8` was fine; `i8-a8` showed no audible degradation either — ADR 0150). v4-Large: `i8`,
+#: **provisional** — nothing has been listened to yet; the maintainer decides after listening.
+IRODORI_MODEL_DEFAULT_QUANTS: Mapping[str, str] = {
+    IRODORI_V41_MF_MODEL: "i8",
+    IRODORI_V4_LARGE_MODEL: "i8",
+}
+
+#: Model → (preset name → its own label), for a model whose family labels would state something
+#: untrue of it ({@link irodori_quants}). The family's "Half size" / "Quarter size" are sizes
+#: relative to the `f32` preset, which v4-Large does not ship.
+IRODORI_MODEL_SEAT_LABELS: Mapping[str, Mapping[str, str]] = {
+    IRODORI_V4_LARGE_MODEL: {
+        "f16": "Largest (f16)",
+        "i8": "Smaller (int8)",
+    },
+}
 
 #: Model → (preset name → its own description), for a model whose presets were judged apart from
 #: the family's rulings ({@link irodori_quants}). The family's descriptions carry the v4 listening
@@ -1188,6 +1369,16 @@ IRODORI_MODEL_SEAT_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = {
         " download; it sounded fine in a listening check.",
         "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
         " — the same download as plain int8, with no audible degradation in a listening check.",
+    },
+    # Nothing was listened to or timed for v4-Large yet, and it ships no `f32`: storage facts only
+    # (`i8+dit4` keeps the family's text, which states storage facts only).
+    IRODORI_V4_LARGE_MODEL: {
+        "f16": "Every graph stored as f16 and computed in f32 — the largest download of this"
+        " repository (no f32 preset is shipped).",
+        "i8": "Every graph stored as int8 and computed in f32, with the execution path left"
+        " unchanged.",
+        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
+        " — the same download as plain int8.",
     },
 }
 
@@ -1249,6 +1440,10 @@ def _v41_owner(role: str) -> str:
 #:   `duration_*` at v4.1-small, the rest at v4-small. That a borrowed graph is the student's own is
 #:   checked on the inputs: every checkpoint tensor it is built from, and the configs, equal the
 #:   holder's ({@link assert_irodori_borrowed_weights}).
+#: - v4-Large exports its own seven graphs (other dimensions, another text encoder) and takes the
+#:   codec pair — a separate upstream with its own weights, the same DACVAE upstream's model card
+#:   names — as published by v4-small, in the series its presets select (`f16` / `i8`). Its
+#:   checkpoint holds no codec tensor, so the borrowing check has no input to compare for them.
 #:
 #: The tokenizer asset is not a container and always comes from the series
 #: ({@link IRODORI_TOKENIZER_HOLDERS} says where it is referenced instead of stored).
@@ -1268,6 +1463,12 @@ IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
         for dtype, roles in IRODORI_DTYPE_ROLES.items()
         for role in roles
         if role not in IRODORI_DIT_ROLES
+    },
+    IRODORI_V4_LARGE_MODEL: {
+        irodori_role(role, dtype): IRODORI_V4_MODEL
+        for dtype, roles in irodori_dtype_roles(IRODORI_V4_LARGE_MODEL).items()
+        for role in roles
+        if role in IRODORI_CODEC_DIRS
     },
 }
 
@@ -1465,7 +1666,12 @@ def assert_irodori_borrowed_weights(sources: IrodoriSources, model: str) -> None
     owners: dict[str, set[str]] = {}
     for role, owner in borrowed.items():
         # `<graph role>_<dtype>` — the dtype never contains `_` ({@link IRODORI_WEIGHT_DTYPES}).
-        owners.setdefault(owner, set()).add(role.rsplit("_", 1)[0])
+        graph_role = role.rsplit("_", 1)[0]
+        # A graph built from no tensor of the checkpoint (the codec — a separate upstream with its
+        # own weights) has nothing to compare; it alone does not make the two checkpoints' configs
+        # a condition (v4-Large borrows only the codec, under another config).
+        if IRODORI_ROLE_TENSOR_PREFIXES[graph_role]:
+            owners.setdefault(owner, set()).add(graph_role)
     for owner, graph_roles in sorted(owners.items()):
         theirs = sources.model.parent / owner / IRODORI_CKPT_FILE
         if not theirs.is_file():
@@ -1499,8 +1705,6 @@ def assert_irodori_borrowed_weights(sources: IrodoriSources, model: str) -> None
             for graph_role in sorted(graph_roles)
             for prefix in IRODORI_ROLE_TENSOR_PREFIXES[graph_role]
         )
-        if not prefixes:
-            continue
         mine, theirs_tensors = (
             _checkpoint_tensors(own, prefixes),
             _checkpoint_tensors(theirs, prefixes),
@@ -1524,7 +1728,8 @@ def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
     — the published containers of {@link IRODORI_PUBLISHED} whose holder is another model, and the
     tokenizer asset of {@link IRODORI_TOKENIZER_HOLDERS} — one reference per holder, in name order
     (v4-small first). v4.1-small references {@link IRODORI_V41_SHARED_ROLES} at v4-small;
-    v4.1-small-mf references v4-small and v4.1-small; v4-small stays self-contained (it is the one
+    v4.1-small-mf references v4-small and v4.1-small; v4-Large references the codec pair at
+    v4-small (its tokenizer is its own); v4-small stays self-contained (it is the one
     upstream retrained from, and the e2e checks read its mirror file by file)."""
     borrowed = {
         role: holder for role, holder in IRODORI_PUBLISHED.get(model, {}).items() if holder != model
@@ -1597,6 +1802,20 @@ _IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIR
 #: manifest's weights), and the 2 bundled upstream models are taken from the same constants as the
 #: card.
 
+#: The changes made to the codec and the constants precomputed in every graph — one text for the
+#: notices of both lines ({@link IRODORI_NOTICE_MARKDOWN}, {@link IRODORI_LARGE_NOTICE_MARKDOWN}):
+#: the v4-Large line ships the very codec containers of v4-small, so its notice cannot list other
+#: changes.
+_IRODORI_CODEC_CHANGES = """\
+- The codec was adapted for deterministic inference. Its weight-normalized convolutions are stored
+  as their effective weights (weight normalization folded in, in place of the upstream
+  `weight_g` / `weight_v` pairs). `codec_encoder` keeps only the mean half of
+  `quantizer.in_proj` (the first half of its output channels; the scale half is unused when
+  encoding deterministically). `codec_decoder` bypasses the watermarking branch, keeping only its
+  waveform output layers on the decoding path.
+- Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
+  the codec's Snake activations, were precomputed and stored as constants."""
+
 IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the Irodori-TTS checkpoint listed in `README.md`
@@ -1619,14 +1838,7 @@ The following changes were made:
 - The model and the codec were split into these graphs and re-expressed in the Karume container
   format (a `.krm` part sequence whose first part carries the graph and model descriptors):
   {", ".join(f"`{name}`" for name in IRODORI_WEIGHTS)}.
-- The codec was adapted for deterministic inference. Its weight-normalized convolutions are stored
-  as their effective weights (weight normalization folded in, in place of the upstream
-  `weight_g` / `weight_v` pairs). `codec_encoder` keeps only the mean half of
-  `quantizer.in_proj` (the first half of its output channels; the scale half is unused when
-  encoding deterministically). `codec_decoder` bypasses the watermarking branch, keeping only its
-  waveform output layers on the decoding path.
-- Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
-  the codec's Snake activations, were precomputed and stored as constants.
+{_IRODORI_CODEC_CHANGES}
 - **The weights were quantized**: every graph is also stored as `f16` and `i8`, and the DiT's two
   graphs (`dit` and `dit_context`) add an `i4` series rounded with GPTQ calibration. The `f32`
   series is not quantized.
@@ -1676,10 +1888,11 @@ def irodori_root_files() -> dict[str, str]:
     }
 
 
-#: The one entry for `--pipeline irodori` (the driver merges it into core's PIPELINES).
+#: The one entry for `--pipeline irodori` (the driver merges it into core's PIPELINES). It builds
+#: the MIT line only — a v4-Large model is refused by its repository name and its plan.
 PIPELINE = Pipeline(
     default_model=IRODORI_DEFAULT_MODEL,
-    repo_name=irodori_repo_name,
+    repo_name=irodori_mit_repo_name,
     plan=irodori_dist_plan,
     # There is only one attribution profile (the set of model + text backbone + codec (+ its
     # original Apache 2.0 weights) is the same for every model; only the model's upstream repository
@@ -1690,5 +1903,172 @@ PIPELINE = Pipeline(
     # weights) apply to the one distribution repository, so they are set here once regardless of how
     # many times it is assembled (ADR 0092 decision 7).
     root_files=irodori_root_files(),
+    references=irodori_references,
+)
+
+
+#: Where the Gemma texts of the v4-Large line live, **verbatim** copies of the files upstream ships
+#: with the checkpoint (`inputs/irodori/v4-large/` at the revision `irodori.card` names —
+#: `GEMMA_TERMS_OF_USE.md`, `GEMMA_PROHIBITED_USE_POLICY.md`, `NOTICE`). MUST: never reformatted —
+#: the moment they are rewrapped they are no longer "a copy of this Agreement" (Gemma Terms of Use
+#: §3.1). The digests are frozen in `tests/test_distribution.py`. They live next to this recipe, not
+#: in `_shared/licenses/`, because no other family ships them yet.
+IRODORI_LEGAL_DIR = Path(__file__).parent / "licenses"
+GEMMA_TERMS_OF_USE_PATH = IRODORI_LEGAL_DIR / "gemma_terms_of_use.txt"
+GEMMA_PROHIBITED_USE_POLICY_PATH = IRODORI_LEGAL_DIR / "gemma_prohibited_use_policy.txt"
+GEMMA_NOTICE_PATH = IRODORI_LEGAL_DIR / "gemma_notice.txt"
+
+
+def gemma_terms_of_use() -> str:
+    """The Gemma Terms of Use as upstream ships them (verbatim)."""
+    return GEMMA_TERMS_OF_USE_PATH.read_text(encoding="utf-8")
+
+
+def gemma_prohibited_use_policy() -> str:
+    """The Gemma Prohibited Use Policy as upstream ships it (verbatim)."""
+    return GEMMA_PROHIBITED_USE_POLICY_PATH.read_text(encoding="utf-8")
+
+
+def gemma_notice() -> str:
+    """The notice text upstream ships as its `NOTICE` file (verbatim — the "Notice" text of Gemma
+    Terms of Use §3.1(4); one line, no trailing newline)."""
+    return GEMMA_NOTICE_PATH.read_text(encoding="utf-8")
+
+
+#: The MIT copyright line of the codec in the v4-Large repositories — the codec's line of
+#: {@link IRODORI_COPYRIGHTS} (the maintainer ruling of 2026-09-24 applied Aratako's line to the
+#: codec weights). The SB Intuitions line is not carried: it is the ModernBERT text backbone's, and
+#: v4-Large has none.
+IRODORI_LARGE_COPYRIGHTS: tuple[str, ...] = (IRODORI_COPYRIGHTS[0],)
+
+
+def irodori_large_license_markdown() -> str:
+    """`LICENSE.md` of the v4-Large line — the Gemma Terms of Use and the Gemma Prohibited Use
+    Policy it incorporates (the checkpoint's terms), then the MIT and Apache 2.0 texts of the codec
+    components, in one file (`root_files` has a single `LICENSE.md` slot —
+    `karume.dist.LEGAL_PATHS`).
+
+    The file starts with the Terms of Use as is; every later text follows a separator (`---`) and,
+    for the codec's two, a heading that names its scope. MUST: no text is touched — the two Gemma
+    files are Markdown already and go in as they are; the MIT and Apache texts go verbatim inside a
+    fence, as in {@link irodori_license_markdown} (``` occurs in none of the four texts).
+    """
+    return (
+        gemma_terms_of_use()
+        + "\n---\n\n"
+        + gemma_prohibited_use_policy()
+        + "\n---\n\n"
+        + f"## MIT License — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
+        + f"The codec components {_IRODORI_CODEC_COMPONENTS} are the DACVAE codec"
+        + f" `{IRODORI_CODEC_MODEL}`,\nwhich is licensed under the MIT License (see `NOTICE.md`)."
+        + " They are covered by the license below and\nby the Apache License 2.0 that follows."
+        + " Every other component comes from the checkpoint listed in\n`README.md`, which upstream"
+        + " tags `license: gemma`, and is covered by the Gemma Terms of Use above.\n\n"
+        + "```text\n"
+        + mit_license(IRODORI_LARGE_COPYRIGHTS)
+        + "```\n"
+        + "\n---\n\n"
+        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
+        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\nlicensed under the Apache License,"
+        + " Version 2.0 (see `NOTICE.md`). They are covered by the license below\nin addition to"
+        + " the MIT License above.\n\n"
+        + "```text\n"
+        + apache_license_2_0()
+        + "```\n"
+    )
+
+
+def _irodori_large_storage_sentence() -> str:
+    """The quantization bullet of {@link IRODORI_LARGE_NOTICE_MARKDOWN}, derived from the series
+    the line's model ships ({@link irodori_dtype_roles}): the dtypes every graph has, and the i4
+    series of the DiT pair. Any other shape fails at import — the sentence could not state it."""
+    dtype_roles = irodori_dtype_roles(IRODORI_V4_LARGE_MODEL)
+    every = [
+        dtype for dtype, roles in dtype_roles.items() if set(roles) == set(IRODORI_GRAPH_ROLES)
+    ]
+    rest = {dtype: set(roles) for dtype, roles in dtype_roles.items() if dtype not in every}
+    if rest != {"i4": set(IRODORI_DIT_ROLES)} or not every or IRODORI_PLAIN_DTYPE in every:
+        raise DistError(
+            f"{IRODORI_V4_LARGE_MODEL}'s series {dtype_roles} are not every graph in non-f32"
+            " storage plus the DiT pair in i4 — rewrite IRODORI_LARGE_NOTICE_MARKDOWN"
+        )
+    stored = " and ".join(f"`{dtype}`" for dtype in every)
+    return (
+        f"- **The weights were quantized**: every graph is stored as {stored}, and the DiT's two\n"
+        "  graphs (`dit` and `dit_context`) add an `i4` series rounded with GPTQ calibration. No"
+        " `f32`\n  series is distributed.\n"
+    )
+
+
+#: The notice of the v4-Large line (`NOTICE.md`). It opens with the notice upstream ships
+#: ({@link gemma_notice} — the "Notice" text file Gemma Terms of Use §3.1(4) requires of every
+#: distribution), then attributes the checkpoint and the codec and lists every change that reaches
+#: the stored values or the graphs (§3.1(3): "cause any modified files to carry prominent notices
+#: stating that you modified the files"; Apache 2.0 §4(b) for the codec — the same list as the MIT
+#: line's for it, {@link _IRODORI_CODEC_CHANGES}).
+#:
+#: MUST: every statement about a license repeats what upstream states (its model card and tags) and
+#: what the MIT line's notice already says of the codec — the maintainer checks the wording before
+#: publication. As in {@link IRODORI_NOTICE_MARKDOWN}, the model's upstream repository is not named
+#: (`root_files` is fixed per Pipeline; the card names it from the manifest), and the components
+#: are spelled from the weights declarations.
+IRODORI_LARGE_NOTICE_MARKDOWN = f"""# NOTICE
+
+{gemma_notice()}
+
+This repository redistributes a modified form of the Irodori-TTS checkpoint listed in `README.md`.
+The checkpoint's model card states that it is subject to the Gemma Terms of Use because its shared
+text / caption encoder is derived from `{IRODORI_LARGE_TEXT_ENCODER_MODEL}`. The Gemma Terms of Use
+and the Gemma Prohibited Use Policy are included in `LICENSE.md`; the notice above is the one the
+checkpoint is distributed with.
+
+The codec components ({_IRODORI_CODEC_COMPONENTS}) are the DACVAE codec
+`{IRODORI_CODEC_MODEL}` (which upstream ships as a separate repository), licensed
+under the MIT License. Its weights derive from
+[`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
+licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
+that it was derived from
+[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
+itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The MIT License and Apache License 2.0
+texts are included in `LICENSE.md` and cover the codec components; the changes made to them are
+listed below.
+
+The following changes were made:
+
+- The model and the codec were split into these graphs and re-expressed in the Karume container
+  format (a `.krm` part sequence whose first part carries the graph and model descriptors):
+  {", ".join(f"`{name}`" for name in irodori_weights(IRODORI_V4_LARGE_MODEL))}.
+- The text encoder's bidirectional sliding-window attention mask was precomputed and stored as one
+  constant, and the selection of its embedding's end-of-image row was rewritten as an elementwise
+  selection (the same values).
+- The tokenizer (`tokenizer/tokenizer.json`) was converted from upstream's `tokenizer.json` into
+  Karume's tokenizer format.
+{_IRODORI_CODEC_CHANGES}
+{_irodori_large_storage_sentence()}
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+"""
+
+
+def irodori_large_root_files() -> dict[str, str]:
+    """Legal texts at the root of a v4-Large-line repository (`karume.dist.Pipeline.root_files`):
+    `LICENSE.md` ({@link irodori_large_license_markdown}) and `NOTICE.md`
+    ({@link IRODORI_LARGE_NOTICE_MARKDOWN})."""
+    return {
+        "LICENSE.md": irodori_large_license_markdown(),
+        "NOTICE.md": IRODORI_LARGE_NOTICE_MARKDOWN,
+    }
+
+
+#: The one entry for `--pipeline irodori-large` — the v4-Large line (the driver merges it into
+#: core's PIPELINES). A separate Pipeline because the legal texts at the repository root differ from
+#: the MIT line's (upstream is tagged `license: gemma`), and `root_files` is one fixed set per
+#: Pipeline; the plan, the references and the card template are the family's.
+LARGE_PIPELINE = Pipeline(
+    default_model=IRODORI_V4_LARGE_MODEL,
+    repo_name=irodori_large_repo_name,
+    plan=irodori_large_dist_plan,
+    card_profiles={"irodori-large": render_irodori_large_model_card},
+    root_files=irodori_large_root_files(),
     references=irodori_references,
 )

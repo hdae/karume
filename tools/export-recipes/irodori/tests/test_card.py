@@ -18,7 +18,11 @@ from typing import Any
 
 import pytest
 
-from irodori.card import IRODORI_SUPPORTED_PIPELINE, render_irodori_model_card
+from irodori.card import (
+    IRODORI_SUPPORTED_PIPELINE,
+    render_irodori_large_model_card,
+    render_irodori_model_card,
+)
 
 #: The repo ID written into the usage snippet (dist passes it from the pipeline declaration).
 REPO = "hdae/fake-repo"
@@ -214,3 +218,110 @@ class TestIrodoriMeanFlowCard:
         from irodori.distribution import IRODORI_FLOW_MEANFLOW
 
         assert IRODORI_MEANFLOW == IRODORI_FLOW_MEANFLOW
+
+
+def _large_manifest(codec_repo: str | None = "hdae/karume-irodori-v4-small") -> dict[str, Any]:
+    """The fake manifest of v4-Large: f16 / i8 on every component, i4 on the DiT pair, the codec
+    referenced in another repository (`codec_repo`; `None` = stored here)."""
+    manifest = _irodori_manifest("v4-large")
+    model = manifest["models"]["v4-large"]
+    names = ("backbone", "dit", "dit_context", "codec_decoder", "codec_encoder")
+    weights: dict[str, Any] = {}
+    for name in names:
+        labels = ("f16", "i8", "i4") if name in ("dit", "dit_context") else ("f16", "i8")
+        weights[name] = {}
+        for label in labels:
+            ref = _ref(f"v4-large/{name}/model.{label}-00001-of-00003.krm", 11, "c")
+            if name.startswith("codec_") and codec_repo is not None:
+                ref |= {"repo": codec_repo, "revision": "0" * 40}
+            weights[name][label] = _container(ref)
+    model["weights"] = weights
+    model["quants"] = {
+        "f16": {"weights": dict.fromkeys(names, "f16"), "session": {}},
+        "i8": {"weights": dict.fromkeys(names, "i8"), "session": {}},
+    }
+    model["defaultQuant"] = "i8"
+    return manifest
+
+
+class TestIrodoriLargeCard:
+    """The card of the v4-Large line: the Gemma terms as upstream states them, the T5Gemma 2 text
+    encoder, the codec referenced in v4-small's repository, and no rare-token split."""
+
+    def test_the_frontmatter_carries_upstreams_license_tag_and_the_text_encoder(self) -> None:
+        card = render_irodori_large_model_card(_large_manifest(), REPO)
+        front = card.split("---")[1]
+
+        assert "license: gemma" in front
+        assert "license_link" not in front
+        assert "  - Aratako/Irodori-TTS-v4-Large" in front
+        assert "  - google/t5gemma-2-1b-1b" in front
+        assert "  - Aratako/Semantic-DACVAE-Japanese-32dim" in front
+
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        lines = render_irodori_large_model_card(_large_manifest(), REPO).splitlines()
+        title = lines.index("# Irodori-TTS v4 Large — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of Aratako/Irodori-TTS-v4-Large,"
+            " google/t5gemma-2-1b-1b and Aratako/Semantic-DACVAE-Japanese-32dim for Karume. It is"
+            " not affiliated with or endorsed by Aratako and Google."
+        )
+
+    def test_the_attribution_repeats_upstreams_license_statement(self) -> None:
+        card = render_irodori_large_model_card(_large_manifest(), REPO)
+
+        assert (
+            "[Aratako/Irodori-TTS-v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large)"
+            " at revision `2e0c55428ce97268a507f1feeb2478f8d9148e8b`,"
+        ) in card
+        assert "[Gemma Terms of Use](https://ai.google.dev/gemma/terms)" in card
+        assert (
+            "[Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy)"
+        ) in card
+        assert "licensed **MIT**\n  (as of retrieval). This repository does not store it" in card
+        assert "ModernBERT" not in card
+        assert "licensed **MIT** (as of retrieval). It is redistributed here" not in card
+
+    def test_a_codec_stored_here_is_said_to_be_redistributed_here(self) -> None:
+        card = render_irodori_large_model_card(_large_manifest(codec_repo=None), REPO)
+
+        assert "It is redistributed here in the container format as the" in card
+        assert "does not store it" not in card
+
+    def test_the_changes_follow_the_manifests_storage(self) -> None:
+        card = render_irodori_large_model_card(_large_manifest(), REPO)
+
+        assert "every component is stored as `f16` / `i8` series, and the DiT" in card
+        assert "adds an `i4` series rounded with GPTQ calibration" in card
+        assert "no `f32` series is distributed" in card
+
+    def test_a_storage_label_on_only_some_components_fails(self) -> None:
+        manifest = _large_manifest()
+        model = manifest["models"]["v4-large"]
+        model["weights"]["backbone"]["i4"] = model["weights"]["backbone"]["i8"]
+
+        with pytest.raises(ValueError, match="neither on every component nor exactly"):
+            render_irodori_large_model_card(manifest, REPO)
+
+    def test_the_usage_does_not_offer_the_rare_token_split(self) -> None:
+        large = render_irodori_large_model_card(_large_manifest(), REPO)
+        small = render_irodori_model_card(_irodori_manifest(), REPO)
+
+        assert "splitRareTokens: false" not in large
+        assert "// splitRareTokens: false, // keep rare long words" in small
+        assert "The tokenizer asset carries no rare-token split table" in large
+        assert "`splitRareTokens` follows the tokenizer asset" not in large
+        assert "`splitRareTokens` follows the tokenizer asset" in small
+
+    def test_each_lines_card_refuses_the_other_lines_model(self) -> None:
+        with pytest.raises(ValueError, match="IRODORI_UPSTREAMS"):
+            render_irodori_model_card(_large_manifest(), REPO)
+        with pytest.raises(ValueError, match="IRODORI_LARGE_UPSTREAMS"):
+            render_irodori_large_model_card(_irodori_manifest("v4-small"), REPO)
+
+    def test_the_component_spellings_are_the_distributions(self) -> None:
+        from irodori.card import IRODORI_CODEC_COMPONENTS, IRODORI_DIT_COMPONENTS
+        from irodori.distribution import IRODORI_CODEC_DIRS, IRODORI_DIT_ROLES
+
+        assert tuple(IRODORI_CODEC_DIRS) == IRODORI_CODEC_COMPONENTS
+        assert IRODORI_DIT_ROLES == IRODORI_DIT_COMPONENTS

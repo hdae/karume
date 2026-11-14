@@ -1,4 +1,4 @@
-# Third-party notices — Irodori-TTS v4 / v4.1 / v4.1 MF
+# Third-party notices — Irodori-TTS v4 / v4.1 / v4.1 MF / v4 Large
 
 Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
 directory is known to derive from. **It is not a license determination.**
@@ -18,7 +18,10 @@ record; the reason is given in the field.
 - **Weights** — [Aratako/Irodori-TTS-v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small),
   [Aratako/Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small)
   and [Aratako/Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)
-  (one distribution repository per model; `card.py`'s `IRODORI_UPSTREAMS` picks by model name).
+  (one distribution repository per model; `card.py`'s `IRODORI_UPSTREAMS` picks by model name),
+  and [Aratako/Irodori-TTS-v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large) — tagged
+  `license: gemma`, so it is its own line with its own Pipeline (`card.py`'s
+  `IRODORI_LARGE_UPSTREAMS`, `distribution.py`'s `LARGE_PIPELINE`).
 - **Model implementation** — [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS),
   imported from a local clone through `sys.path` (`--source-dir`). `patch.py` replaces class
   attributes, and one of its replacement forwards is a verbatim copy of the upstream forward except
@@ -29,6 +32,14 @@ record; the reason is given in the field.
 - **Text backbone** — [sbintuitions/modernbert-ja-310m](https://huggingface.co/sbintuitions/modernbert-ja-310m),
   the ModernBERT-ja checkpoint the text encoder was built from, re-distributed inside the Irodori
   distribution repositories. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
+- **Text encoder and tokenizer of v4-Large** — [google/t5gemma-2-1b-1b](https://huggingface.co/google/t5gemma-2-1b-1b),
+  the T5Gemma 2 checkpoint upstream fine-tuned v4-Large's text encoder from, and whose tokenizer
+  upstream ships in the v4-Large repository; both are re-distributed inside the v4-Large
+  distribution. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
+- **Gemma legal texts** — `licenses/gemma_terms_of_use.txt`, `licenses/gemma_prohibited_use_policy.txt`
+  and `licenses/gemma_notice.txt` are verbatim copies of `GEMMA_TERMS_OF_USE.md`,
+  `GEMMA_PROHIBITED_USE_POLICY.md` and `NOTICE` from the v4-Large snapshot (block below); the
+  v4-Large distribution's `LICENSE.md` / `NOTICE.md` carry them.
 - **Codec weights** — [Aratako/Semantic-DACVAE-Japanese-32dim](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim),
   also re-distributed. Its weights derive from
   [Aratako/Semantic-DACVAE-Japanese](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese)
@@ -76,6 +87,28 @@ published.
 | Code license             | n/a (weights only) |
 | Weights license          | MIT — `license: mit` in the frontmatter of the upstream model card at the revision above (read 2026-11-14). It is upstream's MeanFlow distillation of Irodori-TTS-v4.1-Small (`base_model` in the same frontmatter). |
 | Attribution requirements | Unverified — the same MIT notice as the v4 / v4.1 blocks ("Copyright (c) 2026 Aratako" in the distribution's `LICENSE.md`) is assumed; whether the distilled weights carry any further condition is for the release review. |
+
+### Aratako/Irodori-TTS-v4-Large (weights)
+
+| Item                     | Value |
+| ------------------------ | ----- |
+| Upstream repository      | <https://huggingface.co/Aratako/Irodori-TTS-v4-Large> |
+| Revision used            | `2e0c55428ce97268a507f1feeb2478f8d9148e8b` — the snapshot in `inputs/irodori/v4-large/`, whose download records name this commit for `README.md`, `GEMMA_TERMS_OF_USE.md` and `NOTICE` (read 2026-11-14). The card names this revision. |
+| Form of copy             | Loaded, not copied. Its seven text-side graphs and its tokenizer asset are re-distributed in converted storage form (f16 / i8, the DiT pair also i4 — no f32 series is distributed); the codec pair is the published v4-small container, referenced across repositories rather than copied. |
+| Code license             | n/a (weights only) |
+| Weights license          | `license: gemma` in the frontmatter of the upstream model card at the revision above (read 2026-11-14). Its "License" section says the model is subject to the Gemma Terms of Use because its shared text / caption encoder is derived from `google/t5gemma-2-1b-1b`, and that use and redistribution must comply with those terms, including the Gemma Prohibited Use Policy, as well as the ethical restrictions listed below it. The snapshot ships `GEMMA_TERMS_OF_USE.md` ("Last modified: April 1, 2026"), `GEMMA_PROHIBITED_USE_POLICY.md` ("Last modified: February 21, 2024") and `NOTICE` (the §3.1(4) notice line). |
+| Attribution requirements | Unverified — what the distribution ships, as the recipe's reading of Gemma Terms of Use §3.1: a copy of the Terms of Use and of the Prohibited Use Policy (verbatim, in `LICENSE.md`), upstream's `NOTICE` text as the first paragraph of `NOTICE.md` (§3.1(4)), the list of changes in `NOTICE.md` (§3.1(3)), and the card's statement that use and redistribution must comply with those terms (§3.1(1)'s notice to subsequent users). Whether that meets §3.1 — in particular §3.1(1)'s "enforceable provision in any agreement governing the use and/or distribution" — and whether the card should restate upstream's ethical restrictions rather than point at them are for the release review (the maintainer checks the wording before publication). |
+
+### google/t5gemma-2-1b-1b (v4-Large text encoder and tokenizer)
+
+| Item                     | Value |
+| ------------------------ | ----- |
+| Upstream repository      | <https://huggingface.co/google/t5gemma-2-1b-1b> |
+| Revision used            | Unverified — not loaded: the repository is gated, and the export builds the text encoder from the config embedded in the v4-Large checkpoint. That checkpoint's `config_json` names `text_encoder_revision` `dd0a2683227859151b1730ca3a63087df5b5f39b` and `text_tokenizer_repo` / `caption_tokenizer_repo` `google/t5gemma-2-1b-1b` (read 2026-11-14); nobody has looked that revision up on the Hub. |
+| Form of copy             | Not copied directly. Upstream fine-tuned its text encoder (the `backbone` component — "the fine-tuned text encoder from google/t5gemma-2-1b-1b", upstream's model card) and ships the tokenizer in the v4-Large repository's `tokenizer/`; both reach the distribution through the v4-Large block above. Whether that `tokenizer/` is byte-identical to this repository's tokenizer at the revision above is Unverified. |
+| Code license             | n/a (weights only; modeling code is `transformers`) |
+| Weights license          | Unverified at the revision used. The Gemma Terms of Use upstream ships list "T5Gemma 2" in their Appendix, and upstream's model card names this model as the reason those terms apply to v4-Large. |
+| Attribution requirements | Unverified — assumed covered by the v4-Large block's (the same Gemma Terms of Use); the card lists this repository in `base_model` and in the attribution. |
 
 ### Aratako/Irodori-TTS (model implementation)
 
@@ -141,7 +174,7 @@ published.
 | Form of copy             | Not copied directly. It is the `base_model` of the parent above, so the redistributed codec weights derive from it.                                                                                                                                                                                                          |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                           |
 | Weights license          | `card.py` records `apache-2.0` (the HF license tag, checked 2026-09-24). The repository README says "SAM License"; the upstream discussions/1 confirms that the README is wrong (user-confirmed 2026-09-24 — `card.py`).                                                                                                     |
-| Attribution requirements | Apache 2.0 §4(a)(b): the distribution repositories carry the Apache 2.0 text and the attribution / change notice (`distribution.py`'s `irodori_root_files` — `LICENSE.md` / `NOTICE.md`). Neither the HF nor the GitHub upstream carries a `NOTICE` file, so §4(d) has nothing to propagate (`card.py`, checked 2026-09-24). |
+| Attribution requirements | Apache 2.0 §4(a)(b): the distribution repositories carry the Apache 2.0 text and the attribution / change notice (`distribution.py`'s `irodori_root_files` — `LICENSE.md` / `NOTICE.md`; `irodori_large_root_files` for v4-Large). Neither the HF nor the GitHub upstream carries a `NOTICE` file, so §4(d) has nothing to propagate (`card.py`, checked 2026-09-24). |
 
 ### facebookresearch/dacvae (codec implementation)
 
