@@ -99,10 +99,10 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 /**
  * The distribution mirrors the guard **requires to exist** (the roster of the absence check — the
  * reach of the manifest checks is derived from the layout by {@link discoverDistributions}) = the
- * 16 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
+ * 17 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
  * 0.14.0, `karume-moss-image`, first published in 0.15.1, `karume-gemma4-qat-mobile`, published
- * under this name in 0.16.0, and `karume-irodori-v4.1-small-mf`, first published in 0.21.0) + the
- * unpublished `karume-wan2.1`.
+ * under this name in 0.16.0, `karume-irodori-v4.1-small-mf`, first published in 0.21.0, and
+ * `karume-irodori-v4-large`, first published in 0.22.0) + the unpublished `karume-wan2.1`.
  *
  * The two published ones were on the guard's roster before publication: `karume-umt5-xxl` is the
  * cross-repo reference root of the e2e of Wan's GPU path (ADR 0119 stage 10d — without it the
@@ -127,6 +127,10 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  *
  * `karume-irodori-v4.1-small-mf` (ADR 0150) is the root of the MeanFlow e2e
  * (`e2e_irodori_meanflow_test.ts`, `e2e_irodori_meanflow_wav_test.ts`), which SKIP on its absence.
+ *
+ * `karume-irodori-v4-large` (ADR 0151) is the root of the v4-Large e2e
+ * (`e2e_irodori_v4_large_test.ts`, `e2e_irodori_v4_large_wav_test.ts`) and of the A/B check's
+ * v4-Large case (`e2e_irodori_ab_test.ts`), which SKIP on its absence.
  */
 const DISTRIBUTIONS = [
   "karume-anima",
@@ -136,6 +140,7 @@ const DISTRIBUTIONS = [
   "karume-gemma4",
   "karume-gemma4-qat",
   "karume-gemma4-qat-mobile",
+  "karume-irodori-v4-large",
   "karume-irodori-v4-small",
   "karume-irodori-v4.1-small",
   "karume-irodori-v4.1-small-mf",

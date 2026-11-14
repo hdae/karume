@@ -73,6 +73,8 @@ export const IRODORI_PIPELINE_MAJOR = 1;
  *   that retrained only the duration predictor)
  * - `"irodori-v4.1-small-mf"` = `hdae/karume-irodori-v4.1-small-mf` (upstream's MeanFlow student of
  *   v4.1 — 4 steps without CFG; ADR 0150)
+ * - `"irodori-v4-large"` = `hdae/karume-irodori-v4-large` (upstream's v4-Large — the T5Gemma 2
+ *   text encoder and the Gemma tokenizer asset, under the Gemma Terms of Use; ADR 0151)
  *
  * The utterance lengths come out differently, so v4 and v4.1 stand side by side as **separate
  * sources** rather than "old and new" (the example scripts defaulted to v4.1 — the examples were
@@ -103,6 +105,10 @@ export const SOURCES = {
   "irodori-v4.1-small-mf": {
     repo: "hdae/karume-irodori-v4.1-small-mf",
     revision: "fc4ba31e2f9ea5bc03564758fc98a17805216ace",
+  },
+  "irodori-v4-large": {
+    repo: "hdae/karume-irodori-v4-large",
+    revision: "63ff6cf0f120f091a65e849bdaa2133004886c3c",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

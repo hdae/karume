@@ -22,8 +22,10 @@ measurements in `docs/research/`.
   tokenizer (ADR 0151). The asset's `format` key picks the tokenizer: absent is the Unigram asset of the v4 / v4.1
   Small models, `karume-gemma-tokenizer/1` the Gemma one, and any other value fails. Such an asset has no rare-token
   split table, so `splitRareTokens` omitted is off and `true` is a `ModelInputError`. The Gemma tokenizer reader
-  accepts the post_processor that prepends `<bos>` alone (`spec.postProcessor: "bos"`). The distribution
-  (`karume-irodori-v4-large`, under the Gemma Terms of Use) is not published yet and has no `SOURCES` entry.
+  accepts the post_processor that prepends `<bos>` alone (`spec.postProcessor: "bos"`). The distribution, under the
+  Gemma Terms of Use, is published as `hdae/karume-irodori-v4-large` and pinned as `irodori.SOURCES["irodori-v4-large"]`
+  (also in `KARUME_SOURCES`); its default preset is `i8-a8`, and its presets are `f16` / `i8` / `i8-a8` / `i8+dit4`
+  (no `f32`). It references its codec pair at `karume-irodori-v4-small`; the tokenizer asset is its own.
 
 ## [0.21.0] - 2026-11-14
 

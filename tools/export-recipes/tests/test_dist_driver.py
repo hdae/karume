@@ -266,6 +266,8 @@ RELEASE_REPOSITORIES = [
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
     ("irodori", ["v4.1-small-mf"], None, "karume-irodori-v4.1-small-mf"),
+    # The v4-Large line has its own Pipeline (the Gemma legal texts at the repository root).
+    ("irodori-large", ["v4-large"], None, "karume-irodori-v4-large"),
     # Points at the published repository without `--repo` (the Pipeline declares the family's
     # repository name — W-RC5-2).
     ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
@@ -328,7 +330,7 @@ class TestDeclaredReferencesOfThePublishedRepositories:
         for reference in declared_references(dist.PIPELINES[pipeline], models):
             assert reference.repo_name in published - {directory}, reference
 
-    def test_the_four_referencing_repositories(self) -> None:
+    def test_the_five_referencing_repositories(self) -> None:
         referencing = {
             directory: sorted(
                 reference.repo_name
@@ -338,6 +340,7 @@ class TestDeclaredReferencesOfThePublishedRepositories:
         }
         assert {name: repos for name, repos in referencing.items() if repos} == {
             "karume-anima-extra": ["karume-anima"],
+            "karume-irodori-v4-large": ["karume-irodori-v4-small"],
             "karume-irodori-v4.1-small": ["karume-irodori-v4-small"],
             "karume-irodori-v4.1-small-mf": [
                 "karume-irodori-v4-small",

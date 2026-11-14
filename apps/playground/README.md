@@ -85,7 +85,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `irodori-v4` | `models/karume-irodori-v4-small` | `hdae/karume-irodori-v4-small` (plus the revision `irodori-v4.1`, `irodori-v4.1-mf` and `irodori-v4-large` reference) | Irodori-TTS |
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` (plus the revision `irodori-v4.1-mf` references) | Irodori-TTS |
 | `irodori-v4.1-mf` | `models/karume-irodori-v4.1-small-mf` | `hdae/karume-irodori-v4.1-small-mf` | Irodori-TTS |
-| `irodori-v4-large` | `models/karume-irodori-v4-large` | `hdae/karume-irodori-v4-large` (written in `src/mounts.ts` until `irodori.SOURCES` has the entry; the repository is not published yet) | Irodori-TTS |
+| `irodori-v4-large` | `models/karume-irodori-v4-large` | `hdae/karume-irodori-v4-large` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
 | `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |

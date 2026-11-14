@@ -40,9 +40,10 @@ Node and Deno.
   `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset; the i4
   series (GPTQ), the local mirror, the real-GPU e2e (tolerances from measurement, sha256 rows, the `i8-a8` census) and
   the Node measurement of the presets (ADR 0151, Consequences). The default preset is `i8-a8` (the
-  maintainer's ruling of 2026-11-14). Left, in order: the Playground page in a browser, the maintainer's review of the licence wording,
-  then the publication (the release-runbook §0 items for this repository; the test-asset upload first settles whether
-  the `dit` io goldens store the condition K/V once).
+  maintainer's ruling of 2026-11-14). The maintainer reviewed the licence wording on 2026-11-14; published 2026-11-14 with
+  0.22.0 as `karume-irodori-v4-large`, pinned as `irodori.SOURCES["irodori-v4-large"]`, which the Playground mount reads
+  its repository name from; its goldens are in the test-asset dataset (the `dit` io goldens store the condition K/V
+  once). Left: only the Playground page in a browser.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 

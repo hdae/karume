@@ -36,13 +36,15 @@ export type {
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
- * Upstream v4 / v4.1 / v4.1 MF are separate repositories, so three entries:
+ * Upstream v4 / v4.1 / v4.1 MF / v4-Large are separate repositories, so four entries:
  *
  * - `SOURCES["irodori-v4-small"]` = `hdae/karume-irodori-v4-small`
  * - `SOURCES["irodori-v4.1-small"]` = `hdae/karume-irodori-v4.1-small` (the follow-up
  *   version in which only the duration predictor was retrained)
  * - `SOURCES["irodori-v4.1-small-mf"]` = `hdae/karume-irodori-v4.1-small-mf` (upstream's MeanFlow
  *   student of v4.1 — 4 steps without CFG; ADR 0150)
+ * - `SOURCES["irodori-v4-large"]` = `hdae/karume-irodori-v4-large` (upstream's v4-Large — the
+ *   T5Gemma 2 text encoder and the Gemma tokenizer asset, under the Gemma Terms of Use; ADR 0151)
  *
  * The pin of the older version is kept too (**there is no default entry** — the caller spells out
  * which one to use).

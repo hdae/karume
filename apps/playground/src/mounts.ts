@@ -69,8 +69,7 @@ export const MOUNTS = {
   },
   "irodori-v4-large": {
     directory: "models/karume-irodori-v4-large",
-    // TODO: irodori.SOURCES["irodori-v4-large"].repo once the entry exists (it arrives at release).
-    hfRepo: "hdae/karume-irodori-v4-large",
+    hfRepo: irodori.SOURCES["irodori-v4-large"].repo,
   },
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },

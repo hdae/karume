@@ -2,9 +2,10 @@
 
 - Status: proposed (2026-11-14 — the recipe exports the seven text-side graphs, the tokenizer asset and the full-loop
   goldens, writes the f16 / i8 / i4 series and assembles the distribution; the TS pipeline reads the tokenizer asset;
-  the local mirror is built and the real-GPU e2e passes on it. The listening, the licence review and the publication
-  are pending — see Pending; the default preset is `i8-a8` by the maintainer's ruling of 2026-11-14, and the licence
-  wording is unreviewed)
+  the local mirror is built and the real-GPU e2e passes on it. The default preset is `i8-a8` by the maintainer's ruling
+  of 2026-11-14; the maintainer reviewed the licence wording on 2026-11-14, and the distribution was published with
+  0.22.0 on 2026-11-14 (`hdae/karume-irodori-v4-large`, `irodori.SOURCES["irodori-v4-large"]`, its goldens in the
+  test-asset dataset). The Playground page in a browser is pending — see Pending)
 - Date: 2026-11-14
 - Related: [0084](0084-gemma-tokenizer-chat.md) (the Gemma tokenizer asset; its addendum of 2026-11-14 adds the third
   post_processor shape) / [0149](0149-irodori-rare-token-split.md) (the rare-token split table; its addendum of
@@ -200,13 +201,14 @@ What is new for the stack:
   measured differences. The per-graph io goldens of the f16 series go from 4.83 GB to 0.65 GB (`dit` 4.18 GB →
   0.30 MB, `dit_context` 0.61 GB). The small models keep the copy in their `dit` io: their goldens are in the
   test-asset dataset in that form.
-- The distribution's legal texts follow the recipe's reading of Gemma Terms of Use §3.1, recorded as Unverified in
-  `tools/export-recipes/irodori/THIRD_PARTY_NOTICES.md`; the maintainer reviews the wording before any upload.
+- The distribution's legal texts follow the recipe's reading of Gemma Terms of Use §3.1, recorded in
+  `tools/export-recipes/irodori/THIRD_PARTY_NOTICES.md`. The maintainer reviewed that wording as built on 2026-11-14
+  and approved the publication; this is a review of the wording, not a legal opinion.
+- Published with 0.22.0 (2026-11-14): the HF upload of `hdae/karume-irodori-v4-large` built with `--resolve-refs hf`
+  against v4-small's main (the revision `irodori.SOURCES["irodori-v4-small"]` pins); the goldens are in the
+  test-asset dataset with the pin moved in the same commit as the tests, and `irodori.SOURCES["irodori-v4-large"]`
+  pins the uploaded revision, which the Playground mount reads its repository name from.
 
 ## Pending
 
 - The Playground page in a browser (built, not run).
-- The maintainer's review of the licence wording, then the publication: the HF upload built with `--resolve-refs hf`
-  against v4-small's main, the goldens in the test-asset dataset with the pin moved, the
-  `irodori.SOURCES["irodori-v4-large"]` entry, and the Playground mount reading its repository name from that entry
-  (`docs/release-runbook.md` §0).
