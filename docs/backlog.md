@@ -7,9 +7,20 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.20.0 release (released 2026-11-10)
+## now — after the 0.21.0 release (released 2026-11-14)
 
-0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
+0.21.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.21.0 — fusion rules written outside the runtime
+and the per-family geometry profiles; Irodori's rare-token split (ADR 0149) and its MeanFlow model v4.1-small-mf (ADR
+0150); acquisition that falls back when a device cannot run 32-lane subgroups). On HF: `karume-irodori-v4-small` with the
+split table in its tokenizer asset, `karume-irodori-v4.1-small` rebuilt against it, `karume-irodori-v4.1-small-mf`
+published for the first time (no FAILED row, the large parts at 32.9 MiB per term or more), and a card-only upload of
+`karume-anima` / `karume-anima-extra` for the corrected license text; the three `irodori.SOURCES` entries moved or were
+added. The breaking changes are the geometry-profile ones listed in the CHANGELOG. The kernel-check page on Chrome / D3D12
+(RTX 5070 Ti) reads as on 2026-11-12: the product verdict passes, the states-attention check FAILs in the K-95 classes
+only, and the online-attention check is incomplete because its `wg` form needs more workgroup storage than the device
+grants (its `sg32` form passes); the page was not run on Dawn / Vulkan, where the core lane ran the same checks.
+
+Before it: 0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
 its host tier, self-speculation and per-layer slots; the parallel-GEMV rows and the RMS→add width for 26B, with the 26B
 presets `i4-gemvpar` / `i4-fast`). `hdae/karume-gemma4-qat` was re-uploaded with them (no FAILED row, the large parts at
 51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking. Published-smoke is green on
