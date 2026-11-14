@@ -246,6 +246,18 @@ export type GenerateRequest = {
    */
   readonly caption?: string;
   readonly speaker?: SpeakerInput;
+  /**
+   * Encode the text without the rare long tokens of the v4 Small text tokenizer, which the model
+   * often misreads or skips (upstream's `split_rare_tokens` — ADR 0149). The text itself is not
+   * rewritten: the tokenizer falls back to shorter, well-trained pieces. **Text only** — the
+   * caption is never split.
+   *
+   * Omitted: on when the distribution's tokenizer asset carries the split table (the v4 / v4.1
+   * Small tokenizer from a distribution revision that has it), off otherwise — the same default as
+   * upstream, where other tokenizers are unaffected. `true` with an asset that has no table is a
+   * `ModelInputError` before anything runs; `false` always works and gives the unsplit encoding.
+   */
+  readonly splitRareTokens?: boolean;
   /** Random seed (default 0 — the same seed gives the same latent). */
   readonly seed?: number;
   /**
@@ -577,12 +589,16 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
  * moved forward from stage 4 to the entry — both `generate` and `generateLatent` fail before the
  * text / caption stages and the codec encoder run.
  *
+ * `splitRareTokens` is resolved by the same {@link resolveSplitRareTokens} that stage 1 uses, so
+ * the entry rejects exactly what the generation would.
+ *
  * NOTE: `export` is for the tests that pin the acceptance sets without a GPU (not exposed on
  * `mod.ts` / the subpath surface — ADR 0008, same convention as `latentSnapshot`).
  */
 export const assertIrodoriRequest = (
   request: GenerateRequest,
   config: IrodoriPipelineConfig,
+  tokenizer: Pick<IrodoriTokenizer, "hasRareTokenSplit">,
 ): void => {
   // The default is checked too — the caller is not obliged to pass `codecTileFrames`, so a
   // distribution whose relation between the default tile and `codecHaloFrames` is broken must not
@@ -600,6 +616,39 @@ export const assertIrodoriRequest = (
   // Whether the reference (audio / latent) reaches the speaker minimum — waiting until stage 4 would
   // fail only after the text / caption stages and the codec encoder ran on the GPU.
   assertSpeakerReference(request.speaker, config);
+  resolveSplitRareTokens(request.splitRareTokens, tokenizer);
+};
+
+/**
+ * The rare-token split flag of one request (ADR 0149) — the single place that decides it, used by
+ * the entry check and by stage 1.
+ *
+ * Omitted follows the asset: on when the tokenizer asset carries the split table, off when it does
+ * not (upstream splits only the tokenizer its threshold was measured on). An explicit `true`
+ * without the table is a `ModelInputError` (ADR 0107 — the caller's knob asks for something the
+ * distribution cannot do; silently encoding unsplit would hide it). An explicit `false` always
+ * holds.
+ *
+ * NOTE: `export` is for the GPU-free tests (not exposed on `mod.ts` / the subpath surface).
+ */
+export const resolveSplitRareTokens = (
+  requested: boolean | undefined,
+  tokenizer: Pick<IrodoriTokenizer, "hasRareTokenSplit">,
+): boolean => {
+  if (requested === undefined) return tokenizer.hasRareTokenSplit;
+  if (typeof requested !== "boolean") {
+    throw new ModelInputError(
+      `irodori.Pipeline: splitRareTokens must be a boolean (received: ${String(requested)})`,
+    );
+  }
+  if (requested && !tokenizer.hasRareTokenSplit) {
+    throw new ModelInputError(
+      "irodori.Pipeline: splitRareTokens is true, but this distribution's tokenizer asset carries" +
+        " no rare-token split table (it exists only for the v4 Small tokenizer from a revision" +
+        " that includes it) — omit the option or pass false",
+    );
+  }
+  return requested;
 };
 
 /** Builds a latent from one text (+ caption / reference speaker). */
@@ -609,7 +658,11 @@ const generateLatent = async (
   request: GenerateRequest,
 ): Promise<LatentStage> => {
   const { config } = state;
-  const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text");
+  // Text only — `packCaptionIds` never splits (the MUST of `host/pack.ts`).
+  const splitRareTokens = resolveSplitRareTokens(request.splitRareTokens, state.tokenizer);
+  const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text", {
+    splitRareTokens,
+  });
   // Whether a caption exists is decided on the **raw string** (upstream
   // `str(req.caption).strip() != ""`).
   const captionText = request.caption ?? "";
@@ -1030,7 +1083,7 @@ export class Pipeline {
     // The request-knob checks also happen at call time (outside the chain) — inside the chain, a
     // typo would fail only after waiting for the preceding generation to settle
     // (`createOperationChain` delays by 1 microtask even on an empty chain).
-    assertIrodoriRequest(request, this.#state.config);
+    assertIrodoriRequest(request, this.#state.config, this.#state.tokenizer);
     return await this.#chain(() => generateAudio(this.#state, emitter(request.onEvent), request));
   }
 
@@ -1045,7 +1098,7 @@ export class Pipeline {
     if (this.#disposal !== undefined) {
       throw new Error("irodori.Pipeline: cannot generate after dispose");
     }
-    assertIrodoriRequest(request, this.#state.config);
+    assertIrodoriRequest(request, this.#state.config, this.#state.tokenizer);
     return await this.#chain(
       async () => (await generateLatent(this.#state, emitter(request.onEvent), request)).latent,
     );

@@ -281,6 +281,7 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "",
         "  seed: 42, // same seed + same inputs → same audio",
         "  // durationSeconds: 5, // override the predicted utterance length (seconds)",
+        "  // splitRareTokens: false, // keep rare long words as single tokens (see Defaults)",
         "});",
         "",
         "await Deno.writeFile(",
@@ -343,6 +344,12 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
         "",
         "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same",
         "seed with the same request gives the same audio.",
+        "",
+        "`splitRareTokens` follows the tokenizer asset: when it carries the rare-token split",
+        "table (upstream's default for this tokenizer), the text — never the caption — is encoded",
+        "without the rare long tokens the model tends to misread, falling back to shorter pieces;",
+        "`false` turns that off. A tokenizer without the table encodes unsplit, and asking it for",
+        "the split is refused.",
     ]
 
 

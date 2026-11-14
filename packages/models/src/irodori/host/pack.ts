@@ -13,11 +13,15 @@
  * `inference_runtime._synthesize` applies `normalize_text(...).strip()` to text, but only
  * `str(...).strip()` to caption (`normalize_text` is for text only). Normalizing the caption too
  * would silently change the conditioning by the outer-bracket stripping, NFKC and symbol deletion.
+ *
+ * MUST: the rare-token split (ADR 0149) is **text only**. Upstream enables it on the text tokenizer
+ * and builds the caption tokenizer as a separate instance that is never switched, so the caption
+ * path always encodes without it, whatever the request says.
  */
 
 import { ModelInputError } from "../../errors.ts";
 import { normalizeText } from "../text/normalize.ts";
-import type { IrodoriTokenizer } from "../text/tokenizer.ts";
+import type { IrodoriEncodeOptions, IrodoriTokenizer } from "../text/tokenizer.ts";
 
 /**
  * Preprocessed body → a packed sequence with BOS prepended, cut at `maxLength-1`.
@@ -30,8 +34,9 @@ const packBody = (
   tokenizer: IrodoriTokenizer,
   body: string,
   maxLength: number,
+  options: IrodoriEncodeOptions,
 ): Int32Array<ArrayBuffer> => {
-  const padded = tokenizer.encodePadded(body, maxLength);
+  const padded = tokenizer.encodePadded(body, maxLength, options);
   let used = 0;
   while (used < padded.mask.length && padded.mask[used] === 1) used += 1;
   return padded.ids.slice(0, used);
@@ -43,12 +48,16 @@ const packBody = (
  * MUST: empty after normalization fails loudly. Upstream (`_packed_ids` in
  * `irodori/pipeline_ref.py`) fails at the same place — letting a BOS-only sequence through
  * generates **an utterance with no content that is not even silence**.
+ *
+ * `options.splitRareTokens` is the flag the pipeline resolved from the request
+ * (`resolveSplitRareTokens` in `pipeline.ts`).
  */
 export const packIds = (
   tokenizer: IrodoriTokenizer,
   text: string,
   maxLength: number,
   where: string,
+  options: IrodoriEncodeOptions,
 ): Int32Array<ArrayBuffer> => {
   const normalized = normalizeText(text).trim();
   if (normalized.length === 0) {
@@ -60,7 +69,7 @@ export const packIds = (
       `irodori: ${where} is empty after normalisation (there is no text to synthesise)`,
     );
   }
-  return packBody(tokenizer, normalized, maxLength);
+  return packBody(tokenizer, normalized, maxLength, options);
 };
 
 /**
@@ -83,5 +92,6 @@ export const packCaptionIds = (
       "irodori: caption is empty after strip (input that belongs on the no-caption path)",
     );
   }
-  return packBody(tokenizer, stripped, maxLength);
+  // Never split (the MUST of the module doc).
+  return packBody(tokenizer, stripped, maxLength, { splitRareTokens: false });
 };

@@ -26,7 +26,7 @@
 // latent silently** reaches the subscriber, and the real-GPU WAV check stays green because it does
 // not go through the observation hook.
 
-import { test } from "vite-plus/test";
+import { describe, it, test } from "vite-plus/test";
 import {
   assertEquals,
   assertNotStrictEquals,
@@ -38,7 +38,7 @@ import { parseManifest } from "@karume/hub";
 import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { assetJson } from "../src/irodori/admission.ts";
 import { latentSnapshot } from "../src/irodori/dit-loop.ts";
-import { assertIrodoriRequest, Pipeline } from "../src/irodori/pipeline.ts";
+import { assertIrodoriRequest, Pipeline, resolveSplitRareTokens } from "../src/irodori/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
@@ -293,6 +293,9 @@ test("assetJson: a JSON syntax error fails with a message different from decode 
   assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
 });
 
+/** A tokenizer whose asset has no rare-token split table (the knobs below do not involve it). */
+const NO_SPLIT_TABLE = { hasRareTokenSplit: false } as const;
+
 test("assertIrodoriRequest: a misspelled request knob fails before the heavy computation", () => {
   // These checks originally existed only **after** latent generation (`planCodecTiles` right before
   // decode, `Randn` at stage ⑦), so they failed after consuming the 1.26GB weight load and every
@@ -305,28 +308,32 @@ test("assertIrodoriRequest: a misspelled request knob fails before the heavy com
   // taken range (`10 <= 16`), and passed through it would run up to right before decode and fail.
   for (const codecTileFrames of [10, 0, 1.5]) {
     assertThrows(
-      () => assertIrodoriRequest({ text, codecTileFrames }, config),
+      () => assertIrodoriRequest({ text, codecTileFrames }, config, NO_SPLIT_TABLE),
       ModelInputError,
       "is not an integer greater than two halos",
     );
   }
   for (const seed of [-1, 1.5]) {
     assertThrows(
-      () => assertIrodoriRequest({ text, seed }, config),
+      () => assertIrodoriRequest({ text, seed }, config, NO_SPLIT_TABLE),
       ModelInputError,
       "non-negative safe integer",
     );
   }
   assertThrows(
-    () => assertIrodoriRequest({ text, durationSeconds: NaN }, config),
+    () => assertIrodoriRequest({ text, durationSeconds: NaN }, config, NO_SPLIT_TABLE),
     ModelInputError,
     "durationSeconds",
   );
 
   // Valid values pass (the evidence that the check does not always fail is on the side of the 6
   // cases above).
-  assertIrodoriRequest({ text, codecTileFrames: 182, seed: 0, durationSeconds: 3 }, config);
-  assertIrodoriRequest({ text }, config);
+  assertIrodoriRequest(
+    { text, codecTileFrames: 182, seed: 0, durationSeconds: 3 },
+    config,
+    NO_SPLIT_TABLE,
+  );
+  assertIrodoriRequest({ text }, config, NO_SPLIT_TABLE);
 });
 
 test("assertIrodoriRequest: a speaker reference shorter than 2 tokens (the export's Dim(min=2)) fails before the GPU runs", () => {
@@ -342,14 +349,14 @@ test("assertIrodoriRequest: a speaker reference shorter than 2 tokens (the expor
   // 0 samples, 80ms (2 frames = 0 tokens), exactly 7 frames (1 token).
   for (const samples of [0, 3840, 7 * 1920]) {
     assertThrows(
-      () => assertIrodoriRequest({ text, speaker: audio(samples) }, config),
+      () => assertIrodoriRequest({ text, speaker: audio(samples) }, config, NO_SPLIT_TABLE),
       ModelInputError,
       "tokens",
     );
   }
   // The tail is rounded up to a multiple of hop by reflect pad, so 7 frames + 1 sample is 8 frames
   // = 2 tokens.
-  assertIrodoriRequest({ text, speaker: audio(7 * 1920 + 1) }, config);
+  assertIrodoriRequest({ text, speaker: audio(7 * 1920 + 1) }, config, NO_SPLIT_TABLE);
   assertThrows(
     () =>
       assertIrodoriRequest(
@@ -358,6 +365,7 @@ test("assertIrodoriRequest: a speaker reference shorter than 2 tokens (the expor
           speaker: { audio: { data: new Float32Array(8 * 1920), sampleRate: 24000 } },
         },
         config,
+        NO_SPLIT_TABLE,
       ),
     ModelInputError,
     "resampler",
@@ -366,12 +374,12 @@ test("assertIrodoriRequest: a speaker reference shorter than 2 tokens (the expor
   const latent = (frames: number) => ({ latent: new Float32Array(frames * 32) });
   for (const frames of [0, 4, 7]) {
     assertThrows(
-      () => assertIrodoriRequest({ text, speaker: latent(frames) }, config),
+      () => assertIrodoriRequest({ text, speaker: latent(frames) }, config, NO_SPLIT_TABLE),
       ModelInputError,
       "is less than",
     );
   }
-  assertIrodoriRequest({ text, speaker: latent(8) }, config);
+  assertIrodoriRequest({ text, speaker: latent(8) }, config, NO_SPLIT_TABLE);
 });
 
 test("assertIrodoriRequest: checks the default tile even for a request that does not pass codecTileFrames", () => {
@@ -380,10 +388,51 @@ test("assertIrodoriRequest: checks the default tile even for a request that does
   // `codecHaloFrames` **always** fail after the DiT loop.
   const config = parseIrodoriPipelineConfig({ ...PIPELINE_CONFIG, codecHaloFrames: 91 });
   assertThrows(
-    () => assertIrodoriRequest({ text: "テスト" }, config),
+    () => assertIrodoriRequest({ text: "テスト" }, config, NO_SPLIT_TABLE),
     ModelInputError,
     "tileFrames 182 is not an integer greater than two halos (182)",
   );
+});
+
+describe("splitRareTokens (ADR 0149 — the rare-token split of the text)", () => {
+  const WITH_SPLIT_TABLE = { hasRareTokenSplit: true } as const;
+
+  it("omitted, it follows the tokenizer asset: on with the split table, off without it", () => {
+    assertEquals(resolveSplitRareTokens(undefined, WITH_SPLIT_TABLE), true);
+    assertEquals(resolveSplitRareTokens(undefined, NO_SPLIT_TABLE), false);
+  });
+
+  it("an explicit false always holds, with or without the table", () => {
+    assertEquals(resolveSplitRareTokens(false, WITH_SPLIT_TABLE), false);
+    assertEquals(resolveSplitRareTokens(false, NO_SPLIT_TABLE), false);
+    assertEquals(resolveSplitRareTokens(true, WITH_SPLIT_TABLE), true);
+  });
+
+  it("an explicit true without the table is an input error before anything runs", () => {
+    const config = parseIrodoriPipelineConfig(PIPELINE_CONFIG);
+    assertThrows(
+      () => resolveSplitRareTokens(true, NO_SPLIT_TABLE),
+      ModelInputError,
+      "carries no rare-token split table",
+    );
+    // The entry check rejects exactly what stage 1 would (both call the same resolver).
+    assertThrows(
+      () => assertIrodoriRequest({ text: "テスト", splitRareTokens: true }, config, NO_SPLIT_TABLE),
+      ModelInputError,
+      "splitRareTokens is true",
+    );
+    assertIrodoriRequest({ text: "テスト", splitRareTokens: true }, config, WITH_SPLIT_TABLE);
+  });
+
+  it("a non-boolean value from an untyped caller is an input error, not a truthy switch", () => {
+    for (const value of ["yes", 1, null]) {
+      assertThrows(
+        () => resolveSplitRareTokens(value as unknown as boolean, WITH_SPLIT_TABLE),
+        ModelInputError,
+        "must be a boolean",
+      );
+    }
+  });
 });
 
 test("latentSnapshot: copies the latent as of binding (advancing the step does not change the copy)", () => {

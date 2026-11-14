@@ -12,6 +12,8 @@
 //    committed; the exporter measures that the lattice equals the full vocabulary's by scanning the
 //    whole vocabulary in reverse)
 //  - **the whole** table of single code points whose NFKC is not the identity
+//  - the rare-token split (ADR 0149): upstream's table cut to the subset and 8 cases, each solved by
+//    upstream with the split off and on (4 of them also in `batch_encode`'s final form)
 //
 // It depends on neither real assets (under outputs/) nor a GPU, so it always runs.
 //
@@ -60,6 +62,20 @@ type CaptionCase = {
   readonly normalizeSensitive: boolean;
 };
 
+type SplitCase = {
+  readonly name: string;
+  readonly why: string;
+  readonly raw: string;
+  readonly normalized: string;
+  readonly ids: number[];
+  readonly idsSplit: number[];
+  readonly maxLength?: number;
+  readonly idsPadded?: number[];
+  readonly mask?: boolean[];
+  readonly idsPaddedSplit?: number[];
+  readonly maskSplit?: boolean[];
+};
+
 type NormalizeCase = {
   readonly name: string;
   readonly why: string;
@@ -77,11 +93,19 @@ type Fixture = {
     readonly padId: number;
     readonly unkId: number;
     readonly byteBaseId: number;
+    readonly rareTokenSplit: {
+      readonly disabledScore: number;
+      readonly disabledIds: number[];
+      readonly forcedSplits: [number, number[]][];
+      readonly minScore: number;
+      readonly disabledTotal: number;
+    };
   };
   readonly encode: {
     readonly cases: EncodeCase[];
     readonly batch: BatchCase[];
     readonly caption: CaptionCase[];
+    readonly split: SplitCase[];
   };
   readonly normalize: { readonly cases: NormalizeCase[] };
   readonly nfkcDiff: Record<string, string>;
@@ -104,6 +128,26 @@ const assets: IrodoriTokenizerAssets = {
 };
 
 const tokenizer = new IrodoriTokenizer(assets);
+
+/** The unsplit path (every case of the fixture before `encode.split` is upstream's plain encoding). */
+const PLAIN = { splitRareTokens: false } as const;
+/** The rare-token split path (ADR 0149). */
+const SPLIT = { splitRareTokens: true } as const;
+
+/**
+ * The same subset with the split table. MUST: `minScore` of the split side comes from the
+ * **whole replaced-score** vocabulary (the recipe's `split_min_score`), not from the subset or the
+ * original minimum.
+ */
+const splitTokenizer = new IrodoriTokenizer({
+  ...assets,
+  rareTokenSplit: {
+    disabledScore: fixture.asset.rareTokenSplit.disabledScore,
+    disabledIds: fixture.asset.rareTokenSplit.disabledIds,
+    minScore: fixture.asset.rareTokenSplit.minScore,
+    forcedSplits: new Map(fixture.asset.rareTokenSplit.forcedSplits),
+  },
+});
 
 // ---- The fixture itself -------------------------------------------------------
 
@@ -146,12 +190,12 @@ for (const testCase of fixture.encode.cases) {
     // miss a normalisation mistake and an encoding mistake that cancel out.
     assertEquals(normalizeText(testCase.raw), testCase.normalized, "the normalised string");
     assertEquals(
-      tokenizer.encode(testCase.normalized),
+      tokenizer.encode(testCase.normalized, PLAIN),
       testCase.ids,
       "the id sequence from the normalised text",
     );
     assertEquals(
-      tokenizer.encode(normalizeText(testCase.raw)),
+      tokenizer.encode(normalizeText(testCase.raw), PLAIN),
       testCase.ids,
       "the full path from the raw text",
     );
@@ -184,7 +228,7 @@ test("assets: the ids of the 256 byte tokens run consecutively as byteBaseId + b
 
 for (const testCase of fixture.encode.batch) {
   test(`assembly parity [${testCase.name}] ${testCase.why}`, () => {
-    const padded = tokenizer.encodePadded(testCase.normalized, testCase.maxLength);
+    const padded = tokenizer.encodePadded(testCase.normalized, testCase.maxLength, PLAIN);
     assertEquals([...padded.ids], testCase.idsPadded, "idsPadded");
     assertEquals([...padded.mask], testCase.mask.map(Number), "mask");
   });
@@ -196,7 +240,7 @@ test("assembly: truncation really fires, BOS remains, and the total length is ma
   // A fault that mistakes the body's budget for `max_length` fails this case's id-sequence parity
   // (with only cases where truncation does not fire, it would pass).
   assert(
-    tokenizer.encode(truncated.normalized).length + 1 > truncated.maxLength,
+    tokenizer.encode(truncated.normalized, PLAIN).length + 1 > truncated.maxLength,
     "truncation did not fire",
   );
   assertEquals(truncated.idsPadded.length, truncated.maxLength);
@@ -207,7 +251,7 @@ test("assembly: truncation really fires, BOS remains, and the total length is ma
 test("assembly: a short input is right-padded and the mask marks the valid length", () => {
   const short = fixture.encode.batch.find((entry) => entry.name === "batch-short");
   assert(short !== undefined, "the fixture has no short case");
-  const used = tokenizer.encode(short.normalized).length + 1;
+  const used = tokenizer.encode(short.normalized, PLAIN).length + 1;
   assertEquals(short.mask.filter(Boolean).length, used);
   assertEquals(
     short.idsPadded.slice(used),
@@ -231,7 +275,7 @@ for (const testCase of fixture.encode.caption) {
       "caption path (strip only)",
     );
     assertEquals(
-      [...packIds(tokenizer, testCase.raw, testCase.maxLength, "text")],
+      [...packIds(tokenizer, testCase.raw, testCase.maxLength, "text", PLAIN)],
       testCase.normalizedIdsPacked,
       "text path (normalize + strip)",
     );
@@ -618,11 +662,15 @@ test("does not accept an unpaired surrogate (no silent pass for input the source
   // It arrives as the body of a generation request, so it is an input error (ADR 0107 decision 2 —
   // fixing the character makes it pass). The source of truth for the acceptance condition is still
   // the single `toCodePoints`, so the owner's diagnostic stays in `cause`.
-  const error = assertThrows(() => tokenizer.encode("a\ud800b"), ModelInputError, "surrogate");
+  const error = assertThrows(
+    () => tokenizer.encode("a\ud800b", PLAIN),
+    ModelInputError,
+    "surrogate",
+  );
   assert(error.cause instanceof Error);
   assert(!(error.cause instanceof ModelInputError), "cause is the shared helper's plain Error");
   // The other side: paired surrogates (such as U+1F600) pass.
-  assert(tokenizer.encode("a\ud83d\ude00b").length > 0);
+  assert(tokenizer.encode("a\ud83d\ude00b", PLAIN).length > 0);
 });
 
 test("added tokens are split out **before** the lattice (they do not lose to the vocabulary's split)", () => {
@@ -646,12 +694,12 @@ test("added tokens are split out **before** the lattice (they do not lose to the
     padId: 2,
   };
   const added = new IrodoriTokenizer({ ...base, addedTokens: new Map([["<|x|>", 99]]) });
-  assertEquals(added.encode("<|x|>"), [99], "the added token's id comes out directly");
+  assertEquals(added.encode("<|x|>", PLAIN), [99], "the added token's id comes out directly");
   // Removed from the added tokens, the lattice wins with a three-way split (= evidence the check
   // above is not vacuous).
   const plain = new IrodoriTokenizer({ ...base, addedTokens: new Map() });
   assertEquals(
-    plain.encode("<|x|>"),
+    plain.encode("<|x|>", PLAIN),
     [6, 7, 8],
     "the lattice chooses the three-way split by score sum",
   );
@@ -758,4 +806,250 @@ test("outer-bracket stripping: matches the source of truth's sequential form on 
   // The random inputs really exercise the stripping side (if everything passed through unchanged,
   // the comparison would be vacuous).
   assert(stripped >= 50, `only ${stripped} inputs get stripped`);
+});
+
+// ---- ⑥ The rare-token split (ADR 0149 — upstream's `RareTokenSplitter`) ------------------
+//
+// The fixture's split cases were solved by upstream with the split on (`enable_rare_token_split`)
+// and off, on the real vocabulary. The synthetic vocabularies further down pin the boundaries the
+// real cases cannot isolate.
+
+test("split fixture: the cases are present and the split really changes most of them", () => {
+  assertEquals(fixture.encode.split.length, 8);
+  assertEquals(fixture.encode.split.filter((entry) => entry.idsPadded !== undefined).length, 4);
+  const changed = fixture.encode.split.filter((entry) => !arraysEqual(entry.ids, entry.idsSplit));
+  assert(changed.length >= 6, `only ${changed.length} split cases differ from the plain encoding`);
+  // The split side's unknown-node weight comes from its own (replaced) minimum.
+  assert(
+    fixture.asset.rareTokenSplit.minScore < fixture.asset.minScore,
+    "the split minScore is not below the original one",
+  );
+  assert(fixture.asset.rareTokenSplit.disabledIds.length > 0, "no disabled id is in the subset");
+});
+
+for (const testCase of fixture.encode.split) {
+  test(`split parity [${testCase.name}] ${testCase.why}`, () => {
+    assertEquals(normalizeText(testCase.raw).trim(), testCase.normalized, "the normalised string");
+    assertEquals(splitTokenizer.encode(testCase.normalized, SPLIT), testCase.idsSplit, "split on");
+    // The same tokenizer with the flag off is upstream's plain encoding (the table changes nothing
+    // until it is asked for).
+    assertEquals(splitTokenizer.encode(testCase.normalized, PLAIN), testCase.ids, "split off");
+    assertEquals(tokenizer.encode(testCase.normalized, PLAIN), testCase.ids, "no table");
+  });
+}
+
+for (const testCase of fixture.encode.split) {
+  const { maxLength, idsPadded, mask, idsPaddedSplit, maskSplit } = testCase;
+  if (maxLength === undefined) continue;
+  test(`split assembly parity [${testCase.name}]`, () => {
+    assert(idsPadded !== undefined && mask !== undefined, "the plain padded form is missing");
+    assert(idsPaddedSplit !== undefined && maskSplit !== undefined, "the split form is missing");
+    const plain = splitTokenizer.encodePadded(testCase.normalized, maxLength, PLAIN);
+    assertEquals([...plain.ids], idsPadded, "idsPadded");
+    assertEquals([...plain.mask], mask.map(Number), "mask");
+    const split = splitTokenizer.encodePadded(testCase.normalized, maxLength, SPLIT);
+    assertEquals([...split.ids], idsPaddedSplit, "idsPaddedSplit");
+    assertEquals([...split.mask], maskSplit.map(Number), "maskSplit");
+  });
+}
+
+test("split: truncation applies after the split (a body that fits unsplit is cut once split)", () => {
+  const truncates = fixture.encode.split.find((entry) => entry.name === "split-truncates");
+  assert(truncates?.maxLength !== undefined, "the fixture has no truncation-after-split case");
+  const { maxLength } = truncates;
+  assert(truncates.ids.length + 1 <= maxLength, "the plain body already overflows");
+  assert(truncates.idsSplit.length + 1 > maxLength, "the split body does not overflow");
+  const packed = packIds(splitTokenizer, truncates.raw, maxLength, "text", SPLIT);
+  assertEquals([...packed], [fixture.asset.bosId, ...truncates.idsSplit.slice(0, maxLength - 1)]);
+});
+
+test("split: the caption path never splits, whatever tokenizer it gets", () => {
+  // Upstream builds the caption tokenizer as a separate instance and never switches it.
+  const commit = fixture.encode.split.find((entry) => entry.name === "split-commit-examples");
+  assert(commit !== undefined, "the fixture has no commit-example case");
+  assert(commit.raw === commit.normalized, "the case would also test normalisation");
+  const caption = packCaptionIds(splitTokenizer, commit.raw, 512);
+  assertEquals([...caption], [fixture.asset.bosId, ...commit.ids]);
+  // The text path of the same tokenizer and string does split (the caption side is not equal by
+  // accident).
+  assertEquals(
+    [...packIds(splitTokenizer, commit.raw, 512, "text", SPLIT)],
+    [fixture.asset.bosId, ...commit.idsSplit],
+  );
+});
+
+/** Element-wise equality of two id lists. */
+const arraysEqual = (left: readonly number[], right: readonly number[]): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+/**
+ * A synthetic vocabulary for the split boundaries. `abcd` is disabled (its pieces `ab` / `cd`
+ * exist), `xy` is forced to `x` + `y`, and `pq` is disabled although `p` / `q` are not in the
+ * vocabulary at all (only an unknown piece could replace it).
+ */
+const SPLIT_VOCAB: readonly (readonly [string, number])[] = [
+  ["<unk>", 0],
+  ["<s>", 0],
+  ["<pad>", 0],
+  ["abcd", -14],
+  ["ab", -8],
+  ["cd", -8],
+  ["xy", -3],
+  ["x", -4],
+  ["y", -4],
+  ["pq", -14],
+];
+
+const syntheticAssets = (): IrodoriTokenizerAssets => ({
+  vocab: new Map(SPLIT_VOCAB.map(([token, score], id) => [token, { id, score }])),
+  minScore: -14,
+  maxTokenLength: 4,
+  unkId: 0,
+  byteBaseId: 100,
+  bosId: 1,
+  padId: 2,
+  addedTokens: new Map(),
+});
+
+const syntheticSplit = (minScore: number = -1e9): IrodoriTokenizer =>
+  new IrodoriTokenizer({
+    ...syntheticAssets(),
+    rareTokenSplit: {
+      disabledScore: -1e9,
+      disabledIds: [3, 9],
+      minScore,
+      forcedSplits: new Map([[6, [7, 8]]]),
+    },
+  });
+
+test("split: a disabled token falls back to shorter pieces", () => {
+  assertEquals(syntheticSplit().encode("abcd", PLAIN), [3]);
+  assertEquals(syntheticSplit().encode("abcd", SPLIT), [4, 5]);
+});
+
+test("split: a forced id expands to its pieces after the lattice is solved", () => {
+  // `xy` (-3) beats `x` + `y` (-8) in the lattice, so only the forced table splits it.
+  assertEquals(syntheticSplit().encode("xy", PLAIN), [6]);
+  assertEquals(syntheticSplit().encode("xy", SPLIT), [7, 8]);
+});
+
+test("split: encodePadded cuts the body after the split", () => {
+  const tokenizer = syntheticSplit();
+  // Split body [4, 5, 7, 8] cut to maxLength − 1 = 3; the plain body [3, 6] fits.
+  assertEquals([...tokenizer.encodePadded("abcdxy", 4, SPLIT).ids], [1, 4, 5, 7]);
+  assertEquals([...tokenizer.encodePadded("abcdxy", 4, PLAIN).ids], [1, 3, 6, 2]);
+});
+
+test("split: the caption pack ignores the table while the text pack uses it", () => {
+  assertEquals([...packCaptionIds(syntheticSplit(), "abcdxy", 8)], [1, 3, 6]);
+  assertEquals([...packIds(syntheticSplit(), "abcdxy", 8, "text", SPLIT)], [1, 4, 5, 7, 8]);
+});
+
+test("split: an unknown piece costs the replaced minimum − 10, so a disabled token without pieces stays", () => {
+  // Under the split model the unknown node of `p` / `q` costs -1e9 − 10 each, below the disabled
+  // `pq` (-1e9): upstream's copy keeps emitting `pq`. Removing the entry instead, or keeping the
+  // original minimum (-14 → unknown = -24), would turn it into bytes.
+  assertEquals(syntheticSplit().encode("pq", SPLIT), [9]);
+  const staleMinimum = syntheticSplit(-14);
+  assertEquals(
+    staleMinimum.encode("pq", SPLIT),
+    [...new TextEncoder().encode("pq")].map((byte) => 100 + byte),
+    "evidence the check above depends on the minimum",
+  );
+});
+
+test("split: asking for the split without a table fails loudly", () => {
+  const plain = new IrodoriTokenizer(syntheticAssets());
+  assertEquals(plain.hasRareTokenSplit, false);
+  assertEquals(syntheticSplit().hasRareTokenSplit, true);
+  assertThrows(() => plain.encode("abcd", SPLIT), Error, "carries no rareTokenSplit table");
+  assertThrows(() => plain.encodePadded("abcd", 4, SPLIT), Error, "carries no rareTokenSplit");
+  // The plain path of the same tokenizer still works.
+  assertEquals(plain.encode("abcd", PLAIN), [3]);
+});
+
+// ---- ⑥' The asset parser of the split table ------------------------------------
+
+/** A parseable asset over {@link SPLIT_VOCAB} + 256 byte rows, with an optional split table. */
+const splitAssetJson = (rareTokenSplit?: unknown): Record<string, unknown> => {
+  const { vocabText, scores, byteBaseId } = padVocabForByteBase(
+    SPLIT_VOCAB.map(([token]) => token),
+    SPLIT_VOCAB.map(([, score]) => score),
+  );
+  return {
+    vocabText,
+    scores,
+    addedTokens: [],
+    bosId: 1,
+    padId: 2,
+    unkId: 0,
+    byteBaseId,
+    ...(rareTokenSplit === undefined ? {} : { rareTokenSplit }),
+  };
+};
+
+const VALID_SPLIT = { disabledScore: -1e9, disabledIds: [3, 9], forcedSplits: [[6, [7, 8]]] };
+
+test("asset parser: reads the split table and computes the replaced-score minimum from the whole vocabulary", () => {
+  const parsed = parseIrodoriTokenizerAsset(splitAssetJson(VALID_SPLIT));
+  assert(parsed.rareTokenSplit !== undefined, "the table was dropped");
+  assertEquals(parsed.rareTokenSplit.disabledIds, [3, 9]);
+  assertEquals(parsed.rareTokenSplit.disabledScore, -1e9);
+  assertEquals([...parsed.rareTokenSplit.forcedSplits], [[6, [7, 8]]]);
+  assertEquals(parsed.minScore, -14, "the original minimum is unchanged");
+  assertEquals(parsed.rareTokenSplit.minScore, -1e9, "the split minimum is the replaced one");
+  assertEquals(new IrodoriTokenizer(parsed).encode("abcdxy", SPLIT), [4, 5, 7, 8]);
+  // An asset without the key (an older revision) has no split path.
+  assertEquals(parseIrodoriTokenizerAsset(splitAssetJson()).rareTokenSplit, undefined);
+});
+
+test("asset parser: a malformed split table is an asset error", () => {
+  const VOCAB_SIZE = SPLIT_VOCAB.length + 256;
+  const broken: readonly (readonly [unknown, string])[] = [
+    ["table", "tokenizer.rareTokenSplit: not an object"],
+    [{ ...VALID_SPLIT, disabledScore: Number.NaN }, "disabledScore: not a finite number"],
+    [{ ...VALID_SPLIT, disabledScore: "-1e9" }, "disabledScore: not a finite number"],
+    [{ ...VALID_SPLIT, disabledIds: "3,9" }, "disabledIds: not an array"],
+    [
+      { ...VALID_SPLIT, disabledIds: [3, VOCAB_SIZE] },
+      `disabledIds[1]: token id ${VOCAB_SIZE} is not below the vocabulary row count`,
+    ],
+    [{ ...VALID_SPLIT, disabledIds: [3, 2.5] }, "disabledIds[1]: token id is not an integer"],
+    [
+      { ...VALID_SPLIT, disabledIds: [9, 3] },
+      "disabledIds[1]: id 3 is not above the previous id 9",
+    ],
+    [
+      { ...VALID_SPLIT, disabledIds: [3, 3] },
+      "disabledIds[1]: id 3 is not above the previous id 3",
+    ],
+    [{ ...VALID_SPLIT, forcedSplits: [[6]] }, "forcedSplits[0]: not a [tokenId, pieces] pair"],
+    [
+      {
+        ...VALID_SPLIT,
+        forcedSplits: [
+          [6, [7]],
+          [6, [8]],
+        ],
+      },
+      "id 6 is not above the previous id 6",
+    ],
+    [{ ...VALID_SPLIT, forcedSplits: [[6, []]] }, "forcedSplits[0][1]: token 6 has no pieces"],
+    [
+      { ...VALID_SPLIT, forcedSplits: [[6, [7, VOCAB_SIZE]]] },
+      `forcedSplits[0][1][1]: token id ${VOCAB_SIZE} is not below`,
+    ],
+    [
+      { ...VALID_SPLIT, forcedSplits: [[VOCAB_SIZE, [7]]] },
+      "is not below the vocabulary row count",
+    ],
+  ];
+  for (const [table, message] of broken) {
+    assertThrows(
+      () => parseIrodoriTokenizerAsset(splitAssetJson(table)),
+      Error,
+      message,
+      JSON.stringify(table),
+    );
+  }
 });

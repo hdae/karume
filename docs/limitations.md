@@ -2038,7 +2038,7 @@ or silent fallback:
   (the 33 normalize cases of the golden do not include this region).
 - WAV reading (/32768) and writing (×32767) stay asymmetric (each is correct in matching the outside world —
   the MUST in `src/audio/wav.ts`. A round trip drifts at the 1 LSB level).
-- **Request knobs (`codecTileFrames` / `seed` / `durationSeconds`) are checked at call time** (it does not fail after
+- **Request knobs (`codecTileFrames` / `seed` / `durationSeconds` / `splitRareTokens`) are checked at call time** (it does not fail after
   proceeding partway through the stages). As public-surface behaviour, ① even `generateLatent`, which does not run the codec,
   fails on an invalid `codecTileFrames` ② even generation that passes `initialNoise` has the range of `seed` checked
   (previously that path drew no random numbers, so it was silently ignored).

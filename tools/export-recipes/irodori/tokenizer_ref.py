@@ -10,9 +10,11 @@ It touches neither the model graph nor the weights (all it reads from the checkp
 Four outputs (default `outputs/series/irodori-v4-small/tokenizer/`, under `.gitignore`):
 
     tokenizer.json         the runtime asset (vocabText / scores / addedTokens / bosId / padId /
-                           unkId / byteBaseId)
-    golden.encode.json     fixed `{raw, normalized, ids}` cases, batch_encode equivalence cases
-                           and the cases of the **caption path** (strip only)
+                           unkId / byteBaseId, + rareTokenSplit for the tokenizer upstream
+                           splits — below)
+    golden.encode.json     fixed `{raw, normalized, ids}` cases, batch_encode equivalence cases,
+                           the cases of the **caption path** (strip only) and the rare-token
+                           split cases (split off / on)
     golden.normalize.json  `{raw, normalized}` of `normalize_text` (every replacement rule fires
                            at least once)
     nfkc-diff.json         the map `{cp: normalized}` of single code points on which NFKC is
@@ -54,6 +56,23 @@ every time). The TS side only has to implement "expand to UTF-8 bytes when not i
 vocabulary"; unk stays only as the path for the case without byte_fallback. The c / d cases of
 the golden pin this path.
 
+## The rare-token split (ADR 0149)
+
+Upstream encodes the text (never the caption) of models whose `text_tokenizer_repo` is
+`sbintuitions/modernbert-ja-310m` with a copy of the Unigram tokenizer in which rare long tokens
+carry the score -1e9, then replaces the ids of its FORCE_SPLITS words by fixed pieces
+(`irodori_tts/token_split.py`, on by default). The rule is **not** restated here:
+{@link RareTokenSplit} runs upstream's `RareTokenSplitter` on the real tokenizer and
+{@link derive_rare_token_split} writes what it did into the asset as one key, written last so the
+asset without it is byte-identical to the asset before the key existed:
+
+    "rareTokenSplit": {"disabledScore": -1e9,
+                       "disabledIds": [ascending ids whose score the splitter replaced],
+                       "forcedSplits": [[tokenId, [pieceId, ...]], ... ascending by tokenId]}
+
+The TS side solves the replaced-score vocabulary as its own Unigram model (its own minimum score,
+hence its own unknown-piece weight) and then expands the forced ids.
+
 ## What is checked
 
 Everything is checked before emitting, and if any check fails **nothing is written** (fail loudly,
@@ -74,12 +93,21 @@ ADR 0005):
 - The caption cases are **sensitive to normalization** (the strip and normalize id lists
   differ) — upstream applies only strip on the caption path, so with insensitive cases alone a
   mix-up would pass the check unnoticed
+- The split table is exactly what the splitter did (every id whose score differs, one replaced
+  value, `forcedSplits` equal to the splitter's `forced`), and **the table alone reproduces the
+  splitter**: a tokenizer rebuilt from `tokenizer.json` with only the table applied gives the
+  splitter's id list on every split case and on the spelling of every disabled and forced token
+- The split golden is taken through upstream's entry (`enable_rare_token_split`) and agrees with
+  the splitter itself, and every split case exercises the role its reason names
+  ({@link check_split_coverage})
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import math
 import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -277,6 +305,77 @@ TRUNCATING_PASSAGE = (
     "近づいてきて、私は原稿を閉じ、顔を上げて扉のほうを見た。"
 )
 
+#: The asset key of the rare-token split table (ADR 0149). Present only for a tokenizer upstream
+#: applies its `RareTokenSplitter` to; the asset without it stays byte-identical to the asset
+#: before the key existed.
+RARE_TOKEN_SPLIT_KEY = "rareTokenSplit"
+
+#: The cases of the **rare-token split** golden `(name, reason, raw text)`, each solved by upstream
+#: with the split on (`PretrainedTextTokenizer.enable_rare_token_split()`) and off.
+#:
+#: MUST: {@link check_split_coverage} checks that every role named in a reason really happens on
+#: the real vocabulary (a disabled token falls back, a forced id expands, a KEEP / hiragana-only
+#: token below the threshold stays one token, truncation fires only on the split side). A rule
+#: change upstream that turns one of them into a no-op fails the emit instead of leaving a case
+#: that tests nothing.
+SPLIT_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "split-commit-examples",
+        "disabled tokens fall back to shorter pieces and a forced token expands"
+        " (the examples of upstream's commit message)",
+        "浦和レッズの試合を見ながら、ゼルダの伝説を遊んだ。送料無料です。",
+    ),
+    (
+        "split-forced",
+        "FORCE_SPLITS entries above the threshold, two of them into three pieces",
+        "セブンイレブンで厚生労働省の代表取締役社長に会った。",
+    ),
+    (
+        "split-forced-solved-piece",
+        "a FORCE_SPLITS piece that is not a token itself: the table holds what the splitter solved"
+        " it into",
+        "リハビリテーションに通う",
+    ),
+    (
+        "split-keep",
+        "KEEP_TOKENS below the threshold stay one token (both paths agree)",
+        "心筋梗塞と瀬戸内海",
+    ),
+    (
+        "split-hiragana-only",
+        "a hiragana-only token below the threshold is never disabled; the next word is",
+        "わたくしが参ります。",
+    ),
+    (
+        "split-added-token-emoji",
+        "an added token and both emoji paths (in vocabulary / byte_fallback) next to a disabled"
+        " token",
+        f"設定で <|user|> と書くと{IN_VOCAB_EMOJI}浦和レッズ{OUT_OF_VOCAB_EMOJI}",
+    ),
+    (
+        "split-truncates",
+        "fits max_text_len unsplit but not split: truncation applies after the split",
+        "浦和レッズとゼルダの伝説、" * 40,
+    ),
+    (
+        "split-long-passage",
+        "a long passage that truncates on both paths",
+        TRUNCATING_PASSAGE,
+    ),
+)
+
+#: The split cases whose padded `batch_encode` form (BOS + right padding + mask, at
+#: `max_text_len`) also goes into the golden. The others carry the plain id lists only (the
+#: padded form of every case would multiply the fixture for no extra boundary).
+SPLIT_BATCH_CASES = frozenset(
+    {"split-commit-examples", "split-added-token-emoji", "split-truncates", "split-long-passage"}
+)
+
+#: Token spellings the coverage check looks for, per role (they come from upstream's lists and
+#: commit message; {@link check_split_coverage} reads their ids from the vocabulary).
+SPLIT_KEEP_TOKEN = "心筋梗塞"
+SPLIT_HIRAGANA_TOKEN = "わたくし"
+
 #: The fixed cases of `golden.normalize.json` `(name, reason, raw text)`.
 #:
 #: `normalize_text` has five stages, SIMPLE_REPLACE_MAP → REGEX_REPLACE_MAP →
@@ -435,14 +534,30 @@ def check_upstream_shape(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_asset(raw: Mapping[str, Any], text_config: Mapping[str, Any]) -> dict[str, Any]:
+def build_asset(
+    raw: Mapping[str, Any],
+    text_config: Mapping[str, Any],
+    rare_token_split: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """The asset the Deno side uses by lookup alone (folded like anima's T5 asset).
 
     MUST: `bosId` / `padId` come from the **checkpoint config** and are checked against the
     spelling of the added tokens. Looking only at the tokenizer's `added_tokens` breaks silently
     when the config points at another id: a different id from the BOS the model expects gets
     prepended.
+
+    `rare_token_split` (the table of {@link derive_rare_token_split}) becomes the **last** key, so
+    the asset of a tokenizer without it keeps the exact bytes it had before the key existed and
+    the asset with it differs from that by the one key only.
     """
+    asset = _base_asset(raw, text_config)
+    if rare_token_split is not None:
+        asset[RARE_TOKEN_SPLIT_KEY] = dict(rare_token_split)
+    return asset
+
+
+def _base_asset(raw: Mapping[str, Any], text_config: Mapping[str, Any]) -> dict[str, Any]:
+    """The keys of the asset that every tokenizer has (the body of {@link build_asset})."""
     vocab: list[list[Any]] = raw["model"]["vocab"]
     added = {entry["content"]: int(entry["id"]) for entry in raw["added_tokens"]}
     bos_id = int(text_config["bos_token_id"])
@@ -502,6 +617,327 @@ class TokenizerPair:
                 f"  tokenizers={raw_ids}\n  transformers={hf_ids}"
             )
         return raw_ids
+
+
+def derive_rare_token_split(
+    original_vocab: Sequence[Sequence[Any]],
+    split_vocab: Sequence[Sequence[Any]],
+    forced: Mapping[int, Sequence[int]],
+) -> dict[str, Any]:
+    """The asset's rare-token split table, read from what upstream's splitter **did**.
+
+    `original_vocab` / `split_vocab` are the `model.vocab` lists of the tokenizer before and after
+    upstream's `RareTokenSplitter` replaced the scores, and `forced` is the splitter's `forced` map
+    (token id → piece ids). The rule itself (threshold, length, hiragana exception, KEEP_TOKENS,
+    FORCE_SPLITS) is not restated here, so the table follows upstream's lists by construction.
+
+    MUST: the table holds every id whose score differs and nothing else, and all the replaced
+    scores are one value. A replaced-score copy whose vocabulary moved, a second replacement value
+    or an empty result means the splitter changed shape — fail rather than write a table the TS
+    side would reproduce wrongly.
+    """
+    if len(original_vocab) != len(split_vocab):
+        raise SystemExit(
+            f"the split vocabulary has {len(split_vocab)} entries, the original"
+            f" {len(original_vocab)}"
+        )
+    disabled: list[int] = []
+    replaced: set[float] = set()
+    for index, (before, after) in enumerate(zip(original_vocab, split_vocab, strict=True)):
+        if before[0] != after[0]:
+            raise SystemExit(
+                f"vocabulary id {index}: the split copy holds {after[0]!r} instead of {before[0]!r}"
+            )
+        if float(before[1]) != float(after[1]):
+            disabled.append(index)
+            replaced.add(float(after[1]))
+    if not disabled:
+        raise SystemExit("the splitter replaced no score (an empty table would split nothing)")
+    if len(replaced) != 1:
+        raise SystemExit(f"the splitter replaced scores with {len(replaced)} different values")
+    (disabled_score,) = replaced
+    if not math.isfinite(disabled_score):
+        raise SystemExit(f"the replaced score is not finite: {disabled_score}")
+
+    size = len(original_vocab)
+    disabled_set = set(disabled)
+    forced_rows: list[list[Any]] = []
+    for token_id in sorted(forced):
+        pieces = [int(piece) for piece in forced[token_id]]
+        if not pieces:
+            raise SystemExit(f"forced token {token_id} has no pieces")
+        if not 0 <= int(token_id) < size or any(not 0 <= piece < size for piece in pieces):
+            raise SystemExit(f"forced token {token_id} → {pieces} leaves the vocabulary")
+        if token_id in disabled_set:
+            raise SystemExit(
+                f"forced token {token_id} is also disabled (it could never be emitted)"
+            )
+        forced_rows.append([int(token_id), pieces])
+    return {
+        "disabledScore": disabled_score,
+        "disabledIds": disabled,
+        "forcedSplits": forced_rows,
+    }
+
+
+def split_min_score(raw_vocab: Sequence[Sequence[Any]], table: Mapping[str, Any]) -> float:
+    """The minimum score of the **replaced-score** vocabulary (the weight of its unknown nodes).
+
+    MUST: computed over the whole vocabulary with the scores replaced, not taken from the original
+    — the Unigram model of the split copy derives its unknown-piece score from its own minimum.
+    """
+    disabled = set(table["disabledIds"])
+    return min(
+        float(table["disabledScore"]) if index in disabled else float(score)
+        for index, (_token, score) in enumerate(raw_vocab)
+    )
+
+
+class RareTokenSplit:
+    """Upstream's rare-token split on the real tokenizer, and the asset table derived from it.
+
+    The splitter is built exactly as upstream builds it (`RareTokenSplitter` over the
+    `transformers` backend tokenizer), and the golden is taken through upstream's own entry
+    (`PretrainedTextTokenizer.enable_rare_token_split()`); {@link RareTokenSplit.encode} checks
+    that the two agree, the way {@link TokenizerPair.encode} does for the plain path.
+    """
+
+    def __init__(self, pair: TokenizerPair, raw_vocab: Sequence[Sequence[Any]]) -> None:
+        from irodori_tts.token_split import FORCE_SPLITS, SCORE_THRESHOLD, RareTokenSplitter
+        from irodori_tts.tokenizer import PretrainedTextTokenizer
+
+        backend = pair.hf.backend_tokenizer
+        original = json.loads(backend.to_str())["model"]["vocab"]
+        if [(token, float(score)) for token, score in original] != [
+            (token, float(score)) for token, score in raw_vocab
+        ]:
+            raise SystemExit("the transformers backend's vocabulary differs from tokenizer.json")
+        self.splitter = RareTokenSplitter(backend)
+        split_vocab = json.loads(self.splitter.tokenizer.to_str())["model"]["vocab"]
+        self.table = derive_rare_token_split(original, split_vocab, self.splitter.forced)
+        if self.table["forcedSplits"] != [
+            [token_id, list(pieces)] for token_id, pieces in sorted(self.splitter.forced.items())
+        ]:
+            raise SystemExit("forcedSplits differs from the splitter's forced map")
+        self.force_splits: Mapping[str, Sequence[str]] = FORCE_SPLITS
+        self.threshold = float(SCORE_THRESHOLD)
+        self.wrapper = PretrainedTextTokenizer(pair.hf, add_bos=True)
+        self.wrapper.enable_rare_token_split()
+
+    def encode(self, text: str, where: str) -> list[int]:
+        """The split id list without special tokens (upstream's `encode(text, add_bos=False)`)."""
+        wrapper_ids = [int(value) for value in self.wrapper.encode(text, add_bos=False).tolist()]
+        splitter_ids = list(self.splitter.encode(text))
+        if wrapper_ids != splitter_ids:
+            raise SystemExit(
+                f"{where}: the split id lists of the wrapper and the splitter differ\n"
+                f"  wrapper={wrapper_ids}\n  splitter={splitter_ids}"
+            )
+        return wrapper_ids
+
+
+def rare_token_split_for(
+    pair: TokenizerPair, raw: Mapping[str, Any], model_config: Mapping[str, Any]
+) -> RareTokenSplit | None:
+    """The split for a model whose text tokenizer upstream splits, `None` for any other.
+
+    Upstream enables the split only when `text_tokenizer_repo` is the tokenizer whose score scale
+    the threshold was measured on (`inference_runtime.InferenceRuntime` / `SPLIT_TOKENIZER_REPO`),
+    so the same condition decides whether the asset gets the table.
+    """
+    from irodori_tts.token_split import SPLIT_TOKENIZER_REPO
+
+    repo = model_config.get("text_tokenizer_repo")
+    if repo is None:
+        raise SystemExit("the checkpoint config has no text_tokenizer_repo")
+    if repo != SPLIT_TOKENIZER_REPO:
+        return None
+    return RareTokenSplit(pair, raw["model"]["vocab"])
+
+
+def check_table_reproduces_splitter(
+    raw: Mapping[str, Any],
+    table: Mapping[str, Any],
+    split_encode: Any,
+    texts: Sequence[str],
+) -> int:
+    """Check that the **table alone** reproduces the splitter (what the TS side relies on).
+
+    A tokenizer is rebuilt from `tokenizer.json` with only the table's ids set to its score (its
+    own Unigram model, so its own minimum score), followed by the forced-id expansion, and its id
+    lists are compared with `split_encode` (upstream's splitter) over `texts`. Not tautological:
+    the rebuilt side never sees upstream's rule or lists.
+    """
+    from tokenizers import Tokenizer
+
+    data = copy.deepcopy(dict(raw))
+    vocab = data["model"]["vocab"]
+    for index in table["disabledIds"]:
+        vocab[index][1] = table["disabledScore"]
+    rebuilt = Tokenizer.from_str(json.dumps(data, ensure_ascii=False))
+    rebuilt.no_padding()
+    rebuilt.no_truncation()
+    forced = {int(token_id): list(pieces) for token_id, pieces in table["forcedSplits"]}
+    for text in texts:
+        ids: list[int] = []
+        for token_id in rebuilt.encode(text, add_special_tokens=False).ids:
+            ids.extend(forced.get(token_id, (token_id,)))
+        want = list(split_encode(text))
+        if ids != want:
+            raise SystemExit(
+                f"the table does not reproduce the splitter on {text!r}\n"
+                f"  table={ids}\n  splitter={want}"
+            )
+    return len(texts)
+
+
+def reproduction_texts(
+    raw_vocab: Sequence[Sequence[Any]],
+    table: Mapping[str, Any],
+    split_cases: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """The texts {@link check_table_reproduces_splitter} runs: every split case, and the spelling
+    of every disabled and every forced token on its own (each one is a lattice the replaced scores
+    decide)."""
+    ids = [*table["disabledIds"], *(token_id for token_id, _pieces in table["forcedSplits"])]
+    return [*(case["normalized"] for case in split_cases), *(raw_vocab[index][0] for index in ids)]
+
+
+def build_split_cases(
+    pair: TokenizerPair, split: RareTokenSplit, normalize_text: Any, model_config: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """The rare-token split golden: each case with the split off (`ids`) and on (`idsSplit`).
+
+    The body is `normalize_text(raw).strip()`, the string the pipeline tokenizes. The cases of
+    {@link SPLIT_BATCH_CASES} also carry upstream's padded `batch_encode` form on both paths
+    (truncation of the body at `max_text_len - 1` happens **after** the split upstream).
+    """
+    max_length = int(model_config[TEXT_MAX_LENGTH_KEY])
+    cases: list[dict[str, Any]] = []
+    for name, why, text in SPLIT_CASES:
+        normalized = normalize_text(text).strip()
+        case: dict[str, Any] = {
+            "name": name,
+            "why": why,
+            "raw": text,
+            "normalized": normalized,
+            "ids": pair.encode(normalized, name),
+            "idsSplit": split.encode(normalized, name),
+        }
+        if name in SPLIT_BATCH_CASES:
+            case["maxLength"] = max_length
+            for suffix, wrapper, body in (
+                ("", pair.wrapper, case["ids"]),
+                ("Split", split.wrapper, case["idsSplit"]),
+            ):
+                ids, mask = wrapper.batch_encode([normalized], max_length=max_length)
+                used = int(mask[0].sum())
+                if used != min(len(body) + 1, max_length):
+                    raise SystemExit(
+                        f"{name}: the mask's valid length {used} differs from BOS + body ({suffix})"
+                    )
+                if [int(value) for value in ids[0, 1:used].tolist()] != body[: used - 1]:
+                    raise SystemExit(
+                        f"{name}: the padded body is not the encoded prefix ({suffix})"
+                    )
+                case[f"idsPadded{suffix}"] = [int(value) for value in ids[0].tolist()]
+                case[f"mask{suffix}"] = [bool(value) for value in mask[0].tolist()]
+        cases.append(case)
+    return cases
+
+
+def check_split_coverage(
+    cases: Sequence[Mapping[str, Any]],
+    table: Mapping[str, Any],
+    raw_vocab: Sequence[Sequence[Any]],
+    force_splits: Mapping[str, Sequence[str]],
+    threshold: float,
+    max_text_len: int,
+) -> dict[str, Any]:
+    """Check that every split case exercises the role its reason names (the MUST of
+    {@link SPLIT_CASES}).
+
+    Judged on the measured id lists against the table and the vocabulary, so a case that stopped
+    testing its boundary (upstream moved a token into KEEP_TOKENS, a forced split now matches the
+    vocabulary, …) fails here.
+    """
+    by_name = {case["name"]: case for case in cases}
+    disabled = set(table["disabledIds"])
+    forced = {token_id: pieces for token_id, pieces in table["forcedSplits"]}
+    ids_of = {token: index for index, (token, _score) in enumerate(raw_vocab)}
+    problems: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            problems.append(message)
+
+    commit = by_name["split-commit-examples"]
+    require(any(i in disabled for i in commit["ids"]), "commit examples: no disabled token")
+    require(any(i in forced for i in commit["ids"]), "commit examples: no forced token")
+    require(
+        not any(i in disabled for i in commit["idsSplit"]),
+        "commit examples: a disabled token survived the split",
+    )
+
+    forced_case = [i for i in by_name["split-forced"]["ids"] if i in forced]
+    require(len(forced_case) >= 2, "forced: fewer than two forced tokens")
+    require(any(len(forced[i]) >= 3 for i in forced_case), "forced: no three-piece expansion")
+
+    solved = [i for i in by_name["split-forced-solved-piece"]["ids"] if i in forced]
+    require(
+        any(len(forced[i]) > len(force_splits[raw_vocab[i][0]]) for i in solved),
+        "forced-solved-piece: no forced token whose pieces had to be solved",
+    )
+
+    for name, token in (
+        ("split-keep", SPLIT_KEEP_TOKEN),
+        ("split-hiragana-only", SPLIT_HIRAGANA_TOKEN),
+    ):
+        case = by_name[name]
+        token_id = ids_of[token]
+        require(
+            float(raw_vocab[token_id][1]) <= threshold, f"{name}: {token!r} is above the threshold"
+        )
+        require(token_id not in disabled, f"{name}: {token!r} is disabled")
+        require(
+            token_id in case["ids"] and token_id in case["idsSplit"],
+            f"{name}: {token!r} is not one token on both paths",
+        )
+    require(
+        by_name["split-keep"]["ids"] == by_name["split-keep"]["idsSplit"],
+        "keep: the split changed the case",
+    )
+    require(
+        by_name["split-hiragana-only"]["ids"] != by_name["split-hiragana-only"]["idsSplit"],
+        "hiragana-only: nothing next to the kept token was split",
+    )
+
+    added = by_name["split-added-token-emoji"]
+    require(any(i in disabled for i in added["ids"]), "added-token-emoji: no disabled token")
+    require(ids_of["<|user|>"] in added["idsSplit"], "added-token-emoji: the added token is lost")
+    require(
+        byte_fallback_ids(OUT_OF_VOCAB_EMOJI)
+        == [
+            i for i in added["idsSplit"] if EXPECTED_BYTE_BASE_ID <= i < EXPECTED_BYTE_BASE_ID + 256
+        ],
+        "added-token-emoji: the byte_fallback emoji is not the only byte run",
+    )
+
+    truncates = by_name["split-truncates"]
+    require(
+        len(truncates["ids"]) + 1 <= max_text_len < len(truncates["idsSplit"]) + 1,
+        "truncates: truncation does not fire on the split side only",
+    )
+    require(
+        len(by_name["split-long-passage"]["ids"]) + 1 > max_text_len,
+        "long passage: truncation does not fire unsplit",
+    )
+    if problems:
+        raise SystemExit(f"the split cases lost their roles: {problems}")
+    return {
+        "changed": sum(1 for case in cases if case["ids"] != case["idsSplit"]),
+        "cases": len(cases),
+    }
 
 
 def build_encode_cases(pair: TokenizerPair, normalize_text: Any) -> list[dict[str, Any]]:
@@ -728,6 +1164,7 @@ def lattice_texts(
     encode_cases: Sequence[Mapping[str, Any]],
     batch_cases: Sequence[Mapping[str, Any]],
     caption_cases: Sequence[Mapping[str, Any]],
+    split_cases: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     """The strings the Viterbi lattice really sees (the golden's bodies with ▁ replaced).
 
@@ -738,8 +1175,13 @@ def lattice_texts(
     Splitting out the added tokens cuts the text into pieces, but **a substring of a piece is a
     substring of the original string**, so passing the whole text before the split is enough to
     extract the vocabulary (it only yields a superset; the lattice does not change).
+
+    The split cases solve the same match set with replaced scores, so their texts join the same
+    extraction.
     """
-    texts = [case["normalized"] for case in (*encode_cases, *batch_cases, *caption_cases)]
+    texts = [
+        case["normalized"] for case in (*encode_cases, *batch_cases, *caption_cases, *split_cases)
+    ]
     texts.extend(case["stripped"] for case in caption_cases)
     return [text.replace(" ", METASPACE) for text in texts]
 
@@ -805,16 +1247,35 @@ def build_parity_fixture(
     caption_cases: Sequence[Mapping[str, Any]],
     normalize_cases: Sequence[Mapping[str, Any]],
     diff: Mapping[str, str],
+    split_cases: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """The fixture of the TS-side parity check (**tracked in git**, runs without the real assets).
 
     MUST: `minScore` / `maxTokenLength` come from the **full** vocabulary. The score of unknown
     nodes and the search width of the prefix match are determined by the whole, so deriving them
     from the subset gives a different segmentation (the same trap as anima's T5).
+
+    When the asset carries the rare-token split table, the fixture carries it too, cut down the
+    same way: `disabledIds` only within the subset (an id outside it never enters a case's
+    lattice), `forcedSplits` whole, and `minScore` of the **replaced-score full** vocabulary
+    ({@link split_min_score}), with the split golden under `encode.split`.
     """
-    texts = lattice_texts(encode_cases, batch_cases, caption_cases)
+    texts = lattice_texts(encode_cases, batch_cases, caption_cases, split_cases)
     subset = vocab_subset(raw_vocab, texts, dict(asset["addedTokens"]))
     matched = check_subset_covers_lattice(raw_vocab, texts, subset)
+    split_fixture: dict[str, Any] = {}
+    table = asset.get(RARE_TOKEN_SPLIT_KEY)
+    if table is not None:
+        in_subset = {row[1] for row in subset}
+        split_fixture = {
+            RARE_TOKEN_SPLIT_KEY: {
+                "disabledScore": table["disabledScore"],
+                "disabledIds": [index for index in table["disabledIds"] if index in in_subset],
+                "forcedSplits": table["forcedSplits"],
+                "minScore": split_min_score(raw_vocab, table),
+                "disabledTotal": len(table["disabledIds"]),
+            }
+        }
     return {
         "_doc": [
             "Parity fixture of the Irodori-TTS v4 text layer",
@@ -825,6 +1286,14 @@ def build_parity_fixture(
             "diff table is complete (the moment TS's normalize('NFKC') and the Unicode version",
             "drift apart, normalization changes silently). encode.caption has the id lists of the",
             "caption path (upstream: strip only) and the text path (normalize) for one raw text.",
+            *(
+                [
+                    "asset.rareTokenSplit / encode.split: upstream's rare-token split (ADR 0149);",
+                    "disabledIds is cut to the subset; minScore is the replaced-score minimum.",
+                ]
+                if split_fixture
+                else []
+            ),
         ],
         "source": {"repo": "Aratako/Irodori-TTS", "reference": "tokenizers + transformers"},
         "asset": {
@@ -836,11 +1305,13 @@ def build_parity_fixture(
             "padId": asset["padId"],
             "unkId": asset["unkId"],
             "byteBaseId": asset["byteBaseId"],
+            **split_fixture,
         },
         "encode": {
             "cases": list(encode_cases),
             "batch": list(batch_cases),
             "caption": list(caption_cases),
+            **({"split": list(split_cases)} if split_fixture else {}),
         },
         "normalize": {"cases": list(normalize_cases)},
         "nfkcDiff": dict(diff),
@@ -864,12 +1335,36 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
     text_config, model_config = read_configs(model_dir)
     raw = _tokenizer_json(model_dir)
     shape = check_upstream_shape(raw)
-    asset = build_asset(raw, text_config)
 
     pair = TokenizerPair(model_dir)
+    split = rare_token_split_for(pair, raw, model_config)
     encode_cases = build_encode_cases(pair, normalize_text)
     batch_cases = build_batch_cases(pair, normalize_text, model_config)
     caption_cases = build_caption_cases(pair, normalize_text, model_config)
+    split_cases: list[dict[str, Any]] = []
+    split_summary: dict[str, Any] | None = None
+    if split is not None:
+        split_cases = build_split_cases(pair, split, normalize_text, model_config)
+        split_summary = {
+            "disabledScore": split.table["disabledScore"],
+            "disabled": len(split.table["disabledIds"]),
+            "forced": len(split.table["forcedSplits"]),
+            "coverage": check_split_coverage(
+                split_cases,
+                split.table,
+                raw["model"]["vocab"],
+                split.force_splits,
+                split.threshold,
+                int(model_config[TEXT_MAX_LENGTH_KEY]),
+            ),
+            "reproduced": check_table_reproduces_splitter(
+                raw,
+                split.table,
+                split.splitter.encode,
+                reproduction_texts(raw["model"]["vocab"], split.table, split_cases),
+            ),
+        }
+    asset = build_asset(raw, text_config, None if split is None else split.table)
     normalize_cases = build_normalize_cases(normalize_text)
     coverage = check_rule_coverage(normalize_cases)
     diff = nfkc_diff_table()
@@ -881,6 +1376,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
         caption_cases,
         normalize_cases,
         diff,
+        split_cases,
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -889,7 +1385,12 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
         (ASSET_FILE, asset, None),
         (
             ENCODE_GOLDEN_FILE,
-            {"cases": encode_cases, "batch": batch_cases, "caption": caption_cases},
+            {
+                "cases": encode_cases,
+                "batch": batch_cases,
+                "caption": caption_cases,
+                **({"split": split_cases} if split is not None else {}),
+            },
             1,
         ),
         (NORMALIZE_GOLDEN_FILE, {"cases": normalize_cases}, 1),
@@ -932,6 +1433,11 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
                 "normalizeSensitive": case["normalizeSensitive"],
             }
             for case in caption_cases
+        },
+        "rareTokenSplit": split_summary,
+        "splitCases": {
+            case["name"]: {"tokens": len(case["ids"]), "tokensSplit": len(case["idsSplit"])}
+            for case in split_cases
         },
         "normalizeCases": len(normalize_cases),
         "ruleCoverage": coverage,

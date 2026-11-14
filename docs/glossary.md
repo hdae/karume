@@ -206,6 +206,7 @@
 | Output parser (`parseChatResponse`) | One generated model turn (ids with their stop token, decoded with special spellings) → `{ content, thinking, tool_calls }`, equal to upstream `parse_response`; a cut or malformed turn fails loudly | `packages/models/src/gemma/text/chat-response.ts` |
 | Tool-call turn (`"tool-call"` end) | A `ChatSession` turn that stopped at `<|tool_response>` after one or more calls; `sendToolResults` continues it, with `<|tool_response>` as the pending token (as `<turn|>` is for a closed turn) | `packages/models/src/gemma/chat-session.ts` |
 | Suppressed tokens | `pipelineConfig.suppressTokens`: token ids a model never generates (upstream `generation_config.json` `suppress_tokens`); their logits are −∞ before every selection, as HF `generate()` does | `packages/models/src/generation/sampler.ts`, CHANGELOG `[Unreleased]` |
+| Rare-token split (Irodori, `splitRareTokens`) | Encoding the Irodori text without the rare long tokens of the v4 Small tokenizer: a second Unigram model with the disabled tokens at score -1e9 (its own minimum score), then the forced id splits. The tokenizer asset carries upstream `RareTokenSplitter`'s result as `rareTokenSplit`; on by default when it does, never on the caption | ADR [0149](decisions/0149-irodori-rare-token-split.md) |
 
 ## Verification
 

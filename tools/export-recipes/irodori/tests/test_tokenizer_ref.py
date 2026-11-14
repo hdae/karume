@@ -565,7 +565,7 @@ class TestParityFixture:
 CASE_TABLE_NAMES = ("ENCODE_CASES", "BATCH_CASES", "CAPTION_CASES", "NORMALIZE_CASES")
 
 
-def _case_body_literals() -> dict[str, str]:
+def _case_body_literals(names: tuple[str, ...] = CASE_TABLE_NAMES) -> dict[str, str]:
     """Collect the **bodies** of the case tables as spelled in the script, not as values.
 
     The value cannot tell "a raw U+3099" from "U+3099 written as `\\u3099`" (the whole point of
@@ -580,7 +580,7 @@ def _case_body_literals() -> dict[str, str]:
             name = node.targets[0].id
         else:
             continue
-        if name not in CASE_TABLE_NAMES:
+        if name not in names:
             continue
         for case in node.value.elts:
             literals[case.elts[0].value] = ast.get_source_segment(source, case.elts[2])
@@ -638,6 +638,24 @@ class TestCaseTableLiterals:
         assert caption["caption-surrounding-space"].count("\u3000") == 3
 
 
+class TestSplitCaseTable:
+    """The split cases follow the discipline of the other case tables."""
+
+    def test_no_split_case_body_is_written_with_a_raw_invisible_character(self):
+        literals = _case_body_literals(("SPLIT_CASES",))
+
+        assert len(literals) == len(tok.SPLIT_CASES)
+        assert {name: _invisible_codepoints(text) for name, text in literals.items()} == {
+            name: [] for name in literals
+        }
+
+    def test_the_split_cases_have_unique_names_and_the_batch_cases_exist(self):
+        names = [name for name, _why, _text in tok.SPLIT_CASES]
+
+        assert len(names) == len(set(names))
+        assert set(names) >= tok.SPLIT_BATCH_CASES
+
+
 class TestCli:
     def test_the_default_out_dir_is_derived_from_the_weight_directory(self, tmp_path):
         out = tok.default_out_dir(tmp_path / "v4-small")
@@ -661,3 +679,271 @@ class TestCli:
         raw["pre_tokenizer"]["prepend_scheme"] = "always"
 
         assert snapshot == tok.EXPECTED_PRE_TOKENIZER
+
+
+#: The ids of the synthetic coverage vocabulary below (after the 15 specials + 256 bytes).
+_KEEP, _HIRAGANA, _DISABLED, _FORCED, _PIECE_A, _PIECE_B, _FORCED_3 = (
+    271,
+    272,
+    273,
+    274,
+    275,
+    276,
+    277,
+)
+_PIECES_3, _DISABLED_NEXT, _SHORT, _SHORT_B, _SHORT_C = (278, 279, 280), 281, 282, 283, 284
+_USER = SPECIALS.index("<|user|>")
+
+
+def _coverage_vocab() -> list[list]:
+    """15 specials + 256 bytes + the tokens each split role needs (scores on upstream's scale)."""
+    vocab = [list(row) for row in _raw()["model"]["vocab"][: 15 + 256]]
+    vocab += [
+        [tok.SPLIT_KEEP_TOKEN, -14.0],
+        [tok.SPLIT_HIRAGANA_TOKEN, -14.0],
+        ["disabled", -14.0],
+        ["freeship", -10.0],
+        ["free", -8.0],
+        ["ship", -8.0],
+        ["seveneleven", -10.0],
+        ["se", -9.0],
+        ["ven", -9.0],
+        ["eleven", -9.0],
+        ["nextword", -14.0],
+        ["short", -8.0],
+        ["shortb", -8.0],
+        ["shortc", -8.0],
+    ]
+    return vocab
+
+
+_COVERAGE_TABLE = {
+    "disabledScore": -1e9,
+    "disabledIds": [_DISABLED, _DISABLED_NEXT],
+    "forcedSplits": [[_FORCED, [_PIECE_A, _PIECE_B]], [_FORCED_3, list(_PIECES_3)]],
+}
+_FORCE_SPLITS = {"freeship": ("free", "ship"), "seveneleven": ("seven", "eleven")}
+_EMOJI_BYTES = tok.byte_fallback_ids(tok.OUT_OF_VOCAB_EMOJI)
+
+
+def _coverage_cases() -> list[dict]:
+    """Measured-looking id lists in which every role of `SPLIT_CASES` happens."""
+    rows = {
+        "split-commit-examples": ([_DISABLED, _FORCED], [_SHORT, _PIECE_A, _PIECE_B]),
+        "split-forced": ([_FORCED, _FORCED_3], [_PIECE_A, _PIECE_B, *_PIECES_3]),
+        "split-forced-solved-piece": ([_FORCED_3], list(_PIECES_3)),
+        "split-keep": ([_KEEP], [_KEEP]),
+        "split-hiragana-only": ([_HIRAGANA, _DISABLED_NEXT], [_HIRAGANA, _SHORT_B, _SHORT_C]),
+        "split-added-token-emoji": (
+            [_USER, _DISABLED, *_EMOJI_BYTES],
+            [_USER, _SHORT, *_EMOJI_BYTES],
+        ),
+        "split-truncates": ([_SHORT] * 10, [_SHORT] * 20),
+        "split-long-passage": ([_SHORT] * 20, [_SHORT] * 22),
+    }
+    return [{"name": name, "ids": ids, "idsSplit": split} for name, (ids, split) in rows.items()]
+
+
+def _check_coverage(cases) -> dict:
+    return tok.check_split_coverage(
+        cases, _COVERAGE_TABLE, _coverage_vocab(), _FORCE_SPLITS, -13.0, 16
+    )
+
+
+class TestDeriveRareTokenSplit:
+    """MUST: the table is what the splitter **did** — every replaced id and nothing else."""
+
+    @staticmethod
+    def _vocabs():
+        original = [["a", -1.0], ["bcde", -14.0], ["f", -2.0], ["ghij", -15.0]]
+        split = [["a", -1.0], ["bcde", -1e9], ["f", -2.0], ["ghij", -1e9]]
+        return original, split
+
+    def test_the_replaced_ids_and_the_forced_map_become_the_table(self):
+        original, split = self._vocabs()
+
+        table = tok.derive_rare_token_split(original, split, {2: [0], 0: [2, 2]})
+
+        assert table == {
+            "disabledScore": -1e9,
+            "disabledIds": [1, 3],
+            "forcedSplits": [[0, [2, 2]], [2, [0]]],
+        }
+
+    @pytest.mark.parametrize(
+        ("mutate", "forced", "message"),
+        [
+            (lambda split: split.__setitem__(0, ["x", -1.0]), {}, "instead of"),
+            (lambda split: split.__setitem__(3, ["ghij", -2e9]), {}, "2 different values"),
+            (
+                lambda split: (
+                    split.__setitem__(1, ["bcde", -14.0]) or split.__setitem__(3, ["ghij", -15.0])
+                ),
+                {},
+                "replaced no score",
+            ),
+            (lambda split: split.pop(), {}, "entries"),
+            (lambda split: None, {1: [0]}, "also disabled"),
+            (lambda split: None, {0: []}, "no pieces"),
+            (lambda split: None, {0: [4]}, "leaves the vocabulary"),
+        ],
+    )
+    def test_a_splitter_of_another_shape_fails_loudly(self, mutate, forced, message):
+        original, split = self._vocabs()
+        mutate(split)
+
+        with pytest.raises(SystemExit, match=message):
+            tok.derive_rare_token_split(original, split, forced)
+
+    def test_the_split_min_score_is_the_replaced_vocabulary_minimum(self):
+        """MUST: the split Unigram derives its unknown-piece weight from its **own** minimum."""
+        original, split = self._vocabs()
+        table = tok.derive_rare_token_split(original, split, {})
+
+        assert tok.split_min_score(original, table) == -1e9
+        # Not the original minimum, and not the minimum of what is left after removing them.
+        assert min(score for _token, score in original) == -15.0
+
+
+class TestAssetSplitKey:
+    def test_the_table_is_appended_as_the_last_key(self):
+        table = {"disabledScore": -1e9, "disabledIds": [271], "forcedSplits": []}
+
+        plain = tok.build_asset(_raw(), TEXT_CONFIG)
+        with_split = tok.build_asset(_raw(), TEXT_CONFIG, table)
+
+        assert tok.RARE_TOKEN_SPLIT_KEY not in plain
+        assert list(with_split) == [*plain, tok.RARE_TOKEN_SPLIT_KEY]
+        assert with_split[tok.RARE_TOKEN_SPLIT_KEY] == table
+        # The bytes of the asset without the table are a prefix of the asset with it.
+        plain_text = json.dumps(plain, ensure_ascii=False)
+        split_text = json.dumps(with_split, ensure_ascii=False)
+        assert split_text.startswith(plain_text[:-1] + ", ")
+
+    def test_the_fixture_cuts_the_disabled_ids_to_the_subset(self):
+        raw = _raw_with_unreachable_token()
+        unreachable = len(raw["model"]["vocab"]) - 1
+        world = [token for token, _score in raw["model"]["vocab"]].index("世界")
+        table = {
+            "disabledScore": -1e9,
+            "disabledIds": [world, unreachable],
+            "forcedSplits": [[world, [world - 1]]],
+        }
+
+        fixture = tok.build_parity_fixture(
+            tok.build_asset(raw, TEXT_CONFIG, table),
+            raw["model"]["vocab"],
+            PARITY_CASES,
+            [],
+            [],
+            [],
+            {},
+            [{"normalized": "世界"}],
+        )
+
+        split = fixture["asset"][tok.RARE_TOKEN_SPLIT_KEY]
+        assert split["disabledIds"] == [world]
+        assert split["disabledTotal"] == 2
+        assert split["minScore"] == -1e9
+        assert split["forcedSplits"] == table["forcedSplits"]
+        assert fixture["encode"]["split"] == [{"normalized": "世界"}]
+
+    def test_a_fixture_without_the_table_has_no_split_sections(self):
+        raw = _raw_with_unreachable_token()
+
+        fixture = tok.build_parity_fixture(
+            tok.build_asset(raw, TEXT_CONFIG), raw["model"]["vocab"], PARITY_CASES, [], [], [], {}
+        )
+
+        assert tok.RARE_TOKEN_SPLIT_KEY not in fixture["asset"]
+        assert "split" not in fixture["encode"]
+
+
+def _unigram_tokenizer(vocab):
+    """A real `tokenizers` Unigram over `vocab` with the pre-tokenizer of the real asset."""
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    tokenizer = Tokenizer(
+        models.Unigram([tuple(row) for row in vocab], unk_id=0, byte_fallback=False)
+    )
+    tokenizer.pre_tokenizer = pre_tokenizers.Metaspace(
+        replacement=tok.METASPACE, prepend_scheme="never", split=False
+    )
+    return tokenizer
+
+
+class TestTableReproducesSplitter:
+    """The table alone (ids + one score + the forced map) reproduces upstream's splitter."""
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def splitter():
+        token_split = pytest.importorskip("irodori_tts.token_split")
+        vocab = [
+            ["<unk>", 0.0],
+            ["浦和レッズ", -14.0],
+            ["浦和", -8.0],
+            ["レッ", -9.0],
+            ["ズ", -9.0],
+            ["送料無料", -10.0],
+            ["送料", -8.0],
+            ["無料", -8.0],
+            ["の", -3.0],
+        ]
+        return _unigram_tokenizer(vocab), token_split.RareTokenSplitter(_unigram_tokenizer(vocab))
+
+    def test_the_rebuilt_tokenizer_agrees_with_the_splitter(self, splitter):
+        tokenizer, rare = splitter
+        raw = json.loads(tokenizer.to_str())
+        split_vocab = json.loads(rare.tokenizer.to_str())["model"]["vocab"]
+        table = tok.derive_rare_token_split(raw["model"]["vocab"], split_vocab, rare.forced)
+
+        assert table["disabledIds"] == [1]
+        assert table["forcedSplits"] == [[5, [6, 7]]]
+        texts = ["浦和レッズの送料無料", "浦和レッズ", "送料無料"]
+        assert tok.check_table_reproduces_splitter(raw, table, rare.encode, texts) == 3
+        assert rare.encode("浦和レッズの送料無料") == [2, 3, 4, 8, 6, 7]
+
+    def test_a_table_missing_a_disabled_id_fails_loudly(self, splitter):
+        """Against tautology: the rebuilt side never sees the rule, so a short table shows."""
+        tokenizer, rare = splitter
+        raw = json.loads(tokenizer.to_str())
+        table = {"disabledScore": -1e9, "disabledIds": [], "forcedSplits": [[5, [6, 7]]]}
+
+        with pytest.raises(SystemExit, match="does not reproduce"):
+            tok.check_table_reproduces_splitter(raw, table, rare.encode, ["浦和レッズ"])
+
+
+class TestSplitCoverage:
+    """MUST (the docstring of `SPLIT_CASES`): every case still exercises the role it names."""
+
+    def test_cases_that_exercise_every_role_pass(self):
+        assert _check_coverage(_coverage_cases()) == {"changed": 7, "cases": 8}
+
+    @pytest.mark.parametrize(
+        ("name", "field", "ids", "message"),
+        [
+            ("split-commit-examples", "ids", [_SHORT, _FORCED], "no disabled token"),
+            ("split-commit-examples", "idsSplit", [_DISABLED], "survived the split"),
+            ("split-forced", "ids", [_FORCED], "fewer than two"),
+            ("split-forced-solved-piece", "ids", [_FORCED], "had to be solved"),
+            ("split-keep", "idsSplit", [_SHORT], "not one token on both paths"),
+            ("split-hiragana-only", "idsSplit", [_HIRAGANA, _DISABLED_NEXT], "nothing next to"),
+            ("split-added-token-emoji", "idsSplit", [_SHORT, *_EMOJI_BYTES], "added token is lost"),
+            ("split-truncates", "ids", [_SHORT] * 16, "split side only"),
+            ("split-long-passage", "ids", [_SHORT] * 15, "truncation does not fire unsplit"),
+        ],
+    )
+    def test_a_case_that_lost_its_role_fails_loudly(self, name, field, ids, message):
+        cases = _coverage_cases()
+        next(case for case in cases if case["name"] == name)[field] = ids
+
+        with pytest.raises(SystemExit, match=message):
+            _check_coverage(cases)
+
+    def test_a_keep_token_above_the_threshold_fails_loudly(self):
+        """The KEEP case only shows KEEP_TOKENS when the token would otherwise be disabled."""
+        with pytest.raises(SystemExit, match="above the threshold"):
+            tok.check_split_coverage(
+                _coverage_cases(), _COVERAGE_TABLE, _coverage_vocab(), _FORCE_SPLITS, -20.0, 16
+            )

@@ -163,9 +163,23 @@ measurements in `docs/research/`.
 - `@karume/runtime/tune`: `sweepDefaultKernelsIds`, the default table's kernel fingerprints per op family that a
   sweep record carries as its ratio baseline (optionally of a candidate set), and the type `GeometryProfileFamilyIds`
   of both per-family maps; `@karume/runtime`: the types `GeometryProfileFamily` and `GeometryProfileFamilyProvenance`.
+- `@karume/models`: `irodori.GenerateRequest.splitRareTokens`, upstream Irodori-TTS's rare-token split: the text —
+  never the caption — is encoded without the rare long tokens of the v4 Small tokenizer, which the model tends to
+  misread, falling back to shorter pieces. Omitted, it is on when the distribution's tokenizer asset carries the split
+  table and off when it does not; `true` without the table is a `ModelInputError`; `false` always gives the unsplit
+  encoding. The tokenizer asset reads an optional `rareTokenSplit` key (ADR 0149).
 
 ### Changed
 
+- The anima distributions (`karume-anima`, `karume-anima-extra`): the bundled CircleStone Labs Non-Commercial
+  License v1.2 text follows upstream's fix of two section references (`circlestone-labs/Anima@6e0b2da2`,
+  2026-11-12) — §4(a)(i) now refers to §2(e) and the survival list of §8(c) to §2(e) and §2(f) — and the cards'
+  `license_link` points at that commit. The license version and every other term are unchanged. Mirror `LICENSE.md`
+  and `README.md` change at their next upload.
+- `@karume/models` (Irodori): with a distribution whose tokenizer asset carries the rare-token split table, the
+  default encoding of a text that contains one of its rare long tokens changes, as it did upstream (commit
+  `82c9980b`), and the generated audio with it. The distributions published so far carry no table and do not change
+  until they are reassembled; `splitRareTokens: false` keeps the previous encoding (ADR 0149).
 - `@karume/runtime`: the prefetch form of `rms_norm` and of the RMS → add fusion (rows of a multiple of 256 up to
   4096) rounds `x · inv` before the weight multiplies it. On Metal the form wrote words other than the plain kernel's,
   because the compiler multiplied `x · weight` first. Its keys are `rms_norm:v3:…` and `rms_norm_add:v3:…`; outputs

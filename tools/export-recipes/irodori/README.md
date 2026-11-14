@@ -106,3 +106,20 @@ uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf
 
 v4-small stays self-contained. A local reader of v4.1-small (`nodeDirectory`) needs both mirrors
 and a `crossRepo` mapping of `hdae/karume-irodori-v4-small` to the v4-small one.
+
+## Rare-token split (ADR 0149)
+
+Upstream (`irodori_tts/token_split.py`, on by default) encodes the **text** — never the caption — of
+models whose `text_tokenizer_repo` is `sbintuitions/modernbert-ja-310m` without the rare long tokens
+of that vocabulary, which the model tends to misread. Step 3 does not restate that rule: it runs
+upstream's `RareTokenSplitter` on the real tokenizer and writes the result into the tokenizer asset
+as one key written last (`rareTokenSplit` — the disabled ids, their replaced score and the forced id
+splits), so the asset without it stays byte-identical. Before writing, it checks that a tokenizer
+rebuilt from `tokenizer.json` with only that table reproduces the splitter, and it adds a split-on /
+split-off golden (`encode.split` of the parity fixture) taken through upstream's own entry. v4-small
+and v4.1-small share the tokenizer, so the table is the same for both; v4.1-small's manifest pins
+v4-small's tokenizer bytes by its cross-repository reference, so the table reaches it only when
+v4.1-small is assembled against the v4-small revision that carries it.
+
+Step 3 imports `token_split.py` from `--source-dir`, so the clone must include upstream commit
+`82c9980b` or later.

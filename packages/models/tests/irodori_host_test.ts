@@ -447,21 +447,24 @@ const tinyTokenizer = (): IrodoriTokenizer => {
   return new IrodoriTokenizer(assets);
 };
 
+/** The unsplit path (`tinyTokenizer` has no rare-token split table). */
+const PLAIN = { splitRareTokens: false } as const;
+
 test("packIds: BOS prefix + no pad (the packed sequence of the static scheme)", () => {
-  assertEquals([...packIds(tinyTokenizer(), "あいう", 8, "text")], [1, 4, 5, 6]);
+  assertEquals([...packIds(tinyTokenizer(), "あいう", 8, "text", PLAIN)], [1, 4, 5, 6]);
 });
 
 test("packIds: the text budget is maxLength−1 (room is left for the BOS)", () => {
-  assertEquals([...packIds(tinyTokenizer(), "あいう", 3, "text")], [1, 4, 5]);
+  assertEquals([...packIds(tinyTokenizer(), "あいう", 3, "text", PLAIN)], [1, 4, 5]);
 });
 
 test("packIds: goes through normalization (ideographic spaces vanish — stage ① of `normalize.ts`)", () => {
-  assertEquals([...packIds(tinyTokenizer(), "あ　い", 8, "text")], [1, 4, 5]);
+  assertEquals([...packIds(tinyTokenizer(), "あ　い", 8, "text", PLAIN)], [1, 4, 5]);
 });
 
 test("packIds: rejects a sequence that is empty after normalization (no BOS-only sequence passes)", () => {
   assertThrows(
-    () => packIds(tinyTokenizer(), "　 ", 8, "caption"),
+    () => packIds(tinyTokenizer(), "　 ", 8, "caption", PLAIN),
     ModelInputError,
     "caption is empty after normalisation",
   );
@@ -481,7 +484,7 @@ test("packCaptionIds: applies no normalization (upstream's `_synthesize` only st
     [...packCaptionIds(tinyTokenizer(), "「あい」", 16)],
     [1, ...byteIds("「"), 4, 5, ...byteIds("」")],
   );
-  assertEquals([...packIds(tinyTokenizer(), "「あい」", 16, "text")], [1, 4, 5]);
+  assertEquals([...packIds(tinyTokenizer(), "「あい」", 16, "text", PLAIN)], [1, 4, 5]);
 });
 
 test("packCaptionIds: only leading and trailing spaces are dropped (an inner ideographic space stays)", () => {
@@ -561,7 +564,7 @@ describe("irodori's input-caused failures (ADR 0107)", () => {
   });
 
   it("text that is empty after normalization is caught as ModelInputError", () => {
-    assertThrows(() => packIds(tinyTokenizer(), "　 ", 8, "text"), ModelInputError);
+    assertThrows(() => packIds(tinyTokenizer(), "　 ", 8, "text", PLAIN), ModelInputError);
   });
 
   it("an out-of-range seed is caught as ModelInputError on the generator side too", () => {
