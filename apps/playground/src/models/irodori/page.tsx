@@ -1,8 +1,8 @@
 /**
- * The Irodori-TTS text → speech check: pick v4-small or v4.1-small and a preset, design a voice with
- * a caption or clone one from a reference audio, run one synthesis on the page's GPU, listen to it
- * and save a record of the run (per-stage seconds, real-time factor, Session diagnostics, the sha256
- * of the f32 samples).
+ * The Irodori-TTS text → speech check: pick v4-small, v4.1-small or the MeanFlow v4.1-small-mf and a
+ * preset, design a voice with a caption or clone one from a reference audio, run one synthesis on the
+ * page's GPU, listen to it and save a record of the run (per-stage seconds, real-time factor, Session
+ * diagnostics, the sha256 of the f32 samples).
  */
 
 import { SOURCES, type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
@@ -68,6 +68,7 @@ import { CAPTION_EXAMPLES } from "./samples";
 import {
   buildRequest,
   changedKeyFields,
+  emptyCaptionText,
   FormError,
   type IrodoriConfigView,
   type IrodoriForm,
@@ -84,6 +85,7 @@ import {
   referenceLimits,
   resolveLinearCompute,
   samePipelineKey,
+  samplerText,
   type VoiceMode,
 } from "./settings";
 
@@ -95,12 +97,17 @@ const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { gpuTiming: true };
 const TOP_OPS = 5;
 
 /**
- * v4.1-small references the components it shares with v4-small in v4-small's repository; on the
- * direct route those files come from the `irodori-v4` mount.
+ * v4.1-small references the components it shares with v4-small in v4-small's repository, and
+ * v4.1-small-mf references its duration predictor in v4.1-small's and the rest in v4-small's; on the
+ * direct route those files come from the mounts that hold those repositories.
  */
 const REPO_HOLDERS: RepoHolders<IrodoriMount> = {
   [SOURCES["irodori-v4-small"].repo]: "irodori-v4",
+  [SOURCES["irodori-v4.1-small"].repo]: "irodori-v4.1",
 };
+
+/** The mounts the page's model choice offers, in its order (the badges show their status). */
+const PAGE_MOUNTS: readonly IrodoriMount[] = MODEL_CHOICES.map(({ value }) => value);
 
 const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
   backbone: "Backbone (ModernBERT)",
@@ -186,8 +193,8 @@ export const IrodoriPage = () => {
   }, [manifest]);
   const manifestView = view?.kind === "ready" ? view.view : undefined;
 
-  // Preselect the manifest's default preset. A switch to the other distribution keeps the chosen
-  // preset when that manifest has it too (both small distributions declare the same five).
+  // Preselect the manifest's default preset. A switch to another distribution keeps the chosen
+  // preset when that manifest has it too (the small distributions declare the same five names).
   useEffect(() => {
     if (manifestView === undefined) return;
     setForm((current) =>
@@ -380,17 +387,17 @@ export const IrodoriPage = () => {
           report({ stage: "building the pipeline" });
           buildStart = performance.now();
           // The direct route maps the repositories the manifest references to the mounts that
-          // hold them (v4.1-small takes what it shares with v4-small from the v4-small mount); the
-          // cached route follows the references on /hf/. A self-contained manifest maps nothing.
+          // hold them (REPO_HOLDERS); the cached route follows the references on /hf/. A
+          // self-contained manifest maps nothing.
           const crossRepo =
             key.source.kind === "direct"
               ? crossRepoMounts(referencing, key.model, key.quant, REPO_HOLDERS)
               : {};
-          for (const target of new Set(Object.values(crossRepo))) {
+          for (const [repo, target] of Object.entries(crossRepo)) {
             const held = mountStatus(statuses, target);
             if (held?.available !== true) {
               throw new Error(
-                `${key.model} takes the components it shares with v4-small from the ${target} mount, but ${
+                `${key.model} takes components from ${repo}, which the ${target} mount holds, but ${
                   held?.directory ?? target
                 } is missing`,
               );
@@ -531,13 +538,13 @@ export const IrodoriPage = () => {
       {index.kind === "error" ? (
         <ErrorAlert title="Distribution index" error={index.error} />
       ) : null}
-      <MountBadges index={index} mounts={["irodori-v4.1", "irodori-v4"]} />
+      <MountBadges index={index} mounts={PAGE_MOUNTS} />
       {manifest.kind === "missing" ? (
         <Alert>
           <AlertTitle>The distribution is missing</AlertTitle>
           <AlertDescription>
             The dev server has no <code>{manifest.directory}</code> (a directory with a{" "}
-            <code>karume.json</code>). Put the distribution there and reload, or choose the other
+            <code>karume.json</code>). Put the distribution there and reload, or choose another
             model.
           </AlertDescription>
         </Alert>
@@ -651,8 +658,9 @@ export const IrodoriPage = () => {
                 Checked: splitRareTokens is left out, so the model decides: rare tokens of the text
                 are split into smaller pieces, as upstream does. Unchecked: false, the unsplit
                 encoding. It only has an effect on distributions whose tokenizer asset carries the
-                split table (v4 / v4.1 small from the revision that includes it); elsewhere both
-                give the same encoding. It applies to the text, never the caption.
+                split table (v4 / v4.1 small from the revision that includes it, and v4.1 small MF,
+                which uses v4 small's tokenizer asset); elsewhere both give the same encoding. It
+                applies to the text, never the caption.
               </p>
             </div>
             <div className="flex flex-col gap-2 sm:col-span-2">
@@ -702,8 +710,8 @@ export const IrodoriPage = () => {
                   </div>
                   <p className="text-xs text-muted-foreground">
                     A Japanese description of the voice. An example fills the caption and a text
-                    that suits it. Empty = no voice design (the caption condition is zero and its
-                    guidance is off). Only the first{" "}
+                    that suits it. Empty = no voice design (
+                    {emptyCaptionText(manifestView?.config.flow)}). Only the first{" "}
                     {manifestView === undefined
                       ? "maxCaptionLen"
                       : manifestView.config.maxCaptionLen - 1}{" "}
@@ -814,7 +822,9 @@ export const IrodoriPage = () => {
             <Field
               id="irodori-steps"
               label="Steps"
-              hint="Fixed by the distribution's pipelineConfig (the API has no step knob)."
+              hint={`Fixed by the distribution's pipelineConfig (the API has no step knob).${
+                manifestView === undefined ? "" : ` ${samplerText(manifestView.config.flow)}.`
+              }`}
             >
               <Input
                 id="irodori-steps"

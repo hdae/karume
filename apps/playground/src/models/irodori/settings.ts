@@ -1,5 +1,5 @@
 /**
- * The Irodori-TTS page's form: the two distributions, the knobs, the numbers the page reads from the
+ * The Irodori-TTS page's form: the three distributions, the knobs, the numbers the page reads from the
  * manifest's `pipelineConfig`, and the pure step from the form to a generation request. The pipeline
  * validates every request itself (seed range, codec tile, reference length and rate — a
  * `ModelInputError`); the form only parses what it must turn into numbers.
@@ -12,13 +12,18 @@ import type { Choice } from "@/components/choice-select";
 
 import { DEFAULT_CAPTION, DEFAULT_TEXT } from "./samples";
 
-/** The two distributions (separate repos upstream, so separate mounts); v4.1 is the default. */
-export type IrodoriMount = "irodori-v4.1" | "irodori-v4";
+/**
+ * The three distributions (separate repos upstream, so separate mounts); v4.1 is the default. The
+ * MeanFlow model (`irodori-v4.1-mf`, ADR 0150) is v4.1-small's MeanFlow student: its step count,
+ * presets and sampler come from its manifest like the others'.
+ */
+export type IrodoriMount = "irodori-v4.1" | "irodori-v4.1-mf" | "irodori-v4";
 
 export const DEFAULT_MOUNT: IrodoriMount = "irodori-v4.1";
 
 export const MODEL_CHOICES: readonly Choice<IrodoriMount>[] = [
   { value: "irodori-v4.1", label: "v4.1-small (default) — retrained duration predictor" },
+  { value: "irodori-v4.1-mf", label: "v4.1-small-mf — MeanFlow student of v4.1-small" },
   { value: "irodori-v4", label: "v4-small" },
 ];
 
@@ -81,10 +86,18 @@ export const initialForm = (): IrodoriForm => ({
 });
 
 /**
+ * The flow parameterization a distribution declares, spelled as upstream spells it (ADR 0150):
+ * `rf_velocity` = the rectified-flow Euler sampler with classifier-free guidance (v4 / v4.1, whose
+ * manifests carry no such key), `meanflow` = one conditional forward per step and no guidance at run
+ * time.
+ */
+export type IrodoriFlow = "rf_velocity" | "meanflow";
+
+/**
  * The numbers of the model's `pipelineConfig` the page needs before a pipeline exists: the rate to
- * decode a reference audio to, the length bounds, the token limits and the fixed step count for the
- * hints. The pipeline owns the full schema; this reads only these fields and fails loudly when one
- * is missing.
+ * decode a reference audio to, the length bounds, the token limits, the fixed step count and the flow
+ * parameterization for the hints. The pipeline owns the full schema; this reads only these fields and
+ * fails loudly when one is missing or malformed.
  */
 export type IrodoriConfigView = {
   readonly sampleRate: number;
@@ -99,6 +112,8 @@ export type IrodoriConfigView = {
   readonly minSeconds: number;
   readonly maxSeconds: number;
   readonly steps: number;
+  /** `pipelineConfig.flowParameterization`; absent = `rf_velocity` (the pipeline's reading). */
+  readonly flow: IrodoriFlow;
 };
 
 const CONFIG_FIELDS = [
@@ -114,6 +129,8 @@ const CONFIG_FIELDS = [
   "steps",
 ] as const satisfies readonly (keyof IrodoriConfigView)[];
 
+const FLOW_FIELD = "flowParameterization";
+
 export const readIrodoriConfig = (
   manifest: Manifest,
   model: string = manifest.defaultModel,
@@ -128,6 +145,14 @@ export const readIrodoriConfig = (
     }
     return value;
   };
+  const readFlow = (): IrodoriFlow => {
+    if (!Object.hasOwn(config, FLOW_FIELD)) return "rf_velocity";
+    const value = config[FLOW_FIELD];
+    if (value === "rf_velocity" || value === "meanflow") return value;
+    throw new Error(
+      `pipelineConfig.${FLOW_FIELD} of model '${model}' is ${JSON.stringify(value)}, not "rf_velocity" or "meanflow"`,
+    );
+  };
   return {
     sampleRate: read("sampleRate"),
     maxTextLen: read("maxTextLen"),
@@ -139,7 +164,25 @@ export const readIrodoriConfig = (
     minSeconds: read("minSeconds"),
     maxSeconds: read("maxSeconds"),
     steps: read("steps"),
+    flow: readFlow(),
   };
+};
+
+/** How the declared flow samples, for the Steps hint. */
+export const samplerText = (flow: IrodoriFlow): string =>
+  flow === "meanflow"
+    ? "MeanFlow: one conditional DiT forward per step, no classifier-free guidance at run time"
+    : "rectified-flow Euler steps with classifier-free guidance";
+
+/**
+ * What an empty caption means, for the caption hint: the caption condition is zero, and on the
+ * rectified flow its guidance term is off too. A MeanFlow model runs no guidance at all; `undefined`
+ * (the manifest is not known yet) says only what holds for both.
+ */
+export const emptyCaptionText = (flow: IrodoriFlow | undefined): string => {
+  if (flow === "rf_velocity") return "the caption condition is zero and its guidance is off";
+  if (flow === "meanflow") return "the caption condition is zero; this model runs no guidance";
+  return "the caption condition is zero";
 };
 
 /** What a preset declares that the page shows next to the linear-compute choice. */

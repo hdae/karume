@@ -49,7 +49,9 @@ export const MOUNTS = {
   },
   siglip2: { directory: "models/karume-siglip2", hfRepo: siglip2.SOURCES["siglip2"].repo },
   // karume-irodori-v4.1-small takes the components it shares with v4-small from
-  // karume-irodori-v4-small at the revision its manifest declares (the same opt-in as `anima`).
+  // karume-irodori-v4-small, and karume-irodori-v4.1-small-mf (the MeanFlow model, which carries only
+  // its DiT) takes its duration predictor from karume-irodori-v4.1-small and the rest from
+  // karume-irodori-v4-small, each at the revision its manifest declares (the same opt-in as `anima`).
   "irodori-v4": {
     directory: "models/karume-irodori-v4-small",
     hfRepo: irodori.SOURCES["irodori-v4-small"].repo,
@@ -58,6 +60,13 @@ export const MOUNTS = {
   "irodori-v4.1": {
     directory: "models/karume-irodori-v4.1-small",
     hfRepo: irodori.SOURCES["irodori-v4.1-small"].repo,
+    aliasReferencedRevisions: true,
+  },
+  "irodori-v4.1-mf": {
+    directory: "models/karume-irodori-v4.1-small-mf",
+    // TODO: irodori.SOURCES["irodori-v4.1-small-mf"].repo once the entry exists (it arrives with the
+    // upload of the distribution repository).
+    hfRepo: "hdae/karume-irodori-v4.1-small-mf",
   },
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },

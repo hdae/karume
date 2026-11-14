@@ -6,10 +6,15 @@ import { MOUNTS } from "../src/mounts.ts";
 
 const hex = (character: string): string => character.repeat(64);
 const V4 = "hdae/karume-irodori-v4-small";
+const V41 = "hdae/karume-irodori-v4.1-small";
 const REVISION = "4".repeat(40);
 const HOLDERS: RepoHolders<"irodori-v4"> = { [V4]: "irodori-v4" };
+const MF_HOLDERS: RepoHolders<"irodori-v4" | "irodori-v4.1"> = {
+  [V4]: "irodori-v4",
+  [V41]: "irodori-v4.1",
+};
 
-const container = (prefix: string, borrowed: boolean) => ({
+const container = (prefix: string, borrowed: boolean | string) => ({
   container: {
     descriptor: {
       graph: { length: 8, sha256: hex("d") },
@@ -19,10 +24,47 @@ const container = (prefix: string, borrowed: boolean) => ({
       path: `${prefix}-0000${part}-of-00002.krm`,
       size: part === 1 ? 40 : 8,
       sha256: hex(part === 1 ? "a" : "b"),
-      ...(borrowed ? { repo: V4, revision: REVISION } : {}),
+      ...(borrowed === false
+        ? {}
+        : { repo: borrowed === true ? V4 : borrowed, revision: REVISION }),
     })),
   },
 });
+
+/**
+ * A `karume/5` manifest shaped like Irodori v4.1-small-mf (ADR 0150): only `dit` is its own; the
+ * duration predictor points at v4.1-small's repository, the backbone and the tokenizer at v4-small's.
+ */
+const mfManifest = (): Manifest =>
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "test",
+      defaultModel: "v4.1-small-mf",
+      models: {
+        "v4.1-small-mf": {
+          pipeline: "irodori/1",
+          assets: {
+            tokenizer: {
+              path: "v4-small/tokenizer/tokenizer.json",
+              size: 16,
+              sha256: hex("c"),
+              repo: V4,
+              revision: REVISION,
+            },
+          },
+          weights: {
+            backbone: { i8: container("v4-small/backbone/model.i8", V4) },
+            dit: { i8: container("v4.1-small-mf/dit/model.i8", false) },
+            duration: { i8: container("v4.1-small/duration/model.i8", V41) },
+          },
+          quants: { i8: { weights: { backbone: "i8", dit: "i8", duration: "i8" }, session: {} } },
+          defaultQuant: "i8",
+          pipelineConfig: {},
+        },
+      },
+    }),
+  );
 
 /**
  * A `karume/5` manifest shaped like Irodori v4.1-small: with `borrowing`, the components it shares
@@ -85,6 +127,19 @@ describe("crossRepoMounts", () => {
     });
   });
 
+  it("maps each of two borrowed repositories to its own mount (the MeanFlow model)", () => {
+    expect(crossRepoMounts(mfManifest(), "v4.1-small-mf", "i8", MF_HOLDERS)).toEqual({
+      [V4]: "irodori-v4",
+      [V41]: "irodori-v4.1",
+    });
+  });
+
+  it("fails loudly when only one of the two borrowed repositories has a mount", () => {
+    expect(() => crossRepoMounts(mfManifest(), "v4.1-small-mf", "i8", HOLDERS)).toThrow(
+      /references hdae\/karume-irodori-v4\.1-small, which no mount/,
+    );
+  });
+
   it("is empty for a distribution that references no other repository", () => {
     expect(crossRepoMounts(v41Manifest(false), "v4.1-small", "i8", HOLDERS)).toEqual({});
   });
@@ -97,11 +152,15 @@ describe("crossRepoMounts", () => {
 });
 
 describe("the mounts other distributions reference", () => {
-  // karume-anima-extra borrows from karume-anima, and the rebuilt karume-irodori-v4.1-small from
-  // karume-irodori-v4-small, each at the revision its manifest pins — not the revision these mounts
-  // are served at. Without the opt-in the serving table throws, and /models/index.json builds it,
-  // so every page would fail (vite-plugin-distributions.ts).
-  it.each(["anima", "irodori-v4"] as const)("%s aliases the referenced revisions", (name) => {
-    expect(MOUNTS[name].aliasReferencedRevisions).toBe(true);
-  });
+  // karume-anima-extra borrows from karume-anima, the rebuilt karume-irodori-v4.1-small from
+  // karume-irodori-v4-small, and karume-irodori-v4.1-small-mf from both Irodori repositories, each at
+  // the revision its manifest pins — not the revision these mounts are served at. Without the opt-in
+  // the serving table throws, and /models/index.json builds it, so every page would fail
+  // (vite-plugin-distributions.ts).
+  it.each(["anima", "irodori-v4", "irodori-v4.1"] as const)(
+    "%s aliases the referenced revisions",
+    (name) => {
+      expect(MOUNTS[name].aliasReferencedRevisions).toBe(true);
+    },
+  );
 });

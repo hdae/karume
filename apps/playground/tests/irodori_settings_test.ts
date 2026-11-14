@@ -1,18 +1,23 @@
 import { parseManifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
+import { pageAt } from "../src/models/registry.ts";
 import {
   buildRequest,
   changedKeyFields,
+  DEFAULT_MOUNT,
+  emptyCaptionText,
   FormError,
   initialForm,
   type IrodoriForm,
   linearComputeNote,
+  MODEL_CHOICES,
   readIrodoriConfig,
   readPresetFacts,
   referenceLimits,
   resolveLinearCompute,
   samePipelineKey,
+  samplerText,
 } from "../src/models/irodori/settings.ts";
 
 const PIPELINE_CONFIG = {
@@ -65,7 +70,22 @@ const manifestWith = (pipelineConfig: Record<string, unknown>) =>
     }),
   );
 
+/** The MeanFlow declaration (ADR 0150): its own step count, the flow key, none of the CFG keys. */
+const MEANFLOW_CONFIG = { ...PIPELINE_CONFIG, flowParameterization: "meanflow", steps: 4 };
+
 const form = (patch: Partial<IrodoriForm> = {}): IrodoriForm => ({ ...initialForm(), ...patch });
+
+describe("MODEL_CHOICES", () => {
+  it("offers exactly the mounts the page registry lists for the Irodori page", () => {
+    const mounts = pageAt("/irodori")?.mounts ?? [];
+    expect(MODEL_CHOICES.map(({ value }) => value).sort()).toEqual([...mounts].sort());
+  });
+
+  it("offers the MeanFlow model next to the two rectified-flow ones, v4.1 staying the default", () => {
+    expect(MODEL_CHOICES.map(({ value }) => value)).toContain("irodori-v4.1-mf");
+    expect(DEFAULT_MOUNT).toBe("irodori-v4.1");
+  });
+});
 
 const reference = { data: new Float32Array(20_000), sampleRate: 48000 };
 
@@ -170,7 +190,27 @@ describe("readIrodoriConfig", () => {
       minSeconds: 0.5,
       maxSeconds: 30,
       steps: 40,
+      flow: "rf_velocity",
     });
+  });
+
+  it("reads the MeanFlow declaration's flow and step count from the manifest", () => {
+    const config = readIrodoriConfig(manifestWith(MEANFLOW_CONFIG));
+    expect(config.flow).toBe("meanflow");
+    expect(config.steps).toBe(4);
+  });
+
+  it("takes an explicit rf_velocity as the rectified flow", () => {
+    const config = readIrodoriConfig(
+      manifestWith({ ...PIPELINE_CONFIG, flowParameterization: "rf_velocity" }),
+    );
+    expect(config.flow).toBe("rf_velocity");
+  });
+
+  it.each([["x0"], [1], [null]])("fails loudly on the flow parameterization %j", (value) => {
+    expect(() =>
+      readIrodoriConfig(manifestWith({ ...PIPELINE_CONFIG, flowParameterization: value })),
+    ).toThrow("pipelineConfig.flowParameterization");
   });
 
   it("fails loudly on a missing field", () => {
@@ -180,6 +220,24 @@ describe("readIrodoriConfig", () => {
 
   it("fails loudly on an unknown model", () => {
     expect(() => readIrodoriConfig(manifestWith(PIPELINE_CONFIG), "v9")).toThrow("no model 'v9'");
+  });
+});
+
+describe("samplerText", () => {
+  it("names guidance for the rectified flow and its absence for MeanFlow", () => {
+    expect(samplerText("rf_velocity")).toContain("with classifier-free guidance");
+    expect(samplerText("meanflow")).toContain("no classifier-free guidance");
+  });
+});
+
+describe("emptyCaptionText", () => {
+  it("says the caption's guidance goes off only on the rectified flow", () => {
+    expect(emptyCaptionText("rf_velocity")).toContain("guidance is off");
+    expect(emptyCaptionText("meanflow")).toContain("runs no guidance");
+  });
+
+  it("claims nothing about guidance before the manifest is known", () => {
+    expect(emptyCaptionText(undefined)).not.toContain("guidance");
   });
 });
 
