@@ -107,6 +107,42 @@ uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf
 v4-small stays self-contained. A local reader of v4.1-small (`nodeDirectory`) needs both mirrors
 and a `crossRepo` mapping of `hdae/karume-irodori-v4-small` to the v4-small one.
 
+## A MeanFlow student (v4.1-small-mf — ADR 0150)
+
+Upstream's `Aratako/Irodori-TTS-v4.1-Small-MF` (place it in `inputs/irodori/v4.1-small-mf/`) is v4.1-small distilled
+with MeanFlow: its checkpoint config says `flow_parameterization: "meanflow"`, its DiT has one more branch
+(`delta_cond_module`, embedding the length of the sampling interval) and it samples in 4 steps without CFG
+(`irodori_tts/meanflow.py`). Everything keys off that config value, never off the directory name: `export.py` writes a
+step graph `dit` with the extra input `delta_embed` (after `t_embed`) and golden cases with an interval each,
+`pipeline_ref.py` runs the MeanFlow loop and compares it with upstream's `sample_euler_meanflow`, `calib.py` captures
+the i4 calibration from that loop (12 cases × 4 steps — about 2.5 minutes of CPU), and `distribution.py` declares the
+MeanFlow `pipelineConfig` (no CFG knob).
+
+Only the DiT pair is new, so only it is exported — the other seven graphs are the published v4-small / v4.1-small
+containers, which the distribution borrows across repositories (`IRODORI_BORROWED`: `duration_*` from v4.1-small, the
+rest from v4-small; the tokenizer asset stays local because it carries the rare-token split table). Step 7 reads those
+containers from the two mirrors (`models/karume-irodori-v4-small/`, `models/karume-irodori-v4.1-small/`) and checks that
+the student's checkpoint tensors behind every borrowed graph, and its configs, equal the owner's (`inputs/irodori/v4-small/`
+and `inputs/irodori/v4.1-small/` must be present):
+
+```sh
+D=../../inputs/irodori/v4.1-small-mf
+for dtype in f32 f16 i8; do
+  uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir $D --dtype $dtype \
+      --target dit --target dit-context                                    # 2 / 2' / 2'''
+done
+uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir $D --dtype i4        # 2''
+uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref --model-dir $D \
+    --fixture-out ../../outputs/misc/parity-mf.json                        # 3 (the fixture equals v4-small's)
+for dtype in f32 f16 i8 i4; do
+  uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --model-dir $D --dtype $dtype  # 4 / 4' / 4'' / 4'''
+done
+uv run python dist.py --pipeline irodori --model v4.1-small-mf --resolve-refs hf             # 7
+```
+
+The export writes no `--target` other than the DiT pair for this model (the reference computations still run in
+full). A local reader (`nodeDirectory`) needs the two borrowed-from mirrors too, mapped through `crossRepo`.
+
 ## Rare-token split (ADR 0149)
 
 Upstream (`irodori_tts/token_split.py`, on by default) encodes the **text** — never the caption — of

@@ -56,15 +56,23 @@ class IrodoriUpstream:
     #: Display name used in the title and the bold text of the overview (matches what upstream
     #: calls itself).
     display: str
+    #: The upstream commit the weights were taken from, named in the attribution (`None` for the
+    #: entries published before the card named one).
+    revision: str | None = None
+    #: The model upstream distilled these weights from (a MeanFlow student names its RF teacher —
+    #: ADR 0150), or `None`.
+    teacher: str | None = None
 
 
 #: Distributed model name → upstream facts. v4.1-small is the successor with only the duration
 #: predictor retrained (the other 683 tensors are bit-identical to v4 and the tokenizer is
 #: byte-identical — measured 2026-09-01).
+#: v4.1-small-mf is upstream's MeanFlow student of v4.1-small (ADR 0150 — the whole DiT retrained
+#: with an interval embedding added; everything else is v4.1-small's, measured 2026-11-14).
 #: A model name missing from the table fails loudly — silently writing another version's
 #: attribution would make the stated origin disagree with the actual weights.
-#: Licenses checked at the source (2026-08-12 / v4.1 on 2026-09-01, `tags` of the HF models API):
-#: all are `license: mit`.
+#: Licenses checked at the source (2026-08-12 / v4.1 on 2026-09-01 / v4.1 MF on 2026-11-14 —
+#: `license: mit` in the model card's frontmatter at the revision below): all are `license: mit`.
 IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     "v4-small": IrodoriUpstream(
         repo="Aratako/Irodori-TTS-v4-Small", display="Irodori-TTS v4 Small"
@@ -72,7 +80,24 @@ IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     "v4.1-small": IrodoriUpstream(
         repo="Aratako/Irodori-TTS-v4.1-Small", display="Irodori-TTS v4.1 Small"
     ),
+    "v4.1-small-mf": IrodoriUpstream(
+        repo="Aratako/Irodori-TTS-v4.1-Small-MF",
+        display="Irodori-TTS v4.1 Small MF",
+        revision="ccc78f5d480b6e51b69b2d5042a14c4da04fea6e",
+        teacher="Aratako/Irodori-TTS-v4.1-Small",
+    ),
 }
+
+#: The `flowParameterization` value of a MeanFlow model in `pipelineConfig` (the spelling of
+#: `irodori.distribution.IRODORI_FLOW_MEANFLOW`, which imports this module — kept as a literal
+#: here to avoid the cycle; `tests/test_card.py` pins that the two agree).
+IRODORI_MEANFLOW = "meanflow"
+
+
+def _is_meanflow(model: Mapping[str, Any]) -> bool:
+    """Whether a manifest model entry declares the MeanFlow sampler (absent = RF)."""
+    return model["pipelineConfig"].get("flowParameterization") == IRODORI_MEANFLOW
+
 
 #: The Japanese ModernBERT the text backbone was made from (the one the checkpoint's
 #: `config_json` names in `text_tokenizer_repo` / `text_encoder_revision`). The same for every
@@ -162,11 +187,25 @@ IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧�
 
 
 def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) -> list[str]:
-    sample_rate = default_model(manifest)["pipelineConfig"]["sampleRate"]
+    model = default_model(manifest)
+    sample_rate = model["pipelineConfig"]["sampleRate"]
+    meanflow = _is_meanflow(model)
+    flow = "MeanFlow-distilled" if meanflow else "rectified-flow"
+    step = (
+        (
+            "one forward per sampling step — guidance was distilled in, so there are no",
+            "  classifier-free-guidance branches",
+        )
+        if meanflow
+        else (
+            "one forward per Euler step,",
+            "  plus one per classifier-free-guidance branch",
+        )
+    )
     return [
         "## What is this",
         "",
-        f"A Japanese text-to-speech distribution: the **{upstream.display}** rectified-flow DiT",
+        f"A Japanese text-to-speech distribution: the **{upstream.display}** {flow} DiT",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
         "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
         "browser and in Deno.",
@@ -174,8 +213,8 @@ def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) ->
         "- Nine graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
         "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
         "  encoder, the `duration` predictor, the DiT split in two — `dit_context` (the",
-        "  conditioning keys / values, once per generation) and `dit` (one forward per Euler step,",
-        "  plus one per classifier-free-guidance branch) — and the DACVAE codec"
+        f"  conditioning keys / values, once per generation) and `dit` ({step[0]}",
+        f"{step[1]}) — and the DACVAE codec"
         f" ([{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}))",
         "  as `codec_decoder` / `codec_encoder`.",
         "- **Text in, waveform out.** `generate()` returns f32 mono samples at the codec's sample",
@@ -195,6 +234,27 @@ def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) ->
     ]
 
 
+def _irodori_weights_line(upstream: IrodoriUpstream) -> list[str]:
+    """The first bullet of the attribution: where the weights come from (with the upstream
+    revision and the distillation teacher when the table names them)."""
+    at = "" if upstream.revision is None else f" at revision `{upstream.revision}`"
+    lines = [
+        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},"
+        " licensed **MIT**",
+    ]
+    if upstream.teacher is not None:
+        lines += [
+            "  (as of retrieval). Upstream distilled it from"
+            f" [{upstream.teacher}](https://huggingface.co/{upstream.teacher}) with MeanFlow:",
+            "  the whole DiT was retrained (with an added interval embedding) to take few, large",
+            "  steps, and the guidance was fused into the teacher's targets, so it runs without",
+            "  classifier-free guidance. Its condition encoders and duration predictor are the",
+            "  teacher's. The training / inference implementation it comes with",
+        ]
+        return lines
+    return [*lines, "  (as of retrieval). The training / inference implementation it comes with"]
+
+
 def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
     """The attribution section. It claims conversion + quantization (producing the int8 series)
     — no retraining or fine-tuning."""
@@ -203,9 +263,7 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
         "",
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
-        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}),"
-        " licensed **MIT**",
-        "  (as of retrieval). The training / inference implementation it comes with",
+        *_irodori_weights_line(upstream),
         "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
         "  Karume's runtime contains none of that code — it is an independent implementation that",
         "  reads these weights from its own container format.",
@@ -326,19 +384,33 @@ def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _irodori_sampler_lines(config: Mapping[str, Any]) -> list[str]:
+    """The step and guidance bullets of Defaults (a MeanFlow model has no runtime guidance)."""
+    if config.get("flowParameterization") == IRODORI_MEANFLOW:
+        return [
+            f"- **steps**: {config['steps']} MeanFlow steps (t from 1 to 0 in equal intervals, one",
+            "  conditional DiT forward each)",
+            "- **guidance**: none at run time — it was fused into the teacher's targets during",
+            "  distillation",
+        ]
+    scales = config["cfgScales"]
+    return [
+        f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
+        "- **guidance**: "
+        + " / ".join(f"{name} {knob(scale)}" for name, scale in scales.items())
+        + f", applied for t in [{config['cfgMinT']}, {config['cfgMaxT']}]",
+    ]
+
+
 def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
     """Runtime knobs (the side that fills in what was not passed to `generate()`)."""
     config = model["pipelineConfig"]
-    scales = config["cfgScales"]
     return [
         "### Defaults",
         "",
         "The sampler knobs are fixed by the manifest — `generate()` takes none of them.",
         "",
-        f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
-        "- **guidance**: "
-        + " / ".join(f"{name} {knob(scale)}" for name, scale in scales.items())
-        + f", applied for t in [{config['cfgMinT']}, {config['cfgMaxT']}]",
+        *_irodori_sampler_lines(config),
         f"- **duration**: clamped to [{config['minSeconds']}, {config['maxSeconds']}] seconds"
         " (the duration predictor decides within that, unless `durationSeconds` is passed)",
         "",

@@ -44,6 +44,11 @@ equivalence check of `irodori.export` (`EAGER_EQUIV_ATOL = 0`, including the equ
 the split) — together with "stages one by one ≡ the bare block loop" (the check here), two
 measurements close the claim that the stage split matches the path of the distributed graphs.
 
+MUST: a MeanFlow checkpoint (ADR 0150) is driven by **its own** upstream loop,
+`irodori_tts.meanflow.sample_euler_meanflow` (4 steps, one conditional forward per step, no CFG) —
+the activations its blocks see are those of the distribution's MeanFlow loop, so calibrating it
+with the RF loop would choose rounding targets for a trajectory that never runs.
+
 MUST: the reference loop runs with `use_context_kv_cache=False` ({@link capture_stage_batches}) —
 upstream's default (True) passes the condition K/V in **a separate cache per block**, which does
 not fit the core driver that reuses one kwargs for every stage, and it breaks silently before the
@@ -51,7 +56,8 @@ stage-split identity check. The distributed graphs build the condition-side K/V 
 graph (`dit-context`) (ADR 0114 — the same semantics as upstream's cache), but the values are the
 output of the same `project_context_kv`, so they are bit-identical to the activations taken with
 False. Running the condition-side projections **inside** the stage is also what lets those 72
-modules see their own inputs in GPTQ.
+modules see their own inputs in GPTQ. The MeanFlow loop has no such switch (it always builds the
+cache), so {@link _without_context_kv_cache} gives it the same form.
 
 NOTE (why this is not shared with the rig of `irodori.measure_quant`): that one is scaffolding for
 3 grids × quality measurement, and its driver is confined to **the patched distribution wrappers**
@@ -63,7 +69,8 @@ premise moves — instead each rig verifies itself independently with its own id
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -83,6 +90,7 @@ from karume.quantize import DEFAULT_GROUP_SIZE, Int4Report, channel_rows, iter_q
 
 from . import export as ex
 from . import pipeline_ref as ip
+from .distribution import IRODORI_FLOW_MEANFLOW
 
 #: FQN prefix of the stage sequence (`TextToLatentRFDiT.blocks` — the same as the attribute name
 #: in the distribution wrappers).
@@ -123,6 +131,11 @@ BATCHED_BLOCK_ARGS = frozenset(
 #: The arguments of the same forward without a batch axis (passed on to the next stage as they
 #: are). `context_kv` is always `None` by the MUST of {@link capture_stage_batches}.
 UNBATCHED_BLOCK_ARGS = frozenset({"freqs_cis", "self_mask", "context_kv"})
+
+#: The arguments of the same forward that are **derived from the batched ones for the whole
+#: batch** and are therefore replaced by `None` in the cond-side batch, so the block rebuilds them
+#: from the sliced arguments (the reasoning is at {@link _split_block_kwargs}).
+REBUILT_BLOCK_ARGS = frozenset({"context_plan"})
 
 #: Name of the argument that carries hidden (the core driver passes hidden as a **positional
 #: argument**, so it is removed from kwargs).
@@ -307,8 +320,32 @@ def _split_block_kwargs(kwargs: Mapping[str, Any], batch_rows: int) -> StageBatc
 
     `batch_rows` is the number of rows kept as the cond side (**always 1** — upstream's independent
     CFG batches `[cond, uncond…]` into one forward, with cond in row 0).
+
+    `context_plan` ({@link REBUILT_BLOCK_ARGS}) is upstream's `ContextAttentionPlan`
+    (`irodori_tts/attention.py`), which `forward_with_encoded_conditions` builds once per forward
+    for the **whole** batch and hands to every block. It holds the key mask of the concatenated
+    self / text / speaker / caption segments, `kv_mask` `(B, S_kv)`, plus `query_len`, and on the
+    FlashAttention-3 path (CUDA only) a packing index and cumulative lengths over the flattened
+    `B × S_kv`. It is not row-independent: the uncond rows carry all-False masks for their own
+    segment, so replaying the captured plan against the one cond row would attend with masks of
+    rows that are not there (and a packing index would point past the sliced keys).
+
+    The cond-side batch therefore passes `None`, and `JointAttention.forward` takes its own
+    fallback: it builds the plan from the arguments it receives (the row-0 masks) with the same
+    `build_context_masks` + `build_context_attention_plan` that `forward_with_encoded_conditions`
+    calls. Why this gives row 0 the same block output as upstream's own forward: that builder works
+    row by row (it concatenates the segment masks along the key axis and fills a missing mask with
+    ones per row), slicing rows leaves the segment lengths unchanged, and `use_fa3` is False
+    on CPU — so the rebuilt `kv_mask` is exactly row 0 of the captured one, `query_len` is equal,
+    and `context_attention` runs the same `masked_sdpa(q, k, v, kv_mask[:, None, None, :])` on
+    row 0's queries, keys and mask. This rests on `self_mask` being `None` (the reference loop
+    passes no `latent_mask`); a per-sample `(B, S)` mask would stay unsliced and the rebuild would
+    fail loudly in its `torch.cat` against the one-row masks. Slicing the plan instead would
+    rewrite upstream's dataclass field by field (and go stale when it gains one), and rebuilding it
+    here would copy upstream's argument mapping. {@link assert_stage_split} replays the unsliced
+    call, so it keeps the captured plan for the batch it was built for.
     """
-    wanted = BATCHED_BLOCK_ARGS | UNBATCHED_BLOCK_ARGS
+    wanted = BATCHED_BLOCK_ARGS | UNBATCHED_BLOCK_ARGS | REBUILT_BLOCK_ARGS
     if set(kwargs) != wanted:
         raise AssertionError(
             f"the block call arguments are {sorted(kwargs)}, not the expected {sorted(wanted)}"
@@ -323,7 +360,9 @@ def _split_block_kwargs(kwargs: Mapping[str, Any], batch_rows: int) -> StageBatc
     sliced = {
         name: (value[:batch_rows] if name in BATCHED_BLOCK_ARGS and value is not None else value)
         for name, value in kwargs.items()
+        if name not in REBUILT_BLOCK_ARGS
     }
+    sliced.update(dict.fromkeys(REBUILT_BLOCK_ARGS))
     hidden = sliced.pop(HIDDEN_ARG)
     return ((hidden.detach(),), {name: _detached(value) for name, value in sliced.items()})
 
@@ -352,6 +391,27 @@ def _load_tokenizers(context: CalibContext) -> tuple[Any, Any]:
     )
 
 
+@contextmanager
+def _without_context_kv_cache(dit: nn.Module) -> Iterator[None]:
+    """Run upstream's MeanFlow loop with every block projecting its condition K/V itself.
+
+    `sample_euler_meanflow` always calls `model.build_context_kv_cache(...)` and hands the
+    per-block cache to every forward — the RF sampler's `use_context_kv_cache=False` has no
+    counterpart there. While this is active the instance's `build_context_kv_cache` returns `None`,
+    so `forward_with_encoded_conditions` passes `context_kv=None` and each block calls the same
+    `project_context_kv` on the same states (the values the cache would hold — the MUST of the
+    module docstring). If upstream stops going through that method, the cache reaches the block
+    and {@link _split_block_kwargs} fails loudly instead of calibrating with it.
+    """
+    if "build_context_kv_cache" in vars(dit):
+        raise AssertionError("build_context_kv_cache is already shadowed on this DiT instance")
+    dit.build_context_kv_cache = lambda **_kwargs: None
+    try:
+        yield
+    finally:
+        del dit.build_context_kv_cache
+
+
 def _capture_case(
     dit: nn.Module,
     case: ip.PipelineCase,
@@ -365,11 +425,14 @@ def _capture_case(
     Upstream's independent CFG is 1 step = **1 forward** (cond and uncond batched together), so
     the number of calls to the first block is the step count. Taking only row 0 is what "the cond
     side's forward only" means, the same capture semantics as the measurement of iteration J-2
-    (`irodori.measure_quant.capture_case_batches`).
+    (`irodori.measure_quant.capture_case_batches`). A MeanFlow checkpoint runs its own loop
+    (`sample_euler_meanflow` — 1 step = 1 conditional forward of one row), so the same capture
+    applies unchanged.
 
     Once `steps` have been captured, a sentinel cuts the reference loop short — the upstream loop
     would run the remaining steps too, so without cutting it a reduced run would not work.
     """
+    from irodori_tts.meanflow import sample_euler_meanflow
     from irodori_tts.rf import sample_euler_rf_cfg
 
     tokenizer, caption_tokenizer = tokenizers
@@ -431,26 +494,41 @@ def _capture_case(
         dit.out_norm.register_forward_pre_hook(on_tail),
     ]
     try:
-        with torch.no_grad():
-            sample_euler_rf_cfg(
-                model=dit,
-                text_input_ids=text_padded,
-                text_mask=text_mask,
-                ref_latent=reference_latent,
-                ref_mask=reference_mask,
-                sequence_length=sequence,
-                caption_input_ids=caption_padded,
-                caption_mask=caption_mask,
-                num_steps=ip.NUM_STEPS,
-                cfg_scale_text=ip.CFG_SCALES["text"],
-                cfg_scale_caption=ip.CFG_SCALES["caption"],
-                cfg_scale_speaker=ip.CFG_SCALES["speaker"] if has_speaker else 0.0,
-                cfg_guidance_mode="independent",
-                cfg_min_t=ip.CFG_MIN_T,
-                cfg_max_t=ip.CFG_MAX_T,
-                seed=case.seed,
-                use_context_kv_cache=False,
-            )
+        if ex.dit_flow(dit) == IRODORI_FLOW_MEANFLOW:
+            with torch.no_grad(), _without_context_kv_cache(dit):
+                sample_euler_meanflow(
+                    model=dit,
+                    text_input_ids=text_padded,
+                    text_mask=text_mask,
+                    ref_latent=reference_latent,
+                    ref_mask=reference_mask,
+                    sequence_length=sequence,
+                    caption_input_ids=caption_padded,
+                    caption_mask=caption_mask,
+                    num_steps=ip.MEANFLOW_NUM_STEPS,
+                    seed=case.seed,
+                )
+        else:
+            with torch.no_grad():
+                sample_euler_rf_cfg(
+                    model=dit,
+                    text_input_ids=text_padded,
+                    text_mask=text_mask,
+                    ref_latent=reference_latent,
+                    ref_mask=reference_mask,
+                    sequence_length=sequence,
+                    caption_input_ids=caption_padded,
+                    caption_mask=caption_mask,
+                    num_steps=ip.NUM_STEPS,
+                    cfg_scale_text=ip.CFG_SCALES["text"],
+                    cfg_scale_caption=ip.CFG_SCALES["caption"],
+                    cfg_scale_speaker=ip.CFG_SCALES["speaker"] if has_speaker else 0.0,
+                    cfg_guidance_mode="independent",
+                    cfg_min_t=ip.CFG_MIN_T,
+                    cfg_max_t=ip.CFG_MAX_T,
+                    seed=case.seed,
+                    use_context_kv_cache=False,
+                )
     except _CalibStepsReached:
         pass
     finally:
@@ -460,8 +538,8 @@ def _capture_case(
         raise AssertionError(
             f"{case.name}: captured calibration input for only {len(batches)} steps"
             f" (requested {steps} steps / block loop tails {len(tail)})"
-            " — the spelling of upstream sample_euler_rf_cfg disagrees with what the script"
-            " assumes"
+            " — the spelling of upstream's sampler (sample_euler_rf_cfg / sample_euler_meanflow)"
+            " disagrees with what the script assumes"
         )
     print(f"[{label}] {case.name}: S={sequence} / captured {len(batches)} steps", flush=True)
     return CapturedRun(tuple(batches), graph_batch[0], tail[0])

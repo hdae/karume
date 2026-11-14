@@ -96,3 +96,8 @@ where a vocabulary without it would fall back to bytes.
 - Older distribution revisions keep working: without the key there is no split path, the default is off, and only an
   explicit `true` is refused.
 - The recipe's step 3 needs an upstream clone that includes `82c9980b` (it imports `token_split.py`).
+- The recipe's reference loops and the GPTQ calibration corpus keep the unsplit encoding (decided 2026-11-14). The
+  full-loop golden texts contain no disabled or forced token, so their goldens are the same either way. 8 of the 12
+  calibration cases would encode differently, and re-rounding with split text would change the published i4 bytes of
+  v4-small and v4.1-small with no measured gain. To be revisited if listening finds a regression specific to split
+  text.

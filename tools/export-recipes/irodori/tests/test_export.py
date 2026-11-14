@@ -42,7 +42,14 @@ from torch import nn
 from irodori import export as ir
 from irodori import patch as patch_irodori
 from irodori import pipeline_ref as ip
-from irodori.distribution import _assert_irodori_dit_boundary, irodori_context_kv_names
+from irodori.distribution import (
+    IRODORI_FLOW_MEANFLOW,
+    IRODORI_FLOW_RF,
+    IRODORI_MEANFLOW_DIT_HEAD_INPUTS,
+    _assert_irodori_dit_boundary,
+    irodori_context_kv_names,
+    irodori_dit_head_inputs,
+)
 from karume.dist import ir_graph
 from karume.ir import IrGraph, IrInput, IrNode, IrValue
 from karume.pipeline import export_to_file, publish_model
@@ -1080,7 +1087,7 @@ TINY_SPEAKER_MAX = 4
 TINY_CONTEXT_TOTAL = 6 + (TINY_SPEAKER_MAX + 1) + 7
 
 
-def _tiny_real_dit() -> nn.Module:
+def _tiny_real_dit(flow_parameterization: str = "rf_velocity") -> nn.Module:
     """Upstream's `TextToLatentRFDiT` itself (a small config, condition encoders from scratch).
 
     head_dim is 64 as in the real weights (the bit identity of real-pair RoPE depends on the
@@ -1116,6 +1123,7 @@ def _tiny_real_dit() -> nn.Module:
         speaker_mlp_ratio=1.0,
         timestep_embed_dim=16,
         adaln_rank=4,
+        flow_parameterization=flow_parameterization,
     )
     with torch.random.fork_rng():
         torch.manual_seed(0)
@@ -1131,6 +1139,7 @@ class _TinySplit:
     assembling the inputs) with the same functions on a small real DiT."""
 
     def __init__(self, model: nn.Module) -> None:
+        flow = ir.dit_flow(model)
         from irodori_tts.model import TextToLatentRFDiT, get_timestep_embedding
 
         source = SimpleNamespace(
@@ -1150,6 +1159,7 @@ class _TinySplit:
             {ir.DIT_TEXT_SOURCE: torch.randn(1, 5, 16, generator=generator)},
             {ir.DIT_CAPTION_SOURCE: torch.randn(1, 3, 16, generator=generator)},
             {ir.DIT_SPEAKER_SOURCE: torch.randn(1, 3, 16, generator=generator)},
+            flow=flow,
         )
         self.pristine = ir._pristine_dit_outputs(model, reference)
         self.context_inputs, self.owner = ir._dit_context_cases(self.inputs)
@@ -1159,6 +1169,7 @@ class _TinySplit:
             self.owner,
             self.context,
             irodori_context_kv_names(len(model.blocks)),
+            irodori_dit_head_inputs(flow),
         )
 
 
@@ -1389,6 +1400,183 @@ class TestDitSplit:
             tmp_path,
         )
         assert written == [f"{ir.IO_PREFIX}dit-cond-1s{ir.IO_SUFFIX}"]
+
+
+@pytest.fixture
+def tiny_meanflow_split(restore_forward) -> tuple[nn.Module, _TinySplit]:
+    """`tiny_split` for a MeanFlow checkpoint (upstream's own `delta_cond_module`, every weight
+    randomized — the zero-initialized last linear included)."""
+    model = _tiny_real_dit(IRODORI_FLOW_MEANFLOW)
+    split = _TinySplit(model)
+    patch_irodori.apply_patches()
+    return model, split
+
+
+class TestMeanFlowDit:
+    """The DiT step of a MeanFlow checkpoint takes the interval embedding too (ADR 0150).
+
+    MUST: the step stays bit-identical to upstream's `forward_with_encoded_conditions(…,
+    delta_t=…)` — the same eager equivalence (atol 0) as the RF step.
+    """
+
+    def test_the_checkpoint_flow_picks_the_step_wrapper(self):
+        rf = _tiny_real_dit()
+        meanflow = _tiny_real_dit(IRODORI_FLOW_MEANFLOW)
+
+        assert ir.dit_flow(rf) == IRODORI_FLOW_RF
+        assert ir.dit_flow(meanflow) == IRODORI_FLOW_MEANFLOW
+        assert type(ir.dit_wrappers(rf, 8).dit) is ir.DitGraph
+        assert type(ir.dit_wrappers(meanflow, 8).dit) is ir.MeanFlowDitGraph
+
+    def test_the_step_takes_delta_embed_right_after_t_embed(self):
+        model = _tiny_real_dit(IRODORI_FLOW_MEANFLOW)
+        names = ir.dit_wrappers(model, 8).dit.input_names
+
+        assert (
+            names[:4]
+            == IRODORI_MEANFLOW_DIT_HEAD_INPUTS
+            == (
+                "x_t",
+                "t_embed",
+                "delta_embed",
+                "mask",
+            )
+        )
+        assert names[4:] == irodori_context_kv_names(len(model.blocks))
+
+    def test_the_step_owns_the_interval_branch_and_the_context_graph_does_not(self):
+        model = _tiny_real_dit(IRODORI_FLOW_MEANFLOW)
+        wrappers = ir.dit_wrappers(model, 8)
+        step = {name for name, _ in wrappers.dit.named_parameters()}
+        context = {name for name, _ in wrappers.context.named_parameters()}
+
+        assert {f"delta_cond_module.{index}.weight" for index in (0, 2, 4)} <= step
+        assert not {name for name in context if name.startswith("delta_cond_module")}
+
+    def test_the_composed_pair_reproduces_the_upstream_forward_bit_for_bit(
+        self, tiny_meanflow_split
+    ):
+        model, split = tiny_meanflow_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        composed = ir.ComposedDitGraph(wrappers.context, wrappers.dit)
+
+        for name, args in split.inputs.items():
+            assert list(args)[:4] == list(IRODORI_MEANFLOW_DIT_HEAD_INPUTS), name
+            diff = ir._check_wrapper_equivalence(
+                composed, tuple(args.values()), (split.pristine[name],), name, 0.0
+            )
+            assert diff == 0.0, name
+
+    def test_the_step_fed_with_the_context_golden_matches_upstream(self, tiny_meanflow_split):
+        model, split = tiny_meanflow_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+
+        for name, args in split.dit_inputs.items():
+            assert list(args) == list(wrappers.dit.input_names), name
+            assert (
+                ir._check_wrapper_equivalence(
+                    wrappers.dit, tuple(args.values()), (split.pristine[name],), name, 0.0
+                )
+                == 0.0
+            )
+
+    def test_a_dropped_interval_breaks_the_equivalence(self, tiny_meanflow_split):
+        """Fault injection: the interval embedding of another delta (here the one of t itself)
+        does not pass the atol-0 check."""
+        model, split = tiny_meanflow_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        args = dict(split.dit_inputs["dit-cond-1s"])
+        args["delta_embed"] = args["t_embed"]
+
+        with pytest.raises(AssertionError, match="eager equivalence broke"):
+            ir._check_wrapper_equivalence(
+                wrappers.dit, tuple(args.values()), (split.pristine["dit-cond-1s"],), "drop", 0.0
+            )
+
+    def test_the_cases_carry_an_interval_and_one_more_case_varies_only_it(self):
+        cases = ir.dit_cases(IRODORI_FLOW_MEANFLOW)
+        by_name = {case.name: case for case in cases}
+
+        assert all(case.delta is not None for case in cases)
+        assert all(case.delta is None for case in ir.dit_cases(IRODORI_FLOW_RF))
+        lhs, rhs = (by_name[name] for name in ir.MEANFLOW_DIT_DELTA_PAIR)
+        assert (lhs.length, lhs.seed, lhs.t, lhs.uncond) == (
+            rhs.length,
+            rhs.seed,
+            rhs.t,
+            rhs.uncond,
+        )
+        assert lhs.delta != rhs.delta
+
+    def test_the_interval_divergence_and_the_mask_divergence_hold_on_the_tiny_dit(
+        self, tiny_meanflow_split
+    ):
+        _model, split = tiny_meanflow_split
+
+        assert ir._dit_delta_divergence(split.pristine) >= ir.DIT_DELTA_DIVERGENCE_MIN
+        assert ir._dit_uncond_divergence(split.pristine, ir.dit_cases(IRODORI_FLOW_MEANFLOW))
+
+    def test_identical_outputs_for_both_intervals_fail_loudly(self):
+        same = torch.ones(1, 25, 4)
+        pristine = dict.fromkeys(ir.MEANFLOW_DIT_DELTA_PAIR, same)
+
+        with pytest.raises(AssertionError, match="interval embedding seems not to reach"):
+            ir._dit_delta_divergence(pristine)
+
+    def test_the_exported_boundary_passes_the_assembly_check(self, tiny_meanflow_split, tmp_path):
+        """The exported step carries `delta_embed` in the contract's position (mask moves to the
+        fourth input, so its derived dimension is declared there), and the assembly check accepts
+        it for a MeanFlow pipelineConfig — and refuses it for an RF one."""
+        model, split = tiny_meanflow_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        paths = {
+            ir.TARGET_DIT_CONTEXT: tmp_path / ir.TARGET_DIT_CONTEXT / ir.MODEL_FILE,
+            ir.TARGET_DIT: tmp_path / ir.TARGET_DIT / ir.MODEL_FILE,
+        }
+        publish_model(
+            paths[ir.TARGET_DIT_CONTEXT],
+            *ir.export_ir(
+                wrappers.context,
+                tuple(next(iter(split.context_inputs.values())).values()),
+                axis=ir.TargetAxis(None, None, 0, {}, ir.PRESERVED_OP_PREFIXES),
+                output_names=wrappers.context.output_names,
+            ),
+            provenance=ir.PROVENANCE,
+            graph_name="dit_context",
+        )
+        dit_graph = publish_model(
+            paths[ir.TARGET_DIT],
+            *ir.export_ir(
+                wrappers.dit,
+                tuple(split.dit_inputs["dit-cond-1s"].values()),
+                axis=ir.TargetAxis(
+                    ir.DIT_TORCH_DIM,
+                    ir.DIT_SYMBOL,
+                    split.sym_max,
+                    {0: (1, 0), 3: (3, TINY_CONTEXT_TOTAL)},
+                    ir.PRESERVED_OP_PREFIXES,
+                ),
+                input_names=wrappers.dit.input_names,
+            ),
+            provenance=ir.PROVENANCE,
+            graph_name="dit",
+        )
+        graphs = {
+            role: ir_graph(path)
+            for role, path in (
+                ("dit_context", paths[ir.TARGET_DIT_CONTEXT]),
+                ("dit", paths[ir.TARGET_DIT]),
+            )
+        }
+        placements = {"dit_context": paths[ir.TARGET_DIT_CONTEXT], "dit": paths[ir.TARGET_DIT]}
+        segments = {"maxTextLen": 6, "speakerRows": TINY_SPEAKER_MAX + 1, "maxCaptionLen": 7}
+
+        assert tuple(spec.name for spec in dit_graph.inputs) == wrappers.dit.input_names
+        _assert_irodori_dit_boundary(
+            graphs, placements, {**segments, "flowParameterization": IRODORI_FLOW_MEANFLOW}
+        )
+        with pytest.raises(Exception, match="not the order derived"):
+            _assert_irodori_dit_boundary(graphs, placements, segments)
 
 
 class TestPristineDitContextOrdering:

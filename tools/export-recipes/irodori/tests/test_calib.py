@@ -21,12 +21,14 @@ pinned here is only what would turn into a **false PASS** if it broke:
   all of i8 is rounded, before the i4 side is rounded)
 - a change of the arguments of upstream `DiffusionBlock.forward` fails (the cond-side slicing
   would silently come off)
+- the context plan upstream builds for the whole batch is not replayed against the cond row (the
+  block rebuilds it from the sliced masks)
 - running with a condition K/V cache fails (one kwargs cannot be reused across all stages)
 - `--no-calib` really does not run calibration, as an opt-out
 
 The model here is a tiny skeleton that copies **the real FQNs** (`blocks.<i>` / `in_proj` /
 `out_proj` / `cond_module.<i>`, the condition-side projections `wk_text` … of attention and
-`k_norm`) and **the same call shape** (a block takes all 11 arguments as keywords and returns the
+`k_norm`) and **the same call shape** (a block takes all 12 arguments as keywords and returns the
 hidden state; the DiT holds copies of the other roles inside). Even the names are copied so that
 the checks run against the predicates meant for the real model without replacing them
 ({@link irodori.calib.dit_i4_names} takes the intersection with the union of what the two DiT
@@ -119,8 +121,13 @@ class TinyAttention(nn.Module):
 class TinyBlock(nn.Module):
     """A block that copies only the **call shape** of upstream `DiffusionBlock`.
 
-    It takes all 11 arguments as keywords and returns the hidden state — the same as the real
+    It takes all 12 arguments as keywords and returns the hidden state — the same as the real
     one, so the stages can be chained as is without wrapping (`irodori.calib.dit_stages`).
+
+    `context_plan` stands in for upstream's `ContextAttentionPlan` by its batch-shaped content
+    (the concatenated key mask `(B, S_kv)`): like the real one it belongs to the batch it was built
+    for, so a plan replayed against a different number of rows fails, and `None` means "build it
+    from the masks received" (upstream `JointAttention.forward`'s fallback).
 
     adaLN uses the real attribute names (`attention_adaln` / `mlp_adaln`) in the form that **has a
     linear as a child** (`…_adaln.1`) — so that the model side also exercises the match being by
@@ -147,7 +154,13 @@ class TinyBlock(nn.Module):
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
+        context_plan: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if context_plan is not None and context_plan.shape[0] != x.shape[0]:
+            raise ValueError(
+                f"a context plan built for {context_plan.shape[0]} rows was replayed against"
+                f" {x.shape[0]}"
+            )
         context = self.attention.context(text_state, speaker_state, caption_state)
         attended = torch.tanh(self.attention.wq(x) + context)
         return x + self.attention.wo(self.mlp(attended)) * self.modulation(cond_embed)
@@ -178,7 +191,7 @@ class TinyDit(nn.Module):
         self.pretrained_text_backbone = nn.Linear(HIDDEN, HIDDEN, bias=False)
 
     def forward_with_encoded_conditions(self, x_t: torch.Tensor, **conditions: Any) -> torch.Tensor:
-        """The same shape as upstream: "call every block with all 11 arguments as
+        """The same shape as upstream: "call every block with all 12 arguments as
         keywords"."""
         x = self.in_proj(x_t)
         for block in self.blocks:
@@ -209,6 +222,7 @@ class DriftingBlock(TinyBlock):
         caption_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
+        context_plan: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return super().forward(
             x,
@@ -221,6 +235,7 @@ class DriftingBlock(TinyBlock):
             caption_mask,
             freqs_cis,
             self_mask,
+            context_plan=context_plan,
         )
 
 
@@ -322,7 +337,7 @@ def make_dit(blocks: int = 3, seed: int = 0, dit_type: type[TinyDit] = TinyDit) 
 
 
 def make_conditions(seed: int = 7, rows: int = CFG_ROWS) -> dict[str, Any]:
-    """The full set of accompanying arguments passed to a block (the 10 besides `x`)."""
+    """The full set of accompanying arguments passed to a block (the 11 besides `x`)."""
     generator = torch.Generator().manual_seed(seed)
 
     def randn(*shape: int) -> torch.Tensor:
@@ -339,6 +354,9 @@ def make_conditions(seed: int = 7, rows: int = CFG_ROWS) -> dict[str, Any]:
         "freqs_cis": randn(TOKENS, 4),
         "self_mask": None,
         "context_kv": None,
+        # Self + text + speaker + caption keys, one plan for the whole batch (as upstream builds it
+        # once per forward).
+        "context_plan": torch.ones(rows, TOKENS + 5 + 3 + 4, dtype=torch.bool),
     }
 
 
@@ -520,6 +538,20 @@ class TestCapturedKwargs:
         # Arguments without a batch axis stay as they are (slicing would make the RoPE table 1
         # long).
         assert kwargs["freqs_cis"].shape[0] == TOKENS
+
+    def test_the_cond_row_lets_the_block_rebuild_the_whole_batch_context_plan(self):
+        """Upstream builds the context plan once for the whole `[cond, uncond…]` batch — the
+        cond-side batch hands the block `None` so it builds the plan from the row-0 masks, while
+        the unsliced batch keeps the captured plan for the stage-split replay."""
+        dit = make_dit()
+
+        run = capture_run(dit)
+
+        assert run.batches[0][1]["context_plan"] is None
+        assert run.graph_batch[1]["context_plan"].shape[0] == CFG_ROWS
+        # The cond-side batch really replays through a block (a kept whole-batch plan raises).
+        args, kwargs = run.batches[0]
+        dit.blocks[0](*args, **kwargs)
 
     def test_a_dropped_block_argument_is_caught(self):
         """If upstream drops an argument, the cond-side slicing silently comes off (the numbers
@@ -1015,3 +1047,51 @@ class TestCalibProvenance:
     def test_it_is_not_written_for_other_targets(self, tmp_path):
         assert ir._write_calib_provenance("i4", make_plan(), ir.TARGET_BACKBONE, tmp_path) is None
         assert not (tmp_path / "calib_provenance.json").exists()
+
+
+class CacheBuildingDit(TinyDit):
+    """A DiT whose sampler would hand every block a per-block condition K/V cache (the shape of
+    upstream's MeanFlow loop, which always builds one through `build_context_kv_cache`)."""
+
+    def build_context_kv_cache(self, **_states: Any) -> list[tuple[torch.Tensor, ...]]:
+        return [(torch.ones(1),) for _ in self.blocks]
+
+
+class TestMeanFlowCapture:
+    """The MeanFlow loop of upstream always builds the condition K/V cache; the capture runs it
+    with every block projecting its own K/V instead (ADR 0150)."""
+
+    def test_the_cache_builder_returns_nothing_while_shadowed_and_comes_back_after(self):
+        dit = CacheBuildingDit()
+
+        with calib._without_context_kv_cache(dit):
+            assert dit.build_context_kv_cache(text_state=None) is None
+        assert dit.build_context_kv_cache(text_state=None) == [(torch.ones(1),) for _ in dit.blocks]
+        assert "build_context_kv_cache" not in vars(dit)
+
+    def test_the_cache_builder_comes_back_after_a_failure_too(self):
+        dit = CacheBuildingDit()
+
+        with pytest.raises(RuntimeError, match="boom"), calib._without_context_kv_cache(dit):
+            raise RuntimeError("boom")
+        assert "build_context_kv_cache" not in vars(dit)
+
+    def test_shadowing_twice_fails_loudly(self):
+        dit = CacheBuildingDit()
+
+        with (
+            calib._without_context_kv_cache(dit),
+            pytest.raises(AssertionError, match="already shadowed"),
+            calib._without_context_kv_cache(dit),
+        ):
+            pass
+
+    def test_a_meanflow_dit_is_driven_by_its_own_loop(self):
+        """The capture picks the sampler from the DiT itself (its `delta_cond_module`), never from a
+        name — the same test `irodori.export.dit_wrappers` uses."""
+        rf = make_dit()
+        meanflow = make_dit()
+        meanflow.delta_cond_module = nn.Linear(HIDDEN, HIDDEN, bias=False)
+
+        assert ir.dit_flow(rf) == "rf_velocity"
+        assert ir.dit_flow(meanflow) == "meanflow"

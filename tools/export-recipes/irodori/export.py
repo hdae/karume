@@ -301,8 +301,13 @@ from .distribution import (
     CALIB_PROVENANCE_FILE,
     IRODORI_CONTEXT_INPUTS,
     IRODORI_DIT_HEAD_INPUTS,
+    IRODORI_FLOW_MEANFLOW,
+    IRODORI_FLOW_RF,
+    IRODORI_MEANFLOW_DIT_HEAD_INPUTS,
     IRODORI_SERIES_ROLES,
     irodori_context_kv_names,
+    irodori_dit_head_inputs,
+    irodori_flow_parameterization,
 )
 
 if TYPE_CHECKING:  # imported lazily at run time (the NOTE of {@link _fake_quant_i4} below)
@@ -702,6 +707,71 @@ DIT_CASES: tuple[tuple[str, int, int, float, str | None], ...] = (
 #: that were already pad = every variant equals cond / the 3 variants drop the same segment). The
 #: **minimum pairwise difference** of the 4 outputs is measured every time to catch that shape.
 DIT_UNCOND_DIVERGENCE_MIN = 1e-3
+
+
+class DitCase(NamedTuple):
+    """One `dit` golden case (the rows of {@link DIT_CASES}, plus the interval length of a
+    MeanFlow checkpoint — `None` for the RF step, which takes none)."""
+
+    name: str
+    length: int
+    seed: int
+    t: float
+    uncond: str | None
+    delta: float | None = None
+
+
+#: The interval length `delta = t − t_next` of each {@link DIT_CASES} row for a **MeanFlow**
+#: checkpoint (ADR 0150 — its `dit` takes `delta_embed` too). 0.25 is the interval of upstream's
+#: default 4-step schedule; `dit-cond-late` takes the final interval of a step that ends at 0 (t
+#: 0.3 → 0). The three uncond variants keep the interval of `dit-cond-1s`, so they still differ
+#: from it by the mask alone ({@link _dit_uncond_divergence}).
+MEANFLOW_DIT_DELTAS: Mapping[str, float] = MappingProxyType(
+    {
+        "dit-cond-min": 0.25,
+        "dit-cond-1s": 0.25,
+        "dit-cond-late": 0.3,
+        "dit-uncond-text": 0.25,
+        "dit-uncond-speaker": 0.25,
+        "dit-uncond-caption": 0.25,
+        "dit-cond-max": 0.25,
+    }
+)
+
+#: The one case only a MeanFlow checkpoint adds: the inputs of `dit-cond-1s` (same S, seed and t)
+#: with a different interval, so that "the interval moves the output" is measured
+#: ({@link _dit_delta_divergence}). MUST: not vacuous — upstream initializes the last linear of
+#: `delta_cond_module` to zero, and if the trained branch stayed negligible a graph that dropped
+#: `delta_embed` would still pass every golden.
+MEANFLOW_DIT_EXTRA_CASES: tuple[DitCase, ...] = (
+    DitCase("dit-cond-1s-wide", 25, 302, 0.9, None, 0.9),
+)
+
+#: The pair {@link _dit_delta_divergence} compares (same inputs, different interval).
+MEANFLOW_DIT_DELTA_PAIR = ("dit-cond-1s", "dit-cond-1s-wide")
+
+#: Lower bound for seeing that the interval moves the output (the same floor as the mask pairs).
+DIT_DELTA_DIVERGENCE_MIN = 1e-3
+
+
+def dit_cases(flow: str) -> tuple[DitCase, ...]:
+    """The `dit` golden cases of a checkpoint of flow parameterization `flow`.
+
+    The RF cases are {@link DIT_CASES} as they are (no interval); a MeanFlow checkpoint gets each
+    row's interval from {@link MEANFLOW_DIT_DELTAS} plus {@link MEANFLOW_DIT_EXTRA_CASES}. A row
+    without an interval fails loudly — a MeanFlow step cannot run without one.
+    """
+    if flow == IRODORI_FLOW_RF:
+        return tuple(DitCase(*row) for row in DIT_CASES)
+    if flow != IRODORI_FLOW_MEANFLOW:
+        raise SystemExit(f"Unknown flow parameterization {flow!r}")
+    missing = sorted({name for name, *_rest in DIT_CASES} - set(MEANFLOW_DIT_DELTAS))
+    if missing:
+        raise SystemExit(f"The MeanFlow dit cases {missing} have no interval length")
+    return (
+        *(DitCase(*row, MEANFLOW_DIT_DELTAS[row[0]]) for row in DIT_CASES),
+        *MEANFLOW_DIT_EXTRA_CASES,
+    )
 
 
 class IrodoriSource:
@@ -1303,12 +1373,24 @@ class DitGraph(nn.Module):
         mask: torch.Tensor,
         *context: torch.Tensor,
     ) -> torch.Tensor:
+        return self._denoise(x_t, self.cond_module(t_embed), mask, context)
+
+    def _denoise(
+        self,
+        x_t: torch.Tensor,
+        cond: torch.Tensor,
+        mask: torch.Tensor,
+        context: Sequence[torch.Tensor],
+    ) -> torch.Tensor:
+        """The step after the condition embedding (`cond_embed` before its sequence axis is
+        added) — shared by both flow parameterizations, which differ only in how `cond` is made
+        ({@link MeanFlowDitGraph})."""
         if len(context) != 2 * len(self.source_blocks):
             raise ValueError(
                 f"{len(context)} condition-side K/V tensors (should be 2 × the block count ="
                 f" {2 * len(self.source_blocks)})"
             )
-        cond_embed = self.cond_module(t_embed)[:, None, :]
+        cond_embed = cond[:, None, :]
         x = self.in_proj(x_t)
         # Cut to the same length as upstream's `_rope_freqs(x.shape[1])` (the
         # `freqs_cis[:seq_len]` on the `JointAttention` side becomes the identity at this point).
@@ -1355,9 +1437,55 @@ class DitGraph(nn.Module):
         return attention.wo(y)
 
 
+class MeanFlowDitGraph(DitGraph):
+    """Export wrapper of one DiT step of a **MeanFlow** checkpoint (ADR 0150).
+
+    Upstream's MeanFlow DiT adds `delta_cond_module` (three bias-free linears, the same shape as
+    `cond_module`) and makes the condition embedding
+    `cond_module(t_embed) + delta_cond_module(delta_embed)`, where `delta_embed` is
+    `get_timestep_embedding` of the interval length `t − t_next`
+    (`TextToLatentRFDiT.forward_with_encoded_conditions`). Everything after that embedding is the
+    same step as the RF one ({@link DitGraph._denoise}), so this differs from {@link DitGraph}
+    only in one more input, `delta_embed` — built on the host for the same reason as `t_embed`
+    (`cos` is not in the vocabulary) — and in owning `delta_cond_module`.
+
+    The two embeddings are evaluated in upstream's order (`cond_module` first, then
+    `delta_cond_module`, then the sum), so the eager equivalence check at atol 0 holds as for the
+    RF step.
+    """
+
+    def __init__(self, model: nn.Module, sym_max: int) -> None:
+        super().__init__(model, sym_max)
+        if model.delta_cond_module is None:
+            raise ValueError(
+                "MeanFlowDitGraph needs a MeanFlow DiT (this one has no delta_cond_module)"
+            )
+        self.delta_cond_module = model.delta_cond_module
+
+    @property
+    def input_names(self) -> tuple[str, ...]:
+        """The IR input names (the spelling {@link name_boundary} renames to after the export)."""
+        return (
+            *IRODORI_MEANFLOW_DIT_HEAD_INPUTS,
+            *irodori_context_kv_names(len(self.source_blocks)),
+        )
+
+    def forward(  # type: ignore[override]  # one more positional input than the RF step
+        self,
+        x_t: torch.Tensor,
+        t_embed: torch.Tensor,
+        delta_embed: torch.Tensor,
+        mask: torch.Tensor,
+        *context: torch.Tensor,
+    ) -> torch.Tensor:
+        cond = self.cond_module(t_embed) + self.delta_cond_module(delta_embed)
+        return self._denoise(x_t, cond, mask, context)
+
+
 class ComposedDitGraph(nn.Module):
-    """`dit(x_t, t_embed, mask, *dit_context(3 condition states))` — composed with the same 6
-    inputs as before the split.
+    """`dit(<head inputs>, *dit_context(3 condition states))` — composed with the same inputs as
+    before the split (`x_t` / `t_embed` / `mask` for the RF step, with `delta_embed` after
+    `t_embed` for MeanFlow — {@link DitGraph.input_names}).
 
     The subject of the split's equivalence check; it is not exported ({@link export_series}
     matches it against upstream's unpatched `forward_with_encoded_conditions` at atol 0 — ADR
@@ -1369,16 +1497,15 @@ class ComposedDitGraph(nn.Module):
         self.context = context
         self.dit = dit
 
-    def forward(
-        self,
-        x_t: torch.Tensor,
-        t_embed: torch.Tensor,
-        mask: torch.Tensor,
-        text_state: torch.Tensor,
-        speaker_state: torch.Tensor,
-        caption_state: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.dit(x_t, t_embed, mask, *self.context(text_state, speaker_state, caption_state))
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
+        """The head inputs of `dit` followed by the 3 condition states, in that order."""
+        heads = len(self.dit.input_names) - 2 * len(self.dit.source_blocks)
+        if len(inputs) != heads + len(IRODORI_CONTEXT_INPUTS):
+            raise ValueError(
+                f"{len(inputs)} inputs (should be the {heads} head inputs of dit + the"
+                f" {len(IRODORI_CONTEXT_INPUTS)} condition states)"
+            )
+        return self.dit(*inputs[:heads], *self.context(*inputs[heads:]))
 
 
 class DitWrappers(NamedTuple):
@@ -1400,8 +1527,24 @@ def dit_wrappers(model: nn.Module, sym_max: int) -> DitWrappers:
     {@link DitGraph}). The i4 eligibility check (`irodori.calib.dit_i4_names`), the read-back of the
     i4 series (`irodori.pipeline_ref`) and the measurement rig (`irodori.measure_quant`) build from
     here as well — the pair of wrappers is decided in one place.
+
+    The step wrapper follows the checkpoint's own flow parameterization: upstream builds
+    `delta_cond_module` exactly when the config says `meanflow` (`TextToLatentRFDiT.__init__`), so
+    its presence picks {@link MeanFlowDitGraph} (ADR 0150) — never the directory name.
     """
-    return DitWrappers(context=DitContextGraph(model), dit=DitGraph(model, sym_max))
+    meanflow = getattr(model, "delta_cond_module", None) is not None
+    step = MeanFlowDitGraph(model, sym_max) if meanflow else DitGraph(model, sym_max)
+    return DitWrappers(context=DitContextGraph(model), dit=step)
+
+
+def dit_flow(model: nn.Module) -> str:
+    """The flow parameterization of a loaded DiT (the same presence test as
+    {@link dit_wrappers})."""
+    return (
+        IRODORI_FLOW_MEANFLOW
+        if getattr(model, "delta_cond_module", None) is not None
+        else IRODORI_FLOW_RF
+    )
 
 
 def golden_case_body(name: str, kind: str, body: str, normalize_text: Any) -> str:
@@ -1747,9 +1890,15 @@ def _dit_cases(
     text_proj: Mapping[str, torch.Tensor],
     caption_proj: Mapping[str, torch.Tensor],
     speaker: Mapping[str, torch.Tensor],
+    *,
+    flow: str = IRODORI_FLOW_RF,
 ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, dict[str, torch.Tensor]]]:
     """Build the DiT inputs **in condition-state form** and the full arguments **for calling the
     real module**.
+
+    `flow` is the checkpoint's flow parameterization ({@link dit_flow}): a MeanFlow case also
+    carries its interval — `delta_embed` (built by the same upstream function as `t_embed`) on the
+    graph side, `delta_t` on the reference side ({@link dit_cases}).
 
     Returns `(inputs in condition-state form, kwargs of the reference call)`. The former are the 6
     inputs of `dit` before the split (`x_t` / `t_embed` / `mask` + the 3 condition states), the
@@ -1809,7 +1958,7 @@ def _dit_cases(
     embed_dim = int(config.timestep_embed_dim)
     inputs: dict[str, dict[str, torch.Tensor]] = {}
     reference: dict[str, dict[str, torch.Tensor]] = {}
-    for name, length, seed, t_value, uncond in DIT_CASES:
+    for name, length, seed, t_value, uncond, delta in dit_cases(flow):
         if uncond is not None and uncond not in DIT_UNCOND_VARIANTS:
             raise SystemExit(
                 f"{name}: the uncond segment {uncond!r} is not in {DIT_UNCOND_VARIANTS}"
@@ -1822,8 +1971,16 @@ def _dit_cases(
         generator = torch.Generator().manual_seed(seed)
         x_t = torch.randn(1, length, latent_dim, generator=generator)
         t = torch.tensor([t_value], dtype=torch.float32)
+        delta_t = None if delta is None else torch.tensor([delta], dtype=torch.float32)
         with torch.no_grad():
             t_embed = source.timestep_embedding(t, embed_dim).to(dtype=x_t.dtype)
+            interval = (
+                {}
+                if delta_t is None
+                else {
+                    "delta_embed": source.timestep_embedding(delta_t, embed_dim).to(dtype=x_t.dtype)
+                }
+            )
         masks = {
             segment: _segment_mask(
                 caps[segment], 0 if uncond == segment else int(packed[segment].shape[1])
@@ -1845,6 +2002,7 @@ def _dit_cases(
         inputs[name] = {
             "x_t": x_t,
             "t_embed": t_embed,
+            **interval,
             "mask": mask,
             "text_state": padded["text"],
             "speaker_state": padded["speaker"],
@@ -1853,6 +2011,7 @@ def _dit_cases(
         reference[name] = {
             "x_t": x_t,
             "t": t,
+            **({} if delta_t is None else {"delta_t": delta_t}),
             **{
                 f"{segment}_state": (
                     torch.zeros_like(normed[segment]) if uncond == segment else normed[segment]
@@ -1869,11 +2028,15 @@ def _call_dit(model: nn.Module, args: Mapping[str, torch.Tensor]) -> torch.Tenso
     taken).
 
     `latent_mask=None` is upstream's inference path as is (`JointAttention` builds all ones).
+    `delta_t` is present only in a MeanFlow case ({@link _dit_cases}); upstream refuses it for an
+    RF checkpoint and requires it for a MeanFlow one, so passing it through as is lets upstream
+    itself reject a mix-up.
     """
     with torch.no_grad():
         return model.forward_with_encoded_conditions(
             x_t=args["x_t"],
             t=args["t"],
+            delta_t=args.get("delta_t"),
             text_state=args["text_state"],
             text_mask=args["text_mask"],
             speaker_state=args["speaker_state"],
@@ -1973,9 +2136,11 @@ def _dit_graph_inputs(
     owner: Mapping[str, str],
     context: Mapping[str, Sequence[torch.Tensor]],
     names: Sequence[str],
+    heads: Sequence[str] = IRODORI_DIT_HEAD_INPUTS,
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """The graph inputs of `dit` (`x_t` / `t_embed` / `mask` + the condition-side K/V under their
-    boundary names).
+    """The graph inputs of `dit` (the head inputs `heads` — `x_t` / `t_embed` / `mask`, with
+    `delta_embed` after `t_embed` for MeanFlow — + the condition-side K/V under their boundary
+    names).
 
     The K/V are **the unpatched expected values** of `dit-context` themselves (a chain — the torch
     expected values of the upstream target become the downstream inputs, the same form as
@@ -1984,29 +2149,37 @@ def _dit_graph_inputs(
     """
     return {
         name: {
-            **{key: args[key] for key in IRODORI_DIT_HEAD_INPUTS},
+            **{key: args[key] for key in heads},
             **dict(zip(names, context[owner[name]], strict=True)),
         }
         for name, args in dit_inputs.items()
     }
 
 
-def _dit_uncond_divergence(pristine: Mapping[str, torch.Tensor]) -> dict[str, float]:
+def _dit_uncond_divergence(
+    pristine: Mapping[str, torch.Tensor], cases: Sequence[DitCase] | None = None
+) -> dict[str, float]:
     """Measure that the outputs of the 4 that differ only in the mask (cond + the 3 uncond
     variants) differ **from each other**.
 
     MUST: do not let it become vacuous — even if the segment layout (the order and offsets of self
     S / text / speaker / caption) breaks, the golden still matches when the wrapper and the
     reference break the same way. Fails when the minimum pairwise difference drops below the floor.
+
+    `cases` defaults to the RF cases ({@link dit_cases}); a MeanFlow checkpoint passes its own, and
+    the interval is part of what the group shares (only the mask may differ).
     """
-    keys = {(length, seed, t) for _n, length, seed, t, uncond in DIT_CASES if uncond is not None}
+    table = dit_cases(IRODORI_FLOW_RF) if cases is None else cases
+    keys = {
+        (case.length, case.seed, case.t, case.delta) for case in table if case.uncond is not None
+    }
     if len(keys) != 1:
         raise AssertionError(
             f"The uncond variants do not share x_t / t ({sorted(keys)}) — the difference would not"
             " be the mask alone"
         )
     key = keys.pop()
-    group = [name for name, length, seed, t, _u in DIT_CASES if (length, seed, t) == key]
+    group = [case.name for case in table if (case.length, case.seed, case.t, case.delta) == key]
     if len(group) != 1 + len(DIT_UNCOND_VARIANTS):
         raise AssertionError(
             f"The set of cond + the 3 uncond variants is {group} — a cond case is needed as the"
@@ -2024,6 +2197,23 @@ def _dit_uncond_divergence(pristine: Mapping[str, torch.Tensor]) -> dict[str, fl
             " of the mask is suspected not to work"
         )
     return {name: round(value, 5) for name, value in pairs.items()}
+
+
+def _dit_delta_divergence(pristine: Mapping[str, torch.Tensor]) -> float:
+    """Measure that the interval of a MeanFlow step moves the output ({@link
+    MEANFLOW_DIT_DELTA_PAIR} — the same `x_t` / t / conditions / mask, another `delta`).
+
+    MUST: do not let it become vacuous (the reason at {@link MEANFLOW_DIT_EXTRA_CASES}). Fails
+    when the difference drops below {@link DIT_DELTA_DIVERGENCE_MIN}.
+    """
+    lhs, rhs = MEANFLOW_DIT_DELTA_PAIR
+    difference = float((pristine[lhs] - pristine[rhs]).abs().max())
+    if difference < DIT_DELTA_DIVERGENCE_MIN:
+        raise AssertionError(
+            f"The output difference between {lhs} and {rhs} (only the interval differs) is"
+            f" {difference} — the interval embedding seems not to reach the output"
+        )
+    return round(difference, 5)
 
 
 def _single(outputs: Mapping[str, torch.Tensor]) -> dict[str, tuple[torch.Tensor, ...]]:
@@ -2539,10 +2729,21 @@ def _calib_plan(
     no_calib: bool,
 ) -> CalibPlan:
     """Build the scaffolding for rounding the i4 series (only calibration cases that passed the
-    separation check)."""
+    separation check).
+
+    The default step count is the whole reference loop of the checkpoint's flow parameterization
+    (40 Euler steps, or the 4 steps of a MeanFlow loop — ADR 0150).
+    """
     from . import calib
     from .calib_cases import calibration_cases
+    from .pipeline_ref import reference_steps
 
+    loop_steps = reference_steps(irodori_flow_parameterization(model_config))
+    if steps is not None and not 1 <= steps <= loop_steps:
+        raise SystemExit(
+            f"--calib-steps must be 1 to {loop_steps} for this checkpoint (the step count of its"
+            f" reference loop; given {steps})"
+        )
     return CalibPlan(
         context=calib.CalibContext(
             model_dir=model_dir,
@@ -2552,7 +2753,7 @@ def _calib_plan(
             model_config=model_config,
         ),
         cases=calibration_cases(),
-        steps=calib.CALIB_STEPS if steps is None else steps,
+        steps=loop_steps if steps is None else steps,
         calibrated=not no_calib,
     )
 
@@ -2924,6 +3125,9 @@ def export_series(
     )
     duration = load_duration_predictor(source, state, config)
     dit = load_dit(source, state, config, text_config)
+    # The checkpoint's own flow parameterization decides the step graph's inputs and the golden
+    # cases (ADR 0150) — read from the loaded DiT, never from the directory name.
+    flow = dit_flow(dit)
     calib_plan = (
         _calib_plan(model_dir, source, config, text_config, model_config, calib_steps, no_calib)
         if dtype == "i4"
@@ -3006,20 +3210,26 @@ def export_series(
         _first(pristine[TARGET_TEXT_PROJ]),
         _first(pristine[TARGET_CAPTION_PROJ]),
         _first(pristine[TARGET_SPEAKER]),
+        flow=flow,
     )
     dit_pristine = _pristine_dit_outputs(dit, dit_reference)
-    dit_divergence = _dit_uncond_divergence(dit_pristine)
+    dit_divergence = _dit_uncond_divergence(dit_pristine, dit_cases(flow))
+    dit_delta_divergence = (
+        _dit_delta_divergence(dit_pristine) if flow == IRODORI_FLOW_MEANFLOW else None
+    )
     # `dit-context` has one case per set of condition states (one, if every DiT case uses the same
     # set). Its expected values are taken unpatched through upstream's cache path
     # (`build_context_kv_cache`) and used as is as the K/V of `dit`'s golden inputs (a chain).
     context_inputs, context_owner = _dit_context_cases(dit_inputs)
     pristine[TARGET_DIT_CONTEXT] = _pristine_dit_context_outputs(dit, context_inputs)
     pristine[TARGET_DIT] = _single(dit_pristine)
+    dit_heads = irodori_dit_head_inputs(flow)
     dit_graph_inputs = _dit_graph_inputs(
         dit_inputs,
         context_owner,
         pristine[TARGET_DIT_CONTEXT],
         irodori_context_kv_names(len(dit.blocks)),
+        dit_heads,
     )
 
     # ---- ② Apply the patches (eager values taken from here on cannot serve as references) ----
@@ -3030,6 +3240,11 @@ def export_series(
 
     # ---- ③ Eager equivalence of the wrappers (measures the patches and the dropped masks) ----
     dit_graphs = dit_wrappers(dit, dit_max)
+    if dit_graphs.dit.input_names[: len(dit_heads)] != dit_heads:
+        raise AssertionError(
+            f"The step wrapper's head inputs {dit_graphs.dit.input_names[: len(dit_heads)]} are not"
+            f" the {flow} heads {dit_heads}"
+        )
     graphs = {
         TARGET_BACKBONE: BackboneGraph(backbone),
         TARGET_TEXT_PROJ: ProjectorGraph(projectors[TARGET_TEXT_PROJ]),
@@ -3106,11 +3321,13 @@ def export_series(
         TARGET_DURATION: TargetAxis(
             TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
         ),
+        # `mask` sits after `t_embed` (RF) or after `delta_embed` (MeanFlow) — its position is
+        # read from the step's own input names.
         TARGET_DIT: TargetAxis(
             DIT_TORCH_DIM,
             DIT_SYMBOL,
             dit_max,
-            {0: (1, 0), 2: (3, dit_context_total)},
+            {0: (1, 0), dit_heads.index("mask"): (3, dit_context_total)},
             PRESERVED_OP_PREFIXES,
         ),
         TARGET_DIT_CONTEXT: TargetAxis(None, None, 0, {}, PRESERVED_OP_PREFIXES),
@@ -3178,7 +3395,9 @@ def export_series(
         "dit_sym_max": dit_max,
         "dit_context_total": dit_context_total,
         "dit_context_cases": context_owner,
+        "flow_parameterization": flow,
         "dit_uncond_divergence": dit_divergence,
+        **({} if dit_delta_divergence is None else {"dit_delta_divergence": dit_delta_divergence}),
         "rope_buffers_lifted": rope_buffers,
         "static_scheme_max_abs": {k: float(f"{v:.3e}") for k, v in static_evidence.items()},
         "no_reference_max_abs": no_reference_max_abs,
@@ -3270,6 +3489,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     # check on both sides) from the start.
     from .pipeline_ref import NUM_STEPS
 
+    # The longest reference loop (RF's 40 Euler steps) bounds it here without reading the
+    # checkpoint; a MeanFlow checkpoint's shorter loop (4 steps — ADR 0150) is checked by
+    # `_calib_plan` as soon as the config is read, before any rounding.
     if args.calib_steps is not None and not 1 <= args.calib_steps <= NUM_STEPS:
         parser.error(
             f"--calib-steps must be 1 to {NUM_STEPS} (the step count of the reference loop;"

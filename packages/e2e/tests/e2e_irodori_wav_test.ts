@@ -85,7 +85,7 @@ import {
 } from "../../models/irodori.ts";
 import { type DecodedWav, decodeWav, encodeWav } from "../../models/mod.ts";
 import {
-  type IrodoriPipelineConfig,
+  type IrodoriRfPipelineConfig,
   parseIrodoriPipelineConfig,
 } from "../../models/src/irodori/config.ts";
 import { tSchedule } from "../../models/src/irodori/host/sampler.ts";
@@ -268,8 +268,11 @@ const loadLocalAssets = async (
  * breaks the digest, it says first whether the cause is on the asset side or the implementation
  * side).
  */
-const assertReferenceKnobs = (entry: ModelEntry): IrodoriPipelineConfig => {
+const assertReferenceKnobs = (entry: ModelEntry): IrodoriRfPipelineConfig => {
   const config = parseIrodoriPipelineConfig(entry.pipelineConfig);
+  if (config.flowParameterization !== "rf_velocity") {
+    throw new Error("the distribution does not declare the RF sampler the digests were baked with");
+  }
   const drifted: string[] = [];
   const check = (key: string, expected: number, actual: number): void => {
     if (expected !== actual) drifted.push(`${key} ${expected} → ${actual}`);
@@ -298,7 +301,7 @@ const assertReferenceKnobs = (entry: ModelEntry): IrodoriPipelineConfig => {
  * A one-line rendering of the effective knobs (keeps "what was baked" in the report when the
  * comparison breaks).
  */
-const describeKnobs = (item: WavCase, config: IrodoriPipelineConfig): string =>
+const describeKnobs = (item: WavCase, config: IrodoriRfPipelineConfig): string =>
   `model ${MODEL} / quant ${QUANT} / seed ${item.seed} / text ${JSON.stringify(item.text)} / ` +
   `caption ${JSON.stringify(item.caption ?? "")} / reference audio ${
     item.withReference ? "yes" : "no"
@@ -370,7 +373,7 @@ const describeFirstDifference = async (
  */
 const mismatchReport = async (
   item: WavCase,
-  config: IrodoriPipelineConfig,
+  config: IrodoriRfPipelineConfig,
   audio: GeneratedAudio,
   wav: Uint8Array<ArrayBuffer>,
   expected: string,
@@ -401,7 +404,7 @@ const mismatchReport = async (
  */
 const runCase = async (
   pipeline: Pipeline,
-  config: IrodoriPipelineConfig,
+  config: IrodoriRfPipelineConfig,
   item: WavCase,
   reference: DecodedWav,
   /**
@@ -469,7 +472,7 @@ const runCase = async (
 describe.skipIf(!RUNNABLE)(
   `e2e (real GPU): the WAV of distribution ${MODEL} / quant ${QUANT} matches the reference sha256`,
   () => {
-    let config: IrodoriPipelineConfig;
+    let config: IrodoriRfPipelineConfig;
     let reference: DecodedWav;
     // Observations per run. Whether `lastRun` (the arena record) is present is **independent
     // evidence** of "host path or resident path" — the resident path's `enqueue` creates neither

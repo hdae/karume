@@ -9,6 +9,10 @@
  * Waveforms go in and out as f32 (`encodeWav`, which writes WAV, and `decodeWav`, which reads
  * reference audio, are in the barrel — both are common processing independent of any family).
  *
+ * The same {@link Pipeline} runs the rectified-flow models (v4 / v4.1 Small — Euler steps with
+ * classifier-free guidance) and their MeanFlow student (v4.1 Small MF — 4 steps, one forward each,
+ * no guidance at run time); the distribution's `flowParameterization` picks the sampler (ADR 0150).
+ *
  * MUST: every module is free of side effects (no execution at import, no global mutable state —
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */

@@ -30,6 +30,50 @@ export const tSchedule = (steps: number, initScale: number): Float32Array<ArrayB
   return schedule;
 };
 
+/**
+ * The t sequence of `[steps+1]` of the **MeanFlow** sampler (ADR 0150) — the f32 values of
+ * upstream's `torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float32)`, for any step count.
+ *
+ * MUST: this is not the closed form `1 − i/steps` (it splits from torch in the last bit at some
+ * points — for 5 of the step counts 1–12: 3, 6, 7, 11 and 12). torch's kernel takes
+ * `step = (end − start) / steps` in f32 and fills
+ * the first half as `start + step·i` and the second half as `end − step·(steps − i)`, each a
+ * fused multiply-add (one rounding). Here the f64 product and sum are exact (`step` has 24
+ * significant bits and `i < 2^24`), so one `Math.fround` gives the same single rounding, and
+ * `Math.fround(-1 / steps)` is the f32 division (rounding the f64 quotient once more is exact for
+ * division — 53 ≥ 2·24 + 2). Pinned against torch 2.13's CPU values for several step counts
+ * (`tests/irodori_host_test.ts`).
+ * NOTE: the fused multiply-add is the compiled kernel's behaviour (CPU and CUDA alike), not a
+ * documented guarantee of `linspace`.
+ */
+export const meanflowSchedule = (steps: number): Float32Array<ArrayBuffer> => {
+  if (!Number.isInteger(steps) || steps < 1 || steps >= 2 ** 24) {
+    throw new RangeError(`steps ${steps} is not an integer in [1, 2^24)`);
+  }
+  const schedule = new Float32Array(steps + 1);
+  const step = f32(-1 / steps);
+  const halfway = Math.floor((steps + 1) / 2);
+  for (let index = 0; index <= steps; index += 1) {
+    schedule[index] = index < halfway ? f32(1 + step * index) : f32(-(step * (steps - index)));
+  }
+  return schedule;
+};
+
+/**
+ * The interval length of each MeanFlow step, `delta_i = t_i − t_{i+1}` in f32 (upstream's
+ * `t_value − next_value` on two f32 tensors; the difference of two f32 values is exact in f64, so
+ * one rounding reproduces it). `[steps]`.
+ */
+export const meanflowIntervals = (
+  schedule: Float32Array<ArrayBuffer>,
+): Float32Array<ArrayBuffer> => {
+  const intervals = new Float32Array(Math.max(0, schedule.length - 1));
+  for (let index = 0; index < intervals.length; index += 1) {
+    intervals[index] = f32(schedule[index] - schedule[index + 1]);
+  }
+  return intervals;
+};
+
 /** One CFG variant (the result of an uncond forward and its strength). */
 export type CfgVariant = {
   /**

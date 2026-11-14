@@ -1,4 +1,4 @@
-# Third-party notices — Irodori-TTS v4 / v4.1
+# Third-party notices — Irodori-TTS v4 / v4.1 / v4.1 MF
 
 Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
 directory is known to derive from. **It is not a license determination.**
@@ -15,8 +15,9 @@ record; the reason is given in the field.
 
 ## Upstream sources
 
-- **Weights** — [Aratako/Irodori-TTS-v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small)
-  and [Aratako/Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small)
+- **Weights** — [Aratako/Irodori-TTS-v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small),
+  [Aratako/Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small)
+  and [Aratako/Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)
   (one distribution repository per model; `card.py`'s `IRODORI_UPSTREAMS` picks by model name).
 - **Model implementation** — [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS),
   imported from a local clone through `sys.path` (`--source-dir`). `patch.py` replaces class
@@ -65,12 +66,23 @@ published.
 | Weights license          | MIT — unchanged (interview 2026-09-25). `card.py` records `mit` (checked on the HF models API, 2026-09-01).                                                                                                                                                                                                                                                                                                                   |
 | Attribution requirements | The MIT copyright notice — the distribution's `LICENSE.md` carries "Copyright (c) 2026 Aratako" (interview 2026-09-25). The card also states restrictions on misuse and gives a BibTeX citation. The BibTeX citation on the card is an academic citation format, not a redistribution condition; naming the upstream as `base_model` on HF and stating the license in the card were judged sufficient (interview 2026-09-25). |
 
+### Aratako/Irodori-TTS-v4.1-Small-MF (weights)
+
+| Item                     | Value |
+| ------------------------ | ----- |
+| Upstream repository      | <https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF> |
+| Revision used            | `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e` (published 2026-09-12; the snapshot in `inputs/irodori/v4.1-small-mf`, 2026-11-14). The card names this revision. |
+| Form of copy             | Loaded, not copied. Its DiT pair (`dit` / `dit_context`) and its tokenizer asset are re-distributed in converted storage form; every other component is the published v4-small / v4.1-small container, referenced across repositories rather than copied (ADR 0150). |
+| Code license             | n/a (weights only) |
+| Weights license          | MIT — `license: mit` in the frontmatter of the upstream model card at the revision above (read 2026-11-14). It is upstream's MeanFlow distillation of Irodori-TTS-v4.1-Small (`base_model` in the same frontmatter). |
+| Attribution requirements | Unverified — the same MIT notice as the v4 / v4.1 blocks ("Copyright (c) 2026 Aratako" in the distribution's `LICENSE.md`) is assumed; whether the distilled weights carry any further condition is for the release review. |
+
 ### Aratako/Irodori-TTS (model implementation)
 
 | Item                     | Value                                                                                                                                                                                                                                                            |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://github.com/Aratako/Irodori-TTS>                                                                                                                                                                                                                         |
-| Revision used            | `8224dafb46d0aba89209a8f905f1cb7e3299d9c1` — the HEAD of the clone this recipe imports (`inputs/irodori/Irodori-TTS`), the same source as `patch.py`'s attribution comment (local fetch record, 2026-09-25)                                                      |
+| Revision used            | `382205679ebc32295b7d1bfb329327d04c8f4eed` — the HEAD of the clone this recipe imports (`inputs/irodori/Irodori-TTS`), the same source as `patch.py`'s attribution comment (local fetch record, 2026-11-14; previously `8224dafb`). Reproduced on 2026-11-14: at this revision the f32 / f16 / i8 export of v4-small rebuilds every data shard of the published distribution byte for byte, and the calibrated i4 export is byte-identical to the same run at `8224dafb` on the same machine |
 | Form of copy             | Imported from a clone via `sys.path`. `patch.py`'s `_folded_rms_low_rank_adaln_forward` is a verbatim copy of `irodori_tts.model.LowRankAdaLN.forward` except for the normalization line (its docstring says so).                                                |
 | Code license             | MIT — read from the `LICENSE` of the clone this recipe imports (`inputs/irodori/Irodori-TTS`, checked 2026-09-05; "Copyright (c) 2026 Aratako").                                                                                                                 |
 | Weights license          | n/a                                                                                                                                                                                                                                                              |

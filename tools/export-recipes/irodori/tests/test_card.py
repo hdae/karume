@@ -165,3 +165,52 @@ class TestIrodoriHouseSentence:
             " sbintuitions/modernbert-ja-310m and Aratako/Semantic-DACVAE-Japanese-32dim for"
             " Karume. It is not affiliated with or endorsed by Aratako and SB Intuitions."
         )
+
+
+def _meanflow_manifest() -> dict[str, Any]:
+    """The fake manifest of the MeanFlow student (its pipelineConfig declares the MeanFlow sampler
+    and carries no RF knob — ADR 0150)."""
+    manifest = _irodori_manifest("v4.1-small-mf")
+    config = manifest["models"]["v4.1-small-mf"]["pipelineConfig"]
+    for key in ("initScale", "cfgMinT", "cfgMaxT", "cfgScales"):
+        del config[key]
+    del config["speakerUncondMode"], config["cfgGuidanceMode"]
+    config["flowParameterization"] = "meanflow"
+    config["steps"] = 3
+    return manifest
+
+
+class TestIrodoriMeanFlowCard:
+    """The card of the MeanFlow student says what the model is (ADR 0150)."""
+
+    def test_the_card_names_the_student_its_revision_and_its_teacher(self) -> None:
+        card = render_irodori_model_card(_meanflow_manifest(), REPO)
+
+        assert "# Irodori-TTS v4.1 Small MF — Karume" in card
+        assert (
+            "[Aratako/Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)"
+            " at revision `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e`, licensed **MIT**"
+        ) in card
+        assert "distilled it from [Aratako/Irodori-TTS-v4.1-Small]" in card
+        assert "MeanFlow-distilled DiT" in card
+
+    def test_the_defaults_state_the_step_count_and_no_runtime_guidance(self) -> None:
+        card = render_irodori_model_card(_meanflow_manifest(), REPO)
+
+        assert "- **steps**: 3 MeanFlow steps" in card
+        assert "- **guidance**: none at run time" in card
+        assert "initScale" not in card
+        assert "plus one per classifier-free-guidance branch" not in card
+
+    def test_the_rf_card_keeps_its_wording(self) -> None:
+        card = render_irodori_model_card(_irodori_manifest(), REPO)
+
+        assert "rectified-flow DiT" in card
+        assert "- **steps**: 61 Euler steps (`initScale` 0.111)" in card
+        assert "at revision" not in card
+
+    def test_the_meanflow_spelling_is_the_distributions(self) -> None:
+        from irodori.card import IRODORI_MEANFLOW
+        from irodori.distribution import IRODORI_FLOW_MEANFLOW
+
+        assert IRODORI_MEANFLOW == IRODORI_FLOW_MEANFLOW

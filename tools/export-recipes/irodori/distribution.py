@@ -38,13 +38,14 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from safetensors import safe_open
 
 from _shared.calib_provenance import calib_complaint
 from _shared.licenses import apache_license_2_0, mit_license
-from _shared.paths import INPUTS_ROOT
+from _shared.paths import DIST_ROOT, INPUTS_ROOT
 from karume.dist import (
     Artifact,
     CrossRepoReference,
@@ -87,6 +88,16 @@ IRODORI_PIPELINE = "irodori/1"
 #: with is inside the checkpoint (it is not re-fetched from HF).
 IRODORI_CKPT_FILE = "model.safetensors"
 IRODORI_CONFIG_META_KEY = "config_json"
+
+#: The two flow parameterizations upstream knows, spelled as upstream spells them
+#: (`TextToLatentRFDiT.__init__` accepts exactly these): the rectified-flow velocity of v4 /
+#: v4.1, and MeanFlow, whose DiT also takes the length of the sampling interval (ADR 0150).
+IRODORI_FLOW_RF = "rf_velocity"
+IRODORI_FLOW_MEANFLOW = "meanflow"
+
+#: The key of the checkpoint's `config_json` that names the flow parameterization (absent in the
+#: v4 / v4.1 checkpoints — upstream's `ModelConfig` default is {@link IRODORI_FLOW_RF}).
+IRODORI_FLOW_CONFIG_KEY = "flow_parameterization"
 
 #: Role name → target directory name of the series (spelled as in `irodori.export.TARGETS`). Role
 #: names are also the keys of the manifest's weights / assets, so they are decoupled here from the
@@ -187,25 +198,26 @@ CALIB_PROVENANCE_FILE = "calib_provenance.json"
 CALIB_SHIPPABLE_METHOD = "gptq"
 
 
-def irodori_calib_floor() -> Mapping[str, int]:
+def irodori_calib_floor(flow: str = IRODORI_FLOW_RF) -> Mapping[str, int]:
     """The minimum calibration budget allowed for distribution (required only **when the field is
     present** in {@link CALIB_PROVENANCE_FILE}).
 
     The values are not copied but taken from the source of truth — the corpus size from
     {@link irodori.calib_cases.CALIB_CASES}, the captured step count from the full length of the
-    reference loop (`irodori.pipeline_ref.NUM_STEPS` = the default of `irodori.calib.CALIB_STEPS`).
-    Both are exactly the conditions under which the listening ruling of 2026-08-23 was made, and
-    assets baked with the smoke budget `--calib-steps 1` would ship "a configuration below the
-    ruling" (the storage format does not change by a single byte, so it cannot be read from the
-    assets).
+    reference loop of the checkpoint's flow parameterization (`irodori.pipeline_ref.reference_steps`
+    — 40 Euler steps for RF, 4 MeanFlow steps — = the default the export captures). For RF both are
+    exactly the conditions under which the listening ruling of 2026-08-23 was made, and assets
+    baked with the smoke budget `--calib-steps 1` would ship "a configuration below the ruling"
+    (the storage format does not change by a single byte, so it cannot be read from the assets).
+    A MeanFlow loop has only 4 steps, so its whole loop is its floor (ADR 0150).
 
     NOTE (deferred import): `irodori.pipeline_ref` imports this module back, so it cannot be read at
     module level. `irodori.calib_cases` forms the same cycle through pipeline_ref.
     """
     from .calib_cases import CALIB_CASES
-    from .pipeline_ref import NUM_STEPS
+    from .pipeline_ref import reference_steps
 
-    return {"cases": len(CALIB_CASES), "steps": NUM_STEPS}
+    return {"cases": len(CALIB_CASES), "steps": reference_steps(flow)}
 
 
 def irodori_role(role: str, dtype: str) -> str:
@@ -441,6 +453,20 @@ IRODORI_SAMPLING_DEFAULTS: Mapping[str, Any] = {
     "cfgGuidanceMode": "independent",
 }
 
+#: The run-time knobs of a **MeanFlow** checkpoint (ADR 0150): its parameterization, upstream's
+#: default step count for it (`inference_runtime` uses `4 if is_meanflow else 40` when no count is
+#: requested) and the same clamp on seconds. Upstream ignores every RF-only control for such a
+#: checkpoint (CFG scales, guidance mode and CFG time bounds, initial-noise truncation — and the
+#: initial scale of the t schedule, since its loop runs t from 1 to 0 — `docs/meanflow.md`), so
+#: none of them is declared: the TS side refuses them, and karume does not accept a value it would
+#: ignore. `speakerUncondMode` is an RF declaration too (it only shapes CFG's uncond branch).
+IRODORI_MEANFLOW_SAMPLING_DEFAULTS: Mapping[str, Any] = {
+    "flowParameterization": IRODORI_FLOW_MEANFLOW,
+    "steps": 4,
+    "minSeconds": IRODORI_MIN_SECONDS,
+    "maxSeconds": IRODORI_MAX_SECONDS,
+}
+
 #: The `(input names in order, number of outputs)` required of each graph. **The input order is the
 #: source of truth for the form read by position at run time**, and the output count is where "a
 #: separate verification asset slipped in" is caught (the same mechanism as SBV2's
@@ -472,6 +498,44 @@ IRODORI_CONTEXT_INPUTS: tuple[str, ...] = ("text_state", "speaker_state", "capti
 
 #: The first 3 inputs of `dit`. The condition-side K/V ({@link irodori_context_kv_names}) follow.
 IRODORI_DIT_HEAD_INPUTS: tuple[str, ...] = ("x_t", "t_embed", "mask")
+
+#: The first 4 inputs of a MeanFlow `dit`: `delta_embed` is the timestep embedding of the
+#: interval length (`t − t_next`), the same width and form as `t_embed` (upstream's
+#: `delta_cond_module` input — ADR 0150). The condition-side K/V follow, as in
+#: {@link IRODORI_DIT_HEAD_INPUTS}.
+IRODORI_MEANFLOW_DIT_HEAD_INPUTS: tuple[str, ...] = ("x_t", "t_embed", "delta_embed", "mask")
+
+
+def irodori_flow_parameterization(config: Mapping[str, Any]) -> str:
+    """The flow parameterization a checkpoint's `config_json` declares.
+
+    Absent means {@link IRODORI_FLOW_RF} (upstream's `ModelConfig` default — the v4 / v4.1
+    checkpoints carry no such key). The value is normalized the way upstream normalizes it
+    (`str(...).strip().lower()` in `TextToLatentRFDiT.__init__`), and anything outside the two
+    parameterizations fails — upstream refuses it too, and guessing would build the wrong sampler.
+    """
+    raw = config.get(IRODORI_FLOW_CONFIG_KEY, IRODORI_FLOW_RF)
+    if not isinstance(raw, str):
+        raise DistError(
+            f"{IRODORI_CONFIG_META_KEY}: {IRODORI_FLOW_CONFIG_KEY} is not a string ({raw!r})"
+        )
+    flow = raw.strip().lower()
+    if flow not in (IRODORI_FLOW_RF, IRODORI_FLOW_MEANFLOW):
+        raise DistError(
+            f"{IRODORI_CONFIG_META_KEY}: {IRODORI_FLOW_CONFIG_KEY} is {raw!r}, not"
+            f" '{IRODORI_FLOW_RF}' or '{IRODORI_FLOW_MEANFLOW}'"
+        )
+    return flow
+
+
+def irodori_dit_head_inputs(flow: str) -> tuple[str, ...]:
+    """The inputs `dit` takes from the host per forward, for a flow parameterization (the
+    condition-side K/V follow them)."""
+    if flow == IRODORI_FLOW_MEANFLOW:
+        return IRODORI_MEANFLOW_DIT_HEAD_INPUTS
+    if flow == IRODORI_FLOW_RF:
+        return IRODORI_DIT_HEAD_INPUTS
+    raise DistError(f"Unknown flow parameterization {flow!r}")
 
 
 def irodori_context_kv_names(blocks: int) -> tuple[str, ...]:
@@ -554,6 +618,10 @@ class IrodoriSources:
     series_by_dtype: Mapping[str, Path]
     #: Likewise for the codec (the codec has no i4 series, so 3: f32 / f16 / i8).
     codec_series_by_dtype: Mapping[str, Path]
+    #: Role name (`<graph role>_<dtype>`) → the **published container** it is borrowed as: the
+    #: representative path in the local mirror of the repository that physically holds the bytes
+    #: (empty for a model that exports everything it ships — {@link irodori_borrowed_sources}).
+    borrowed: Mapping[str, Path] = MappingProxyType({})
 
     @property
     def series(self) -> Path:
@@ -570,12 +638,16 @@ class IrodoriSources:
         return self.codec_series_by_dtype[IRODORI_PLAIN_DTYPE]
 
 
-def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
+def irodori_sources(
+    series_dir: Path, model: str = IRODORI_DEFAULT_MODEL, dist_root: Path | None = None
+) -> IrodoriSources:
     """Look up the inputs from the series' parent directory (`outputs/series/`) and the spellings
     of `_shared.paths`.
 
     The dtype suffixes are spelled the same as in `irodori.export.default_out_root` /
-    `irodori.dacvae.export.default_out_root` — writer and reader build from the same word.
+    `irodori.dacvae.export.default_out_root` — writer and reader build from the same word. A model
+    that borrows published containers ({@link IRODORI_BORROWED}) reads them from the mirrors under
+    `dist_root` (default `models/` — the same place the dist driver reconciles references against).
     """
     suffix = {
         dtype: "" if dtype == IRODORI_PLAIN_DTYPE else f"-{dtype}"
@@ -597,6 +669,7 @@ def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> Iro
         codec_model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / IRODORI_CODEC_NAME,
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
+        borrowed=irodori_borrowed_sources(model, DIST_ROOT if dist_root is None else dist_root),
     )
 
 
@@ -609,13 +682,18 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
     placements = {"tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE}
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         for role in roles:
+            name = irodori_role(role, dtype)
+            if name in sources.borrowed:
+                # A borrowed role is the published container itself (never re-exported).
+                placements[name] = sources.borrowed[name]
+                continue
             series = (
                 sources.series_by_dtype[dtype]
                 if role in IRODORI_SERIES_DIRS
                 else sources.codec_series_by_dtype[dtype]
             )
             directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
-            placements[irodori_role(role, dtype)] = series / directory / "model.krm"
+            placements[name] = series / directory / "model.krm"
     return placements
 
 
@@ -718,6 +796,13 @@ def irodori_pipeline_config(
 ) -> dict[str, Any]:
     """Build `pipelineConfig` (the 23 fields of the TS-side schema) from the checkpoint config.
 
+    The sampler part follows the checkpoint's own flow parameterization
+    ({@link irodori_flow_parameterization}): the RF knobs of {@link IRODORI_SAMPLING_DEFAULTS}, or
+    for a MeanFlow checkpoint {@link IRODORI_MEANFLOW_SAMPLING_DEFAULTS} (its declaration, its
+    step count and the clamp on seconds — ADR 0150). The RF form carries no
+    `flowParameterization` (absent means RF on the TS side, so the published manifests stay as
+    they are).
+
     MUST: do not copy model-specific numbers — if only the host holds stale numbers after the
     weights are swapped, the right padding and the row counting still pass (the shapes match) and a
     result that **read the conditions at different positions** comes out silently. The source of
@@ -765,7 +850,11 @@ def irodori_pipeline_config(
         "textDim": _irodori_int(config, "text_dim"),
         "captionDim": _irodori_int(config, "caption_dim"),
         "timestepEmbedDim": _irodori_int(config, "timestep_embed_dim"),
-        **IRODORI_SAMPLING_DEFAULTS,
+        **(
+            IRODORI_MEANFLOW_SAMPLING_DEFAULTS
+            if irodori_flow_parameterization(config) == IRODORI_FLOW_MEANFLOW
+            else IRODORI_SAMPLING_DEFAULTS
+        ),
     }
 
 
@@ -865,8 +954,10 @@ def _assert_irodori_dit_boundary(
 
     - the inputs of `dit_context` are {@link IRODORI_CONTEXT_INPUTS} and its outputs are in the
       order of {@link irodori_context_kv_names} (the runtime binds resident tensors by name)
-    - the inputs of `dit` are {@link IRODORI_DIT_HEAD_INPUTS} + the same boundary names in order,
-      and it has 1 output
+    - the inputs of `dit` are the head inputs of the declared flow parameterization
+      ({@link irodori_dit_head_inputs} — `flowParameterization` of pipelineConfig, absent = RF) +
+      the same boundary names in order, and it has 1 output; a MeanFlow `delta_embed` has the
+      same shape as `t_embed` (the same embedding of another scalar — ADR 0150)
     - each boundary tensor has the same shape on both sides, and the condition-side length (axis 1)
       equals the sum of the 3 condition segments of `mask` — otherwise the K/V concatenation of
       `dit` keeps a different length while only the mask points at the segments
@@ -904,7 +995,8 @@ def _assert_irodori_dit_boundary(
             " so a different spelling or order reads the K / V of another block"
         )
     dit_inputs = graph_inputs(dit, dit_path)
-    expected = (*IRODORI_DIT_HEAD_INPUTS, *boundary)
+    flow = pipeline_config.get("flowParameterization", IRODORI_FLOW_RF)
+    expected = (*irodori_dit_head_inputs(flow), *boundary)
     if tuple(dit_inputs) != expected:
         raise DistError(
             f"The graph inputs of {dit_path} are {list(dit_inputs)[:5]}… ({len(dit_inputs)}),"
@@ -914,6 +1006,11 @@ def _assert_irodori_dit_boundary(
     dit_outputs = dit.get("outputs")
     if not isinstance(dit_outputs, list) or len(dit_outputs) != 1:
         raise DistError(f"The graph of {dit_path} does not have exactly 1 output ({dit_outputs!r})")
+    if flow == IRODORI_FLOW_MEANFLOW and dit_inputs["delta_embed"] != dit_inputs["t_embed"]:
+        raise DistError(
+            f"{dit_path}: input 'delta_embed' is {dit_inputs['delta_embed']!r}, while 't_embed' is"
+            f" {dit_inputs['t_embed']!r} — both are the host's timestep embedding of one scalar"
+        )
     total = sum(
         pipeline_config[field_name] for field_name in ("maxTextLen", "speakerRows", "maxCaptionLen")
     )
@@ -949,7 +1046,7 @@ def _assert_irodori_dit_boundary(
         )
 
 
-def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
+def assert_irodori_calib_provenance(sources: IrodoriSources, flow: str = IRODORI_FLOW_RF) -> None:
     """Confirm from the writer's record that the i4 series was rounded with **calibration allowed
     for distribution** (GPTQ × a budget at or above the floor).
 
@@ -984,7 +1081,7 @@ def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
                 f"Cannot parse the record of the calibration conditions: {path} — {cause}"
             ) from cause
         complaint = calib_complaint(
-            record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
+            record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor(flow)
         )
         if complaint is not None:
             raise DistError(
@@ -1005,10 +1102,10 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     """Build the plan of one Irodori model (every check and the config reading are done here)."""
     assert_model_name(model)
     placements = irodori_placements(sources)
-    pipeline_config = irodori_pipeline_config(
-        irodori_model_config(sources.model), irodori_codec_numbers(sources.codec_model)
-    )
-    assert_irodori_calib_provenance(sources)
+    config = irodori_model_config(sources.model)
+    pipeline_config = irodori_pipeline_config(config, irodori_codec_numbers(sources.codec_model))
+    assert_irodori_calib_provenance(sources, irodori_flow_parameterization(config))
+    assert_irodori_borrowed_weights(sources, model)
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)
@@ -1038,6 +1135,9 @@ def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 IRODORI_V4_MODEL = "v4-small"
 IRODORI_V41_MODEL = "v4.1-small"
 
+#: The MeanFlow student distilled from v4.1-small by upstream (ADR 0150) — its own repository.
+IRODORI_V41_MF_MODEL = "v4.1-small-mf"
+
 #: Roles of v4.1-small that are byte-identical to v4-small, so v4.1-small's distribution
 #: references them in v4-small's repository instead of storing them a second time (ADR 0038 §7
 #: addendum 2026-10-28; 26 roles = 90 files, 5,637 MiB, measured 2026-10-28).
@@ -1059,10 +1159,177 @@ IRODORI_V41_SHARED_ROLES: tuple[str, ...] = (
 )
 
 
+#: The graph roles of the DiT pair — the only ones a MeanFlow distillation retrains (upstream's
+#: recipe trains the whole student DiT and freezes the condition encoders and the duration
+#: predictor — `docs/meanflow.md`; measured for v4.1-small-mf 2026-11-14: only DiT-side tensors
+#: differ from v4.1-small, plus the 3 of `delta_cond_module`).
+IRODORI_DIT_ROLES: tuple[str, ...] = ("dit", "dit_context")
+
+
+def _v41_owner(role: str) -> str:
+    """The model whose repository physically holds the bytes of a v4.1-small role: v4.1-small
+    itself for what it stores, v4-small for what it borrows ({@link IRODORI_V41_SHARED_ROLES})."""
+    return IRODORI_V4_MODEL if role in IRODORI_V41_SHARED_ROLES else IRODORI_V41_MODEL
+
+
+#: Model → (role name → the model whose **published container** that role borrows). ADR 0150:
+#: v4.1-small-mf physically carries only the roles whose bytes are new (the DiT pair, every
+#: series, and its tokenizer asset) and borrows every other graph role from the repository that
+#: physically holds it — references are not followed further (`karume.dist.external_refs`), so a
+#: role v4.1-small itself borrows points at v4-small directly: `duration_*` at v4.1-small, the
+#: rest at v4-small.
+#:
+#: Unlike v4.1-small ({@link IRODORI_V41_SHARED_ROLES}, which exports every role and checks the
+#: bytes against v4-small's), a borrowed role here is **the published container itself**: it is
+#: not re-exported, and the assembly reads it from the owner's mirror
+#: ({@link irodori_borrowed_sources}). The published non-DiT containers predate the
+#: `provenance.notice` field, so a fresh export of the same weights differs from them in part 0
+#: and could never be reconciled byte for byte. What makes the borrowing hold is checked on the
+#: inputs instead: every checkpoint tensor such a graph is built from, and the configs, are equal
+#: to the owner's ({@link assert_irodori_borrowed_weights}).
+#:
+#: The tokenizer stays local: the published v4-small asset predates the rare-token split table
+#: (ADR 0149), which upstream applies to this model's tokenizer, so borrowing it would drop that
+#: behaviour.
+IRODORI_BORROWED: Mapping[str, Mapping[str, str]] = {
+    IRODORI_V41_MF_MODEL: {
+        irodori_role(role, dtype): _v41_owner(irodori_role(role, dtype))
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        for role in roles
+        if role not in IRODORI_DIT_ROLES
+    },
+}
+
+
+def irodori_borrowed_sources(model: str, dist_root: Path) -> Mapping[str, Path]:
+    """Role name → the representative path of the published container a model borrows, in the
+    owner's local mirror (`<dist_root>/<owner repository>/<owner model>/<role path>`)."""
+    return MappingProxyType(
+        {
+            role: dist_root / irodori_repo_name(owner) / owner / IRODORI_OUTPUT_PATHS[role]
+            for role, owner in IRODORI_BORROWED.get(model, {}).items()
+        }
+    )
+
+
+#: Graph role → the checkpoint's state_dict prefixes it is built from (the attribute names of
+#: `irodori_tts/model.py`, as `irodori.export` loads them — `text_norm` sits inside `duration`,
+#: `caption_norm` inside `caption_proj`'s second output, `speaker_norm` inside `speaker`). The
+#: codec is a separate repository with its own weights, so it has none.
+IRODORI_ROLE_TENSOR_PREFIXES: Mapping[str, tuple[str, ...]] = {
+    "backbone": ("pretrained_text_backbone.",),
+    "text_proj": ("text_encoder.",),
+    "caption_proj": ("caption_encoder.", "caption_norm."),
+    "speaker": ("speaker_encoder.", "speaker_norm."),
+    "duration": ("duration_predictor.", "text_norm."),
+    "codec_decoder": (),
+    "codec_encoder": (),
+}
+
+#: The `config_json` keys that may differ between a borrower and the owner (only the flow
+#: parameterization — it changes the DiT, never the borrowed graphs).
+IRODORI_BORROW_CONFIG_EXEMPT = frozenset({IRODORI_FLOW_CONFIG_KEY})
+
+
+def _checkpoint_tensors(path: Path, prefixes: tuple[str, ...]) -> dict[str, bytes]:
+    """The raw bytes (and dtype / shape) of every tensor of a checkpoint under `prefixes`."""
+    picked: dict[str, bytes] = {}
+    with safe_open(str(path), framework="np") as handle:
+        for key in handle.keys():  # noqa: SIM118 — safe_open has no __iter__
+            if key.startswith(prefixes):
+                array = handle.get_tensor(key)
+                picked[key] = f"{array.dtype}:{list(array.shape)}:".encode() + array.tobytes()
+    return picked
+
+
+def _checkpoint_metadata(path: Path) -> Mapping[str, str]:
+    with safe_open(str(path), framework="np") as handle:
+        metadata = handle.metadata()
+    if not isinstance(metadata, dict):
+        raise DistError(f"{path} has no __metadata__")
+    return metadata
+
+
+def assert_irodori_borrowed_weights(sources: IrodoriSources, model: str) -> None:
+    """Check that every role `model` borrows ({@link IRODORI_BORROWED}) is built from **exactly
+    the owner's inputs**: the checkpoint tensors under its prefixes
+    ({@link IRODORI_ROLE_TENSOR_PREFIXES}) are byte-identical, the text-encoder config is equal,
+    and the model config differs at most in {@link IRODORI_BORROW_CONFIG_EXEMPT}.
+
+    MUST: a borrowed role is the owner's published container, never re-exported, so this is the
+    check that the borrowing is the same graph and the same weights — without it a borrower whose
+    duration predictor (say) had been retrained would ship the owner's silently. The owner's
+    checkpoint is the sibling input directory (`inputs/irodori/<owner>/`).
+    """
+    borrowed = IRODORI_BORROWED.get(model, {})
+    if not borrowed:
+        return
+    own = sources.model / IRODORI_CKPT_FILE
+    if not own.is_file():
+        raise DistError(f"Assembly input missing: {own}")
+    owners: dict[str, set[str]] = {}
+    for role, owner in borrowed.items():
+        # `<graph role>_<dtype>` — the dtype never contains `_` ({@link IRODORI_WEIGHT_DTYPES}).
+        owners.setdefault(owner, set()).add(role.rsplit("_", 1)[0])
+    for owner, graph_roles in sorted(owners.items()):
+        theirs = sources.model.parent / owner / IRODORI_CKPT_FILE
+        if not theirs.is_file():
+            raise DistError(
+                f"{model} borrows {sorted(graph_roles)} from {owner}, whose checkpoint is needed to"
+                f" check that the weights are the same: {theirs} is missing"
+            )
+        mine_meta, their_meta = _checkpoint_metadata(own), _checkpoint_metadata(theirs)
+        mine_config = json.loads(mine_meta[IRODORI_CONFIG_META_KEY])
+        their_config = json.loads(their_meta[IRODORI_CONFIG_META_KEY])
+        differing = sorted(
+            key
+            for key in set(mine_config) | set(their_config)
+            if key not in IRODORI_BORROW_CONFIG_EXEMPT
+            and mine_config.get(key) != their_config.get(key)
+        )
+        # Compared as JSON values: the two checkpoints serialize the same config with another key
+        # order (measured 2026-11-14 — v4-small / v4.1-small / v4.1-small-mf).
+        text_key = "text_encoder_config_json"
+        if json.loads(mine_meta.get(text_key, "null")) != json.loads(
+            their_meta.get(text_key, "null")
+        ):
+            differing.append(text_key)
+        if differing:
+            raise DistError(
+                f"{model} borrows {sorted(graph_roles)} from {owner}, but the configs differ in"
+                f" {differing} — the borrowed graphs would not be the ones this checkpoint builds"
+            )
+        prefixes = tuple(
+            prefix
+            for graph_role in sorted(graph_roles)
+            for prefix in IRODORI_ROLE_TENSOR_PREFIXES[graph_role]
+        )
+        if not prefixes:
+            continue
+        mine, theirs_tensors = (
+            _checkpoint_tensors(own, prefixes),
+            _checkpoint_tensors(theirs, prefixes),
+        )
+        if not mine:
+            raise DistError(f"{own} has no tensor under {list(prefixes)}")
+        unequal = sorted(
+            key
+            for key in set(mine) | set(theirs_tensors)
+            if mine.get(key) != theirs_tensors.get(key)
+        )
+        if unequal:
+            raise DistError(
+                f"{model} borrows {sorted(graph_roles)} from {owner}, but {len(unequal)} checkpoint"
+                f" tensors differ ({unequal[:3]}…) — a borrowed role must be the owner's weights"
+            )
+
+
 def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
     """`Pipeline.references` of Irodori: v4.1-small borrows {@link IRODORI_V41_SHARED_ROLES} from
     v4-small's repository (the base model stays self-contained — it is the one upstream retrained
-    from, and the e2e checks read its mirror file by file)."""
+    from, and the e2e checks read its mirror file by file); v4.1-small-mf borrows
+    {@link IRODORI_BORROWED} from the two repositories that hold the bytes (one reference per
+    owner, v4-small first)."""
     if model == IRODORI_V41_MODEL:
         return (
             CrossRepoReference(
@@ -1071,7 +1338,16 @@ def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
                 roles=IRODORI_V41_SHARED_ROLES,
             ),
         )
-    return ()
+    borrowed = IRODORI_BORROWED.get(model, {})
+    owners = sorted(set(borrowed.values()))
+    return tuple(
+        CrossRepoReference(
+            repo_name=irodori_repo_name(owner),
+            model=owner,
+            roles=tuple(role for role, holder in borrowed.items() if holder == owner),
+        )
+        for owner in owners
+    )
 
 
 #: The MIT copyright lines (`LICENSE.md` at the root of the distribution repository). The 3 upstream

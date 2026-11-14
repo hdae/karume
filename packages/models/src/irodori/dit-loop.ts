@@ -18,6 +18,12 @@
  * they are" (DECIDED: ADR 0114). Only the copy differs (a GPU copy, or a `write` through the
  * host); the K / V bytes `dit` reads are the same.
  *
+ * The loop runs one of two samplers ({@link DitSampler}, chosen from the distribution's
+ * `flowParameterization` in `./pipeline.ts`): the RF Euler loop with independent CFG, or the
+ * MeanFlow loop (ADR 0150 — one conditional forward per step that also takes the interval
+ * embedding `delta_embed`, and the same Euler update `x + (t_next − t)·v`). Both paths run both
+ * samplers, so the MUST below holds for each.
+ *
  * MUST: every module is free of side effects (no execution at import time, no global mutable state
  * — CLAUDE.md).
  */
@@ -103,6 +109,27 @@ export type UncondVariant = {
 };
 
 /**
+ * The sampler of one loop — what differs between the two flow parameterizations.
+ *
+ * - `rf_velocity`: the CFG window and the uncond variants (an uncond forward per variant inside
+ *   the window).
+ * - `meanflow` (ADR 0150): the interval length of each step (`t_i − t_{i+1}` in f32, `[steps]`),
+ *   embedded like t and passed as `delta_embed`. No CFG.
+ */
+export type DitSampler =
+  | {
+      readonly kind: "rf_velocity";
+      /** The t window where CFG applies (both ends included). */
+      readonly cfgMinT: number;
+      readonly cfgMaxT: number;
+      readonly uncondVariants: readonly UncondVariant[];
+    }
+  | {
+      readonly kind: "meanflow";
+      readonly intervals: Float32Array<ArrayBuffer>;
+    };
+
+/**
  * The material of one DiT loop (the 2 paths read **the same thing** — the host computation is
  * identical on both).
  */
@@ -110,6 +137,7 @@ export type DitLoop = {
   readonly frames: number;
   /** Initial noise `[frames × latentDim]`. */
   readonly initial: Float32Array<ArrayBuffer>;
+  /** The t sequence `[steps+1]` (the RF closed form, or the MeanFlow `linspace`). */
   readonly schedule: Float32Array<ArrayBuffer>;
   readonly frequencies: Float32Array<ArrayBuffer>;
   /**
@@ -118,8 +146,31 @@ export type DitLoop = {
    */
   readonly conditions: Readonly<Record<string, Tensor>>;
   readonly condMask: Tensor;
-  readonly uncondVariants: readonly UncondVariant[];
+  readonly sampler: DitSampler;
 };
+
+/**
+ * The per-step host inputs that sit beside `x_t` and `mask` — `t_embed`, plus `delta_embed` on the
+ * MeanFlow loop (the same host function on both paths, so the bytes `dit` reads are the same).
+ */
+const stepEmbeddings = (
+  loop: DitLoop,
+  step: number,
+  width: number,
+): { readonly t_embed: Tensor; readonly delta_embed?: Tensor } => {
+  const tEmbed = f32(timestepEmbedding(loop.schedule[step], loop.frequencies), [1, width]);
+  if (loop.sampler.kind === "rf_velocity") return { t_embed: tEmbed };
+  return {
+    t_embed: tEmbed,
+    delta_embed: f32(timestepEmbedding(loop.sampler.intervals[step], loop.frequencies), [1, width]),
+  };
+};
+
+/** The uncond variants that run at t (none outside the CFG window, none on the MeanFlow loop). */
+const variantsAt = (sampler: DitSampler, t: number): readonly UncondVariant[] =>
+  sampler.kind === "rf_velocity" && t >= sampler.cfgMinT && t <= sampler.cfgMaxT
+    ? sampler.uncondVariants
+    : [];
 
 /** Result of the loop (the final latent and how many times `dit` ran). */
 type DitLoopResult = {
@@ -276,37 +327,35 @@ export const runDitLoopOnHost = async (
       for (let step = 0; step < config.steps; step += 1) {
         const t = loop.schedule[step];
         const tNext = loop.schedule[step + 1];
-        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
+        const embeddings = stepEmbeddings(loop, step, config.timestepEmbedDim);
         const xTensor = f32(x, [1, loop.frames, config.latentDim]);
         const cond = asF32(
           outputAt(
             state.dit,
-            await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...context }),
+            await run({ x_t: xTensor, ...embeddings, mask: loop.condMask, ...context }),
             0,
           ),
           "dit velocity field",
         );
         forwards += 1;
         const variants: CfgVariant[] = [];
-        if (t >= config.cfgMinT && t <= config.cfgMaxT) {
-          // MUST: the combination order is SEGMENT_ORDER (text → speaker → caption) — the doc of
-          // `combineCfg`.
-          for (const variant of loop.uncondVariants) {
-            const outputs = await run({
-              x_t: xTensor,
-              t_embed: tEmbed,
-              mask: variant.mask,
-              ...context,
-            });
-            forwards += 1;
-            variants.push({
-              scale: variant.scale,
-              velocity: asF32(
-                outputAt(state.dit, outputs, 0),
-                `dit velocity field (uncond ${variant.segment})`,
-              ),
-            });
-          }
+        // MUST: the combination order is SEGMENT_ORDER (text → speaker → caption) — the doc of
+        // `combineCfg`.
+        for (const variant of variantsAt(loop.sampler, t)) {
+          const outputs = await run({
+            x_t: xTensor,
+            ...embeddings,
+            mask: variant.mask,
+            ...context,
+          });
+          forwards += 1;
+          variants.push({
+            scale: variant.scale,
+            velocity: asF32(
+              outputAt(state.dit, outputs, 0),
+              `dit velocity field (uncond ${variant.segment})`,
+            ),
+          });
         }
         x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
         await emit({
@@ -402,17 +451,20 @@ export const runDitLoopResident = async (
     const dit = await open(state.dit, state.ditSessionOptions);
     const combine = await openHostGraph("combine", combineGraph(frames, config.latentDim));
     const euler = await openHostGraph("euler", eulerGraph(frames, config.latentDim));
-    // The strengths do not depend on the step, so they are built once.
-    const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
+    // The strengths do not depend on the step, so they are built once (none on the MeanFlow loop;
+    // inside the window `variantsAt` returns this same array, so the indices line up).
+    const scales = (loop.sampler.kind === "rf_velocity" ? loop.sampler.uncondVariants : []).map(
+      (variant) => f32(Float32Array.of(variant.scale), [1]),
+    );
 
     let forwards = 0;
     await withBatch(gpu, async (batch) => {
       for (let step = 0; step < config.steps; step += 1) {
         const t = loop.schedule[step];
-        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
+        const embeddings = stepEmbeddings(loop, step, config.timestepEmbedDim);
         const forward = async (mask: Tensor, target: ResidentTensor): Promise<void> => {
           await dit.enqueue(
-            { x_t: xT, t_embed: tEmbed, mask, ...context },
+            { x_t: xT, ...embeddings, mask, ...context },
             { batch, bindings, copyOutputs: { [velocity]: target } },
           );
           forwards += 1;
@@ -423,12 +475,13 @@ export const runDitLoopResident = async (
         // it there is no measurement for the whole span = the chunk stays at its initial 16, and
         // about 96,000 dispatches split into 6,000 submits. The cost is one fence (≈11 ms).
         if (step === 0) await batch.settle();
-        const guided = t >= config.cfgMinT && t <= config.cfgMaxT && loop.uncondVariants.length > 0;
+        const variants = variantsAt(loop.sampler, t);
+        const guided = variants.length > 0;
         if (guided) {
           // MUST: the combination order is SEGMENT_ORDER (text → speaker → caption) — the doc of
           // `combineCfg`.
-          for (let index = 0; index < loop.uncondVariants.length; index += 1) {
-            await forward(loop.uncondVariants[index].mask, vVariant);
+          for (let index = 0; index < variants.length; index += 1) {
+            await forward(variants[index].mask, vVariant);
             // The augend for k = 0 is cond itself (`let value = base` in the canonical
             // `combineCfg`). The same buffer is only read through 2 inputs, acc_in and cond, so it
             // is legal on WebGPU too.

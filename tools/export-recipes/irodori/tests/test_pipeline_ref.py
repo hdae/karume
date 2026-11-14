@@ -39,7 +39,12 @@ from torch import nn
 
 from irodori import export as ex
 from irodori import pipeline_ref as ip
-from irodori.distribution import CALIB_PROVENANCE_FILE, irodori_calib_floor
+from irodori.distribution import (
+    CALIB_PROVENANCE_FILE,
+    IRODORI_FLOW_MEANFLOW,
+    IRODORI_FLOW_RF,
+    irodori_calib_floor,
+)
 from karume.container import BLOCK_MAX_BYTES, container_parts
 from karume.emit import stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
@@ -881,6 +886,111 @@ class TestEulerSharesOneContext:
             len(kv) == len(context) and all(a is b for a, b in zip(kv, context, strict=True))
             for kv in received
         )
+
+
+class TestMeanFlowSchedule:
+    """The schedule of a MeanFlow checkpoint is upstream's own (ADR 0150)."""
+
+    @pytest.mark.parametrize("steps", [1, 2, 3, 4, 7, 16, 40])
+    def test_it_is_upstreams_float32_linspace_from_one_to_zero(self, steps):
+        schedule = ip.meanflow_schedule(steps)
+
+        assert schedule.dtype == torch.float32
+        assert torch.equal(schedule, torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float32))
+        assert float(schedule[0]) == 1.0
+        assert float(schedule[-1]) == 0.0
+
+    def test_the_reference_loop_length_follows_the_flow(self):
+        assert ip.reference_steps(IRODORI_FLOW_RF) == ip.NUM_STEPS == 40
+        assert ip.reference_steps(IRODORI_FLOW_MEANFLOW) == ip.MEANFLOW_NUM_STEPS == 4
+
+    def test_an_unknown_flow_fails_loudly(self):
+        with pytest.raises(SystemExit, match="Unknown flow"):
+            ip.reference_steps("ddpm")
+
+    def test_the_calibration_floor_is_the_whole_meanflow_loop(self):
+        assert irodori_calib_floor(IRODORI_FLOW_MEANFLOW)["steps"] == ip.MEANFLOW_NUM_STEPS
+        assert irodori_calib_floor()["steps"] == ip.NUM_STEPS
+
+
+class TestMeanFlowLoop:
+    """One conditional forward per step with the interval, and `x += v (t_next − t)` (upstream's
+    `sample_euler_meanflow`)."""
+
+    @staticmethod
+    def _run(
+        *, zero_interval: bool = False
+    ) -> tuple[torch.Tensor, int, list[tuple[float, float, torch.Tensor]], torch.Tensor]:
+        context = (torch.ones(1, 2), torch.full((1, 2), 2.0))
+        received: list[tuple[float, float, torch.Tensor]] = []
+
+        def dit(x_t, t_embed, delta_embed, mask, *kv):
+            assert all(a is b for a, b in zip(kv, context, strict=True))
+            received.append((float(t_embed[0, 0]), float(delta_embed[0, 0]), mask))
+            # A velocity that depends on both scalars, so the update is checked numerically.
+            return torch.full_like(x_t, float(t_embed[0, 0]) + 10.0 * float(delta_embed[0, 0]))
+
+        graphs = ip.HostGraphs(
+            backbone=nn.Identity(),
+            text_proj=nn.Identity(),
+            caption_proj=nn.Identity(),
+            speaker=nn.Identity(),
+            duration=nn.Identity(),
+            dit_context=nn.Identity(),
+            dit=dit,  # type: ignore[arg-type]
+        )
+        # The embedding writes its scalar into the first column (the loop must pass t and delta).
+        source = SimpleNamespace(
+            timestep_embedding=lambda value, dim: value.reshape(1, 1).expand(1, dim).clone()
+        )
+        segments = dict.fromkeys(ex.DIT_UNCOND_VARIANTS, 2)
+        schedule = ip.meanflow_schedule(4)
+        noise = torch.zeros(1, 3, 4)
+        z, forwards = ip._meanflow(
+            graphs,
+            source,  # type: ignore[arg-type]
+            noise,
+            context,
+            {name: 1 for name in segments},
+            segments,
+            4,
+            schedule,
+            zero_interval=zero_interval,
+        )
+        return z, forwards, received, schedule
+
+    def test_every_step_runs_exactly_one_conditional_forward(self):
+        _z, forwards, received, _schedule = self._run()
+        cond = ip._segment_masks(
+            3,
+            dict.fromkeys(ex.DIT_UNCOND_VARIANTS, 1),
+            dict.fromkeys(ex.DIT_UNCOND_VARIANTS, 2),
+            None,
+        )
+
+        assert forwards == len(received) == 4
+        assert all(torch.equal(mask, cond) for _t, _d, mask in received)
+
+    def test_each_forward_gets_t_and_the_interval_to_the_next_t(self):
+        _z, _forwards, received, schedule = self._run()
+
+        for index, (t, delta, _mask) in enumerate(received):
+            assert t == float(schedule[index])
+            assert delta == float(schedule[index] - schedule[index + 1])
+
+    def test_the_update_is_x_plus_v_times_t_next_minus_t(self):
+        z, _forwards, received, schedule = self._run()
+        x = torch.zeros(1, 3, 4)
+        for index, (t, delta, _mask) in enumerate(received):
+            velocity = torch.full_like(x, t + 10.0 * delta)
+            x = x + velocity * (schedule[index + 1] - schedule[index])
+
+        assert torch.equal(z, x)
+
+    def test_the_zero_interval_run_embeds_every_interval_as_zero(self):
+        _z, _forwards, received, _schedule = self._run(zero_interval=True)
+
+        assert [delta for _t, delta, _mask in received] == [0.0] * 4
 
 
 class TestCli:

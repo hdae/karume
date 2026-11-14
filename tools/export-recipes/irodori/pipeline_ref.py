@@ -103,7 +103,13 @@ from karume.quantize import dequantize_int4
 
 from . import export as ex
 from . import patch
-from .distribution import CALIB_PROVENANCE_FILE, CALIB_SHIPPABLE_METHOD, irodori_calib_floor
+from .distribution import (
+    CALIB_PROVENANCE_FILE,
+    CALIB_SHIPPABLE_METHOD,
+    IRODORI_FLOW_MEANFLOW,
+    IRODORI_FLOW_RF,
+    irodori_calib_floor,
+)
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -112,6 +118,22 @@ T_EMBED_FILE = "t-embed.safetensors"
 
 #: Number of Euler steps (the default of upstream `SamplingRequest.num_steps`).
 NUM_STEPS = 40
+
+#: Number of steps of a **MeanFlow** checkpoint (ADR 0150 — upstream's default for one:
+#: `inference_runtime` takes `4 if is_meanflow else 40` when the request names no step count, and
+#: `meanflow.sample_euler_meanflow` defaults to 4 as well).
+MEANFLOW_NUM_STEPS = 4
+
+
+def reference_steps(flow: str) -> int:
+    """The step count of the reference loop for a flow parameterization (the RF Euler loop or
+    the MeanFlow loop)."""
+    if flow == IRODORI_FLOW_MEANFLOW:
+        return MEANFLOW_NUM_STEPS
+    if flow == IRODORI_FLOW_RF:
+        return NUM_STEPS
+    raise SystemExit(f"Unknown flow parameterization {flow!r}")
+
 
 #: Initial factor of the t schedule (`init_scale` of `rf.sample_euler_rf_cfg`).
 INIT_SCALE = 0.999
@@ -193,6 +215,13 @@ def euler_reference_within_sensitivity(worst: float, amp: float) -> bool:
     return worst <= amp * EULER_NOISE_PER_AMP and worst <= EULER_REFERENCE_ABS_CEILING
 
 
+#: The lower bound for the interval of a MeanFlow loop actually having an effect (the largest
+#: absolute difference from the z run with every interval set to 0).
+#: MUST: not vacuous — the TS side builds `delta_embed` on the host, and if the trained branch
+#: barely moved the output, a host that dropped or misplaced it would still pass the comparison
+#: with this golden (the counterpart of {@link CFG_EFFECT_MIN} for a loop without CFG).
+DELTA_EFFECT_MIN = 1e-2
+
 #: The lower bound for CFG actually having an effect (the largest absolute difference from the
 #: z run with cond only).
 #: MUST: not vacuous — setting the scale to 0, or getting the uncond mask wrong so that it equals
@@ -263,6 +292,17 @@ def t_schedule(num_steps: int) -> torch.Tensor:
     not, the TS formula is adjusted).
     """
     return (1.0 - torch.linspace(0.0, 1.0, num_steps + 1)) * INIT_SCALE
+
+
+def meanflow_schedule(num_steps: int) -> torch.Tensor:
+    """The t sequence `[num_steps+1]` of a MeanFlow loop — **exactly** upstream's
+    `sample_euler_meanflow` (`torch.linspace(1.0, 0.0, num_steps + 1, dtype=torch.float32)`).
+
+    Each step uses `delta = t − t_next` and the update `x + v·(t_next − t)`, both in f32 tensor
+    arithmetic. The TS side reproduces these f32 values for any step count (ADR 0150 — torch's f32
+    `linspace` is not the closed form `1 − i/n`), so the golden records the sequence it used.
+    """
+    return torch.linspace(1.0, 0.0, num_steps + 1, dtype=torch.float32)
 
 
 def closed_form_matches(schedule: torch.Tensor, num_steps: int) -> float:
@@ -419,6 +459,46 @@ def _euler(
     return x_t, forwards
 
 
+def _meanflow(
+    graphs: HostGraphs,
+    source: ex.IrodoriSource,
+    noise: torch.Tensor,
+    context: Sequence[torch.Tensor],
+    used: Mapping[str, int],
+    caps: Mapping[str, int],
+    embed_dim: int,
+    schedule: torch.Tensor,
+    *,
+    zero_interval: bool = False,
+) -> tuple[torch.Tensor, int]:
+    """The MeanFlow loop (ADR 0150). Returns `(final z, forward count)`.
+
+    The same 3 points of upstream `meanflow.sample_euler_meanflow` are copied as in the RF loop
+    ({@link _euler}) — the interval `delta = t − t_next`, one **conditional** forward per step (no
+    CFG: guidance was fused into the teacher during distillation) and `x += v (t_next − t)` — and
+    both embeddings call upstream's `get_timestep_embedding`. The comparison with upstream's own
+    loop is {@link EULER_REFERENCE_ATOL} (the same two-stage judgement as the RF loop).
+
+    `zero_interval` runs the same loop with every interval embedded as 0 — only for the
+    non-vacuity measurement ({@link DELTA_EFFECT_MIN}).
+    """
+    x_t = noise
+    mask = _segment_masks(int(noise.shape[1]), used, caps, None)
+    forwards = 0
+    for index in range(len(schedule) - 1):
+        t, t_next = schedule[index], schedule[index + 1]
+        delta = t - t_next
+        if zero_interval:
+            delta = torch.zeros_like(delta)
+        with torch.no_grad():
+            t_embed = source.timestep_embedding(t.reshape(1), embed_dim).to(x_t.dtype)
+            delta_embed = source.timestep_embedding(delta.reshape(1), embed_dim).to(x_t.dtype)
+            velocity = graphs.dit(x_t, t_embed, delta_embed, mask, *context)
+            forwards += 1
+            x_t = x_t + velocity * (t_next - t)
+    return x_t, forwards
+
+
 def run_case(
     case: PipelineCase,
     graphs: HostGraphs,
@@ -432,6 +512,7 @@ def run_case(
     *,
     frames_override: int | None = None,
     sensitivity_probe: bool = False,
+    flow: str = IRODORI_FLOW_RF,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """Run the host path of one case and return `(tensors to save, meta)`.
 
@@ -446,6 +527,10 @@ def run_case(
     `sensitivity_probe=True` runs the Euler loop once more (noise + {@link SENSITIVITY_EPS}) and
     puts the amplification factor in `meta["sensitivityAmp"]`. Only for emit's second stage
     ({@link euler_reference_within_sensitivity}) — not measured by default (it doubles the cost).
+
+    `flow` is the checkpoint's flow parameterization: a MeanFlow checkpoint runs {@link _meanflow}
+    instead of the Euler + CFG loop (ADR 0150), and its non-vacuity check is the interval's
+    effect ({@link DELTA_EFFECT_MIN}) instead of CFG's.
     """
     bos_id = int(text_config["bos_token_id"])
     embed_dim = int(config.timestep_embed_dim)
@@ -541,47 +626,70 @@ def run_case(
     with torch.no_grad():
         context = graphs.dit_context(*states)
 
-    # ---- ⑦ Euler + CFG ----
-    # The active CFGs follow the conditions of upstream `resolve_cfg_scales` /
-    # `sample_euler_rf_cfg`: text always / speaker only with a reference / caption only when
-    # non-empty.
-    enabled = ["text"]
-    if has_speaker:
-        enabled.append("speaker")
-    if used["caption"] > 0:
-        enabled.append("caption")
-    schedule = t_schedule(NUM_STEPS)
     noise = torch.randn(
         (1, steps, latent_dim),
         dtype=torch.float32,
         generator=torch.Generator(device="cpu").manual_seed(case.seed),
     )
-    latent, forwards = _euler(
-        graphs, source, noise, context, used, caps, enabled, embed_dim, schedule
-    )
-    cond_only, _forwards = _euler(
-        graphs, source, noise, context, used, caps, (), embed_dim, schedule
-    )
-    cfg_effect = float((latent - cond_only).abs().max())
-    if cfg_effect < CFG_EFFECT_MIN:
-        raise SystemExit(
-            f"{case.name}: the difference with and without CFG is {cfg_effect} — CFG seems to have"
-            " no effect (scale 0 / the uncond mask equals cond)"
-        )
     sensitivity_amp = None
-    if sensitivity_probe:
-        perturbed, _fw = _euler(
-            graphs,
-            source,
-            noise + SENSITIVITY_EPS,
-            context,
-            used,
-            caps,
-            enabled,
-            embed_dim,
-            schedule,
+    if flow == IRODORI_FLOW_MEANFLOW:
+        # ---- ⑦ the MeanFlow loop (one conditional forward per step, no CFG — ADR 0150) ----
+        enabled: list[str] = []
+        schedule = meanflow_schedule(MEANFLOW_NUM_STEPS)
+        latent, forwards = _meanflow(
+            graphs, source, noise, context, used, caps, embed_dim, schedule
         )
-        sensitivity_amp = float((perturbed - latent).abs().max()) / SENSITIVITY_EPS
+        zero_interval, _forwards = _meanflow(
+            graphs, source, noise, context, used, caps, embed_dim, schedule, zero_interval=True
+        )
+        effect = {"deltaEffectMaxAbs": float((latent - zero_interval).abs().max())}
+        if effect["deltaEffectMaxAbs"] < DELTA_EFFECT_MIN:
+            raise SystemExit(
+                f"{case.name}: the difference with and without the interval is"
+                f" {effect['deltaEffectMaxAbs']} — the interval embedding seems to have no effect"
+            )
+        if sensitivity_probe:
+            perturbed, _fw = _meanflow(
+                graphs, source, noise + SENSITIVITY_EPS, context, used, caps, embed_dim, schedule
+            )
+            sensitivity_amp = float((perturbed - latent).abs().max()) / SENSITIVITY_EPS
+    else:
+        # ---- ⑦ Euler + CFG ----
+        # The active CFGs follow the conditions of upstream `resolve_cfg_scales` /
+        # `sample_euler_rf_cfg`: text always / speaker only with a reference / caption only when
+        # non-empty.
+        enabled = ["text"]
+        if has_speaker:
+            enabled.append("speaker")
+        if used["caption"] > 0:
+            enabled.append("caption")
+        schedule = t_schedule(NUM_STEPS)
+        latent, forwards = _euler(
+            graphs, source, noise, context, used, caps, enabled, embed_dim, schedule
+        )
+        cond_only, _forwards = _euler(
+            graphs, source, noise, context, used, caps, (), embed_dim, schedule
+        )
+        effect = {"cfgEffectMaxAbs": float((latent - cond_only).abs().max())}
+        if effect["cfgEffectMaxAbs"] < CFG_EFFECT_MIN:
+            raise SystemExit(
+                f"{case.name}: the difference with and without CFG is"
+                f" {effect['cfgEffectMaxAbs']} — CFG seems to have no effect (scale 0 / the uncond"
+                " mask equals cond)"
+            )
+        if sensitivity_probe:
+            perturbed, _fw = _euler(
+                graphs,
+                source,
+                noise + SENSITIVITY_EPS,
+                context,
+                used,
+                caps,
+                enabled,
+                embed_dim,
+                schedule,
+            )
+            sensitivity_amp = float((perturbed - latent).abs().max()) / SENSITIVITY_EPS
 
     # MUST: the id sequences are lowered to the IR's actual representation (i64 → i32) when saved
     # — the TS side reads them under the same boundary convention (ADR 0009). Here they stay int64,
@@ -603,9 +711,15 @@ def run_case(
         "duration": {**duration_meta, "logFrames": round(float(log_frames), 6)},
         "tokens": {"text": int(text_ids.shape[1]), "caption": used["caption"]},
         "segments": dict(used),
-        "cfg": {name: CFG_SCALES[name] for name in enabled},
+        # MUST: the RF meta keeps its keys and their order (the TS-side latent check reads them);
+        # a MeanFlow loop has no CFG, so it carries no `cfg`.
+        **(
+            {}
+            if flow == IRODORI_FLOW_MEANFLOW
+            else {"cfg": {name: CFG_SCALES[name] for name in enabled}}
+        ),
         "forwards": forwards,
-        "cfgEffectMaxAbs": float(f"{cfg_effect:.4e}"),
+        **{key: float(f"{value:.4e}") for key, value in effect.items()},
         **(
             {"sensitivityAmp": float(f"{sensitivity_amp:.4e}")}
             if sensitivity_amp is not None
@@ -694,9 +808,12 @@ def upstream_latent(
     text_config: Mapping[str, Any],
     model_config: Mapping[str, Any],
     config: Any,
+    *,
+    flow: str = IRODORI_FLOW_RF,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the same conditions through upstream's canonical path (`rf.sample_euler_rf_cfg`).
-    Returns `(z, initial noise)`.
+    """Run the same conditions through upstream's canonical path (`rf.sample_euler_rf_cfg`, or
+    `meanflow.sample_euler_meanflow` for a MeanFlow checkpoint — the sampler upstream's runtime
+    picks from the same `flow_parameterization`). Returns `(z, initial noise)`.
 
     MUST: the inputs follow upstream's calling convention — the text token sequence is
     right-padded to `max_text_len` (restoring the padding the host removed in the static scheme),
@@ -715,6 +832,24 @@ def upstream_latent(
         dtype=torch.float32,
         generator=torch.Generator(device="cpu").manual_seed(case.seed),
     )
+    if flow == IRODORI_FLOW_MEANFLOW:
+        from irodori_tts.meanflow import sample_euler_meanflow
+
+        # Upstream ignores every RF-only control for a MeanFlow checkpoint (CFG scales, mode and
+        # bounds — docs/meanflow.md), so none is passed: one conditional forward per step.
+        latent = sample_euler_meanflow(
+            model=model,
+            text_input_ids=text_padded,
+            text_mask=text_mask,
+            ref_latent=reference_latent,
+            ref_mask=reference_mask,
+            sequence_length=steps,
+            caption_input_ids=caption_padded,
+            caption_mask=caption_mask,
+            num_steps=MEANFLOW_NUM_STEPS,
+            seed=case.seed,
+        )
+        return latent, noise
     latent = sample_euler_rf_cfg(
         model=model,
         text_input_ids=text_padded,
@@ -790,8 +925,14 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
     MUST: the formula is not copied; upstream `get_timestep_embedding` is called (if the θ split
     changed, a copied formula would silently stay at the old one).
     """
+    return embedding_table(source, schedule[:-1], dim)
+
+
+def embedding_table(source: ex.IrodoriSource, values: torch.Tensor, dim: int) -> torch.Tensor:
+    """The `[len(values), dim]` table of upstream's `get_timestep_embedding`, one row per value
+    (the `t` of each step, or a MeanFlow loop's intervals)."""
     with torch.no_grad():
-        rows = [source.timestep_embedding(t.reshape(1), dim) for t in schedule[:-1]]
+        rows = [source.timestep_embedding(value.reshape(1), dim) for value in values]
     return torch.cat(rows, dim=0).contiguous()
 
 
@@ -839,7 +980,7 @@ class RestoredDit(NamedTuple):
     changed: int
 
 
-def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
+def _shippable_calib(series_dir: Path, flow: str = IRODORI_FLOW_RF) -> Mapping[str, Any]:
     """Read the calibration conditions of an i4 series, check that they are **conditions fit
     for distribution** (GPTQ × a budget at or above the floor) and return them.
 
@@ -865,7 +1006,7 @@ def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
             f"cannot parse the calibration conditions record: {path} — {cause}"
         ) from cause
     complaint = calib_complaint(
-        record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
+        record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor(flow)
     )
     if complaint is not None:
         raise SystemExit(
@@ -928,7 +1069,7 @@ def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> to
 
 
 def restore_dit_from_i4_series(
-    wrappers: Mapping[str, nn.Module], series_root: Path
+    wrappers: Mapping[str, nn.Module], series_root: Path, flow: str = IRODORI_FLOW_RF
 ) -> dict[str, RestoredDit]:
     """Overwrite every parameter the DiT distribution wrappers own with the **shipped bytes** of
     the i4 series (rounding stage 2).
@@ -985,7 +1126,7 @@ def restore_dit_from_i4_series(
         raise SystemExit("no wrapper to read the i4 series back into")
     seen: dict[str, tuple[str, str]] = {}
     restored = {
-        target: _restore_container(target, wrapper, series_root / target, seen)
+        target: _restore_container(target, wrapper, series_root / target, seen, flow)
         for target, wrapper in wrappers.items()
     }
     calibs = {target: dict(record.calib) for target, record in restored.items()}
@@ -1008,7 +1149,11 @@ def _stored_digest(entry: StoredTensor) -> str:
 
 
 def _restore_container(
-    target: str, wrapper: nn.Module, series_dir: Path, seen: dict[str, tuple[str, str]]
+    target: str,
+    wrapper: nn.Module,
+    series_dir: Path,
+    seen: dict[str, tuple[str, str]],
+    flow: str = IRODORI_FLOW_RF,
 ) -> RestoredDit:
     """Read back one container (the checks are described in
     {@link restore_dit_from_i4_series}).
@@ -1023,7 +1168,7 @@ def _restore_container(
             f"no container of the i4 series: {container}"
             " (run `python -m irodori.export --dtype i4` first)"
         )
-    calib = _shippable_calib(series_dir)
+    calib = _shippable_calib(series_dir, flow)
     stored = weight_tensors(read_stored(container))
     owned = dict(wrapper.named_parameters())
     absent = sorted(set(owned) - set(stored))
@@ -1138,6 +1283,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     duration_predictor = ex.load_duration_predictor(source, state, config)
     dit = ex.load_dit(source, state, config, text_config)
+    # The checkpoint's own flow parameterization picks the loop and the upstream sampler compared
+    # with (ADR 0150).
+    flow = ex.dit_flow(dit)
 
     # MUST: rounding happens right after load and before the golden is taken (the ordering MUST of
     # `irodori.export.fake_quant`). `dit` is the **whole** `TextToLatentRFDiT` (it holds copies of
@@ -1173,6 +1321,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             # the wrappers reaches `dit` too.
             ex.dit_wrappers(dit, ex.dit_sym_max(config)).by_target(),
             ex.default_out_root(model_dir, dtype),
+            flow,
         )
         if dtype == "i4"
         else None
@@ -1201,7 +1350,11 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     tokenizer = Tokenizer.from_file(str(model_dir / ex.TOKENIZER_FILE))
     caption_tokenizer = upstream_caption_tokenizer(model_dir, bool(config.caption_add_bos_resolved))
 
-    schedule = t_schedule(NUM_STEPS)
+    schedule = (
+        meanflow_schedule(MEANFLOW_NUM_STEPS)
+        if flow == IRODORI_FLOW_MEANFLOW
+        else t_schedule(NUM_STEPS)
+    )
     cases: dict[str, dict[str, Any]] = {}
     payloads: dict[str, dict[str, torch.Tensor]] = {}
     for case in PIPELINE_CASES:
@@ -1215,6 +1368,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             model_config,
             config,
             caps,
+            flow=flow,
         )
         # ---- standing check: compare S and the final z with upstream's canonical path ----
         text_ids = tensors["text_ids"]
@@ -1263,6 +1417,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             text_config,
             model_config,
             config,
+            flow=flow,
         )
         if not torch.equal(upstream_noise, tensors["noise"]):
             raise SystemExit(
@@ -1287,6 +1442,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
                 config,
                 caps,
                 sensitivity_probe=True,
+                flow=flow,
             )
             if not torch.equal(probed_tensors["z"], tensors["z"]):
                 raise SystemExit(
@@ -1302,7 +1458,8 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
                     f" amplification factor {amp:.4g} it is still {worst / amp:.4g} >"
                     f" {EULER_NOISE_PER_AMP}, or it exceeds the absolute ceiling"
                     f" {EULER_REFERENCE_ABS_CEILING} — a difference error accumulation cannot"
-                    " explain; the CFG combination formula / t schedule / mask segments seem broken"
+                    " explain; the CFG combination formula / t schedule / interval / mask segments"
+                    " seem broken"
                 )
         meta["upstreamMaxAbs"] = float(f"{worst:.4e}")
         cases[case.name] = meta
@@ -1320,24 +1477,48 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             str(path),
         )
         written[path.name] = path.stat().st_size
-    table = t_embed_table(source, schedule, int(config.timestep_embed_dim))
-    save_file(
-        {"t": schedule[:-1].contiguous(), "t_embed": table},
-        str(out_dir / T_EMBED_FILE),
-    )
+    embed_dim = int(config.timestep_embed_dim)
+    table = t_embed_table(source, schedule, embed_dim)
+    embeddings = {"t": schedule[:-1].contiguous(), "t_embed": table}
+    if flow == IRODORI_FLOW_MEANFLOW:
+        # The intervals the loop used and their embeddings (the same upstream function — the
+        # TS-side `delta_embed` is checked against this table).
+        intervals = (schedule[:-1] - schedule[1:]).contiguous()
+        embeddings |= {
+            "delta": intervals,
+            "delta_embed": embedding_table(source, intervals, embed_dim),
+        }
+    save_file(embeddings, str(out_dir / T_EMBED_FILE))
     written[T_EMBED_FILE] = (out_dir / T_EMBED_FILE).stat().st_size
 
+    # MUST: the RF meta keeps its keys and their order (the TS-side latent check reads them). A
+    # MeanFlow loop declares its parameterization and has no initial scale and no CFG.
+    sampler: dict[str, Any] = (
+        {
+            "flowParameterization": IRODORI_FLOW_MEANFLOW,
+            "steps": MEANFLOW_NUM_STEPS,
+        }
+        if flow == IRODORI_FLOW_MEANFLOW
+        else {
+            "steps": NUM_STEPS,
+            "initScale": INIT_SCALE,
+            "cfgRange": [CFG_MIN_T, CFG_MAX_T],
+            "cfgScales": dict(CFG_SCALES),
+        }
+    )
+    schedule_meta: dict[str, Any] = (
+        {"deltaSchedule": [float(value) for value in (schedule[:-1] - schedule[1:]).tolist()]}
+        if flow == IRODORI_FLOW_MEANFLOW
+        else {"tScheduleClosedFormMaxAbs": closed_form_matches(schedule, NUM_STEPS)}
+    )
     meta_payload: dict[str, Any] = {
         "dtype": dtype,
         "fakeQuant": quantized.reports,
-        "steps": NUM_STEPS,
-        "initScale": INIT_SCALE,
-        "cfgRange": [CFG_MIN_T, CFG_MAX_T],
-        "cfgScales": dict(CFG_SCALES),
+        **sampler,
         "frameRate": ex.CODEC_FRAME_RATE,
         "tSchedule": [float(value) for value in schedule.tolist()],
-        "tScheduleClosedFormMaxAbs": closed_form_matches(schedule, NUM_STEPS),
-        "tEmbedDim": int(config.timestep_embed_dim),
+        **schedule_meta,
+        "tEmbedDim": embed_dim,
         "caps": caps,
         "cases": cases,
     }

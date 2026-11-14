@@ -41,13 +41,16 @@ from irodori.card import (
 from irodori.distribution import (
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
+    IRODORI_BORROWED,
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
     IRODORI_COPYRIGHTS,
     IRODORI_DEFAULT_MODEL,
     IRODORI_DTYPE_ROLES,
+    IRODORI_FLOW_MEANFLOW,
     IRODORI_GRAPH_ROLES,
+    IRODORI_MEANFLOW_SAMPLING_DEFAULTS,
     IRODORI_NOTICE_MARKDOWN,
     IRODORI_OUTPUT_PATHS,
     IRODORI_QUANT_ABBREVIATIONS,
@@ -57,13 +60,16 @@ from irodori.distribution import (
     IRODORI_STORAGE_FORBIDDEN,
     IRODORI_STORAGE_REQUIREMENTS,
     IRODORI_V4_MODEL,
+    IRODORI_V41_MF_MODEL,
     IRODORI_V41_MODEL,
     IRODORI_V41_SHARED_ROLES,
     IRODORI_WEIGHT_DTYPES,
     IRODORI_WEIGHTS,
     PIPELINE,
     IrodoriSources,
+    irodori_borrowed_sources,
     irodori_calib_floor,
+    irodori_flow_parameterization,
     irodori_license_markdown,
     irodori_plan,
     irodori_references,
@@ -82,14 +88,36 @@ from karume.dist import (
     verify_dist,
 )
 
+#: One tensor per state_dict prefix a borrowed graph is built from (the same values for every
+#: model — a borrower's weights are the owner's; `assert_irodori_borrowed_weights`).
+_CHECKPOINT_TENSORS: Mapping[str, np.ndarray] = {
+    f"{prefix}w": np.full(2, index, dtype=np.float32)
+    for index, prefix in enumerate(
+        (
+            "pretrained_text_backbone.",
+            "text_encoder.",
+            "caption_encoder.",
+            "caption_norm.",
+            "speaker_encoder.",
+            "speaker_norm.",
+            "duration_predictor.",
+            "text_norm.",
+        )
+    )
+}
 
-def _fake_checkpoint(metadata: Mapping[str, str] | None = None) -> bytes:
-    """A stand-in for the upstream checkpoint (one tensor + `__metadata__`).
 
-    The assembly reads only `config_json` from `__metadata__`, so the contents can be anything,
-    but the file must be **a real safetensors** (the reader is the strict `safetensors` reader).
+def _fake_checkpoint(
+    metadata: Mapping[str, str] | None = None,
+    tensors: Mapping[str, np.ndarray] = _CHECKPOINT_TENSORS,
+) -> bytes:
+    """A stand-in for the upstream checkpoint (a few tensors + `__metadata__`).
+
+    The assembly reads `config_json` from `__metadata__` and — for a model that borrows — the
+    tensors under the borrowed roles' prefixes, so the file must be **a real safetensors** (the
+    reader is the strict `safetensors` reader).
     """
-    return save({"w": np.zeros(1, dtype=np.float32)}, metadata=dict(metadata or {}))
+    return save({"w": np.zeros(1, dtype=np.float32), **tensors}, metadata=dict(metadata or {}))
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -140,6 +168,19 @@ _IRODORI_CONFIG: Mapping[str, Any] = {
     "max_caption_len": 14,
     "ref_max_seconds": 8.0,
 }
+
+#: The same checkpoint config for the MeanFlow student (only the parameterization differs —
+#: ADR 0150).
+_IRODORI_MEANFLOW_CONFIG: Mapping[str, Any] = {
+    **_IRODORI_CONFIG,
+    "flow_parameterization": IRODORI_FLOW_MEANFLOW,
+}
+
+
+def _config_for(model: str) -> Mapping[str, Any]:
+    """The synthetic checkpoint config of a model (the MeanFlow student declares its flow)."""
+    return _IRODORI_MEANFLOW_CONFIG if model == IRODORI_V41_MF_MODEL else _IRODORI_CONFIG
+
 
 #: The numbers derived from the config above (one place, so the tests do not copy the formulas).
 _IRODORI_SPEAKER_ROWS = 101  # int(8.0 × 25) // 2 + 1
@@ -212,6 +253,26 @@ _IRODORI_CONFIG_KEYS = (
     "cfgGuidanceMode",
 )
 
+#: The field names of a MeanFlow `pipelineConfig` (ADR 0150 — the RF-only keys are absent and
+#: `flowParameterization` is added; the TS-side `parseIrodoriPipelineConfig` refuses an RF key
+#: next to `"meanflow"`).
+_IRODORI_MEANFLOW_CONFIG_KEYS = (
+    *(
+        key
+        for key in _IRODORI_CONFIG_KEYS
+        if key
+        not in (
+            "initScale",
+            "cfgMinT",
+            "cfgMaxT",
+            "cfgScales",
+            "speakerUncondMode",
+            "cfgGuidanceMode",
+        )
+    ),
+    "flowParameterization",
+)
+
 
 #: The shape of one graph (input names and shapes, outputs, symbol name). Outputs are a count
 #: (each `[1]`, default names) or a list of named `(name, shape)` (for `dit_context`, whose outputs
@@ -229,8 +290,9 @@ def _context_kv(blocks: int = _IRODORI_DIT_BLOCKS) -> list[tuple[str, list[Any]]
     ]
 
 
-def _irodori_specs() -> dict[str, _Spec]:
-    """The shapes of the 9 graphs — consistent with {@link _IRODORI_CONFIG}.
+def _irodori_specs(meanflow: bool = False) -> dict[str, _Spec]:
+    """The shapes of the 9 graphs — consistent with {@link _IRODORI_CONFIG} (`meanflow`: the
+    step also takes `delta_embed` — ADR 0150).
 
     Both the cases a check must refuse and the valid containers ({@link _irodori_input}) are built
     from here — with two sources of truth for the shapes, the day only one moved a check would
@@ -266,6 +328,11 @@ def _irodori_specs() -> dict[str, _Spec]:
             [
                 ("x_t", [1, "S", latent_dim]),
                 ("t_embed", [1, _IRODORI_CONFIG["timestep_embed_dim"]]),
+                *(
+                    [("delta_embed", [1, _IRODORI_CONFIG["timestep_embed_dim"]])]
+                    if meanflow
+                    else []
+                ),
                 ("mask", [1, 1, 1, f"S+{_IRODORI_MASK_TOTAL}"]),
                 *_context_kv(),
             ],
@@ -317,7 +384,7 @@ def _build_irodori_sources(
     root: Path,
     *,
     model: str = IRODORI_DEFAULT_MODEL,
-    config: Mapping[str, Any] = _IRODORI_CONFIG,
+    config: Mapping[str, Any] | None = None,
     specs: Mapping[str, _Spec] | None = None,
     codec_metadata: Mapping[str, Any] | None = _IRODORI_CODEC_METADATA,
     calib_provenance: Mapping[str, Any] | None = _IRODORI_CALIB_PROVENANCE,
@@ -330,7 +397,14 @@ def _build_irodori_sources(
     separate series with separate input material** (`dacvae-32dim`), so it goes into two
     directories apart from the Irodori body. One series per storage dtype (`IRODORI_DTYPE_ROLES`
     — only i4 covers the DiT's two roles, so its series has two directories as well).
+
+    A model that borrows published containers (`IRODORI_BORROWED`) reads them from the mirrors
+    under `<root>/models/` ({@link _mirrors_for} builds them); its config and DiT shape follow its
+    flow ({@link _config_for}).
     """
+    config = _config_for(model) if config is None else config
+    meanflow = irodori_flow_parameterization(config) == IRODORI_FLOW_MEANFLOW
+    shapes = _irodori_specs(meanflow)
     series_root = root / "outputs" / "series"
     suffix = {dtype: "" if dtype == "f32" else f"-{dtype}" for dtype in IRODORI_WEIGHT_DTYPES}
     by_dtype = {
@@ -346,6 +420,7 @@ def _build_irodori_sources(
         codec_model=root / "inputs" / "irodori" / IRODORI_CODEC_NAME,
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
+        borrowed=irodori_borrowed_sources(model, root / "models"),
     )
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         for role in roles:
@@ -356,7 +431,7 @@ def _build_irodori_sources(
             directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
             # The forms that name synthetic metadata (cases that test a check) stop at the
             # planning stage and never reach the assembly, so the old fake containers are fine.
-            payload = _irodori_input(dtype, role, (specs or {}).get(role))
+            payload = _irodori_input(dtype, role, (specs or {}).get(role) or shapes[role])
             write_component(series / directory / "model.krm", payload)
             # E2E fixtures that must not enter the distribution (the series really holds them).
             _write(series / directory / "io.case0.safetensors", b"io-fixture")
@@ -396,8 +471,11 @@ def _v4_mirror_for(model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     v4.1-small references v4-small's repository ({@link irodori_references}): this places
     v4-small's distribution where the driver reads referenced mirrors (`dist.DIST_ROOT`), built
     from the same synthetic series (so the shared roles are byte-identical), and returns the
-    revision source — the placeholder (no Hub in the tests). Nothing for v4-small.
+    revision source — the placeholder (no Hub in the tests). v4.1-small-mf borrows from both
+    repositories ({@link _mirrors_for}). Nothing for v4-small.
     """
+    if model == IRODORI_V41_MF_MODEL:
+        return _mirrors_for(tmp_path, monkeypatch)
     if model != IRODORI_V41_MODEL:
         return []
     import dist
@@ -408,6 +486,24 @@ def _v4_mirror_for(model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         IRODORI_V4_MODEL,
     )
     monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+    return [dist.ALLOW_PLACEHOLDER_FLAG]
+
+
+def _mirrors_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The two mirrors v4.1-small-mf borrows from, under `<tmp_path>/models/` (each assembled
+    from its own synthetic series and checkpoint, so the inputs the borrowing check reads exist
+    too), with both modules' `DIST_ROOT` pointed there; returns the placeholder flag."""
+    import dist
+    from irodori import distribution
+
+    for owner in (IRODORI_V4_MODEL, IRODORI_V41_MODEL):
+        _assemble_irodori(
+            _build_irodori_sources(tmp_path, model=owner),
+            tmp_path / "models" / irodori_repo_name(owner),
+            owner,
+        )
+    monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+    monkeypatch.setattr(distribution, "DIST_ROOT", tmp_path / "models")
     return [dist.ALLOW_PLACEHOLDER_FLAG]
 
 
@@ -1640,3 +1736,205 @@ class TestIrodoriCrossRepoReferences:
             path.startswith((f"{IRODORI_V41_MODEL}/duration/", f"{IRODORI_V41_MODEL}/dit/model.i4"))
             for path in verify_dist(out_dir)
         )
+
+
+class TestIrodoriMeanFlow:
+    """v4.1-small-mf — upstream's MeanFlow student of v4.1-small (ADR 0150): its own repository
+    that carries only the DiT pair and its tokenizer, borrows every other role from the repository
+    that physically holds it, and declares the MeanFlow sampler."""
+
+    #: The roles it borrows, spelled out per owner (not derived like the recipe's table).
+    _FROM_V4 = frozenset(
+        f"{role}_{dtype}"
+        for role in (
+            "backbone",
+            "text_proj",
+            "caption_proj",
+            "speaker",
+            "codec_decoder",
+            "codec_encoder",
+        )
+        for dtype in ("f32", "f16", "i8")
+    )
+    _FROM_V41 = frozenset(f"duration_{dtype}" for dtype in ("f32", "f16", "i8"))
+
+    @staticmethod
+    def _assemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict]:
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
+        flags = _v4_mirror_for(IRODORI_V41_MF_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                "irodori",
+                "--model",
+                IRODORI_V41_MF_MODEL,
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+                *flags,
+            ]
+        )
+        return out_dir, json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+    def test_it_borrows_every_non_dit_role_from_the_repository_holding_its_bytes(self) -> None:
+        borrowed = IRODORI_BORROWED[IRODORI_V41_MF_MODEL]
+
+        assert {role for role, owner in borrowed.items() if owner == IRODORI_V4_MODEL} == (
+            self._FROM_V4
+        )
+        assert {role for role, owner in borrowed.items() if owner == IRODORI_V41_MODEL} == (
+            self._FROM_V41
+        )
+        local = set(IRODORI_OUTPUT_PATHS) - set(borrowed)
+        assert local == {
+            *(
+                f"{role}_{dtype}"
+                for role in ("dit", "dit_context")
+                for dtype in IRODORI_WEIGHT_DTYPES
+            ),
+            "tokenizer",
+        }
+
+    def test_it_declares_one_reference_per_owner(self) -> None:
+        v4, v41 = irodori_references(IRODORI_V41_MF_MODEL)
+
+        assert (v4.repo, v4.model, set(v4.roles)) == (
+            "hdae/karume-irodori-v4-small",
+            IRODORI_V4_MODEL,
+            self._FROM_V4,
+        )
+        assert (v41.repo, v41.model, set(v41.roles)) == (
+            "hdae/karume-irodori-v4.1-small",
+            IRODORI_V41_MODEL,
+            self._FROM_V41,
+        )
+
+    def test_the_rf_models_borrow_nothing_published(self) -> None:
+        assert set(IRODORI_BORROWED) == {IRODORI_V41_MF_MODEL}
+
+    @staticmethod
+    def _owners(tmp_path: Path) -> None:
+        """The two mirrors and checkpoints the student borrows from (no driver involved)."""
+        for owner in (IRODORI_V4_MODEL, IRODORI_V41_MODEL):
+            _assemble_irodori(
+                _build_irodori_sources(tmp_path, model=owner),
+                tmp_path / "models" / irodori_repo_name(owner),
+                owner,
+            )
+
+    def test_the_pipeline_config_declares_the_meanflow_sampler_and_no_rf_knob(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
+        self._owners(tmp_path)
+
+        config = irodori_plan(sources, IRODORI_V41_MF_MODEL).pipeline_config
+
+        assert sorted(config) == sorted(_IRODORI_MEANFLOW_CONFIG_KEYS)
+        assert {key: config[key] for key in IRODORI_MEANFLOW_SAMPLING_DEFAULTS} == dict(
+            IRODORI_MEANFLOW_SAMPLING_DEFAULTS
+        )
+        assert config["flowParameterization"] == "meanflow"
+        assert config["steps"] == 4
+
+    def test_it_stores_only_the_dit_pair_and_the_tokenizer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_dir, manifest = self._assemble(tmp_path, monkeypatch)
+        model = manifest["models"][IRODORI_V41_MF_MODEL]
+        repos = {
+            f"{name}_{label}": {ref.get("repo") for ref in entry["container"]["parts"]}
+            for name, labels in model["weights"].items()
+            for label, entry in labels.items()
+        }
+
+        for role, holders in repos.items():
+            if role in self._FROM_V4:
+                assert holders == {"hdae/karume-irodori-v4-small"}, role
+            elif role in self._FROM_V41:
+                assert holders == {"hdae/karume-irodori-v4.1-small"}, role
+            else:
+                assert holders == {None}, role
+        assert "repo" not in model["assets"]["tokenizer"]
+        stored = {path.split("/")[1] for path in verify_dist(out_dir)}
+        assert stored == {"dit", "dit_context", "tokenizer"}
+        assert model["pipelineConfig"]["flowParameterization"] == "meanflow"
+        assert model["defaultQuant"] == "i8-a8"
+
+    def test_a_borrowed_role_whose_weights_differ_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUST: a retrained component is never borrowed silently (the published container is
+        not re-exported, so the inputs are compared)."""
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
+        _mirrors_for(tmp_path, monkeypatch)
+        retrained = {**_CHECKPOINT_TENSORS, "duration_predictor.w": np.full(2, 9, np.float32)}
+        _write(
+            sources.model / "model.safetensors",
+            _fake_checkpoint(
+                {"config_json": json.dumps(_IRODORI_MEANFLOW_CONFIG, ensure_ascii=False)},
+                retrained,
+            ),
+        )
+
+        with pytest.raises(DistError, match="checkpoint tensors differ"):
+            irodori_plan(sources, IRODORI_V41_MF_MODEL)
+
+    def test_a_borrowed_role_under_another_config_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
+        _mirrors_for(tmp_path, monkeypatch)
+        _write(
+            tmp_path / "inputs" / "irodori" / IRODORI_V4_MODEL / "model.safetensors",
+            _fake_checkpoint(
+                {"config_json": json.dumps({**_IRODORI_CONFIG, "max_text_len": 11})},
+            ),
+        )
+
+        with pytest.raises(DistError, match="configs differ"):
+            irodori_plan(sources, IRODORI_V41_MF_MODEL)
+
+    def test_a_missing_owner_checkpoint_fails(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
+        self._owners(tmp_path)
+        (tmp_path / "inputs" / "irodori" / IRODORI_V41_MODEL / "model.safetensors").unlink()
+
+        with pytest.raises(DistError, match="checkpoint is needed"):
+            irodori_plan(sources, IRODORI_V41_MF_MODEL)
+
+    def test_a_meanflow_step_without_the_interval_input_is_refused(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(
+            tmp_path,
+            model=IRODORI_V41_MF_MODEL,
+            specs={"dit": _irodori_specs(meanflow=False)["dit"]},
+        )
+        self._owners(tmp_path)
+
+        with pytest.raises(DistError, match="not the order derived"):
+            irodori_plan(sources, IRODORI_V41_MF_MODEL)
+
+    def test_an_rf_step_with_the_interval_input_is_refused(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(
+            tmp_path, specs={"dit": _irodori_specs(meanflow=True)["dit"]}
+        )
+
+        with pytest.raises(DistError, match="not the order derived"):
+            irodori_plan(sources, IRODORI_DEFAULT_MODEL)
+
+    @pytest.mark.parametrize(
+        ("raw", "flow"),
+        [({}, "rf_velocity"), ({"flow_parameterization": " MeanFlow "}, "meanflow")],
+    )
+    def test_the_flow_follows_upstreams_normalization(self, raw, flow) -> None:
+        assert irodori_flow_parameterization(raw) == flow
+
+    @pytest.mark.parametrize("value", ["consistency", 1])
+    def test_an_unknown_flow_is_refused(self, value) -> None:
+        with pytest.raises(DistError, match="flow_parameterization"):
+            irodori_flow_parameterization({"flow_parameterization": value})

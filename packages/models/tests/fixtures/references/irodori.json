@@ -2,6 +2,12 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "meanflow-no-ref": {
+      "node-nvidia-geforce-rtx-3080-ti": "07532291b5a5d43d852e11ac030d7541e8149d1b94b5b2a1d77a01b36eeac28d"
+    },
+    "meanflow-voice-clone": {
+      "node-nvidia-geforce-rtx-3080-ti": "f91af254b5cdfb02d9b3df5f81928bc4155be4ac84d08756a6053b7d59c9721c"
+    },
     "no-ref": {
       "deno-intel-graphics-bmg-g21": "35a643d355ec13c200bfd51a69a6061c12583bcfc252f2bf9f806dbe8abbe367",
       "deno-nvidia-geforce-rtx-3080-ti": "5cc43d7fe9ae0a8733e0b06088948e33f947cdabe0934fea3988622530da3e8d",

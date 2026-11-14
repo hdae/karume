@@ -25,7 +25,9 @@
  *    K / V into resident tensors, and the Session is closed before `dit` opens. DECIDED: ADR 0114)
  * 7. `dit` runs 40 to 100 forwards in one session (it takes the K / V of 6' as resident inputs. The
  *    CFG combination and Euler are two small GPU-resident graphs — the whole loop is one batch, and
- *    the only trip to the host is the final latent, once) → latent
+ *    the only trip to the host is the final latent, once) → latent. A MeanFlow distribution
+ *    (`flowParameterization: "meanflow"` — ADR 0150) runs one conditional forward per step instead
+ *    (4 by default), each also taking the embedding of the step's interval, and no CFG
  * 8. Host: decide the tail-trim position **on z** (`host/trim.ts`)
  * 9. `codec_decoder` runs over the tiles in one session (`codec.ts`) → full-length waveform
  * 10. Host: cut at sample granularity to the shorter of the requested seconds / the tail trim
@@ -67,7 +69,8 @@
  * ## MUST: uncond is only "cond's state + an all-False mask over the segment" (ADR 0047 decision 1)
  *
  * A distribution whose `speakerUncondMode` / `cfgGuidanceMode` is unsupported is **rejected by
- * `config.ts` at parse time**, so there is no branch here.
+ * `config.ts` at parse time**, so there is no branch here. A MeanFlow distribution has no uncond at
+ * all (its guidance was distilled into the weights), and `config.ts` refuses CFG keys next to it.
  *
  * ## MUST: numerical correctness is not guaranteed here
  *
@@ -118,6 +121,7 @@ import {
 } from "./conditioning.ts";
 import {
   type DitLoop,
+  type DitSampler,
   type LatentStage,
   runDitLoopOnHost,
   runDitLoopResident,
@@ -157,7 +161,7 @@ import {
   sequenceLengthFromSeconds,
   type SequencePlan,
 } from "./host/round.ts";
-import { tSchedule } from "./host/sampler.ts";
+import { meanflowIntervals, meanflowSchedule, tSchedule } from "./host/sampler.ts";
 import { timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 import { settleAbort } from "../concurrency/abort.ts";
@@ -192,7 +196,7 @@ export type GeneratedLatent = {
    * draws a random number.
    */
   readonly seed?: number;
-  /** How many times `dit` ran (cond + the CFG uncond passes). */
+  /** How many times `dit` ran (cond + the CFG uncond passes; one per step for MeanFlow). */
   readonly forwards: number;
 };
 
@@ -211,7 +215,7 @@ export type GeneratedAudio = {
   readonly frames: number;
   /** The random seed actually used. `undefined` for a generation given `initialNoise`. */
   readonly seed?: number;
-  /** How many times `dit` ran (cond + the CFG uncond passes). */
+  /** How many times `dit` ran (cond + the CFG uncond passes; one per step for MeanFlow). */
   readonly forwards: number;
 };
 
@@ -651,6 +655,56 @@ export const resolveSplitRareTokens = (
   return requested;
 };
 
+/**
+ * The t sequence and the sampler of one generation's DiT loop, from the declared flow
+ * parameterization (ADR 0150): for `"meanflow"` upstream's f32 `linspace(1, 0)` and the interval of
+ * each step, with no uncond variant at all (the guidance was distilled into the weights); for RF the
+ * closed-form schedule, the CFG window and one uncond variant per condition with CFG enabled.
+ *
+ * NOTE: `export` is for the GPU-free test of the loop material (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
+ */
+export const ditSampler = (
+  config: IrodoriPipelineConfig,
+  frames: number,
+  used: SegmentLengths,
+  caps: SegmentLengths,
+  maskShape: readonly number[],
+): { readonly schedule: Float32Array<ArrayBuffer>; readonly sampler: DitSampler } => {
+  if (config.flowParameterization === "meanflow") {
+    const schedule = meanflowSchedule(config.steps);
+    return { schedule, sampler: { kind: "meanflow", intervals: meanflowIntervals(schedule) } };
+  }
+  // Conditions with CFG enabled (upstream `has_*_cfg`): the strength is positive and the condition
+  // is actually present (text always has at least 1 token — packIds rejects an empty string). The
+  // uncond masks are not rebuilt per step; they are built once here.
+  const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER.filter(
+    (segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0,
+  ).map((segment) => ({
+    segment,
+    // MUST: the strength is held as f32 — the host path's `combineCfg` feeds it into the multiply
+    // as f64, while the resident path rounds it to f32 before passing it to the GPU, so a value
+    // that is not exact in f32 splits the 2 paths by 1 to 2 ulp. `parseCfgScales` accepts only
+    // f32-exact values, so on real input this is the identity, but rounding here makes "the host
+    // side sees f32" readable locally (the numeric source of truth is `host/sampler.ts`).
+    scale: Math.fround(config.cfgScales[segment]),
+    mask: {
+      dtype: "bool",
+      shape: [...maskShape],
+      data: buildDitMask(frames, used, caps, segment),
+    } satisfies Tensor,
+  }));
+  return {
+    schedule: tSchedule(config.steps, config.initScale),
+    sampler: {
+      kind: "rf_velocity",
+      cfgMinT: config.cfgMinT,
+      cfgMaxT: config.cfgMaxT,
+      uncondVariants,
+    },
+  };
+};
+
 /** Builds a latent from one text (+ caption / reference speaker). */
 const generateLatent = async (
   state: IrodoriState,
@@ -810,25 +864,7 @@ const generateLatent = async (
     shape: maskShape,
     data: buildDitMask(frames, used, caps),
   };
-  // Conditions with CFG enabled (upstream `has_*_cfg`): the strength is positive and the condition
-  // is actually present (text always has at least 1 token — packIds rejects an empty string). The
-  // uncond masks are not rebuilt per step; they are built once here.
-  const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER.filter(
-    (segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0,
-  ).map((segment) => ({
-    segment,
-    // MUST: the strength is held as f32 — the host path's `combineCfg` feeds it into the multiply
-    // as f64, while the resident path rounds it to f32 before passing it to the GPU, so a value
-    // that is not exact in f32 splits the 2 paths by 1 to 2 ulp. `parseCfgScales` accepts only
-    // f32-exact values, so on real input this is the identity, but rounding here makes "the host
-    // side sees f32" readable locally (the numeric source of truth is `host/sampler.ts`).
-    scale: Math.fround(config.cfgScales[segment]),
-    mask: {
-      dtype: "bool",
-      shape: maskShape,
-      data: buildDitMask(frames, used, caps, segment),
-    } satisfies Tensor,
-  }));
+  const { schedule, sampler } = ditSampler(config, frames, used, caps, maskShape);
 
   // --- (6') context K/V projection + (7) Euler + CFG independent (both paths in dit-loop.ts) ---
   const noiseLength = frames * config.latentDim;
@@ -851,11 +887,11 @@ const generateLatent = async (
   const loop: DitLoop = {
     frames,
     initial,
-    schedule: tSchedule(config.steps, config.initScale),
+    schedule,
     frequencies: timestepFrequencies(config.timestepEmbedDim),
     conditions,
     condMask,
-    uncondVariants,
+    sampler,
   };
   // MUST: a device with timing enabled cannot open a batch (ADR 0021 — unresolved timestamps pile
   // up for the whole span). To keep the per-op GPU time hook (`onRunDiagnostics` + `gpuTiming`),
@@ -947,7 +983,8 @@ const generateAudio = async (
 };
 
 /**
- * The text → speech pipeline of Irodori-TTS v4.
+ * The text → speech pipeline of Irodori-TTS v4 — the rectified-flow models (v4 / v4.1 Small) and
+ * their MeanFlow student (v4.1 Small MF), whose sampler the distribution declares (ADR 0150).
  *
  * Construction has only two entry points, {@link Pipeline.fromPretrained} (fetch from HF)
  * and {@link Pipeline.fromAssets} (already fetched bytes) — the constructor is private so

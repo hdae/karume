@@ -428,6 +428,13 @@ const IRODORI_DIT_A8 = { variant: 245, reference: 0 } as const;
  * run per generation).
  */
 const IRODORI_DIT_CONTEXT_A8 = { variant: 72, reference: 0 } as const;
+/**
+ * The irodori v4.1-small-mf DiT (the MeanFlow student — ADR 0150): the 245 of the RF `dit` plus the
+ * 3 bias-free linears of `delta_cond_module` (k ∈ {512, 1280} — i8 × k % 4 == 0), counted from the
+ * graph of the local mirror's `dit` (`linear` nodes of the i8 and i4 containers, 2026-11-14). Its
+ * `dit_context` is the RF one's shape (72).
+ */
+const IRODORI_MEANFLOW_DIT_A8 = { variant: 248, reference: 0 } as const;
 /** anima DiT: 454 linears (the 5 official variants and the 2 additional ones share the graph). */
 const ANIMA_DIT_LINEARS = { variant: 454, reference: 0 } as const;
 const ANIMA_MODELS = [
@@ -857,6 +864,15 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     session: { linearCompute: "a8" },
     census: {
       dit: { step: { linearCompute: IRODORI_DIT_A8 } },
+      "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
+    },
+  },
+  {
+    family: "irodori",
+    models: ["v4.1-small-mf"],
+    session: { linearCompute: "a8" },
+    census: {
+      dit: { step: { linearCompute: IRODORI_MEANFLOW_DIT_A8 } },
       "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
     },
   },

@@ -27,6 +27,18 @@
  * branching on them they are **not accepted** (the type can express only "mask" / "independent"
  * too).
  *
+ * ## MUST: the sampler follows the declared flow parameterization (ADR 0150)
+ *
+ * `flowParameterization` names upstream's parameterization, spelled as upstream spells it:
+ * `"rf_velocity"` (the rectified-flow Euler sampler with CFG — the v4 / v4.1 distributions, whose
+ * manifests carry no such key, so **absent means `"rf_velocity"`**) or `"meanflow"` (the MeanFlow
+ * student: one conditional forward per step with the interval embedding, no CFG). For
+ * `"meanflow"` the RF-only keys (`initScale`, `cfgMinT`, `cfgMaxT`, `cfgScales`,
+ * `speakerUncondMode`, `cfgGuidanceMode`) **must be absent** — upstream ignores them for such a
+ * checkpoint, and karume does not accept a value it would ignore. The parsed type is a
+ * discriminated union on `flowParameterization`, so the CFG fields cannot be read on the MeanFlow
+ * branch.
+ *
  * NOTE: the table of public distribution repositories ({@link SOURCES}) lives here too. It
  * is not one of the "model-specific numbers" the MUST above forbids but belongs to "which manifest
  * to fetch", a value a distribution cannot hold in the first place (ADR 0073).
@@ -88,7 +100,15 @@ export const SOURCES = {
   },
 } as const satisfies Record<string, HubRepoRef>;
 
-const ROOT_KEYS: readonly string[] = [
+/** The flow parameterizations a distribution can declare (upstream's spellings — ADR 0150). */
+export const IRODORI_FLOW_RF = "rf_velocity";
+export const IRODORI_FLOW_MEANFLOW = "meanflow";
+type IrodoriFlow = typeof IRODORI_FLOW_RF | typeof IRODORI_FLOW_MEANFLOW;
+
+const FLOW_KEY = "flowParameterization";
+
+/** The keys every declaration has, whatever its flow parameterization. */
+const COMMON_KEYS: readonly string[] = [
   "maxTextLen",
   "maxCaptionLen",
   "speakerRows",
@@ -104,12 +124,19 @@ const ROOT_KEYS: readonly string[] = [
   "captionDim",
   "timestepEmbedDim",
   "steps",
+  "minSeconds",
+  "maxSeconds",
+];
+
+/**
+ * The keys only the RF sampler reads (a MeanFlow declaration that carries one fails —
+ * ADR 0150).
+ */
+const RF_KEYS: readonly string[] = [
   "initScale",
   "cfgMinT",
   "cfgMaxT",
   "cfgScales",
-  "minSeconds",
-  "maxSeconds",
   "speakerUncondMode",
   "cfgGuidanceMode",
 ];
@@ -128,7 +155,8 @@ type IrodoriCfgScales = {
   readonly caption: number;
 };
 
-export type IrodoriPipelineConfig = {
+/** The fields every declaration has (model-specific numbers, step count and seconds clamp). */
+type IrodoriCommonConfig = {
   /**
    * Maximum text token length (BOS included). Also the declared length of `text_state` of
    * `dit_context`.
@@ -168,19 +196,28 @@ export type IrodoriPipelineConfig = {
   readonly speakerDim: number;
   readonly textDim: number;
   readonly captionDim: number;
-  /** Width of `t_embed` (first half cos / second half sin). */
+  /**
+   * Width of `t_embed` (first half cos / second half sin) — and of the MeanFlow step's
+   * `delta_embed`, the same embedding of the interval length.
+   */
   readonly timestepEmbedDim: number;
-  /** Number of Euler steps. */
+  /** Number of sampler steps (Euler steps for RF, MeanFlow steps for MeanFlow). */
   readonly steps: number;
+  /** Seconds that decide the clamp range of S. */
+  readonly minSeconds: number;
+  readonly maxSeconds: number;
+};
+
+/** The rectified-flow Euler sampler with independent CFG (v4 / v4.1). */
+type IrodoriRfSampler = {
+  /** Absent in the manifest means this value (the published v4 / v4.1 manifests carry none). */
+  readonly flowParameterization: typeof IRODORI_FLOW_RF;
   /** Initial scale of the t schedule (`t_i = initScale·(1 − i/steps)`). */
   readonly initScale: number;
   /** Lower / upper bound of the t where CFG applies (both ends included). */
   readonly cfgMinT: number;
   readonly cfgMaxT: number;
   readonly cfgScales: IrodoriCfgScales;
-  /** Seconds that decide the clamp range of S. */
-  readonly minSeconds: number;
-  readonly maxSeconds: number;
   /**
    * The only value ADR 0047 accepts. **Held to check the distribution's declaration, not to branch
    * on**.
@@ -188,6 +225,22 @@ export type IrodoriPipelineConfig = {
   readonly speakerUncondMode: typeof SPEAKER_UNCOND_MODE;
   readonly cfgGuidanceMode: typeof CFG_GUIDANCE_MODE;
 };
+
+/**
+ * The MeanFlow sampler (ADR 0150): t runs from 1 to 0 in `steps` equal intervals of upstream's
+ * f32 `linspace`, each step one conditional forward that also takes the interval embedding. It
+ * has no knob of its own (no CFG, no initial scale).
+ */
+type IrodoriMeanFlowSampler = {
+  readonly flowParameterization: typeof IRODORI_FLOW_MEANFLOW;
+};
+
+/** A parsed RF declaration (the branch whose CFG fields can be read). */
+export type IrodoriRfPipelineConfig = IrodoriCommonConfig & IrodoriRfSampler;
+/** A parsed MeanFlow declaration. */
+export type IrodoriMeanFlowPipelineConfig = IrodoriCommonConfig & IrodoriMeanFlowSampler;
+/** A parsed `pipelineConfig` — a discriminated union on `flowParameterization` (ADR 0150). */
+export type IrodoriPipelineConfig = IrodoriRfPipelineConfig | IrodoriMeanFlowPipelineConfig;
 
 const isPositiveFinite = (value: number): boolean => Number.isFinite(value) && value > 0;
 const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) && value >= 0;
@@ -235,12 +288,86 @@ const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   };
 };
 
+/**
+ * Reads the declared flow parameterization (absent = {@link IRODORI_FLOW_RF}; anything else than
+ * the two exact spellings fails).
+ */
+const readFlow = (raw: Readonly<Record<string, unknown>>, where: string): IrodoriFlow => {
+  if (!Object.hasOwn(raw, FLOW_KEY)) return IRODORI_FLOW_RF;
+  const value = raw[FLOW_KEY];
+  if (value === IRODORI_FLOW_RF || value === IRODORI_FLOW_MEANFLOW) return value;
+  throw new Error(
+    `${where}.${FLOW_KEY}: '${String(value)}' is not '${IRODORI_FLOW_RF}' or '${IRODORI_FLOW_MEANFLOW}'`,
+  );
+};
+
+/** Reads the RF sampler's knobs (the declaration has no `flowParameterization`, or `"rf_velocity"`). */
+const parseRfSampler = (
+  raw: Readonly<Record<string, unknown>>,
+  where: string,
+): IrodoriRfSampler => {
+  const sampler: IrodoriRfSampler = {
+    flowParameterization: IRODORI_FLOW_RF,
+    initScale: readNumber(
+      raw,
+      "initScale",
+      where,
+      isPositiveF32Finite,
+      "not a positive finite number, or not finite in f32",
+    ),
+    cfgMinT: readNumber(raw, "cfgMinT", where, Number.isFinite, "not a finite number"),
+    cfgMaxT: readNumber(raw, "cfgMaxT", where, Number.isFinite, "not a finite number"),
+    cfgScales: parseCfgScales(Object.hasOwn(raw, "cfgScales") ? raw["cfgScales"] : undefined),
+    speakerUncondMode: readOnly(
+      raw,
+      "speakerUncondMode",
+      where,
+      SPEAKER_UNCOND_MODE,
+      "uncond is expressed as 'the cond state + every mask of that segment False' (ADR 0047 decision 1)",
+    ),
+    cfgGuidanceMode: readOnly(
+      raw,
+      "cfgGuidanceMode",
+      where,
+      CFG_GUIDANCE_MODE,
+      "the CFG combination is limited to the form `v_cond + Σ s_k(v_cond − v_k)` (ADR 0047 decision 1)",
+    ),
+  };
+  // A declaration with an empty / reversed interval stays silent as "CFG never applies" (only the
+  // forward count goes down).
+  if (sampler.cfgMinT > sampler.cfgMaxT) {
+    throw new Error(
+      `${where}: cfgMinT ${sampler.cfgMinT} is greater than cfgMaxT ${sampler.cfgMaxT} (CFG would never apply)`,
+    );
+  }
+  return sampler;
+};
+
 /** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseIrodoriPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): IrodoriPipelineConfig => {
   const where = "pipelineConfig";
-  assertAllowedKeys(raw, ROOT_KEYS, where);
+  const flow = readFlow(raw, where);
+  if (flow === IRODORI_FLOW_MEANFLOW) {
+    // MUST: a value MeanFlow would ignore is refused by name, before the generic unknown-key check
+    // (whose message would not say why).
+    const ignored = RF_KEYS.filter((key) => Object.hasOwn(raw, key));
+    if (ignored.length > 0) {
+      throw new Error(
+        `${where}: a '${IRODORI_FLOW_MEANFLOW}' distribution declares the RF-only key(s)` +
+          ` ${ignored.map((key) => `'${key}'`).join(", ")} — the MeanFlow sampler has no CFG and no` +
+          " initial scale, so the value would be ignored (ADR 0150)",
+      );
+    }
+  }
+  assertAllowedKeys(
+    raw,
+    flow === IRODORI_FLOW_MEANFLOW
+      ? [...COMMON_KEYS, FLOW_KEY]
+      : [...COMMON_KEYS, ...RF_KEYS, FLOW_KEY],
+    where,
+  );
   const positive = "not a positive integer";
   // A field that loses one entry to a leading token (BOS for text / caption, the mean token for
   // speaker) needs at least 2 so that the body keeps a budget. Accepting 1 gives text a body of 0
@@ -248,7 +375,7 @@ export const parseIrodoriPipelineConfig = (
   // message such as "maximum reference-audio samples 0" → "the waveform is empty" from
   // `integratedLoudness`.
   const withLeadingToken = (value: number): boolean => Number.isInteger(value) && value >= 2;
-  const config: IrodoriPipelineConfig = {
+  const common: IrodoriCommonConfig = {
     maxTextLen: readNumber(raw, "maxTextLen", where, withLeadingToken, "not an integer >= 2"),
     maxCaptionLen: readNumber(raw, "maxCaptionLen", where, withLeadingToken, "not an integer >= 2"),
     speakerRows: readNumber(raw, "speakerRows", where, withLeadingToken, "not an integer >= 2"),
@@ -271,16 +398,6 @@ export const parseIrodoriPipelineConfig = (
       "not a positive even number",
     ),
     steps: readNumber(raw, "steps", where, isPositiveInteger, positive),
-    initScale: readNumber(
-      raw,
-      "initScale",
-      where,
-      isPositiveF32Finite,
-      "not a positive finite number, or not finite in f32",
-    ),
-    cfgMinT: readNumber(raw, "cfgMinT", where, Number.isFinite, "not a finite number"),
-    cfgMaxT: readNumber(raw, "cfgMaxT", where, Number.isFinite, "not a finite number"),
-    cfgScales: parseCfgScales(Object.hasOwn(raw, "cfgScales") ? raw["cfgScales"] : undefined),
     minSeconds: readNumber(
       raw,
       "minSeconds",
@@ -295,28 +412,11 @@ export const parseIrodoriPipelineConfig = (
       isPositiveFinite,
       "not a positive finite number",
     ),
-    speakerUncondMode: readOnly(
-      raw,
-      "speakerUncondMode",
-      where,
-      SPEAKER_UNCOND_MODE,
-      "uncond is expressed as 'the cond state + every mask of that segment False' (ADR 0047 decision 1)",
-    ),
-    cfgGuidanceMode: readOnly(
-      raw,
-      "cfgGuidanceMode",
-      where,
-      CFG_GUIDANCE_MODE,
-      "the CFG combination is limited to the form `v_cond + Σ s_k(v_cond − v_k)` (ADR 0047 decision 1)",
-    ),
   };
-  // A declaration with an empty / reversed interval stays silent as "CFG never applies" (only the
-  // forward count goes down).
-  if (config.cfgMinT > config.cfgMaxT) {
-    throw new Error(
-      `${where}: cfgMinT ${config.cfgMinT} is greater than cfgMaxT ${config.cfgMaxT} (CFG would never apply)`,
-    );
-  }
+  const config: IrodoriPipelineConfig =
+    flow === IRODORI_FLOW_MEANFLOW
+      ? { ...common, flowParameterization: IRODORI_FLOW_MEANFLOW }
+      : { ...common, ...parseRfSampler(raw, where) };
   if (config.minSeconds > config.maxSeconds) {
     throw new Error(
       `${where}: minSeconds ${config.minSeconds} is greater than maxSeconds ${config.maxSeconds}`,

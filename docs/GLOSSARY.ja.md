@@ -208,6 +208,8 @@
 | soft tokens △ | soft token | 画像が占めるプロンプトの行（id 258880）。embedder のベクトルがその埋め込みを上書きする | — | ADR 0144 |
 | f16 full-layer KV | f16 KV | 全層の KV を f16 で詰めて持つ格納（`fullStateStorage`）。丸めは追記の 1 か所だけ | — | ADR 0143 |
 | capacity | capacity | 1 会話が確保する KV cache の論理位置の数（使える最大の文脈長） | — | ADR 0066 |
+| MeanFlow △ | MeanFlow | Irodori の flow のパラメータ化の 1 つ。瞬間の速度ではなく区間の平均速度を学習し、少ない大きなステップで生成する。上流の v4.1 Small MF は v4.1 Small から蒸留した生徒モデルで、DiT が区間長の埋め込み（`delta_embed`）も受け取り、1 ステップ 1 回の条件つき forward を 4 ステップ回す。実行時の CFG は無い | — | ADR 0150 |
+| interval embedding △ | 区間の埋め込み | MeanFlow の 1 ステップの区間長 `t − t_next` を t と同じ関数で埋め込んだもの（`dit` の入力 `delta_embed`） | — | ADR 0150 |
 | rare-token split △ | 稀なトークンの分割 | Irodori のテキストを、v4 Small のトークナイザが持つ稀な長いトークンを使わずに符号化すること（スコアを -1e9 にした別の Unigram と強制分割）。キャプションには掛けない。トークナイザ資産の `rareTokenSplit` に上流の結果を持つ | — | ADR 0149 |
 | chunkLength | chunkLength | prefill 1 回に流す行数 | — | ADR 0066 決定 4 |
 | maxChunkLength | maxChunkLength | `chunkLength` の上限（配布形の宣言） | trace 上限 | ADR 0066 |

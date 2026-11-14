@@ -168,6 +168,14 @@ measurements in `docs/research/`.
   misread, falling back to shorter pieces. Omitted, it is on when the distribution's tokenizer asset carries the split
   table and off when it does not; `true` without the table is a `ModelInputError`; `false` always gives the unsplit
   encoding. The tokenizer asset reads an optional `rareTokenSplit` key (ADR 0149).
+- `@karume/models` (Irodori): the MeanFlow sampler, for upstream's MeanFlow student Irodori-TTS v4.1 Small MF
+  (ADR 0150). `pipelineConfig` takes an optional `flowParameterization` (`"rf_velocity"`, the meaning when it is
+  absent — the published manifests — or `"meanflow"`); a `"meanflow"` declaration must not carry the RF-only keys
+  (`initScale`, `cfgMinT`, `cfgMaxT`, `cfgScales`, `speakerUncondMode`, `cfgGuidanceMode`), which is a parse error.
+  Its loop runs one conditional `dit` forward per step over the f32 values of upstream's `linspace(1, 0)` with the
+  embedding of the step's interval as the extra `dit` input `delta_embed`, and no classifier-free guidance; `forwards`
+  is then the step count (4 by default). The distribution (`karume-irodori-v4.1-small-mf`) is not published yet and
+  has no `SOURCES` entry.
 
 ### Changed
 

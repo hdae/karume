@@ -474,6 +474,9 @@ for (const series of SERIES) {
       // the dist regeneration have not drifted apart).
       const meta = readMeta();
       const config = parseIrodoriPipelineConfig(modelEntry(readManifest()).pipelineConfig);
+      if (config.flowParameterization !== "rf_velocity") {
+        throw new Error(`${series.name}: the distribution does not declare the RF sampler`);
+      }
       const drifted: string[] = [];
       const check = (key: string, expected: number, actual: number): void => {
         if (expected !== actual) drifted.push(`${key} golden ${expected} → distribution ${actual}`);

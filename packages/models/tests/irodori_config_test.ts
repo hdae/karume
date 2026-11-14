@@ -17,6 +17,8 @@ import { assertEquals, assertThrows } from "@std/assert";
 import {
   IRODORI_PIPELINE_MAJOR,
   IRODORI_PIPELINE_NAME,
+  type IrodoriPipelineConfig,
+  type IrodoriRfPipelineConfig,
   parseIrodoriPipelineConfig,
 } from "../src/irodori/config.ts";
 
@@ -60,6 +62,16 @@ const without = (key: string): Record<string, unknown> => {
   return rest;
 };
 
+/**
+ * Narrows a parsed declaration to the RF branch (the shape of `BASE`, which declares no
+ * `flowParameterization` — absent means RF, ADR 0150) and fails if it is not.
+ */
+const assertRf: (config: IrodoriPipelineConfig) => asserts config is IrodoriRfPipelineConfig = (
+  config,
+) => {
+  assertEquals(config.flowParameterization, "rf_velocity");
+};
+
 test("the contract name and major are fixed by this implementation (what the manifest's spelling is checked against)", () => {
   assertEquals(IRODORI_PIPELINE_NAME, "irodori");
   assertEquals(IRODORI_PIPELINE_MAJOR, 1);
@@ -67,6 +79,7 @@ test("the contract name and major are fixed by this implementation (what the man
 
 test("parseIrodoriPipelineConfig: reads the real weights' values completely", () => {
   const config = parseIrodoriPipelineConfig(BASE);
+  assertRf(config);
   assertEquals(config.maxTextLen, 256);
   assertEquals(config.speakerRows, 751);
   assertEquals(config.cfgScales, { text: 3, speaker: 5, caption: 3 });
@@ -159,7 +172,9 @@ test("parseIrodoriPipelineConfig: initScale accepts only values that stay finite
   // f32's maximum itself is finite, so it passes (the boundary is "whether the rounded result is
   // finite").
   const largest = 3.4028234663852886e38;
-  assertEquals(parseIrodoriPipelineConfig(withPatch({ initScale: largest })).initScale, largest);
+  const config = parseIrodoriPipelineConfig(withPatch({ initScale: largest }));
+  assertRf(config);
+  assertEquals(config.initScale, largest);
 });
 
 test("parseIrodoriPipelineConfig: fails when the CFG window is reversed (CFG would vanish silently)", () => {
@@ -240,6 +255,7 @@ test("parseIrodoriPipelineConfig: cfgScales 0 is a valid value (no CFG for that 
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 3, speaker: 0, caption: 0 } }),
   );
+  assertRf(config);
   assertEquals(config.cfgScales.speaker, 0);
 });
 
@@ -257,5 +273,6 @@ test("parseIrodoriPipelineConfig: a cfgScale not exactly representable in f32 fa
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 1.25, speaker: 5, caption: 3 } }),
   );
+  assertRf(config);
   assertEquals(config.cfgScales.text, 1.25);
 });

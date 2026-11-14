@@ -267,7 +267,7 @@ const assetsWith = async (patch: Patch = {}): Promise<Record<string, Uint8Array<
 
 const FILE = { size: 16, sha256: "a".repeat(64) };
 
-const manifestText = (): string => {
+const manifestText = (pipelineConfig: Readonly<Record<string, unknown>> = CONFIG): string => {
   let weights: Record<string, unknown> = {};
   let mapping: Record<string, string> = {};
   for (const name of COMPONENTS) {
@@ -285,15 +285,18 @@ const manifestText = (): string => {
         assets: { tokenizer: { ...FILE, path: "tokenizer.json" } },
         quants: { f32: { weights: mapping, session: {} } },
         defaultQuant: "f32",
-        pipelineConfig: CONFIG,
+        pipelineConfig,
       },
     },
   });
 };
 
-const build = async (patch: Patch = {}): Promise<unknown> =>
+const build = async (
+  patch: Patch = {},
+  pipelineConfig: Readonly<Record<string, unknown>> = CONFIG,
+): Promise<unknown> =>
   await Pipeline.fromAssets({
-    manifest: parseManifest(manifestText()),
+    manifest: parseManifest(manifestText(pipelineConfig)),
     assets: await assetsWith(patch),
   });
 
@@ -763,5 +766,71 @@ test("admitIrodori: an explicit f16 the shared GPU does not support fails by nam
       ),
     Error,
     "shader-f16",
+  );
+});
+
+// --- MeanFlow (ADR 0150): the step takes the interval embedding too ----------------------
+
+/** The MeanFlow declaration of the same model numbers (no RF knob — the real v4.1-small-mf's). */
+const MEANFLOW_CONFIG: Readonly<Record<string, unknown>> = (() => {
+  const {
+    initScale: _initScale,
+    cfgMinT: _cfgMinT,
+    cfgMaxT: _cfgMaxT,
+    cfgScales: _cfgScales,
+    speakerUncondMode: _speakerUncondMode,
+    cfgGuidanceMode: _cfgGuidanceMode,
+    ...common
+  } = CONFIG;
+  return { ...common, flowParameterization: "meanflow", steps: 4 };
+})();
+
+/** The MeanFlow `dit`: the RF step's inputs with `delta_embed` (the width of `t_embed`) after `t_embed`. */
+const meanflowDit = (width: number = CONFIG.timestepEmbedDim): TensorlessGraphSpec => {
+  const dit = graphSpecs().dit;
+  return {
+    ...dit,
+    inputs: dit.inputs.flatMap((input) =>
+      input.name === "t_embed" ? [input, { name: "delta_embed", shape: [1, width] }] : [input],
+    ),
+  };
+};
+
+test("admitIrodori: a MeanFlow dit with delta_embed proceeds to the asset stage", async () => {
+  await assertRejects(
+    () => build({ dit: meanflowDit() }, MEANFLOW_CONFIG),
+    Error,
+    "irodori: asset 'tokenizer' is missing",
+  );
+});
+
+test("admitIrodori: a MeanFlow distribution whose dit lacks delta_embed fails naming the input", async () => {
+  const error = await assertRejects(() => build({}, MEANFLOW_CONFIG), Error, "delta_embed");
+  assertStringIncludes(error.message, "irodori");
+});
+
+test("admitIrodori: an RF distribution whose dit takes delta_embed fails (it would never be fed)", async () => {
+  const error = await assertRejects(
+    () => build({ dit: meanflowDit() }),
+    Error,
+    "the dit inputs do not match {x_t, t_embed, mask} ∪ the dit_context outputs",
+  );
+  assertStringIncludes(error.message, "only in dit: [delta_embed]");
+});
+
+test("admitIrodori: a MeanFlow delta_embed of another width fails naming timestepEmbedDim", async () => {
+  const error = await assertRejects(
+    () => build({ dit: meanflowDit(CONFIG.timestepEmbedDim + 2) }, MEANFLOW_CONFIG),
+    Error,
+    "timestepEmbedDim",
+  );
+  assertStringIncludes(error.message, "delta_embed");
+});
+
+test("admitIrodori: a MeanFlow declaration with a CFG knob fails before the graph check", async () => {
+  await assertRejects(
+    () => build({ dit: meanflowDit() }, { ...MEANFLOW_CONFIG, cfgScales: CONFIG.cfgScales }),
+    Error,
+    "declares the RF-only key(s) 'cfgScales'",
   );
 });

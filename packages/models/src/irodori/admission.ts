@@ -171,8 +171,17 @@ const assertOutputDim = (
   }
 };
 
-/** Inputs `dit` takes from the host per forward (the rest are all outputs of `dit_context`). */
-const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
+/**
+ * Inputs `dit` takes from the host per forward (the rest are all outputs of `dit_context`), per
+ * flow parameterization: a MeanFlow step also takes `delta_embed`, the embedding of the step's
+ * interval (ADR 0150).
+ */
+const DIT_STEP_INPUTS: Readonly<
+  Record<IrodoriPipelineConfig["flowParameterization"], readonly string[]>
+> = {
+  rf_velocity: ["x_t", "t_embed", "mask"],
+  meanflow: ["x_t", "t_embed", "delta_embed", "mask"],
+};
 
 /**
  * Checks the wiring from the outputs of `dit_context` to the inputs of `dit`, and derives the sizes
@@ -184,7 +193,9 @@ const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
  *   shape that depends on S cannot be placed)
  * - the outputs are an even number, at least 2 (the K / V pair of each block — the block count is
  *   derived from the declaration, not baked in)
- * - the set of `dit` input names = {@link DIT_STEP_INPUTS} ∪ the output names of `dit_context`
+ * - the set of `dit` input names = the step inputs of the declared flow parameterization
+ *   ({@link DIT_STEP_INPUTS}) ∪ the output names of `dit_context` — so a MeanFlow distribution
+ *   whose `dit` lacks `delta_embed` (or an RF one whose `dit` has it) fails here
  * - each output has a static shape and matches the same-named input of `dit` in dtype and shape
  *
  * MUST: do not remove this check. A resident input is checked **only for its size** (the doc of
@@ -192,7 +203,11 @@ const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
  * matches, the loop runs silently on K / V read as a different layout. A name mismatch also fails
  * at run time, but only **after** GB-class weights have been downloaded.
  */
-const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitContextOutput[] => {
+const admitDitContext = (
+  dit: GraphOwner,
+  ditContext: GraphOwner,
+  stepInputs: readonly string[],
+): readonly DitContextOutput[] => {
   const symbols = ditContext.graph.symbols;
   if (symbols.length !== 0) {
     throw new Error(
@@ -208,12 +223,12 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
     );
   }
   const ditInputs = new Map(dit.graph.inputs.map((input) => [input.name, input] as const));
-  const expected: readonly string[] = [...DIT_STEP_INPUTS, ...outputs];
+  const expected: readonly string[] = [...stepInputs, ...outputs];
   const missing = expected.filter((name) => !ditInputs.has(name));
   const extra = [...ditInputs.keys()].filter((name) => !expected.includes(name));
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(
-      `irodori: the dit inputs do not match {${DIT_STEP_INPUTS.join(", ")}} ∪ the dit_context outputs` +
+      `irodori: the dit inputs do not match {${stepInputs.join(", ")}} ∪ the dit_context outputs` +
         ` (missing from dit: [${missing.join(", ")}] / only in dit: [${extra.join(", ")}])`,
     );
   }
@@ -414,6 +429,11 @@ export const admitIrodori = async (
   // comes from the config).
   assertStaticDim(dit, "x_t", 2, config.latentDim, "latentDim");
   assertStaticDim(dit, "t_embed", 1, config.timestepEmbedDim, "timestepEmbedDim");
+  // The interval embedding of a MeanFlow step has the width of `t_embed` (the same host function —
+  // ADR 0150). Its presence is checked with the other step inputs in `admitDitContext`.
+  if (config.flowParameterization === "meanflow") {
+    assertStaticDim(dit, "delta_embed", 1, config.timestepEmbedDim, "timestepEmbedDim");
+  }
   // The 3 conditions are taken by `dit_context` (`dit` takes the K / V — ADR 0114).
   assertStaticDim(ditContext, "text_state", 1, config.maxTextLen, "maxTextLen");
   assertStaticDim(ditContext, "text_state", 2, config.textDim, "textDim");
@@ -457,7 +477,11 @@ export const admitIrodori = async (
     );
   }
   const ditSymbol = ditSymbols[0];
-  const ditContextOutputs = admitDitContext(dit, ditContext);
+  const ditContextOutputs = admitDitContext(
+    dit,
+    ditContext,
+    DIT_STEP_INPUTS[config.flowParameterization],
+  );
 
   // MUST: a missing capability of a shared GPU (feature / device limit) fails here — unlike the
   // case where the pipeline acquires its own, there is no reason to wait for `acquireGpu`, and this

@@ -15,6 +15,12 @@ presets `i4-gemvpar` / `i4-fast`). `hdae/karume-gemma4-qat` was re-uploaded with
 51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking. Published-smoke is green on
 Node and Deno.
 
+- **Irodori v4.1-small-mf** (upstream's MeanFlow student — ADR [0150](decisions/0150-irodori-meanflow.md), proposed):
+  the recipe, the MeanFlow sampler of the TS pipeline, the local mirror and its e2e checks are in place (2026-11-14).
+  Left: the maintainer's listening (the default preset and the quality of the 4-step student under `i8+dit4` /
+  `i8-a8`), a self A/B band for its `i8-a8`, and publication — the HF upload, the staged goldens to the test-asset
+  dataset with the pin, and its `SOURCES` entry.
+
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
