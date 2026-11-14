@@ -440,7 +440,9 @@ const IRODORI_MEANFLOW_DIT_A8 = { variant: 248, reference: 0 } as const;
  * i8 × k % 4 == 0, counted from the graph of `dit` in the recipe's i8 series
  * (`outputs/series/irodori-v4-large-i8/`, whose bytes the distribution ships — `linear` nodes and
  * their weight residency, 2026-11-14; the same count gives v4-small's 245 / 72 from its own i8
- * series). The mirror did not exist yet.
+ * series). Checked against a real dispatch on 2026-11-14 by the key census of
+ * `e2e_irodori_ab_test.ts` on the mirror `models/karume-irodori-v4-large/` (`i8-a8` — `dit` 485 /
+ * `dit_context` 144 i8a8 GEMMs per run, no f32 linear): the measurement equals the count.
  */
 const IRODORI_V4_LARGE_DIT_A8 = { variant: 485, reference: 0 } as const;
 /** The irodori v4-large `dit_context`: 144 linears (24 blocks × text / speaker / caption × K / V). */
