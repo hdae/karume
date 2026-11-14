@@ -33,6 +33,14 @@ Node and Deno.
   goldens are in the test-asset dataset and the pin moved. Published 2026-11-14 with 0.21.0 (after the re-uploads of
   v4-small and v4.1-small), pinned as `irodori.SOURCES["irodori-v4.1-small-mf"]`, which the Playground mount reads its
   repository name from. Left: only a self A/B band for its `i8-a8`.
+- **Irodori v4-Large** (upstream's 3.3 B model with the T5Gemma 2 text encoder, under the Gemma Terms of Use — ADR
+  [0151](decisions/0151-irodori-v4-large.md), proposed): done 2026-11-14 — the recipe exports the seven text-side
+  graphs (the sliding window folded into a constant), the Gemma-format tokenizer asset, the full-loop goldens, the f16
+  / i8 series, and assembles the distribution (`dist.py --pipeline irodori-large`, presets `f16` / `i8` / `i8-a8` /
+  `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset. Left, in
+  order: the i4 series (GPTQ, running), the local mirror, the real-GPU e2e (tolerances and sha256 rows), the Node
+  measurement of the presets, the maintainer's listening (the default `i8` is provisional until then), the maintainer's
+  review of the licence wording, then the publication (the release-runbook §0 items for this repository).
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 

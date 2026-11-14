@@ -33,7 +33,7 @@ repository borrows is the recipe's declaration (`Pipeline.references` — ADR 00
 the commit. **The publication build passes `--resolve-refs hf`** (`tools/export-recipes/dist.py`): it reads the referenced
 repository's main from the HF API and, before writing anything, requires every borrowed file to be in that commit with the bytes of
 the local mirror under `models/` — a stale SHA, a referenced mirror rebuilt but not uploaded, or a renamed path fails the build
-instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are four referencing repositories today:
+instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are four referencing repositories on the Hub today, and a fifth that the recipe declares but that is not published yet:
 
 | Referencing repository | Referenced repository | Borrowed roles (the recipe's declaration) |
 | --- | --- | --- |
@@ -41,6 +41,7 @@ instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly with
 | `karume-wan2.2` (ADR [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d", ADR [0121](decisions/0121-wan22-ti2v-5b.md) decision 9) | `karume-umt5-xxl` (model `xxl`) | `text_encoder` (`WAN_TEXT_ENCODER_REFERENCE`) |
 | `karume-irodori-v4.1-small` | `karume-irodori-v4-small` (model `v4-small`) | 26 roles = 90 files, 5,637 MiB: every graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and `tokenizer` (`IRODORI_V41_SHARED_ROLES`) |
 | `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), first published in 0.21.0) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
+| `karume-irodori-v4-large` (ADR [0151](decisions/0151-irodori-v4-large.md), not published yet) | `karume-irodori-v4-small` (model `v4-small`) | the codec pair `codec_encoder` / `codec_decoder` in f16 and i8 (`IRODORI_PUBLISHED`); the tokenizer asset is its own |
 
 `karume-wan2.1` has the same reference as Wan2.2 but is not published on HF (the maintainer's ruling 2026-10-15). The Wan procedure
 is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
@@ -103,11 +104,32 @@ per model):
 5. **Pins**: update `irodori.SOURCES["irodori-v4.1-small"]` (and `"irodori-v4-small"` only when step 1 uploaded it); add
    `SOURCES["irodori-v4.1-small-mf"]` when step 4 published it (the first-publication items of §3).
 
+**`karume-irodori-v4-large`** (ADR [0151](decisions/0151-irodori-v4-large.md); its first publication — nothing of it is on the
+Hub yet). It is its own recipe Pipeline, `irodori-large`, because its repository carries the Gemma Terms of Use instead of the
+MIT texts, and it references only v4-small (the codec pair):
+
+1. **The maintainer reviews the licence wording before the upload** — `LICENSE.md` (the Gemma Terms of Use and Prohibited Use
+   Policy verbatim, then the codec's MIT and Apache 2.0 texts), `NOTICE.md`, the card's licence statement, and the
+   "Attribution requirements" row of the v4-Large block in `tools/export-recipes/irodori/THIRD_PARTY_NOTICES.md`, which is
+   Unverified until then. No upload before that review.
+2. **Build after v4-small's main is final** (step 1 above): in `tools/export-recipes`,
+   `uv run python dist.py --pipeline irodori-large --resolve-refs hf` (it reads `models/karume-irodori-v4-small/` for the
+   codec pair and checks every borrowed file in v4-small's main), then the placeholder check of this section on
+   `models/karume-irodori-v4-large/karume.json`.
+3. **Upload it**: `tools/release/hf-upload.zsh upload karume-irodori-v4-large` (a new repository — nothing to delete; the
+   build has already refused any container this model exports without `license: gemma` — ADR 0151 decision 4).
+4. **The goldens**: upload the model's goldens to the test-asset dataset and move the pin in
+   `packages/test-support/src/test-assets.pin.json` in the same commit as the tests that read them
+   (`tools/test-assets/README.md` "Upload the assets of a new model").
+5. **Pins and the Playground**: add `irodori.SOURCES["irodori-v4-large"]` (the first-publication items of §3), and point the
+   Playground mount of the model (`irodori-v4-large` in `apps/playground/src/mounts.ts`, which spells the repository name
+   until the entry exists) at `irodori.SOURCES["irodori-v4-large"].repo`, as the other Irodori mounts read theirs.
+
 If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
 **when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
-`karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small` and `karume-irodori-v4.1-small-mf` for
-`karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`). **0.15.0: `karume-wan2.2` must be
+`karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` and (once published)
+`karume-irodori-v4-large` for `karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`). **0.15.0: `karume-wan2.2` must be
 re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online`, `i8` and `i8-a8-attn8-online-conv8` presets
 (ADRs 0132 / 0133), the default moved to `i8-a8-attn8-online-conv8`, and it gained the `vae_decoder_first_32` / `vae_decoder_next_32`
 containers (ADR 0134) — check the new containers in the fragmentation check of §2 too.**

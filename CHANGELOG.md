@@ -15,6 +15,16 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/models` (Irodori): the pipeline reads a distribution whose tokenizer asset is in the shared Gemma format
+  (`karume-gemma-tokenizer/1`), for upstream's Irodori-TTS v4-Large, whose text tokenizer is T5Gemma 2's Gemma BPE
+  tokenizer (ADR 0151). The asset's `format` key picks the tokenizer: absent is the Unigram asset of the v4 / v4.1
+  Small models, `karume-gemma-tokenizer/1` the Gemma one, and any other value fails. Such an asset has no rare-token
+  split table, so `splitRareTokens` omitted is off and `true` is a `ModelInputError`. The Gemma tokenizer reader
+  accepts the post_processor that prepends `<bos>` alone (`spec.postProcessor: "bos"`). The distribution
+  (`karume-irodori-v4-large`, under the Gemma Terms of Use) is not published yet and has no `SOURCES` entry.
+
 ## [0.21.0] - 2026-11-14
 
 ### Added

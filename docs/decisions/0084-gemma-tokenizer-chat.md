@@ -335,3 +335,14 @@ are still refused. Images are placed structurally: text parts are encoded on the
 of the three ids is refused, as upstream's count check refuses it. The ids around an image are checked against upstream's template
 and processor (`gemma4-12b-chat.json`, `imageChat`). `ChatSession` embeds an image once and reuses its rows on a re-render and in a
 fork; two different images never compare equal.
+
+## Addendum (2026-11-14) — a third post_processor shape, `bos` (T5Gemma 2)
+
+Context 1 found two post_processor shapes in real assets: nothing (gemma4) and `<bos>` … `<eos>` (EmbeddingGemma). The
+tokenizer of T5Gemma 2 (`google/t5gemma-2-1b-1b`, the text tokenizer of Irodori-TTS v4-Large — ADR
+[0151](0151-irodori-v4-large.md)) prepends `<bos>` and appends nothing. The compile script
+(`tools/export-recipes/_shared/gemma_tokenizer.py`) accepts it as a third shape, `spec.postProcessor: "bos"`, and still
+rejects a `<bos>` without the sequence; the TS reader (`packages/models/src/gemma/text/asset.ts`,
+`GemmaPostProcessor`) accepts the same three values, and `encodeWithSpecialTokens` prepends `<bos>` alone for it. The gemma4 assets (E2B / E4B / 12B / 26B) are byte-identical with and without the change. Irodori encodes the body
+without special tokens and prepends its BOS itself, so on that path the post_processor never runs (ADR 0151
+decision 2).

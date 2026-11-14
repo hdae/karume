@@ -123,3 +123,10 @@ where a vocabulary without it would fall back to bytes.
   calibration cases would encode differently, and re-rounding with split text would change the published i4 bytes of
   v4-small and v4.1-small with no measured gain. To be revisited if listening finds a regression specific to split
   text.
+
+## Addendum (2026-11-14) — the Gemma tokenizer kind has no split table
+
+A Gemma-format tokenizer asset (`karume-gemma-tokenizer/1`, the T5Gemma 2 tokenizer of Irodori v4-Large — ADR
+[0151](0151-irodori-v4-large.md) decision 2) carries no `rareTokenSplit` table, as upstream splits only the Unigram
+tokenizer of `sbintuitions/modernbert-ja-310m`: an omitted `splitRareTokens` is off, and an explicit `true` is rejected
+as decision 3 rejects it for any asset without the table.

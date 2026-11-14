@@ -1922,7 +1922,9 @@ is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
 The same static scheme as EmbeddingGemma (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
 is measured on every emit by a standing check in the export script (`_static_scheme_evidence` in
-`tools/export-recipes/irodori/export.py` — measured at most 8.3e-6, check 1e-3. If it breaks, the whole export fails). Related:
+`tools/export-recipes/irodori/export.py` — measured at most 8.3e-6, check 1e-3. If it breaks, the whole export fails).
+The T5Gemma 2 backbone of v4-Large follows the same scheme under the same check; its sliding window is a constant in
+the graph, not a run-time mask (ADR [0151](decisions/0151-irodori-v4-large.md) decision 1). Related:
 
 - **An empty caption (all-zero mask) is not represented in the graph** — in eager the projector output is strictly all
   zeros in that shape, so the host produces the zeros directly (the same treatment as CFG uncond — under ADR 0044).
