@@ -9,7 +9,8 @@ breakage would give a **false pass**:
 - The check of the static scheme (no runtime attention_mask) really fails when the scheme breaks
 - Mixing up the text / caption projectors (reading the same weights twice) fails in `_sanity`
 - `_write_io` writes no io that disagrees with the IR's input names / no io with a different
-  number of outputs
+  number of outputs, and leaves an input out (a reference to another golden) only when it is that
+  golden's bytes
 - The second output of `caption-proj` is the sequence with `caption_norm` applied, and the
   first output stays the plain projector output (the same formula as `text-proj`)
 - Mixing up `text_norm` / `caption_norm` (reading the same weights twice) fails in
@@ -31,11 +32,13 @@ breakage would give a **false pass**:
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import nn
 
@@ -666,6 +669,133 @@ class TestWriteIo:
 
         with pytest.raises(AssertionError, match="expected outputs"):
             ir._write_io(two, {"a": {"hidden": hidden}}, expected, out_dir)
+
+    def test_without_references_the_file_carries_no_metadata(self, exported):
+        """The form the published small models' goldens are in (their bytes must not move)."""
+        module, graph, out_dir = exported
+        hidden = torch.randn(1, 3, 4)
+        with torch.no_grad():
+            expected = {"a": (module(hidden),)}
+
+        ir._write_io(graph, {"a": {"hidden": hidden}}, expected, out_dir)
+
+        with safe_open(str(out_dir / f"{ir.IO_PREFIX}a{ir.IO_SUFFIX}"), framework="pt") as io:
+            assert io.metadata() is None
+
+
+class TinyMixer(nn.Module):
+    """A minimal graph with a second input (`kv`) that a reference can leave out."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 2, bias=False)
+
+    def forward(self, hidden: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        return self.fc(hidden) + kv
+
+
+class TestWriteIoReferences:
+    """`_write_io` with references (the `dit` io of the T5Gemma2 line): the named inputs are left
+    out only when they are the referenced golden's bytes."""
+
+    SOURCE = f"source/{ir.IO_PREFIX}s{ir.IO_SUFFIX}"
+    REFERENCE = ir.IoReference(golden=SOURCE, tensors={"input.kv": "output.0"})
+
+    @pytest.fixture
+    def exported(self, tmp_path):
+        torch.manual_seed(0)
+        module = TinyMixer()
+        graph = export_to_file(
+            module,
+            (torch.randn(1, 3, 4), torch.randn(1, 3, 2)),
+            tmp_path / ir.MODEL_FILE,
+            provenance=ir.PROVENANCE,
+            graph_name="tiny",
+        )
+        out_dir = tmp_path / "target"
+        out_dir.mkdir()
+        return module, graph, tmp_path, out_dir
+
+    def _store_source(self, root: Path, kv: torch.Tensor) -> None:
+        (root / "source").mkdir()
+        save_file({"input.state": torch.zeros(1), "output.0": kv}, str(root / self.SOURCE))
+
+    def _case(self, module: nn.Module) -> tuple[dict, dict]:
+        hidden, kv = torch.randn(1, 3, 4), torch.randn(1, 3, 2)
+        with torch.no_grad():
+            expected = {"a": (module(hidden, kv),)}
+        return {"a": {"hidden": hidden, "kv": kv}}, expected
+
+    def test_the_named_inputs_are_left_out_and_their_source_is_recorded(self, exported):
+        module, graph, root, out_dir = exported
+        inputs, expected = self._case(module)
+        self._store_source(root, inputs["a"]["kv"])
+
+        ir._write_io(
+            graph, inputs, expected, out_dir, references={"a": self.REFERENCE}, series_root=root
+        )
+
+        path = out_dir / f"{ir.IO_PREFIX}a{ir.IO_SUFFIX}"
+        with safe_open(str(path), framework="pt") as io:
+            assert sorted(io.keys()) == ["input.hidden", "output.0"]
+            assert json.loads(io.metadata()[ir.IO_INPUTS_FROM_KEY]) == {
+                "golden": self.SOURCE,
+                "tensors": {"input.kv": "output.0"},
+            }
+            assert torch.equal(io.get_tensor("input.hidden"), inputs["a"]["hidden"])
+
+    def test_an_input_that_differs_from_its_source_fails_and_writes_nothing(self, exported):
+        """MUST: no tensor that differs is dropped silently."""
+        module, graph, root, out_dir = exported
+        inputs, expected = self._case(module)
+        self._store_source(root, inputs["a"]["kv"] + 1.0)
+
+        with pytest.raises(AssertionError, match="not byte-identical"):
+            ir._write_io(
+                graph, inputs, expected, out_dir, references={"a": self.REFERENCE}, series_root=root
+            )
+
+        assert not (out_dir / f"{ir.IO_PREFIX}a{ir.IO_SUFFIX}").exists()
+
+    def test_equal_values_with_other_bytes_fail(self, exported):
+        """The check is on bytes, not on values: 0.0 and -0.0 compare equal but differ."""
+        module, graph, root, out_dir = exported
+        inputs, expected = self._case(module)
+        inputs["a"]["kv"] = torch.zeros(1, 3, 2)
+        self._store_source(root, -torch.zeros(1, 3, 2))
+
+        with pytest.raises(AssertionError, match="not byte-identical"):
+            ir._write_io(
+                graph, inputs, expected, out_dir, references={"a": self.REFERENCE}, series_root=root
+            )
+
+    def test_an_absent_source_fails_loudly(self, exported):
+        module, graph, root, out_dir = exported
+        inputs, expected = self._case(module)
+
+        with pytest.raises(AssertionError, match="is absent"):
+            ir._write_io(
+                graph, inputs, expected, out_dir, references={"a": self.REFERENCE}, series_root=root
+            )
+
+    def test_a_reference_to_an_output_the_source_lacks_fails_loudly(self, exported):
+        module, graph, root, out_dir = exported
+        inputs, expected = self._case(module)
+        self._store_source(root, inputs["a"]["kv"])
+        reference = ir.IoReference(golden=self.SOURCE, tensors={"input.kv": "output.1"})
+
+        with pytest.raises(AssertionError, match=r"has no output\.1"):
+            ir._write_io(
+                graph, inputs, expected, out_dir, references={"a": reference}, series_root=root
+            )
+
+
+class TestDitIoReferencesContext:
+    def test_the_t5gemma2_line_references_dit_context(self):
+        assert ir.dit_io_references_context({"model_type": "T5Gemma2"})
+
+    def test_the_modernbert_line_keeps_its_copy(self):
+        assert not ir.dit_io_references_context({"model_type": "modernbert"})
 
 
 class TestTargetCli:

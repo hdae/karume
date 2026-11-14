@@ -192,6 +192,12 @@ uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir ../../
   Measured on the backbone alone against f32 (2026-11-14): 61.3 → 68.6 dB on the two long caption cases. ModernBERT's
   buffers are rounded as before (its published bytes do not change).
 - The containers of this model carry the provenance licence `gemma` (`provenance_of`), the small models `mit`.
+- The `dit` io goldens of this model do not carry the 48 condition K/V inputs: they are the same bytes in all seven
+  cases (597 MB each) and equal to the outputs of `dit-context/io.dit-cond-min.safetensors`. Each `dit` io names that
+  golden and the output each omitted input comes from in its `__metadata__` (`inputs_from` —
+  `dit_io_references_context`), and the export fails unless every omitted input is byte-identical to that golden as
+  stored (so `dit-context` is written first, and `--target dit` alone checks the stored one). The f16 series' io goldens
+  are 0.65 GB instead of 4.83 GB. The small models' `dit` io keep their copy.
 
 ## Rare-token split (ADR 0149)
 

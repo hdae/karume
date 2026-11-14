@@ -294,6 +294,13 @@ unpatched reference".
 
 The tensor-key convention of io is the same as for tiny golden / DeBERTa (`input.<graph input
 name>` / `output.<position>`).
+
+A checkpoint of the T5Gemma2 line (v4-Large) writes its `dit` io **without the condition K/V**:
+they are byte-identical across the `dit` cases and equal to the outputs of the `dit-context` golden
+of the same condition states, so each `dit` io names that golden in its `__metadata__` instead of
+carrying a copy ({@link dit_io_references_context} / {@link IO_INPUTS_FROM_KEY}; 4.18 GB of the
+f16 series' 4.83 GB were that copy). The writer reads the named golden back from its final place
+and fails unless every omitted input is byte-identical to the output it names.
 """
 
 from __future__ import annotations
@@ -433,6 +440,34 @@ def provenance_of(text_config: Mapping[str, Any]) -> Provenance:
     """The provenance baked into the containers of a checkpoint — picked by the same fact that
     picks its licence upstream, the text backbone it embeds ({@link is_t5gemma2})."""
     return LARGE_PROVENANCE if is_t5gemma2(text_config) else PROVENANCE
+
+
+#: The `__metadata__` key of an io golden that does not carry some of its inputs: they are outputs
+#: of another golden of the same series. The value is JSON,
+#: `{"golden": "<target>/io.<case>.safetensors", "tensors": {"input.<name>": "output.<i>", ...}}` —
+#: the golden's path relative to the series root, and each omitted input key mapped to the output
+#: key of that golden that holds its bytes.
+IO_INPUTS_FROM_KEY = "inputs_from"
+
+
+class IoReference(NamedTuple):
+    """The {@link IO_INPUTS_FROM_KEY} entry of one io golden (the JSON value's two fields)."""
+
+    golden: str
+    tensors: Mapping[str, str]
+
+
+def dit_io_references_context(text_config: Mapping[str, Any]) -> bool:
+    """Whether the `dit` io goldens reference `dit-context`'s golden for the condition K/V instead
+    of carrying a copy — picked, like {@link provenance_of}, by the text backbone the checkpoint
+    embeds: the T5Gemma2 line (v4-Large) does.
+
+    The copy is the same bytes in every `dit` case (all of them share one set of condition states),
+    and for v4-Large it is 48 × `[1,1519,32,64]` f32 = 597 MB per case, 4.18 GB of the f16 series'
+    4.83 GB of io goldens. The ModernBERT line (v4-small, v4.1-small, v4.1-small-mf) keeps the copy:
+    its goldens are in the test-asset dataset in that form, and none of their bytes may move.
+    """
+    return is_t5gemma2(text_config)
 
 
 #: state_dict prefixes (the attribute names in `irodori_tts/model.py`).
@@ -2771,12 +2806,20 @@ def _write_io(
     inputs: Mapping[str, Mapping[str, torch.Tensor]],
     expected: Mapping[str, Sequence[torch.Tensor]],
     out_dir: Path,
+    references: Mapping[str, IoReference] | None = None,
+    series_root: Path | None = None,
 ) -> list[str]:
     """Write each case's inputs and torch CPU expected outputs to `io.<case>.safetensors`.
 
     The expected values come as **positional tuples** (only `caption-proj` has 2 — the G1b section
     of the module docstring). An io whose count disagrees with the IR's output count would pass
     quietly as "readable, but one output never verified", so it is matched per case.
+
+    `references` (case → {@link IoReference}) leaves the inputs it names out of that case's file
+    and records the reference under {@link IO_INPUTS_FROM_KEY}; the referenced golden is read from
+    `series_root`. MUST: every omitted input is byte-identical (dtype, shape, bytes) to the output
+    it names in that golden **as stored** — otherwise the write fails, so no tensor that differs is
+    dropped silently. Without `references` the file is written exactly as before (no metadata).
     """
     declared = [spec.name for spec in graph.inputs]
     written: list[str] = []
@@ -2801,10 +2844,53 @@ def _write_io(
             tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
                 value.detach().contiguous(), f"{name}: output {index}"
             )
+        reference = None if references is None else references[name]
+        metadata = None
+        if reference is not None:
+            if series_root is None:
+                raise AssertionError(f"{name}: a reference needs the series root to resolve it")
+            _omit_referenced(tensors, reference, series_root, name)
+            payload = {"golden": reference.golden, "tensors": dict(reference.tensors)}
+            metadata = {IO_INPUTS_FROM_KEY: json.dumps(payload, separators=(",", ":"))}
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
-        save_file(tensors, str(path))
+        save_file(tensors, str(path), metadata=metadata)
         written.append(path.name)
     return written
+
+
+def _omit_referenced(
+    tensors: dict[str, torch.Tensor], reference: IoReference, series_root: Path, name: str
+) -> None:
+    """Drop the inputs `reference` names from `tensors`, after checking each against the bytes of
+    the output it names in the referenced golden ({@link _write_io}'s MUST)."""
+    source = series_root / reference.golden
+    if not source.is_file():
+        raise AssertionError(
+            f"{name}: the referenced golden {source} is absent — it is written before the io that"
+            " references it"
+        )
+    with safe_open(str(source), framework="pt") as stored:
+        stored_keys = set(stored.keys())
+        for key, origin in reference.tensors.items():
+            if not key.startswith(INPUT_PREFIX) or key not in tensors:
+                raise AssertionError(f"{name}: the reference names {key}, not an input of the io")
+            if origin not in stored_keys:
+                raise AssertionError(f"{name}: {reference.golden} has no {origin}")
+            carried = tensors.pop(key)
+            kept = stored.get_tensor(origin)
+            same = (
+                carried.dtype == kept.dtype
+                and carried.shape == kept.shape
+                and torch.equal(
+                    carried.contiguous().reshape(-1).view(torch.uint8),
+                    kept.contiguous().reshape(-1).view(torch.uint8),
+                )
+            )
+            if not same:
+                raise AssertionError(
+                    f"{name}: {key} is not byte-identical to {origin} of {reference.golden} — a"
+                    " tensor that differs would be dropped"
+                )
 
 
 def _sanity(pristine: Mapping[str, Mapping[str, Sequence[torch.Tensor]]]) -> dict[str, Any]:
@@ -3717,12 +3803,29 @@ def export_series(
     pristine[TARGET_DIT_CONTEXT] = _pristine_dit_context_outputs(dit, context_inputs)
     pristine[TARGET_DIT] = _single(dit_pristine)
     dit_heads = irodori_dit_head_inputs(flow)
+    context_kv_names = irodori_context_kv_names(len(dit.blocks))
     dit_graph_inputs = _dit_graph_inputs(
         dit_inputs,
         context_owner,
         pristine[TARGET_DIT_CONTEXT],
-        irodori_context_kv_names(len(dit.blocks)),
+        context_kv_names,
         dit_heads,
+    )
+    # The T5Gemma2 line stores the condition K/V once: each `dit` io names its K/V's owner among
+    # the `dit-context` goldens, input i ↔ output i (the chain of {@link _dit_graph_inputs}).
+    dit_references = (
+        {
+            name: IoReference(
+                golden=f"{TARGET_DIT_CONTEXT}/{IO_PREFIX}{context_owner[name]}{IO_SUFFIX}",
+                tensors={
+                    f"{INPUT_PREFIX}{kv}": f"{OUTPUT_PREFIX}{index}"
+                    for index, kv in enumerate(context_kv_names)
+                },
+            )
+            for name in dit_inputs
+        }
+        if dit_io_references_context(text_config)
+        else None
     )
 
     # ---- ② Apply the patches (eager values taken from here on cannot serve as references) ----
@@ -3844,7 +3947,12 @@ def export_series(
     }
     written: dict[str, Any] = {}
     window_form: dict[str, Any] | None = None
-    for target in targets:
+    # MUST: with references, `dit-context` is put in place before `dit` — `dit`'s writer checks its
+    # omitted inputs against that golden as stored (a `--target dit` run checks the stored one).
+    order = (
+        targets if dit_references is None else sorted(targets, key=lambda name: name == TARGET_DIT)
+    )
+    for target in order:
         target_dir = out_dir / target
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         by_case = graph_args[target]
@@ -3890,7 +3998,14 @@ def export_series(
                     target, graphs[target], quantized.overrides
                 ),
             )
-            io_files = _write_io(graph, by_case, pristine[target], staged)
+            io_files = _write_io(
+                graph,
+                by_case,
+                pristine[target],
+                staged,
+                references=dit_references if target == TARGET_DIT else None,
+                series_root=out_dir,
+            )
             # The record of the calibration conditions (only the 2 DiT graphs of i4). **The stdout
             # summary is for people to read**; the machine matching relies on
             # `calib_provenance.json`.

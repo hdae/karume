@@ -43,7 +43,13 @@ import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
+import {
+  acquireGpu,
+  parseSafetensors,
+  prepareContainer,
+  type SafetensorsFile,
+  type Tensor,
+} from "../../runtime/mod.ts";
 import {
   compareTensors,
   formatAllclose,
@@ -375,6 +381,62 @@ const IO_SUFFIX = ".safetensors";
 const ioUrl = (target: string, name: string): URL =>
   new URL(`${target}/${IO_PREFIX}${name}${IO_SUFFIX}`, GRAPH_GOLDENS);
 
+const readIo = async (url: URL): Promise<SafetensorsFile> => {
+  const bytes = await readFile(url);
+  return parseSafetensors(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
+};
+
+/**
+ * The `__metadata__` key of an io golden that does not carry some of its inputs
+ * (`IO_INPUTS_FROM_KEY` of `irodori/export.py`). Its value is JSON `{ golden, tensors }`: the path
+ * of another golden of this series (relative to the series root) and, per omitted input key, the
+ * output key of that golden holding its bytes. This model's `dit` io names the `dit-context`
+ * golden for the 48 condition K/V (they are the same bytes in all seven cases, 597 MB each); the
+ * recipe checks the bytes at write time.
+ */
+const IO_INPUTS_FROM_KEY = "inputs_from";
+
+/** A golden's reference, opened: omitted input key → the referenced golden's key, and that file. */
+type OpenedReference = {
+  readonly tensors: ReadonlyMap<string, string>;
+  readonly url: URL;
+  readonly file: SafetensorsFile;
+};
+
+/**
+ * Open the golden an io references (`undefined` when it carries every input). A metadata value of
+ * any other shape, or a path outside this series, FAILs.
+ */
+const openReference = async (
+  io: SafetensorsFile,
+  where: string,
+): Promise<OpenedReference | undefined> => {
+  const text = io.metadata.get(IO_INPUTS_FROM_KEY);
+  if (text === undefined) return undefined;
+  const value: unknown = JSON.parse(text);
+  const malformed = new Error(
+    `${where}: __metadata__.${IO_INPUTS_FROM_KEY} is not { golden, tensors }`,
+  );
+  if (typeof value !== "object" || value === null || !("golden" in value) || !("tensors" in value))
+    throw malformed;
+  const { golden, tensors } = value;
+  if (typeof golden !== "string" || typeof tensors !== "object" || tensors === null)
+    throw malformed;
+  const map = new Map<string, string>();
+  for (const [key, origin] of Object.entries(tensors)) {
+    if (typeof origin !== "string") throw malformed;
+    map.set(key, origin);
+  }
+  const url = new URL(golden, GRAPH_GOLDENS);
+  assert(
+    url.href.startsWith(GRAPH_GOLDENS.href),
+    `${where} references ${url.pathname}, outside its series`,
+  );
+  return { tensors: map, url, file: await readIo(url) };
+};
+
 /**
  * The io goldens listed under one target directory (sorted). Only NotFound means absent — any
  * other failure propagates, so a broken root is reported as broken rather than skipped.
@@ -465,16 +527,21 @@ for (const [target, { graph, cases, tolerances }] of Object.entries(TARGETS)) {
               parsed.graph.outputs.length,
               `${target}'s tolerance count differs from the IR output count`,
             );
-            const bytes = await readFile(url);
-            const io = parseSafetensors(
-              bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-            );
+            const io = await readIo(url);
+            // An input the golden does not carry comes from the golden its metadata names (the
+            // condition K/V of `dit`, from `dit-context`) — fed the same way as a carried one.
+            const reference = await openReference(io, url.pathname);
+            const omitted = [...(reference?.tensors.keys() ?? [])];
             const expectedKeys = [
               ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
               ...parsed.graph.outputs.map((_, index) => `output.${index}`),
             ].sort();
+            // Every input and output exactly once: carried by the golden or named by its reference.
+            for (const key of omitted) {
+              assert(!io.tensors.has(key), `${url.pathname} both carries and references ${key}`);
+            }
             assertEquals(
-              [...io.tensors.keys()].sort(),
+              [...io.tensors.keys(), ...omitted].sort(),
               expectedKeys,
               `tensor keys of ${url.pathname}`,
             );
@@ -483,9 +550,15 @@ for (const [target, { graph, cases, tolerances }] of Object.entries(TARGETS)) {
             // 750 for `speaker` / `dit` (`ref-max` / `dit-cond-max`).
             const inputs: Record<string, Tensor> = {};
             for (const spec of parsed.graph.inputs) {
-              const view = io.tensors.get(`input.${spec.name}`);
-              assert(view !== undefined, `input.${spec.name} is not in the golden`);
-              inputs[spec.name] = ioTensor(io, view, spec.dtype);
+              const key = `input.${spec.name}`;
+              const origin = reference?.tensors.get(key);
+              const [file, stored, where] =
+                reference !== undefined && origin !== undefined
+                  ? [reference.file, origin, reference.url.pathname]
+                  : [io, key, url.pathname];
+              const view = file.tensors.get(stored);
+              assert(view !== undefined, `${stored} (for ${key}) is not in ${where}`);
+              inputs[spec.name] = ioTensor(file, view, spec.dtype);
             }
             const gpu = await acquireGpu();
             try {

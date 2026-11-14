@@ -193,15 +193,19 @@ What is new for the stack:
   Every preset predicts the same frame counts on these three texts. The final latents against `f16`'s (same text and
   seed, four seeds pooled): `i8` 17.8–18.5 dB, `i8-a8` 14.2–22.7 dB, `i8+dit4` 3.5–12.2 dB, at equal latent energy.
   That figure is the divergence of 40 guided steps, not an audio-quality measure; the listening decides.
+- The `dit` io goldens store the condition K/V once (2026-11-14): the 48 inputs `[1,1519,32,64]` are byte-identical in
+  the seven cases and equal to the outputs of the one `dit_context` golden, so each `dit` io leaves them out and names
+  that golden and the output each comes from in its `__metadata__` (`inputs_from`). The recipe fails the export unless
+  every omitted input is byte-identical to that golden as stored, and the e2e check feeds them from it, with the same
+  measured differences. The per-graph io goldens of the f16 series go from 4.83 GB to 0.65 GB (`dit` 4.18 GB →
+  0.30 MB, `dit_context` 0.61 GB). The small models keep the copy in their `dit` io: their goldens are in the
+  test-asset dataset in that form.
 - The distribution's legal texts follow the recipe's reading of Gemma Terms of Use §3.1, recorded as Unverified in
   `tools/export-recipes/irodori/THIRD_PARTY_NOTICES.md`; the maintainer reviews the wording before any upload.
 
 ## Pending
 
 - The Playground page in a browser (built, not run).
-- The goldens are staged locally and not in the private test-asset dataset. The per-graph io goldens of the f16 series
-  are 4.83 GB, of which 4.18 GB is the 48 condition K/V inputs repeated in the seven `dit` cases (byte-identical to
-  `dit_context`'s outputs); whether the recipe stores them once is decided before the upload.
 - The maintainer's review of the licence wording, then the publication: the HF upload built with `--resolve-refs hf`
   against v4-small's main, the goldens in the test-asset dataset with the pin moved, the
   `irodori.SOURCES["irodori-v4-large"]` entry, and the Playground mount reading its repository name from that entry
