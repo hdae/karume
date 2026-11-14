@@ -2089,10 +2089,13 @@ class TestLegalTexts:
     repository** (not to a model's assets), so the 2 files at the root handle them.
     """
 
-    #: sha256 of the original text fetched from upstream (measured 2026-08-20). It is pinned
-    #: because if formatting or newline conversion moved even one byte, it would no longer be "a
-    #: copy of this license" (§3(a)).
-    LICENSE_SHA256 = "ee956174133d7c2cdcf220440c7726187eaf4b50e8e48ee32194353a22164d15"
+    #: sha256 of the original text fetched from upstream — `LICENSE.md` at
+    #: `circlestone-labs/Anima@6e0b2da2` (fetched 2026-11-14; the upstream commit of 2026-11-12
+    #: fixed two section references in v1.2). It is pinned because if formatting or newline
+    #: conversion moved even one byte, it would no longer be "a copy of this license" (§3(a)).
+    #: MUST: a commit that changes this digest follows an upstream change of the text and moves
+    #: `license_link` in `anima/card.py` to the same commit.
+    LICENSE_SHA256 = "761ed5af40f4be63701fdd6a52336c23778961a4fb4e3cd20e4259a501e4e7f8"
 
     #: sha256 of the vendored NVIDIA Open Model License Agreement — a verbatim plain-text
     #: transcription of the web version "Version Release Date: October 24, 2025"

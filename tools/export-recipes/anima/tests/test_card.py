@@ -543,18 +543,18 @@ class TestFrontmatter:
         assert "license_name: circlestone-labs-non-commercial-license" in head
         assert (
             "license_link: https://huggingface.co/circlestone-labs/Anima/blob/"
-            "f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md" in head
+            "6e0b2da2112573380abfb6a1435a60a994b254f2/LICENSE.md" in head
         )
         assert "library_name: karume" in head
 
     def test_the_license_link_is_pinned_to_a_commit(self, card: str) -> None:
         """The link shows the text bundled as `LICENSE.md` (v1.2 at
-        `circlestone-labs/Anima@f973fc41`), not whatever `main` holds — a moving branch would
+        `circlestone-labs/Anima@6e0b2da2`), not whatever `main` holds — a moving branch would
         drift from the bundled text the day upstream publishes another version."""
         head = card.split("---")[1]
         (link,) = [line for line in head.splitlines() if line.startswith("license_link: ")]
         assert "/blob/main/" not in link
-        assert "/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/" in link
+        assert "/blob/6e0b2da2112573380abfb6a1435a60a994b254f2/" in link
         assert [line for line in head.splitlines() if line.startswith("  - ")] == [
             "  - text-to-image",
             "  - webgpu",

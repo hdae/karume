@@ -43,7 +43,9 @@ PIPELINE_TAG = "text-to-image"
 #: tensor, to files that `circlestone-labs/Anima@f973fc41` publishes under v1.2 (measured
 #: 2026-10-29), so v1.2 governs (ruling 37 a; the evidence is in THIRD_PARTY_NOTICES.md).
 #: `license_link` is pinned to the commit of the bundled text: pointing at `main` would let the link
-#: and the bundled LICENSE.md disagree silently on the day upstream publishes a new version.
+#: and the bundled LICENSE.md disagree silently on the day upstream publishes a new version. That
+#: commit is `6e0b2da2` (2026-11-12, upstream's fix of two section references in v1.2), not the
+#: `f973fc41` above — the weights were compared at `f973fc41`, and the text moved on after it.
 ANIMA_METADATA = CardMetadata(
     pipeline_tag=PIPELINE_TAG,
     base_model=("circlestone-labs/Anima-Base-v1.0-Diffusers",),
@@ -52,7 +54,7 @@ ANIMA_METADATA = CardMetadata(
     license_name="circlestone-labs-non-commercial-license",
     license_link=(
         "https://huggingface.co/circlestone-labs/Anima/blob/"
-        "f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md"
+        "6e0b2da2112573380abfb6a1435a60a994b254f2/LICENSE.md"
     ),
     tags=("text-to-image", "webgpu"),
 )
