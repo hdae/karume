@@ -159,6 +159,8 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "packages/e2e/tests/e2e_irodori_context_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_irodori_meanflow_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_irodori_meanflow_wav_test.ts", why: TTS_INPUT, maxLines: 3 },
+  { path: "packages/e2e/tests/e2e_irodori_v4_large_test.ts", why: TTS_INPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_irodori_v4_large_wav_test.ts", why: TTS_INPUT, maxLines: 16 },
   { path: "packages/e2e/tests/e2e_irodori_wav_test.ts", why: TTS_INPUT, maxLines: 3 },
   { path: "packages/e2e/tests/e2e_sbv2_ab_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_sbv2_wav_test.ts", why: TTS_INPUT, maxLines: 1 },

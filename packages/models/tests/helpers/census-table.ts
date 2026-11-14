@@ -435,6 +435,16 @@ const IRODORI_DIT_CONTEXT_A8 = { variant: 72, reference: 0 } as const;
  * `dit_context` is the RF one's shape (72).
  */
 const IRODORI_MEANFLOW_DIT_A8 = { variant: 248, reference: 0 } as const;
+/**
+ * The irodori v4-large DiT (ADR 0151 — 24 blocks of width 2048, where v4 has 12): 485 linears, all
+ * i8 × k % 4 == 0, counted from the graph of `dit` in the recipe's i8 series
+ * (`outputs/series/irodori-v4-large-i8/`, whose bytes the distribution ships — `linear` nodes and
+ * their weight residency, 2026-11-14; the same count gives v4-small's 245 / 72 from its own i8
+ * series). The mirror did not exist yet.
+ */
+const IRODORI_V4_LARGE_DIT_A8 = { variant: 485, reference: 0 } as const;
+/** The irodori v4-large `dit_context`: 144 linears (24 blocks × text / speaker / caption × K / V). */
+const IRODORI_V4_LARGE_DIT_CONTEXT_A8 = { variant: 144, reference: 0 } as const;
 /** anima DiT: 454 linears (the 5 official variants and the 2 additional ones share the graph). */
 const ANIMA_DIT_LINEARS = { variant: 454, reference: 0 } as const;
 const ANIMA_MODELS = [
@@ -874,6 +884,15 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     census: {
       dit: { step: { linearCompute: IRODORI_MEANFLOW_DIT_A8 } },
       "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
+    },
+  },
+  {
+    family: "irodori",
+    models: ["v4-large"],
+    session: { linearCompute: "a8" },
+    census: {
+      dit: { step: { linearCompute: IRODORI_V4_LARGE_DIT_A8 } },
+      "dit-context": { run: { linearCompute: IRODORI_V4_LARGE_DIT_CONTEXT_A8 } },
     },
   },
   // --- anima (the preset's session reaches only the DiT = transformer) ------
