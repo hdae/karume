@@ -1,5 +1,5 @@
 /**
- * The Irodori-TTS page's form: the three distributions, the knobs, the numbers the page reads from the
+ * The Irodori-TTS page's form: the four distributions, the knobs, the numbers the page reads from the
  * manifest's `pipelineConfig`, and the pure step from the form to a generation request. The pipeline
  * validates every request itself (seed range, codec tile, reference length and rate — a
  * `ModelInputError`); the form only parses what it must turn into numbers.
@@ -13,11 +13,13 @@ import type { Choice } from "@/components/choice-select";
 import { DEFAULT_CAPTION, DEFAULT_TEXT } from "./samples";
 
 /**
- * The three distributions (separate repos upstream, so separate mounts); v4.1 is the default. The
- * MeanFlow model (`irodori-v4.1-mf`, ADR 0150) is v4.1-small's MeanFlow student: its step count,
- * presets and sampler come from its manifest like the others'.
+ * The four distributions (separate repos upstream, so separate mounts); v4.1 is the default. The
+ * MeanFlow model (`irodori-v4.1-mf`, ADR 0150) is v4.1-small's MeanFlow student, and v4-large
+ * (`irodori-v4-large`) has a T5Gemma 2 text encoder, other dimensions and its own preset list: the
+ * step count, presets, sampler and token limits of each come from its manifest, and whether its
+ * tokenizer asset carries the rare-token split table from that asset (`split-table.ts`).
  */
-export type IrodoriMount = "irodori-v4.1" | "irodori-v4.1-mf" | "irodori-v4";
+export type IrodoriMount = "irodori-v4.1" | "irodori-v4.1-mf" | "irodori-v4" | "irodori-v4-large";
 
 export const DEFAULT_MOUNT: IrodoriMount = "irodori-v4.1";
 
@@ -25,6 +27,7 @@ export const MODEL_CHOICES: readonly Choice<IrodoriMount>[] = [
   { value: "irodori-v4.1", label: "v4.1-small (default) — retrained duration predictor" },
   { value: "irodori-v4.1-mf", label: "v4.1-small-mf — MeanFlow student of v4.1-small" },
   { value: "irodori-v4", label: "v4-small" },
+  { value: "irodori-v4-large", label: "v4-large — T5Gemma 2 text encoder" },
 ];
 
 /**
@@ -283,11 +286,15 @@ const parseOptionalInteger = (text: string, what: string): number | undefined =>
  * The generation request of the form. Only the active voice tab is sent: a caption in caption mode
  * (an empty one = no voice design, the API's zero caption condition), the reference in reference
  * mode. The text is sent as typed (the pipeline normalizes it). `splitRareTokens` is sent only as
- * `false` (the box unchecked); checked leaves it to the model's default.
+ * `false` (the box unchecked); checked leaves it to the model's default. `splitTable` is whether the
+ * distribution's tokenizer asset carries the rare-token split table (`undefined` = not known yet):
+ * without the table the option is not offered, so it is left out whatever the box says (the model's
+ * default is then the unsplit encoding).
  */
 export const buildRequest = (
   form: IrodoriForm,
   reference: ReferenceSamples | undefined,
+  splitTable?: boolean,
 ): IrodoriRequestParts => {
   if (form.text.trim() === "") throw new FormError("Enter the text to speak");
   const seed = parseOptionalInteger(form.seed, "Seed");
@@ -307,7 +314,7 @@ export const buildRequest = (
     seed,
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...(codecTileFrames === undefined ? {} : { codecTileFrames }),
-    ...(form.splitRareTokens ? {} : { splitRareTokens: false }),
+    ...(form.splitRareTokens || splitTable === false ? {} : { splitRareTokens: false }),
   };
 };
 

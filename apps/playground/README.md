@@ -14,7 +14,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Vision | BiRefNet (HR / Lucida) | `/birefnet` | done |
 | Vision | Depth Anything V2 | `/depth-anything` | done |
 | Vision | SigLIP 2 | `/siglip2` | done |
-| Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser) |
+| Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built, not yet run — its local mirror does not exist yet) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
@@ -82,9 +82,10 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `lucida` | `models/karume-lucida` | `hdae/karume-lucida` | BiRefNet |
 | `depth-anything` | `models/karume-depth-anything-v2` | `hdae/karume-depth-anything-v2` | Depth Anything V2 |
 | `siglip2` | `models/karume-siglip2` | `hdae/karume-siglip2` | SigLIP 2 |
-| `irodori-v4` | `models/karume-irodori-v4-small` | `hdae/karume-irodori-v4-small` (plus the revision `irodori-v4.1` and `irodori-v4.1-mf` reference) | Irodori-TTS |
+| `irodori-v4` | `models/karume-irodori-v4-small` | `hdae/karume-irodori-v4-small` (plus the revision `irodori-v4.1`, `irodori-v4.1-mf` and `irodori-v4-large` reference) | Irodori-TTS |
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` (plus the revision `irodori-v4.1-mf` references) | Irodori-TTS |
 | `irodori-v4.1-mf` | `models/karume-irodori-v4.1-small-mf` | `hdae/karume-irodori-v4.1-small-mf` | Irodori-TTS |
+| `irodori-v4-large` | `models/karume-irodori-v4-large` | `hdae/karume-irodori-v4-large` (written in `src/mounts.ts` until `irodori.SOURCES` has the entry; the repository is not published yet) | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
 | `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
@@ -126,7 +127,8 @@ by default the server refuses that (the table fails loudly). The `anima` mount o
 
 The `irodori-v4` and `irodori-v4.1` mounts opt in the same way: `irodori-v4.1` borrows from
 `hdae/karume-irodori-v4-small`, and `irodori-v4.1-mf` borrows its duration predictor from
-`hdae/karume-irodori-v4.1-small` and everything else from `hdae/karume-irodori-v4-small`.
+`hdae/karume-irodori-v4.1-small` and everything else from `hdae/karume-irodori-v4-small`, and
+`irodori-v4-large` borrows its codec pair from `hdae/karume-irodori-v4-small`.
 
 The direct route needs no alias: `localDirectory` maps cross-repo references to mounts explicitly
 (`pretrainedRef(source, "anima-extra", { "hdae/karume-anima": "anima" })`) and follows no revision.
@@ -731,11 +733,13 @@ value-level diff when two machines' hashes differ. **Copy record** copies the JS
 
 ## The Irodori-TTS page
 
-The page speaks Japanese text with `irodori.Pipeline` on the page's GPU. It reads one of three
+The page speaks Japanese text with `irodori.Pipeline` on the page's GPU. It reads one of four
 distributions: v4.1-small (default; upstream retrained only the duration predictor), v4.1-small-mf
 (the MeanFlow student of v4.1-small — ADR 0150: a few steps of one conditional forward each, no
 classifier-free guidance at run time; it carries only its DiT and takes the duration predictor from
-v4.1-small and the rest from v4-small) or v4-small. The sampler follows the manifest's
+v4.1-small and the rest from v4-small), v4-small, or v4-large (a T5Gemma 2 text encoder with a Gemma
+BPE tokenizer and larger dimensions, its own preset list, and the codec pair taken from v4-small; its
+repository is not published yet, so it runs only from a local mirror). The sampler follows the manifest's
 `pipelineConfig.flowParameterization`. It
 acquires the GPU once (`acquireGpu({})`, plus `gpuTiming: true` while **GPU timing** is on). The
 first **Run** builds the pipeline. Later runs reuse it until the model, preset, linear compute,
@@ -747,17 +751,17 @@ keeps no weights on the GPU. One synthesis runs at a time.
 
 | Control | What it does |
 | --- | --- |
-| Model | The mount: `irodori-v4.1` (v4.1-small, default), `irodori-v4.1-mf` (v4.1-small-mf) or `irodori-v4` (v4-small). The hint names its directory, with "(missing)" when it is absent. With the **Direct** source, a model that borrows components needs the mounts that hold them (v4.1-small: `irodori-v4`; v4.1-small-mf: `irodori-v4` and `irodori-v4.1`); Run fails naming the missing directory otherwise. A switch keeps the chosen preset when the other manifest has it (all three declare the same five names; the default preset can differ), and keeps the decoded reference audio while the new manifest loads. |
+| Model | The mount: `irodori-v4.1` (v4.1-small, default), `irodori-v4.1-mf` (v4.1-small-mf), `irodori-v4` (v4-small) or `irodori-v4-large` (v4-large). The hint names its directory, with "(missing)" when it is absent. With the **Direct** source, a model that borrows components needs the mounts that hold them (v4.1-small and v4-large: `irodori-v4`; v4.1-small-mf: `irodori-v4` and `irodori-v4.1`); Run fails naming the missing directory otherwise. A switch keeps the chosen preset when the other manifest has it and takes that manifest's default otherwise (the three small distributions declare the same five names; v4-large declares four, without `f32`; the default preset can differ), and keeps the decoded reference audio while the new manifest loads. |
 | Preset | The manifest's `quants`; `defaultQuant` is preselected and marked "(default)". |
 | Source | **Cached** (default): `/hf/` through the hub's CacheStorage. **Direct**: `localDirectory` over plain fetch from `/models/`. |
 | Linear compute | `linearCompute` of `fromPretrained`, applied to the DiT and its context projection only. Choices: the preset's declaration (default), `f32`, or `a8`. The hint names the preset's DiT weights label, its declaration and the value the DiT is asked for. `a8` runs only on int8 / int4 weights: with weights labelled `f32` / `f16` the page shows a note, because the runtime sends float weights to the f32 path without an error. `f16` is not offered: it needs a device with `shaderF16: true`. |
-| Text | The Japanese text, sent as typed (the pipeline normalizes it). It starts with the first voice-design example's text (`src/models/irodori/samples.ts`). Only the first `maxTextLen − 1` tokens after normalization are read (255 on the small distributions). The pipeline cuts the rest without an error (upstream behaviour). |
-| Split rare tokens | `splitRareTokens` (ADR 0149). Checked (default): the option is left out, so the model's default holds: on when the distribution's tokenizer asset carries upstream's rare-token split table, off otherwise. Unchecked: `false`, the unsplit encoding. The page never sends `true`, which the pipeline refuses (`ModelInputError`) on an asset without the table. It only has an effect on distributions whose tokenizer carries the table (v4 / v4.1 small from the revision that includes it, and v4.1 small MF, which uses v4 small's tokenizer asset), and it applies to the text, never the caption. |
+| Text | The Japanese text, sent as typed (the pipeline normalizes it). It starts with the first voice-design example's text (`src/models/irodori/samples.ts`). Only the first `maxTextLen − 1` tokens after normalization are read (255 on every current distribution, v4-large included; the hint reads the number from the manifest). The pipeline cuts the rest without an error (upstream behaviour). |
+| Split rare tokens | `splitRareTokens` (ADR 0149). Checked (default): the option is left out, so the model's default holds: on when the distribution's tokenizer asset carries upstream's rare-token split table, off otherwise. Unchecked: `false`, the unsplit encoding. The page never sends `true`, which the pipeline refuses (`ModelInputError`) on an asset without the table. It applies to the text, never the caption. The page reads the tokenizer asset when the model or the source changes (through the hub with the ref the build gets, so the cached route caches it for the build) and looks for its `rareTokenSplit` key, the fact the pipeline's default rests on. With the table (v4 / v4.1 small from the revision that includes it, and v4.1 small MF, which uses v4 small's tokenizer asset) the box is offered. Without it (v4-large's Gemma tokenizer asset has none) the box is disabled as "unavailable" and the option is left out whatever it said. While the asset is being read, or when the read fails (the hint says why), the box is offered as with the table. |
 | Voice | Two exclusive tabs; only the active tab is sent. **Voice design**: a Japanese caption (`caption`) plus four example buttons, each filling the caption and a text that suits it. An empty caption means no voice design: the caption condition is zero, and on the rectified-flow models its guidance is off too (the MeanFlow model runs no guidance; the hint says which applies). The caption is cut at `maxCaptionLen − 1` tokens the same way. **Voice clone**: a reference audio file (`speaker.audio`), decoded to the distribution's `sampleRate` (below). The panel stays mounted, so the file input keeps its file across tab switches. The hint gives the minimum length and the first N seconds the model reads, both from `pipelineConfig`. |
 | Seed | `seed` (default 0). |
 | Duration (s) | `durationSeconds`. Empty = the duration predictor decides. A number skips the predictor, and the pipeline clamps it to the distribution's `minSeconds`–`maxSeconds`. |
 | Codec tile (latent frames) | `codecTileFrames`. Empty = the pipeline's default. It only trades memory; the waveform does not change. |
-| Steps | Read-only: `pipelineConfig.steps` (40 on v4 / v4.1 small, 4 on v4.1 small MF). The API has no step knob. The hint names the sampler from `pipelineConfig.flowParameterization`: rectified-flow Euler steps with classifier-free guidance (absent or `rf_velocity`), or MeanFlow, one conditional forward per step and no guidance (`meanflow`). |
+| Steps | Read-only: `pipelineConfig.steps` (40 on v4 / v4.1 small and v4-large, 4 on v4.1 small MF). The API has no step knob. The hint names the sampler from `pipelineConfig.flowParameterization`: rectified-flow Euler steps with classifier-free guidance (absent or `rf_velocity`), or MeanFlow, one conditional forward per step and no guidance (`meanflow`). |
 | Stage events | On (default): subscribes to `onEvent`. This gives per-stage seconds, the step counter, and **Cancel** at the next stage or step. The DiT loop then runs on the host path (one readback per step); the waveform is bit-identical. Off: no `onEvent`, so there are no stage seconds, and once synthesis starts the run cannot be cancelled. The status card's Cancel is then disabled, with the reason under it. The DiT loop is resident (one GPU batch, the fastest path) unless GPU timing is on, which forces the host loop. |
 | Run / Cancel | Run one synthesis. Cancel stops a pipeline build at once, and a synthesis at its next stage or step (only with stage events on). A Cancel pressed while the finished run's record is being assembled still ends the run as cancelled. |
 | GPU timing | As on the Wan2.2 page: times every kernel of every stage. A timed run uses the host DiT loop and is slower. Switching acquires the GPU again, so the next run rebuilds the pipeline. Disabled while running and when the adapter has no `timestamp-query`. |
@@ -799,7 +803,7 @@ the record:
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)` |
 | `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
-| `model`, `preset`, `linearCompute` | the manifest model (`v4.1-small` / `v4.1-small-mf` / `v4-small`); `{ quant, label, isDefault }`; the page's choice `preset` / `f32` / `a8` |
+| `model`, `preset`, `linearCompute` | the manifest model (`v4.1-small` / `v4.1-small-mf` / `v4-small` / `v4-large`); `{ quant, label, isDefault }`; the page's choice `preset` / `f32` / `a8` |
 | `linearComputeResolved` | what the DiT Sessions were asked for: the choice, else the preset's `session.linearCompute`, else `f32` |
 | `ditLinearDispatches` | `{ i8a8, other }`: planned dispatches of linear kernels in the `dit` component's last run, counted from its pipeline keys (a runtime diagnostic label, outside semver). `null` when no `dit` diagnostics came. `a8` with `i8a8: 0` = float weights on the f32 path. |
 | `request` | `text` (as typed, before truncation); `voice` = `{ kind: "caption", caption }` (`""` = no voice design) or `{ kind: "reference", file, decoder, sampleRate, samples, seconds, f32Sha256 }`; `seed`; `durationSeconds` (a number or `"predicted"`); `codecTileFrames` (a number or `"default"`); `splitRareTokens` (`"default"` when left out, else the value sent — the page sends only `false`); `steps` (from `pipelineConfig`) |

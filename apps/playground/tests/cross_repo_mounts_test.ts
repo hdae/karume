@@ -67,6 +67,41 @@ const mfManifest = (): Manifest =>
   );
 
 /**
+ * A `karume/5` manifest shaped like Irodori v4-large: its own graphs and tokenizer asset, and the
+ * codec pair pointing at v4-small's repository (the published containers).
+ */
+const largeManifest = (): Manifest =>
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "test",
+      defaultModel: "v4-large",
+      models: {
+        "v4-large": {
+          pipeline: "irodori/1",
+          assets: {
+            tokenizer: { path: "v4-large/tokenizer/tokenizer.json", size: 16, sha256: hex("c") },
+          },
+          weights: {
+            backbone: { i8: container("v4-large/backbone/model.i8", false) },
+            dit: { i8: container("v4-large/dit/model.i8", false) },
+            codec_encoder: { i8: container("v4-small/codec_encoder/model.i8", V4) },
+            codec_decoder: { i8: container("v4-small/codec_decoder/model.i8", V4) },
+          },
+          quants: {
+            i8: {
+              weights: { backbone: "i8", dit: "i8", codec_encoder: "i8", codec_decoder: "i8" },
+              session: {},
+            },
+          },
+          defaultQuant: "i8",
+          pipelineConfig: {},
+        },
+      },
+    }),
+  );
+
+/**
  * A `karume/5` manifest shaped like Irodori v4.1-small: with `borrowing`, the components it shares
  * with v4-small (`backbone`, `dit` in i8, the tokenizer) point at v4-small's repository while
  * `duration` and the i4 `dit` stay its own — the per-container rule. Without it, the distribution
@@ -140,6 +175,12 @@ describe("crossRepoMounts", () => {
     );
   });
 
+  it("maps v4-large's borrowed codec pair to the v4-small mount", () => {
+    expect(crossRepoMounts(largeManifest(), "v4-large", "i8", HOLDERS)).toEqual({
+      [V4]: "irodori-v4",
+    });
+  });
+
   it("is empty for a distribution that references no other repository", () => {
     expect(crossRepoMounts(v41Manifest(false), "v4.1-small", "i8", HOLDERS)).toEqual({});
   });
@@ -153,8 +194,9 @@ describe("crossRepoMounts", () => {
 
 describe("the mounts other distributions reference", () => {
   // karume-anima-extra borrows from karume-anima, the rebuilt karume-irodori-v4.1-small from
-  // karume-irodori-v4-small, and karume-irodori-v4.1-small-mf from both Irodori repositories, each at
-  // the revision its manifest pins — not the revision these mounts are served at. Without the opt-in
+  // karume-irodori-v4-small, karume-irodori-v4.1-small-mf from both small Irodori repositories, and
+  // karume-irodori-v4-large its codec pair from karume-irodori-v4-small, each at the revision its
+  // manifest pins — not the revision these mounts are served at. Without the opt-in
   // the serving table throws, and /models/index.json builds it, so every page would fail
   // (vite-plugin-distributions.ts).
   it.each(["anima", "irodori-v4", "irodori-v4.1"] as const)(

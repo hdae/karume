@@ -1,8 +1,8 @@
 /**
- * The Irodori-TTS text → speech check: pick v4-small, v4.1-small or the MeanFlow v4.1-small-mf and a
- * preset, design a voice with a caption or clone one from a reference audio, run one synthesis on the
- * page's GPU, listen to it and save a record of the run (per-stage seconds, real-time factor, Session
- * diagnostics, the sha256 of the f32 samples).
+ * The Irodori-TTS text → speech check: pick v4-small, v4.1-small, the MeanFlow v4.1-small-mf or
+ * v4-large and a preset, design a voice with a caption or clone one from a reference audio, run one
+ * synthesis on the page's GPU, listen to it and save a record of the run (per-stage seconds, real-time
+ * factor, Session diagnostics, the sha256 of the f32 samples).
  */
 
 import { SOURCES, type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
@@ -88,6 +88,7 @@ import {
   samplerText,
   type VoiceMode,
 } from "./settings";
+import { readSplitTable } from "./split-table";
 
 /** Module constants (useGpu needs stable options); GPU timestamps while "GPU timing" is on. */
 const UNTIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = {};
@@ -97,9 +98,10 @@ const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { gpuTiming: true };
 const TOP_OPS = 5;
 
 /**
- * v4.1-small references the components it shares with v4-small in v4-small's repository, and
- * v4.1-small-mf references its duration predictor in v4.1-small's and the rest in v4-small's; on the
- * direct route those files come from the mounts that hold those repositories.
+ * v4.1-small references the components it shares with v4-small in v4-small's repository,
+ * v4.1-small-mf references its duration predictor in v4.1-small's and the rest in v4-small's, and
+ * v4-large references its codec pair in v4-small's; on the direct route those files come from the
+ * mounts that hold those repositories.
  */
 const REPO_HOLDERS: RepoHolders<IrodoriMount> = {
   [SOURCES["irodori-v4-small"].repo]: "irodori-v4",
@@ -110,7 +112,7 @@ const REPO_HOLDERS: RepoHolders<IrodoriMount> = {
 const PAGE_MOUNTS: readonly IrodoriMount[] = MODEL_CHOICES.map(({ value }) => value);
 
 const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
-  backbone: "Backbone (ModernBERT)",
+  backbone: "Backbone (text encoder)",
   "text-proj": "Text projection",
   "caption-proj": "Caption projection",
   "codec-encoder": "Codec encoder (reference audio)",
@@ -140,6 +142,13 @@ type ReferenceState =
       readonly f32Sha256: string;
     }
   | { readonly kind: "error"; readonly file: string; readonly error: unknown };
+
+/** Whether the chosen distribution's tokenizer asset carries the rare-token split table. */
+type SplitTableState =
+  | { readonly kind: "none" }
+  | { readonly kind: "reading" }
+  | { readonly kind: "ready"; readonly table: boolean }
+  | { readonly kind: "error"; readonly error: unknown };
 
 type IrodoriRun = {
   readonly id: number;
@@ -194,7 +203,8 @@ export const IrodoriPage = () => {
   const manifestView = view?.kind === "ready" ? view.view : undefined;
 
   // Preselect the manifest's default preset. A switch to another distribution keeps the chosen
-  // preset when that manifest has it too (the small distributions declare the same five names).
+  // preset when that manifest has it too (the small distributions declare the same five names;
+  // v4-large declares four, without f32), and takes that manifest's default otherwise.
   useEffect(() => {
     if (manifestView === undefined) return;
     setForm((current) =>
@@ -205,6 +215,31 @@ export const IrodoriPage = () => {
   }, [manifestView]);
 
   const { source, hfRef, choose: chooseSource } = usePipelineSource(status);
+
+  // Whether the distribution's tokenizer asset carries the rare-token split table, read from the
+  // asset itself with the ref the build gets (on the cached route this caches the asset the build
+  // reads). The option is offered only with the table; while this is reading or failed, the box
+  // behaves as it does with one (it never sends true, so every asset accepts the request).
+  const [splitTableState, setSplitTableState] = useState<SplitTableState>({ kind: "none" });
+  const mount = form.mount;
+  useEffect(() => {
+    if (status?.available !== true) {
+      setSplitTableState({ kind: "none" });
+      return undefined;
+    }
+    const controller = new AbortController();
+    setSplitTableState({ kind: "reading" });
+    readSplitTable(pretrainedRef(source, mount, REPO_HOLDERS), controller.signal).then(
+      (table) => {
+        if (!controller.signal.aborted) setSplitTableState({ kind: "ready", table });
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) setSplitTableState({ kind: "error", error });
+      },
+    );
+    return () => controller.abort();
+  }, [status, source, mount]);
+  const splitTable = splitTableState.kind === "ready" ? splitTableState.table : undefined;
 
   // A device setting, not a form field: switching re-acquires the GPU (the next run rebuilds the
   // pipeline on the new one).
@@ -297,7 +332,11 @@ export const IrodoriPage = () => {
     requestProblem = "The reference audio could not be decoded (the error is above).";
   } else {
     try {
-      request = buildRequest(form, reference.kind === "ready" ? reference.decoded : undefined);
+      request = buildRequest(
+        form,
+        reference.kind === "ready" ? reference.decoded : undefined,
+        splitTable,
+      );
     } catch (error) {
       if (!(error instanceof FormError)) throw error;
       requestProblem = error.message;
@@ -648,20 +687,36 @@ export const IrodoriPage = () => {
               <Label className="flex items-center gap-2 font-normal">
                 <Checkbox
                   id="irodori-split-rare-tokens"
-                  checked={form.splitRareTokens}
+                  checked={splitTable === false ? false : form.splitRareTokens}
                   onCheckedChange={(checked) => update({ splitRareTokens: checked })}
-                  disabled={disabled}
+                  disabled={disabled || splitTable === false}
                 />
-                Split rare tokens (the model's default)
+                {splitTable === false
+                  ? "Split rare tokens (unavailable)"
+                  : "Split rare tokens (the model's default)"}
               </Label>
-              <p className="text-xs text-muted-foreground">
-                Checked: splitRareTokens is left out, so the model decides: rare tokens of the text
-                are split into smaller pieces, as upstream does. Unchecked: false, the unsplit
-                encoding. It only has an effect on distributions whose tokenizer asset carries the
-                split table (v4 / v4.1 small from the revision that includes it, and v4.1 small MF,
-                which uses v4 small's tokenizer asset); elsewhere both give the same encoding. It
-                applies to the text, never the caption.
-              </p>
+              {splitTable === false ? (
+                <p id="irodori-split-note" className="text-xs text-muted-foreground">
+                  Not offered: this distribution's tokenizer asset carries no rare-token split
+                  table, so splitRareTokens is left out and the text is encoded unsplit (the model's
+                  default).
+                </p>
+              ) : (
+                <p id="irodori-split-note" className="text-xs text-muted-foreground">
+                  Checked: splitRareTokens is left out, so the model decides: rare tokens of the
+                  text are split into smaller pieces, as upstream does. Unchecked: false, the
+                  unsplit encoding. It applies to the text, never the caption.{" "}
+                  {splitTableState.kind === "ready"
+                    ? "This distribution's tokenizer asset carries the split table."
+                    : null}
+                  {splitTableState.kind === "reading"
+                    ? "Reading the tokenizer asset to see whether it carries the split table…"
+                    : null}
+                  {splitTableState.kind === "error"
+                    ? `Whether the tokenizer asset carries the split table is unknown (${thrownText(splitTableState.error)}); the box is offered as with the table.`
+                    : null}
+                </p>
+              )}
             </div>
             <div className="flex flex-col gap-2 sm:col-span-2">
               <Label>Voice</Label>

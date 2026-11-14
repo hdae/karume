@@ -85,6 +85,11 @@ describe("MODEL_CHOICES", () => {
     expect(MODEL_CHOICES.map(({ value }) => value)).toContain("irodori-v4.1-mf");
     expect(DEFAULT_MOUNT).toBe("irodori-v4.1");
   });
+
+  it("offers v4-large as a fourth model, v4.1 staying the default", () => {
+    expect(MODEL_CHOICES.map(({ value }) => value)).toContain("irodori-v4-large");
+    expect(DEFAULT_MOUNT).toBe("irodori-v4.1");
+  });
 });
 
 const reference = { data: new Float32Array(20_000), sampleRate: 48000 };
@@ -168,6 +173,24 @@ describe("buildRequest", () => {
     expect(buildRequest(form({ splitRareTokens: false }), undefined).splitRareTokens).toBe(false);
     for (const splitRareTokens of [true, false]) {
       expect(buildRequest(form({ splitRareTokens }), undefined).splitRareTokens).not.toBe(true);
+    }
+  });
+
+  it("leaves splitRareTokens out on an asset without the split table, whatever the box says", () => {
+    for (const splitRareTokens of [true, false]) {
+      const request = buildRequest(form({ splitRareTokens }), undefined, false);
+      expect("splitRareTokens" in request).toBe(false);
+    }
+  });
+
+  it("follows the box on an asset with the split table, as while the asset is not known", () => {
+    for (const splitTable of [true, undefined]) {
+      expect(buildRequest(form({ splitRareTokens: false }), undefined, splitTable)).toMatchObject({
+        splitRareTokens: false,
+      });
+      expect(
+        "splitRareTokens" in buildRequest(form({ splitRareTokens: true }), undefined, splitTable),
+      ).toBe(false);
     }
   });
 

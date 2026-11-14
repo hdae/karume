@@ -51,6 +51,7 @@ export const MOUNTS = {
   // karume-irodori-v4.1-small takes the components it shares with v4-small from
   // karume-irodori-v4-small, and karume-irodori-v4.1-small-mf (the MeanFlow model, which carries only
   // its DiT) takes its duration predictor from karume-irodori-v4.1-small and the rest from
+  // karume-irodori-v4-small, and karume-irodori-v4-large takes its codec pair from
   // karume-irodori-v4-small, each at the revision its manifest declares (the same opt-in as `anima`).
   "irodori-v4": {
     directory: "models/karume-irodori-v4-small",
@@ -65,6 +66,11 @@ export const MOUNTS = {
   "irodori-v4.1-mf": {
     directory: "models/karume-irodori-v4.1-small-mf",
     hfRepo: irodori.SOURCES["irodori-v4.1-small-mf"].repo,
+  },
+  "irodori-v4-large": {
+    directory: "models/karume-irodori-v4-large",
+    // TODO: irodori.SOURCES["irodori-v4-large"].repo once the entry exists (it arrives at release).
+    hfRepo: "hdae/karume-irodori-v4-large",
   },
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },

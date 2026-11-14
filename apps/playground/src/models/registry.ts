@@ -100,10 +100,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/irodori",
     title: "Irodori-TTS",
     summary:
-      "Japanese text → speech with the v4 and v4.1 small models and the v4.1 small MeanFlow model.",
+      "Japanese text → speech with the v4 and v4.1 small models, the v4.1 small MeanFlow model and v4-large.",
     group: "Audio",
     icon: AudioLinesIcon,
-    mounts: ["irodori-v4", "irodori-v4.1", "irodori-v4.1-mf"],
+    mounts: ["irodori-v4", "irodori-v4.1", "irodori-v4.1-mf", "irodori-v4-large"],
   },
   {
     path: "/sbv2",
