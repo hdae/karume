@@ -33,10 +33,10 @@ Two outputs (**tracked in git**):
     packages/models/tests/fixtures/birefnet-matte/matte.safetensors
         — input logits and expected values
 
-After generating, run `deno fmt packages/models/tests/fixtures/birefnet-matte/matte.json` (the
-formatter decides the committed form). The safetensors tensors are `<input>.logits` (F32 `[h, w]`)
-per input, and `<case>.hr` (U8 `[H, W]` — HR's final α) and `<case>.lucida` (F32 `[H, W]` —
-Lucida's `255α` before rounding) per case.
+After generating, run `vp fmt packages/models/tests/fixtures/birefnet-matte/matte.json` from the
+repository root (the formatter decides the committed form). The safetensors tensors are
+`<input>.logits` (F32 `[h, w]`) per input, and `<case>.hr` (U8 `[H, W]` — HR's final α) and
+`<case>.lucida` (F32 `[H, W]` — Lucida's `255α` before rounding) per case.
 
 ## Inputs (2 kinds)
 

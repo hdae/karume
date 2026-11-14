@@ -69,8 +69,8 @@ describe("collectDestroyedDevices", () => {
 
   describe("default (globalThis)", () => {
     it("in a run with --expose-gc it resolves after waiting twice, and in a run without it resolves without waiting", async () => {
-      // Branches on the run's flag: the deno.json task (with the flag) sees the former, a plain run
-      // without the flag the latter.
+      // Branches on the run's flag: a `vp test` run (the Vitest config passes the flag) sees the
+      // former, a plain run without the flag the latter.
       const host: object = globalThis;
       const exposedGc = "gc" in host ? host.gc : undefined;
       if (typeof exposedGc !== "function") {

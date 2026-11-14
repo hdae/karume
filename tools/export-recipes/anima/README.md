@@ -12,7 +12,7 @@ and dist contracts live in [`../../exporter/README.md`](../../exporter/README.md
 
 Real weights for the image generation side. `anima/export.py` writes out the 4 emit targets of ADR
 [0016](../../../docs/decisions/0016-anima-chain-export.md). The full emit (`outputs/series/anima/`) and the
-Deno-side E2E (`packages/models/tests/e2e_anima_test.ts`) were completed in M1-P4.
+TypeScript-side E2E (`packages/e2e/tests/e2e_anima_test.ts`) were completed in M1-P4.
 
 ### Dependencies and obtaining the weights
 
@@ -717,8 +717,8 @@ not touch the model graphs.
 # assets (2 files into outputs/series/anima-demo/text/) + fixture (packages/models/tests/fixtures/anima-text/)
 cd tools/export-recipes
 uv run --group anima python -m anima.demo
-# always format afterwards (the committed form is what the formatter produces — verify's fmt --check covers fixtures too)
-cd ../.. && deno fmt packages/models/tests/fixtures/anima-text/parity.json
+# always format afterwards (the committed form is what the formatter produces — the format check of vp check covers fixtures too)
+cd ../.. && vp fmt packages/models/tests/fixtures/anima-text/parity.json
 ```
 
 **A single run always produces both** (if they are not built from the same table, the runtime

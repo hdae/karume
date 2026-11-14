@@ -24,7 +24,7 @@
  * ③ **Budget-split parity** (ADR 0124): a split finer than the binding limit made by
  *    `SessionOptions.attentionRowBlockMaxBytes` equals the unbudgeted run (1 block) as Uint32. The
  *    2 f16-compute variants (which need `shader-f16`) run both the forced split and the budget
- *    split in a separate `Deno.test` (the variant enumeration of ADR 0124 decision 4).
+ *    split in a separate `test` (the variant enumeration of ADR 0124 decision 4).
  *
  * MUST: do not make it tautological. ① also checks that the intermediate peak
  * (`peakTransientBytes`) **shrinks monotonically** with the block count — without it, "the split
@@ -110,7 +110,7 @@ const VARIANTS: readonly Variant[] = [
 
 /**
  * The f16-compute variants (ADR 0028 — another storage form passing S as `array<f16>`). They need
- * `shader-f16`, so they run in a separate `Deno.test` that takes the device of
+ * `shader-f16`, so they run in a separate `test` that takes the device of
  * `acquireGpu({ shaderF16: true })` (the device of {@link VARIANTS} is taken without the feature).
  * They can be combined with the mask and GQA.
  */

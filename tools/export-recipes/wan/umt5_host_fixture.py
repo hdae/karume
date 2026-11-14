@@ -170,7 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args.out.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.out / TENSORS_FILE))
-    # Two-space indent (the JSON shape `deno fmt` writes — the fixture is tracked, so rewriting it
+    # Two-space indent (the indent of the repository formatter, Oxfmt — it also folds short arrays
+    # onto one line, so run `vp fmt` on the written file; the fixture is tracked, so rewriting it
     # must not produce a diff).
     (args.out / META_FILE).write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

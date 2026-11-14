@@ -1,5 +1,5 @@
 // Fixture of gpu_gridstride_test.ts (the DegenerateCase type and the case builders per kernel
-// family). The execution harness (runDegenerate / Deno.test) and the assembly of the case list stay
+// family). The execution harness (runDegenerate / test) and the assembly of the case list stay
 // in gpu_gridstride_test.ts; this file only "produces the reduced-dispatch cases of one family" —
 // dependencies go one way, helpers → src.
 

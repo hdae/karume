@@ -28,9 +28,9 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-q
 # 1c. i4 series — the shipped variant only (the seat of the SBV2 `i8+bert4` quant)
 uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
 
-# 2. real-GPU comparison — the Deno-side E2E, from the repository root (see the note below)
+# 2. real-GPU comparison — the TypeScript-side E2E, from the repository root (see the note below)
 cd ../..
-deno task test:models:deberta
+vp test --project models:deberta
 ```
 
 - **transformers is pinned to 5.14.1** (`docs/research/2026-08-02-deberta-front-recon.md` §6,

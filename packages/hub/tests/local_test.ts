@@ -424,7 +424,7 @@ test("localDirectory: a delegate (fallback) field for cross-repository reference
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
   // The type check: if the field came back to the public surface, the `@ts-expect-error` would be
-  // unused and `deno check` would turn red (no value buildable through the public surface works as
+  // unused and the type check of `vp check` would turn red (no value buildable through the public surface works as
   // a delegate — the NOTE on `LocalDirectoryOptions.crossRepo`).
   const options: LocalDirectoryOptions = {
     // @ts-expect-error there is no delegate field in LocalDirectoryOptions

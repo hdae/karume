@@ -508,8 +508,8 @@ const openTarget = async (target: string) =>
   );
 
 /**
- * Listed synchronously, as it is needed at registration time (the same reason as Deno.test's
- * ignore decision).
+ * Listed synchronously, as it is needed at registration time (the same reason as the
+ * `test.skipIf` decision).
  */
 const TARGETS = discoverTargets(GOLDEN_ROOT);
 /**

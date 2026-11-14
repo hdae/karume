@@ -169,10 +169,10 @@ EXPECTED_RESAMPLE = 3
 #: 255.0 in f64).
 EXPECTED_RESCALE = 1.0 / 255.0
 
-#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). **The source of
-#: truth for the images is `examples/anima/eval-images.ts`** (it holds the prompts / seeds /
-#: resolutions, and `deno task demo:eval-images` bakes the same 4 images again — the chosen ones
-#: are frozen by hand). The case names are spelled as in the `REAL_CASES` of SigLIP2 / BiRefNet
+#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). The images were
+#: baked by `examples/anima/eval-images.ts` (`deno task demo:eval-images`, which held the
+#: prompts / seeds / resolutions — removed in 0.15 with no replacement), and the chosen ones were
+#: frozen by hand. The case names are spelled as in the `REAL_CASES` of SigLIP2 / BiRefNet
 #: (the same 4 images, just read from a different series directory).
 REAL_CASES: tuple[tuple[str, str, str], ...] = (
     (

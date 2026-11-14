@@ -132,7 +132,7 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
 };
 
 /**
- * Listed synchronously because it is needed at registration (the same reason as Deno.test's ignore
+ * Listed synchronously because it is needed at registration (the same reason as the `test.skipIf`
  * decision). Without KARUME_SERIES=1 the series is not read: the expected cases are registered as
  * explicit SKIPs.
  */
@@ -145,7 +145,7 @@ const AVAILABLE = SERIES_CHECKS && CASES.length > 0;
 /**
  * Whether **anything at all** is left (the SKIP predicate of the completeness test — Codex round H
  * finding H-02). A gap where every io is gone and only the model remains makes `AVAILABLE` false,
- * and with `ignore: !AVAILABLE` the completeness test itself would SKIP — the predicate that turns
+ * and with `test.skipIf(!AVAILABLE)` the completeness test itself would SKIP — the predicate that turns
  * a gap into a FAIL may stay dormant only when the directory is "completely empty".
  */
 const ANY_PRESENT = SERIES_CHECKS && (AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT)));

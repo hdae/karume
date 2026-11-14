@@ -721,7 +721,7 @@ type Sbv2Case = {
 };
 
 /**
- * Enumerated synchronously, as registration needs it (the same reason as Deno.test's ignore). The
+ * Enumerated synchronously, as registration needs it (the same reason as `test.skipIf`). The
  * raw weights (config.json / ckpt / style_vectors.npy) live separately under `inputs/sbv2/F1/` and
  * do not come into the series root, but a target is a directory, so looking at **directories
  * only** is kept.

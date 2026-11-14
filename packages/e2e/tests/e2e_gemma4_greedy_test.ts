@@ -310,8 +310,8 @@ const discoverCases = (prefix: string): readonly string[] =>
     .sort();
 
 /**
- * Listed synchronously because it is needed at registration (the same reason as `Deno.test`'s
- * ignore decision). Without KARUME_SERIES=1 the series is not read at all.
+ * Listed synchronously because it is needed at registration (the same reason as the
+ * `test.skipIf` decision). Without KARUME_SERIES=1 the series is not read at all.
  */
 const IO_CASES = SERIES_CHECKS ? discoverCases(IO_PREFIX) : [];
 const GREEDY_CASES = SERIES_CHECKS ? discoverCases(GREEDY_PREFIX) : [];

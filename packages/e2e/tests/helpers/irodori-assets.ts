@@ -8,7 +8,7 @@
  * they do not share one table). What is shared is only "what to read from where"; **what to require
  * belongs to each check**.
  *
- * NOTE: only the tests read local files with `Deno.readFile`. The packages themselves use Web
+ * NOTE: only the tests read local files (`readFile` of `@karume/test-support/fs`). The packages themselves use Web
  * standard APIs only (cross-cutting invariant), and `fromAssets` is a surface that only takes bytes.
  */
 

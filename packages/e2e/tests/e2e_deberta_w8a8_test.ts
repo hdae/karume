@@ -255,8 +255,8 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
 };
 
 /**
- * Listed synchronously because it is needed at registration (the same reason as the Deno.test
- * ignore decision).
+ * Listed synchronously because it is needed at registration (the same reason as the
+ * `test.skipIf` decision).
  * MUST: the series is listed only under SERIES_CHECKS (the default lanes do not read it).
  */
 const FILES = SERIES_CHECKS ? mirrorFiles(ROOT) : [];

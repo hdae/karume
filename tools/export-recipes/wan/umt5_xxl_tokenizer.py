@@ -11,9 +11,9 @@ asset and the fixture go stale separately. The same practice as `wan.umt5_tokeni
        (`wan.umt5_distribution`).
   ② Fixture `packages/models/tests/fixtures/umt5/tokenizer-cases.json` (tracked).
 
-After generating, run `deno fmt packages/models/tests/fixtures/umt5/` (the committed form is what
-the formatter produces). With `--fetch`, the pinned tokenizer files are downloaded when they are not
-in the HF cache (without it, a missing file fails).
+After generating, run `vp fmt packages/models/tests/fixtures/umt5/` from the repository root (the
+committed form is what the formatter produces). With `--fetch`, the pinned tokenizer files are
+downloaded when they are not in the HF cache (without it, a missing file fails).
 
 ## Asset (`karume-umt5-tokenizer/1`)
 

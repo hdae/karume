@@ -33,8 +33,9 @@ exhaustively + by random sampling on every emit, and in addition the id sequence
 implementation and `AutoTokenizer` are compared on 2,000 random samples. On a mismatch **nothing is
 written** (ADR 0005).
 
-After generation, run `deno fmt packages/models/tests/fixtures/anima-text/parity.json` (the
-formatter decides the committed form — `fmt --check` of `deno task verify` also covers fixtures).
+After generation, run `vp fmt packages/models/tests/fixtures/anima-text/parity.json` from the
+repository root (the formatter decides the committed form — the format check of `vp check` also
+covers fixtures).
 """
 
 from __future__ import annotations

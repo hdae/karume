@@ -57,8 +57,9 @@
  * absent from a complete fetch of the pinned test assets (the dataset at the pin lacks it — ADR
  * 0139), and a case file absent beside a present `meta.json` (an inconsistent golden set).
  *
- * NOTE: only the tests use `Deno.readFile` for local reads. The package itself uses Web standard
- * APIs only (a cross-cutting invariant), and `fromAssets` is a surface that only receives bytes.
+ * NOTE: only the tests read local files (`readFile` of `@karume/test-support/fs`). The package
+ * itself uses Web standard APIs only (a cross-cutting invariant), and `fromAssets` is a surface that
+ * only receives bytes.
  */
 
 import { test } from "vite-plus/test";

@@ -66,8 +66,9 @@
  * machine). Environments missing them and environments without a GPU **SKIP explicitly** with a
  * reason (no deleting tests to go silently green — ADR 0005).
  *
- * NOTE: only the tests use `Deno.readFile` for local reads. The package itself uses Web standard
- * APIs only (a cross-cutting invariant), and `fromAssets` is a surface that only takes bytes.
+ * NOTE: only the tests read local files (`readFile` of `@karume/test-support/fs`). The package
+ * itself uses Web standard APIs only (a cross-cutting invariant), and `fromAssets` is a surface that
+ * only takes bytes.
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";

@@ -32,10 +32,10 @@
  *   variable as the 121-frame case of the end-to-end e2e). It stays out of the default lanes so as not to lengthen the
  *   full verify (a countermeasure is to be considered separately).
  *
- * Command that runs the 121 frames (as a **process of its own** through `--filter` — "Device use" below):
+ * Command that runs the 121 frames (as a **process of its own** through `-t` — "Device use" below):
  *
  * ```
- * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_ab_test.ts --filter "121f"
+ * KARUME_WAN_TI2V_121F=1 vp test packages/e2e/tests/e2e_wan_ti2v_ab_test.ts -t "121f"
  * ```
  *
  * ## The I2V case (ADR 0121 step 9d; the user's rulings, 2026-10-09 to 10)
@@ -58,7 +58,7 @@
  * so neither the band nor the census would catch it). Command that runs it:
  *
  * ```
- * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_ab_test.ts --filter "i2v"
+ * KARUME_WAN_TI2V_I2V_FULL=1 vp test packages/e2e/tests/e2e_wan_ti2v_ab_test.ts -t "i2v"
  * ```
  *
  * There is no per-knob record (2.1's `knobRungs`) — it is not in the acceptance conditions of step 7, and it would
@@ -72,11 +72,11 @@
  * ## Device use
  *
  * One device is acquired per describe, and the releases are awaited with `settleReleases` between observations (as in
- * 2.1). Run with the opt-in env and without `--filter`, one process acquires devices in turn (121 → 33 → I2V). On a
+ * 2.1). Run with the opt-in env and without `-t`, one process acquires devices in turn (121 → 33 → I2V). On a
  * machine where `destroy()` does not return VRAM at once (B570 — ADR 0120 risk 6), what is left of the previous case's
  * allocations can overlap the next case's, so the opt-in cases are run alone with the commands above (the same
  * discipline as the opt-ins of the end-to-end e2e). The 121 frames come first so that, even when run without
- * `--filter`, the large allocations are made without carrying what other cases left on the device.
+ * `-t`, the large allocations are made without carrying what other cases left on the device.
  *
  * MUST: the assets are `models/karume-wan2.2/` (untracked; local assets of a real-GPU machine). Environments without
  * them or without a GPU **SKIP explicitly** with the reason (the assembly command) (ADR 0005). The fault-injection

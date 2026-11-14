@@ -230,8 +230,9 @@ def write(out: Path, model: str = DEFAULT_MODEL) -> dict[str, Any]:
         {name: tensor.contiguous() for name, tensor in tensors.items()},
         str(out / "unipc.safetensors"),
     )
-    # Two-space indent (the JSON shape of `deno fmt` — the fixture is tracked, so a rewrite must not
-    # produce a diff).
+    # Two-space indent (the indent of the repository formatter, Oxfmt — it also folds short arrays
+    # onto one line, so run `vp fmt` on the written file; the fixture is tracked, so a rewrite must
+    # not produce a diff).
     (out / "unipc.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

@@ -46,7 +46,7 @@ contaminating combinations do not exist structurally.
 The weights are not part of what is shipped (`inputs/` is in `.gitignore`). See the README for how
 to get them.
 
-Output layout (enumerated by the Deno side, `packages/runtime/tests/e2e_sbv2_test.ts`). The series
+Output layout (enumerated by the TypeScript side, `packages/e2e/tests/e2e_sbv2_test.ts`). The series
 name is derived from the directory name of `--model-dir` (`sbv2-F1` for the default
 `inputs/sbv2/F1/`):
 

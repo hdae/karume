@@ -96,7 +96,7 @@
  *   needs, `accept-ferret` — the acceptance case). Both carry reference-preset rows.
  * - Portrait 704×1280 (reference preset, `boxing-cats`'s landscape source image cropped to an explicit portrait size,
  *   seed 42, no CPU reference — completion, 0 non-finite values, the sha256 per-environment row).
- * - The 50-step run (a separate `Deno.test` — the section below; sha256 per-environment rows for the reference and the
+ * - The 50-step run (a separate `describe` — the section below; sha256 per-environment rows for the reference and the
  *   practical preset).
  *
  * The opt-in rows register with the reference guard only under the opt-in (they do not run in the default lane, so
@@ -109,10 +109,10 @@
  * in the same process):
  *
  * ```
- * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_i2v_pipeline_test.ts --filter "I2V end-to-end 2 steps"
+ * KARUME_WAN_TI2V_I2V_FULL=1 vp test packages/e2e/tests/e2e_wan_ti2v_i2v_pipeline_test.ts -t "I2V end-to-end 2 steps"
  * ```
  *
- * ## The 50-step run (the same opt-in, a separate process with `--filter "50 steps"`)
+ * ## The 50-step run (the same opt-in, a separate process with `-t "50 steps"`)
  *
  * The precomputed path, `boxing-cats`'s image and prompt, seed 42, shift 5.0, 1280×704 (chosen by the image's aspect
  * ratio), 33 frames and the manifest's default 50 steps run once each with the reference and the practical preset,
@@ -127,12 +127,12 @@
  * the two-step practical row, ADR 0110 decision 5).
  * The cases register with the reference guard only under the opt-in (the "Opt-in" section above). On a machine without
  * the rows, this test skips that case's sha comparison (keeping the artifact and the measured sha) and ends green; what
- * turns red is the reference-guard test (registered by `registerReferenceGate` — the `--filter` of the command below
+ * turns red is the reference-guard test (registered by `registerReferenceGate` — the `-t` of the command below
  * does not run it; run it by its name with the same env, or run without a filter). The rows are written by adding
  * `KARUME_REFERENCE=write` to the same command:
  *
  * ```
- * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_i2v_pipeline_test.ts --filter "50 steps"
+ * KARUME_WAN_TI2V_I2V_FULL=1 vp test packages/e2e/tests/e2e_wan_ti2v_i2v_pipeline_test.ts -t "50 steps"
  * ```
  *
  * ## Hooks for observation and fault injection (no hook added to the product code)
@@ -166,10 +166,10 @@
  *
  * ## Device use
  *
- * The one two-step `Deno.test` takes a single device and runs every case with `t.step` (with `settleReleases`
- * between cases). Building only reads the distribution's parts and creates no Session (each stage builds and disposes
+ * The one two-step `describe` takes a single device (in its `beforeAll`) and runs every case as an `it` (with
+ * `settleReleases` between cases). Building only reads the distribution's parts and creates no Session (each stage builds and disposes
  * its own), so the one-layer-inside state and the public pipeline use the same device in turn. The 50 steps are a
- * separate `Deno.test` (one device) and run as a **separate process** with `--filter "50 steps"`.
+ * separate `describe` (one device) and run as a **separate process** with `-t "50 steps"`.
  *
  * ## Observations (not checks)
  *
@@ -2002,9 +2002,9 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
   },
 );
 
-// NOTE: run with the opt-in env and without `--filter`, one process takes two devices in turn together with the
-// two-step `Deno.test` (hitting B570's `destroy()` not returning VRAM). Run it as a separate process with
-// `--filter "50 steps"`.
+// NOTE: run with the opt-in env and without `-t`, one process takes two devices in turn together with the
+// two-step `describe` (hitting B570's `destroy()` not returning VRAM). Run it as a separate process with
+// `-t "50 steps"`.
 describe.skipIf(!I2V_FULL || !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
   "Wan2.2 I2V end-to-end 50 steps (real GPU, opt-in KARUME_WAN_TI2V_I2V_FULL=1): 1280×704, 33 frames (reference and practical preset)" +
     " complete with 0 non-finite values; time and VRAM at stage switches, PNG of every frame + contact sheet, sha256 per-environment rows",

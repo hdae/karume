@@ -189,10 +189,10 @@ DIM_SCALE = 0.5
 NEAR_PAIR = ("ramp", "ramp-dim")
 FAR_PAIR = ("ramp", "checker")
 
-#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). **The source of
-#: truth for the images is `examples/anima/eval-images.ts`** (it holds the prompts / seeds /
-#: resolution, and `deno task demo:eval-images` re-bakes the same 4 images — the chosen ones are
-#: frozen by hand as copies).
+#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). The images were
+#: baked by `examples/anima/eval-images.ts` (`deno task demo:eval-images`, which held the
+#: prompts / seeds / resolution — removed in 0.15 with no replacement), and the chosen ones were
+#: frozen by hand as copies.
 REAL_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "photo-portrait",

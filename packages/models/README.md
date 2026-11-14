@@ -82,7 +82,9 @@ minified) until the package declares `"sideEffects": false`
 
 - A WebGPU device with a real GPU adapter — the same requirement as `@karume/runtime`, since every
   pipeline opens a session. There is no CPU fallback.
-- Deno 2 (tested on 2.9.6) or a browser. Deno exposes WebGPU without a flag.
+- A browser, Node 24 or Deno 2 (tested on 2.9.6). Deno exposes WebGPU without a flag; a Node
+  application passes its WebGPU implementation (e.g. Dawn, the npm package `webgpu`) to
+  `acquireGpu({ gpu })` — see the `@karume/runtime` README.
 - Network access when a pipeline is built with `fromPretrained`. A distribution that is already on
   disk is passed as a source handle instead, and then nothing goes over the network.
 

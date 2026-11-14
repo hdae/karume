@@ -78,9 +78,9 @@
  *   applied. That the bundle reached the Session is checked in the second run's census. The longest point of ADR 0120
  *   decision 4's form (two points, the default and the longest) is **S = 27,280** (1280×704, 121 frames — the accepted
  *   maximum, the same shape as the opt-in point of the self A/B check); it has no golden, so its input is a random
- *   latent and a real prompt's embedding, and the same check runs in a separate Deno.test. The allocations are large
+ *   latent and a real prompt's embedding, and the same check runs in a separate `describe`. The allocations are large
  *   and it takes long, so it is opt-in (`KARUME_WAN_TI2V_121F=1` — the same variable as the self A/B check and the
- *   end-to-end e2e's 121 frames) and runs as a separate process with `--filter "27280"` (taking a single device — the
+ *   end-to-end e2e's 121 frames) and runs as a separate process with `-t "27280"` (taking a single device — the
  *   same rule as the end-to-end e2e's opt-in). There is an estimate (ADR 0121) that the 16-dispatch chunks before
  *   backing swell on the large-S side, and the 1 s check is most likely to turn red at that point, so the longest point
  *   is not left out.
@@ -876,8 +876,8 @@ const results = openResults("wan-ti2v-dit");
  * unpatchify). The normal-mode test compares against these as Uint32 (chunk boundaries do not move values — the same as
  * 2.1's `measuredTokens`).
  *
- * MUST: register the measuring-mode comparison before normal mode (Deno runs a file's tests in registration order). A
- * run that skipped measuring mode (`--filter` and the like) has nothing to compare against, so it fails instead of
+ * MUST: register the measuring-mode comparison before normal mode (Vitest runs a file's tests in registration order). A
+ * run that skipped measuring mode (`-t` and the like) has nothing to compare against, so it fails instead of
  * silently skipping the comparison.
  */
 const measuredTokens = new Map<string, Float32Array>();

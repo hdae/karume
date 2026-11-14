@@ -1,7 +1,7 @@
 /**
  * Decides whether the real-GPU tests can run.
  *
- * Without an adapter the tests are **explicitly SKIPped** with `Deno.test({ ignore })` (the tests
+ * Without an adapter the tests are **explicitly SKIPped** with `test.skipIf` (the tests
  * are not removed to go green silently). The decision is needed when the tests are registered, so
  * it runs once, at module evaluation. An environment where `requestAdapter()` throws is "a broken
  * environment", so the exception propagates instead of being swallowed.

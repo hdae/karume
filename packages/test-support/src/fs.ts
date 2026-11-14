@@ -1,9 +1,10 @@
 /**
  * Deno-shaped file helpers for tests, implemented on `node:fs`.
  *
- * The Deno suite reads fixtures and local assets with `Deno.readFile` & co. These helpers keep the
- * call shape (name, argument order, `string | URL` paths, `Uint8Array<ArrayBuffer>` results) so the
- * port is a mechanical rename. Only the functions the suite uses exist here; add on demand.
+ * The suite was written on Deno (before 0.15) and read fixtures and local assets with
+ * `Deno.readFile` & co. These helpers keep the call shape (name, argument order, `string | URL`
+ * paths, `Uint8Array<ArrayBuffer>` results) so the port was a mechanical rename. Only the functions
+ * the suite uses exist here; add on demand.
  *
  * Byte results are always backed by their own `ArrayBuffer` (Node may hand out views into a shared
  * pool for small reads, which would break `new Float32Array(bytes.buffer)`-style reinterpretation).

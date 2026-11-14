@@ -111,7 +111,7 @@
  * partner first). The cases register with the reference guard only under the opt-in (they do not run in the default
  * lane, so registering them would turn the reference guard red on a machine without the rows — the same as the 121
  * frames). The rows are written by adding `KARUME_REFERENCE=write` to the same command
- * (`KARUME_WAN_TI2V_FULL_PIPELINE=1` and `--filter "50 steps"`). The results directory is kept apart from the default
+ * (`KARUME_WAN_TI2V_FULL_PIPELINE=1` and `-t "50 steps"`). The results directory is kept apart from the default
  * lane's (`<date>_wan-ti2v-pipeline/`) because `results.json` is rewritten whole on every run.
  *
  * ## The 121-frame reference values (env opt-in `KARUME_WAN_TI2V_121F=1` — not in the default lane)
@@ -130,14 +130,14 @@
  * to the same command:
  *
  * ```
- * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "121 frames"
+ * KARUME_WAN_TI2V_121F=1 vp test packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts -t "121 frames"
  * ```
  *
  * ## Device use (B570's `destroy()` does not return VRAM — docs/known-issues.md)
  *
- * The one `Deno.test` of the default lane takes a single device and runs every case with `t.step` (with
- * `settleReleases` between cases). The opt-in 50 steps and 121 frames likewise use one device and run as a **separate
- * process** with `--filter "50 steps"` / `--filter "121 frames"` (so they do not carry what the default lane's device
+ * The one `describe` of the default lane takes a single device (in its `beforeAll`) and runs every case as an `it`
+ * (with `settleReleases` between cases). The opt-in 50 steps and 121 frames likewise use one device and run as a
+ * **separate process** with `-t "50 steps"` / `-t "121 frames"` (so they do not carry what the default lane's device
  * left behind). Building (`fromPretrained`) only reads the distribution's parts and does not build Sessions (each
  * stage builds and disposes its own).
  *
@@ -1454,9 +1454,9 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
   },
 );
 
-// NOTE: run with the opt-in env and without `--filter`, one process takes two devices in turn together with the default
-// lane's `Deno.test` (hitting B570's `destroy()` not returning VRAM). Run it as a separate process with
-// `--filter "50 steps"` (module doc "Device use").
+// NOTE: run with the opt-in env and without `-t`, one process takes two devices in turn together with the default
+// lane's `describe` (hitting B570's `destroy()` not returning VRAM). Run it as a separate process with
+// `-t "50 steps"` (module doc "Device use").
 describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
   "Wan2.2 end-to-end 50 steps (real GPU, opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1): 1280×704, 33 frames (reference preset, practical s16, online)" +
     " complete with 0 non-finite values; time and VRAM at stage switches, PNG of every frame + contact sheet, sha256 per-environment rows",
@@ -1563,7 +1563,7 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
   },
 );
 
-// NOTE: like the 50-step run, run it as a separate process with `--filter "121 frames"` (module doc "Device use").
+// NOTE: like the 50-step run, run it as a separate process with `-t "121 frames"` (module doc "Device use").
 test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
   "Wan2.2 end-to-end 121 frames (real GPU, opt-in KARUME_WAN_TI2V_121F=1): 1280×704, 2 steps (reference preset, seed path) complete" +
     " with 0 non-finite values; sha256 per-environment row, time and VRAM at stage switches",

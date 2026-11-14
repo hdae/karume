@@ -7,8 +7,8 @@ import { isNotFound, readFile, readTextFile } from "@karume/test-support/fs";
  * failure part-way through a read as "the asset is missing" would turn a check that never ran into
  * a silent green SKIP (ADR 0005's explicit SKIP; fail loudly).
  *
- * NOTE: only tests use `Deno.readFile` for local reads. The package itself uses Web standard APIs
- * only (cross-cutting invariant).
+ * NOTE: only tests read local files (`readFile` of `@karume/test-support/fs`). The package itself
+ * uses Web standard APIs only (cross-cutting invariant).
  */
 
 const undefinedIfNotFound = (cause: unknown): undefined => {

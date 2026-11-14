@@ -107,7 +107,7 @@ uv run --group sbv2 python -m sbv2.export --verify dec    # before/after remove_
 uv run --group sbv2 python -m sbv2.export --verify voice
 
 # 3. real-GPU comparison (every case SKIPs when the assets are absent)
-cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/models/tests/sbv2_relattn_parity_test.ts
+cd ../.. && vp test packages/e2e/tests/e2e_sbv2_test.ts packages/models/tests/sbv2_relattn_parity_test.ts
 ```
 
 ```
@@ -255,7 +255,7 @@ applied to the effective weights after the removal** (rounding before the remova
 discarded elements feed into amax and shift the whole per-channel scale), and it is written as a
 MUST in the docstrings of `ensure_dec_plain` and `_fake_quant` (ADR 0013 / 0018 / 0019).
 
-On the Deno side: `packages/runtime/tests/e2e_sbv2_test.ts` (one case = one test) and
+On the TypeScript side: `packages/e2e/tests/e2e_sbv2_test.ts` (one case = one test) and
 `packages/models/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
 structure as DeBERTa: **if a series directory (`outputs/series/sbv2-F1/` / `sbv2-F1-f16/` /
 `sbv2-F1-i8/`) contains not a single target directory, that series SKIPs** (this is the environment
@@ -379,19 +379,20 @@ through.
 
 ## Asset prep and torch reference for the voice demo (`sbv2/demo.py`)
 
-The script that provides the **host-side assets** required by `examples/sbv2/` (the Deno demo from
-real text to WAV) and takes on the **numerical parity** of its output. It does not touch the model
+The script that provides the **host-side assets** required by `examples/sbv2/` (the demo from real
+text to WAV — removed in 0.15 with no replacement yet; it remains on the v0.14.0 tag) and takes on the **numerical parity** of its output. It does not touch the model
 graphs (neither the emit path nor the goldens change).
 
 The torch side reads the raw ckpt via `--model-dir` (default `inputs/sbv2/F1`) — **pair it
-explicitly with the dist / model the Deno side uses**, or the comparison silently runs two
+explicitly with the dist / model the demo uses**, or the comparison silently runs two
 different voices (the style assets from ① are also baked per ckpt).
 
 ```sh
 # ① runtime assets (3 files into outputs/misc/sbv2-demo/)
 uv run --group sbv2 python -m sbv2.demo assets --model-dir ../../inputs/sbv2/F1
 
-# ② run the dump demo (from the repository root) → out.wav and dump.safetensors
+# ② run the dump demo (from the repository root) → out.wav and dump.safetensors. The demo
+#    (examples/sbv2/dump.ts) was removed in 0.15 with no replacement yet; its v0.14.0 command was:
 cd ../.. && deno task dump:sbv2 --source models/karume-sbv2-jvnv --model F1 \
     --text "こんにちは、これはテストです。" && cd tools/export-recipes
 

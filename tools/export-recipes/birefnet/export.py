@@ -308,10 +308,10 @@ CHECKER_CELL = 40
 #: Name of the case {@link _sanity} uses to discriminate (the one image with a salient object).
 DISC_CASE = "disc"
 
-#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). **The images'
-#: source of truth is `examples/anima/eval-images.ts`** (it holds the prompts / seeds / resolution,
-#: and `deno task demo:eval-images` can re-bake the same 4 images — the adopted ones are
-#: frozen-copied by hand). The case names are spelled like SigLIP2's `REAL_CASES` (the same 4
+#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). The images were
+#: baked by `examples/anima/eval-images.ts` (`deno task demo:eval-images`, which held the
+#: prompts / seeds / resolution — removed in 0.15 with no replacement), and the adopted ones were
+#: frozen-copied by hand. The case names are spelled like SigLIP2's `REAL_CASES` (the same 4
 #: images, read from a different series directory).
 REAL_CASES: tuple[tuple[str, str, str], ...] = (
     (

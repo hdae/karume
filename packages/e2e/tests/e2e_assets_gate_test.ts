@@ -5,7 +5,7 @@
 // / irodori / minicpm5 / sbv2 / siglip2 / vowel_detector) are `ignore: !available ||
 // !GPU_AVAILABLE`, and `available` is false when the listing of the series root is empty. On a
 // machine that has a GPU but not a single real-weight asset (a new work machine, or a worktree
-// taken to another host), they all SKIP and `deno task verify` still turns green — a silent
+// taken to another host), they all SKIP and the full verify (`vp test`) still turns green — a silent
 // apparent success that reads "not verified" as "verified", so this gate fails one test for it.
 //
 // It looks at **more than presence** (ADR 0108 stage 3, acceptance ②). A series is now a `krm`

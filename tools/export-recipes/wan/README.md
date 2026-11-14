@@ -392,8 +392,8 @@ two images set the tolerance and the third is judged against it. One more case k
 (diffusers 0.39.0, CPU f32), the nine cases differ by 5.3e-7 to 2.1e-6 (largest absolute difference
 over the reference's largest value); the differences come only from the folded conv3d, the L2
 normalization and the attention's reduction order. The GPU gate is
-`packages/models/tests/e2e_wan_ti2v_vae_encoder_test.ts` (tolerance 7.8e-5) in
-`deno task test:models:wan-ti2v`. On a machine with the series root, the asset gate requires the
+`packages/e2e/tests/e2e_wan_ti2v_vae_encoder_test.ts` (tolerance 7.8e-5) in
+`vp test --project models:wan-ti2v`. On a machine with the series root, the asset gate requires the
 three encoder parts as well, so a machine that has only the decoder needs the first command above.
 
 The image preprocessing has a reference of its own, `wan/i2v_preprocess_ref.py` (no command — the
@@ -407,7 +407,7 @@ match byte for byte (45 cases, synthetic images only):
 
 ```bash
 uv run --group wan --inexact python -m wan.lanczos_fixture
-deno fmt ../../packages/models/tests/fixtures/wan-i2v/lanczos.json   # the formatter's form is the committed form
+(cd ../.. && vp fmt packages/models/tests/fixtures/wan-i2v/lanczos.json)   # the formatter's form is the committed form
 ```
 
 It writes `packages/models/tests/fixtures/wan-i2v/lanczos.json` (cases and provenance) and
@@ -627,7 +627,7 @@ other than U+0020 and a trailing space — so they are rejected as well (the mod
 the measurements):
 
 ```bash
-uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer [--fetch]   # asset + fixture (then deno fmt the fixture)
+uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer [--fetch]   # asset + fixture (then vp fmt the fixture from the repository root)
 uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-umt5-xxl
 ```
 
@@ -724,13 +724,10 @@ contents. There is no publishing path for third-party encoders here.
 
 #### Swapping the mirror into Wan (ADR 0122 stage d)
 
-After step 4 above, swap the mirror into Wan. Run this from the repository root; the
-swap section (`examples/wan/README.md`, removed in 0.15) of the `examples/wan` README
-explains the rules:
-
-```bash
-deno task demo:wan --swap-text-encoder outputs/misc/local-dist/<name> --prompt boxing-cats
-```
+After step 4 above, swap the mirror into Wan. The command-line swap (`--swap-text-encoder` of the
+`examples/wan` CLI, whose README explained the rules) was removed in 0.15 with no replacement yet;
+in code, the swap is the load option `components: { text_encoder: { source } }` (ADR 0122 —
+`packages/models/tests/wan_components_test.ts` exercises it).
 
 The swap is admitted only if the mirror's `text_encoder` has the same graph description SHA-256 as
 the one the Wan manifest declares (the `descriptor.graph.sha256` of `text_encoder` in both
@@ -746,7 +743,7 @@ directory, and exits 1 on a `NOASSERTION` container (run from `tools/export-reci
 above):
 
 ```bash
-deno run --no-config --allow-read ../release/container_license.ts ../../outputs/misc/local-dist/<name>
+node ../release/container_license.ts ../../outputs/misc/local-dist/<name>
 ```
 
 ## Distribution (stage 7)
@@ -828,8 +825,8 @@ and the declared limits. Re-running the command writes the same bytes.
 
 ```bash
 uv run --group wan --inexact pytest wan   # from tools/export-recipes/
-deno task test:models:wan                 # from the repository root (packages/models/tests/*wan*_test.ts)
-deno task test:models:wan-ti2v            # Wan2.2 TI2V-5B (packages/models/tests/*wan_ti2v*_test.ts)
+vp test --project models:wan             # from the repository root (*wan*_test.ts in packages/models/tests and packages/e2e/tests, minus *wan_ti2v*)
+vp test --project models:wan-ti2v         # Wan2.2 TI2V-5B (*wan_ti2v*_test.ts in the same two directories)
 ```
 
 `wan/tests/test_distribution.py` assembles the distribution once from minimal synthetic containers
@@ -847,7 +844,7 @@ normalized text equal to `prompt_clean`), the scheduler columns (first timestep 
 decreasing, the 1e-6 correction), the scheduler fixture being current, and the few-step reference
 (shapes, schedule and tile plan in the metadata, the embeddings' sha256, the seeded noise).
 
-The Deno lane runs the host-function tests (including the UniPC / CFG fixture and the pipeline's input
+The `models:wan` lane runs the host-function tests (including the UniPC / CFG fixture and the pipeline's input
 gates) and the real-GPU parity gates for the DiT, the VAE chunk graphs, the tiled decode and the
 two-step pipeline run (with its sha256 row in `packages/models/tests/fixtures/references/wan.json`,
 written with `KARUME_REFERENCE=write`). The DiT and VAE gates read the series under `outputs/series/`

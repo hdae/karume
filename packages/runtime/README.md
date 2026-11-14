@@ -4,9 +4,9 @@ The execution engine of [Karume](https://github.com/hdae/karume), a general-purp
 inference stack that runs on WebGPU. This package opens a Karume container (`krm` — the IR graphs,
 the binding table and the weight blocks), generates WGSL for it, uploads the weights block by block,
 and executes the graph on a GPU device. It is written in pure TypeScript and WGSL, has zero external
-dependencies, and takes the same code path in Deno and in the browser. The other packages of the
-stack are `@karume/hub` (manifest resolution, download, cache) and `@karume/models` (pipelines and
-tokenizers).
+dependencies, and takes the same code path in the browser, on Node and on Deno. The other packages
+of the stack are `@karume/hub` (manifest resolution, download, cache) and `@karume/models`
+(pipelines and tokenizers).
 
 Status: pre-1.0. The public surface is a deliberately thin, explicitly designed API — internal
 modules are never re-exported. Unsupported operators, contract violations and missing device
@@ -131,8 +131,9 @@ entry may change in a minor version (ADR 0148).
 
 ## Requirements
 
-- A WebGPU device. Deno 2 (tested on 2.9.6) exposes WebGPU without a flag; in the browser, any
-  engine with a working `navigator.gpu` will do.
+- A WebGPU device. In the browser, any engine with a working `navigator.gpu` will do; on Node 24,
+  pass a WebGPU implementation to `acquireGpu({ gpu })` (e.g. Dawn via the npm package `webgpu`:
+  `create([])`); Deno 2 (tested on 2.9.6) exposes WebGPU without a flag.
 - A real GPU adapter. There is no CPU fallback — `acquireGpu` throws `GpuUnavailableError` when no
   adapter can be obtained.
 - Nothing else: the runtime uses Web-standard APIs only, and no build step or native module.

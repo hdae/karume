@@ -1,5 +1,5 @@
 // Fixture of gpu_ops_test.ts (the OpCase type, deterministic input generators, the case arrays per
-// op). The test bodies (runCase / checkAll / the Deno.test set) stay in gpu_ops_test.ts; this file
+// op). The test bodies (runCase / checkAll / the test set) stay in gpu_ops_test.ts; this file
 // holds only "the data passed to checkAll" — dependencies go one way only, helpers → src.
 
 import type { Tolerance } from "../../src/reference/allclose.ts";

@@ -18,9 +18,10 @@
  *
  * ## How much is read
  *
- * Each `read` takes only the range with `Deno.open` + `seek` (a file is never loaded whole into
- * RAM). `verified: false` is a MUST — nobody has verified the local files, so `openContainer`
- * applies the per-block sha256 (claiming true would let tampering through — container-v1 §7).
+ * Each `read` takes only the range with `readRange` of `@karume/test-support/fs` (a file is never
+ * loaded whole into RAM). `verified: false` is a MUST — nobody has verified the local files, so
+ * `openContainer` applies the per-block sha256 (claiming true would let tampering through —
+ * container-v1 §7).
  */
 
 import {

@@ -443,7 +443,7 @@ if (!MIRROR_PRESENT) {
 
 for (const series of SERIES) {
   const root = goldenRoot(series);
-  /** Enumerated synchronously, as registration needs it (the same reason as Deno.test's ignore). */
+  /** Enumerated synchronously, as registration needs it (the same reason as `test.skipIf`). */
   const discovered = discoverCases(root);
   const realNames = new Set<string>(REAL_CASES);
   const cases = discovered.filter((name) => !realNames.has(name));

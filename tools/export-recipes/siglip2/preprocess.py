@@ -12,9 +12,9 @@ There is one output (**tracked by git**, outside `.gitignore`):
 
     packages/models/tests/fixtures/image-preprocess/parity.json
 
-After generating it, run `deno fmt packages/models/tests/fixtures/image-preprocess/parity.json`
-(the formatter decides the committed form — `fmt --check` in `deno task verify` covers the fixtures
-too).
+After generating it, run `vp fmt packages/models/tests/fixtures/image-preprocess/parity.json` from
+the repository root (the formatter decides the committed form — the format check of `vp check`
+covers the fixtures too).
 
 ## What the source of truth is
 

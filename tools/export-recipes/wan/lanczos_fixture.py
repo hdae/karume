@@ -13,8 +13,9 @@ Two output files (**tracked in git**):
     packages/models/tests/fixtures/wan-i2v/lanczos.json         — description, provenance, cases
     packages/models/tests/fixtures/wan-i2v/lanczos.safetensors  — pixels (U8)
 
-After generating, run `deno fmt packages/models/tests/fixtures/wan-i2v/lanczos.json` (the formatter
-decides the committed form — the `fmt --check` of `deno task verify` also covers fixtures). The
+After generating, run `vp fmt packages/models/tests/fixtures/wan-i2v/lanczos.json` from the
+repository root (the formatter decides the committed form — the format check of `vp check` also
+covers fixtures). The
 pixels are not a JSON array because the formatter would expand it to one value per line and exceed
 1 MB (the same split as `unipc.json` + `unipc.safetensors` of wan-scheduler).
 

@@ -17,8 +17,8 @@ gets a different id sequence". The same practice as anima's `anima/demo.py`):
        (tracked) — holds the expectations of the random and all-code-point sweeps as digests (TS
        replays the same sequences).
 
-After generating, run `deno fmt packages/models/tests/fixtures/wan-text/` (the committed form is
-what the formatter produces).
+After generating, run `vp fmt packages/models/tests/fixtures/wan-text/` from the repository root
+(the committed form is what the formatter produces).
 
 ## Source of truth for the tokenizer (ADR 0119 decision 1)
 
@@ -803,7 +803,8 @@ def build_sweep_fixture(
     }
 
 
-#: The line width of `deno fmt` (`fmt.lineWidth` in deno.json).
+#: The line width of the repository formatter (`vp fmt` — Oxfmt's default print width, which
+#: `vite.config.ts` does not override).
 FMT_LINE_WIDTH = 100
 
 
@@ -814,13 +815,13 @@ def _display_width(text: str) -> int:
 
 
 def fixture_json(value: Any, indent: int = 0) -> str:
-    """The fixture's JSON (close to the `deno fmt` form — an array that fits the line width on one
+    """The fixture's JSON (close to the Oxfmt form — an array that fits the line width on one
     line, anything else one element per line).
 
     Plain `json.dumps` with `indent` expands even the ranges `[start, end]` and the id sequences to
-    one element per line, and the fixture grows several times over. `deno fmt` keeps an array
-    written on one line as one line as long as it fits the line width, so writing it on one line
-    here keeps the committed form (the formatter's output) small too.
+    one element per line, and the fixture grows several times over. Oxfmt puts an array on one line
+    whenever it fits the line width, so writing it on one line here keeps the written file close to
+    the committed form (the formatter's output) and small.
     """
     pad = " " * (indent + 2)
     if isinstance(value, dict):

@@ -47,9 +47,9 @@
  * NOTE: the checks on the real distribution basically all go **through the fetch layer** (local
  * HTTP + `fromPretrained`) (the same graph-first + sequential streaming route as production). The
  * part split itself can also be read through the whole-asset surface (`fromAssets`), so exactly one
- * check runs base through `Deno.readFile` + `fromAssets` and requires **the same reference sha256**
+ * check runs base through `readFile` + `fromAssets` and requires **the same reference sha256**
  * as the fetch-layer route (the "whole-asset surface" section below — X2-101). Only the test side
- * reads files with `Deno.open` / `Deno.readFile`; the package itself uses Web standard APIs only
+ * reads files (`@karume/test-support/fs`); the package itself uses Web standard APIs only
  * (no fs — a cross-cutting invariant).
  *
  * NOTE: since the official repository is self-contained (ADR 0087), the real-asset check of
@@ -186,7 +186,7 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 //
 // Almost every real-asset check sits on this base — to run the part-split distribution through the
 // same route as production (graph-first + sequential streaming). The whole-asset surface
-// (`Deno.readFile` + `fromAssets`) is held by exactly one check in the "whole-asset surface"
+// (`readFile` + `fromAssets`) is held by exactly one check in the "whole-asset surface"
 // section below. It speaks only the two routes the hub actually calls (the revision-resolution API
 // and the resolve URL).
 

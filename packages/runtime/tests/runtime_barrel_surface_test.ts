@@ -5,10 +5,10 @@
 // construction to a single entry point" (the doc in `mod.ts` is the source of truth for the reason
 // — constructing them directly would create instances that bypass the planRequiredLimits /
 // assertLimitsGranted and errorScope checks). Changing `export type` to `export` **still passes the
-// type check**, and the public-surface snapshot check shows no diff either (`deno doc --json` does
-// not distinguish a type-only re-export from a value re-export in `kind` or in `declarationKind` —
-// measured 2026-09-21). That they are not exported as values is only observable at run time, so the
-// check that names them lives here.
+// type check**, and the public-surface snapshot check shows no diff either (its collector,
+// `tests/helpers/public-surface.ts`, counts a type-only re-export by its target's kind, as
+// `deno doc --json` did — measured on `deno doc` 2026-09-21). That they are not exported as values
+// is only observable at run time, so the check that names them lives here.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";

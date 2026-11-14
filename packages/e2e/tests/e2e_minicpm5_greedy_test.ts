@@ -199,7 +199,7 @@ const discoverCases = (prefix: string): readonly string[] =>
     .sort();
 
 /**
- * Enumerated synchronously, as registration needs it (the same reason as `Deno.test`'s ignore).
+ * Enumerated synchronously, as registration needs it (the same reason as `test.skipIf`).
  * Without KARUME_SERIES=1 the series is not read at all.
  */
 const IO_CASES = SERIES_CHECKS ? discoverCases(IO_PREFIX) : [];

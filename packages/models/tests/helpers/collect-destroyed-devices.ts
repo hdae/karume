@@ -15,10 +15,10 @@
  *   another version may need a different count or wait.
  * - Whether collection happened is not checked (a check on the DRM client count is deferred). It
  *   proceeds silently even when nothing was released.
- * - `gc` exists only in runs with `--v8-flags=--expose-gc`. Every `deno test` task in deno.json
- *   passes that flag (checked by `packages/runtime/tests/verify_lanes_test.ts`), but a direct
- *   `deno test` run without the flag does nothing here (only the mitigation is missing; the tests
- *   mean the same).
+ * - `gc` exists only in runs with `--expose-gc`. The Vitest config passes that flag to every
+ *   worker (`execArgv` in `vite.config.ts`, checked by
+ *   `packages/runtime/tests/verify_lanes_test.ts`), but a run without the flag does nothing here
+ *   (only the mitigation is missing; the tests mean the same).
  * - A GpuContext that is still reachable (held by a variable or a closure) is not collected.
  */
 

@@ -168,7 +168,7 @@ const exists = (url: URL): boolean => {
   }
 };
 
-/** Counted synchronously, since registration needs it (used for Deno.test's ignore decision). */
+/** Counted synchronously, since registration needs it (used for the `test.skipIf` decision). */
 const goldenCount = (series: string): number =>
   REAL_CASES.filter((entry) => exists(goldenUrl(series, entry.name))).length;
 

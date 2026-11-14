@@ -307,7 +307,7 @@ const goldenUrl = (caseName: string): URL =>
   new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, GOLDEN_ROOT);
 
 /**
- * Counted synchronously because it is needed at registration (used for `Deno.test`'s ignore
+ * Counted synchronously because it is needed at registration (used for the `test.skipIf`
  * decision).
  */
 const GOLDEN_COUNT = REAL_CASES.filter((entry) => exists(goldenUrl(entry.name))).length;

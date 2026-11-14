@@ -550,8 +550,8 @@ for (const variant of VARIANTS) {
   const canRead = readable(variant);
   const suffix = suffixOf(variant);
   /**
-   * Listed synchronously because it is needed at registration (the same reason as the Deno.test
-   * ignore decision).
+   * Listed synchronously because it is needed at registration (the same reason as the
+   * `test.skipIf` decision).
    */
   const files = canRead ? goldenFiles(variant.goldens) : [];
   const hasContainer = canRead && containerPresent(variant);
@@ -571,7 +571,7 @@ for (const variant of VARIANTS) {
   /**
    * Whether **anything at all** remains (the SKIP predicate of the completeness test — Codex
    * iteration H finding H-02). A loss where every golden is gone but the model remains makes
-   * `available` false, and with `ignore: !available` the completeness test itself would SKIP — the
+   * `available` false, and with `test.skipIf(!available)` the completeness test itself would SKIP — the
    * predicate that makes a loss a FAIL may sleep only when things are "completely empty".
    * For a mirror variant the goldens are a separate source (the test-asset dataset): their
    * absence SKIPs while the fetch is not complete, and FAILs once it is ({@link missingAtPinned}).

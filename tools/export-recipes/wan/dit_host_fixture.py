@@ -161,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         "rope_base_rows": ROPE_BASE_ROWS,
         "timesteps": timesteps,
     }
-    # Indent by 2 (the JSON shape of `deno fmt` — the fixture is tracked, so a rewrite must not
+    # Indent by 2 (the indent of the repository formatter, Oxfmt — it also folds short arrays onto
+    # one line, so run `vp fmt` on the written file; the fixture is tracked, so a rewrite must not
     # produce a diff).
     (args.out / "host.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

@@ -786,7 +786,7 @@ the attrs are placed here.
 ## Not there yet (later phases)
 
 - A Python interpretation oracle for the IR (numerical comparison). Numerical verification is
-  handled by the Deno-side E2E.
+  handled by the TypeScript-side E2E (`packages/e2e`).
 - **bf16 storage** is no longer pending: it is written like f16 (eligible only when the f32 → bf16
   → f32 round trip is bit-exact; `round_weights_to_bf16` does the rounding) and executed by the
   runtime since ADR 0131. f16 is implemented in ADR 0018, i8 + per-channel scale in ADR 0019, and

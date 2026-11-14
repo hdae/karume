@@ -176,8 +176,7 @@ maintainer's ruling of 2026-11-06).
   (local, untracked).
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
   - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
-    one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed); its README
-    Validation section still says `deno task verify`. No scoring run since the schema 4 / 5 reader (local `inputs/`
+    one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed). No scoring run since the schema 4 / 5 reader (local `inputs/`
     lacks some checkpoints).
   - Function calling and thinking (ADR 0084 addendum 2026-11-04): the `Pipeline.chat` one-shot entry takes no `tools` /
     `enableThinking` (only `chatPrompt` and `ChatSession` do); the parser's exact-integer check reads `JSON.parse`'s

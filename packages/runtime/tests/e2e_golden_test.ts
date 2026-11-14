@@ -129,8 +129,8 @@ const results = openResults("golden");
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
 
 /**
- * Enumerated synchronously because it is needed at registration (the same reason as Deno.test's
- * ignore decision).
+ * Enumerated synchronously because it is needed at registration (the same reason as the
+ * `test.skipIf` decision).
  */
 const goldenModels = (): readonly string[] =>
   [...readDirSync(GOLDEN_ROOT)]

@@ -121,7 +121,7 @@ is the f32 sigmoid → `torchvision.transforms.functional.resize` (antialiased b
 uv run --group birefnet python -m birefnet.matte_fixture \
     --logits-dir ../../outputs/verify/<environment key>/<date>_birefnet   # re-cut the real-logit inputs
 uv run --group birefnet python -m birefnet.matte_fixture                 # rebuild from the committed inputs
-deno fmt ../../packages/models/tests/fixtures/birefnet-matte/matte.json  # the formatter's form is the committed form
+(cd ../.. && vp fmt packages/models/tests/fixtures/birefnet-matte/matte.json)  # the formatter's form is the committed form
 ```
 
 The inputs are crops of the real matte logits that `e2e_birefnet_real_test.ts` writes (with their

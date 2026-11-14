@@ -136,8 +136,8 @@ def build_fixture(positions: Sequence[int] = FIXTURE_POSITIONS) -> dict[str, Any
 
 
 def fixture_json(positions: Sequence[int] = FIXTURE_POSITIONS) -> str:
-    """The text to write. **Indent 2** (it lives on the TS side, so it follows `deno fmt`'s
-    formatting)."""
+    """The text to write. **Indent 2** (it lives on the TS side, where the repository formatter —
+    Oxfmt, `vp fmt` — owns the final layout)."""
     return json.dumps(build_fixture(positions), indent=2, ensure_ascii=False) + "\n"
 
 

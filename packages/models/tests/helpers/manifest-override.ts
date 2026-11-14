@@ -4,8 +4,8 @@
  * manifest of `e2e_gemma4_quant_test.ts`; the original distribution and its weights are not
  * changed by a single byte.
  *
- * NOTE: only tests use `Deno.symlink` / `Deno.makeTempDir` (the package itself uses Web standard
- * APIs only — cross-cutting invariant).
+ * NOTE: only tests use `symlink` / `makeTempDir` (of `@karume/test-support/fs`; the package itself
+ * uses Web standard APIs only — cross-cutting invariant).
  */
 
 import { makeTempDir, readDir, remove, symlink, writeTextFile } from "@karume/test-support/fs";

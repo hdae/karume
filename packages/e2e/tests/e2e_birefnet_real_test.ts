@@ -288,7 +288,7 @@ const goldenUrl = (series: Series, caseName: string): URL =>
   new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, goldenDir(series.name));
 
 /**
- * Counted synchronously because it is needed at registration (used for the `Deno.test` ignore
+ * Counted synchronously because it is needed at registration (used for the `test.skipIf`
  * decision).
  */
 const goldenCount = (series: Series): number =>

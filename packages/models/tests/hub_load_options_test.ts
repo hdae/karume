@@ -11,7 +11,7 @@
 //     overriding the default `globalThis.fetch`, and so on).
 //  ③ `onProgress` is not copied (the family side puts progress into `loadContainerComponents`
 //     separately).
-//  ④ The type check — **every one** of the 9 families accepts `onRetry` (`deno task check` goes red
+//  ④ The type check — **every one** of the 9 families accepts `onRetry` (`vp check` goes red
 //     if one is missing).
 // Finally, as the counterpart seen from the public surface, a mock fetch's 429 checks that "anima's
 // `fromPretrained` carries `onRetry` down to `loadManifest`" (one family is enough — the carrying
@@ -86,7 +86,7 @@ test("hubLoadOptions: onProgress is not copied (the family side adds progress se
 });
 
 test("type check: the fromPretrained options of 9 families accept onRetry", () => {
-  // `satisfies` is the substance (`deno task check` is the check). Goes red if even one family
+  // `satisfies` is the substance (the type check of `vp check` is the check). Goes red if even one family
   // drifts from the shared type.
   const perFamily = [
     { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,

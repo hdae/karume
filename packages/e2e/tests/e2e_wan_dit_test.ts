@@ -950,7 +950,7 @@ test.skipIf(!ASSETS_AVAILABLE)(
  * measuring feature), so they are not loaded at once but run in turn in separate tests.
  *
  * MUST: register the measuring-mode comparison before the normal mode (Vitest runs the tests of one file in
- * registration order). A run that skipped the measuring mode (`--filter` and the like) leaves the normal mode nothing
+ * registration order). A run that skipped the measuring mode (`-t` and the like) leaves the normal mode nothing
  * to compare with, so it fails instead of silently dropping the comparison. NOTE: the default measured-mode case
  * ({@link registerFullStructureGate}) fills this, so the Uint32 gate runs without the opt-in parity cases.
  */

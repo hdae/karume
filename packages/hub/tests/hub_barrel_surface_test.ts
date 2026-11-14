@@ -5,8 +5,9 @@
 // `isDistributionSource` (the doc of `mod.ts` is the source of truth for why — telling it apart by
 // structure would let a misspelling pass as a source). That opacity holds only through
 // `export type`, yet changing it to `export` still passes the type check, and the public surface
-// snapshot check shows no diff either (`deno doc --json` does not tell a type-only re-export from
-// a value re-export — measured 2026-09-21). That nothing is exported as a value can be observed
+// snapshot check shows no diff either (its collector, `runtime/tests/helpers/public-surface.ts`,
+// counts a type-only re-export by its target's kind, as `deno doc --json` did — measured on
+// `deno doc` 2026-09-21). That nothing is exported as a value can be observed
 // only at run time.
 
 import { fileURLToPath } from "node:url";

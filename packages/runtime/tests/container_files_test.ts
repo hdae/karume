@@ -187,7 +187,7 @@ test("resolveParts returns an unsplit container as a single representative path"
 });
 
 test("resolveParts returns numbered parts in ascending order (guarantees the part index)", async () => {
-  // They are placed out of order (a detector that it does not depend on `Deno.readDirSync`'s
+  // They are placed out of order (a detector that it does not depend on `readDirSync`'s
   // listing order).
   const names = [
     "model-00003-of-00003.krm",

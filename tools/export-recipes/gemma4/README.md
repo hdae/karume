@@ -693,8 +693,8 @@ uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
 The PLE scripts (`export.py`, `export_decode.py`, `export_token.py`, `export_product.py`) refuse
 `--model 12b` at the argument.
 
-Both fixture writers print the `deno fmt` command to run afterwards — the committed shape of a
-fixture is whatever the repository formatter produces (`deno task verify` checks it).
+Both fixture writers print the `vp fmt` command to run afterwards — the committed shape of a
+fixture is whatever the repository formatter produces (the format check of `vp check` checks it).
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a
 change in the modeling code changes the graph shape); it is brought in temporarily with `--with`
