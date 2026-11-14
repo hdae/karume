@@ -160,6 +160,35 @@ uv run python dist.py --pipeline irodori --model v4.1-small-mf --resolve-refs hf
 The export writes no `--target` other than the DiT pair for this model (the reference computations still run in
 full). A local reader (`nodeDirectory`) needs the two borrowed-from mirrors too, mapped through `crossRepo`.
 
+## The graphs of v4-Large (step 2)
+
+Upstream's `Aratako/Irodori-TTS-v4-Large` (place it in `inputs/irodori/v4-large/`) keeps the tensor names and the
+structure of the DiT, speaker encoder, duration predictor and projectors — only their dimensions change, and the
+export reads every one of them from the checkpoint's own config. What is new is the text backbone: T5Gemma2's text
+encoder (`google/t5gemma-2-1b-1b`, 26 layers, `[1,T,1152]`), built from the config embedded in the checkpoint (no
+Hub access — that repository is gated). The export recognizes it by that config's `model_type` (the same test
+upstream makes), never by the directory name, and writes the same seven graphs to `outputs/series/irodori-v4-large/`:
+
+```sh
+uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir ../../inputs/irodori/v4-large  # 2
+```
+
+- The `backbone` graph takes `input_ids [1,T]` only (T up to 512). Its sliding layers mask a bidirectional window of
+  256 to the left and 257 to the right (it cuts from T = 257 on), built from the model's own window function and
+  folded into one Tmax constant; the full layers take no mask. Besides the usual checks the export measures that the
+  window reaches the output (T 40 / 256 / 257 / 300 / 512 against full attention in the sliding layers), that the
+  wrapper matches upstream bit for bit at those lengths, and that the folded constant is transformers' own mask
+  (`window_evidence` / `window_equivalence_max_abs` / `window_form` in the printed summary).
+- The token embedding stays in the graph (`embedding` over the f32 `[262144, 1152]` table, 1,152 MiB); its
+  end-of-image row is selected with `where` (patch 5 of `patch.py`).
+- The golden cases are the backbone's own table (`T5GEMMA2_GOLDEN_CASES`): the tokenizer splits the texts differently,
+  and the caption side adds `caption-window` (T 388), `caption-long` cut to the bound by upstream's rule (T 512) and
+  `caption-eoi` (the end-of-image id).
+- Measured on 2026-11-14 (CPU): 134.6 s wall, 30.0 GiB peak RSS for the f32 series (13.2 GB checkpoint). Step 2 still
+  reads the codec's real latent (`dacvae-32dim/host`, step 5), which is model-independent.
+- Only the f32 series exists so far (the graphs here, the tokenizer asset and the full-loop goldens — the two
+  sections at the end of this file). The f16 / i8 / i4 series and the distribution of this model are later steps.
+
 ## Rare-token split (ADR 0149)
 
 Upstream (`irodori_tts/token_split.py`, on by default) encodes the **text** — never the caption — of
@@ -177,3 +206,53 @@ that carries it (`docs/release-runbook.md` §0 has the upload order).
 
 Step 3 imports `token_split.py` from `--source-dir`, so the clone must include upstream commit
 `82c9980b` or later.
+
+## The tokenizer of v4-Large (step 3)
+
+Upstream's `Aratako/Irodori-TTS-v4-Large` (place it in `inputs/irodori/v4-large/`) ships the
+SentencePiece-style BPE tokenizer of `google/t5gemma-2-1b-1b` in its own `tokenizer/` directory
+(the small models use a Unigram one). Step 3 picks the path from that `tokenizer.json` itself
+(`model.type`), never from the directory name, and reads nothing from the Hub:
+
+```sh
+uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref --model-dir ../../inputs/irodori/v4-large
+vp fmt packages/models/tests/fixtures/irodori-text/v4-large-parity.json    # from the repository root
+```
+
+- The asset `outputs/series/irodori-v4-large/tokenizer/tokenizer.json` is the shared Gemma format
+  (`karume-gemma-tokenizer/1`, compiled by `_shared/gemma_tokenizer.py`), not the Unigram one; the
+  goldens next to it keep their names. Its `spec.postProcessor` is `bos` (T5Gemma 2 prepends
+  `<bos>` only — a shape gemma4 and EmbeddingGemma do not have).
+- The parity fixture is `packages/models/tests/fixtures/irodori-text/<weight directory>-parity.json`,
+  so the small models' `parity.json` is left alone. It holds the asset subset, the encode / batch /
+  caption goldens and the BOS / pad ids; the normalize golden and the NFKC table stay in
+  `parity.json` (they do not depend on the tokenizer).
+- No rare-token split: upstream applies it only to `sbintuitions/modernbert-ja-310m` and only to a
+  Unigram tokenizer.
+- The pad id is the added token `<pad>` (the Gemma format has no `padId` field); the step checks
+  that it and the BOS agree with the checkpoint config and with upstream's wrapper.
+- The caption cases add one caption longer than `max_text_len` (256) and one that `max_caption_len`
+  (512) truncates.
+
+## The full-loop goldens of v4-Large (step 4)
+
+v4-Large is an RF checkpoint (`flow_parameterization: "rf_velocity"`), so step 4 runs the same Euler + CFG loop (40
+steps) and compares it with upstream's `sample_euler_rf_cfg` exactly as for v4-small; every dimension, length cap and
+token id comes from the checkpoint's own configs. At f32 it reads no file of step 2 (it builds the same graph
+wrappers from the checkpoint), and writes `outputs/series/irodori-v4-large/pipeline/`:
+
+```sh
+uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --model-dir ../../inputs/irodori/v4-large  # 4
+```
+
+- The case table follows the text backbone, picked by the embedded config as in step 2 (`pipeline_cases`): the
+  small models keep `full` and `no-ref`, and a T5Gemma2 backbone adds `caption-window` — no reference and a 459-token
+  caption, so the backbone runs where its sliding window cuts the sequence (from T = 257 on). Before writing, the step
+  checks with transformers' own mask that some case really is cut, and records the names in `meta.json`
+  (`windowCutCases`, a key written for T5Gemma2 only).
+- The host side tokenizes with the bundled `tokenizer/tokenizer.json` as for the small models; the caption sequence
+  is checked against upstream's own tokenizer wrapper, as before. There is no rare-token split for this model.
+- Measured on 2026-11-14 (CPU, f32): every case passes the first-stage tolerance (1e-3) — largest difference of the
+  final z from upstream 1.96e-5 (`full`), 1.90e-5 (`no-ref`) and 8.13e-5 (`caption-window`); 543 s wall, 30.0 GiB
+  peak RSS.
+- Only the f32 goldens exist so far; the f16 / i8 / i4 series follow their graphs.
