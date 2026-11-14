@@ -45,8 +45,10 @@ def restore_forward():
     from irodori import patch as patch_irodori
 
     modernbert = pytest.importorskip("transformers.models.modernbert.modeling_modernbert")
+    t5gemma2 = pytest.importorskip("transformers.models.t5gemma2.modeling_t5gemma2")
     irodori_model = pytest.importorskip("irodori_tts.model")
     original = modernbert.ModernBertAttention.forward
+    original_embedding = t5gemma2.T5Gemma2TextScaledWordEmbedding.forward
     original_rope = irodori_model.apply_rotary_emb
     original_norm = irodori_model.RMSNorm.forward
     original_adaln = irodori_model.LowRankAdaLN.forward
@@ -55,6 +57,7 @@ def restore_forward():
         yield irodori_model
     finally:
         modernbert.ModernBertAttention.forward = original
+        t5gemma2.T5Gemma2TextScaledWordEmbedding.forward = original_embedding
         irodori_model.apply_rotary_emb = original_rope
         irodori_model.RMSNorm.forward = original_norm
         irodori_model.LowRankAdaLN.forward = original_adaln

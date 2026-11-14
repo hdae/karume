@@ -1,8 +1,8 @@
 """Patch layer that makes Irodori-TTS v4 exportable with torch.export.
 
-The targets are the **text condition encoder** (the bundled ModernBERT-ja-310m backbone) and
-Irodori's own Transformer modules (speaker encoder = `ReferenceLatentEncoder` / duration
-predictor / DiT). There are four patches:
+The targets are the **text condition encoder** (the bundled ModernBERT-ja-310m backbone, or the
+T5Gemma2 text encoder of v4-Large) and Irodori's own Transformer modules (speaker encoder =
+`ReferenceLatentEncoder` / duration predictor / DiT). There are five patches:
 
 1. **Bring ModernBertAttention's qkv extraction down to rank ≤ 4** — the original builds the
    **rank 5** `Wqkv(x).view(B, T, 3, H, D)` and then splits it into three with
@@ -30,10 +30,16 @@ predictor / DiT). There are four patches:
    so `aten.mean.dim` / `aten.rsqrt.default` stay in the IR. Replacing it with
    `F.rms_norm(x, (D,), None, eps)` (no weight = synthesized ones) puts it on the existing fold
    path as is (`_folded_rms_low_rank_adaln_forward` below).
+5. **Select T5Gemma2's end-of-image row with `where`** (the T5Gemma2 text backbone of v4-Large)
+   — `T5Gemma2TextScaledWordEmbedding.forward` overwrites the rows of `eoi_token_index` with a
+   separate trained vector through a boolean `index_put`, which lowers to `aten.eq.Scalar` +
+   `aten.index_put.default`, neither in the IR vocabulary. The same selection is written as
+   `where(ids == eoi, eoi_embedding, scaled rows)`, with the equality test as two f32 scalar
+   comparisons (`_where_eoi_scaled_embedding_forward` below).
 
 MUST: the patched modules are **eager-equivalent** to the unpatched ones (`irodori/export.py`
 measures this with the real weights on every golden case and fails the whole export on any
-difference). For 3 and 4 the op sequences map one to one, so **bit identity** holds
+difference). For 3, 4 and 5 the op sequences map one to one, so **bit identity** holds
 structurally. 2 is exactly equivalent as a formula, but **bit identity depends on the shape**
 (the note on `_real_pair_apply_rotary_emb` — measured 0 at this checkpoint's head_dim 64).
 
@@ -280,8 +286,56 @@ def _folded_rms_low_rank_adaln_forward(
     return x.to(x_dtype), gate
 
 
+#: The largest id the f32 comparison of {@link _where_eoi_scaled_embedding_forward} tells apart
+#: from its neighbours (every integer up to 2^24 is exact in f32).
+F32_EXACT_INTEGER_MAX = 2**24
+
+
+# Third-party code notice (`irodori/THIRD_PARTY_NOTICES.md`).
+# `_where_eoi_scaled_embedding_forward` below is adapted from
+# `T5Gemma2TextScaledWordEmbedding.forward` in huggingface/transformers
+# (`src/transformers/models/t5gemma2/modeling_t5gemma2.py`, `transformers==5.14.1`). The scaled
+# lookup is verbatim; the overwrite of the end-of-image rows was changed from a boolean index
+# assignment to `where`. License: Apache License, Version 2.0
+# (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied verbatim from the
+# header of that file:
+#
+#   Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
+def _where_eoi_scaled_embedding_forward(self: Any, input_ids: torch.Tensor) -> torch.Tensor:
+    """Equivalent implementation of `T5Gemma2TextScaledWordEmbedding.forward` (no boolean
+    `index_put`).
+
+    The original scales the looked-up rows by `embed_scale` and then **assigns** `eoi_embedding`
+    to every row whose id is `eoi_token_index` (`embeddings[input_ids == eoi] = eoi_embedding`).
+    Here the same rows are **selected** with `where` instead.
+
+    Why it is equivalent: the scaled lookup is the same call on the same operands, and both forms
+    put exactly `eoi_embedding` (cast to the rows' dtype, as the original does) on the rows where
+    the id equals `eoi_token_index` and leave every other row untouched — `where` copies, it
+    computes nothing, so the claim is **bit identity**.
+
+    The equality is written `(id >= eoi) & (id <= eoi)` on the ids cast to f32, because the IR's
+    scalar comparisons take f32 only and its vocabulary has no `eq`. MUST: the cast is exact only
+    for ids up to 2^24, so a larger vocabulary fails loudly here (two ids could compare equal
+    after rounding).
+    """
+    if int(self.num_embeddings) > F32_EXACT_INTEGER_MAX:
+        raise ValueError(
+            f"A vocabulary of {self.num_embeddings} ids exceeds 2^24, where the f32 comparison of"
+            " the end-of-image id stops being exact"
+        )
+    input_embeddings = torch.nn.Embedding.forward(self, input_ids) * self.embed_scale.to(
+        self.weight.dtype
+    )
+    ids = input_ids.to(torch.float32)
+    is_eoi = (ids >= self.eoi_token_index) & (ids <= self.eoi_token_index)
+    return torch.where(
+        is_eoi.unsqueeze(-1), self.eoi_embedding.to(input_embeddings.dtype), input_embeddings
+    )
+
+
 def apply_patches() -> None:
-    """Apply the ModernBERT / Irodori model patches process-wide (idempotent).
+    """Apply the ModernBERT / T5Gemma2 / Irodori model patches process-wide (idempotent).
 
     MUST: callers call this only after they have taken the "unpatched reference"
     ({@link patches_applied}).
@@ -291,8 +345,10 @@ def apply_patches() -> None:
         return
     from irodori_tts import model as irodori_model
     from transformers.models.modernbert.modeling_modernbert import ModernBertAttention
+    from transformers.models.t5gemma2.modeling_t5gemma2 import T5Gemma2TextScaledWordEmbedding
 
     ModernBertAttention.forward = _flat_qkv_attention_forward
+    T5Gemma2TextScaledWordEmbedding.forward = _where_eoi_scaled_embedding_forward
     _ORIGINAL_APPLY_ROTARY_EMB = irodori_model.apply_rotary_emb
     # SelfAttention.forward looks the function up by its module-global name, so replacing the
     # global reaches it.

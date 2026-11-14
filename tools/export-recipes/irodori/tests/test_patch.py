@@ -269,3 +269,68 @@ class TestPatchedLowRankAdaLnIsBitIdentical:
             without_correction, _gate = module(x, cond_embed)
 
         assert not torch.allclose(with_correction, without_correction)
+
+
+class TestPatchedT5Gemma2EmbeddingIsBitIdentical:
+    """Selecting T5Gemma2's end-of-image row with `where` (patch 5) instead of the boolean index
+    assignment does not change the value."""
+
+    EOI = 60
+
+    def _module(self):
+        """A small `T5Gemma2TextScaledWordEmbedding` whose end-of-image vector **differs** from the
+        scaled table row of the same id.
+
+        MUST: `eoi_embedding` is initialized to zeros upstream — left so, a selection that put the
+        wrong vector on the row, or none at all, could still agree by accident with a zero row.
+        """
+        t5gemma2 = pytest.importorskip("transformers.models.t5gemma2.modeling_t5gemma2")
+        torch.manual_seed(4)
+        module = t5gemma2.T5Gemma2TextScaledWordEmbedding(
+            64, 8, 0, embed_scale=8**0.5, eoi_token_index=self.EOI
+        ).eval()
+        with torch.no_grad():
+            for parameter in module.parameters():
+                torch.nn.init.normal_(parameter)
+        return module
+
+    @pytest.mark.parametrize(
+        "ids",
+        [[[2, 5, 60, 7, 60]], [[2, 5, 6, 7]]],
+        ids=["with the end-of-image id", "without it"],
+    )
+    def test_the_patched_forward_reproduces_the_original(self, restore_forward, ids):
+        module = self._module()
+        input_ids = torch.tensor(ids, dtype=torch.int64)
+        with torch.no_grad():
+            expected = module(input_ids)
+
+        patch_irodori.apply_patches()
+        assert type(module).forward is patch_irodori._where_eoi_scaled_embedding_forward
+        with torch.no_grad():
+            actual = module(input_ids)
+
+        assert torch.equal(actual, expected)
+
+    def test_the_end_of_image_rows_take_the_separate_vector(self, restore_forward):
+        """Check against tautology — the selected rows really differ from the scaled table rows,
+        so dropping the selection would show."""
+        module = self._module()
+        patch_irodori.apply_patches()
+        input_ids = torch.tensor([[2, self.EOI, 5]], dtype=torch.int64)
+        with torch.no_grad():
+            actual = module(input_ids)
+            scaled = module.weight[self.EOI] * module.embed_scale
+
+        assert torch.equal(actual[0, 1], module.eoi_embedding.detach())
+        assert not torch.allclose(actual[0, 1], scaled)
+        assert torch.equal(actual[0, 2], module.weight[5].detach() * module.embed_scale)
+
+    def test_a_vocabulary_beyond_exact_f32_integers_fails_loudly(self, restore_forward):
+        """MUST: past 2^24 two ids can compare equal after the f32 cast, so the patch refuses."""
+        module = self._module()
+        patch_irodori.apply_patches()
+        module.num_embeddings = patch_irodori.F32_EXACT_INTEGER_MAX + 1
+
+        with pytest.raises(ValueError, match="exceeds 2\\^24"):
+            module(torch.tensor([[2, 5]], dtype=torch.int64))

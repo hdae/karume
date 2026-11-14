@@ -1693,3 +1693,420 @@ class TestProvenance:
         from karume.dist import NOTICE_FILENAME
 
         assert ir.PROVENANCE.notice == NOTICE_FILENAME
+
+
+#: The end-of-image id of the tiny T5Gemma2 backbone (inside its 64-id vocabulary).
+TINY_EOI = 60
+
+#: The window of the tiny T5Gemma2 backbone: `sliding_window_mask_function(8, is_causal=False)`
+#: keeps 4 to the left and 5 to the right, so its band starts to cut from T = 5.
+TINY_WINDOW = 8
+
+#: The symbolic bound of the tiny backbone's export.
+TINY_T5GEMMA2_SYM_MAX = 16
+
+#: Lengths on both sides of the tiny window (3 / 4 whole, 5 / 12 / 16 cut).
+TINY_WINDOW_LENGTHS = (3, 4, 5, 12, 16)
+
+#: What `build_cases` / `build_window_cases` read from a T5Gemma2 checkpoint's text config.
+T5GEMMA2_TEXT_CONFIG = {"model_type": "t5gemma2", "bos_token_id": 1}
+
+
+def _tiny_t5gemma2_backbone() -> nn.Module:
+    """Upstream's `PretrainedTextBackbone` built down its t5gemma2 branch from a small embedded
+    config (2 sliding layers around 1 full one, MQA 4:1, both RoPE kinds as in v4-Large).
+
+    Every weight is overwritten with deterministic random values (upstream zeroes
+    `eoi_embedding` and the RMSNorm offsets, which would make the end-of-image selection inert).
+    """
+    pytest.importorskip("irodori_tts")
+    pytest.importorskip("transformers.models.t5gemma2.modeling_t5gemma2")
+    from irodori_tts.model import PretrainedTextBackbone
+    from transformers.models.t5gemma2.configuration_t5gemma2 import T5Gemma2Config
+
+    text = {
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "intermediate_size": 48,
+        "num_hidden_layers": 3,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+        "head_dim": 16,
+        "sliding_window": TINY_WINDOW,
+        "layer_types": ["sliding_attention", "full_attention", "sliding_attention"],
+        "rope_parameters": {
+            "full_attention": {"rope_type": "linear", "factor": 8.0, "rope_theta": 1000000},
+            "sliding_attention": {"rope_type": "default", "rope_theta": 10000},
+        },
+        "query_pre_attn_scalar": 16,
+        "pad_token_id": 0,
+        "bos_token_id": 2,
+        "eos_token_id": 1,
+    }
+    config = T5Gemma2Config(
+        encoder={
+            "text_config": text,
+            "vision_config": {
+                "hidden_size": 16,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "image_size": 28,
+                "patch_size": 14,
+            },
+            "mm_tokens_per_image": 4,
+            "eoi_token_index": TINY_EOI,
+        },
+        decoder=dict(text),
+        vocab_size=64,
+    )
+    backbone = PretrainedTextBackbone(
+        "", config_dict=config.to_dict(), load_pretrained_weights=False
+    )
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        with torch.no_grad():
+            for parameter in backbone.parameters():
+                parameter.normal_(0.0, 0.3)
+    return backbone.eval()
+
+
+def _tiny_window_cases() -> dict[int, torch.Tensor]:
+    """Deterministic ids per length (BOS first, the end-of-image id inside the longer ones)."""
+    cases: dict[int, torch.Tensor] = {}
+    for length in TINY_WINDOW_LENGTHS:
+        ids = torch.randint(
+            3, TINY_EOI, (1, length), generator=torch.Generator().manual_seed(length)
+        )
+        ids[0, 0] = 2
+        if length >= 12:
+            ids[0, 6] = TINY_EOI
+        cases[length] = ids
+    return cases
+
+
+def _sdpa_band(mask_function: object):
+    """A stand-in for `ir.t5gemma2_masks` that builds the sliding side from another mask
+    function (fault injection for the form check)."""
+    from transformers.masking_utils import sdpa_mask
+
+    def masks(config: object, input_ids: torch.Tensor) -> dict[str, torch.Tensor | None]:
+        length = input_ids.shape[1]
+        return {
+            "full_attention": None,
+            "sliding_attention": sdpa_mask(
+                batch_size=1,
+                q_length=length,
+                kv_length=length,
+                mask_function=mask_function,
+                attention_mask=None,
+                allow_is_causal_skip=False,
+                allow_is_bidirectional_skip=False,
+                use_vmap=False,
+            ),
+        }
+
+    return masks
+
+
+class TestT5Gemma2Family:
+    """The text backbone family comes from the checkpoint's embedded config (the same test
+    upstream makes), never from the directory name."""
+
+    def test_the_model_type_decides(self):
+        assert ir.is_t5gemma2({"model_type": "t5gemma2"})
+        assert ir.is_t5gemma2({"model_type": "T5Gemma2"})
+        assert not ir.is_t5gemma2({"model_type": "modernbert"})
+        assert not ir.is_t5gemma2({})
+
+    def test_the_golden_table_follows_the_family(self):
+        assert ir.golden_table({"model_type": "modernbert"}) == (ir.GOLDEN_CASES, frozenset())
+        assert ir.golden_table({"model_type": "t5gemma2"}) == (
+            ir.T5GEMMA2_GOLDEN_CASES,
+            ir.T5GEMMA2_TRUNCATED_CASES,
+        )
+
+    def test_a_holder_without_the_upstream_config_keeps_the_modernbert_scheme(self):
+        assert not ir.BackboneGraph(TinyBackboneHolder()).t5gemma2
+
+    def test_the_masks_refuse_an_implementation_other_than_sdpa(self):
+        config = SimpleNamespace(_attn_implementation="eager", sliding_window=TINY_WINDOW)
+
+        with pytest.raises(ValueError, match="'eager'"):
+            ir.t5gemma2_masks(config, torch.ones((1, 4), dtype=torch.int64))
+
+
+class TestT5Gemma2GoldenTable:
+    """The T5Gemma2 table keeps every case the downstream chain reads and adds the captions that
+    reach beyond the window (and the bound) plus the end-of-image case."""
+
+    def test_the_downstream_sources_are_in_the_table(self):
+        names = {name for name, _kind, _body in ir.T5GEMMA2_GOLDEN_CASES}
+        sources = {
+            *(text for _name, text, _speaker, _caption in ir.DURATION_CASES),
+            ir.DURATION_CAPTION_SOURCE,
+            ir.DIT_TEXT_SOURCE,
+            ir.DIT_CAPTION_SOURCE,
+        }
+
+        assert sources <= names
+
+    def test_the_captions_beyond_the_window_and_the_end_of_image_case_are_added(self):
+        table = {name: (kind, body) for name, kind, body in ir.T5GEMMA2_GOLDEN_CASES}
+
+        assert table["caption-window"] == ("caption", ir.LONG_PASSAGE_A + ir.LONG_PASSAGE_B)
+        assert table["caption-long"][1] == (
+            ir.LONG_PASSAGE_A + ir.LONG_PASSAGE_B + ir.LONG_PASSAGE_C
+        )
+        assert table["caption-eoi"][1].endswith(ir.T5GEMMA2_EOI_TEXT)
+        assert set(table) >= ir.T5GEMMA2_TRUNCATED_CASES
+
+
+def _word_tokenizer(model_dir: Path, words: list[str]) -> None:
+    """Write a whitespace word-level `tokenizer.json` (id 1 = `<bos>`) where `build_cases`
+    reads it."""
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    vocab = {"<unk>": 0, "<bos>": 1, **{word: index + 2 for index, word in enumerate(words)}}
+    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    path = model_dir / ir.TOKENIZER_FILE
+    path.parent.mkdir(parents=True)
+    tokenizer.save(str(path))
+
+
+class TestBuildCasesTruncation:
+    """Only a case the table declares cut is cut (upstream's rule: BOS + the first
+    `bound − 1` body tokens), and only when it really exceeds the bound."""
+
+    SOURCE = SimpleNamespace(normalize_text=lambda text: text)
+
+    def test_a_declared_case_is_cut_to_the_bound(self, tmp_path, monkeypatch):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        monkeypatch.setattr(ir, "T5GEMMA2_GOLDEN_CASES", (("long", "caption", "a b a b a b"),))
+        monkeypatch.setattr(ir, "T5GEMMA2_TRUNCATED_CASES", frozenset({"long"}))
+
+        ((name, _kind, ids),) = ir.build_cases(tmp_path, self.SOURCE, T5GEMMA2_TEXT_CONFIG, 4)
+
+        assert name == "long"
+        assert ids.tolist() == [[1, 2, 3, 2]]
+
+    def test_a_declared_case_that_does_not_reach_the_bound_fails_loudly(
+        self, tmp_path, monkeypatch
+    ):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        monkeypatch.setattr(ir, "T5GEMMA2_GOLDEN_CASES", (("long", "caption", "a b a"),))
+        monkeypatch.setattr(ir, "T5GEMMA2_TRUNCATED_CASES", frozenset({"long"}))
+
+        with pytest.raises(SystemExit, match="does not reach the bound"):
+            ir.build_cases(tmp_path, self.SOURCE, T5GEMMA2_TEXT_CONFIG, 4)
+
+    def test_any_other_case_beyond_the_bound_still_fails_loudly(self, tmp_path, monkeypatch):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        monkeypatch.setattr(ir, "T5GEMMA2_GOLDEN_CASES", (("other", "caption", "a b a b a b"),))
+
+        with pytest.raises(SystemExit, match="outside the symbolic dimension's range"):
+            ir.build_cases(tmp_path, self.SOURCE, T5GEMMA2_TEXT_CONFIG, 4)
+
+    def test_the_modernbert_table_cuts_nothing(self, tmp_path, monkeypatch):
+        """MUST: the cut set belongs to the T5Gemma2 table — a case of the same name in
+        ModernBERT's table beyond the bound still fails instead of being cut."""
+        _word_tokenizer(tmp_path, ["a", "b"])
+        monkeypatch.setattr(ir, "GOLDEN_CASES", (("caption-long", "caption", "a b a b a b"),))
+        modernbert = {"model_type": "modernbert", "bos_token_id": 1}
+
+        with pytest.raises(SystemExit, match="outside the symbolic dimension's range"):
+            ir.build_cases(tmp_path, self.SOURCE, modernbert, 4)
+
+
+class TestBuildWindowCases:
+    def _passages(self, monkeypatch, words: str) -> None:
+        monkeypatch.setattr(ir, "LONG_PASSAGE_A", words)
+        monkeypatch.setattr(ir, "LONG_PASSAGE_B", " ")
+        monkeypatch.setattr(ir, "LONG_PASSAGE_C", words)
+
+    def test_each_length_is_a_prefix_of_the_caption_text(self, tmp_path, monkeypatch):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        self._passages(monkeypatch, "a b a")
+        monkeypatch.setattr(ir, "WINDOW_EVIDENCE_LENGTHS", (2, 5))
+
+        cases = ir.build_window_cases(tmp_path, T5GEMMA2_TEXT_CONFIG, 8)
+
+        assert {length: ids.tolist() for length, ids in cases.items()} == {
+            2: [[1, 2]],
+            5: [[1, 2, 3, 2, 2]],
+        }
+
+    def test_a_text_shorter_than_the_longest_length_fails_loudly(self, tmp_path, monkeypatch):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        self._passages(monkeypatch, "a")
+        monkeypatch.setattr(ir, "WINDOW_EVIDENCE_LENGTHS", (2, 5))
+
+        with pytest.raises(SystemExit, match="fewer than the length 5"):
+            ir.build_window_cases(tmp_path, T5GEMMA2_TEXT_CONFIG, 8)
+
+    def test_a_length_outside_the_symbolic_range_fails_loudly(self, tmp_path, monkeypatch):
+        _word_tokenizer(tmp_path, ["a", "b"])
+        self._passages(monkeypatch, "a b a b a b")
+        monkeypatch.setattr(ir, "WINDOW_EVIDENCE_LENGTHS", (2, 9))
+
+        with pytest.raises(SystemExit, match="outside"):
+            ir.build_window_cases(tmp_path, T5GEMMA2_TEXT_CONFIG, 8)
+
+
+@pytest.fixture
+def tiny_t5gemma2(restore_forward, monkeypatch):
+    """The tiny backbone, its window cases and the unpatched window evidence (① of
+    `export_series`), returned **after** the patches are applied (②)."""
+    monkeypatch.setattr(ir, "WINDOW_EVIDENCE_LENGTHS", TINY_WINDOW_LENGTHS)
+    backbone = _tiny_t5gemma2_backbone()
+    cases = _tiny_window_cases()
+    evidence = ir._sliding_window_evidence(backbone, cases)
+    patch_irodori.apply_patches()
+    return backbone, cases, evidence
+
+
+class TestT5Gemma2Window:
+    """The window of the T5Gemma2 sliding layers (v4-Large): it reaches the output, the wrapper
+    reproduces upstream on both sides of it, and the exported IR carries transformers' own band."""
+
+    def test_the_evidence_marks_the_lengths_the_window_cuts(self, tiny_t5gemma2):
+        _backbone, _cases, evidence = tiny_t5gemma2
+
+        assert {length: entry["window_masks"] for length, entry in evidence.report.items()} == {
+            3: False,
+            4: False,
+            5: True,
+            12: True,
+            16: True,
+        }
+        for length in (5, 12, 16):
+            assert evidence.report[length]["full_vs_windowed_max_abs"] >= ir.WINDOW_DIVERGENCE_MIN
+
+    def test_the_wrapper_reproduces_upstream_bit_for_bit_on_both_sides(self, tiny_t5gemma2):
+        backbone, cases, evidence = tiny_t5gemma2
+        wrapper = ir.BackboneGraph(backbone)
+
+        assert wrapper.t5gemma2
+        for length, ids in cases.items():
+            diff = ir._check_wrapper_equivalence(
+                wrapper, (ids,), (evidence.reference[length],), f"window-{length}", 0.0
+            )
+            assert diff == 0.0
+
+    def test_a_window_that_does_not_reach_the_output_fails_loudly(
+        self, restore_forward, monkeypatch
+    ):
+        """Fault injection: transformers' mask claims a cut at every length, but the model's own
+        window is wider than the sequence, so full attention gives the same output."""
+        backbone = _tiny_t5gemma2_backbone()
+        backbone.backbone.config.sliding_window = 64
+        cut = torch.ones((1, 1, 4, 4), dtype=torch.bool)
+        cut[..., 0, 3] = False
+        monkeypatch.setattr(ir, "upstream_sliding_mask", lambda _config, _length: cut)
+
+        with pytest.raises(AssertionError, match="does not reach the output"):
+            ir._sliding_window_evidence(backbone, {4: torch.tensor([[2, 5, 6, 7]])})
+
+    def test_lengths_on_one_side_of_the_window_only_fail_loudly(self, restore_forward):
+        backbone = _tiny_t5gemma2_backbone()
+        cases = {length: ids for length, ids in _tiny_window_cases().items() if length < 5}
+
+        with pytest.raises(AssertionError, match="one side of the window only"):
+            ir._sliding_window_evidence(backbone, cases)
+
+    def test_the_evidence_refuses_a_patched_process(self, monkeypatch):
+        monkeypatch.setattr(patch_irodori, "_APPLIED", True)
+
+        with pytest.raises(AssertionError, match="after the patches were applied"):
+            ir._sliding_window_evidence(nn.Identity(), {})
+
+    def _export(self, backbone: nn.Module) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+        axis = ir.TargetAxis(
+            ir.TEXT_SYMBOL,
+            ir.TEXT_SYMBOL,
+            TINY_T5GEMMA2_SYM_MAX,
+            {0: (1, 0)},
+            ir.PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+        return ir.export_ir(ir.BackboneGraph(backbone), (_tiny_window_cases()[16],), axis=axis)
+
+    def test_the_exported_graph_carries_transformers_band(self, tiny_t5gemma2):
+        backbone, _cases, _evidence = tiny_t5gemma2
+        graph, tensors = self._export(backbone)
+
+        form = ir._t5gemma2_window_form(
+            graph, tensors, backbone.backbone.config, TINY_T5GEMMA2_SYM_MAX
+        )
+
+        assert [spec.name for spec in graph.inputs] == ["input_ids"]
+        assert {"embedding", "where", "ge_scalar", "le_scalar", "cast"} <= set(graph.required_ops)
+        assert form["sliding_layers"] == 2
+        assert form["full_layers"] == 1
+        assert form["window_masks_at"] == {
+            2: False,
+            3: False,
+            4: False,
+            5: True,
+            12: True,
+            16: True,
+        }
+
+    def test_full_attention_in_the_sliding_layers_is_refused(self, tiny_t5gemma2, monkeypatch):
+        backbone, _cases, _evidence = tiny_t5gemma2
+        monkeypatch.setattr(
+            ir,
+            "t5gemma2_masks",
+            lambda _config, _ids: {"full_attention": None, "sliding_attention": None},
+        )
+        graph, tensors = self._export(backbone)
+
+        with pytest.raises(AssertionError, match="is not the sym_prefix_slice"):
+            ir._t5gemma2_window_form(
+                graph, tensors, backbone.backbone.config, TINY_T5GEMMA2_SYM_MAX
+            )
+
+    def test_another_window_is_refused(self, tiny_t5gemma2, monkeypatch):
+        """Fault injection: transformers' generic symmetric band (`|q − kv| <= window` — what
+        ModernBERT's scheme would build) instead of T5Gemma2's 4-left / 5-right one."""
+        from transformers.masking_utils import sliding_window_bidirectional_mask_function
+
+        backbone, _cases, _evidence = tiny_t5gemma2
+        symmetric = sliding_window_bidirectional_mask_function(TINY_WINDOW // 2)
+        monkeypatch.setattr(ir, "t5gemma2_masks", _sdpa_band(symmetric))
+        graph, tensors = self._export(backbone)
+
+        with pytest.raises(AssertionError, match="disagrees with transformers' mask"):
+            ir._t5gemma2_window_form(
+                graph, tensors, backbone.backbone.config, TINY_T5GEMMA2_SYM_MAX
+            )
+
+
+class TestEoiEvidence:
+    """The end-of-image selection is run by a golden case and is not inert."""
+
+    def _body(self) -> nn.Module:
+        return _tiny_t5gemma2_backbone().backbone
+
+    def test_a_carrying_case_with_a_distinct_vector_is_measured(self):
+        body = self._body()
+        cases = (("eoi", "caption", torch.tensor([[2, TINY_EOI, 5]])),)
+
+        assert ir._eoi_evidence(body, cases) >= ir.EOI_DIVERGENCE_MIN
+
+    def test_no_case_carrying_the_id_fails_loudly(self):
+        body = self._body()
+        cases = (("plain", "caption", torch.tensor([[2, 5, 6]])),)
+
+        with pytest.raises(AssertionError, match="No golden case carries"):
+            ir._eoi_evidence(body, cases)
+
+    def test_an_inert_selection_fails_loudly(self):
+        body = self._body()
+        embedding = body.embed_tokens
+        with torch.no_grad():
+            embedding.eoi_embedding.copy_(embedding.weight[TINY_EOI] * embedding.embed_scale)
+        cases = (("eoi", "caption", torch.tensor([[2, TINY_EOI, 5]])),)
+
+        with pytest.raises(AssertionError, match="the selection is inert"):
+            ir._eoi_evidence(body, cases)

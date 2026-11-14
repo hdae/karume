@@ -36,6 +36,13 @@ in is transformers, so no limited-import trick is needed.
 The 5 inputs of `duration` are `text_state [1,T,512]` / `speaker_vec [1,768]` /
 `has_speaker [1,1]` (bool) / `caption_vec [1,512]` / `has_caption [1,1]` (bool).
 
+The widths and counts above are v4-Small's; every one of them is read from the checkpoint's own
+configs. **v4-Large** has the same seven graphs with other dimensions (text / caption / speaker
+width 1280, model width 2048, 24 DiT layers — so 48 condition K/V tensors) and another text
+backbone: T5Gemma2's text encoder (`[1,T,1152]`, 26 layers, upstream's t5gemma2 branch of
+`PretrainedTextBackbone` — {@link is_t5gemma2}), whose sliding layers mask a real window (the
+section on the run-time attention_mask below).
+
 The backbone is not fused with the projectors because **the backbone is shared by text and
 caption** (fusing would duplicate 1.2GB of weights into 2 series). The host runs the backbone
 twice and feeds each projector.
@@ -199,6 +206,38 @@ it is the identity, so it is exactly equivalent to not passing it at all, and th
 real band, so the model's own `create_bidirectional_sliding_window_mask` builds it, and it is
 folded into a Tmax constant + `sym_prefix_slice` (ADR 0010).
 
+### The T5Gemma2 backbone (v4-Large)
+
+The same scheme holds for T5Gemma2's text encoder, by the same reading of transformers' source
+(`T5Gemma2TextEncoder.forward`): positions are `arange(T)` whatever the padding, so right padding
+leaves the valid positions (and their RoPE angles) unchanged; the full layers' mask is the padding
+mask alone, and the sliding layers' mask is the window **and** the padding mask, so a valid query
+row sees exactly the valid keys inside its window in both calls. `_static_scheme_evidence`
+measures it as for ModernBERT (the caption cases are padded to 512, where the window cuts).
+
+What differs is the window itself: a **bidirectional band of 256 to the left and 257 to the right**
+of each query (`sliding_window_mask_function(512, is_causal=False)` of `modeling_t5gemma2`), which
+starts to mask from T = 257. The graph builds it from that very function ({@link t5gemma2_masks})
+and folds it into one Tmax constant shared by the 22 sliding layers; the 4 full layers take no mask.
+Three checks keep it honest, none of which the golden alone would give:
+
+- `_sliding_window_evidence` — at T 40 / 256 / 257 / 300 / 512 (real text), upstream's windowed
+  call differs from full attention in the sliding layers wherever transformers' mask cuts
+  something (so a graph without the window could not pass), and the wrapper matches the windowed
+  call at atol 0 at every one of them
+- `_t5gemma2_window_form` — in the exported IR, layer by layer, full layers have no mask and
+  sliding layers slice one constant whose leading T×T block **is** transformers' mask (0 / −inf)
+  at those lengths and both ends of the range
+- the golden cases of {@link T5GEMMA2_GOLDEN_CASES} reach T 388 and 512 on the caption side
+
+The token embedding stays in the graph (`embedding` over the `[262144, 1152]` table, scaled by
+`embed_scale`), and its end-of-image row selection goes through patch 5 of `irodori.patch`
+(`where` instead of a boolean index assignment — `_eoi_evidence` checks that a golden case runs it
+and that it is not inert). GQA is left as transformers' SDPA path forms it: the full layers call
+SDPA with `enable_gqa` (k / v with 1 head), the sliding layers expand k / v to the 4 query heads
+(`repeat_kv`, lowered to a rank-3 expand by normalization) — the EmbeddingGemma precedent, and the
+reason the wrapper's eager output is bit-identical to upstream's.
+
 MUST: SDPA is **preserved** (`PRESERVED_OP_PREFIXES_WITH_ATTENTION` — the fused attention of ADR
 0023). This is a script-local choice and is not put in the default decomposition table (ADR 0023
 decision 5).
@@ -286,6 +325,7 @@ from karume.convert import (
 )
 from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph, IrInput
+from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
 from karume.pipeline import export_module, publish_model
 from karume.quantize import (
     QUANT_CHANNEL_AXES,
@@ -369,6 +409,18 @@ OUTPUT_PREFIX = "output."
 #: is needed**.
 TEXT_CONFIG_META_KEY = "text_encoder_config_json"
 MODEL_CONFIG_META_KEY = "config_json"
+
+#: The `model_type` of the embedded text-encoder config for which upstream builds
+#: `T5Gemma2TextEncoder` (the t5gemma2 branch of `PretrainedTextBackbone.__init__` — v4-Large).
+#: Every other value takes upstream's `AutoModel` path (ModernBERT-ja-310m for v4-Small).
+T5GEMMA2_MODEL_TYPE = "t5gemma2"
+
+
+def is_t5gemma2(text_config: Mapping[str, Any]) -> bool:
+    """Whether the checkpoint's text backbone is T5Gemma2's text encoder — the same test upstream
+    makes (`model_type`, lower-cased) on the same embedded config."""
+    return str(text_config.get("model_type", "")).lower() == T5GEMMA2_MODEL_TYPE
+
 
 #: state_dict prefixes (the attribute names in `irodori_tts/model.py`).
 BACKBONE_PREFIX = "pretrained_text_backbone."
@@ -592,6 +644,79 @@ GOLDEN_CASES: tuple[tuple[str, str, str], ...] = (
     ("text-long", "text", LONG_PASSAGE_A),
     ("caption-long", "caption", LONG_PASSAGE_A + LONG_PASSAGE_B + LONG_PASSAGE_C),
 )
+
+#: The literal that T5Gemma2's tokenizer turns into the end-of-image id (`eoi_token_index`) — an
+#: added special token, so a caption that contains it reaches the backbone as that one id
+#: (upstream encodes captions with `add_special_tokens=False`, which still matches added tokens).
+#: {@link _eoi_evidence} checks that a golden case really carries the id.
+T5GEMMA2_EOI_TEXT = "<end_of_image>"
+
+#: The fixed golden cases of a checkpoint whose text backbone is **T5Gemma2** (v4-Large —
+#: {@link is_t5gemma2}). Its tokenizer splits the same texts differently (T 11 / 19 / 24 / 30 /
+#: 213 for the first five; the three paragraphs of `caption-long` come to 591, beyond the bound),
+#: and its sliding layers mask a real window (from T = 257 on — {@link BackboneGraph}), so the
+#: caption side gets three cases of its own:
+#:
+#: - `caption-window` (T 388) — beyond the window, below the bound
+#: - `caption-long` — the three paragraphs **cut to the bound the way upstream cuts an over-long
+#:   text** ({@link T5GEMMA2_TRUNCATED_CASES}), so T is exactly 512: the whole folded mask
+#:   constant, with both ends of the band masked
+#: - `caption-eoi` — `caption-ja` followed by {@link T5GEMMA2_EOI_TEXT}, the only case that runs
+#:   the end-of-image row selection (patch 5 of `irodori.patch`); without it that selection would
+#:   go unverified by every golden
+T5GEMMA2_GOLDEN_CASES: tuple[tuple[str, str, str], ...] = (
+    *(case for case in GOLDEN_CASES if case[0] != "caption-long"),
+    ("caption-window", "caption", LONG_PASSAGE_A + LONG_PASSAGE_B),
+    ("caption-long", "caption", LONG_PASSAGE_A + LONG_PASSAGE_B + LONG_PASSAGE_C),
+    (
+        "caption-eoi",
+        "caption",
+        next(body for name, _kind, body in GOLDEN_CASES if name == "caption-ja")
+        + T5GEMMA2_EOI_TEXT,
+    ),
+)
+
+#: The cases of {@link T5GEMMA2_GOLDEN_CASES} whose body is **cut** to the symbolic bound instead
+#: of failing, by upstream's own rule for an over-long text (`PretrainedTextTokenizer.batch_encode`:
+#: BOS + the first `max_length − 1` body tokens). MUST: such a case must really exceed the bound
+#: ({@link build_cases} fails otherwise — a cut that cuts nothing would not test the bound), and
+#: the set belongs to its table (ModernBERT's `caption-long` is 404 tokens and is never cut).
+T5GEMMA2_TRUNCATED_CASES: frozenset[str] = frozenset({"caption-long"})
+
+
+class GoldenTable(NamedTuple):
+    """The golden case table of one text backbone (the return value of {@link golden_table})."""
+
+    #: `(name, kind, text)` rows.
+    cases: tuple[tuple[str, str, str], ...]
+    #: The names cut to the symbolic bound by upstream's rule (empty: every case must fit).
+    truncated: frozenset[str] = frozenset()
+
+
+def golden_table(text_config: Mapping[str, Any]) -> GoldenTable:
+    """The golden case table of the checkpoint's text backbone ({@link GOLDEN_CASES} for
+    ModernBERT, {@link T5GEMMA2_GOLDEN_CASES} with its cut cases for T5Gemma2) — the one place
+    the backbone family picks the cases."""
+    if is_t5gemma2(text_config):
+        return GoldenTable(T5GEMMA2_GOLDEN_CASES, T5GEMMA2_TRUNCATED_CASES)
+    return GoldenTable(GOLDEN_CASES)
+
+
+#: The lengths at which {@link _sliding_window_evidence} compares the T5Gemma2 backbone with and
+#: without its window: well below it, the last length the window leaves whole (256), the first one
+#: it cuts (257), beyond it, and the bound (512). The ids are real text — prefixes of the
+#: three-paragraph caption.
+WINDOW_EVIDENCE_LENGTHS: tuple[int, ...] = (40, 256, 257, 300, 512)
+
+#: Lower bound of the output difference between the windowed backbone and the same backbone with
+#: full attention in its sliding layers, at every evidence length where the window masks
+#: something. Below it the window would not reach the output, and a graph that dropped it would
+#: still pass the goldens.
+WINDOW_DIVERGENCE_MIN = 1e-2
+
+#: Lower bound of the difference between `eoi_embedding` and the scaled table row of the same id
+#: (what a graph that dropped the end-of-image selection would produce instead).
+EOI_DIVERGENCE_MIN = 1e-3
 
 #: The **synthetic** golden cases of `speaker` `(name, token count S after patching, random seed)`.
 #:
@@ -989,6 +1114,81 @@ def load_dit(
     return model.eval()
 
 
+def t5gemma2_masks(config: Any, input_ids: torch.Tensor) -> dict[str, torch.Tensor | None]:
+    """The mask dict the T5Gemma2 text encoder is called with (no padding — the static scheme).
+
+    `full_attention` is `None` (no mask — what transformers itself returns for an unpadded
+    bidirectional mask under SDPA). `sliding_attention` is the bool band transformers builds,
+    from **the model's own window function** (`sliding_window_mask_function(sliding_window,
+    is_causal=False)` of `modeling_t5gemma2` — left 256 / right 257 for a window of 512) joined with
+    `bidirectional_mask_function` by `and_masks`, exactly the composition
+    `T5Gemma2TextEncoder.forward` hands to `create_bidirectional_mask`.
+
+    MUST: built through `sdpa_mask(use_vmap=False)`, not `create_bidirectional_mask` — the latter
+    forces the vmap expansion for any `and_mask_function`, which ends in a rank-raising `expand` of
+    the bool `[T,T]` band; the exporter does not fold such an expand, so the band would stop at the
+    folding frontier as a bool constant, which the IR has no initializer for. The index-broadcast
+    path transformers provides for index-based mask functions ends in a no-op expand, and the band
+    folds to an additive Tmax constant + `sym_prefix_slice` (ADR 0010). The values are the same
+    (`_t5gemma2_window_form` compares the folded constant with transformers' own vmap-built mask).
+
+    MUST: the attention implementation is SDPA — the mask form (bool, `None` for no mask) is SDPA's.
+    """
+    from transformers.masking_utils import and_masks, bidirectional_mask_function, sdpa_mask
+    from transformers.models.t5gemma2.modeling_t5gemma2 import sliding_window_mask_function
+
+    implementation = getattr(config, "_attn_implementation", None)
+    if implementation != "sdpa":
+        raise ValueError(
+            f"The T5Gemma2 text encoder runs attention implementation {implementation!r}"
+            " (the masks are built for sdpa)"
+        )
+    length = input_ids.shape[1]
+    band = and_masks(
+        bidirectional_mask_function,
+        sliding_window_mask_function(int(config.sliding_window), is_causal=False),
+    )
+    return {
+        "full_attention": None,
+        "sliding_attention": sdpa_mask(
+            batch_size=input_ids.shape[0],
+            q_length=length,
+            kv_length=length,
+            mask_function=band,
+            attention_mask=None,
+            allow_is_causal_skip=False,
+            allow_is_bidirectional_skip=False,
+            use_vmap=False,
+        ),
+    }
+
+
+def upstream_sliding_mask(config: Any, length: int) -> torch.Tensor:
+    """The bool sliding-window mask `[1,1,length,length]` exactly as `T5Gemma2TextEncoder.forward`
+    builds it for an unpadded sequence (`create_bidirectional_mask` with the model's window
+    function — the vmap path).
+
+    The reference the T5Gemma2 window checks compare against ({@link _sliding_window_evidence} /
+    {@link _t5gemma2_window_form}) — independent of {@link t5gemma2_masks}, which builds the same
+    band another way.
+    """
+    from transformers.masking_utils import create_bidirectional_mask
+    from transformers.models.t5gemma2.modeling_t5gemma2 import sliding_window_mask_function
+
+    mask = create_bidirectional_mask(
+        config=config,
+        inputs_embeds=torch.zeros(1, length, 1, dtype=torch.float32),
+        attention_mask=None,
+        and_mask_function=sliding_window_mask_function(int(config.sliding_window), is_causal=False),
+    )
+    if mask is None or mask.dtype is not torch.bool:
+        raise AssertionError(
+            f"transformers built no bool sliding mask at T={length} ({mask!r}) — the window"
+            " reference does not exist"
+        )
+    return mask
+
+
 class BackboneGraph(nn.Module):
     """Export wrapper of `PretrainedTextBackbone.forward` (no mask as a run-time input).
 
@@ -999,6 +1199,12 @@ class BackboneGraph(nn.Module):
     - the output's `state * mask` is dropped (`×1`)
     - a dict is passed as `attention_mask`, with the full_attention side set to `None` (an all-true
       band mask is all zeros in additive form, so the addition itself is the identity)
+
+    The sliding side of the dict follows the backbone: ModernBERT's own
+    `create_bidirectional_sliding_window_mask`, or for the **T5Gemma2** text encoder of v4-Large
+    ({@link is_t5gemma2} on upstream's `config_dict`) its own window function
+    ({@link t5gemma2_masks}). A holder without upstream's `config_dict` (the test stand-ins) keeps
+    the ModernBERT scheme.
     """
 
     def __init__(self, backbone: nn.Module) -> None:
@@ -1007,8 +1213,14 @@ class BackboneGraph(nn.Module):
         # cos remain in the IR.
         assert_rope_lifted(backbone.backbone, "irodori text backbone")
         self.model = backbone.backbone
+        config_dict = getattr(backbone, "config_dict", None)
+        self.t5gemma2 = config_dict is not None and is_t5gemma2(config_dict)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.t5gemma2:
+            masks = t5gemma2_masks(self.model.config, input_ids)
+            return self.model(input_ids=input_ids, attention_mask=masks).last_hidden_state
+
         from transformers.masking_utils import create_bidirectional_sliding_window_mask
 
         model = self.model
@@ -1578,21 +1790,64 @@ def build_cases(
     (`inference_runtime._synthesize`): per-kind preprocessing ({@link golden_case_body}) → tokenize
     without special tokens → prepend BOS. There is **no** right padding (in the static scheme the
     host packs the sequence — the module docstring).
+
+    The table is the backbone's own ({@link golden_table}). A case it declares cut keeps BOS + the
+    first `sym_max − 1` body tokens (upstream's cut of an over-long text); every other case outside
+    `[2, sym_max]` fails.
     """
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(model_dir / TOKENIZER_FILE))
     bos_id = int(text_config["bos_token_id"])
+    table = golden_table(text_config)
     cases: list[tuple[str, str, torch.Tensor]] = []
-    for name, kind, body in GOLDEN_CASES:
+    for name, kind, body in table.cases:
         prepared = golden_case_body(name, kind, body, source.normalize_text)
-        ids = [bos_id, *tokenizer.encode(prepared, add_special_tokens=False).ids]
+        body_ids = tokenizer.encode(prepared, add_special_tokens=False).ids
+        if name in table.truncated:
+            if len(body_ids) <= sym_max - 1:
+                raise SystemExit(
+                    f"{name}: the body has {len(body_ids)} tokens and does not reach the bound"
+                    f" {sym_max} it is cut to (the case would not test the bound)"
+                )
+            body_ids = body_ids[: sym_max - 1]
+        ids = [bos_id, *body_ids]
         if not 2 <= len(ids) <= sym_max:
             raise SystemExit(
                 f"{name}: T={len(ids)} is outside the symbolic dimension's range [2, {sym_max}]"
             )
         cases.append((name, kind, torch.tensor([ids], dtype=torch.int64)))
     return tuple(cases)
+
+
+def build_window_cases(
+    model_dir: Path, text_config: Mapping[str, Any], sym_max: int
+) -> dict[int, torch.Tensor]:
+    """The inputs of {@link _sliding_window_evidence}: length → `[1,length]` ids (BOS + the first
+    `length − 1` tokens of the three-paragraph caption, prepared as a caption).
+
+    MUST: every length of {@link WINDOW_EVIDENCE_LENGTHS} is in `[2, sym_max]` and the text is long
+    enough for the longest (no padding, no repetition — the evidence runs on real text).
+    """
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(model_dir / TOKENIZER_FILE))
+    body = golden_case_body(
+        "window", "caption", LONG_PASSAGE_A + LONG_PASSAGE_B + LONG_PASSAGE_C, None
+    )
+    ids = [int(text_config["bos_token_id"]), *tokenizer.encode(body, add_special_tokens=False).ids]
+    cases: dict[int, torch.Tensor] = {}
+    for length in WINDOW_EVIDENCE_LENGTHS:
+        if not MIN_SYM_LENGTH <= length <= sym_max:
+            raise SystemExit(
+                f"The window evidence length {length} is outside [{MIN_SYM_LENGTH}, {sym_max}]"
+            )
+        if length > len(ids):
+            raise SystemExit(
+                f"The window evidence text has {len(ids)} tokens, fewer than the length {length}"
+            )
+        cases[length] = torch.tensor([ids[:length]], dtype=torch.int64)
+    return cases
 
 
 def build_speaker_cases(latent_dim: int, sym_max: int) -> tuple[tuple[str, torch.Tensor], ...]:
@@ -2313,6 +2568,165 @@ def _static_scheme_evidence(
             )
         evidence[name] = diff
     return evidence
+
+
+class WindowEvidence(NamedTuple):
+    """The result of {@link _sliding_window_evidence}."""
+
+    #: Length → the windowed upstream output (the reference the wrapper is matched against at atol
+    #: 0 after patching).
+    reference: dict[int, torch.Tensor]
+    #: Length → `{"window_masks": …, "full_vs_windowed_max_abs": …}` (the summary's record).
+    report: dict[int, dict[str, Any]]
+
+
+def _sliding_window_evidence(
+    backbone: nn.Module, cases: Mapping[int, torch.Tensor]
+) -> WindowEvidence:
+    """Measure that the T5Gemma2 sliding layers' window **reaches the output** (unpatched).
+
+    At each length the upstream canonical call (`PretrainedTextBackbone.forward`, all-ones mask —
+    the window built by transformers) is compared with the same body called with **full attention
+    in its sliding layers** (`{"full_attention": None, "sliding_attention": None}`). Where
+    transformers' own mask cuts something ({@link upstream_sliding_mask}), the two must differ by
+    at least {@link WINDOW_DIVERGENCE_MIN} — otherwise a graph without the window would pass every
+    golden. Where the mask is whole, the difference is only reported.
+
+    MUST: the lengths span both sides of the window (at least one whole, at least one cut) — a
+    table entirely on one side would leave the other unmeasured.
+    """
+    if patch.patches_applied():
+        raise AssertionError(
+            "Tried to take a reference after the patches were applied (the equivalence check would"
+            " become vacuous)"
+        )
+    body = backbone.backbone
+    reference: dict[int, torch.Tensor] = {}
+    report: dict[int, dict[str, Any]] = {}
+    for length, ids in cases.items():
+        masks = bool(not upstream_sliding_mask(body.config, length).all())
+        with torch.no_grad():
+            windowed = backbone(ids, torch.ones_like(ids, dtype=torch.bool))
+            full = body(
+                input_ids=ids,
+                attention_mask={"full_attention": None, "sliding_attention": None},
+            ).last_hidden_state
+        diff = float((windowed - full).abs().max())
+        if masks and diff < WINDOW_DIVERGENCE_MIN:
+            raise AssertionError(
+                f"T={length}: the window masks part of the sequence, but full attention in the"
+                f" sliding layers moves the output by only {diff} — the window does not reach the"
+                " output"
+            )
+        reference[length] = windowed
+        report[length] = {"window_masks": masks, "full_vs_windowed_max_abs": diff}
+    sides = {entry["window_masks"] for entry in report.values()}
+    if sides != {True, False}:
+        raise AssertionError(
+            f"The window evidence lengths {sorted(cases)} lie on one side of the window only"
+            f" (window masks: {sorted(sides)})"
+        )
+    return WindowEvidence(reference, report)
+
+
+def _eoi_evidence(body: nn.Module, cases: Sequence[tuple[str, str, torch.Tensor]]) -> float:
+    """Measure that the end-of-image row selection of T5Gemma2's embedding is **not inert**, and
+    that a golden case runs it.
+
+    Returns the max abs difference between `eoi_embedding` and the scaled table row of the same id
+    — what a graph that dropped the selection would put there instead. MUST: at least
+    {@link EOI_DIVERGENCE_MIN}, and some golden case carries the id; otherwise the selection
+    (patch 5 of `irodori.patch`) would pass every golden whether or not it is in the graph.
+    """
+    embedding = body.embed_tokens
+    eoi = int(embedding.eoi_token_index)
+    carriers = [name for name, _kind, ids in cases if bool((ids == eoi).any())]
+    if not carriers:
+        raise AssertionError(
+            f"No golden case carries the end-of-image id {eoi} — the row selection would go"
+            " unverified"
+        )
+    with torch.no_grad():
+        scaled = embedding.weight[eoi] * embedding.embed_scale.to(embedding.weight.dtype)
+        diff = float((embedding.eoi_embedding - scaled).abs().max())
+    if diff < EOI_DIVERGENCE_MIN:
+        raise AssertionError(
+            f"eoi_embedding differs from the scaled row {eoi} by only {diff} — the selection is"
+            " inert, so the golden cannot tell whether the graph performs it"
+        )
+    return diff
+
+
+def _t5gemma2_window_form(
+    graph: IrGraph,
+    tensors: Mapping[str, torch.Tensor],
+    config: Any,
+    sym_max: int,
+) -> dict[str, Any]:
+    """Check the exported T5Gemma2 backbone's attention layer by layer, and that its folded window
+    is **transformers' own mask** at every evidence length.
+
+    In graph order (= layer order) each `attention` node must match `config.layer_types`: a full
+    layer has no mask (3 inputs); a sliding layer takes the `sym_prefix_slice` of one Tmax
+    constant `[1,1,sym_max,sym_max]`. That constant's leading `T×T` block must equal transformers'
+    bool mask at T ({@link upstream_sliding_mask}) in additive form (0 / −inf) for every length of
+    {@link WINDOW_EVIDENCE_LENGTHS} plus the two ends of the symbolic range — a graph with full
+    attention in the sliding layers, or another window, fails here (the golden io would catch it
+    only at the lengths it holds).
+    """
+    layer_types = list(config.layer_types)
+    attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
+    if len(attentions) != len(layer_types):
+        raise AssertionError(
+            f"{len(attentions)} attention nodes for {len(layer_types)} layers (SDPA may have"
+            " fallen to the decomposed path)"
+        )
+    producer = {out: node for node in graph.nodes for out in node.outs}
+    constants: set[str] = set()
+    for index, (node, kind) in enumerate(zip(attentions, layer_types, strict=True)):
+        where = f"attention[{index}] ({kind})"
+        if kind == "full_attention":
+            if len(node.ins) != 3:
+                raise AssertionError(f"{where}: {len(node.ins)} inputs (a full layer has no mask)")
+            continue
+        if kind != "sliding_attention":
+            raise AssertionError(f"{where}: unknown layer type")
+        source = producer.get(node.ins[3]) if len(node.ins) == 4 else None
+        if source is None or source.op != SYM_PREFIX_SLICE_OP:
+            raise AssertionError(
+                f"{where}: the mask is not the {SYM_PREFIX_SLICE_OP} of a folded constant"
+            )
+        constants.add(source.ins[0])
+    if len(constants) != 1:
+        raise AssertionError(
+            f"The sliding layers take {len(constants)} mask constants (expected one shared band)"
+        )
+    (name,) = constants
+    if name not in graph.initializers:
+        raise AssertionError(f"The sliding mask source '{name}' is not an initializer")
+    band = tensors[graph.initializers[name].tensor]
+    if tuple(band.shape) != (1, 1, sym_max, sym_max):
+        raise AssertionError(
+            f"The sliding mask constant is {tuple(band.shape)}, not [1, 1, {sym_max}, {sym_max}]"
+        )
+    checked: dict[int, bool] = {}
+    for length in sorted({MIN_SYM_LENGTH, *WINDOW_EVIDENCE_LENGTHS, sym_max}):
+        allowed = upstream_sliding_mask(config, length)
+        expected = torch.where(allowed, torch.tensor(0.0), torch.tensor(float("-inf"))).to(
+            torch.float32
+        )
+        if not torch.equal(band[..., :length, :length], expected):
+            raise AssertionError(
+                f"The folded sliding mask disagrees with transformers' mask at T={length}"
+            )
+        checked[length] = bool(not allowed.all())
+    return {
+        "attention_nodes": len(attentions),
+        "sliding_layers": layer_types.count("sliding_attention"),
+        "full_layers": layer_types.count("full_attention"),
+        "mask_constant": name,
+        "window_masks_at": checked,
+    }
 
 
 def _check_wrapper_equivalence(
@@ -3127,6 +3541,9 @@ def export_series(
     )
     duration = load_duration_predictor(source, state, config)
     dit = load_dit(source, state, config, text_config)
+    # Every module has copied its weights out of the checkpoint dict by now; dropping it keeps a
+    # second full copy (13 GB for v4-Large) from staying resident through the export.
+    del state
     # The checkpoint's own flow parameterization decides the step graph's inputs and the golden
     # cases (ADR 0150) — read from the loaded DiT, never from the directory name.
     flow = dit_flow(dit)
@@ -3155,6 +3572,10 @@ def export_series(
         calib_plan=calib_plan,
     )
     cases = build_cases(model_dir, source, text_config, sym_max)
+    # The T5Gemma2 backbone (v4-Large) adds the window and end-of-image checks
+    # ({@link _sliding_window_evidence} / {@link _eoi_evidence} / {@link _t5gemma2_window_form}).
+    t5gemma2 = is_t5gemma2(text_config)
+    window_cases = build_window_cases(model_dir, text_config, sym_max) if t5gemma2 else {}
     speaker_max = speaker_sym_max(model_config)
     speaker_cases = (
         *build_speaker_cases(int(config.speaker_patched_latent_dim), speaker_max),
@@ -3178,6 +3599,8 @@ def export_series(
     static_evidence = _static_scheme_evidence(
         backbone, text_config, model_config, cases, _first(pristine[TARGET_BACKBONE])
     )
+    window = _sliding_window_evidence(backbone, window_cases) if t5gemma2 else None
+    eoi_divergence = _eoi_evidence(backbone.backbone, cases) if t5gemma2 else None
     sanity = _sanity(pristine)
     norm_divergence = _norm_divergence(text_norm, caption_norm)
     pristine[TARGET_SPEAKER] = _single(
@@ -3294,6 +3717,23 @@ def export_series(
         )
         for name, args in dit_inputs.items()
     )
+    # The windowed reference at the evidence lengths (T5Gemma2 only): the wrapper — its own mask
+    # dict, the patched embedding — matches upstream's windowed call bit for bit on both sides of
+    # the window and at the bound, not only at the golden lengths.
+    window_equivalence = (
+        None
+        if window is None
+        else max(
+            _check_wrapper_equivalence(
+                graphs[TARGET_BACKBONE],
+                (window_cases[length],),
+                (window.reference[length],),
+                f"{TARGET_BACKBONE}/window-{length}",
+                EAGER_EQUIV_ATOL,
+            )
+            for length in window_cases
+        )
+    )
 
     # ---- ④ Export and write the golden ----
     # The declaration of symbolic dimensions per target ({@link TargetAxis}). The 3 text graphs and
@@ -3335,6 +3775,7 @@ def export_series(
         TARGET_DIT_CONTEXT: TargetAxis(None, None, 0, {}, PRESERVED_OP_PREFIXES),
     }
     written: dict[str, Any] = {}
+    window_form: dict[str, Any] | None = None
     for target in targets:
         target_dir = out_dir / target
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -3359,6 +3800,12 @@ def export_series(
                     dit_graphs.context.output_names if target == TARGET_DIT_CONTEXT else None
                 ),
             )
+            # MUST: the folded window is checked before publishing (a failure leaves nothing in
+            # place).
+            if target == TARGET_BACKBONE and t5gemma2:
+                window_form = _t5gemma2_window_form(
+                    exported, tensors, backbone.backbone.config, sym_max
+                )
             graph = publish_model(
                 staged / MODEL_FILE,
                 exported,
@@ -3408,6 +3855,16 @@ def export_series(
         "dit_split_equivalence_max_abs": split_equivalence,
         "projector_divergence": sanity,
         "norm_divergence": round(norm_divergence, 5),
+        **(
+            {}
+            if window is None
+            else {
+                "window_evidence": window.report,
+                "window_equivalence_max_abs": window_equivalence,
+                "eoi_divergence": eoi_divergence,
+                **({} if window_form is None else {"window_form": window_form}),
+            }
+        ),
     }
 
 
