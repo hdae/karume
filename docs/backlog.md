@@ -17,6 +17,7 @@ rulings of 2026-11-14 the full verify was not run for this model-only release (n
 `packages/hub` or `packages/kernel-checks` changed since 0.21.0): the core lane, the Irodori lane with the upstream-parity
 cases, the CPU tests of the shared Gemma tokenizer, the Playground suite and both pytest suites ran green, and no other
 family's e2e ran; the kernel-check page was not run either, and the record of 0.21.0 stands.
+Published-smoke is green on Node and Deno (17 manifests and the sbv2 `fromPretrained`).
 
 Before it: 0.21.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.21.0 — fusion rules written outside the runtime
 and the per-family geometry profiles; Irodori's rare-token split (ADR 0149) and its MeanFlow model v4.1-small-mf (ADR
