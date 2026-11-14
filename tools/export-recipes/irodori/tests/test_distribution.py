@@ -2059,8 +2059,8 @@ class TestIrodoriMeanFlow:
 
         assert IRODORI_MODEL_DEFAULT_QUANTS == {
             IRODORI_V41_MF_MODEL: "i8",
-            # Provisional until the maintainer's listening (2026-11-14).
-            IRODORI_V4_LARGE_MODEL: "i8",
+            # The maintainer's ruling of 2026-11-14 (ADR 0151 decision 3).
+            IRODORI_V4_LARGE_MODEL: "i8-a8",
         }
         assert IRODORI_DEFAULT_QUANT == "i8-a8"
 
@@ -2300,8 +2300,8 @@ class TestIrodoriPresetsPerModel:
                 assert claim not in text, (name, claim)
         assert set(IRODORI_MODEL_SEAT_LABELS[IRODORI_V4_LARGE_MODEL]) == {"f16", "i8"}
 
-    def test_its_default_is_the_provisional_int8(self) -> None:
-        assert irodori_default_quant(IRODORI_V4_LARGE_MODEL) == "i8"
+    def test_its_default_is_int8_a8_by_the_maintainers_ruling(self) -> None:
+        assert irodori_default_quant(IRODORI_V4_LARGE_MODEL) == "i8-a8"
 
     def test_a_default_outside_the_models_presets_fails(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2392,7 +2392,7 @@ class TestIrodoriV4Large:
         model = manifest["models"][IRODORI_V4_LARGE_MODEL]
 
         assert list(model["quants"]) == list(_LARGE_PRESETS)
-        assert model["defaultQuant"] == "i8"
+        assert model["defaultQuant"] == "i8-a8"
         assert all("f32" not in labels for labels in model["weights"].values())
         for name, labels in model["weights"].items():
             for label, entry in labels.items():
@@ -2439,7 +2439,7 @@ class TestIrodoriV4Large:
         assert "every component is stored as `f16` / `i8` series" in card
         assert "no `f32` series is distributed" in card
         assert "splitRareTokens: false" not in card
-        assert '// quant: "i8", // default — available: f16 / i8 / i8+dit4 / i8-a8' in card
+        assert '// quant: "i8-a8", // default — available: f16 / i8 / i8+dit4 / i8-a8' in card
         assert '  repo: "hdae/karume-irodori-v4-large",' in card
 
     def test_its_borrowing_of_the_codec_needs_no_equal_config(self, tmp_path: Path) -> None:
@@ -2449,7 +2449,7 @@ class TestIrodoriV4Large:
 
         plan = irodori_plan(sources, IRODORI_V4_LARGE_MODEL)
 
-        assert plan.default_quant == "i8"
+        assert plan.default_quant == "i8-a8"
         assert {role for role in plan.artifacts if role in sources.published} == _LARGE_BORROWED
 
     def test_it_needs_no_f32_series(self, tmp_path: Path) -> None:

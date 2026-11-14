@@ -3,7 +3,7 @@
 - Status: proposed (2026-11-14 — the recipe exports the seven text-side graphs, the tokenizer asset and the full-loop
   goldens, writes the f16 / i8 / i4 series and assembles the distribution; the TS pipeline reads the tokenizer asset;
   the local mirror is built and the real-GPU e2e passes on it. The listening, the licence review and the publication
-  are pending — see Pending; the default preset `i8` is provisional until the maintainer's listening, and the licence
+  are pending — see Pending; the default preset is `i8-a8` by the maintainer's ruling of 2026-11-14, and the licence
   wording is unreviewed)
 - Date: 2026-11-14
 - Related: [0084](0084-gemma-tokenizer-chat.md) (the Gemma tokenizer asset; its addendum of 2026-11-14 adds the third
@@ -105,8 +105,10 @@ What is new for the stack:
    and is never published: the f32 DiT alone is 6.2 GB. The family's labels "Half size" / "Quarter size" are sizes
    relative to `f32`, so this model has its own (`IRODORI_MODEL_SEAT_LABELS`: "Largest (f16)", "Smaller (int8)"), and
    its preset descriptions state storage facts only (`IRODORI_MODEL_SEAT_DESCRIPTIONS`), since nothing has been
-   listened to or timed for it. **The default is `i8`, provisional** (`IRODORI_MODEL_DEFAULT_QUANTS`): the maintainer
-   picks the default after listening (ADR 0147 decision 3). Alternative not taken: the family's list with `f32` (a
+   listened to or timed for it. **The default is `i8-a8`** (`IRODORI_MODEL_DEFAULT_QUANTS`), by the maintainer's
+   ruling of 2026-11-14 on the listening material and the measurement in Consequences (ADR 0147 decision 3): the same
+   download as `i8`, and the fastest preset measured (about 1.5–1.7 times `i8` on the RTX 3080 Ti). The default was
+   `i8`, provisionally, until that ruling. Alternative not taken: the family's list with `f32` (a
    13.16 GB download that only repeats the reference series).
 
 4. **A separate recipe Pipeline for the licence; the containers carry the provenance licence `gemma`.** v4-Large is
@@ -196,8 +198,6 @@ What is new for the stack:
 
 ## Pending
 
-- The maintainer's listening, which decides the default preset (material: five requests × seeds 42–45 × the four
-  presets under `outputs/ab/irodori-v4-large-2026-11-14/`).
 - The Playground page in a browser (built, not run).
 - The goldens are staged locally and not in the private test-asset dataset. The per-graph io goldens of the f16 series
   are 4.83 GB, of which 4.18 GB is the 48 condition K/V inputs repeated in the seven `dit` cases (byte-identical to

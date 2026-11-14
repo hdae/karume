@@ -39,8 +39,8 @@ Node and Deno.
   / i8 series, and assembles the distribution (`dist.py --pipeline irodori-large`, presets `f16` / `i8` / `i8-a8` /
   `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset; the i4
   series (GPTQ), the local mirror, the real-GPU e2e (tolerances from measurement, sha256 rows, the `i8-a8` census) and
-  the Node measurement of the presets (ADR 0151, Consequences). Left, in order: the maintainer's listening (the default
-  `i8` is provisional until then), the Playground page in a browser, the maintainer's review of the licence wording,
+  the Node measurement of the presets (ADR 0151, Consequences). The default preset is `i8-a8` (the
+  maintainer's ruling of 2026-11-14). Left, in order: the Playground page in a browser, the maintainer's review of the licence wording,
   then the publication (the release-runbook §0 items for this repository; the test-asset upload first settles whether
   the `dit` io goldens store the condition K/V once).
 

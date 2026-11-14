@@ -268,7 +268,7 @@ v4-Large has its own repository line, `karume-irodori-v4-large`, on its own Pipe
 Pipeline). `--pipeline irodori` refuses `v4-large`, and `--pipeline irodori-large` refuses every other model.
 
 - **Presets**: `f16` / `i8` / `i8-a8` / `i8+dit4` — no `f32` (the f32 DiT alone is 6.2 GB; the f32 series stays the
-  recipe's reference series). The default is `i8`, provisional until the maintainer has listened to it. The list is a
+  recipe's reference series). The default is `i8-a8` (the maintainer's ruling of 2026-11-14). The list is a
   per-model fact (`IRODORI_MODEL_PRESETS`), and the build reads and lays out only the series those presets select
   (`irodori_dtype_roles`): every graph in f16 and i8, the DiT pair in i4.
 - **Components**: the seven text-side graphs come from v4-Large's own series; the codec pair is the published

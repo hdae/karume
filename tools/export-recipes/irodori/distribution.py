@@ -1337,13 +1337,15 @@ IRODORI_MODEL_PRESETS: Mapping[str, tuple[str, ...]] = {
     IRODORI_V4_LARGE_MODEL: ("f16", "i8", "i8-a8", "i8+dit4"),
 }
 
-#: Model → its default quant preset, for a model whose default is not the family's
-#: {@link IRODORI_DEFAULT_QUANT}. v4.1-small-mf: `i8` by the maintainer's listening of 2026-11-14
-#: (`i8` was fine; `i8-a8` showed no audible degradation either — ADR 0150). v4-Large: `i8`,
-#: **provisional** — nothing has been listened to yet; the maintainer decides after listening.
+#: Model → its default quant preset, for a model with its own ruling (the others take the family's
+#: {@link IRODORI_DEFAULT_QUANT}). v4.1-small-mf: `i8` by the maintainer's listening of 2026-11-14
+#: (`i8` was fine; `i8-a8` showed no audible degradation either — ADR 0150). v4-Large: `i8-a8` by
+#: the maintainer's ruling of 2026-11-14, made on this model's own listening material and
+#: measurement (ADR 0151 decision 3) — it equals the family's default, and is spelled here so that
+#: it does not follow a later change of the small models' ruling.
 IRODORI_MODEL_DEFAULT_QUANTS: Mapping[str, str] = {
     IRODORI_V41_MF_MODEL: "i8",
-    IRODORI_V4_LARGE_MODEL: "i8",
+    IRODORI_V4_LARGE_MODEL: "i8-a8",
 }
 
 #: Model → (preset name → its own label), for a model whose family labels would state something
