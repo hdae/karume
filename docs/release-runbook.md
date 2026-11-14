@@ -33,13 +33,14 @@ repository borrows is the recipe's declaration (`Pipeline.references` — ADR 00
 the commit. **The publication build passes `--resolve-refs hf`** (`tools/export-recipes/dist.py`): it reads the referenced
 repository's main from the HF API and, before writing anything, requires every borrowed file to be in that commit with the bytes of
 the local mirror under `models/` — a stale SHA, a referenced mirror rebuilt but not uploaded, or a renamed path fails the build
-instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are three pairs today:
+instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are four referencing repositories today:
 
 | Referencing repository | Referenced repository | Borrowed roles (the recipe's declaration) |
 | --- | --- | --- |
 | `karume-anima-extra` (fine-tuned models — ADR 0087, the same shape as the former turbo → anima direction) | `karume-anima` (model `anima-v1.0`) | `text_encoder` / `vae_decoder` / `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` / `tokenizer_2` (`ANIMA_EXTRA_SHARED_ROLES`) |
 | `karume-wan2.2` (ADR [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d", ADR [0121](decisions/0121-wan22-ti2v-5b.md) decision 9) | `karume-umt5-xxl` (model `xxl`) | `text_encoder` (`WAN_TEXT_ENCODER_REFERENCE`) |
 | `karume-irodori-v4.1-small` | `karume-irodori-v4-small` (model `v4-small`) | 26 roles = 90 files, 5,637 MiB: every graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and `tokenizer` (`IRODORI_V41_SHARED_ROLES`) |
+| `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), not yet published) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
 
 `karume-wan2.1` has the same reference as Wan2.2 but is not published on HF (the maintainer's ruling 2026-10-15). The Wan procedure
 is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
@@ -72,29 +73,41 @@ is the umT5 and Wan2.2 items of "First publication of a family" below. For the a
          `packages/e2e/tests/e2e_*_fusion_counts_test.ts`, and freeze the fusion counts and reference sha of the extra variants anew
          (the check that was emptied once when the official repository became self-contained — the table and the distribution mechanism are kept)
 
-For the irodori pair (v4.1-small references v4-small — upstream v4.1 retrained only the duration predictor; v4-small stays
-self-contained):
+For the irodori repositories (v4.1-small references v4-small — upstream v4.1 retrained only the duration predictor;
+v4.1-small-mf references both; v4-small stays self-contained). **No irodori build exports a published container again**:
+each model takes its published containers from the local mirror of the repository that holds them (`IRODORI_PUBLISHED`)
+and the build fails unless every part is the published bytes (`IRODORI_PUBLISHED_PART0` — ADR
+[0149](decisions/0149-irodori-rare-token-split.md) decision 5). So before building, the mirrors must hold the published
+containers — compare them with HF's main as in §2, and restore any difference from the Hub (`hf download`), never by
+rebuilding from the series. Only the tokenizer asset comes from the series (step 3 of `tools/export-recipes/irodori/README.md`,
+per model):
 
 1. **`karume-irodori-v4-small` first.** When its bytes and manifest are unchanged since its published pin
-   (`irodori.SOURCES["irodori-v4-small"]`), it need not be uploaded again — v4.1-small references that commit. When it is rebuilt and
-   uploaded (a new generator tag or card text), upload it first and let the next step read its new main.
+   (`irodori.SOURCES["irodori-v4-small"]`), it need not be uploaded again — the others reference that commit. When it is
+   rebuilt (a new tokenizer asset, generator tag or card text), in `tools/export-recipes`
+   `uv run python dist.py --pipeline irodori` (it reads its containers from `models/karume-irodori-v4-small/` itself and
+   replaces the non-container files), upload it first, and let the next steps read its new main.
 2. **Build `karume-irodori-v4.1-small`**: in `tools/export-recipes`,
-   `uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf` (it reads the mirror `models/karume-irodori-v4-small/`).
+   `uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf` (it reads both mirrors).
    The result holds 16 files: the 12 parts of `duration` f32 / f16 / i8 and `dit` i4, the manifest, the card and the 2 legal texts.
-3. **Upload it with `--delete` for the 90 borrowed paths** — `hf upload` does not delete files that are absent locally, and the
-   self-contained 0.14.0 upload holds them on main: `tools/release/hf-upload.zsh upload karume-irodori-v4.1-small
-   --delete 'v4.1-small/backbone/*' --delete 'v4.1-small/text_proj/*' --delete 'v4.1-small/caption_proj/*'
-   --delete 'v4.1-small/speaker/*' --delete 'v4.1-small/dit_context/*' --delete 'v4.1-small/codec_decoder/*'
-   --delete 'v4.1-small/codec_encoder/*' --delete 'v4.1-small/tokenizer/*' --delete 'v4.1-small/dit/model.f32-*'
-   --delete 'v4.1-small/dit/model.f16-*' --delete 'v4.1-small/dit/model.i8-*'`, then compare HF's main with the mirror as in §2
-   (the 12 kept parts are byte-identical to what is already there). The old revisions keep the full files, so pins of 0.14.0 and earlier
-   keep working.
-4. **Pins**: update `irodori.SOURCES["irodori-v4.1-small"]` (and `"irodori-v4-small"` only when step 1 uploaded it).
+   Confirm that no placeholder revision remains (`rg -c '"revision": "0{40}"' models/karume-irodori-v4.1-small/karume.json`
+   prints nothing) and that every reference names the v4-small main of step 1.
+3. **Upload it.** Compare HF's main with the mirror as in §2 and add `--delete` for the paths only HF holds. The 90 paths
+   the self-contained 0.14.0 upload stored were deleted from main in 0.15.0 (the old revisions keep them, so pins of 0.14.0
+   and earlier keep working), so today the difference is `.gitattributes` alone:
+   `tools/release/hf-upload.zsh upload karume-irodori-v4.1-small`. The 12 kept parts are byte-identical to what is already
+   there.
+4. **Build and upload `karume-irodori-v4.1-small-mf`** after steps 1 and 3 (its references pin both mains):
+   `uv run python dist.py --pipeline irodori --model v4.1-small-mf --resolve-refs hf`, the same placeholder check, then
+   `tools/release/hf-upload.zsh upload karume-irodori-v4.1-small-mf` (a new repository — nothing to delete).
+5. **Pins**: update `irodori.SOURCES["irodori-v4.1-small"]` (and `"irodori-v4-small"` only when step 1 uploaded it); add
+   `SOURCES["irodori-v4.1-small-mf"]` when step 4 published it (the first-publication items of §3).
 
 If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
 **when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
-`karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small` for `karume-irodori-v4-small`). **0.15.0: `karume-wan2.2` must be
+`karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small` and `karume-irodori-v4.1-small-mf` for
+`karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`). **0.15.0: `karume-wan2.2` must be
 re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online`, `i8` and `i8-a8-attn8-online-conv8` presets
 (ADRs 0132 / 0133), the default moved to `i8-a8-attn8-online-conv8`, and it gained the `vae_decoder_first_32` / `vae_decoder_next_32`
 containers (ADR 0134) — check the new containers in the fragmentation check of §2 too.**

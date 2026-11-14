@@ -116,7 +116,8 @@ CASE_PREFIX = "case."
 CASE_SUFFIX = ".safetensors"
 T_EMBED_FILE = "t-embed.safetensors"
 
-#: Number of Euler steps (the default of upstream `SamplingRequest.num_steps`).
+#: Number of Euler steps (upstream's default for an RF checkpoint: `SamplingRequest.num_steps` is
+#: `None` by default, and `inference_runtime` then takes `4 if is_meanflow else 40`).
 NUM_STEPS = 40
 
 #: Number of steps of a **MeanFlow** checkpoint (ADR 0150 — upstream's default for one:

@@ -1,7 +1,8 @@
 # 0149: Irodori rare-token split — upstream's table in the tokenizer asset, on by default for the text
 
 - Status: proposed (2026-11-14 — follows upstream Irodori-TTS commit `82c9980b`; the recipe, the TS tokenizer and the
-  request option are implemented and pass the parity fixture; no distribution carries the table yet)
+  request option are implemented and pass the parity fixture; the local mirrors of v4-small, v4.1-small and
+  v4.1-small-mf carry the table (decision 5); no published distribution carries it yet)
 - Date: 2026-11-14
 - Related: [0048](0048-irodori-host-port.md) (the Irodori host port and its shared Unigram layer) /
   [0107](0107-model-input-error.md) (input-caused failures) / [0005](0005-verification.md) (addendum of 2026-10-11:
@@ -84,6 +85,26 @@ where a vocabulary without it would fall back to bytes.
    emoji paths, a text that truncates only once split, and a long passage. Four of them also carry the padded
    `batch_encode` form.
 
+5. **How the table reaches the published repositories: a tokenizer-only reassembly.** v4-small is reassembled with
+   every container left as the published bytes; only the tokenizer asset is today's (the published bytes plus the
+   trailing key), and the manifest (`generator` and the tokenizer's size and sha256), the card and the legal texts are
+   rendered by the recipe. A full reassembly from the series is not an option: the published non-DiT containers
+   predate the `provenance.notice` field, so a fresh export differs in part 0, and the GPTQ i4 series rounds about 16%
+   of the DiT weights differently on another machine (measured 2026-11-14, an environment difference shown by an A/B).
+   The recipe therefore declares the containers each model takes as published instead of exporting them
+   (`irodori.distribution.IRODORI_PUBLISHED` — for v4-small and v4.1-small every graph role, for v4.1-small-mf every
+   role but the DiT pair) and pins part 0 of each published container by sha256 (`IRODORI_PUBLISHED_PART0`; part 0's
+   descriptor declares the sha256 of the other parts). The build reads those containers from the local mirror of the
+   repository that holds them and fails, before writing anything, when a part is not the published bytes
+   (`assert_irodori_published_containers`) — a mirror rebuilt from the series, for one. This is the same mechanism
+   v4.1-small-mf uses to borrow containers across repositories (ADR [0150](0150-irodori-meanflow.md) decision 1),
+   extended to a model's own containers; re-exporting a model's containers on purpose is a change to those two tables.
+
+   v4.1-small is reassembled the same way (its own `duration_*` and `dit_i4` from its own repository, the rest
+   referenced at v4-small) against the v4-small revision that carries the table, and v4.1-small-mf references the
+   tokenizer at that revision too. The upload order is v4-small, then v4.1-small, then v4.1-small-mf
+   (`docs/release-runbook.md` §0).
+
 ## Consequences
 
 - With a distribution whose tokenizer asset carries the table, the default output changes for every text that contains
@@ -92,7 +113,8 @@ where a vocabulary without it would fall back to bytes.
   (`calib_cases.py`) do, and the recipe's reference loops (`pipeline_ref.py`, `calib.py`, `export.py`) encode unsplit.
 - The tokenizer asset gains one key (261,160 bytes on 3,232,154). A distribution has to be reassembled to carry it, and
   v4.1-small reads v4-small's tokenizer through a cross-repository reference that pins its bytes, so it picks up the
-  table only when it is assembled against the v4-small revision that carries it.
+  table only when it is assembled against the v4-small revision that carries it (decision 5). The reassembly moves no
+  container byte, so no sha256 row and no golden changes.
 - Older distribution revisions keep working: without the key there is no split path, the default is off, and only an
   explicit `true` is refused.
 - The recipe's step 3 needs an upstream clone that includes `82c9980b` (it imports `token_split.py`).

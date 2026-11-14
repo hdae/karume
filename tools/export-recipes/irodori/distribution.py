@@ -46,6 +46,7 @@ from safetensors import safe_open
 from _shared.calib_provenance import calib_complaint
 from _shared.licenses import apache_license_2_0, mit_license
 from _shared.paths import DIST_ROOT, INPUTS_ROOT
+from karume.container import ContainerFormatError
 from karume.dist import (
     Artifact,
     CrossRepoReference,
@@ -57,9 +58,12 @@ from karume.dist import (
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
+    component_parts,
     graph_inputs,
     ir_graph,
+    sha256_file,
 )
+from karume.verify import ContainerError, verify_container
 
 from .card import (
     IRODORI_CODEC_MODEL,
@@ -389,22 +393,30 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
     ),
 }
 
-IRODORI_QUANTS: Mapping[str, Any] = {
-    name: {
-        "weights": {role: seat.roles.get(role, seat.dtype) for role in IRODORI_GRAPH_ROLES},
-        "session": dict(seat.session),
-        "label": seat.label,
-        "description": seat.description,
-    }
-    for name, seat in IRODORI_QUANT_SEATS.items()
-}
 
-#: The default is `i8-a8` (the maintainer's listening ruling of 2026-08-12 — the 4 presets were
-#: checked end to end with a DAC + headphones: "it does not feel like a loss of audio quality". The
-#: distribution at 25.2% / DiT resident 0.37GB / wall ×1.12 take effect by default, and the most
-#: faithful `f32` preset stays available to pick explicitly. The numeric band (sim LSD 5.64, z
-#: maxAbs 2.97 against the i8 golden) is held by the discriminating band of
-#: `e2e_irodori_ab_test.ts`).
+def irodori_quants(model: str) -> dict[str, Any]:
+    """The manifest's quant table of one model: {@link IRODORI_QUANT_SEATS}, with the descriptions
+    of {@link IRODORI_MODEL_SEAT_DESCRIPTIONS} in place of the family's where the model has its
+    own (the storage, the knobs and the labels are the same for every model)."""
+    descriptions = IRODORI_MODEL_SEAT_DESCRIPTIONS.get(model, {})
+    return {
+        name: {
+            "weights": {role: seat.roles.get(role, seat.dtype) for role in IRODORI_GRAPH_ROLES},
+            "session": dict(seat.session),
+            "label": seat.label,
+            "description": descriptions.get(name, seat.description),
+        }
+        for name, seat in IRODORI_QUANT_SEATS.items()
+    }
+
+
+#: The family's default is `i8-a8` (the maintainer's listening ruling of 2026-08-12 — the 4
+#: presets were checked end to end with a DAC + headphones: "it does not feel like a loss of audio
+#: quality". The distribution at 25.2% / DiT resident 0.37GB / wall ×1.12 take effect by default,
+#: and the most faithful `f32` preset stays available to pick explicitly. The numeric band (sim
+#: LSD 5.64, z maxAbs 2.97 against the i8 golden) is held by the discriminating band of
+#: `e2e_irodori_ab_test.ts`). A model with its own ruling is in
+#: {@link IRODORI_MODEL_DEFAULT_QUANTS}.
 IRODORI_DEFAULT_QUANT = "i8-a8"
 
 #: DACVAE frame rate (Hz) — 48kHz / hop 1920 = 25. The same value as
@@ -596,6 +608,19 @@ def irodori_repo_name(model: str) -> str:
     return f"karume-{IRODORI_SERIES_PREFIX}-{model}"
 
 
+class PublishedContainer(NamedTuple):
+    """One container a model takes as **published**, not from its series
+    ({@link IRODORI_PUBLISHED}): where its bytes are and the digest that pins them."""
+
+    #: The model whose repository holds the bytes (the model itself, or the one it borrows from).
+    holder: str
+    #: The representative path in the holder's local mirror
+    #: (`<dist_root>/<holder repository>/<holder>/<role path>`).
+    path: Path
+    #: sha256 of part 0 as published ({@link IRODORI_PUBLISHED_PART0}).
+    part0_sha256: str
+
+
 @dataclass(frozen=True)
 class IrodoriSources:
     """The assembly inputs. Two sets: the series, and where the checkpoints live (`inputs/` — not
@@ -618,10 +643,10 @@ class IrodoriSources:
     series_by_dtype: Mapping[str, Path]
     #: Likewise for the codec (the codec has no i4 series, so 3: f32 / f16 / i8).
     codec_series_by_dtype: Mapping[str, Path]
-    #: Role name (`<graph role>_<dtype>`) → the **published container** it is borrowed as: the
-    #: representative path in the local mirror of the repository that physically holds the bytes
-    #: (empty for a model that exports everything it ships — {@link irodori_borrowed_sources}).
-    borrowed: Mapping[str, Path] = MappingProxyType({})
+    #: Role name (`<graph role>_<dtype>`) → the **published container** the role is taken as,
+    #: instead of the series (empty for a model that exports everything it ships —
+    #: {@link irodori_published_sources}).
+    published: Mapping[str, PublishedContainer] = MappingProxyType({})
 
     @property
     def series(self) -> Path:
@@ -645,9 +670,10 @@ def irodori_sources(
     of `_shared.paths`.
 
     The dtype suffixes are spelled the same as in `irodori.export.default_out_root` /
-    `irodori.dacvae.export.default_out_root` — writer and reader build from the same word. A model
-    that borrows published containers ({@link IRODORI_BORROWED}) reads them from the mirrors under
-    `dist_root` (default `models/` — the same place the dist driver reconciles references against).
+    `irodori.dacvae.export.default_out_root` — writer and reader build from the same word. The
+    roles a model takes as published containers ({@link IRODORI_PUBLISHED}) are read from the
+    mirrors under `dist_root` (default `models/` — the same place the dist driver reconciles
+    references against).
     """
     suffix = {
         dtype: "" if dtype == IRODORI_PLAIN_DTYPE else f"-{dtype}"
@@ -669,7 +695,7 @@ def irodori_sources(
         codec_model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / IRODORI_CODEC_NAME,
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
-        borrowed=irodori_borrowed_sources(model, DIST_ROOT if dist_root is None else dist_root),
+        published=irodori_published_sources(model, DIST_ROOT if dist_root is None else dist_root),
     )
 
 
@@ -683,9 +709,9 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         for role in roles:
             name = irodori_role(role, dtype)
-            if name in sources.borrowed:
-                # A borrowed role is the published container itself (never re-exported).
-                placements[name] = sources.borrowed[name]
+            if name in sources.published:
+                # The published container itself (never re-exported).
+                placements[name] = sources.published[name].path
                 continue
             series = (
                 sources.series_by_dtype[dtype]
@@ -1065,9 +1091,14 @@ def assert_irodori_calib_provenance(sources: IrodoriSources, flow: str = IRODORI
     writing it out through 2 wrappers (ADR 0114), so the records must be identical — if they
     differ, series from separate export runs (another budget, another rounding) sit side by side in
     one preset.
+
+    A role taken as a published container ({@link IrodoriSources.published}) is not checked: its
+    series is not what ships, and the published bytes are pinned by digest instead.
     """
     records: dict[str, Any] = {}
     for role in IRODORI_DTYPE_ROLES["i4"]:
+        if irodori_role(role, "i4") in sources.published:
+            continue
         path = sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS[role] / CALIB_PROVENANCE_FILE
         if not path.is_file():
             raise DistError(
@@ -1106,6 +1137,7 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     pipeline_config = irodori_pipeline_config(config, irodori_codec_numbers(sources.codec_model))
     assert_irodori_calib_provenance(sources, irodori_flow_parameterization(config))
     assert_irodori_borrowed_weights(sources, model)
+    assert_irodori_published_containers(sources)
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)
@@ -1119,8 +1151,8 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
         },
         weights=IRODORI_WEIGHTS,
         assets=IRODORI_ASSETS,
-        quants=complete_quant_weights(IRODORI_WEIGHTS, IRODORI_QUANTS),
-        default_quant=IRODORI_DEFAULT_QUANT,
+        quants=complete_quant_weights(IRODORI_WEIGHTS, irodori_quants(model)),
+        default_quant=IRODORI_MODEL_DEFAULT_QUANTS.get(model, IRODORI_DEFAULT_QUANT),
         pipeline_config=pipeline_config,
     )
 
@@ -1137,6 +1169,27 @@ IRODORI_V41_MODEL = "v4.1-small"
 
 #: The MeanFlow student distilled from v4.1-small by upstream (ADR 0150) — its own repository.
 IRODORI_V41_MF_MODEL = "v4.1-small-mf"
+
+#: Model → its default quant preset, for a model whose default is not the family's
+#: {@link IRODORI_DEFAULT_QUANT}. v4.1-small-mf: `i8` by the maintainer's listening of 2026-11-14
+#: (`i8` was fine; `i8-a8` showed no audible degradation either — ADR 0150).
+IRODORI_MODEL_DEFAULT_QUANTS: Mapping[str, str] = {IRODORI_V41_MF_MODEL: "i8"}
+
+#: Model → (preset name → its own description), for a model whose presets were judged apart from
+#: the family's rulings ({@link irodori_quants}). The family's descriptions carry the v4 listening
+#: check and the v4 speed measurement; for v4.1-small-mf they say only what was established for
+#: that model — the maintainer's listening of 2026-11-14 covered `i8` and `i8-a8`, and nothing
+#: else was judged or measured for it (ADR 0150). `f32` and `i8+dit4` state facts of the storage
+#: only, so they keep the family's text.
+IRODORI_MODEL_SEAT_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = {
+    IRODORI_V41_MF_MODEL: {
+        "f16": "Every graph stored as f16 and computed in f32 — half the f32 download.",
+        "i8": "Every graph stored as int8 and computed in f32 — about a quarter of the f32"
+        " download; it sounded fine in a listening check.",
+        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
+        " — the same download as plain int8, with no audible degradation in a listening check.",
+    },
+}
 
 #: Roles of v4.1-small that are byte-identical to v4-small, so v4.1-small's distribution
 #: references them in v4-small's repository instead of storing them a second time (ADR 0038 §7
@@ -1172,26 +1225,44 @@ def _v41_owner(role: str) -> str:
     return IRODORI_V4_MODEL if role in IRODORI_V41_SHARED_ROLES else IRODORI_V41_MODEL
 
 
-#: Model → (role name → the model whose **published container** that role borrows). ADR 0150:
-#: v4.1-small-mf physically carries only the roles whose bytes are new (the DiT pair, every
-#: series, and its tokenizer asset) and borrows every other graph role from the repository that
-#: physically holds it — references are not followed further (`karume.dist.external_refs`), so a
-#: role v4.1-small itself borrows points at v4-small directly: `duration_*` at v4.1-small, the
-#: rest at v4-small.
+#: Model → (role name → the model whose repository holds the **published container** the role is
+#: taken as). Such a role is not re-exported: the assembly reads the container from the holder's
+#: mirror ({@link irodori_published_sources}) and requires it to be the published bytes
+#: ({@link IRODORI_PUBLISHED_PART0}, {@link assert_irodori_published_containers}). When the holder
+#: is another model, the role is also a cross-repository reference there
+#: ({@link irodori_references}); when it is the model itself, the container is stored again as is.
 #:
-#: Unlike v4.1-small ({@link IRODORI_V41_SHARED_ROLES}, which exports every role and checks the
-#: bytes against v4-small's), a borrowed role here is **the published container itself**: it is
-#: not re-exported, and the assembly reads it from the owner's mirror
-#: ({@link irodori_borrowed_sources}). The published non-DiT containers predate the
-#: `provenance.notice` field, so a fresh export of the same weights differs from them in part 0
-#: and could never be reconciled byte for byte. What makes the borrowing hold is checked on the
-#: inputs instead: every checkpoint tensor such a graph is built from, and the configs, are equal
-#: to the owner's ({@link assert_irodori_borrowed_weights}).
+#: Why the published bytes and not the series: a fresh export cannot reproduce them. The published
+#: non-DiT containers predate the `provenance.notice` field (part 0 differs), and the GPTQ i4 series
+#: rounds about 16% of the DiT weights differently on another machine (measured 2026-11-14 — an
+#: environment difference, not an upstream one). A reassembly that only adds or changes a
+#: non-container file (the rare-token split table of ADR 0149, the card) must therefore not move a
+#: published container. Re-exporting a model's containers is a deliberate change: remove its
+#: entries here and in {@link IRODORI_PUBLISHED_PART0}.
 #:
-#: The tokenizer stays local: the published v4-small asset predates the rare-token split table
-#: (ADR 0149), which upstream applies to this model's tokenizer, so borrowing it would drop that
-#: behaviour.
-IRODORI_BORROWED: Mapping[str, Mapping[str, str]] = {
+#: - v4-small and v4.1-small take every graph role as published: v4-small from its own repository,
+#:   v4.1-small its own roles (`duration_*`, `dit_i4`) from its own and the rest from v4-small
+#:   ({@link IRODORI_V41_SHARED_ROLES}).
+#: - v4.1-small-mf (ADR 0150) exports only the DiT pair, whose bytes are new, and takes every other
+#:   graph role from the repository that physically holds it — references are not followed further
+#:   (`karume.dist.external_refs`), so a role v4.1-small itself borrows points at v4-small directly:
+#:   `duration_*` at v4.1-small, the rest at v4-small. That a borrowed graph is the student's own is
+#:   checked on the inputs: every checkpoint tensor it is built from, and the configs, equal the
+#:   holder's ({@link assert_irodori_borrowed_weights}).
+#:
+#: The tokenizer asset is not a container and always comes from the series
+#: ({@link IRODORI_TOKENIZER_HOLDERS} says where it is referenced instead of stored).
+IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
+    IRODORI_V4_MODEL: {
+        irodori_role(role, dtype): IRODORI_V4_MODEL
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        for role in roles
+    },
+    IRODORI_V41_MODEL: {
+        irodori_role(role, dtype): _v41_owner(irodori_role(role, dtype))
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        for role in roles
+    },
     IRODORI_V41_MF_MODEL: {
         irodori_role(role, dtype): _v41_owner(irodori_role(role, dtype))
         for dtype, roles in IRODORI_DTYPE_ROLES.items()
@@ -1200,28 +1271,147 @@ IRODORI_BORROWED: Mapping[str, Mapping[str, str]] = {
     },
 }
 
+#: Holder model → (role name → sha256 of **part 0** of its published container). Part 0's
+#: descriptor declares the sha256 of every other part (container-v1 §7), so this one digest pins
+#: the whole container. Recorded 2026-11-14 from the Hub's main of `karume-irodori-v4-small` and
+#: `karume-irodori-v4.1-small` (LFS oids; the local mirrors were byte-compared with every file of
+#: those commits the same day).
+IRODORI_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
+    IRODORI_V4_MODEL: {
+        "backbone_f16": "f7da9ed1cc9424b89217515aaa15aa44eee43f3a10d8f183ce4da0d310dda5b5",
+        "backbone_f32": "4bf46f4feed0c8c51491d6d3e086b5e68322a31cd29cc3f7d9a5003f2195008c",
+        "backbone_i8": "4faccb6361996b0efc66b123fd76547326cf7c0d141de8d400a193e77c366a4b",
+        "caption_proj_f16": "8499b683a87ece8dcec9c7febb8c3b2f8a2fb508a8f7e68d1e966b45c4d309b2",
+        "caption_proj_f32": "66e346f9060a83a73cc60efe47a4797d7a57b5e26545bed59cd0ceb354e4bebc",
+        "caption_proj_i8": "ceb3057974e623fe49e44ec0bb8c2cab8dfede84c6af2a5746ffb28e344afa22",
+        "codec_decoder_f16": "45c1acd0a0a1d7b5a9bb26d926cc392724f93c328e3b0ef70f35ca33dbaab729",
+        "codec_decoder_f32": "0240e41c08ba0bde8683bd807f20a046af0a6cc3db448d0a7330b3eec6f15db6",
+        "codec_decoder_i8": "ea18b51377c3bc97593d1410c3567cd9ceac2d4b6f52421866404e6eec6dda38",
+        "codec_encoder_f16": "ec0547b90a0a5a63cf329561af9e2c0c69c2daec1c7a0973d395d1c922b84d71",
+        "codec_encoder_f32": "d8da3a7ae8f82f1ca004a7bf3ff4a0f2aec34ab6325721fa83d7e91d200cd08d",
+        "codec_encoder_i8": "6c890e50ef6755f8e780e706ac13b67a5cdfdd8595f1f6cd3eb54f4c1002f748",
+        "dit_f16": "efbf0477e04bf491c9f27ad1b1610ca636cd3a4ca5b2175fd4b1b51e893a4495",
+        "dit_f32": "a3aa39059f6818548e38c6ceb23a55523b22fe3099d34dc81015fe68635044b3",
+        "dit_i4": "e92aca74e1cb1619d33a927ded3dc16cbae7ed0063a8a109de6fb88b27f60ba3",
+        "dit_i8": "7d5bd3804ca24274bd6d26aa18d42b2af42cf9350ce7708b98247ba96943a21b",
+        "dit_context_f16": "22d3838f813e56c6a9cff674d3e86c3102d42b992522c3c1a020d964cecc17b1",
+        "dit_context_f32": "3a80725741e9bfbd8aa88084e4ad7f62b68f48c848f270ef3d5a35813ce50d3e",
+        "dit_context_i4": "09a060761f79c243e44ecfa8556babf3a232e8886291f06cec421bb8f206b2e0",
+        "dit_context_i8": "af029d181069d971626bff723095decf467ae84134184be0b5200309a65a7246",
+        "duration_f16": "45cc2c32b12f3e1b5d69326ffb49f9f22f1f18f84a85b7f00d0aea520d930c93",
+        "duration_f32": "4ada94f3600d0bd7944d8e0e5f5637d5e19900e1c17e22bc27d073255ec18bae",
+        "duration_i8": "a05dfc0d9f4338780ee8992d64d0c25adb0ccbea0524e7f450d5a2e2d74f8232",
+        "speaker_f16": "e410fab58eed5a6a24451b6c80612457dade40fcf11cb7b3155e5526cc872df8",
+        "speaker_f32": "2d317da551e0484e9bc8485a7cfcf1e6ce31e7660fb58f167f495f279b5b7f6a",
+        "speaker_i8": "d1ad8e2978a95cd25e70d314ce5db2fcead74c27b8e52ebe74fe7a23c2d66338",
+        "text_proj_f16": "1fafc49e129bb96d2380d2ee77b6893f67c3bfa47454753f36aa0c6d099a0245",
+        "text_proj_f32": "4e64f1bba21f6f8f8d5321f748cbec93565c85c2f2c821f941ead26ead8074c5",
+        "text_proj_i8": "fc56eb9388a46ee7252d8f2ad3cff9e532cebffa105913d0ce988fde146a7cff",
+    },
+    IRODORI_V41_MODEL: {
+        "dit_i4": "09ac1ac698596ad5f9ff652b5b174a968ce2ada97b0e7de1f50d0614bb20f0a8",
+        "duration_f16": "b424211ef9b9cc131a796dd9e6dfb6550bc0d8d54e7ad52920b65499213472e3",
+        "duration_f32": "a7e80841ce62c9086d4a3ee12f20c7fdb6e69e2e1cd331e6db14d2e9c1a259b2",
+        "duration_i8": "a59a496c4213d12792cee402012802032f92fa8a15ae37db16cd35c8878bdb98",
+    },
+}
 
-def irodori_borrowed_sources(model: str, dist_root: Path) -> Mapping[str, Path]:
-    """Role name → the representative path of the published container a model borrows, in the
-    owner's local mirror (`<dist_root>/<owner repository>/<owner model>/<role path>`)."""
-    return MappingProxyType(
-        {
-            role: dist_root / irodori_repo_name(owner) / owner / IRODORI_OUTPUT_PATHS[role]
-            for role, owner in IRODORI_BORROWED.get(model, {}).items()
-        }
-    )
+#: Model → the model whose repository holds its tokenizer asset, for the models that reference it
+#: there instead of storing it. The three checkpoints name the same text tokenizer, and the asset
+#: they produce is byte-identical (measured 2026-11-14, rare-token split table included — ADR
+#: 0149); the core's reference check compares the bytes on every build, so a model whose asset
+#: drifted fails instead of pointing at another tokenizer. ADR 0150: v4.1-small-mf references it
+#: too, now that v4-small's asset carries the table.
+IRODORI_TOKENIZER_HOLDERS: Mapping[str, str] = {
+    IRODORI_V41_MODEL: IRODORI_V4_MODEL,
+    IRODORI_V41_MF_MODEL: IRODORI_V4_MODEL,
+}
+
+
+def irodori_published_sources(model: str, dist_root: Path) -> Mapping[str, PublishedContainer]:
+    """Role name → the published container a model takes the role as ({@link IRODORI_PUBLISHED}),
+    in the holder's local mirror (`<dist_root>/<holder repository>/<holder>/<role path>`), with
+    its pinned digest.
+
+    MUST: a declared role without a pin fails — taking a container "as published" with nothing to
+    say which bytes were published would accept whatever the mirror holds.
+    """
+    published: dict[str, PublishedContainer] = {}
+    for role, holder in IRODORI_PUBLISHED.get(model, {}).items():
+        digest = IRODORI_PUBLISHED_PART0.get(holder, {}).get(role)
+        if digest is None:
+            raise DistError(
+                f"{model} takes {role} as published by {holder}, but there is no published digest"
+                " for it (IRODORI_PUBLISHED_PART0)"
+            )
+        published[role] = PublishedContainer(
+            holder=holder,
+            path=dist_root / irodori_repo_name(holder) / holder / IRODORI_OUTPUT_PATHS[role],
+            part0_sha256=digest,
+        )
+    return MappingProxyType(published)
+
+
+def assert_irodori_published_containers(sources: IrodoriSources) -> None:
+    """Check that every container taken as published ({@link IrodoriSources.published}) is the
+    published bytes: part 0 has the pinned sha256, and every other part has the sha256 part 0's
+    descriptor declares for it.
+
+    MUST: every part is hashed, not a sample — a mirror rebuilt locally from the series differs in
+    some parts only (the i4 rounding), and a stored copy is placed as is while a borrowed one is
+    only referenced, so nothing later compares it with the descriptor. Restoring the mirror from the
+    Hub is the fix, never re-pinning.
+    """
+    for role, published in sources.published.items():
+        parts = component_parts(published.path)
+        if not all(part.is_file() for part in parts):
+            raise DistError(
+                f"{role}: the published container of {irodori_repo_name(published.holder)} is not"
+                f" in its mirror: {published.path}"
+            )
+        actual = sha256_file(parts[0])
+        if actual != published.part0_sha256:
+            raise DistError(
+                f"{role}: {parts[0]} is not the published container of"
+                f" {irodori_repo_name(published.holder)} (part 0 sha256 {actual}, published"
+                f" {published.part0_sha256}) — restore the mirror from the Hub instead of"
+                " rebuilding it from the series"
+            )
+        if len(parts) == 1:
+            continue
+        try:
+            descriptor = verify_container(parts).read.model
+        except (ContainerError, ContainerFormatError) as cause:
+            raise DistError(f"{role}: {parts[0]} cannot be read as a container: {cause}") from cause
+        declared = (
+            {} if descriptor is None else {part.index: part.sha256 for part in descriptor.parts}
+        )
+        for index, part in enumerate(parts[1:], start=1):
+            if sha256_file(part) != declared.get(index):
+                raise DistError(
+                    f"{role}: {part} is not the part {index} the published part 0 declares"
+                    f" ({declared.get(index)}) — restore the mirror from the Hub"
+                )
 
 
 #: Graph role → the checkpoint's state_dict prefixes it is built from (the attribute names of
 #: `irodori_tts/model.py`, as `irodori.export` loads them — `text_norm` sits inside `duration`,
 #: `caption_norm` inside `caption_proj`'s second output, `speaker_norm` inside `speaker`). The
 #: codec is a separate repository with its own weights, so it has none.
+#:
+#: The DiT pair (borrowed by v4.1-small, whose DiT upstream did not retrain): `dit` is built from
+#: the blocks and the modules around them; `dit_context` from the blocks' condition-side
+#: projections and the two condition norms it applies (`irodori.export.DitContextGraph`). It is
+#: compared over every block tensor — a superset of what it reads, so a borrower whose blocks
+#: differ anywhere is refused rather than half-checked.
 IRODORI_ROLE_TENSOR_PREFIXES: Mapping[str, tuple[str, ...]] = {
     "backbone": ("pretrained_text_backbone.",),
     "text_proj": ("text_encoder.",),
     "caption_proj": ("caption_encoder.", "caption_norm."),
     "speaker": ("speaker_encoder.", "speaker_norm."),
     "duration": ("duration_predictor.", "text_norm."),
+    "dit": ("blocks.", "cond_module.", "in_proj.", "out_proj.", "out_norm."),
+    "dit_context": ("blocks.", "text_norm.", "caption_norm."),
     "codec_decoder": (),
     "codec_encoder": (),
 }
@@ -1251,17 +1441,22 @@ def _checkpoint_metadata(path: Path) -> Mapping[str, str]:
 
 
 def assert_irodori_borrowed_weights(sources: IrodoriSources, model: str) -> None:
-    """Check that every role `model` borrows ({@link IRODORI_BORROWED}) is built from **exactly
-    the owner's inputs**: the checkpoint tensors under its prefixes
-    ({@link IRODORI_ROLE_TENSOR_PREFIXES}) are byte-identical, the text-encoder config is equal,
-    and the model config differs at most in {@link IRODORI_BORROW_CONFIG_EXEMPT}.
+    """Check that every role `model` borrows — takes as a published container another model holds
+    ({@link IrodoriSources.published}) — is built from **exactly the owner's inputs**: the
+    checkpoint tensors under its prefixes ({@link IRODORI_ROLE_TENSOR_PREFIXES}) are
+    byte-identical, the text-encoder config is equal, and the model config differs at most in
+    {@link IRODORI_BORROW_CONFIG_EXEMPT}.
 
     MUST: a borrowed role is the owner's published container, never re-exported, so this is the
     check that the borrowing is the same graph and the same weights — without it a borrower whose
     duration predictor (say) had been retrained would ship the owner's silently. The owner's
     checkpoint is the sibling input directory (`inputs/irodori/<owner>/`).
     """
-    borrowed = IRODORI_BORROWED.get(model, {})
+    borrowed = {
+        role: published.holder
+        for role, published in sources.published.items()
+        if published.holder != model
+    }
     if not borrowed:
         return
     own = sources.model / IRODORI_CKPT_FILE
@@ -1325,20 +1520,18 @@ def assert_irodori_borrowed_weights(sources: IrodoriSources, model: str) -> None
 
 
 def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
-    """`Pipeline.references` of Irodori: v4.1-small borrows {@link IRODORI_V41_SHARED_ROLES} from
-    v4-small's repository (the base model stays self-contained — it is the one upstream retrained
-    from, and the e2e checks read its mirror file by file); v4.1-small-mf borrows
-    {@link IRODORI_BORROWED} from the two repositories that hold the bytes (one reference per
-    owner, v4-small first)."""
-    if model == IRODORI_V41_MODEL:
-        return (
-            CrossRepoReference(
-                repo_name=irodori_repo_name(IRODORI_V4_MODEL),
-                model=IRODORI_V4_MODEL,
-                roles=IRODORI_V41_SHARED_ROLES,
-            ),
-        )
-    borrowed = IRODORI_BORROWED.get(model, {})
+    """`Pipeline.references` of Irodori: every role a model takes from another model's repository
+    — the published containers of {@link IRODORI_PUBLISHED} whose holder is another model, and the
+    tokenizer asset of {@link IRODORI_TOKENIZER_HOLDERS} — one reference per holder, in name order
+    (v4-small first). v4.1-small references {@link IRODORI_V41_SHARED_ROLES} at v4-small;
+    v4.1-small-mf references v4-small and v4.1-small; v4-small stays self-contained (it is the one
+    upstream retrained from, and the e2e checks read its mirror file by file)."""
+    borrowed = {
+        role: holder for role, holder in IRODORI_PUBLISHED.get(model, {}).items() if holder != model
+    }
+    tokenizer_holder = IRODORI_TOKENIZER_HOLDERS.get(model)
+    if tokenizer_holder is not None:
+        borrowed.update(dict.fromkeys(IRODORI_ASSETS.values(), tokenizer_holder))
     owners = sorted(set(borrowed.values()))
     return tuple(
         CrossRepoReference(

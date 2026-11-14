@@ -170,8 +170,8 @@ def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=IRODORI_PIPELINE_TAG,
         base_model=(upstream.repo, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
-        # What the default quant (`i8-a8`) downloads is the int8 series, so `quantized` is
-        # declared (same shape as sbv2 / anima.
+        # What the default quant (`i8-a8`; `i8` for the MeanFlow student) downloads is the int8
+        # series, so `quantized` is declared (same shape as sbv2 / anima.
         # The old "kept as f32, not quantized" was a stale premise from before the i8 series was
         # bundled).
         base_model_relation="quantized",

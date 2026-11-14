@@ -27,9 +27,9 @@ Plus one fixture for the TS-side parity check (**tracked in git**, outside `.git
         the 102,400 entries are not committed; {@link check_subset_covers_lattice} checks that
         the lattice is the same as with the full vocabulary)
 
-After generating, run `deno fmt packages/models/tests/fixtures/irodori-text/parity.json`
-(the formatter's output is the committed form — the `fmt --check` of `deno task verify` also
-covers the fixtures).
+After generating, run `vp fmt packages/models/tests/fixtures/irodori-text/parity.json`
+(the formatter's output is the committed form — the format check of `vp check` also covers the
+fixtures).
 
 ## Shape of the asset (follows anima's T5 asset)
 

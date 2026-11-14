@@ -21,13 +21,24 @@ to run them in the order given at the end of this section, not in the listed one
 # 0. one-time inputs: inputs/irodori/{v4-small,v4.1-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
 uv run python -m irodori.dacvae.convert                                  # 1. codec pth → safetensors
 uv run --with 'transformers==5.14.1' python -m irodori.export            # 2. seven graphs + io goldens
-uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref     # 3. tokenizer asset + goldens + parity fixture (deno fmt it)
+uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref     # 3. tokenizer asset + goldens + parity fixture (vp fmt it)
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref      # 4. full-loop latent goldens
 uv run --with descript-audiotools --with einops \
     --with 'transformers==5.14.1' python -m irodori.dacvae.host          # 5. host preprocessing goldens
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export  # 6. codec graphs + io goldens
 uv run python dist.py --pipeline irodori                                 # 7. distribution (9 graphs + tokenizer)
 ```
+
+Step 7 does **not** place the containers of the published models from these series. A fresh export
+cannot reproduce the published bytes — the published non-DiT containers predate the
+`provenance.notice` field, and the GPTQ i4 rounding differs between machines — so v4-small and
+v4.1-small take every graph role as the **published container** from the local mirror of the
+repository that holds it (`IRODORI_PUBLISHED`), and the build fails unless each one is the published
+bytes (`IRODORI_PUBLISHED_PART0` pins part 0, whose descriptor pins the other parts). Only the
+tokenizer asset comes from the series. A reassembly therefore changes non-container files only (the
+tokenizer's rare-token split table, the card, the manifest's `generator`); a mirror that fails the
+check is restored from the Hub, and a deliberate re-export of a model's containers is a change to
+those two tables.
 
 The distribution carries **f16 and i8 weight-storage series** next to f32 (ADR 0050), plus an i4
 series for the DiT's two graphs (below), so step 7 needs f32 / f16 / i8 (all nine roles) and i4
@@ -63,7 +74,9 @@ uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i4  
 ```
 
 Step 4'' **reads the two containers step 2'' wrote** (it is the only series whose goldens are baked
-from the shipped bytes rather than from a second calibration run), so it must follow 2''.
+from the shipped bytes rather than from a second calibration run), so it must follow 2''. Step 2''
+captures the calibration activations through upstream's DiT block and follows its `context_plan`
+argument, so it needs an upstream clone (`inputs/irodori/Irodori-TTS/`) at `89f9d8f` or later.
 
 `--no-calib` swaps the calibration for plain RTN. It exists for smoke runs only: the storage form is
 byte-identical either way, so `dist` — and step 4'' — refuse the result by reading the
@@ -96,12 +109,15 @@ recipe declares them as a cross-repository reference to `karume-irodori-v4-small
 (`irodori_references` — ADR 0038 §7 addendum 2026-10-28). `duration_*` and `dit_i4` stay in
 v4.1-small's own repository: references are per container, and the i4 DiT is calibrated through
 each model's own reference loop, so its bytes differ. Step 7 for v4.1-small therefore reads the
-v4-small mirror (`models/karume-irodori-v4-small/`) and needs a revision source — `--resolve-refs
-hf` for the published v4-small (the build checks every borrowed file on the Hub), or
-`--allow-placeholder-ref` for a development mirror:
+two mirrors (its own published containers from `models/karume-irodori-v4.1-small/`, the shared ones
+from `models/karume-irodori-v4-small/`), needs only the tokenizer step (3) of its own series, and
+needs a revision source — `--resolve-refs hf` for the published v4-small (the build checks every
+borrowed file on the Hub), or `--allow-placeholder-ref` for a development mirror:
 
 ```sh
-uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf
+uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref \
+    --model-dir ../../inputs/irodori/v4.1-small --fixture-out ../../outputs/misc/parity-v4.1.json  # 3
+uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf                     # 7
 ```
 
 v4-small stays self-contained. A local reader of v4.1-small (`nodeDirectory`) needs both mirrors
@@ -119,8 +135,9 @@ the i4 calibration from that loop (12 cases × 4 steps — about 2.5 minutes of 
 MeanFlow `pipelineConfig` (no CFG knob).
 
 Only the DiT pair is new, so only it is exported — the other seven graphs are the published v4-small / v4.1-small
-containers, which the distribution borrows across repositories (`IRODORI_BORROWED`: `duration_*` from v4.1-small, the
-rest from v4-small; the tokenizer asset stays local because it carries the rare-token split table). Step 7 reads those
+containers, which the distribution borrows across repositories (`IRODORI_PUBLISHED`: `duration_*` from v4.1-small, the
+rest from v4-small), and the tokenizer asset is referenced at v4-small (`IRODORI_TOKENIZER_HOLDERS` — the build checks
+that the student's own asset, rare-token split table included, is byte-identical to v4-small's). Step 7 reads those
 containers from the two mirrors (`models/karume-irodori-v4-small/`, `models/karume-irodori-v4.1-small/`) and checks that
 the student's checkpoint tensors behind every borrowed graph, and its configs, equal the owner's (`inputs/irodori/v4-small/`
 and `inputs/irodori/v4.1-small/` must be present):
@@ -152,10 +169,11 @@ upstream's `RareTokenSplitter` on the real tokenizer and writes the result into 
 as one key written last (`rareTokenSplit` — the disabled ids, their replaced score and the forced id
 splits), so the asset without it stays byte-identical. Before writing, it checks that a tokenizer
 rebuilt from `tokenizer.json` with only that table reproduces the splitter, and it adds a split-on /
-split-off golden (`encode.split` of the parity fixture) taken through upstream's own entry. v4-small
-and v4.1-small share the tokenizer, so the table is the same for both; v4.1-small's manifest pins
-v4-small's tokenizer bytes by its cross-repository reference, so the table reaches it only when
-v4.1-small is assembled against the v4-small revision that carries it.
+split-off golden (`encode.split` of the parity fixture) taken through upstream's own entry. v4-small,
+v4.1-small and v4.1-small-mf share the tokenizer, so the table is the same for all three; the
+manifests of v4.1-small and v4.1-small-mf pin v4-small's tokenizer bytes by their cross-repository
+reference, so the table reaches them only when they are assembled against the v4-small revision
+that carries it (`docs/release-runbook.md` §0 has the upload order).
 
 Step 3 imports `token_split.py` from `--source-dir`, so the clone must include upstream commit
 `82c9980b` or later.

@@ -1,7 +1,8 @@
 # 0150: Irodori MeanFlow — v4.1-small-mf, the interval embedding in the DiT step and the 4-step sampler
 
 - Status: proposed (2026-11-14 — the recipe, the TS pipeline, the local mirror `models/karume-irodori-v4.1-small-mf/`
-  and its e2e checks are in place; not published; the default preset waits for the maintainer's listening)
+  and its e2e checks are in place; not published; the default preset is `i8` by the maintainer's listening of
+  2026-11-14, and the tokenizer asset is referenced at v4-small — decisions 1 and 6)
 - Date: 2026-11-14
 - Related: [0038](0038-manifest-v1.md) §7 and its addendum of 2026-10-28 (cross-repository references) /
   [0109](0109-manifest-v5-container.md) decision 3 (a reference covers every part of a container) /
@@ -42,11 +43,12 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
 
 1. **Its own repository, borrowing what it does not change.** The model is `v4.1-small-mf` in the repository
    `karume-irodori-v4.1-small-mf`. It physically carries only the roles whose bytes are new — `dit` and `dit_context` in
-   every series (f32 / f16 / i8 / i4) — and its tokenizer asset; every other role is a cross-repository reference to
-   the repository that physically holds the bytes (references are not followed further — `karume.dist.external_refs`):
-   `duration_*` at `karume-irodori-v4.1-small`, the rest (backbone, the two projectors, speaker, the codec pair) at
-   `karume-irodori-v4-small`. The recipe declares this in `irodori.distribution.IRODORI_BORROWED`, and the existing
-   mechanism expresses the two owners as two references (one per repository, each with its own pinned revision).
+   every series (f32 / f16 / i8 / i4); every other role is a cross-repository reference to the repository that
+   physically holds the bytes (references are not followed further — `karume.dist.external_refs`): `duration_*` at
+   `karume-irodori-v4.1-small`, the rest (backbone, the two projectors, speaker, the codec pair) and the tokenizer asset
+   at `karume-irodori-v4-small`. The recipe declares the containers in `irodori.distribution.IRODORI_PUBLISHED` and the
+   tokenizer in `IRODORI_TOKENIZER_HOLDERS`, and the existing mechanism expresses the two owners as two references (one
+   per repository, each with its own pinned revision).
 
    A borrowed role is **the published container itself**, read from the owner's mirror — not a re-export. The published
    non-DiT containers of v4-small / v4.1-small predate the `provenance.notice` field of the containers (and carry the
@@ -54,12 +56,17 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
    reconciled byte for byte. What makes the borrowing hold is checked on the inputs instead
    (`assert_irodori_borrowed_weights`, failing loudly): every checkpoint tensor a borrowed graph is built from is
    byte-identical to the owner's, the text-encoder configs are equal, and the model configs differ only in
-   `flow_parameterization`. The core's reference check then confirms the pinned revision on the Hub holds those bytes
-   (`--resolve-refs hf`).
+   `flow_parameterization`. Each borrowed container must also be the published bytes: the recipe pins part 0 of every
+   published container by sha256 (`IRODORI_PUBLISHED_PART0`; part 0's descriptor pins the other parts) and fails
+   otherwise (`assert_irodori_published_containers`). The core's reference check then confirms the pinned revision on
+   the Hub holds those bytes (`--resolve-refs hf`).
 
-   The tokenizer stays local because the published v4-small asset predates the rare-token split table (ADR 0149), which
-   upstream applies to this model's tokenizer; borrowing it would drop that behaviour. This makes v4.1-small-mf the
-   first distribution whose tokenizer asset carries the table.
+   The tokenizer asset is referenced at v4-small (the maintainer's ruling of 2026-11-14): the student's own asset,
+   written by the recipe from its checkpoint, is byte-identical to v4-small's once v4-small carries the rare-token split
+   table (ADR 0149 — measured 2026-11-14), and the core's reference check compares the two on every build. Until
+   v4-small's repository is uploaded with the table, the reference can only be built against a development mirror
+   (the order is in `docs/release-runbook.md` §0). An earlier draft carried its own copy, because the published v4-small
+   asset predated the table.
 
 2. **One more input to `dit`.** The step graph of a MeanFlow checkpoint takes `delta_embed` — the timestep embedding of
    the interval, the same width and form as `t_embed`, built on the host by the same function — right after `t_embed`:
@@ -94,8 +101,12 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
    checkpoint config, the references); `card.py` (the card names the student, its revision, its teacher, the 4 steps
    and the absence of runtime CFG); `THIRD_PARTY_NOTICES.md` (a weights block for v4.1-Small-MF).
 
-6. **Quant series.** The same set as v4.1-small: `f32`, `f16`, `i8` (with `i8-a8`) and `i8+dit4`. The family's default
-   rule stays (`i8-a8`); which preset becomes this model's default is the maintainer's decision after listening.
+6. **Quant series.** The same set as v4.1-small: `f32`, `f16`, `i8` (with `i8-a8`) and `i8+dit4`. The default is `i8`,
+   by the maintainer's listening of 2026-11-14: `i8` was fine, and `i8-a8` showed no audible degradation either
+   (`IRODORI_MODEL_DEFAULT_QUANTS`; the family's default stays `i8-a8`). The preset descriptions on this model's card
+   say only that (`IRODORI_MODEL_SEAT_DESCRIPTIONS`): the family's text carries the v4 listening check of `f16` and the
+   v4 speed measurement of `i8-a8`, neither of which was judged or measured for this model; `f32` and `i8+dit4` keep
+   the family's text, which states facts of the storage only.
 
 7. **Tests.** Unit tests for the declaration (both flows and each rejection), the schedule and intervals, the loop
    material and admission; real-asset e2e for the new mirror — per-graph parity of `dit` / `dit-context`, latent parity
@@ -106,18 +117,18 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
 
 - No RF behaviour or byte moves: the RF branch of every changed function keeps its operations and order (the RF goldens,
   WAV sha rows and the export tests are unchanged), and the published v4 / v4.1 manifests parse as before.
-- The MeanFlow distribution is small: 2.7 GB locally (the DiT pair in four series and the tokenizer); its manifest pins
-  the borrowed files at the owners' current Hub revisions, which are newer than the package's `SOURCES` pins of the two
-  repositories (the files are the same bytes — the build confirmed each on the Hub).
+- The MeanFlow distribution is small: 2.7 GB locally (the DiT pair in four series); its manifest pins the borrowed
+  files at the owners' Hub revisions. The publication build follows the upload of v4-small with the table and the
+  re-upload of v4.1-small against it, so it pins the revisions those uploads create.
 - **Open measurement — quality.** A 4-step student leaves no later steps to wash out an error, and the i4 rounding was
   calibrated on 12 cases × 4 steps (7,856 hidden tokens, against 83,080 for the RF loop's 40 steps). Upstream's own
-  benchmarks are in f32. How the student holds under `i8+dit4` (and `i8-a8`) is an open listening measurement; the
-  seat descriptions (f16 "no audible difference in the listening check", `i8-a8` "faster per Euler step") come from the
-  v4 rulings and have not been re-judged for this model.
+  benchmarks are in f32. The maintainer's listening of 2026-11-14 covered `i8` and `i8-a8` (decision 6); `f16` and
+  `i8+dit4` have not been judged for this model, and the speed of `i8-a8` has not been measured for it.
 - The i8-a8 bundle of this model has a census row derived from its graph (248 linears in `dit`, 72 in `dit_context`),
   but no self A/B band yet (the A/B check covers v4.1-small).
 - Reproducing torch's `linspace` rests on the kernel's fused multiply-add, the compiled behaviour on CPU and CUDA alike,
   not a documented guarantee.
-- Publishing needs: the HF upload of the repository, the upload of the staged goldens to the test-asset dataset with
-  the pin moved in the same commit as the tests, and a `SOURCES["irodori-v4.1-small-mf"]` entry pinned at the uploaded
+- Publishing needs: the uploads of v4-small (with the table) and v4.1-small first, then the HF upload of this
+  repository built with `--resolve-refs hf`, the upload of the staged goldens to the test-asset dataset with the pin
+  moved in the same commit as the tests, and a `SOURCES["irodori-v4.1-small-mf"]` entry pinned at the uploaded
   revision.

@@ -175,7 +175,8 @@ measurements in `docs/research/`.
   Its loop runs one conditional `dit` forward per step over the f32 values of upstream's `linspace(1, 0)` with the
   embedding of the step's interval as the extra `dit` input `delta_embed`, and no classifier-free guidance; `forwards`
   is then the step count (4 by default). The distribution (`karume-irodori-v4.1-small-mf`) is not published yet and
-  has no `SOURCES` entry.
+  has no `SOURCES` entry; its default preset is `i8` (the maintainer's listening), and it references its tokenizer
+  asset, the one with the rare-token split table, at `karume-irodori-v4-small`.
 
 ### Changed
 
@@ -188,6 +189,10 @@ measurements in `docs/research/`.
   default encoding of a text that contains one of its rare long tokens changes, as it did upstream (commit
   `82c9980b`), and the generated audio with it. The distributions published so far carry no table and do not change
   until they are reassembled; `splitRareTokens: false` keeps the previous encoding (ADR 0149).
+- The Irodori distributions `karume-irodori-v4-small` and `karume-irodori-v4.1-small` (at their next upload): the
+  tokenizer asset carries the rare-token split table, and v4.1-small references it at the v4-small revision that
+  carries it. Every container keeps its published bytes — only the tokenizer asset, `karume.json` (its `generator`
+  and the tokenizer's size and sha256), the card and v4.1-small's reference revision change (ADR 0149 decision 5).
 - `@karume/runtime`: the prefetch form of `rms_norm` and of the RMS → add fusion (rows of a multiple of 256 up to
   4096) rounds `x · inv` before the weight multiplies it. On Metal the form wrote words other than the plain kernel's,
   because the compiler multiplied `x · weight` first. Its keys are `rms_norm:v3:…` and `rms_norm_add:v3:…`; outputs

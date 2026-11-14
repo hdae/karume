@@ -1325,7 +1325,9 @@ class DitGraph(nn.Module):
     - the condition-side K/V are **taken as arguments** (the outputs of {@link DitContextGraph}
       themselves — the same values as upstream's `context_kv_cache`; ADR 0114)
     - **the concatenation of `JointAttention`'s 4 masks is taken as one argument** (the same thing
-      as upstream's `torch.cat(context_masks, dim=1)[:, None, None, :]`). The K/V concatenation is
+      as upstream's `plan.kv_mask[:, None, None, :]` — `build_context_attention_plan` in
+      `irodori_tts/attention.py` concatenates the segment masks with `torch.cat(segment_masks,
+      dim=1)`, and its non-FA3 path hands that to `masked_sdpa`). The K/V concatenation is
       a **symbolic-axis cat** (`S+1519` — ADR 0046), and the 3 condition-side tensors are folded
       into the static-axis cat on the `dit-context` side (`cat` is associative, so either grouping
       lays out the same elements in the same order)

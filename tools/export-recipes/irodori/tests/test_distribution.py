@@ -41,18 +41,21 @@ from irodori.card import (
 from irodori.distribution import (
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
-    IRODORI_BORROWED,
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
     IRODORI_COPYRIGHTS,
     IRODORI_DEFAULT_MODEL,
+    IRODORI_DEFAULT_QUANT,
     IRODORI_DTYPE_ROLES,
     IRODORI_FLOW_MEANFLOW,
     IRODORI_GRAPH_ROLES,
     IRODORI_MEANFLOW_SAMPLING_DEFAULTS,
+    IRODORI_MODEL_SEAT_DESCRIPTIONS,
     IRODORI_NOTICE_MARKDOWN,
     IRODORI_OUTPUT_PATHS,
+    IRODORI_PUBLISHED,
+    IRODORI_PUBLISHED_PART0,
     IRODORI_QUANT_ABBREVIATIONS,
     IRODORI_QUANT_SEATS,
     IRODORI_SAMPLING_DEFAULTS,
@@ -67,11 +70,13 @@ from irodori.distribution import (
     IRODORI_WEIGHTS,
     PIPELINE,
     IrodoriSources,
-    irodori_borrowed_sources,
+    PublishedContainer,
     irodori_calib_floor,
     irodori_flow_parameterization,
     irodori_license_markdown,
     irodori_plan,
+    irodori_published_sources,
+    irodori_quants,
     irodori_references,
     irodori_repo_name,
     irodori_series_name,
@@ -84,7 +89,9 @@ from karume.dist import (
     DistError,
     assemble_family,
     assert_quant_presentation,
+    component_parts,
     resolve_card_renderer,
+    sha256_file,
     verify_dist,
 )
 
@@ -102,6 +109,11 @@ _CHECKPOINT_TENSORS: Mapping[str, np.ndarray] = {
             "speaker_norm.",
             "duration_predictor.",
             "text_norm.",
+            "blocks.",
+            "cond_module.",
+            "in_proj.",
+            "out_proj.",
+            "out_norm.",
         )
     )
 }
@@ -388,6 +400,7 @@ def _build_irodori_sources(
     specs: Mapping[str, _Spec] | None = None,
     codec_metadata: Mapping[str, Any] | None = _IRODORI_CODEC_METADATA,
     calib_provenance: Mapping[str, Any] | None = _IRODORI_CALIB_PROVENANCE,
+    published: Mapping[str, PublishedContainer] | None = None,
 ) -> IrodoriSources:
     """Recreate the series + checkpoint locations with fake assets (including things that must not
     be distributed).
@@ -398,9 +411,9 @@ def _build_irodori_sources(
     directories apart from the Irodori body. One series per storage dtype (`IRODORI_DTYPE_ROLES`
     — only i4 covers the DiT's two roles, so its series has two directories as well).
 
-    A model that borrows published containers (`IRODORI_BORROWED`) reads them from the mirrors
-    under `<root>/models/` ({@link _mirrors_for} builds them); its config and DiT shape follow its
-    flow ({@link _config_for}).
+    Every role comes from the series unless `published` names it (the containers taken as
+    published — {@link _published_from_mirrors} reads them from synthetic mirrors); its config and
+    DiT shape follow its flow ({@link _config_for}).
     """
     config = _config_for(model) if config is None else config
     meanflow = irodori_flow_parameterization(config) == IRODORI_FLOW_MEANFLOW
@@ -420,7 +433,7 @@ def _build_irodori_sources(
         codec_model=root / "inputs" / "irodori" / IRODORI_CODEC_NAME,
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
-        borrowed=irodori_borrowed_sources(model, root / "models"),
+        published=published or {},
     )
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         for role in roles:
@@ -465,46 +478,67 @@ def _assemble_irodori(
     return assemble_family([irodori_plan(sources, model)], out_dir, model)
 
 
-def _v4_mirror_for(model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """What a build of `model` through the driver needs for its cross-repository references.
-
-    v4.1-small references v4-small's repository ({@link irodori_references}): this places
-    v4-small's distribution where the driver reads referenced mirrors (`dist.DIST_ROOT`), built
-    from the same synthetic series (so the shared roles are byte-identical), and returns the
-    revision source — the placeholder (no Hub in the tests). v4.1-small-mf borrows from both
-    repositories ({@link _mirrors_for}). Nothing for v4-small.
-    """
-    if model == IRODORI_V41_MF_MODEL:
-        return _mirrors_for(tmp_path, monkeypatch)
-    if model != IRODORI_V41_MODEL:
-        return []
-    import dist
-
-    _assemble_irodori(
-        _build_irodori_sources(tmp_path, model=IRODORI_V4_MODEL),
-        tmp_path / "models" / irodori_repo_name(IRODORI_V4_MODEL),
-        IRODORI_V4_MODEL,
-    )
-    monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
-    return [dist.ALLOW_PLACEHOLDER_FLAG]
+#: The models whose repositories hold published containers (the keys of the real pins).
+_HOLDERS: tuple[str, ...] = tuple(IRODORI_PUBLISHED_PART0)
 
 
-def _mirrors_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """The two mirrors v4.1-small-mf borrows from, under `<tmp_path>/models/` (each assembled
-    from its own synthetic series and checkpoint, so the inputs the borrowing check reads exist
-    too), with both modules' `DIST_ROOT` pointed there; returns the placeholder flag."""
+def _part0_digest(path: Path) -> str:
+    """sha256 of part 0 of the container at a representative path."""
+    return sha256_file(component_parts(path)[0])
+
+
+def _build_holder_mirrors(tmp_path: Path) -> None:
+    """The synthetic "published" mirrors of the holders (v4-small, v4.1-small) under
+    `<tmp_path>/models/`, each assembled from its own synthetic series and checkpoint (so the
+    inputs the borrowing check reads exist too). They stand in for the real published bytes."""
+    for holder in _HOLDERS:
+        _assemble_irodori(
+            _build_irodori_sources(tmp_path, model=holder),
+            tmp_path / "models" / irodori_repo_name(holder),
+            holder,
+        )
+
+
+def _published_from_mirrors(model: str, root: Path) -> Mapping[str, PublishedContainer]:
+    """The containers `model` takes as published (`IRODORI_PUBLISHED`), read from the synthetic
+    mirrors under `<root>/models/` and pinned at the digests those hold — the stand-in for the
+    real pins, which name the real published bytes."""
+    return {
+        role: container._replace(part0_sha256=_part0_digest(container.path))
+        for role, container in irodori_published_sources(model, root / "models").items()
+    }
+
+
+def _mirrors_for(model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """What a build of `model` through the driver needs: the holder mirrors
+    ({@link _build_holder_mirrors}), the pins of `IRODORI_PUBLISHED_PART0` replaced by their
+    digests, both modules' `DIST_ROOT` pointed there, and — for a model that references another
+    repository ({@link irodori_references}) — the revision source, the placeholder (no Hub in the
+    tests)."""
     import dist
     from irodori import distribution
 
-    for owner in (IRODORI_V4_MODEL, IRODORI_V41_MODEL):
-        _assemble_irodori(
-            _build_irodori_sources(tmp_path, model=owner),
-            tmp_path / "models" / irodori_repo_name(owner),
-            owner,
-        )
+    _build_holder_mirrors(tmp_path)
+    monkeypatch.setattr(
+        distribution,
+        "IRODORI_PUBLISHED_PART0",
+        {
+            holder: {
+                role: _part0_digest(
+                    tmp_path
+                    / "models"
+                    / irodori_repo_name(holder)
+                    / holder
+                    / IRODORI_OUTPUT_PATHS[role]
+                )
+                for role in roles
+            }
+            for holder, roles in IRODORI_PUBLISHED_PART0.items()
+        },
+    )
     monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
     monkeypatch.setattr(distribution, "DIST_ROOT", tmp_path / "models")
-    return [dist.ALLOW_PLACEHOLDER_FLAG]
+    return [dist.ALLOW_PLACEHOLDER_FLAG] if irodori_references(model) else []
 
 
 @pytest.fixture
@@ -1373,9 +1407,18 @@ class TestIrodoriModelCard:
         # replaces the recipe's binding, not the driver's `dist` (`DIST_ROOT` is the opposite, on
         # the driver).
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        flags = _mirrors_for(IRODORI_DEFAULT_MODEL, tmp_path, monkeypatch)
         out_dir = tmp_path / "dist"
         main(
-            ["--pipeline", "irodori", "--series", str(sources.series.parent), "--out", str(out_dir)]
+            [
+                "--pipeline",
+                "irodori",
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+                *flags,
+            ]
         )
         return out_dir
 
@@ -1457,7 +1500,7 @@ class TestIrodoriLegalText:
                 str(sources.series.parent),
                 "--out",
                 str(out_dir),
-                *_v4_mirror_for(model, tmp_path, monkeypatch),
+                *_mirrors_for(model, tmp_path, monkeypatch),
             ]
         )
         return out_dir
@@ -1604,8 +1647,10 @@ class TestIrodoriCli:
     ) -> None:
         sources = _build_irodori_sources(tmp_path)
         self._reroot(tmp_path, monkeypatch)
+        # v4-small takes every container from its own published mirror — the default directory.
+        flags = _mirrors_for(IRODORI_DEFAULT_MODEL, tmp_path, monkeypatch)
 
-        main(["--pipeline", "irodori", "--series", str(sources.series.parent)])
+        main(["--pipeline", "irodori", "--series", str(sources.series.parent), *flags])
 
         out_dir = tmp_path / "models" / irodori_repo_name(IRODORI_DEFAULT_MODEL)
         expected = _in_subtree(IRODORI_DEFAULT_MODEL, _placed_paths())
@@ -1629,7 +1674,7 @@ class TestIrodoriCli:
                 "v4.1-small",
                 "--series",
                 str(sources.series.parent),
-                *_v4_mirror_for("v4.1-small", tmp_path, monkeypatch),
+                *_mirrors_for("v4.1-small", tmp_path, monkeypatch),
             ]
         )
 
@@ -1695,7 +1740,7 @@ class TestIrodoriCrossRepoReferences:
         from irodori import distribution
 
         sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MODEL)
-        _v4_mirror_for(IRODORI_V41_MODEL, tmp_path, monkeypatch)
+        _mirrors_for(IRODORI_V41_MODEL, tmp_path, monkeypatch)
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
 
@@ -1738,10 +1783,153 @@ class TestIrodoriCrossRepoReferences:
         )
 
 
+class TestIrodoriPublishedContainers:
+    """The containers a model takes as published (`IRODORI_PUBLISHED`) instead of exporting them:
+    a reassembly that changes a non-container file (the tokenizer's rare-token split table — ADR
+    0149) keeps every published container byte for byte, and fails loudly when the mirror does
+    not hold the published bytes."""
+
+    _ALL_GRAPH_ROLES = frozenset(
+        f"{role}_{dtype}" for dtype, roles in IRODORI_DTYPE_ROLES.items() for role in roles
+    )
+
+    def test_v4_small_takes_every_graph_role_from_its_own_repository(self, tmp_path: Path) -> None:
+        published = irodori_published_sources(IRODORI_V4_MODEL, tmp_path)
+
+        assert set(published) == self._ALL_GRAPH_ROLES
+        for role, container in published.items():
+            assert container.holder == IRODORI_V4_MODEL, role
+            assert container.path == (
+                tmp_path / "karume-irodori-v4-small" / "v4-small" / IRODORI_OUTPUT_PATHS[role]
+            )
+
+    def test_v41_takes_its_own_roles_from_itself_and_the_shared_ones_from_v4_small(
+        self, tmp_path: Path
+    ) -> None:
+        published = irodori_published_sources(IRODORI_V41_MODEL, tmp_path)
+        own = {"duration_f32", "duration_f16", "duration_i8", "dit_i4"}
+
+        assert set(published) == self._ALL_GRAPH_ROLES
+        assert {role for role, c in published.items() if c.holder == IRODORI_V41_MODEL} == own
+        assert {role for role, c in published.items() if c.holder == IRODORI_V4_MODEL} == (
+            set(IRODORI_V41_SHARED_ROLES) - {"tokenizer"}
+        )
+
+    def test_every_declared_role_is_pinned_at_a_sha256(self) -> None:
+        for model, roles in IRODORI_PUBLISHED.items():
+            for role, holder in roles.items():
+                digest = IRODORI_PUBLISHED_PART0[holder][role]
+                assert len(digest) == 64 and set(digest) <= set("0123456789abcdef"), (model, role)
+
+    def test_a_declared_role_without_a_pin_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from irodori import distribution
+
+        pins = {holder: dict(roles) for holder, roles in IRODORI_PUBLISHED_PART0.items()}
+        del pins[IRODORI_V4_MODEL]["speaker_i8"]
+        monkeypatch.setattr(distribution, "IRODORI_PUBLISHED_PART0", pins)
+
+        with pytest.raises(DistError, match="no published digest"):
+            irodori_published_sources(IRODORI_V4_MODEL, tmp_path)
+
+    @staticmethod
+    def _files(directory: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(directory)): path.read_bytes()
+            for path in sorted(directory.rglob("*.krm"))
+        }
+
+    def test_a_tokenizer_only_reassembly_keeps_every_published_container(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path)
+        flags = _mirrors_for(IRODORI_V4_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        mirror = tmp_path / "models" / irodori_repo_name(IRODORI_V4_MODEL)
+        before = json.loads((mirror / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        containers = self._files(mirror)
+        # The series keeps writing other container bytes (a fresh export cannot reproduce the
+        # published ones) — none of them may reach the distribution.
+        for dtype, roles in IRODORI_DTYPE_ROLES.items():
+            for role in roles:
+                series = (
+                    sources.codec_series_by_dtype[dtype]
+                    if role in IRODORI_CODEC_DIRS
+                    else sources.series_by_dtype[dtype]
+                )
+                directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
+                replace_component(
+                    series / directory / "model.krm",
+                    ir_container(mark=f"re-export-{role}-{dtype}", named=role, storage=dtype),
+                )
+        _write(sources.series / "tokenizer" / "tokenizer.json", b'{"vocabText": "b"}')
+
+        main(["--pipeline", "irodori", "--series", str(sources.series.parent), *flags])
+
+        after = json.loads((mirror / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert self._files(mirror) == containers
+        model_before, model_after = (
+            manifest["models"][IRODORI_V4_MODEL] for manifest in (before, after)
+        )
+        assert model_after["weights"] == model_before["weights"]
+        assert model_after["assets"] != model_before["assets"]
+        tokenizer = mirror / model_after["assets"]["tokenizer"]["path"]
+        assert tokenizer.read_bytes() == b'{"vocabText": "b"}'
+
+    @staticmethod
+    def _v4_sources(tmp_path: Path, **kwargs: Any) -> IrodoriSources:
+        _build_holder_mirrors(tmp_path)
+        return _build_irodori_sources(
+            tmp_path,
+            published=_published_from_mirrors(IRODORI_V4_MODEL, tmp_path),
+            **kwargs,
+        )
+
+    @staticmethod
+    def _flip_last_byte(path: Path) -> None:
+        payload = bytearray(path.read_bytes())
+        payload[-1] ^= 0xFF
+        path.write_bytes(bytes(payload))
+
+    def test_a_part_0_that_is_not_the_published_one_fails(self, tmp_path: Path) -> None:
+        """MUST: e.g. a mirror rebuilt from the series — fail instead of shipping other bytes."""
+        sources = self._v4_sources(tmp_path)
+        self._flip_last_byte(component_parts(sources.published["dit_i4"].path)[0])
+
+        with pytest.raises(DistError, match="is not the published container"):
+            irodori_plan(sources, IRODORI_V4_MODEL)
+
+    def test_a_later_part_that_part_0_does_not_declare_fails(self, tmp_path: Path) -> None:
+        sources = self._v4_sources(tmp_path)
+        self._flip_last_byte(component_parts(sources.published["codec_decoder_i8"].path)[-1])
+
+        with pytest.raises(DistError, match="is not the part 2 the published part 0 declares"):
+            irodori_plan(sources, IRODORI_V4_MODEL)
+
+    def test_a_published_container_missing_from_its_mirror_fails(self, tmp_path: Path) -> None:
+        sources = self._v4_sources(tmp_path)
+        for part in component_parts(sources.published["backbone_f16"].path):
+            part.unlink()
+
+        with pytest.raises(DistError, match="not in its mirror"):
+            irodori_plan(sources, IRODORI_V4_MODEL)
+
+    def test_the_calibration_record_is_not_required_of_a_published_i4_container(
+        self, tmp_path: Path
+    ) -> None:
+        """The series' record says nothing about the published bytes, which the digest pins."""
+        sources = self._v4_sources(tmp_path, calib_provenance=None)
+
+        assert irodori_plan(sources, IRODORI_V4_MODEL).default_quant == IRODORI_DEFAULT_QUANT
+
+
 class TestIrodoriMeanFlow:
     """v4.1-small-mf — upstream's MeanFlow student of v4.1-small (ADR 0150): its own repository
-    that carries only the DiT pair and its tokenizer, borrows every other role from the repository
-    that physically holds it, and declares the MeanFlow sampler."""
+    that carries only the DiT pair, borrows every other role (the tokenizer asset included) from
+    the repository that physically holds it, and declares the MeanFlow sampler."""
 
     #: The roles it borrows, spelled out per owner (not derived like the recipe's table).
     _FROM_V4 = frozenset(
@@ -1763,7 +1951,7 @@ class TestIrodoriMeanFlow:
         from irodori import distribution
 
         sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
-        flags = _v4_mirror_for(IRODORI_V41_MF_MODEL, tmp_path, monkeypatch)
+        flags = _mirrors_for(IRODORI_V41_MF_MODEL, tmp_path, monkeypatch)
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
         main(
@@ -1782,7 +1970,7 @@ class TestIrodoriMeanFlow:
         return out_dir, json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
     def test_it_borrows_every_non_dit_role_from_the_repository_holding_its_bytes(self) -> None:
-        borrowed = IRODORI_BORROWED[IRODORI_V41_MF_MODEL]
+        borrowed = IRODORI_PUBLISHED[IRODORI_V41_MF_MODEL]
 
         assert {role for role, owner in borrowed.items() if owner == IRODORI_V4_MODEL} == (
             self._FROM_V4
@@ -1803,10 +1991,12 @@ class TestIrodoriMeanFlow:
     def test_it_declares_one_reference_per_owner(self) -> None:
         v4, v41 = irodori_references(IRODORI_V41_MF_MODEL)
 
+        # The tokenizer asset too, now that v4-small's carries the rare-token split table
+        # (the maintainer's ruling of 2026-11-14 — ADR 0150).
         assert (v4.repo, v4.model, set(v4.roles)) == (
             "hdae/karume-irodori-v4-small",
             IRODORI_V4_MODEL,
-            self._FROM_V4,
+            self._FROM_V4 | {"tokenizer"},
         )
         assert (v41.repo, v41.model, set(v41.roles)) == (
             "hdae/karume-irodori-v4.1-small",
@@ -1814,24 +2004,61 @@ class TestIrodoriMeanFlow:
             self._FROM_V41,
         )
 
-    def test_the_rf_models_borrow_nothing_published(self) -> None:
-        assert set(IRODORI_BORROWED) == {IRODORI_V41_MF_MODEL}
+    def test_only_the_student_exports_a_graph_role(self) -> None:
+        """The RF models take every graph role as published; the student exports the DiT pair."""
+        exported = {
+            model: set(IRODORI_OUTPUT_PATHS) - set(IRODORI_PUBLISHED[model]) - {"tokenizer"}
+            for model in IRODORI_PUBLISHED
+        }
+
+        assert exported == {
+            IRODORI_V4_MODEL: set(),
+            IRODORI_V41_MODEL: set(),
+            IRODORI_V41_MF_MODEL: {
+                f"{role}_{dtype}"
+                for role in ("dit", "dit_context")
+                for dtype in IRODORI_WEIGHT_DTYPES
+            },
+        }
+
+    def test_its_default_preset_is_int8_by_the_listening_ruling(self) -> None:
+        """`i8` (the maintainer's listening of 2026-11-14 — ADR 0150); the RF models keep the
+        family's default."""
+        from irodori.distribution import IRODORI_MODEL_DEFAULT_QUANTS
+
+        assert IRODORI_MODEL_DEFAULT_QUANTS == {IRODORI_V41_MF_MODEL: "i8"}
+        assert IRODORI_DEFAULT_QUANT == "i8-a8"
+
+    def test_its_preset_descriptions_claim_only_what_was_judged_for_it(self) -> None:
+        """The family's f16 listening claim and the v4 speed claim of `i8-a8` are not carried over;
+        the storage, the knobs and the labels are the family's."""
+        family = irodori_quants(IRODORI_V4_MODEL)
+        student = irodori_quants(IRODORI_V41_MF_MODEL)
+        changed = {name for name in family if family[name] != student[name]}
+
+        assert changed == set(IRODORI_MODEL_SEAT_DESCRIPTIONS[IRODORI_V41_MF_MODEL])
+        for name in changed:
+            assert {**student[name], "description": ""} == {**family[name], "description": ""}
+            assert_quant_presentation(name, student[name])
+        assert "faster" not in student["i8-a8"]["description"]
+        assert "listening" not in student["f16"]["description"]
 
     @staticmethod
-    def _owners(tmp_path: Path) -> None:
-        """The two mirrors and checkpoints the student borrows from (no driver involved)."""
-        for owner in (IRODORI_V4_MODEL, IRODORI_V41_MODEL):
-            _assemble_irodori(
-                _build_irodori_sources(tmp_path, model=owner),
-                tmp_path / "models" / irodori_repo_name(owner),
-                owner,
-            )
+    def _student(tmp_path: Path, **kwargs: Any) -> IrodoriSources:
+        """The student's sources with the two mirrors and checkpoints it borrows from (no driver
+        involved)."""
+        _build_holder_mirrors(tmp_path)
+        return _build_irodori_sources(
+            tmp_path,
+            model=IRODORI_V41_MF_MODEL,
+            published=_published_from_mirrors(IRODORI_V41_MF_MODEL, tmp_path),
+            **kwargs,
+        )
 
     def test_the_pipeline_config_declares_the_meanflow_sampler_and_no_rf_knob(
         self, tmp_path: Path
     ) -> None:
-        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
-        self._owners(tmp_path)
+        sources = self._student(tmp_path)
 
         config = irodori_plan(sources, IRODORI_V41_MF_MODEL).pipeline_config
 
@@ -1842,7 +2069,7 @@ class TestIrodoriMeanFlow:
         assert config["flowParameterization"] == "meanflow"
         assert config["steps"] == 4
 
-    def test_it_stores_only_the_dit_pair_and_the_tokenizer(
+    def test_it_stores_only_the_dit_pair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         out_dir, manifest = self._assemble(tmp_path, monkeypatch)
@@ -1860,19 +2087,16 @@ class TestIrodoriMeanFlow:
                 assert holders == {"hdae/karume-irodori-v4.1-small"}, role
             else:
                 assert holders == {None}, role
-        assert "repo" not in model["assets"]["tokenizer"]
+        assert model["assets"]["tokenizer"]["repo"] == "hdae/karume-irodori-v4-small"
         stored = {path.split("/")[1] for path in verify_dist(out_dir)}
-        assert stored == {"dit", "dit_context", "tokenizer"}
+        assert stored == {"dit", "dit_context"}
         assert model["pipelineConfig"]["flowParameterization"] == "meanflow"
-        assert model["defaultQuant"] == "i8-a8"
+        assert model["defaultQuant"] == "i8"
 
-    def test_a_borrowed_role_whose_weights_differ_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_borrowed_role_whose_weights_differ_fails(self, tmp_path: Path) -> None:
         """MUST: a retrained component is never borrowed silently (the published container is
         not re-exported, so the inputs are compared)."""
-        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
-        _mirrors_for(tmp_path, monkeypatch)
+        sources = self._student(tmp_path)
         retrained = {**_CHECKPOINT_TENSORS, "duration_predictor.w": np.full(2, 9, np.float32)}
         _write(
             sources.model / "model.safetensors",
@@ -1885,11 +2109,8 @@ class TestIrodoriMeanFlow:
         with pytest.raises(DistError, match="checkpoint tensors differ"):
             irodori_plan(sources, IRODORI_V41_MF_MODEL)
 
-    def test_a_borrowed_role_under_another_config_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
-        _mirrors_for(tmp_path, monkeypatch)
+    def test_a_borrowed_role_under_another_config_fails(self, tmp_path: Path) -> None:
+        sources = self._student(tmp_path)
         _write(
             tmp_path / "inputs" / "irodori" / IRODORI_V4_MODEL / "model.safetensors",
             _fake_checkpoint(
@@ -1901,20 +2122,14 @@ class TestIrodoriMeanFlow:
             irodori_plan(sources, IRODORI_V41_MF_MODEL)
 
     def test_a_missing_owner_checkpoint_fails(self, tmp_path: Path) -> None:
-        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MF_MODEL)
-        self._owners(tmp_path)
+        sources = self._student(tmp_path)
         (tmp_path / "inputs" / "irodori" / IRODORI_V41_MODEL / "model.safetensors").unlink()
 
         with pytest.raises(DistError, match="checkpoint is needed"):
             irodori_plan(sources, IRODORI_V41_MF_MODEL)
 
     def test_a_meanflow_step_without_the_interval_input_is_refused(self, tmp_path: Path) -> None:
-        sources = _build_irodori_sources(
-            tmp_path,
-            model=IRODORI_V41_MF_MODEL,
-            specs={"dit": _irodori_specs(meanflow=False)["dit"]},
-        )
-        self._owners(tmp_path)
+        sources = self._student(tmp_path, specs={"dit": _irodori_specs(meanflow=False)["dit"]})
 
         with pytest.raises(DistError, match="not the order derived"):
             irodori_plan(sources, IRODORI_V41_MF_MODEL)
