@@ -242,7 +242,7 @@ export const ALLOW_LIST: readonly Allowance[] = [
     why: TOKENIZER_CASES,
     maxLines: 39,
   },
-  { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 73 },
+  { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 98 },
   { path: "tools/export-recipes/minicpm5/calib_texts.py", why: CALIBRATION_TEXT, maxLines: 16 },
   { path: "tools/export-recipes/minicpm5/export.py", why: MODEL_OUTPUT, maxLines: 11 },
   { path: "tools/export-recipes/minicpm5/README.md", why: MODEL_OUTPUT, maxLines: 1 },

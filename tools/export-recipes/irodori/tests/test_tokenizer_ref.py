@@ -18,12 +18,17 @@ is only the discipline whose breakage would become a **silent id list mismatch**
   injection into the extraction rule + `minScore` / `maxTokenLength` taken from the whole)
 - The caption cases go through strip only and are **sensitive** to normalization (the check
   fails if they become insensitive)
+- The Gemma BPE kind (v4-Large): which kind a `tokenizer.json` gets, its own default fixture,
+  the conditioning config (BOS on text and caption, one tokenizer for both), no rare-token split,
+  BOS / pad agreement, the roles of its encode cases, the caption window (longer than
+  `max_text_len`, cut at `max_caption_len`) and the shape of its fixture
 """
 
 from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import json
 import unicodedata
 from pathlib import Path
@@ -947,3 +952,450 @@ class TestSplitCoverage:
             tok.check_split_coverage(
                 _coverage_cases(), _COVERAGE_TABLE, _coverage_vocab(), _FORCE_SPLITS, -20.0, 16
             )
+
+
+# --- the Gemma BPE kind (Irodori-TTS v4-Large) ------------------------------------------------
+
+#: The added tokens of the synthetic Gemma tokenizer `(spelling, special)`, ids 0.. in order —
+#: the real one's specials, its non-special HTML and newline entries, and a turn marker.
+_GEMMA_ADDED = (
+    ("<pad>", True),
+    ("<eos>", True),
+    ("<bos>", True),
+    ("<unk>", True),
+    ("<start_of_turn>", True),
+    ("\n", False),
+    ("\n\n", False),
+    ("<b>", False),
+    ("</b>", False),
+)
+
+#: The plain vocabulary after the 256 byte tokens.
+_GEMMA_PIECES = ("a", "b", "ab", tok.METASPACE, tok.METASPACE * 2, tok.METASPACE * 3)
+
+
+def _gemma_raw(pieces=(), post_single=None) -> dict:
+    """A minimal T5Gemma 2-shaped `tokenizer.json` (BPE, the shared generator's accepted set,
+    the bos-only post_processor unless `post_single` replaces it)."""
+    from _shared.gemma_tokenizer import (
+        EXPECTED_DECODER,
+        EXPECTED_NORMALIZER,
+        EXPECTED_PRE_TOKENIZER,
+        byte_token,
+    )
+
+    tokens = [
+        *(content for content, _special in _GEMMA_ADDED),
+        *(byte_token(byte) for byte in range(256)),
+        *_GEMMA_PIECES,
+        tok.IN_VOCAB_EMOJI,
+        *pieces,
+    ]
+    bos = {"SpecialToken": {"id": "<bos>", "type_id": 0}}
+    sequence = {"Sequence": {"id": "A", "type_id": 0}}
+    return {
+        "version": "1.0",
+        "truncation": None,
+        "padding": None,
+        "added_tokens": [
+            {
+                "id": index,
+                "content": content,
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": special,
+            }
+            for index, (content, special) in enumerate(_GEMMA_ADDED)
+        ],
+        "normalizer": EXPECTED_NORMALIZER,
+        "pre_tokenizer": EXPECTED_PRE_TOKENIZER,
+        "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [bos, sequence] if post_single is None else post_single,
+            "pair": [bos, sequence],
+            "special_tokens": {},
+        },
+        "decoder": EXPECTED_DECODER,
+        "model": {
+            "type": "BPE",
+            "dropout": None,
+            "unk_token": "<unk>",
+            "continuing_subword_prefix": None,
+            "end_of_word_suffix": None,
+            "fuse_unk": True,
+            "byte_fallback": True,
+            "ignore_merges": False,
+            "vocab": {token: index for index, token in enumerate(tokens)},
+            "merges": [
+                ["a", "b"],
+                [tok.METASPACE, tok.METASPACE],
+                [tok.METASPACE * 2, tok.METASPACE],
+            ],
+        },
+    }
+
+
+def _gemma_compiled(pieces=()):
+    from _shared.gemma_tokenizer import compile_tokenizer
+
+    return compile_tokenizer(_gemma_raw(pieces))
+
+
+#: The checkpoint configs of the two kinds (the measured values that matter here).
+LARGE_TEXT_CONFIG = {"bos_token_id": 2, "pad_token_id": 0}
+LARGE_MODEL_CONFIG = {
+    "text_tokenizer_repo": "google/t5gemma-2-1b-1b",
+    "text_add_bos": True,
+    "use_caption_condition": True,
+    "caption_tokenizer_repo": "google/t5gemma-2-1b-1b",
+    "caption_add_bos": True,
+}
+SPLIT_REPO = "sbintuitions/modernbert-ja-310m"
+
+
+class TestTokenizerKind:
+    """MUST: the kind comes from upstream's `tokenizer.json` itself (`model.type`)."""
+
+    def test_a_unigram_tokenizer_gets_the_unigram_kind(self):
+        assert tok.tokenizer_kind(_raw()) == tok.UNIGRAM_KIND
+
+    def test_a_bpe_tokenizer_gets_the_gemma_kind(self):
+        assert tok.tokenizer_kind(_gemma_raw()) == tok.GEMMA_KIND
+
+    @pytest.mark.parametrize(
+        "raw", [{"model": {"type": "WordPiece"}}, {"model": {}}, {}, {"model": "BPE"}]
+    )
+    def test_any_other_tokenizer_fails_loudly(self, raw):
+        with pytest.raises(SystemExit, match="neither Unigram nor BPE"):
+            tok.tokenizer_kind(raw)
+
+    @pytest.mark.parametrize(
+        ("directory", "kind"),
+        [("v4-small", tok.UNIGRAM_KIND), ("v4-large", tok.GEMMA_KIND)],
+    )
+    def test_the_real_model_directories_get_their_kind(self, directory, kind):
+        model_dir = tok.REPO_ROOT / "inputs" / "irodori" / directory
+        if not (model_dir / tok.TOKENIZER_FILE).is_file():
+            pytest.skip(f"{model_dir} is not on this machine")
+
+        assert tok.tokenizer_kind(tok._tokenizer_json(model_dir)) == kind
+
+
+class TestDefaultFixturePath:
+    def test_the_unigram_kind_keeps_the_shared_fixture(self, tmp_path):
+        for name in ("v4-small", "v4.1-small-mf"):
+            assert tok.default_fixture_path(tmp_path / name, tok.UNIGRAM_KIND) == (
+                tok.DEFAULT_FIXTURE_PATH
+            )
+
+    def test_the_gemma_kind_writes_its_own_fixture_next_to_it(self, tmp_path):
+        path = tok.default_fixture_path(tmp_path / "v4-large", tok.GEMMA_KIND)
+
+        assert path == tok.DEFAULT_FIXTURE_PATH.with_name("v4-large-parity.json")
+        assert path != tok.DEFAULT_FIXTURE_PATH
+
+
+class TestConditioningConfig:
+    """MUST: the goldens prepend the BOS and tokenize the caption with the text tokenizer."""
+
+    def test_the_v4_large_config_passes(self):
+        tok.check_conditioning_config(LARGE_MODEL_CONFIG)
+
+    def test_a_null_caption_repo_and_bos_fall_back_to_the_text_values(self):
+        tok.check_conditioning_config(
+            {**LARGE_MODEL_CONFIG, "caption_tokenizer_repo": None, "caption_add_bos": None}
+        )
+
+    def test_a_model_without_caption_conditioning_skips_the_caption_checks(self):
+        tok.check_conditioning_config(
+            {**LARGE_MODEL_CONFIG, "use_caption_condition": False, "caption_add_bos": False}
+        )
+
+    @pytest.mark.parametrize(
+        ("override", "message"),
+        [
+            ({"text_add_bos": False}, "text_add_bos"),
+            ({"text_add_bos": None}, "text_add_bos"),
+            ({"caption_tokenizer_repo": SPLIT_REPO}, "not the text tokenizer"),
+            ({"caption_add_bos": False}, "caption_add_bos"),
+        ],
+    )
+    def test_a_config_the_goldens_do_not_describe_fails_loudly(self, override, message):
+        with pytest.raises(SystemExit, match=message):
+            tok.check_conditioning_config({**LARGE_MODEL_CONFIG, **override})
+
+
+class TestGemmaRareTokenSplit:
+    """The Gemma kind has no rare-token split (upstream's splitter is for the Unigram tokenizer
+    of one repository only)."""
+
+    def test_the_t5gemma_repository_has_no_split(self):
+        tok.check_gemma_has_no_split(LARGE_MODEL_CONFIG, SPLIT_REPO)
+
+    def test_a_bpe_tokenizer_under_the_split_repository_fails_loudly(self):
+        with pytest.raises(SystemExit, match="needs a Unigram"):
+            tok.check_gemma_has_no_split({"text_tokenizer_repo": SPLIT_REPO}, SPLIT_REPO)
+
+    def test_the_split_repository_is_upstreams_constant(self):
+        token_split = pytest.importorskip("irodori_tts.token_split")
+
+        assert token_split.SPLIT_TOKENIZER_REPO == SPLIT_REPO
+
+    def test_the_gemma_asset_and_fixture_carry_no_split_table(self):
+        from _shared.gemma_tokenizer import asset_payload
+
+        compiled = _gemma_compiled()
+        asset = asset_payload(compiled, source={})
+        fixture = tok.build_gemma_parity_fixture(compiled, {}, {}, [], [], [])
+
+        assert tok.RARE_TOKEN_SPLIT_KEY not in asset
+        assert tok.RARE_TOKEN_SPLIT_KEY not in fixture["asset"]
+        assert "split" not in fixture["encode"]
+
+
+class TestGemmaPostProcessor:
+    """The shared generator's accepted set gains T5Gemma 2's bos-only post_processor."""
+
+    def test_a_bos_only_post_processor_is_its_own_shape(self):
+        from _shared.gemma_tokenizer import POST_BOS, spec_of
+
+        compiled = _gemma_compiled()
+
+        assert compiled.post_processor == POST_BOS == "bos"
+        assert spec_of(compiled)["postProcessor"] == "bos"
+
+    def test_a_bos_without_the_sequence_is_still_rejected(self):
+        from _shared.gemma_tokenizer import UnsupportedTokenizerError, compile_tokenizer
+
+        bos = {"SpecialToken": {"id": "<bos>", "type_id": 0}}
+        with pytest.raises(UnsupportedTokenizerError, match="unknown shape"):
+            compile_tokenizer(_gemma_raw(post_single=[bos]))
+
+
+class TestGemmaSpecialIds:
+    """MUST: the BOS / pad ids agree across the config, the asset and upstream's wrapper."""
+
+    def test_agreeing_ids_are_returned(self):
+        assert tok.check_gemma_special_ids(_gemma_compiled(), LARGE_TEXT_CONFIG, 2, 0) == {
+            "bosId": 2,
+            "padId": 0,
+        }
+
+    @pytest.mark.parametrize(
+        ("text_config", "bos", "pad", "message"),
+        [
+            ({"bos_token_id": 1, "pad_token_id": 0}, 2, 0, "bos"),
+            (LARGE_TEXT_CONFIG, 1, 0, "bos"),
+            ({"bos_token_id": 2, "pad_token_id": 3}, 2, 0, "pad"),
+            (LARGE_TEXT_CONFIG, 2, None, "pad"),
+        ],
+    )
+    def test_a_disagreeing_id_fails_loudly(self, text_config, bos, pad, message):
+        with pytest.raises(SystemExit, match=message):
+            tok.check_gemma_special_ids(_gemma_compiled(), text_config, bos, pad)
+
+    def test_a_tokenizer_without_the_pad_token_fails_loudly(self):
+        compiled = _gemma_compiled()
+        without_pad = dataclasses.replace(
+            compiled,
+            added_tokens=[row for row in compiled.added_tokens if row[0] != tok.GEMMA_PAD_TOKEN],
+        )
+
+        with pytest.raises(SystemExit, match="pad"):
+            tok.check_gemma_special_ids(without_pad, LARGE_TEXT_CONFIG, 2, 0)
+
+
+def _gemma_role_cases(compiled) -> list[dict]:
+    """Gemma encode cases whose ids play every role (built from the compiled tables)."""
+    vocab = {token: index for index, token in enumerate(compiled.vocab)}
+    added = dict(compiled.added_tokens)
+
+    def utf8(text: str) -> list[int]:
+        return [compiled.byte_ids[byte] for byte in text.encode("utf-8")]
+
+    ids = {
+        "emoji-in-vocab": [vocab["a"], vocab[tok.IN_VOCAB_EMOJI]],
+        "byte-fallback-kanji": [*utf8(tok.GEMMA_BYTE_FALLBACK_KANJI), vocab["a"]],
+        "byte-fallback-emoji-pair": utf8(tok.GEMMA_BYTE_FALLBACK_EMOJI * 2),
+        "added-html": [added["<b>"], vocab["ab"], added["</b>"]],
+        "special-in-text": [added["<start_of_turn>"], vocab["a"], added["<bos>"]],
+        "added-lookalike": [vocab["a"], vocab["b"]],
+        "newlines": [vocab["a"], added["\n\n"], vocab["b"], added["\n"]],
+        "double-space": [vocab[tok.METASPACE * 2], vocab[tok.METASPACE * 3]],
+    }
+    return [
+        {
+            "name": name,
+            "normalized": text,
+            "ids": ids.get(name, []),
+        }
+        for name, _why, text in tok.GEMMA_ENCODE_CASES
+    ]
+
+
+class TestGemmaEncodeRoles:
+    """MUST (the docstring of `GEMMA_ENCODE_CASES`): each case still exercises its boundary."""
+
+    def test_cases_that_play_every_role_pass(self):
+        compiled = _gemma_compiled()
+
+        assert tok.check_gemma_encode_roles(_gemma_role_cases(compiled), compiled) == {
+            "cases": len(tok.GEMMA_ENCODE_CASES),
+            "byteFallbackIds": 8,
+        }
+
+    def test_the_byte_expectation_uses_the_byte_table_not_a_fixed_base(self):
+        """The Unigram base 15 does not hold here (the real Gemma base is 238)."""
+        compiled = _gemma_compiled()
+        cases = _gemma_role_cases(compiled)
+        pair_case = next(case for case in cases if case["name"] == "byte-fallback-emoji-pair")
+        pair_case["ids"] = tok.byte_fallback_ids(tok.GEMMA_BYTE_FALLBACK_EMOJI * 2)
+
+        with pytest.raises(SystemExit, match="byte-fallback-emoji-pair"):
+            tok.check_gemma_encode_roles(cases, compiled)
+
+    @pytest.mark.parametrize(
+        ("name", "ids", "message"),
+        [
+            ("emoji-in-vocab", [], "emoji-in-vocab: not one token"),
+            ("byte-fallback-kanji", [], "byte-fallback-kanji: no byte_fallback run"),
+            ("added-html", [7], "added-html: not cut out"),
+            ("special-in-text", [4], "special-in-text: not cut out"),
+            ("added-lookalike", [7], "added-lookalike: an added token was cut out"),
+            ("newlines", [5], "newlines: not cut out"),
+            ("double-space", [], "double-space: no metaspace-run token"),
+        ],
+    )
+    def test_a_case_that_lost_its_role_fails_loudly(self, name, ids, message):
+        compiled = _gemma_compiled()
+        cases = _gemma_role_cases(compiled)
+        next(case for case in cases if case["name"] == name)["ids"] = ids
+
+        with pytest.raises(SystemExit, match=message):
+            tok.check_gemma_encode_roles(cases, compiled)
+
+    def test_a_byte_fallback_character_that_entered_the_vocabulary_fails_loudly(self):
+        compiled = _gemma_compiled(pieces=(tok.GEMMA_BYTE_FALLBACK_KANJI,))
+
+        with pytest.raises(SystemExit, match="is in the vocabulary"):
+            tok.check_gemma_encode_roles(_gemma_role_cases(compiled), compiled)
+
+
+def _gemma_caption_config() -> dict:
+    """Windows that put the two long cases (code-point ids) on each side of their boundary."""
+    length = len(tok.LONG_CAPTION)
+    return {"max_text_len": length, "max_caption_len": 2 * length + 10}
+
+
+def _drop_tabs(body: str) -> str:
+    return _fake_normalize(body).replace("\t", "")
+
+
+class TestGemmaCaptionCases:
+    """The caption window: BOS first, longer than max_text_len, cut at max_caption_len."""
+
+    @pytest.fixture
+    @staticmethod
+    def cases():
+        return tok.build_caption_cases(
+            _FakeBatchPair(),
+            _drop_tabs,
+            _gemma_caption_config(),
+            (*tok.CAPTION_CASES, *tok.GEMMA_CAPTION_CASES),
+        )
+
+    def test_every_caption_starts_with_the_bos_and_keeps_the_raw_spacing(self, cases):
+        by_name = {case["name"]: case for case in cases}
+
+        assert all(case["idsPacked"][0] == 1 for case in cases)
+        tabs = by_name["caption-newlines-tabs"]
+        assert tabs["idsPacked"][1:] == [ord(char) for char in tabs["stripped"]]
+        assert "\t" in tabs["stripped"] and "\n\n" in tabs["stripped"]
+        assert tabs["normalizeSensitive"] is True
+
+    def test_the_long_captions_hold_their_roles(self, cases):
+        config = _gemma_caption_config()
+        lengths = tok.check_caption_lengths(cases, _FakeBatchPair(), config)
+
+        assert lengths == {
+            "overTextLength": 2 * len(tok.LONG_CAPTION) + 1,
+            "truncatedBody": 3 * len(tok.LONG_CAPTION),
+        }
+        truncated = next(case for case in cases if case["name"] == "caption-truncated")
+        # BOS, then the body cut at max_caption_len - 1 (truncation after the BOS).
+        assert truncated["idsPacked"] == [
+            1,
+            *(ord(char) for char in truncated["stripped"][: config["max_caption_len"] - 1]),
+        ]
+
+    @pytest.mark.parametrize(
+        ("override", "message"),
+        [
+            ({"max_text_len": 10_000}, "caption-over-text-length"),
+            ({"max_caption_len": 10_000}, "caption-truncated"),
+        ],
+    )
+    def test_windows_that_take_the_roles_away_fail_loudly(self, override, message):
+        config = {**_gemma_caption_config(), **override}
+        cases = tok.build_caption_cases(
+            _FakeBatchPair(), _drop_tabs, config, (*tok.CAPTION_CASES, *tok.GEMMA_CAPTION_CASES)
+        )
+
+        with pytest.raises(SystemExit, match=message):
+            tok.check_caption_lengths(cases, _FakeBatchPair(), config)
+
+    def test_the_default_case_table_is_unchanged(self):
+        """The small models' goldens keep their caption cases."""
+        cases = tok.build_caption_cases(_FakePair(), _fake_normalize, CAPTION_MODEL_CONFIG)
+
+        assert [case["name"] for case in cases] == [name for name, _w, _t in tok.CAPTION_CASES]
+
+
+class TestGemmaParityFixture:
+    def test_the_fixture_has_the_gemma_text_shape_and_keeps_the_pad_id(self):
+        compiled = _gemma_compiled()
+        vocab = {token: index for index, token in enumerate(compiled.vocab)}
+        encode = [{"name": "ab", "normalized": "ab", "ids": [vocab["ab"]]}]
+        batch = [{"normalized": "ab", "idsPadded": [2, vocab["ab"], 0, 0]}]
+
+        fixture = tok.build_gemma_parity_fixture(
+            compiled, {"path": "p"}, {"bosId": 2, "padId": 0}, encode, batch, []
+        )
+
+        assert fixture["spec"]["postProcessor"] == "bos"
+        assert set(fixture["asset"]) == {
+            "vocab",
+            "merges",
+            "byteIds",
+            "addedTokens",
+            "specialIds",
+            "unkId",
+            "bosId",
+            "eosId",
+        }
+        # `<pad>` is not in any text, but the padded ids hold it, so the subset keeps it.
+        assert [tok.GEMMA_PAD_TOKEN, 0] in fixture["asset"]["addedTokens"]
+        assert fixture["conditioning"] == {"bosId": 2, "padId": 0}
+        assert fixture["encode"] == {"cases": encode, "batch": batch, "caption": []}
+        assert fixture["stats"]["vocabTotal"] == len(compiled.vocab)
+
+
+class TestGemmaCaseTables:
+    """The Gemma case tables follow the discipline of the other tables."""
+
+    def test_no_case_body_is_written_with_a_raw_invisible_character(self):
+        literals = _case_body_literals(("GEMMA_ENCODE_CASES", "GEMMA_CAPTION_CASES"))
+
+        assert len(literals) == len(tok.GEMMA_ENCODE_CASES) + len(tok.GEMMA_CAPTION_CASES)
+        assert {name: _invisible_codepoints(text) for name, text in literals.items()} == {
+            name: [] for name in literals
+        }
+
+    def test_the_names_are_unique_with_the_shared_caption_cases(self):
+        encode = [name for name, _why, _text in tok.GEMMA_ENCODE_CASES]
+        caption = [name for name, _why, _text in (*tok.CAPTION_CASES, *tok.GEMMA_CAPTION_CASES)]
+
+        assert len(encode) == len(set(encode))
+        assert len(caption) == len(set(caption))

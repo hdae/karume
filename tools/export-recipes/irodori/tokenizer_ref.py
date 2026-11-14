@@ -1,4 +1,4 @@
-r"""Asset and goldens of the Irodori-TTS v4 text preprocessing layer (`normalize_text` + Unigram).
+r"""Asset and goldens of the Irodori-TTS v4 text preprocessing layer (`normalize_text` + tokenizer).
 
 `irodori/export.py` emits the **graphs**; this script handles only "raw text → token id list".
 It touches neither the model graph nor the weights (all it reads from the checkpoint is
@@ -100,6 +100,35 @@ ADR 0005):
 - The split golden is taken through upstream's entry (`enable_rare_token_split`) and agrees with
   the splitter itself, and every split case exercises the role its reason names
   ({@link check_split_coverage})
+
+## The Gemma BPE kind (Irodori-TTS v4-Large)
+
+Which of the two paths runs is decided by upstream's `tokenizer.json` itself
+({@link tokenizer_kind}: `model.type` Unigram → everything above; BPE → this section; anything
+else fails). v4-Large ships the SPM-BPE tokenizer of `google/t5gemma-2-1b-1b` in its own
+`tokenizer/` directory, so no Hub access is needed. Its asset is the shared Gemma format
+(`karume-gemma-tokenizer/1`, compiled by `_shared/gemma_tokenizer.py` with its exact-match
+accepted set), written to the same place and name as the small models' asset; the goldens keep
+their names and shapes. The parity fixture goes to
+`packages/models/tests/fixtures/irodori-text/<weight directory name>-parity.json` (so the small
+models' `parity.json` is never overwritten) and holds the Gemma asset subset
+(`_shared.gemma_tokenizer.asset_subset`), the encode / batch / caption goldens and the BOS / pad
+ids, but not the normalize golden or the NFKC table (both are tokenizer-independent and already
+in `parity.json`; the series still gets its own copies).
+
+- **No rare-token split**: upstream enables it only for `sbintuitions/modernbert-ja-310m`
+  (`inference_runtime.py`, `SPLIT_TOKENIZER_REPO`), and its `RareTokenSplitter` refuses anything
+  but a Unigram model (`token_split.py`). A BPE tokenizer whose config names that repository is a
+  contradiction and fails ({@link check_gemma_has_no_split}).
+- **BOS / pad**: the asset's `bosId` and the added tokens `<bos>` / `<pad>` must agree with the
+  checkpoint config and with what upstream's wrapper uses (`bos_token_id` / `pad_token_id` of
+  the `transformers` tokenizer) — {@link check_gemma_special_ids}. The Gemma asset has no `padId`
+  field; the pad id is the added token `<pad>`.
+- The encode cases are a table of their own ({@link GEMMA_ENCODE_CASES}): the Unigram table's
+  byte_fallback emoji is a single token here and its byte base differs, so the cases whose
+  premise is this vocabulary are re-chosen and their roles checked on the measured ids
+  ({@link check_gemma_encode_roles}). The caption cases add a caption longer than `max_text_len`
+  and one that `max_caption_len` truncates ({@link check_caption_lengths}).
 """
 
 from __future__ import annotations
@@ -114,6 +143,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from _shared.gemma_tokenizer import (
+    CompiledTokenizer,
+    asset_payload,
+    asset_subset,
+    compile_tokenizer,
+    file_digest,
+    spec_of,
+    write_json,
+)
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 
 from .export import DEFAULT_MODEL_DIR, DEFAULT_SOURCE_DIR, TOKENIZER_FILE, read_configs
@@ -467,6 +505,148 @@ NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
         "combined",
         "combined: ideographic space + ？ + dash + brackets + NFKC + ... overlap in one sentence",
         "「本当に\u3000そうなの？―ＡＢＣ...」",
+    ),
+)
+
+#: The tokenizer kinds, keyed by upstream's `model.type` ({@link tokenizer_kind}).
+UNIGRAM_KIND = "unigram"
+GEMMA_KIND = "gemma-bpe"
+TOKENIZER_KINDS: Mapping[str, str] = {"Unigram": UNIGRAM_KIND, "BPE": GEMMA_KIND}
+
+#: Where the parity fixtures live; the Gemma kind's is `<weight directory name>-parity.json`.
+FIXTURE_DIR = DEFAULT_FIXTURE_PATH.parent
+
+#: The added token upstream pads with (the Gemma asset has no `padId` field).
+GEMMA_PAD_TOKEN = "<pad>"
+
+#: A character the Gemma vocabulary does not hold (U+20BB7, a variant of the kanji U+5409 used in
+#: some Japanese names): 4 bytes in UTF-8, so byte_fallback writes it as 4 byte tokens.
+GEMMA_BYTE_FALLBACK_KANJI = "\U00020bb7"
+
+#: An emoji the Gemma vocabulary does not hold (U+1F9CC).
+GEMMA_BYTE_FALLBACK_EMOJI = "\U0001f9cc"
+
+#: The fixed encode cases of the Gemma kind `(name, reason, raw text)`, the same discipline as
+#: {@link ENCODE_CASES} (invisible characters written as `\uXXXX`; one boundary per case). The
+#: tokenizer-neutral cases of the Unigram table come back with the same text; the cases whose
+#: premise was the Unigram vocabulary are re-chosen for this one, and
+#: {@link check_gemma_encode_roles} checks on the measured ids that each still has its role.
+GEMMA_ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
+    ("ja-plain", "kanji mixed with kana + punctuation", "今日は近くの店まで歩いて行きました。"),
+    (
+        "ja-formal",
+        "a longer sentence in polite form (two commas)",
+        "本日はお越しいただき、誠にありがとうございます。どうぞごゆっくりお過ごしください。",
+    ),
+    (
+        "ja-question",
+        "question and exclamation marks (normalization makes them half-width)",
+        "本当にそれでいいの？！",
+    ),
+    (
+        "emoji-in-vocab",
+        "in-vocabulary emoji U+1F60A (one token)",
+        f"それは嬉しい{IN_VOCAB_EMOJI}ね。",
+    ),
+    (
+        "byte-fallback-kanji",
+        "U+20BB7 is not in the vocabulary → 4 byte tokens next to ordinary kanji",
+        f"{GEMMA_BYTE_FALLBACK_KANJI}野家で食べた。",
+    ),
+    (
+        "byte-fallback-emoji-pair",
+        "two out-of-vocabulary emoji U+1F9CC in a row → 8 byte tokens (no merge joins byte tokens)",
+        GEMMA_BYTE_FALLBACK_EMOJI * 2,
+    ),
+    (
+        "emoji-zwj",
+        "ZWJ emoji sequence U+1F62E U+200D U+1F4A8",
+        "\U0001f62e\u200d\U0001f4a8",
+    ),
+    ("emoji-vs16", "with a variation selector U+23F8 U+FE0F", "\u23f8\ufe0f"),
+    (
+        "added-html",
+        "non-special added vocabulary (`<b>` / `</b>`) is cut out before BPE",
+        "<b>ここ</b>を強く読む",
+    ),
+    (
+        "special-in-text",
+        "special added tokens typed in the text are cut out too (pinned as upstream does it)",
+        "<start_of_turn>と<bos>を書く",
+    ),
+    (
+        "added-lookalike",
+        "the small models' added token `<|user|>` is not one here — it falls to BPE",
+        "設定で <|user|> と書くとどうなるのか。",
+    ),
+    (
+        "newlines",
+        "normalize_text keeps newlines; the added `\\n\\n` / `\\n` are cut out leftmost-longest",
+        "一行目。\n\n二行目。\n三行目。",
+    ),
+    ("with-spaces", "half-width space U+0020 → replaced by U+2581", "hello world foo bar"),
+    (
+        "leading-space",
+        "leading space (nothing is prepended — the ▁ comes from the replacement)",
+        " leading space matters",
+    ),
+    (
+        "double-space",
+        "space runs become the ▁▁ / ▁▁▁ tokens through BPE (the input holds U+0020, not U+2581)",
+        "a  b   c",
+    ),
+    (
+        "latin-digits",
+        "mixed with Latin letters and digits (digits split one at a time)",
+        "GPU 4 台で 2026 年に v1.5 を出す。",
+    ),
+    (
+        "combining-dakuten",
+        "the interaction of the combining mark U+3099 and NFKC (U+304B + U+3099 → U+304C)",
+        "か\u3099っこいいし\u3099ゃんけん",
+    ),
+    (
+        "halfwidth-kana",
+        "half-width kana + voiced sound mark (NFKC turns them into composed full-width kana)",
+        "ｶﾞﾝﾊﾞｬﾁ",
+    ),
+)
+
+#: A voice description of about 230 tokens of the Gemma vocabulary (its U+FF01 makes it sensitive
+#: to normalization, so the caption cases built from it keep the strip / normalize check).
+LONG_CAPTION = (
+    "落ち着いた低めの声の男性が、ゆっくりとした速さで話している。"
+    "呼びかけには「はい！」と短く答える。"
+    "声には少しかすれた響きがあり、文の終わりを丁寧に下げて話す癖がある。"
+    "ニュース番組のナレーターのように発音ははっきりしているが、硬すぎることはなく、"
+    "聞き手にそっと語りかけるような柔らかさも感じられる。"
+    "録音は静かな部屋で行われたようで、背景の雑音はほとんど無く、マイクとの距離は近い。"
+    "息継ぎの音がわずかに聞こえ、文と文の間には短い間が置かれている。"
+    "感情の起伏は小さく、全体として穏やかで安定した印象を与える。"
+    "語尾が伸びることは少なく、一つ一つの言葉を確かめるように区切って発音している。"
+    "笑いを含んだ声になる場面はほとんど無いが、冷たい印象ではなく、"
+    "相手の話を最後まで聞いてから答える落ち着きが声全体から伝わってくる。"
+    "年齢は四十代から五十代くらいに聞こえ、長年人前で話してきた人のような余裕がある。"
+)
+
+#: The caption cases the Gemma kind adds to {@link CAPTION_CASES}. The two long ones pin the
+#: caption window: {@link check_caption_lengths} checks that the first is longer than
+#: `max_text_len` and fits `max_caption_len`, and that the second is cut at `max_caption_len`.
+GEMMA_CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "caption-newlines-tabs",
+        "the caption keeps the added `\\n\\n` / `\\t\\t` tokens (normalize drops the tabs)",
+        "明るい声。\n\n落ち着いた\t\tトーン。",
+    ),
+    (
+        "caption-over-text-length",
+        "longer than max_text_len but within max_caption_len (the caption has its own window)",
+        LONG_CAPTION * 2,
+    ),
+    (
+        "caption-truncated",
+        "longer than max_caption_len: upstream cuts the body at max_caption_len - 1 after the BOS",
+        LONG_CAPTION * 3,
     ),
 )
 
@@ -1039,7 +1219,10 @@ def _packed_upstream_ids(pair: TokenizerPair, body: str, max_length: int) -> lis
 
 
 def build_caption_cases(
-    pair: TokenizerPair, normalize_text: Any, model_config: Mapping[str, Any]
+    pair: TokenizerPair,
+    normalize_text: Any,
+    model_config: Mapping[str, Any],
+    case_table: Sequence[tuple[str, str, str]] = CAPTION_CASES,
 ) -> list[dict[str, Any]]:
     """The packed id list of the **caption path** (strip only) and the same list of the **text
     path** (normalize).
@@ -1053,12 +1236,13 @@ def build_caption_cases(
     MUST: cases sensitive to normalization (the two lists differ) make up most of
     {@link CAPTION_CASES}. The only insensitive one is the official Voice Design sentence, and
     that fact is written out to `normalizeSensitive` too (the caption of the existing golden is on
-    that side = fixing the preprocessing does not move the golden).
+    that side = fixing the preprocessing does not move the golden). `case_table` is that table
+    unless the Gemma kind adds {@link GEMMA_CAPTION_CASES} to it (the same rule then holds).
     """
     max_length = int(model_config[CAPTION_MAX_LENGTH_KEY])
     cases: list[dict[str, Any]] = []
     sensitive = 0
-    for name, why, text in CAPTION_CASES:
+    for name, why, text in case_table:
         stripped = text.strip()
         if not stripped:
             raise SystemExit(f"{name}: the caption is empty after strip")
@@ -1080,7 +1264,7 @@ def build_caption_cases(
                 "normalizeSensitive": differs,
             }
         )
-    if sensitive < len(CAPTION_CASES) - 1:
+    if sensitive < len(case_table) - 1:
         raise SystemExit(
             f"only {sensitive} caption cases are sensitive to normalization"
             " (a mix-up of the caption preprocessing would keep the check green)"
@@ -1319,9 +1503,385 @@ def build_parity_fixture(
     }
 
 
-def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -> dict[str, Any]:
+def tokenizer_kind(raw: Mapping[str, Any]) -> str:
+    """The kind of upstream's tokenizer, which decides the asset format and the goldens.
+
+    MUST: decided by the tokenizer file itself, not by the directory name or the repository the
+    config names — the file is what tokenizes. A model type outside {@link TOKENIZER_KINDS} has no
+    asset format and fails.
+    """
+    model = raw.get("model")
+    model_type = model.get("type") if isinstance(model, Mapping) else None
+    kind = TOKENIZER_KINDS.get(model_type) if isinstance(model_type, str) else None
+    if kind is None:
+        raise SystemExit(
+            f"tokenizer.json model.type {model_type!r} is neither Unigram nor BPE"
+            " (no asset format for it)"
+        )
+    return kind
+
+
+def default_fixture_path(model_dir: Path, kind: str) -> Path:
+    """The default parity fixture: `parity.json` for the Unigram kind (shared by the small models),
+    `<weight directory name>-parity.json` for the Gemma kind."""
+    if kind == UNIGRAM_KIND:
+        return DEFAULT_FIXTURE_PATH
+    return FIXTURE_DIR / f"{model_dir.name}-parity.json"
+
+
+def check_conditioning_config(model_config: Mapping[str, Any]) -> None:
+    """Check that the checkpoint config conditions the way the goldens are taken.
+
+    The goldens wrap **one** tokenizer as upstream's `PretrainedTextTokenizer(add_bos=True)`
+    ({@link TokenizerPair}) for both the text and the caption. Upstream builds the caption
+    tokenizer from `caption_tokenizer_repo` / `caption_add_bos`, each falling back to the text's
+    value when null (`ModelConfig.caption_tokenizer_repo_resolved` /
+    `caption_add_bos_resolved`), so a config that names another tokenizer or drops the BOS would
+    make the goldens describe a pipeline the model does not run.
+    """
+    if model_config.get("text_add_bos") is not True:
+        raise SystemExit(
+            f"text_add_bos is {model_config.get('text_add_bos')!r}; the goldens prepend the BOS"
+        )
+    if not model_config.get("use_caption_condition"):
+        return
+    text_repo = model_config.get("text_tokenizer_repo")
+    caption_repo = model_config.get("caption_tokenizer_repo")
+    caption_repo = text_repo if caption_repo is None else caption_repo
+    if caption_repo != text_repo:
+        raise SystemExit(
+            f"the caption tokenizer {caption_repo!r} is not the text tokenizer {text_repo!r}"
+        )
+    caption_bos = model_config.get("caption_add_bos")
+    caption_bos = model_config.get("text_add_bos") if caption_bos is None else caption_bos
+    if caption_bos is not True:
+        raise SystemExit(f"caption_add_bos is {caption_bos!r}; the goldens prepend the BOS")
+
+
+def check_gemma_has_no_split(model_config: Mapping[str, Any], split_repo: str) -> None:
+    """Check that upstream would not enable the rare-token split for this model.
+
+    Upstream enables it only when `text_tokenizer_repo` is `split_repo`
+    (`inference_runtime.py`, `SPLIT_TOKENIZER_REPO`) and its `RareTokenSplitter` refuses any
+    model but Unigram (`token_split.py`), so a BPE tokenizer under that repository name is a
+    contradiction — fail instead of writing an asset without the table.
+    """
+    if model_config.get("text_tokenizer_repo") == split_repo:
+        raise SystemExit(
+            f"text_tokenizer_repo is {split_repo!r}, whose rare-token split needs a Unigram"
+            " tokenizer, but tokenizer.json is BPE"
+        )
+
+
+def check_gemma_special_ids(
+    compiled: CompiledTokenizer,
+    text_config: Mapping[str, Any],
+    tokenizer_bos: int | None,
+    tokenizer_pad: int | None,
+) -> dict[str, int]:
+    """The BOS / pad ids, checked across the three places that name them.
+
+    MUST: the checkpoint config (`bos_token_id` / `pad_token_id`), the asset (`bosId` and the
+    added tokens `<bos>` / `<pad>`) and upstream's wrapper (`bos_token_id` / `pad_token_id` of the
+    `transformers` tokenizer, which `PretrainedTextTokenizer` prepends and pads with) must agree —
+    otherwise the model gets a BOS or a pad id it was not trained with, silently.
+    """
+    added = dict(compiled.added_tokens)
+    bos_id = int(text_config["bos_token_id"])
+    pad_id = int(text_config["pad_token_id"])
+    places = {
+        "bos": {
+            "config": bos_id,
+            "asset bosId": compiled.bos_id,
+            "added <bos>": added.get("<bos>"),
+            "wrapper": tokenizer_bos,
+        },
+        "pad": {
+            "config": pad_id,
+            f"added {GEMMA_PAD_TOKEN}": added.get(GEMMA_PAD_TOKEN),
+            "wrapper": tokenizer_pad,
+        },
+    }
+    for label, ids in places.items():
+        if len(set(ids.values())) != 1:
+            raise SystemExit(f"{label}: the ids disagree {ids}")
+    return {"bosId": bos_id, "padId": pad_id}
+
+
+def build_gemma_encode_cases(pair: TokenizerPair, normalize_text: Any) -> list[dict[str, Any]]:
+    """The fixed `{raw, normalized, ids}` cases of the Gemma kind (the same shape and the same
+    contract as {@link build_encode_cases}: `normalize_text` without strip, ids before the BOS)."""
+    return [
+        {
+            "name": name,
+            "why": why,
+            "raw": text,
+            "normalized": (normalized := normalize_text(text)),
+            "ids": pair.encode(normalized, name),
+        }
+        for name, why, text in GEMMA_ENCODE_CASES
+    ]
+
+
+def check_gemma_encode_roles(
+    cases: Sequence[Mapping[str, Any]], compiled: CompiledTokenizer
+) -> dict[str, Any]:
+    """Check that every Gemma encode case still exercises the boundary its reason names.
+
+    Judged on the measured ids against the compiled tables. The byte expectations come from UTF-8
+    and the 256 byte ids, never from the encoder, so a case that stopped falling back (the
+    character entered the vocabulary) or an added token that stopped being cut out fails here
+    instead of leaving a case that tests nothing.
+    """
+    by_name = {case["name"]: case for case in cases}
+    vocab = {token: index for index, token in enumerate(compiled.vocab)}
+    added = dict(compiled.added_tokens)
+    added_ids = set(added.values())
+    problems: list[str] = []
+
+    def utf8_ids(text: str) -> list[int]:
+        return [compiled.byte_ids[byte] for byte in text.encode("utf-8")]
+
+    def contains_run(ids: Sequence[int], run: Sequence[int]) -> bool:
+        return any(list(ids[start : start + len(run)]) == list(run) for start in range(len(ids)))
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            problems.append(message)
+
+    def has(name: str, ids: Sequence[int | None]) -> bool:
+        return all(token_id is not None and token_id in by_name[name]["ids"] for token_id in ids)
+
+    require(has("emoji-in-vocab", [vocab.get(IN_VOCAB_EMOJI)]), "emoji-in-vocab: not one token")
+    for name, char in (
+        ("byte-fallback-kanji", GEMMA_BYTE_FALLBACK_KANJI),
+        ("byte-fallback-emoji-pair", GEMMA_BYTE_FALLBACK_EMOJI),
+    ):
+        require(char not in vocab, f"{name}: U+{ord(char):04X} is in the vocabulary")
+        require(contains_run(by_name[name]["ids"], utf8_ids(char)), f"{name}: no byte_fallback run")
+    pair_case = by_name["byte-fallback-emoji-pair"]
+    require(
+        pair_case["ids"] == utf8_ids(pair_case["normalized"]),
+        "byte-fallback-emoji-pair: not exactly the UTF-8 bytes",
+    )
+    require(has("added-html", [added.get("<b>"), added.get("</b>")]), "added-html: not cut out")
+    require(
+        has("special-in-text", [added.get("<start_of_turn>"), added.get("<bos>")]),
+        "special-in-text: not cut out",
+    )
+    require(
+        "<|user|>" not in added and not added_ids & set(by_name["added-lookalike"]["ids"]),
+        "added-lookalike: an added token was cut out",
+    )
+    require(has("newlines", [added.get("\n\n"), added.get("\n")]), "newlines: not cut out")
+    require(
+        has("double-space", [vocab.get(METASPACE * 2), vocab.get(METASPACE * 3)]),
+        "double-space: no metaspace-run token",
+    )
+    if problems:
+        raise SystemExit(f"the Gemma encode cases lost their roles: {problems}")
+    return {"cases": len(cases), "byteFallbackIds": len(pair_case["ids"])}
+
+
+def check_caption_lengths(
+    cases: Sequence[Mapping[str, Any]], pair: TokenizerPair, model_config: Mapping[str, Any]
+) -> dict[str, int]:
+    """Check that the two long caption cases pin the caption window (the MUST of
+    {@link GEMMA_CAPTION_CASES}).
+
+    `caption-over-text-length` must be longer than `max_text_len` and fit `max_caption_len` (a
+    port that used the text window would cut it), and `caption-truncated` must really overflow
+    `max_caption_len` (its full body, measured separately from the packed list, does not fit).
+    """
+    text_len = int(model_config[TEXT_MAX_LENGTH_KEY])
+    caption_len = int(model_config[CAPTION_MAX_LENGTH_KEY])
+    by_name = {case["name"]: case for case in cases}
+    over = by_name["caption-over-text-length"]
+    truncated = by_name["caption-truncated"]
+    body = len(pair.encode(truncated["stripped"], "caption-truncated"))
+    problems: list[str] = []
+    if not text_len < len(over["idsPacked"]) < caption_len:
+        problems.append(
+            f"caption-over-text-length: {len(over['idsPacked'])} ids, not in"
+            f" ({text_len}, {caption_len})"
+        )
+    if len(truncated["idsPacked"]) != caption_len or body + 1 <= caption_len:
+        problems.append(
+            f"caption-truncated: {len(truncated['idsPacked'])} ids packed from a body of {body}"
+            f" (max_caption_len {caption_len})"
+        )
+    if problems:
+        raise SystemExit(f"the long caption cases lost their roles: {problems}")
+    return {"overTextLength": len(over["idsPacked"]), "truncatedBody": body}
+
+
+def _repo_relative(path: Path) -> str:
+    """`path` relative to the repository (the fixture is tracked in git — never an absolute
+    path)."""
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        raise SystemExit(f"{path} is outside the repository") from None
+
+
+def build_gemma_parity_fixture(
+    compiled: CompiledTokenizer,
+    source: Mapping[str, Any],
+    conditioning: Mapping[str, int],
+    encode_cases: Sequence[Mapping[str, Any]],
+    batch_cases: Sequence[Mapping[str, Any]],
+    caption_cases: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The TS-side parity fixture of the Gemma kind (**tracked in git**).
+
+    `spec` and `asset` have the shape of the `gemma-text/*-parity.json` fixtures (the subset is
+    cut by `_shared.gemma_tokenizer.asset_subset` from every string a case tokenizes, keeping
+    every id a case holds — the pad id included), so the Gemma reader's test helpers apply as
+    they are. `conditioning` carries the BOS / pad ids upstream's wrapper uses.
+    """
+    texts = [case["normalized"] for case in (*encode_cases, *batch_cases, *caption_cases)]
+    texts.extend(case["stripped"] for case in caption_cases)
+    required: set[int] = set()
+    for case in (*encode_cases, *batch_cases, *caption_cases):
+        for field in ("ids", "idsPadded", "idsPacked", "normalizedIdsPacked"):
+            required.update(case.get(field, ()))
+    return {
+        "_doc": [
+            "Parity fixture of the Irodori-TTS v4-Large text layer (the Gemma BPE tokenizer of",
+            "google/t5gemma-2-1b-1b; generated by tools/export-recipes/irodori/tokenizer_ref.py).",
+            "The id lists were measured with upstream normalize_text and tokenizers / transformers",
+            "(PretrainedTextTokenizer for the padded and packed forms). spec / asset follow the",
+            "gemma-text fixtures (asset is the subset the cases need). The normalize golden and",
+            "the NFKC table are tokenizer-independent and live in parity.json.",
+        ],
+        "source": dict(source),
+        "spec": spec_of(compiled),
+        "conditioning": dict(conditioning),
+        "asset": asset_subset(compiled, texts=texts, required_ids=required),
+        "encode": {
+            "cases": list(encode_cases),
+            "batch": list(batch_cases),
+            "caption": list(caption_cases),
+        },
+        "stats": {
+            "vocabTotal": len(compiled.vocab),
+            "mergesTotal": len(compiled.merges),
+            "addedTotal": len(compiled.added_tokens),
+        },
+    }
+
+
+def emit_gemma(
+    model_dir: Path,
+    out_dir: Path,
+    fixture_path: Path,
+    raw: Mapping[str, Any],
+    configs: tuple[Mapping[str, Any], Mapping[str, Any]],
+    normalize_text: Any,
+) -> dict[str, Any]:
+    """{@link emit} for the Gemma kind (nothing is written when a check fails)."""
+    from irodori_tts.token_split import SPLIT_TOKENIZER_REPO
+
+    text_config, model_config = configs
+    compiled = compile_tokenizer(raw)
+    check_gemma_has_no_split(model_config, SPLIT_TOKENIZER_REPO)
+    pair = TokenizerPair(model_dir)
+    conditioning = check_gemma_special_ids(
+        compiled, text_config, pair.hf.bos_token_id, pair.hf.pad_token_id
+    )
+    encode_cases = build_gemma_encode_cases(pair, normalize_text)
+    roles = check_gemma_encode_roles(encode_cases, compiled)
+    batch_cases = build_batch_cases(pair, normalize_text, model_config)
+    caption_cases = build_caption_cases(
+        pair, normalize_text, model_config, (*CAPTION_CASES, *GEMMA_CAPTION_CASES)
+    )
+    lengths = check_caption_lengths(caption_cases, pair, model_config)
+    normalize_cases = build_normalize_cases(normalize_text)
+    coverage = check_rule_coverage(normalize_cases)
+    diff = nfkc_diff_table()
+    tokenizer_path = model_dir / TOKENIZER_FILE
+    source = {
+        "path": _repo_relative(tokenizer_path),
+        **file_digest(tokenizer_path),
+        "vocabCount": len(compiled.vocab),
+        "mergesCount": len(compiled.merges),
+        "addedCount": len(compiled.added_tokens),
+    }
+    asset = asset_payload(compiled, source=source)
+    fixture = build_gemma_parity_fixture(
+        compiled, source, conditioning, encode_cases, batch_cases, caption_cases
+    )
+
+    written = {ASSET_FILE: write_json(out_dir / ASSET_FILE, asset)}
+    for filename, payload in (
+        (
+            ENCODE_GOLDEN_FILE,
+            {
+                "conditioning": conditioning,
+                "cases": encode_cases,
+                "batch": batch_cases,
+                "caption": caption_cases,
+            },
+        ),
+        (NORMALIZE_GOLDEN_FILE, {"cases": normalize_cases}),
+        (NFKC_DIFF_FILE, diff),
+    ):
+        path = out_dir / filename
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        written[filename] = path.stat().st_size
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    fixture_path.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
+    )
+    return {
+        "kind": GEMMA_KIND,
+        "dir": str(out_dir),
+        "bytes": written,
+        "fixture": {
+            "path": str(fixture_path),
+            "bytes": fixture_path.stat().st_size,
+            "vocabSubset": len(fixture["asset"]["vocab"]),
+            "mergesSubset": len(fixture["asset"]["merges"]),
+            "addedSubset": len(fixture["asset"]["addedTokens"]),
+        },
+        "asset": {
+            "format": asset["format"],
+            "spec": asset["spec"],
+            "vocab": len(compiled.vocab),
+            "merges": len(compiled.merges),
+            "addedTokens": len(compiled.added_tokens),
+            "specialIds": len(compiled.special_ids),
+            **conditioning,
+            "eosId": compiled.eos_id,
+            "unkId": compiled.unk_id,
+        },
+        "encodeRoles": roles,
+        "encodeCases": {case["name"]: len(case["ids"]) for case in encode_cases},
+        "batchCases": {
+            case["name"]: {"maxLength": case["maxLength"], "used": sum(case["mask"])}
+            for case in batch_cases
+        },
+        "captionCases": {
+            case["name"]: {
+                "tokens": len(case["idsPacked"]),
+                "normalizeSensitive": case["normalizeSensitive"],
+            }
+            for case in caption_cases
+        },
+        "captionLengths": lengths,
+        "rareTokenSplit": None,
+        "normalizeCases": len(normalize_cases),
+        "ruleCoverage": coverage,
+        "nfkcDiffEntries": len(diff),
+    }
+
+
+def emit(
+    model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path | None
+) -> dict[str, Any]:
     """Write the asset, the goldens and the fixture and return a summary (nothing is written when
-    a check fails)."""
+    a check fails). `fixture_path=None` takes the kind's default ({@link default_fixture_path});
+    a BPE tokenizer goes to {@link emit_gemma}."""
     if not (source_dir / "irodori_tts" / "text_normalization.py").is_file():
         raise SystemExit(
             f"model implementation not found: {source_dir}"
@@ -1334,6 +1894,14 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
 
     text_config, model_config = read_configs(model_dir)
     raw = _tokenizer_json(model_dir)
+    kind = tokenizer_kind(raw)
+    check_conditioning_config(model_config)
+    if fixture_path is None:
+        fixture_path = default_fixture_path(model_dir, kind)
+    if kind == GEMMA_KIND:
+        return emit_gemma(
+            model_dir, out_dir, fixture_path, raw, (text_config, model_config), normalize_text
+        )
     shape = check_upstream_shape(raw)
 
     pair = TokenizerPair(model_dir)
@@ -1455,7 +2023,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--fixture-out", type=Path, default=DEFAULT_FIXTURE_PATH)
+    parser.add_argument("--fixture-out", type=Path, default=None)
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir) if args.out is None else args.out
     summary = emit(args.model_dir, args.source_dir, out_dir, args.fixture_out)
