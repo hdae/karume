@@ -19,6 +19,7 @@ added. The breaking changes are the geometry-profile ones listed in the CHANGELO
 (RTX 5070 Ti) reads as on 2026-11-12: the product verdict passes, the states-attention check FAILs in the K-95 classes
 only, and the online-attention check is incomplete because its `wg` form needs more workgroup storage than the device
 grants (its `sg32` form passes); the page was not run on Dawn / Vulkan, where the core lane ran the same checks.
+Published-smoke is green on Node and Deno (16 manifests and the sbv2 `fromPretrained`).
 
 Before it: 0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
 its host tier, self-speculation and per-layer slots; the parallel-GEMV rows and the RMS→add width for 26B, with the 26B
