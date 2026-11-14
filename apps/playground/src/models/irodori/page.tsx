@@ -23,6 +23,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
@@ -636,6 +637,24 @@ export const IrodoriPage = () => {
                 />
               </Field>
             </div>
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <Label className="flex items-center gap-2 font-normal">
+                <Checkbox
+                  id="irodori-split-rare-tokens"
+                  checked={form.splitRareTokens}
+                  onCheckedChange={(checked) => update({ splitRareTokens: checked })}
+                  disabled={disabled}
+                />
+                Split rare tokens (the model's default)
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Checked: splitRareTokens is left out, so the model decides: rare tokens of the text
+                are split into smaller pieces, as upstream does. Unchecked: false, the unsplit
+                encoding. It only has an effect on distributions whose tokenizer asset carries the
+                split table (v4 / v4.1 small from the revision that includes it); elsewhere both
+                give the same encoding. It applies to the text, never the caption.
+              </p>
+            </div>
             <div className="flex flex-col gap-2 sm:col-span-2">
               <Label>Voice</Label>
               <Tabs
@@ -948,6 +967,12 @@ const RecordTable = ({ record }: { record: IrodoriRecord }) => {
     [
       "Seed / duration / steps",
       `${record.request.seed} · ${record.request.durationSeconds} · ${record.request.steps}`,
+    ],
+    [
+      "Rare-token split",
+      record.request.splitRareTokens === "default"
+        ? "the model's default (on only with the table)"
+        : String(record.request.splitRareTokens),
     ],
     ["DiT loop", `${record.ditLoop}${record.device.gpuTimingEnabled ? " · GPU timing on" : ""}`],
     ["Pipeline", record.pipeline.built ? `built in ${record.pipeline.loadSeconds} s` : "reused"],

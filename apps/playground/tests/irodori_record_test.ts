@@ -66,8 +66,15 @@ describe("recordRequest", () => {
       seed: 0,
       durationSeconds: "predicted",
       codecTileFrames: "default",
+      splitRareTokens: "default",
       steps: 40,
     });
+  });
+
+  it("names an explicit splitRareTokens false as sent", () => {
+    expect(
+      recordRequest({ text: "t", splitRareTokens: false }, undefined, 40).splitRareTokens,
+    ).toBe(false);
   });
 
   it("names a request without voice design by an empty caption", () => {

@@ -79,6 +79,10 @@ describe("initialForm", () => {
     expect(initial.seed).toBe("0");
     expect(initial.stageEvents).toBe(true);
   });
+
+  it("starts with the rare-token split box checked (the request leaves it to the model)", () => {
+    expect(initialForm().splitRareTokens).toBe(true);
+  });
 });
 
 describe("buildRequest", () => {
@@ -133,6 +137,18 @@ describe("buildRequest", () => {
     ["codec tile", { codecTileFrames: "10.5" }],
   ] as const)("refuses a malformed %s", (_, patch) => {
     expect(() => buildRequest(form(patch), undefined)).toThrow(FormError);
+  });
+
+  it("leaves splitRareTokens out while the box is checked (the model's default)", () => {
+    const request = buildRequest(form({ splitRareTokens: true }), undefined);
+    expect("splitRareTokens" in request).toBe(false);
+  });
+
+  it("sends splitRareTokens false when the box is unchecked, and never true", () => {
+    expect(buildRequest(form({ splitRareTokens: false }), undefined).splitRareTokens).toBe(false);
+    for (const splitRareTokens of [true, false]) {
+      expect(buildRequest(form({ splitRareTokens }), undefined).splitRareTokens).not.toBe(true);
+    }
   });
 
   it("leaves the range checks to the pipeline (a negative seed passes the form)", () => {

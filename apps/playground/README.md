@@ -743,6 +743,7 @@ keeps no weights on the GPU. One synthesis runs at a time.
 | Source | **Cached** (default): `/hf/` through the hub's CacheStorage. **Direct**: `localDirectory` over plain fetch from `/models/`. |
 | Linear compute | `linearCompute` of `fromPretrained`, applied to the DiT and its context projection only. Choices: the preset's declaration (default), `f32`, or `a8`. The hint names the preset's DiT weights label, its declaration and the value the DiT is asked for. `a8` runs only on int8 / int4 weights: with weights labelled `f32` / `f16` the page shows a note, because the runtime sends float weights to the f32 path without an error. `f16` is not offered: it needs a device with `shaderF16: true`. |
 | Text | The Japanese text, sent as typed (the pipeline normalizes it). It starts with the first voice-design example's text (`src/models/irodori/samples.ts`). Only the first `maxTextLen − 1` tokens after normalization are read (255 on the small distributions). The pipeline cuts the rest without an error (upstream behaviour). |
+| Split rare tokens | `splitRareTokens` (ADR 0149). Checked (default): the option is left out, so the model's default holds: on when the distribution's tokenizer asset carries upstream's rare-token split table, off otherwise. Unchecked: `false`, the unsplit encoding. The page never sends `true`, which the pipeline refuses (`ModelInputError`) on an asset without the table. It only has an effect on distributions whose tokenizer carries the table (v4 / v4.1 small from the revision that includes it), and it applies to the text, never the caption. |
 | Voice | Two exclusive tabs; only the active tab is sent. **Voice design**: a Japanese caption (`caption`) plus four example buttons, each filling the caption and a text that suits it. An empty caption means no voice design. The caption is cut at `maxCaptionLen − 1` tokens the same way. **Voice clone**: a reference audio file (`speaker.audio`), decoded to the distribution's `sampleRate` (below). The panel stays mounted, so the file input keeps its file across tab switches. The hint gives the minimum length and the first N seconds the model reads, both from `pipelineConfig`. |
 | Seed | `seed` (default 0). |
 | Duration (s) | `durationSeconds`. Empty = the duration predictor decides. A number skips the predictor, and the pipeline clamps it to the distribution's `minSeconds`–`maxSeconds`. |
@@ -772,6 +773,7 @@ the record:
 - the DiT's linear dispatches (i8a8 / other), with a note when `a8` was asked for but no linear ran
   int8
 - voice, and seed / duration / steps
+- the rare-token split: the model's default or `false`
 - the DiT loop, and whether the pipeline was built (and how long it took) or reused
 - length, samples, latent frames S and forwards
 - generate and wall seconds, and the real-time factor
@@ -791,7 +793,7 @@ the record:
 | `model`, `preset`, `linearCompute` | the manifest model (`v4.1-small` / `v4-small`); `{ quant, label, isDefault }`; the page's choice `preset` / `f32` / `a8` |
 | `linearComputeResolved` | what the DiT Sessions were asked for: the choice, else the preset's `session.linearCompute`, else `f32` |
 | `ditLinearDispatches` | `{ i8a8, other }`: planned dispatches of linear kernels in the `dit` component's last run, counted from its pipeline keys (a runtime diagnostic label, outside semver). `null` when no `dit` diagnostics came. `a8` with `i8a8: 0` = float weights on the f32 path. |
-| `request` | `text` (as typed, before truncation); `voice` = `{ kind: "caption", caption }` (`""` = no voice design) or `{ kind: "reference", file, decoder, sampleRate, samples, seconds, f32Sha256 }`; `seed`; `durationSeconds` (a number or `"predicted"`); `codecTileFrames` (a number or `"default"`); `steps` (from `pipelineConfig`) |
+| `request` | `text` (as typed, before truncation); `voice` = `{ kind: "caption", caption }` (`""` = no voice design) or `{ kind: "reference", file, decoder, sampleRate, samples, seconds, f32Sha256 }`; `seed`; `durationSeconds` (a number or `"predicted"`); `codecTileFrames` (a number or `"default"`); `splitRareTokens` (`"default"` when left out, else the value sent — the page sends only `false`); `steps` (from `pipelineConfig`) |
 | `ditLoop`, `stageEvents` | `host` (stage events or GPU timing on) or `resident`; whether `onEvent` was subscribed |
 | `pipeline` | `{ built: true, loadSeconds }` when this run built it, `{ built: false }` when it reused the open one |
 | `stageSeconds` | seconds per stage (`backbone`, `text-proj`, `caption-proj`, `codec-encoder`, `speaker`, `duration`, `dit-context`, `dit`, `codec-decoder`), from each stage's start event (before its Session) to its end event (after release). Empty with stage events off. |

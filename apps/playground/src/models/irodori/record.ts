@@ -85,6 +85,11 @@ export type RecordRequest = {
   readonly seed: number;
   readonly durationSeconds: number | "predicted";
   readonly codecTileFrames: number | "default";
+  /**
+   * The rare-token split flag as sent: `"default"` = omitted (the model's default — on only when the
+   * tokenizer asset carries the table, which the page cannot see), else the explicit value.
+   */
+  readonly splitRareTokens: boolean | "default";
   /** Euler steps — fixed by the distribution's `pipelineConfig`, not a request field. */
   readonly steps: number;
 };
@@ -124,6 +129,7 @@ export const recordRequest = (
     seed: parts.seed ?? 0,
     durationSeconds: parts.durationSeconds ?? "predicted",
     codecTileFrames: parts.codecTileFrames ?? "default",
+    splitRareTokens: parts.splitRareTokens ?? "default",
     steps,
   };
 };

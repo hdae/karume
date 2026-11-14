@@ -52,6 +52,13 @@ export type IrodoriForm = {
   /** Empty = the pipeline's default tile. */
   readonly codecTileFrames: string;
   /**
+   * Checked = `splitRareTokens` is omitted, so the model's default holds (on when the tokenizer
+   * asset carries upstream's rare-token split table, off otherwise — ADR 0149); unchecked = `false`.
+   * MUST NOT turn into an explicit `true`: with an asset that has no table that is a
+   * `ModelInputError`, and omitting it already gives the split wherever the table exists.
+   */
+  readonly splitRareTokens: boolean;
+  /**
    * Subscribe to the generation events: per-stage seconds, the step counter and Cancel, at the cost
    * of the host DiT loop. Off = no `onEvent`, so a generation cannot be observed or cancelled once it
    * runs; its DiT loop is resident (the fastest path) unless GPU timing forces the host loop.
@@ -69,6 +76,7 @@ export const initialForm = (): IrodoriForm => ({
   seed: "0",
   durationSeconds: "",
   codecTileFrames: "",
+  splitRareTokens: true,
   stageEvents: true,
 });
 
@@ -231,7 +239,8 @@ const parseOptionalInteger = (text: string, what: string): number | undefined =>
 /**
  * The generation request of the form. Only the active voice tab is sent: a caption in caption mode
  * (an empty one = no voice design, the API's zero caption condition), the reference in reference
- * mode. The text is sent as typed (the pipeline normalizes it).
+ * mode. The text is sent as typed (the pipeline normalizes it). `splitRareTokens` is sent only as
+ * `false` (the box unchecked); checked leaves it to the model's default.
  */
 export const buildRequest = (
   form: IrodoriForm,
@@ -255,6 +264,7 @@ export const buildRequest = (
     seed,
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...(codecTileFrames === undefined ? {} : { codecTileFrames }),
+    ...(form.splitRareTokens ? {} : { splitRareTokens: false }),
   };
 };
 
