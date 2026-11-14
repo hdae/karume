@@ -99,9 +99,10 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 /**
  * The distribution mirrors the guard **requires to exist** (the roster of the absence check — the
  * reach of the manifest checks is derived from the layout by {@link discoverDistributions}) = the
- * 15 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
- * 0.14.0, `karume-moss-image`, first published in 0.15.1, and `karume-gemma4-qat-mobile`,
- * published under this name in 0.16.0) + the unpublished `karume-wan2.1`.
+ * 16 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
+ * 0.14.0, `karume-moss-image`, first published in 0.15.1, `karume-gemma4-qat-mobile`, published
+ * under this name in 0.16.0, and `karume-irodori-v4.1-small-mf`, first published in 0.21.0) + the
+ * unpublished `karume-wan2.1`.
  *
  * The two published ones were on the guard's roster before publication: `karume-umt5-xxl` is the
  * cross-repo reference root of the e2e of Wan's GPU path (ADR 0119 stage 10d — without it the
@@ -123,6 +124,9 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * `karume-moss-image` was on the roster before its publication as well (ADR 0138 addendum of
  * 2026-11-01): the pipeline e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so
  * its absence must not be a silent skip.
+ *
+ * `karume-irodori-v4.1-small-mf` (ADR 0150) is the root of the MeanFlow e2e
+ * (`e2e_irodori_meanflow_test.ts`, `e2e_irodori_meanflow_wav_test.ts`), which SKIP on its absence.
  */
 const DISTRIBUTIONS = [
   "karume-anima",
@@ -134,6 +138,7 @@ const DISTRIBUTIONS = [
   "karume-gemma4-qat-mobile",
   "karume-irodori-v4-small",
   "karume-irodori-v4.1-small",
+  "karume-irodori-v4.1-small-mf",
   "karume-lucida",
   "karume-moss-image",
   "karume-sbv2-jvnv",

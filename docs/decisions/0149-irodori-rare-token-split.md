@@ -2,7 +2,7 @@
 
 - Status: proposed (2026-11-14 — follows upstream Irodori-TTS commit `82c9980b`; the recipe, the TS tokenizer and the
   request option are implemented and pass the parity fixture; the local mirrors of v4-small, v4.1-small and
-  v4.1-small-mf carry the table (decision 5); no published distribution carries it yet)
+  v4.1-small-mf carry the table (decision 5), and the three were published with it in 0.21.0 on 2026-11-14)
 - Date: 2026-11-14
 - Related: [0048](0048-irodori-host-port.md) (the Irodori host port and its shared Unigram layer) /
   [0107](0107-model-input-error.md) (input-caused failures) / [0005](0005-verification.md) (addendum of 2026-10-11:

@@ -109,8 +109,8 @@ const FAMILIES: readonly Family[] = [
     name: "irodori.SOURCES",
     sources: irodori.SOURCES,
     // A new generation or version gets its own repository (ADR 0092 decision 1) — v4 and v4.1 side
-    // by side.
-    keys: ["irodori-v4-small", "irodori-v4.1-small"],
+    // by side, and v4.1's MeanFlow student (first published in 0.21.0 — ADR 0150) beside them.
+    keys: ["irodori-v4-small", "irodori-v4.1-small", "irodori-v4.1-small-mf"],
     load: (ref, options) => irodori.Pipeline.fromPretrained(ref, options),
   },
   {
@@ -199,7 +199,7 @@ for (const { name, sources, keys } of FAMILIES) {
 // The totals of families and public repositories are spelled out too. A new repository (birefnet-hr
 // / lucida in iteration b, umT5 / Wan2.2 in 0.14.0) fails this, so an entry missing from the merge
 // into `KARUME_SOURCES` cannot pass silently.
-test("11 families have a source table, with 15 published repositories", () => {
+test("11 families have a source table, with 16 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -216,7 +216,7 @@ test("11 families have a source table, with 15 published repositories", () => {
       "moss.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 15);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 16);
 });
 
 for (const { name, sources } of FAMILIES) {

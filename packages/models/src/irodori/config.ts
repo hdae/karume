@@ -71,10 +71,12 @@ export const IRODORI_PIPELINE_MAJOR = 1;
  * - `"irodori-v4-small"` = `hdae/karume-irodori-v4-small`
  * - `"irodori-v4.1-small"` = `hdae/karume-irodori-v4.1-small` (upstream v4.1 = a follow-up version
  *   that retrained only the duration predictor)
+ * - `"irodori-v4.1-small-mf"` = `hdae/karume-irodori-v4.1-small-mf` (upstream's MeanFlow student of
+ *   v4.1 — 4 steps without CFG; ADR 0150)
  *
- * The utterance lengths come out differently, so the two stand side by side as **separate sources**
- * rather than "old and new" (the example scripts defaulted to v4.1 — the examples were removed in
- * 0.15).
+ * The utterance lengths come out differently, so v4 and v4.1 stand side by side as **separate
+ * sources** rather than "old and new" (the example scripts defaulted to v4.1 — the examples were
+ * removed in 0.15).
  *
  * Pass it **as the opt-in for following the package version automatically** — to pin
  * reproducibility yourself, write your own `{ repo, revision }` instead of this table
@@ -92,11 +94,15 @@ export const IRODORI_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   "irodori-v4-small": {
     repo: "hdae/karume-irodori-v4-small",
-    revision: "485bbee5f0331db555d465955fef48a183bc46e0",
+    revision: "b90ab65f03c0198eb1561a83c6afd0624418af0d",
   },
   "irodori-v4.1-small": {
     repo: "hdae/karume-irodori-v4.1-small",
-    revision: "6cd6959808ca316327644d48f3bf35265bb91d92",
+    revision: "8b54ca335c1ff16621ab5645fbf579ce2ec12ce4",
+  },
+  "irodori-v4.1-small-mf": {
+    repo: "hdae/karume-irodori-v4.1-small-mf",
+    revision: "fc4ba31e2f9ea5bc03564758fc98a17805216ace",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

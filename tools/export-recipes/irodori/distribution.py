@@ -1163,7 +1163,7 @@ def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return irodori_plan(irodori_sources(series_dir, model), model)
 
 
-#: The two published models, one repository each (ADR 0092 decision 1).
+#: The two rectified-flow models, one repository each (ADR 0092 decision 1).
 IRODORI_V4_MODEL = "v4-small"
 IRODORI_V41_MODEL = "v4.1-small"
 

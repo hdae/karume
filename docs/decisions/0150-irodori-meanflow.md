@@ -1,8 +1,9 @@
 # 0150: Irodori MeanFlow — v4.1-small-mf, the interval embedding in the DiT step and the 4-step sampler
 
 - Status: proposed (2026-11-14 — the recipe, the TS pipeline, the local mirror `models/karume-irodori-v4.1-small-mf/`
-  and its e2e checks are in place; not published; the default preset is `i8` by the maintainer's listening of
-  2026-11-14, and the tokenizer asset is referenced at v4-small — decisions 1 and 6)
+  and its e2e checks are in place; published with 0.21.0 on 2026-11-14 (`irodori.SOURCES["irodori-v4.1-small-mf"]`);
+  the default preset is `i8` by the maintainer's listening of 2026-11-14, and the tokenizer asset is referenced at
+  v4-small — decisions 1 and 6)
 - Date: 2026-11-14
 - Related: [0038](0038-manifest-v1.md) §7 and its addendum of 2026-10-28 (cross-repository references) /
   [0109](0109-manifest-v5-container.md) decision 3 (a reference covers every part of a container) /
@@ -63,9 +64,9 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
 
    The tokenizer asset is referenced at v4-small (the maintainer's ruling of 2026-11-14): the student's own asset,
    written by the recipe from its checkpoint, is byte-identical to v4-small's once v4-small carries the rare-token split
-   table (ADR 0149 — measured 2026-11-14), and the core's reference check compares the two on every build. Until
-   v4-small's repository is uploaded with the table, the reference can only be built against a development mirror
-   (the order is in `docs/release-runbook.md` §0). An earlier draft carried its own copy, because the published v4-small
+   table (ADR 0149 — measured 2026-11-14), and the core's reference check compares the two on every build. v4-small's
+   repository is therefore uploaded with the table before this one is built (the order is in
+   `docs/release-runbook.md` §0; done for 0.21.0). An earlier draft carried its own copy, because the published v4-small
    asset predated the table.
 
 2. **One more input to `dit`.** The step graph of a MeanFlow checkpoint takes `delta_embed` — the timestep embedding of
@@ -128,7 +129,7 @@ What changes against v4.1-Small, from upstream's code and checkpoint:
   but no self A/B band yet (the A/B check covers v4.1-small).
 - Reproducing torch's `linspace` rests on the kernel's fused multiply-add, the compiled behaviour on CPU and CUDA alike,
   not a documented guarantee.
-- Publishing needs: the uploads of v4-small (with the table) and v4.1-small first, then the HF upload of this
-  repository built with `--resolve-refs hf`, the upload of the staged goldens to the test-asset dataset with the pin
-  moved in the same commit as the tests, and a `SOURCES["irodori-v4.1-small-mf"]` entry pinned at the uploaded
+- Published with 0.21.0 (2026-11-14) in that order: the uploads of v4-small (with the table) and v4.1-small first, then
+  the HF upload of this repository built with `--resolve-refs hf`; the goldens are in the test-asset dataset with the
+  pin moved in the same commit as the tests, and `irodori.SOURCES["irodori-v4.1-small-mf"]` pins the uploaded
   revision.

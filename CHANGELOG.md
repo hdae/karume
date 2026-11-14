@@ -174,22 +174,24 @@ measurements in `docs/research/`.
   (`initScale`, `cfgMinT`, `cfgMaxT`, `cfgScales`, `speakerUncondMode`, `cfgGuidanceMode`), which is a parse error.
   Its loop runs one conditional `dit` forward per step over the f32 values of upstream's `linspace(1, 0)` with the
   embedding of the step's interval as the extra `dit` input `delta_embed`, and no classifier-free guidance; `forwards`
-  is then the step count (4 by default). The distribution (`karume-irodori-v4.1-small-mf`) is not published yet and
-  has no `SOURCES` entry; its default preset is `i8` (the maintainer's listening), and it references its tokenizer
-  asset, the one with the rare-token split table, at `karume-irodori-v4-small`.
+  is then the step count (4 by default). The distribution is published as `hdae/karume-irodori-v4.1-small-mf` and
+  pinned as `irodori.SOURCES["irodori-v4.1-small-mf"]` (also in `KARUME_SOURCES`); its default preset is `i8` (the
+  maintainer's listening), and it references its tokenizer asset, the one with the rare-token split table, at
+  `karume-irodori-v4-small` and its duration predictor at `karume-irodori-v4.1-small`.
 
 ### Changed
 
 - The anima distributions (`karume-anima`, `karume-anima-extra`): the bundled CircleStone Labs Non-Commercial
   License v1.2 text follows upstream's fix of two section references (`circlestone-labs/Anima@6e0b2da2`,
   2026-11-12) — §4(a)(i) now refers to §2(e) and the survival list of §8(c) to §2(e) and §2(f) — and the cards'
-  `license_link` points at that commit. The license version and every other term are unchanged. Mirror `LICENSE.md`
-  and `README.md` change at their next upload.
+  `license_link` points at that commit. The license version and every other term are unchanged. Both
+  repositories received the two files in a card-only upload (their `SOURCES` pins do not move).
 - `@karume/models` (Irodori): with a distribution whose tokenizer asset carries the rare-token split table, the
   default encoding of a text that contains one of its rare long tokens changes, as it did upstream (commit
-  `82c9980b`), and the generated audio with it. The distributions published so far carry no table and do not change
-  until they are reassembled; `splitRareTokens: false` keeps the previous encoding (ADR 0149).
-- The Irodori distributions `karume-irodori-v4-small` and `karume-irodori-v4.1-small` (at their next upload): the
+  `82c9980b`), and the generated audio with it. The distributions this version pins carry the table (below); older
+  revisions carry none and do not change; `splitRareTokens: false` keeps the previous encoding (ADR 0149).
+- The Irodori distributions `karume-irodori-v4-small` and `karume-irodori-v4.1-small`, re-uploaded, with
+  `irodori.SOURCES["irodori-v4-small"]` and `irodori.SOURCES["irodori-v4.1-small"]` moved to the new revisions: the
   tokenizer asset carries the rare-token split table, and v4.1-small references it at the v4-small revision that
   carries it. Every container keeps its published bytes — only the tokenizer asset, `karume.json` (its `generator`
   and the tokenizer's size and sha256), the card and v4.1-small's reference revision change (ADR 0149 decision 5).

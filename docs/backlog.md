@@ -18,9 +18,9 @@ Node and Deno.
 - **Irodori v4.1-small-mf** (upstream's MeanFlow student — ADR [0150](decisions/0150-irodori-meanflow.md), proposed):
   the recipe, the MeanFlow sampler of the TS pipeline, the local mirror and its e2e checks are in place (2026-11-14).
   The default preset is `i8` and the tokenizer is referenced from v4-small (rulings of 2026-11-14 after listening); its
-  goldens are in the test-asset dataset and the pin moved. Left: a self A/B band for its `i8-a8`, and publication in the
-  order v4-small → v4.1-small → v4.1-small-mf (each referencing build is re-resolved after the upload before it), then
-  its `SOURCES` entry and the Playground mount's repository name read from it.
+  goldens are in the test-asset dataset and the pin moved. Published 2026-11-14 with 0.21.0 (after the re-uploads of
+  v4-small and v4.1-small), pinned as `irodori.SOURCES["irodori-v4.1-small-mf"]`, which the Playground mount reads its
+  repository name from. Left: only a self A/B band for its `i8-a8`.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 

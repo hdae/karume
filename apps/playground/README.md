@@ -84,7 +84,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `siglip2` | `models/karume-siglip2` | `hdae/karume-siglip2` | SigLIP 2 |
 | `irodori-v4` | `models/karume-irodori-v4-small` | `hdae/karume-irodori-v4-small` (plus the revision `irodori-v4.1` and `irodori-v4.1-mf` reference) | Irodori-TTS |
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` (plus the revision `irodori-v4.1-mf` references) | Irodori-TTS |
-| `irodori-v4.1-mf` | `models/karume-irodori-v4.1-small-mf` | `hdae/karume-irodori-v4.1-small-mf` (written in `src/mounts.ts` until `irodori.SOURCES` has the entry) | Irodori-TTS |
+| `irodori-v4.1-mf` | `models/karume-irodori-v4.1-small-mf` | `hdae/karume-irodori-v4.1-small-mf` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
 | `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
