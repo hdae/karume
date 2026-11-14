@@ -9,7 +9,7 @@
  *      = only replaces U+0020 with ▁ (**does not prepend ▁ / does not split into pieces at ▁**)
  *   → Unigram (Viterbi, unk_id=0, **with byte_fallback**, fuse_unk)
  *   → post_processor adds no special tokens (BOS is prepended by
- *      {@link IrodoriTokenizer.encodePadded} below = the counterpart of upstream's
+ *      {@link encodePaddedIds} of `./text-tokenizer.ts` = the counterpart of upstream's
  *      `PretrainedTextTokenizer.batch_encode`)
  *
  * The **rare-token split** (ADR 0149 — upstream's `RareTokenSplitter`) is a second path through
@@ -20,7 +20,8 @@
  *
  * The Unigram core (Viterbi, tie handling, `fuse_unk`, byte expansion) is family-independent, so
  * `src/text/unigram.ts` holds it. This module holds only Irodori's own front end (AddedVocabulary,
- * Metaspace) and back end (BOS prepend, truncation, right padding, mask).
+ * Metaspace); the back end (BOS prepend, truncation, right padding, mask) is shared with the Gemma
+ * kind of v4-Large in `./text-tokenizer.ts`.
  */
 
 import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
@@ -35,6 +36,13 @@ import {
 } from "../../text/asset-gates.ts";
 import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
+import {
+  encodePaddedIds,
+  type IrodoriEncodeOptions,
+  type IrodoriPaddedIds,
+  type IrodoriTextTokenizer,
+  RARE_TOKEN_SPLIT_MISSING,
+} from "./text-tokenizer.ts";
 
 /** Metaspace replacement character (U+2581). */
 const METASPACE = "▁";
@@ -81,19 +89,6 @@ export type IrodoriTokenizerAssets = {
   readonly rareTokenSplit?: IrodoriRareTokenSplit;
 };
 
-/**
- * Which path {@link IrodoriTokenizer.encode} takes. Required on every call: the caller decides
- * (the pipeline resolves the request's `splitRareTokens` once and passes the result to the text
- * path, and `false` to the caption path).
- */
-export type IrodoriEncodeOptions = {
-  /**
-   * `true`: encode with the rare-token split (needs an asset with the table — an asset without it
-   * fails loudly). `false`: the plain Unigram path.
-   */
-  readonly splitRareTokens: boolean;
-};
-
 /** The split path: its own Unigram model and the forced expansion. */
 type SplitPath = {
   readonly model: UnigramModel;
@@ -131,13 +126,7 @@ const buildSplitPath = (
   };
 };
 
-/** Final form of upstream's `batch_encode` (graph input dtypes — i32 and bool = u32, ADR 0009). */
-type IrodoriPaddedIds = {
-  readonly ids: Int32Array<ArrayBuffer>;
-  readonly mask: Uint32Array<ArrayBuffer>;
-};
-
-export class IrodoriTokenizer {
+export class IrodoriTokenizer implements IrodoriTextTokenizer {
   readonly #assets: IrodoriTokenizerAssets;
   readonly #added: AddedTokenMatcher;
   /**
@@ -162,6 +151,16 @@ export class IrodoriTokenizer {
     return this.#split !== undefined;
   }
 
+  /** The asset's `bosId` (prepended by {@link encodePaddedIds}). */
+  get bosId(): number {
+    return this.#assets.bosId;
+  }
+
+  /** The asset's `padId` (the right padding of {@link encodePaddedIds}). */
+  get padId(): number {
+    return this.#assets.padId;
+  }
+
   /**
    * Normalized text → plain id sequence (no special tokens added).
    *
@@ -183,9 +182,7 @@ export class IrodoriTokenizer {
     let forced: ReadonlyMap<number, readonly number[]> | undefined;
     if (options.splitRareTokens) {
       if (this.#split === undefined) {
-        throw new Error(
-          "irodori tokenizer: the rare-token split was requested, but the asset carries no rareTokenSplit table",
-        );
+        throw new Error(RARE_TOKEN_SPLIT_MISSING);
       }
       model = this.#split.model;
       forced = this.#split.forcedSplits;
@@ -215,29 +212,11 @@ export class IrodoriTokenizer {
   }
 
   /**
-   * The same final form as upstream's `PretrainedTextTokenizer.batch_encode([text], max_length)`:
-   * BOS prepended + right padding + valid-length mask.
-   *
-   * MUST: the body budget is `maxLength - 1` (leaving room for the one BOS). Naively cutting at
-   * `maxLength` overflows the whole by one — writing with {@link Int32Array.prototype.set} is there
-   * so that the overflow is not silently discarded (index assignment ignores out-of-range writes,
-   * so the overflow would be swallowed silently).
-   *
-   * MUST: the body is cut **after** the split (upstream: `splitter.encode(text)[:body_max_length]`)
-   * — the split lengthens the body, so cutting first would keep tokens upstream drops.
+   * The same final form as upstream's `PretrainedTextTokenizer.batch_encode([text], max_length)`
+   * — {@link encodePaddedIds} on this tokenizer (the rules are in its doc).
    */
   encodePadded(text: string, maxLength: number, options: IrodoriEncodeOptions): IrodoriPaddedIds {
-    if (!Number.isInteger(maxLength) || maxLength <= 0) {
-      throw new Error(`maxLength must be an integer >= 1 (received: ${maxLength})`);
-    }
-    const body = this.encode(text, options).slice(0, maxLength - 1);
-    const ids = new Int32Array(maxLength).fill(this.#assets.padId);
-    const mask = new Uint32Array(maxLength);
-    ids[0] = this.#assets.bosId;
-    mask[0] = 1;
-    ids.set(body, 1);
-    mask.fill(1, 1, body.length + 1);
-    return { ids, mask };
+    return encodePaddedIds(this, text, maxLength, options);
   }
 }
 

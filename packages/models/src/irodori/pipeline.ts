@@ -16,7 +16,8 @@
  *    `codec_encoder` to a latent (only when `audio` is given — `host/reference.ts`)
  * 1. Host: `normalize_text` → prepend BOS → a **packed** token sequence (static scheme — not called
  *    with padding)
- * 2. `backbone` (ModernBERT) twice, for text and caption (**in the same single session**)
+ * 2. `backbone` (ModernBERT for v4 / v4.1 Small, the T5Gemma 2 text encoder for v4-Large) twice,
+ *    for text and caption (**in the same single session**)
  * 3. `text-proj` → text condition / `caption-proj` (2 outputs) → caption condition + `caption_vec`
  * 4. Host: patch the reference latent → `speaker` → **prepend the mean token** (outside the graph)
  * 5. `duration` → log frames → the host decides S (expm1 → banker's rounding → clamp)
@@ -138,7 +139,8 @@ import {
   withStageSession,
 } from "./stage.ts";
 import type { IrodoriPipelineConfig } from "./config.ts";
-import { IrodoriTokenizer, parseIrodoriTokenizerAsset } from "./text/tokenizer.ts";
+import { parseIrodoriTextTokenizer } from "./text/asset.ts";
+import type { IrodoriTextTokenizer } from "./text/text-tokenizer.ts";
 import {
   assertCodecTileFrames,
   type CodecTile,
@@ -258,8 +260,9 @@ export type GenerateRequest = {
    *
    * Omitted: on when the distribution's tokenizer asset carries the split table (the v4 / v4.1
    * Small tokenizer from a distribution revision that has it), off otherwise — the same default as
-   * upstream, where other tokenizers are unaffected. `true` with an asset that has no table is a
-   * `ModelInputError` before anything runs; `false` always works and gives the unsplit encoding.
+   * upstream, where other tokenizers (the Gemma tokenizer of v4-Large among them) are unaffected.
+   * `true` with an asset that has no table is a `ModelInputError` before anything runs; `false`
+   * always works and gives the unsplit encoding.
    */
   readonly splitRareTokens?: boolean;
   /** Random seed (default 0 — the same seed gives the same latent). */
@@ -443,7 +446,8 @@ export type IrodoriState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: IrodoriPipelineConfig;
-  readonly tokenizer: IrodoriTokenizer;
+  /** The text tokenizer the distribution's asset declares (Unigram or Gemma — `text/asset.ts`). */
+  readonly tokenizer: IrodoriTextTokenizer;
   readonly backbone: ModelComponent;
   readonly textProj: ModelComponent;
   readonly captionProj: ModelComponent;
@@ -501,9 +505,7 @@ const buildIrodoriState = async (
   const codecEncoder = open(CODEC_ENCODER);
 
   await settleAbort(options.signal);
-  const tokenizer = new IrodoriTokenizer(
-    parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
-  );
+  const tokenizer = parseIrodoriTextTokenizer(assetJson(assets, TOKENIZER), TOKENIZER);
 
   await settleAbort(options.signal);
 
@@ -602,7 +604,7 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
 export const assertIrodoriRequest = (
   request: GenerateRequest,
   config: IrodoriPipelineConfig,
-  tokenizer: Pick<IrodoriTokenizer, "hasRareTokenSplit">,
+  tokenizer: Pick<IrodoriTextTokenizer, "hasRareTokenSplit">,
 ): void => {
   // The default is checked too — the caller is not obliged to pass `codecTileFrames`, so a
   // distribution whose relation between the default tile and `codecHaloFrames` is broken must not
@@ -637,7 +639,7 @@ export const assertIrodoriRequest = (
  */
 export const resolveSplitRareTokens = (
   requested: boolean | undefined,
-  tokenizer: Pick<IrodoriTokenizer, "hasRareTokenSplit">,
+  tokenizer: Pick<IrodoriTextTokenizer, "hasRareTokenSplit">,
 ): boolean => {
   if (requested === undefined) return tokenizer.hasRareTokenSplit;
   if (typeof requested !== "boolean") {
@@ -983,8 +985,10 @@ const generateAudio = async (
 };
 
 /**
- * The text → speech pipeline of Irodori-TTS v4 — the rectified-flow models (v4 / v4.1 Small) and
- * their MeanFlow student (v4.1 Small MF), whose sampler the distribution declares (ADR 0150).
+ * The text → speech pipeline of Irodori-TTS v4 — the rectified-flow models (v4 / v4.1 Small and
+ * v4-Large) and the MeanFlow student of v4.1 Small (v4.1 Small MF), whose sampler the distribution
+ * declares (ADR 0150). The text tokenizer is the one the distribution's asset declares (the Unigram
+ * tokenizer of the Small models or the Gemma tokenizer of v4-Large — `text/asset.ts`).
  *
  * Construction has only two entry points, {@link Pipeline.fromPretrained} (fetch from HF)
  * and {@link Pipeline.fromAssets} (already fetched bytes) — the constructor is private so

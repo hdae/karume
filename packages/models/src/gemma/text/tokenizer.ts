@@ -4,7 +4,8 @@
  * The reference pipeline (the same configuration for both assets — ADR 0084 Context 2):
  *   AddedVocabulary (cuts out the added vocabulary leftmost-longest, **before** normalization)
  *   → Replace(" " → "▁") → Split(" ", MergedWithPrevious) → BPE (byte_fallback)
- *   → TemplateProcessing (gemma4 = pass-through / EmbeddingGemma = `<bos>` … `<eos>`)
+ *   → TemplateProcessing (gemma4 = pass-through / EmbeddingGemma = `<bos>` … `<eos>` /
+ *     T5Gemma 2 = `<bos>` …)
  * Decoding is Sequence[Replace("▁" → " "), ByteFallback, Fuse].
  *
  * MUST: **the pre_tokenizer never splits after normalization**. `Split(" ")` runs on the string
@@ -166,11 +167,14 @@ export class Tokenizer {
    * The same id sequence as `tokenizer.encode(text, add_special_tokens=True)`.
    *
    * What is added is decided by the asset's declaration (nothing for gemma4 / `<bos>` … `<eos>` for
-   * EmbeddingGemma). The entry that spares callers from branching on the family.
+   * EmbeddingGemma / `<bos>` alone for T5Gemma 2). The entry that spares callers from branching on
+   * the family.
    */
   encodeWithSpecialTokens(text: string): number[] {
     const ids = this.encode(text);
-    if (this.#assets.spec.postProcessor === "none") return ids;
+    const post = this.#assets.spec.postProcessor;
+    if (post === "none") return ids;
+    if (post === "bos") return [this.#assets.bosId, ...ids];
     return [this.#assets.bosId, ...ids, this.#assets.eosId];
   }
 

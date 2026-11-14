@@ -315,6 +315,33 @@ describe("asset JSON checks: treated as untrusted external input", () => {
     assertThrows(() => parseAsset(asset), Error, "postProcessor");
   });
 
+  it("the bos-only post_processor (T5Gemma 2) is read and prepends <bos> alone", () => {
+    // The third measured form (Irodori-TTS v4-Large's text tokenizer): `<bos> $A`, no `<eos>`.
+    const asset = minimalAsset();
+    asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), postProcessor: "bos" };
+    const tokenizer = new Tokenizer(
+      parseGemmaTokenizerAsset(new TextEncoder().encode(JSON.stringify(asset))),
+    );
+    assertEquals(tokenizer.postProcessor, "bos");
+    const ids = tokenizer.encode("aaa");
+    assertNotEquals(ids, []);
+    assertEquals(tokenizer.encodeWithSpecialTokens("aaa"), [1, ...ids]);
+  });
+
+  it("the other two forms keep their special tokens (the bos-only branch is not taken)", () => {
+    for (const [postProcessor, wrap] of [
+      ["none", (ids: number[]) => ids],
+      ["bos-eos", (ids: number[]) => [1, ...ids, 2]],
+    ] as const) {
+      const asset = minimalAsset();
+      asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), postProcessor };
+      const tokenizer = new Tokenizer(
+        parseGemmaTokenizerAsset(new TextEncoder().encode(JSON.stringify(asset))),
+      );
+      assertEquals(tokenizer.encodeWithSpecialTokens("aaa"), wrap(tokenizer.encode("aaa")));
+    }
+  });
+
   it("fails when the merge count differs from the declared one", () => {
     // A missing merge does not make BPE fail — it just "does not merge because it is not found" (only the split quietly changes).
     assertThrows(() => parseAsset({ ...minimalAsset(), mergesCount: 2 }), Error, "line count");

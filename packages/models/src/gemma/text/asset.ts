@@ -21,8 +21,11 @@ import { assertAllowedKeys } from "../../config/readers.ts";
 import { assertUniqueLines, setUnique } from "../../text/asset-gates.ts";
 import { type BpeModel, createBpeModel } from "../../text/bpe.ts";
 
-/** Version of the asset schema (unknown versions are not read). */
-const ASSET_FORMAT = "karume-gemma-tokenizer/1";
+/**
+ * Version of the asset schema (unknown versions are not read). Exported for the readers that tell
+ * this format from another tokenizer asset by its `format` key (irodori — `src/irodori/text/asset.ts`).
+ */
+export const GEMMA_TOKENIZER_ASSET_FORMAT = "karume-gemma-tokenizer/1";
 
 /**
  * Declaration of the upstream configuration the compile step checked (spellings 1:1 with the
@@ -59,12 +62,13 @@ const SPEC_KEYS = ["normalizer", "preTokenizer", "decoder", "postProcessor"] as 
 export const METASPACE = "▁";
 
 /**
- * The post_processor equivalent (the two forms in real assets).
+ * The post_processor equivalent (the three forms in real assets).
  *
  * - `none` — adds nothing (gemma4; only the chat function adds `<bos>` — ADR 0084 decision 5)
  * - `bos-eos` — wraps in `<bos>` … `<eos>` (EmbeddingGemma)
+ * - `bos` — prepends `<bos>` only (T5Gemma 2, the text tokenizer of Irodori-TTS v4-Large)
  */
-export type GemmaPostProcessor = "none" | "bos-eos";
+export type GemmaPostProcessor = "none" | "bos-eos" | "bos";
 
 /** The upstream configuration the asset declares. */
 export type GemmaTokenizerSpec = {
@@ -137,7 +141,7 @@ const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
     }
   }
   const post = asString(readField(spec, "postProcessor", label), `${label}.postProcessor`);
-  if (post !== "none" && post !== "bos-eos") {
+  if (post !== "none" && post !== "bos-eos" && post !== "bos") {
     throw new Error(`${label}.postProcessor: unknown form (${JSON.stringify(post)})`);
   }
   return { postProcessor: post };
@@ -184,12 +188,20 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   return out;
 };
 
-/** Asset JSON (parsed) → asset tables. */
-const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
+/**
+ * Asset JSON (parsed) → asset tables.
+ *
+ * NOTE: `export` is for irodori, whose asset reader decodes and parses the JSON once and then
+ * chooses the tokenizer by the `format` key (`src/irodori/text/asset.ts`). Not exposed on `mod.ts`
+ * / a subpath surface (ADR 0008).
+ */
+export const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   const asset = asRecord(raw, "tokenizer");
   const format = asString(readField(asset, "format", "tokenizer"), "tokenizer.format");
-  if (format !== ASSET_FORMAT) {
-    throw new Error(`tokenizer.format: not ${JSON.stringify(ASSET_FORMAT)} (${format})`);
+  if (format !== GEMMA_TOKENIZER_ASSET_FORMAT) {
+    throw new Error(
+      `tokenizer.format: not ${JSON.stringify(GEMMA_TOKENIZER_ASSET_FORMAT)} (${format})`,
+    );
   }
   // Placed after the version check — a newer version with more fields fails as "wrong version", not
   // "unknown key".

@@ -7,7 +7,9 @@
  * `_static_scheme_evidence` measures the equivalence on every emit.
  *
  * MUST: normalization happens once only (the doc of `text/tokenizer.ts` — the canonical
- * `tokenizer.json` has a null normalizer, so it is never applied again on the tokenizer side).
+ * `tokenizer.json` has a null normalizer, so it is never applied again on the tokenizer side). The
+ * Gemma tokenizer of v4-Large (`text/gemma-tokenizer.ts`) runs only its own `Replace(" " → "▁")`
+ * on top, as upstream's tokenizer does on the same normalized text.
  *
  * MUST: **the preprocessing differs between text and caption**. Upstream's
  * `inference_runtime._synthesize` applies `normalize_text(...).strip()` to text, but only
@@ -21,22 +23,26 @@
 
 import { ModelInputError } from "../../errors.ts";
 import { normalizeText } from "../text/normalize.ts";
-import type { IrodoriEncodeOptions, IrodoriTokenizer } from "../text/tokenizer.ts";
+import {
+  encodePaddedIds,
+  type IrodoriEncodeOptions,
+  type IrodoriTextTokenizer,
+} from "../text/text-tokenizer.ts";
 
 /**
  * Preprocessed body → a packed sequence with BOS prepended, cut at `maxLength-1`.
  *
- * NOTE: it uses `encodePadded` and drops the padding so that the spelling of the BOS prepend and
+ * NOTE: it uses `encodePaddedIds` and drops the padding so that the spelling of the BOS prepend and
  * the truncation does not exist in 2 places (the mask is always a contiguous prefix from the start,
  * so a scan gives the real length).
  */
 const packBody = (
-  tokenizer: IrodoriTokenizer,
+  tokenizer: IrodoriTextTokenizer,
   body: string,
   maxLength: number,
   options: IrodoriEncodeOptions,
 ): Int32Array<ArrayBuffer> => {
-  const padded = tokenizer.encodePadded(body, maxLength, options);
+  const padded = encodePaddedIds(tokenizer, body, maxLength, options);
   let used = 0;
   while (used < padded.mask.length && padded.mask[used] === 1) used += 1;
   return padded.ids.slice(0, used);
@@ -53,7 +59,7 @@ const packBody = (
  * (`resolveSplitRareTokens` in `pipeline.ts`).
  */
 export const packIds = (
-  tokenizer: IrodoriTokenizer,
+  tokenizer: IrodoriTextTokenizer,
   text: string,
   maxLength: number,
   where: string,
@@ -82,7 +88,7 @@ export const packIds = (
  * condition would be yet another condition, different even from no caption.
  */
 export const packCaptionIds = (
-  tokenizer: IrodoriTokenizer,
+  tokenizer: IrodoriTextTokenizer,
   caption: string,
   maxLength: number,
 ): Int32Array<ArrayBuffer> => {
