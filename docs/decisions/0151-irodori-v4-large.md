@@ -1,9 +1,10 @@
 # 0151: Irodori v4-Large — the T5Gemma 2 text backbone, the Gemma tokenizer and a Gemma-licensed distribution
 
 - Status: proposed (2026-11-14 — the recipe exports the seven text-side graphs, the tokenizer asset and the full-loop
-  goldens, writes the f16 / i8 series and assembles the distribution; the TS pipeline reads the tokenizer asset. The i4
-  series, the local mirror, the real-GPU e2e, the listening and the publication are pending — see Pending; the default
-  preset `i8` is provisional until the maintainer's listening, and the licence wording is unreviewed)
+  goldens, writes the f16 / i8 / i4 series and assembles the distribution; the TS pipeline reads the tokenizer asset;
+  the local mirror is built and the real-GPU e2e passes on it. The listening, the licence review and the publication
+  are pending — see Pending; the default preset `i8` is provisional until the maintainer's listening, and the licence
+  wording is unreviewed)
 - Date: 2026-11-14
 - Related: [0084](0084-gemma-tokenizer-chat.md) (the Gemma tokenizer asset; its addendum of 2026-11-14 adds the third
   post_processor shape) / [0149](0149-irodori-rare-token-split.md) (the rare-token split table; its addendum of
@@ -166,17 +167,41 @@ What is new for the stack:
   of ADR 0050 decision 6).
 - The i4 calibration corpus is checked to be disjoint from the model's own evaluation table (`calib_cases.py`), which
   for T5Gemma2 includes `caption-window`.
+- The i4 series (2026-11-14): GPTQ over 12 calibration cases × 40 steps took 89 minutes on the CPU; 336 linears inside
+  the blocks are i4 (192 in `dit`, 144 in `dit_context`) and 293 stay i8. Download sizes of the presets (the mirror's
+  card): `f16` 6.31 GiB, `i8` and `i8-a8` 3.17 GiB, `i8+dit4` 2.56 GiB.
+- Real-GPU e2e on the mirror (2026-11-14, `node-nvidia-geforce-rtx-3080-ti`; `e2e_irodori_v4_large_test.ts`,
+  `e2e_irodori_v4_large_wav_test.ts`, `e2e_irodori_ab_test.ts`): the seven f16 graphs differ from their torch goldens by
+  4.8e-7 to 1.2e-4 at worst; the full-loop latent differs from each series' own golden by 8.2e-4 (f16), 3.2e-4 (i8) and
+  1.2e-3 (i8+dit4) at \|z\| max about 5, with equal frame and forward counts in all nine cases; `i8-a8` differs from
+  `i8` on the step-1 latent by relRMS 2.76e-3 and 4.28e-3, and its dispatch census equals the census table (485 / 144
+  i8a8 GEMMs per run of `dit` / `dit_context`, no f32 linear). WAV sha256 rows are recorded for three cases on `f16`,
+  one of them passing a 459-token caption through the sliding window.
+- Node measurement of the presets (2026-11-14, RTX 3080 Ti, Node + Dawn; no reference, no caption, 60 forwards; the
+  median wall time of one `generate` call over seeds 42–45, after one warm-up generation; the VRAM figure is the
+  whole-GPU used memory sampled every 0.5 s over the run, 33 MiB of it idle):
+
+  | Preset    | 3.7 s of audio | 8.8 s  | 19.5 s | VRAM peak |
+  | --------- | -------------- | ------ | ------ | --------- |
+  | `f16`     | 10.8 s         | 14.3 s | 23.4 s | 4,001 MiB |
+  | `i8`      | 8.9 s          | 12.1 s | 20.9 s | 2,944 MiB |
+  | `i8-a8`   | 6.1 s          | 8.0 s  | 12.0 s | 3,034 MiB |
+  | `i8+dit4` | 8.4 s          | 11.5 s | 20.5 s | 2,138 MiB |
+
+  Every preset predicts the same frame counts on these three texts. The final latents against `f16`'s (same text and
+  seed, four seeds pooled): `i8` 17.8–18.5 dB, `i8-a8` 14.2–22.7 dB, `i8+dit4` 3.5–12.2 dB, at equal latent energy.
+  That figure is the divergence of 40 guided steps, not an audio-quality measure; the listening decides.
 - The distribution's legal texts follow the recipe's reading of Gemma Terms of Use §3.1, recorded as Unverified in
   `tools/export-recipes/irodori/THIRD_PARTY_NOTICES.md`; the maintainer reviews the wording before any upload.
 
 ## Pending
 
-- The i4 series (GPTQ calibration, running).
-- The local mirror `models/karume-irodori-v4-large/` (its build needs the i4 series).
-- The real-GPU e2e: per-graph and latent parity with tolerances derived per series, and WAV sha256 rows of this
-  machine; the goldens staged for the private test-asset dataset.
-- The Node measurement of the presets.
-- The maintainer's listening, which decides the default preset.
+- The maintainer's listening, which decides the default preset (material: five requests × seeds 42–45 × the four
+  presets under `outputs/ab/irodori-v4-large-2026-11-14/`).
+- The Playground page in a browser (built, not run).
+- The goldens are staged locally and not in the private test-asset dataset. The per-graph io goldens of the f16 series
+  are 4.83 GB, of which 4.18 GB is the 48 condition K/V inputs repeated in the seven `dit` cases (byte-identical to
+  `dit_context`'s outputs); whether the recipe stores them once is decided before the upload.
 - The maintainer's review of the licence wording, then the publication: the HF upload built with `--resolve-refs hf`
   against v4-small's main, the goldens in the test-asset dataset with the pin moved, the
   `irodori.SOURCES["irodori-v4-large"]` entry, and the Playground mount reading its repository name from that entry

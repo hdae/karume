@@ -14,7 +14,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Vision | BiRefNet (HR / Lucida) | `/birefnet` | done |
 | Vision | Depth Anything V2 | `/depth-anything` | done |
 | Vision | SigLIP 2 | `/siglip2` | done |
-| Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built, not yet run — its local mirror does not exist yet) |
+| Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |

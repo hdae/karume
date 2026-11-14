@@ -37,10 +37,12 @@ Node and Deno.
   [0151](decisions/0151-irodori-v4-large.md), proposed): done 2026-11-14 — the recipe exports the seven text-side
   graphs (the sliding window folded into a constant), the Gemma-format tokenizer asset, the full-loop goldens, the f16
   / i8 series, and assembles the distribution (`dist.py --pipeline irodori-large`, presets `f16` / `i8` / `i8-a8` /
-  `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset. Left, in
-  order: the i4 series (GPTQ, running), the local mirror, the real-GPU e2e (tolerances and sha256 rows), the Node
-  measurement of the presets, the maintainer's listening (the default `i8` is provisional until then), the maintainer's
-  review of the licence wording, then the publication (the release-runbook §0 items for this repository).
+  `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset; the i4
+  series (GPTQ), the local mirror, the real-GPU e2e (tolerances from measurement, sha256 rows, the `i8-a8` census) and
+  the Node measurement of the presets (ADR 0151, Consequences). Left, in order: the maintainer's listening (the default
+  `i8` is provisional until then), the Playground page in a browser, the maintainer's review of the licence wording,
+  then the publication (the release-runbook §0 items for this repository; the test-asset upload first settles whether
+  the `dit` io goldens store the condition K/V once).
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
