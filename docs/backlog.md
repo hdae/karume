@@ -7,9 +7,18 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.21.0 release (released 2026-11-14)
+## now — after the 0.22.0 release (released 2026-11-14)
 
-0.21.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.21.0 — fusion rules written outside the runtime
+0.22.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.22.0 — Irodori v4-Large: the Irodori pipeline
+reads a tokenizer asset in the shared Gemma format (ADR 0151)). On HF: `karume-irodori-v4-large` published for the first
+time (no FAILED row, the large parts at 31.7 MiB per term or more, 0 CAS lookups), pinned as
+`irodori.SOURCES["irodori-v4-large"]`; its goldens are in the test-asset dataset. No breaking change. By the maintainer's
+rulings of 2026-11-14 the full verify was not run for this model-only release (nothing under `packages/runtime`,
+`packages/hub` or `packages/kernel-checks` changed since 0.21.0): the core lane, the Irodori lane with the upstream-parity
+cases, the CPU tests of the shared Gemma tokenizer, the Playground suite and both pytest suites ran green, and no other
+family's e2e ran; the kernel-check page was not run either, and the record of 0.21.0 stands.
+
+Before it: 0.21.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.21.0 — fusion rules written outside the runtime
 and the per-family geometry profiles; Irodori's rare-token split (ADR 0149) and its MeanFlow model v4.1-small-mf (ADR
 0150); acquisition that falls back when a device cannot run 32-lane subgroups). On HF: `karume-irodori-v4-small` with the
 split table in its tokenizer asset, `karume-irodori-v4.1-small` rebuilt against it, `karume-irodori-v4.1-small-mf`

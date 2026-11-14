@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-14
+
 ### Added
 
 - `@karume/models` (Irodori): the pipeline reads a distribution whose tokenizer asset is in the shared Gemma format
@@ -2538,7 +2540,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/hdae/karume/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/hdae/karume/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/hdae/karume/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/hdae/karume/compare/v0.18.0...v0.19.0
