@@ -35,6 +35,7 @@ import {
   elementwiseValueWgsl,
   type FusionMatch,
   type FusionMatchContext,
+  type FusionRule,
   type NodePlan,
   sameShape,
   stagedF32,
@@ -383,7 +384,10 @@ const match = (
  * a bundler cannot prove pure (`Object.keys` included) would keep the module's import of
  * `@karume/runtime/kernel` in every bundle of `@karume/models`.
  */
-export const EW_CHAIN_RULE = /* @__PURE__ */ defineRule<EwChainMatch, typeof EW_CHAIN_RULE_NAME>({
+export const EW_CHAIN_RULE: FusionRule<typeof EW_CHAIN_RULE_NAME> = /* @__PURE__ */ defineRule<
+  EwChainMatch,
+  typeof EW_CHAIN_RULE_NAME
+>({
   name: EW_CHAIN_RULE_NAME,
   heads: /* @__PURE__ */ Object.keys(ARITY),
   contract: "E",

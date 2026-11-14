@@ -45,6 +45,7 @@ import {
   defineRule,
   elementwiseValueWgsl,
   type FusionMatch,
+  type FusionRule,
   type NodePlan,
   sameShape,
 } from "@karume/runtime/kernel";
@@ -307,37 +308,35 @@ const match = (nodes: readonly NodePlan[], index: number): VaeRmsSiluMatch | und
  * bundler cannot prove pure would keep the module's import of `@karume/runtime/kernel` in every
  * bundle of `@karume/models`.
  */
-export const VAE_RMS_SILU_RULE = /* @__PURE__ */ defineRule<
-  VaeRmsSiluMatch,
-  typeof VAE_RMS_SILU_RULE_NAME
->({
-  name: VAE_RMS_SILU_RULE_NAME,
-  heads: ["mul"],
-  contract: "E",
-  internals: "stayInChain",
-  match,
-  build: (matched) => {
-    const product = matched.chain[matched.chain.length - 1].outputs[0];
-    const floorBits = new Uint32Array(new Float32Array([matched.floor]).buffer)[0];
-    return {
-      binds: [matched.x, matched.scale, matched.gamma],
-      outputName: product.name,
-      outputShape: product.shape,
-      temps: [],
-      dispatches: [
-        {
-          key: key(matched.tail),
-          wgsl: () => wgsl(matched.tail),
-          // The mask is 0: the XOR changes no bit, it only stands between two operations.
-          params: new Uint32Array([matched.pixels, matched.channels, floorBits, 0]),
-          workgroups: {
-            kind: "gridStride",
-            // One workgroup per tile of pixels; the tile loop covers what the device limit cuts.
-            items: Math.ceil(matched.pixels / PIXELS_PER_WORKGROUP) * WORKGROUP_SIZE,
-            size: WORKGROUP_SIZE,
+export const VAE_RMS_SILU_RULE: FusionRule<typeof VAE_RMS_SILU_RULE_NAME> =
+  /* @__PURE__ */ defineRule<VaeRmsSiluMatch, typeof VAE_RMS_SILU_RULE_NAME>({
+    name: VAE_RMS_SILU_RULE_NAME,
+    heads: ["mul"],
+    contract: "E",
+    internals: "stayInChain",
+    match,
+    build: (matched) => {
+      const product = matched.chain[matched.chain.length - 1].outputs[0];
+      const floorBits = new Uint32Array(new Float32Array([matched.floor]).buffer)[0];
+      return {
+        binds: [matched.x, matched.scale, matched.gamma],
+        outputName: product.name,
+        outputShape: product.shape,
+        temps: [],
+        dispatches: [
+          {
+            key: key(matched.tail),
+            wgsl: () => wgsl(matched.tail),
+            // The mask is 0: the XOR changes no bit, it only stands between two operations.
+            params: new Uint32Array([matched.pixels, matched.channels, floorBits, 0]),
+            workgroups: {
+              kind: "gridStride",
+              // One workgroup per tile of pixels; the tile loop covers what the device limit cuts.
+              items: Math.ceil(matched.pixels / PIXELS_PER_WORKGROUP) * WORKGROUP_SIZE,
+              size: WORKGROUP_SIZE,
+            },
           },
-        },
-      ],
-    };
-  },
-});
+        ],
+      };
+    },
+  });
