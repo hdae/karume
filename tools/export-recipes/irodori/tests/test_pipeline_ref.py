@@ -1059,3 +1059,131 @@ class TestEulerReferenceSensitivity:
         worst = 1.0e-1
         assert worst <= amp * ip.EULER_NOISE_PER_AMP
         assert not ip.euler_reference_within_sensitivity(worst, amp)
+
+
+#: What `pipeline_cases` / `window_evidence` read from each backbone's embedded config.
+MODERNBERT_TEXT_CONFIG = {"model_type": "modernbert", "bos_token_id": 1}
+T5GEMMA2_TEXT_CONFIG = {"model_type": "t5gemma2", "bos_token_id": 2}
+
+#: The window of the tiny T5Gemma2 text config: `sliding_window_mask_function(8,
+#: is_causal=False)` keeps 4 to the left and 5 to the right, so its band cuts from T = 5.
+TINY_WINDOW = 8
+
+#: The v4-Large weight directory (the real-tokenizer test skips without it).
+V4_LARGE_DIR = ex.DEFAULT_MODEL_DIR.parent / "v4-large"
+
+
+def _tiny_t5gemma2_text_config() -> Any:
+    """A small T5Gemma2 text config with a real window, on the attention implementation the
+    loaded encoder runs (SDPA — the form `irodori.export.upstream_sliding_mask` builds for)."""
+    pytest.importorskip("transformers.models.t5gemma2.configuration_t5gemma2")
+    from transformers.models.t5gemma2.configuration_t5gemma2 import T5Gemma2TextConfig
+
+    config = T5Gemma2TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=16,
+        sliding_window=TINY_WINDOW,
+        layer_types=["sliding_attention"],
+    )
+    config._attn_implementation = "sdpa"
+    return config
+
+
+def _case_meta(text: int, caption: int) -> dict[str, Any]:
+    """The part of `run_case`'s meta that `window_evidence` reads (packed token counts)."""
+    return {"tokens": {"text": text, "caption": caption}}
+
+
+class TestPipelineCaseTable:
+    """The full-loop case table follows the checkpoint's text backbone (embedded config)."""
+
+    def test_the_small_models_keep_their_two_cases(self):
+        """MUST: ModernBERT's table is the existing one — another case would move the small
+        models' goldens (new files and a new key in meta.json)."""
+        table = ip.pipeline_cases(MODERNBERT_TEXT_CONFIG)
+
+        assert table is ip.PIPELINE_CASES
+        assert [case.name for case in table] == ["full", "no-ref"]
+
+    def test_a_t5gemma2_backbone_adds_the_window_case_after_the_shared_ones(self):
+        table = ip.pipeline_cases(T5GEMMA2_TEXT_CONFIG)
+
+        assert table[: len(ip.PIPELINE_CASES)] == ip.PIPELINE_CASES
+        assert [case.name for case in table[len(ip.PIPELINE_CASES) :]] == ["caption-window"]
+        assert len({case.name for case in table}) == len(table)
+        assert len({case.seed for case in table}) == len(table)
+
+    def test_the_window_case_runs_the_caption_cfg_without_a_reference(self):
+        """No reference (so its forwards differ from `full`) and a non-empty caption (so the
+        caption reaches the backbone and its CFG is on)."""
+        case = ip.T5GEMMA2_PIPELINE_CASES[-1]
+
+        assert case.reference is None
+        assert case.caption.strip()
+
+    def test_with_the_real_tokenizer_the_window_caption_is_cut_by_the_window_and_not_by_the_cap(
+        self,
+    ):
+        """On v4-Large's own tokenizer and embedded config: the caption is longer than the window
+        (transformers' mask cuts it) and fits `max_caption_len` whole (no body token is dropped),
+        while the shared cases stay inside the window."""
+        tokenizer_path = V4_LARGE_DIR / ex.TOKENIZER_FILE
+        if not (tokenizer_path.is_file() and (V4_LARGE_DIR / ex.CHECKPOINT_FILE).is_file()):
+            pytest.skip(f"no v4-Large weights under {V4_LARGE_DIR}")
+        pytest.importorskip("transformers.models.t5gemma2.configuration_t5gemma2")
+        from tokenizers import Tokenizer
+        from transformers import AutoConfig
+
+        text_config, model_config = ex.read_configs(V4_LARGE_DIR)
+        assert ex.is_t5gemma2(text_config)
+        raw = dict(text_config)
+        backbone_config = AutoConfig.for_model(raw.pop("model_type"), **raw).encoder.text_config
+        backbone_config._attn_implementation = "sdpa"
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        bos = int(text_config["bos_token_id"])
+        cap = int(model_config["max_caption_len"])
+        lengths = {}
+        for case in ip.pipeline_cases(text_config):
+            if not case.caption:
+                continue
+            ids = ip._packed_caption_ids(tokenizer, case.caption, bos, cap)
+            body = tokenizer.encode(case.caption.strip(), add_special_tokens=False).ids
+            assert ids.shape[1] == len(body) + 1, case.name
+            lengths[case.name] = int(ids.shape[1])
+
+        assert int(model_config["max_text_len"]) < lengths["caption-window"] <= cap
+        assert ip.window_cut_cases(backbone_config, lengths) == ["caption-window"]
+
+
+class TestWindowEvidence:
+    def test_a_modernbert_backbone_reads_no_window(self):
+        def unread() -> Any:
+            pytest.fail("the backbone config was read for a ModernBERT checkpoint")
+
+        assert ip.window_evidence(MODERNBERT_TEXT_CONFIG, unread, {"a": _case_meta(3, 0)}) is None
+
+    def test_the_cases_the_window_cuts_are_named(self):
+        """Both sides count: a long text and a long caption are each cut."""
+        config = _tiny_t5gemma2_text_config()
+        cases = {
+            "whole": _case_meta(4, 4),
+            "long-caption": _case_meta(3, 5),
+            "long-text": _case_meta(12, 0),
+        }
+
+        assert ip.window_evidence(T5GEMMA2_TEXT_CONFIG, lambda: config, cases) == [
+            "long-caption",
+            "long-text",
+        ]
+
+    def test_a_table_the_window_never_cuts_fails_loudly(self):
+        config = _tiny_t5gemma2_text_config()
+        cases = {"short": _case_meta(3, 0), "edge": _case_meta(4, 4)}
+
+        with pytest.raises(SystemExit, match="sliding window cuts"):
+            ip.window_evidence(T5GEMMA2_TEXT_CONFIG, lambda: config, cases)

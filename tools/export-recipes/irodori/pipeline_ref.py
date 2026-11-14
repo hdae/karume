@@ -86,7 +86,7 @@ import argparse
 import hashlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -110,6 +110,7 @@ from .distribution import (
     IRODORI_FLOW_RF,
     irodori_calib_floor,
 )
+from .tokenizer_ref import LONG_CAPTION
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -281,6 +282,81 @@ PIPELINE_CASES: tuple[PipelineCase, ...] = (
         seed=1235,
     ),
 )
+
+#: The full-loop cases of a checkpoint whose text backbone is **T5Gemma2** (v4-Large —
+#: `irodori.export.is_t5gemma2`): {@link PIPELINE_CASES} plus `caption-window`, a caption long
+#: enough for the backbone's sliding window to cut it (459 tokens with v4-Large's tokenizer; the
+#: window cuts from T 257 on). Without it the full loop would only ever run the backbone where the
+#: window leaves the sequence whole, and a host that dropped the window would still pass every
+#: golden. {@link window_cut_cases} checks on every run that some case really is cut.
+#:
+#: MUST: a table of its own, picked by {@link pipeline_cases} — the small models (ModernBERT)
+#: keep {@link PIPELINE_CASES}, so their goldens do not move. The caption reuses the voice
+#: description of the tokenizer goldens (`irodori.tokenizer_ref.LONG_CAPTION`, twice), the text
+#: that of `full`; no reference, so its CFG runs text + caption (3 forwards per step).
+T5GEMMA2_PIPELINE_CASES: tuple[PipelineCase, ...] = (
+    *PIPELINE_CASES,
+    PipelineCase(
+        name="caption-window",
+        why="no reference + a caption the backbone's sliding window cuts (beyond 256 tokens;"
+        " CFG on text and caption, 3 forwards per step)",
+        text=next(case.text for case in PIPELINE_CASES if case.name == "full"),
+        caption=LONG_CAPTION * 2,
+        reference=None,
+        seed=1236,
+    ),
+)
+
+
+def pipeline_cases(text_config: Mapping[str, Any]) -> tuple[PipelineCase, ...]:
+    """The full-loop case table of the checkpoint's text backbone ({@link PIPELINE_CASES} for
+    ModernBERT, {@link T5GEMMA2_PIPELINE_CASES} for T5Gemma2) — picked by the embedded config,
+    the same test as `irodori.export.golden_table`, never by the directory name."""
+    if ex.is_t5gemma2(text_config):
+        return T5GEMMA2_PIPELINE_CASES
+    return PIPELINE_CASES
+
+
+def window_cut_cases(backbone_config: Any, lengths: Mapping[str, int]) -> list[str]:
+    """The names of the cases whose backbone input the T5Gemma2 sliding window **cuts**.
+
+    `lengths` maps case name → the longest packed sequence the case sends through the backbone
+    (text or caption). Whether the window cuts is read from transformers' own mask for the model's
+    config (`irodori.export.upstream_sliding_mask`), not from a copied window width. MUST: the
+    caller fails when this is empty — otherwise no golden covers the windowed path.
+    """
+    return [
+        name
+        for name, length in lengths.items()
+        if not bool(ex.upstream_sliding_mask(backbone_config, length).all())
+    ]
+
+
+def window_evidence(
+    text_config: Mapping[str, Any],
+    backbone_config: Callable[[], Any],
+    cases: Mapping[str, Mapping[str, Any]],
+) -> list[str] | None:
+    """For a T5Gemma2 backbone, the cases whose backbone input the sliding window cuts (fails
+    loudly when there is none); `None` for every other backbone (nothing is read).
+
+    `cases` is the per-case meta of {@link run_case} (its `tokens` give the packed lengths);
+    `backbone_config` returns the text encoder's transformers config, read only for T5Gemma2.
+    """
+    if not ex.is_t5gemma2(text_config):
+        return None
+    lengths = {
+        name: max(int(meta["tokens"]["text"]), int(meta["tokens"]["caption"]))
+        for name, meta in cases.items()
+    }
+    cut = window_cut_cases(backbone_config(), lengths)
+    if not cut:
+        raise SystemExit(
+            f"no full-loop case reaches a length the T5Gemma2 sliding window cuts (longest"
+            f" backbone inputs {lengths}) — the windowed path of the backbone would be covered by"
+            " no golden"
+        )
+    return cut
 
 
 def t_schedule(num_steps: int) -> torch.Tensor:
@@ -1284,6 +1360,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     duration_predictor = ex.load_duration_predictor(source, state, config)
     dit = ex.load_dit(source, state, config, text_config)
+    # Every module has copied its weights out of the checkpoint dict by now; dropping it keeps a
+    # second full copy (13 GB for v4-Large) from staying resident through the loops.
+    del state
     # The checkpoint's own flow parameterization picks the loop and the upstream sampler compared
     # with (ADR 0150).
     flow = ex.dit_flow(dit)
@@ -1358,7 +1437,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     cases: dict[str, dict[str, Any]] = {}
     payloads: dict[str, dict[str, torch.Tensor]] = {}
-    for case in PIPELINE_CASES:
+    for case in pipeline_cases(text_config):
         tensors, meta = run_case(
             case,
             graphs,
@@ -1466,6 +1545,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         cases[case.name] = meta
         payloads[case.name] = tensors
 
+    # MUST: checked before a byte is written (the MUST of {@link T5GEMMA2_PIPELINE_CASES}).
+    window_cut = window_evidence(text_config, lambda: backbone.backbone.config, cases)
+
     out_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, int] = {}
     for name, tensors in payloads.items():
@@ -1523,6 +1605,10 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         "caps": caps,
         "cases": cases,
     }
+    if window_cut is not None:
+        # Added only for a T5Gemma2 backbone (no existing key moves): the cases whose backbone
+        # input the sliding window cuts.
+        meta_payload["windowCutCases"] = window_cut
     if restored is not None:
         # MUST: no existing key moves (the deno-side latent check reads them). This is the one
         # key added only for i4, covering the provenance that `fakeQuant`, which only speaks of
