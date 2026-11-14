@@ -33,6 +33,7 @@ from gemma_synthetic import tokenizer_json as _tokenizer_json
 from _shared import gemma_tokenizer as shared_tokenizer
 from _shared.gemma_tokenizer import (
     ASSET_FORMAT,
+    POST_BOS,
     POST_BOS_EOS,
     POST_NONE,
     SHARED_ENCODE_CASES,
@@ -71,6 +72,23 @@ class TestAcceptance:
         )
 
         assert compile_tokenizer(wrapped).post_processor == POST_BOS_EOS
+
+    def test_a_bos_only_post_processor_is_recognised(self) -> None:
+        """The T5Gemma 2 shape (`<bos>` then the sequence, no `<eos>`) — the text tokenizer of
+        Irodori-TTS v4-Large."""
+        prefixed = _tokenizer_json(
+            post_processor={
+                "type": "TemplateProcessing",
+                "single": [
+                    {"SpecialToken": {"id": "<bos>", "type_id": 0}},
+                    {"Sequence": {"id": "A", "type_id": 0}},
+                ],
+                "pair": [],
+                "special_tokens": {},
+            }
+        )
+
+        assert compile_tokenizer(prefixed).post_processor == POST_BOS
 
     @pytest.mark.parametrize(
         ("field", "value"),

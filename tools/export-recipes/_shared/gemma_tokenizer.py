@@ -72,10 +72,12 @@ SPEC_NORMALIZER = "replace-space-with-metaspace"
 SPEC_PRE_TOKENIZER = "split-space-merged-with-previous"
 SPEC_DECODER = "metaspace-byte-fallback-fuse"
 
-#: The two post_processor shapes (measured on the real assets — gemma4 passes through /
-#: EmbeddingGemma wraps in bos…eos).
+#: The post_processor shapes (measured on the real assets — gemma4 passes through /
+#: EmbeddingGemma wraps in bos…eos / T5Gemma 2, the text tokenizer of Irodori-TTS v4-Large,
+#: prepends bos only).
 POST_NONE = "none"
 POST_BOS_EOS = "bos-eos"
+POST_BOS = "bos"
 
 #: Spellings of the special tokens (common to both assets).
 UNK_TOKEN = "<unk>"
@@ -109,7 +111,7 @@ class CompiledTokenizer:
     unk_id: int
     bos_id: int
     eos_id: int
-    #: The post_processor shape ({@link POST_NONE} / {@link POST_BOS_EOS}).
+    #: The post_processor shape ({@link POST_NONE} / {@link POST_BOS_EOS} / {@link POST_BOS}).
     post_processor: str
 
 
@@ -157,7 +159,7 @@ def assert_supported(raw: Mapping[str, Any]) -> str:
 
 
 def _post_processor_kind(post: Any) -> str:
-    """Classify the post_processor as one of the two shapes (anything else fails).
+    """Classify the post_processor as one of the known shapes (anything else fails).
 
     Only `single` is examined — the path that builds pairs (`pair`) is outside this port's scope,
     and a different spelling there does not change the behaviour of single (the accepted set is
@@ -179,6 +181,8 @@ def _post_processor_kind(post: Any) -> str:
     ]
     if single == wrapped:
         return POST_BOS_EOS
+    if single == wrapped[:2]:
+        return POST_BOS
     raise UnsupportedTokenizerError(f"post_processor.single has an unknown shape ({single!r})")
 
 
