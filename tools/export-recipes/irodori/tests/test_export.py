@@ -1972,6 +1972,9 @@ class TestT5Gemma2Family:
         assert not ir.BackboneGraph(TinyBackboneHolder()).t5gemma2
 
     def test_the_masks_refuse_an_implementation_other_than_sdpa(self):
+        # `t5gemma2_masks` imports transformers; an environment without the family's dependency
+        # group (CI) SKIPs.
+        pytest.importorskip("transformers")
         config = SimpleNamespace(_attn_implementation="eager", sliding_window=TINY_WINDOW)
 
         with pytest.raises(ValueError, match="'eager'"):
@@ -2006,12 +2009,13 @@ class TestT5Gemma2GoldenTable:
 
 def _word_tokenizer(model_dir: Path, words: list[str]) -> None:
     """Write a whitespace word-level `tokenizer.json` (id 1 = `<bos>`) where `build_cases`
-    reads it."""
-    from tokenizers import Tokenizer, models, pre_tokenizers
+    reads it. `tokenizers` comes with the family's dependency group; a test that calls this
+    in an environment without it (CI) SKIPs."""
+    tokenizers = pytest.importorskip("tokenizers")
 
     vocab = {"<unk>": 0, "<bos>": 1, **{word: index + 2 for index, word in enumerate(words)}}
-    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab=vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
     path = model_dir / ir.TOKENIZER_FILE
     path.parent.mkdir(parents=True)
     tokenizer.save(str(path))
