@@ -97,7 +97,7 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    request the features when the adapter advertises them, silently run without otherwise; `true`
    keeps its rejecting meaning. The 32-lane known-answer check of ADR 0100 runs whenever the
    features were requested, in both modes: an adapter that advertises them and fails the check is
-   rejected rather than silently demoted (a broken advertisement is a defect to surface). The Wan family acquires with `"available"` when the preset's
+   rejected rather than silently demoted (a broken advertisement is a defect to surface; amended 2026-11-14 — see the addendum of that date: `"available"` now asks whether the device can run 32 lanes and falls back when it cannot). The Wan family acquires with `"available"` when the preset's
    `session` declares `"none"`; a default preset still declares no `gpuFeatures` (ADR 0128 C1
    holds — the feature is never required).
 6. **Wan2.2 gets a new practical preset `f16+dit8-a8-attn8-online`** with the same `weights` map as
@@ -407,3 +407,45 @@ MOSS-Image's shape, so **no built-in table carries the field** and nothing runs 
   CPU estimate with the tiled form, 19,072 B against 11,904 B at N = 8). Fault injections, each turning a test red:
   `vq` sized in N's form on the tiled route, the tiled kernel given N's producer, the facts ignoring the profile's
   field, the estimate ignoring the route's form.
+
+## Addendum (2026-11-14) — `subgroups: "available"` asks whether the device can run 32 lanes
+
+A phone browser (Playground, Anima and Gemma pages) failed `acquireGpu({ subgroups: "available" })` with
+`GpuValidationError: subgroups canary: The subgroup_size attribute (32) is not in the allowed range ([16, 16])`. The
+adapter advertised `subgroups`, `subgroup-size-control` and WGSL `subgroup_id`, so decision 5 requested the features;
+every subgroup kernel of the runtime is written for 32 lanes (`@subgroup_size(32)`), the device's subgroup size is fixed
+at 16, and the 32-lane known-answer check then failed at pipeline creation and took the whole acquisition with it. The
+maintainer's ruling of 2026-11-14: the question `"available"` answers is "can this device run the 32-lane form", not
+"does it advertise the features"; when it cannot, acquire without them (a 16-lane form may come later and is out of
+scope).
+
+- **What changed (amends decision 5's "rejected rather than silently demoted")**: under `"available"` the features are
+  requested only when the three capabilities are present **and** the adapter's reported subgroup size range
+  (`GPUAdapterInfo.subgroupMinSize` / `subgroupMaxSize`) admits 32, decided before the device is created. Where the range
+  is not reported (absent fields, or the zeros `readAdapterInfo` normalises them to), the features are requested and the
+  known-answer check decides: when it fails on the granted device, that device is destroyed and the acquisition takes a
+  fresh adapter and a device with every other request unchanged and without the subgroup features (an adapter gives one
+  device — a second `requestDevice` on a consumed adapter rejects, observed on Dawn). A validation error at the check's
+  pipeline creation (the refusal of 32 lanes) falls back silently; a known-answer mismatch or an internal error — a
+  device that claims 32 lanes and does not run them correctly — falls back and warns once on the device through
+  `GpuContext.warnOnce`, the channel of the dp4a notice (ADR [0128](0128-default-preset-original-weights.md) decision 5).
+  Device loss and out-of-memory errors still propagate.
+- **Why re-acquire instead of keeping the granted device**: every consumer reads the subgroup capability from the
+  device's enabled features (`GpuContext.features`: Session construction's `rmsNormReduce` / `linearGemvReduce`
+  checks, `attentionDeviceFacts`, the kernel checks, the playground records), and the raw device is public, so the only
+  context that cannot show "usable" subgroups on a device whose check failed is one whose device was created without
+  them. The fallback context has neither the features nor `subgroupLanesLinear`.
+- **`true` is unchanged in meaning and fails earlier**: a reported range that excludes 32 is rejected with
+  `GpuFeatureError` before the device is requested, naming the range and the 32-lane requirement; a failing check stays
+  an error.
+- **Invariants**: no other capability is dropped; requiredLimits, the error scopes, codegen and every reference number
+  are unchanged (the fallback device runs the portable forms, which decision 5 already chose on a device without the
+  features). The online attention's `sg32` / `wg` choice and its bit identity are unchanged.
+- **Checks**: `packages/runtime/tests/gpu_device_test.ts` — the planner with reported ranges ([32, 32], [4, 128], [16, 64]
+  request; [16, 16], [8, 16], [64, 64] do not under `"available"` and throw under `true`; an unreported range requests),
+  and `acquireGpu` on a fake GPU for each branch: a range admitting 32 (features granted, canary and probe run), [16, 16]
+  under `"available"` (nothing requested, no canary pipeline, no warning) and under `true` (`GpuFeatureError` naming
+  the range, no device requested), an unreported range whose canary fails validation (a second adapter and a device
+  without the features, the first destroyed, no warning), a known-answer mismatch (the same fallback and one warning),
+  and both failures under `true` (an error, the device destroyed, no second acquisition). Against the code before this
+  addendum six of them fail. The real-GPU subgroup tests on the RTX 3080 Ti (range [32, 32]) are unchanged.

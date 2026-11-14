@@ -105,8 +105,9 @@ export const sessionGpuFeatures = (
  * Builds `acquireGpu` options that request only the declared features — plus, when the effective
  * `SessionOptions` declare the online attention (`attentionScoreStorage: "none"`, ADR 0132
  * decision 5), `subgroups: "available"`: the kernel's subgroup form is faster and bit-identical
- * to its portable form, so the features are requested when the adapter advertises them and never
- * required (a default preset still declares no `gpuFeatures` — ADR 0128 C1).
+ * to its portable form, so the features are requested when the device can run the 32-lane form
+ * (`acquireGpu` decides — ADR 0132 addendum of 2026-11-14) and never required (a default preset
+ * still declares no `gpuFeatures` — ADR 0128 C1).
  */
 export const toAcquireGpuOptions = (
   spec: GpuFeaturesSpec | undefined,

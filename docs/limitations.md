@@ -2731,6 +2731,19 @@ Deno 2.9.6 did not provide the required features; on Node + Dawn (0.15) they are
 They are not included in the stored vocabulary of quant.session. The existing workgroup / parallel can be chosen again.
 For the numbers, target shapes and the range not yet accepted, see [ADR 0100](decisions/0100-rms-subgroup-reduction.md) and [0101](decisions/0101-linear-gemv-subgroup.md).
 
+## Subgroup forms are 32-lane only (devices with another fixed subgroup size run the portable forms)
+
+Every subgroup kernel — `rmsNormReduce: "subgroup32"`, `linearGemvReduce: "parallel-subgroup32"` and the online
+attention's `sg32` form — is written for 32 lanes (`@subgroup_size(32)`), and the acquisition's known-answer check is
+a 32-lane reduction. A device whose subgroup size cannot be 32 (phones with a fixed size of 16, for example) advertises
+the features but cannot run these forms. `acquireGpu({ subgroups: "available" })` acquires such a device without the
+subgroup features — decided from the adapter's reported subgroup size range (`GPUAdapterInfo.subgroupMinSize` /
+`subgroupMaxSize`) before the device is created, or, where no range is reported, from the known-answer check, after
+which the device is acquired again without them — and the online attention runs its portable `wg` form (bit-identical)
+or the three dispatches. `subgroups: true` rejects such a device with `GpuFeatureError` (ADR
+[0132](decisions/0132-online-int8-attention.md) addendum of 2026-11-14). Planned lifting: a 16-lane form, if one is
+measured and adopted; none is scheduled.
+
 ## The real-execution checks of the subgroup variants do not run automatically (the playground's /kernel-check page is the manual check)
 
 > Resolved in 0.15 (2026-10-16): on Node + Dawn the development machine exposes `subgroups`, so the real-execution cases below run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). The text below records the Deno-era state; the manual check still applies to a machine whose adapter lacks the features.

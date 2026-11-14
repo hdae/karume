@@ -247,6 +247,17 @@ measurements in `docs/research/`.
   by at most 92 KiB. The image embedder's estimate no longer
   takes `attentionRowBlockMaxBytes`, which its Session does not get either.
 
+### Fixed
+
+- `@karume/runtime`: `acquireGpu({ subgroups: "available" })` failed on devices whose subgroup size cannot be 32
+  (phones with a fixed size of 16: `GpuValidationError: subgroups canary: The subgroup_size attribute (32) is not in
+  the allowed range ([16, 16])`), taking the Playground pages and the online-attention presets down with it. Every
+  subgroup kernel is written for 32 lanes, so `"available"` now requests the subgroup features only when the adapter
+  also reports a subgroup size range that admits 32; where no range is reported and the 32-lane known-answer check
+  fails on the granted device, the device is acquired again without the features (a wrong answer also warns once on
+  the device). Such a device runs the portable forms, with the same numbers. `subgroups: true` rejects a reported
+  range that excludes 32 with `GpuFeatureError` before creating the device (ADR 0132 addendum of 2026-11-14).
+
 ### Breaking
 
 - `@karume/runtime` and `@karume/runtime/tune`: `GeometryProfile.i8a8.linear` is `readonly I8a8RowsRule[]`

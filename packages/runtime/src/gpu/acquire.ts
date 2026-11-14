@@ -13,10 +13,11 @@ import {
   describeDeviceLoss,
   GpuContext,
   GpuDeviceLostError,
+  RUNTIME_INTERNAL,
   SHADER_F16_FEATURE,
   TIMESTAMP_QUERY_FEATURE,
 } from "./context.ts";
-import { withPipelineScope } from "./error-scope.ts";
+import { GpuInternalError, GpuValidationError, withPipelineScope } from "./error-scope.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import {
   assertGeometryProfile,
@@ -441,23 +442,62 @@ const readWgslLanguageFeatures = (gpu: GPU): ReadonlySet<string> => {
 };
 
 /**
- * Checks the 3 capabilities needed for execution only when requested. `true` = required (a
- * shortfall is rejected — no silent fallback); `"available"` = requested when all three are present,
- * otherwise nothing is requested and nothing is rejected (ADR 0132 decision 5 amends ADR 0100
- * decision 1 — for code whose subgroup form is bit-identical to its portable form).
+ * The subgroup width every subgroup kernel of the runtime is written for (`@subgroup_size(32)` —
+ * ADR 0100). A device whose subgroup size cannot be 32 runs none of them.
+ */
+const SUBGROUP_LANES = 32;
+
+/**
+ * The adapter's subgroup size range as `GPUAdapterInfo` reports it. Both fields are optional here:
+ * an implementation that predates them leaves them undefined, and {@link readAdapterInfo}'s empty
+ * values carry 0 — either way "not reported".
+ */
+type SubgroupSizeRange = {
+  readonly subgroupMinSize?: number;
+  readonly subgroupMaxSize?: number;
+};
+
+/**
+ * Whether the reported range excludes 32 lanes, as `[min, max]` for the diagnostic (undefined when
+ * the range is not reported or admits 32 — an unreported range is decided by the canary).
+ */
+const rangeExcluding32 = (
+  range: SubgroupSizeRange | undefined,
+): readonly [number, number] | undefined => {
+  const min = range?.subgroupMinSize ?? 0;
+  const max = range?.subgroupMaxSize ?? 0;
+  if (min <= 0 || max <= 0) return undefined;
+  return min <= SUBGROUP_LANES && SUBGROUP_LANES <= max ? undefined : [min, max];
+};
+
+/**
+ * Checks the capabilities needed for execution only when requested: the features `subgroups` and
+ * `subgroup-size-control`, the WGSL language feature `subgroup_id`, and — when the adapter reports
+ * its subgroup size range — a range that admits 32 lanes (a device with another fixed size, such
+ * as a phone's [16, 16], advertises the features but refuses `@subgroup_size(32)` at pipeline
+ * creation). `true` = required (a shortfall is rejected — no silent fallback); `"available"` =
+ * requested when the device can run the 32-lane form, otherwise nothing is requested and nothing is
+ * rejected (ADR 0132 decision 5 amends ADR 0100 decision 1 — for code whose subgroup form is
+ * bit-identical to its portable form; the range check is the addendum of 2026-11-14).
+ *
+ * `subgroupSizes` absent = the range is not reported (the canary decides after the device is
+ * created).
  */
 export const planSubgroup32Features = (
   adapterFeatures: GpuFeatureSet,
   languageFeatures: ReadonlySet<string>,
   requested: boolean | "available" | undefined,
+  subgroupSizes?: SubgroupSizeRange,
 ): readonly string[] => {
   if (requested !== undefined && typeof requested !== "boolean" && requested !== "available") {
     throw new GpuFeatureError("subgroups must be a boolean or 'available'");
   }
+  const excluded = rangeExcluding32(subgroupSizes);
   if (requested === "available") {
     return adapterFeatures.has("subgroups") &&
       adapterFeatures.has("subgroup-size-control") &&
-      languageFeatures.has("subgroup_id")
+      languageFeatures.has("subgroup_id") &&
+      excluded === undefined
       ? ["subgroups", "subgroup-size-control"]
       : [];
   }
@@ -471,6 +511,14 @@ export const planSubgroup32Features = (
   }
   if (!languageFeatures.has("subgroup_id")) {
     throw new GpuFeatureError("subgroups: true requires the WGSL language feature 'subgroup_id'");
+  }
+  if (excluded !== undefined) {
+    throw new GpuFeatureError(
+      `subgroups: true was specified, but the adapter reports subgroup sizes [${excluded[0]}, ${excluded[1]}], ` +
+        `which exclude ${SUBGROUP_LANES}: the subgroup forms (rmsNormReduce: "subgroup32", linearGemvReduce: ` +
+        `"parallel-subgroup32") need ${SUBGROUP_LANES} lanes. Omit them and subgroups to run the portable forms ` +
+        `(subgroups: "available" acquires without the features on such a device)`,
+    );
   }
   return ["subgroups", "subgroup-size-control"];
 };
@@ -543,6 +591,53 @@ fn main(@builtin(local_invocation_index) lid: u32,
     // work is left behind.
     staging.destroy();
     out.destroy();
+  }
+};
+
+/** The `GpuContext.warnOnce` key of {@link subgroup32CanaryNotice} (the fact "this device's 32-lane subgroups failed the canary"). */
+const SUBGROUP32_CANARY_WARNING_KEY = "subgroups-canary-failed";
+
+/** Why a device acquired with `subgroups: "available"` cannot use the 32-lane forms. */
+type Subgroup32Unusable = {
+  /** The once-per-device notice, or undefined for a refusal that needs none. */
+  readonly notice: string | undefined;
+};
+
+/**
+ * The notice for a device that advertises the subgroup features, was granted them, and then failed
+ * the 32-lane canary in a way no reported range explains (a wrong known answer, an internal error).
+ * The wording follows the dp4a notice (`runtime/a8-emulation-warning.ts`) — what happened, and what
+ * makes it go away.
+ */
+const subgroup32CanaryNotice = (cause: Error): string =>
+  `@karume/runtime: this device advertises 32-lane subgroups, but the subgroups canary failed\n` +
+  `  (${cause.message}),\n` +
+  `  so acquireGpu({ subgroups: "available" }) acquired the device without the subgroup features.\n` +
+  `Kernels whose subgroup form is optional take their portable form (the same numbers, more slowly).\n` +
+  `Pass subgroups: true to make this an error instead.`;
+
+/**
+ * Runs the 32-lane canary for `subgroups: "available"` and returns why the device cannot use the
+ * subgroup forms, or undefined when it passed.
+ *
+ * - A validation error at pipeline creation = the implementation refuses `@subgroup_size(32)` (a
+ *   fixed size other than 32 behind an unreported range — the reported case never gets here). No
+ *   notice: "available" acquires without the features on such a device, as on one that does not
+ *   advertise them.
+ * - A known-answer mismatch ({@link GpuFeatureError}) or an internal error = the device claims 32
+ *   lanes and does not run them correctly. Not usable either, but surfaced once per device.
+ * - Anything else (device loss, out of memory) is not a statement about subgroups and propagates.
+ */
+const subgroup32Unusable = async (device: GPUDevice): Promise<Subgroup32Unusable | undefined> => {
+  try {
+    await assertSubgroup32Executes(device);
+    return undefined;
+  } catch (cause) {
+    if (cause instanceof GpuValidationError) return { notice: undefined };
+    if (cause instanceof GpuFeatureError || cause instanceof GpuInternalError) {
+      return { notice: subgroup32CanaryNotice(cause) };
+    }
+    throw cause;
   }
 };
 
@@ -654,13 +749,22 @@ export type AcquireGpuOptions = {
   readonly shaderF16?: boolean;
   /**
    * Request for 32-lane subgroups (default false, ADR 0100). Requires subgroups and
-   * subgroup-size-control, and WGSL's subgroup_id. Whenever the features are requested, a
-   * known-answer run is checked at acquisition and a mismatch is rejected.
+   * subgroup-size-control, WGSL's subgroup_id, and a subgroup size of 32: every subgroup kernel is
+   * written for 32 lanes, so an adapter that reports a subgroup size range excluding 32 (a phone's
+   * fixed 16, for example) cannot run them although it advertises the features. Whenever the
+   * features are requested, a 32-lane known-answer run is checked at acquisition.
    *
-   * - `true` = required. A shortfall is rejected ({@link GpuFeatureError}).
-   * - `"available"` = requested when the adapter has all three, otherwise the device is acquired
-   *   without them (no error — ADR 0132 decision 5, amending ADR 0100 decision 1). For code whose
-   *   subgroup form is bit-identical to its portable form, such as the online attention kernel
+   * - `true` = required. A shortfall — including a reported range that excludes 32 — is rejected
+   *   ({@link GpuFeatureError}) before the device is created; a failing known-answer run is
+   *   rejected too.
+   * - `"available"` = requested only when the device can run the 32-lane form, otherwise the device
+   *   is acquired without them (no error — ADR 0132 decision 5, amending ADR 0100 decision 1;
+   *   addendum of 2026-11-14). "Can run" is decided by the three capabilities and the reported
+   *   range before the device is created; where the range is not reported, or the known-answer run
+   *   fails on a device that was granted the features, the device is re-acquired without them (a
+   *   wrong answer or an internal error also warns once on the device). The returned context then
+   *   has neither the features nor `subgroupLanesLinear`. For code whose subgroup form is
+   *   bit-identical to its portable form, such as the online attention kernel
    *   (`attentionScoreStorage: "none"`), which picks its form from the device it gets.
    * - `false` = not requested (the same behavior as `undefined`).
    *
@@ -755,10 +859,92 @@ const requestAdapterOrThrow = async (
   return { gpu, adapter };
 };
 
+/** What {@link planDevice} decided for one adapter. */
+type DevicePlan = {
+  readonly limits: RequiredLimits;
+  readonly shaderF16: boolean;
+  readonly subgroupFeatures: readonly string[];
+  readonly requiredFeatures: readonly GPUFeatureName[];
+};
+
+/**
+ * Plans the device for `adapter`: requiredLimits, the injected geometry profile against them, and
+ * the conditional features (a shortfall is an exception — capabilities are never silently dropped
+ * outside the documented `subgroups: "available"`). ADR 0021 / 0028 / 0100.
+ */
+const planDevice = (
+  adapter: GPUAdapter,
+  adapterInfo: GPUAdapterInfo,
+  languageFeatures: ReadonlySet<string>,
+  options: AcquireGpuOptions,
+  geometryProfile: GeometryProfile | undefined,
+  subgroups: boolean | "available" | undefined,
+): DevicePlan => {
+  const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
+  // Guard order is structure (the copy guard in acquireGpu) → limits. Limits need the adapter, so a
+  // table passed directly is also checked here. The values checked are the planned limits (= what
+  // the device will have — including the reducing caps)
+  if (geometryProfile !== undefined) {
+    try {
+      assertGeometryProfileWithinLimits(geometryProfile, limits);
+    } catch (error) {
+      throw publicProfileError(
+        typeof options.geometryProfile === "function"
+          ? CALLBACK_PROFILE_LABEL
+          : DIRECT_PROFILE_LABEL,
+        error,
+      );
+    }
+  }
+  const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
+  const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);
+  const subgroupFeatures = planSubgroup32Features(
+    adapter.features,
+    languageFeatures,
+    subgroups,
+    adapterInfo,
+  );
+  return {
+    limits,
+    shaderF16,
+    subgroupFeatures,
+    requiredFeatures: [
+      ...REQUIRED_FEATURES,
+      ...(timestampQuery ? [TIMESTAMP_QUERY_FEATURE] : []),
+      ...(shaderF16 ? [SHADER_F16_FEATURE] : []),
+      // A WebGPU feature not in Deno's type definitions. Limited to the boundary where the
+      // adapter's advertisement was checked above.
+      ...(subgroupFeatures as readonly GPUFeatureName[]),
+    ],
+  };
+};
+
+/**
+ * Requests the planned device and checks what does not depend on subgroups (the granted limits,
+ * the shader-f16 canary). The device is destroyed on any failure.
+ */
+const requestPlannedDevice = async (adapter: GPUAdapter, plan: DevicePlan): Promise<GPUDevice> => {
+  const device = await adapter.requestDevice({
+    requiredFeatures: [...plan.requiredFeatures],
+    requiredLimits: plan.limits,
+  });
+  try {
+    assertLimitsGranted(plan.limits, device.limits);
+    // MUST: confirm by running, not by the list (the silent all-0 of denoland/deno#23125).
+    if (plan.shaderF16) await assertShaderF16Executes(device);
+  } catch (cause) {
+    device.destroy();
+    throw cause;
+  }
+  return device;
+};
+
 /**
  * Runs adapter acquisition → raising limits → device acquisition → validating the result.
  * Every failure along the way is an exception (a device with silently reduced capabilities is never
- * returned).
+ * returned) — the one documented exception is `subgroups: "available"` on a device that cannot run
+ * the 32-lane form, which is acquired without the subgroup features
+ * ({@link AcquireGpuOptions.subgroups}).
  */
 export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
   const source = options.geometryProfile;
@@ -780,63 +966,91 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   // broken table
   const geometryProfile =
     typeof source === "function" ? profileFromCallback(source(adapterInfo)) : givenProfile;
-  const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
-  // Guard order is structure (the copy guard above) → limits. Limits need the adapter, so a table
-  // passed directly is also checked here. The values checked are the planned limits (= what the
-  // device will have — including the reducing caps)
-  if (geometryProfile !== undefined) {
-    try {
-      assertGeometryProfileWithinLimits(geometryProfile, limits);
-    } catch (error) {
-      throw publicProfileError(
-        typeof source === "function" ? CALLBACK_PROFILE_LABEL : DIRECT_PROFILE_LABEL,
-        error,
-      );
-    }
-  }
-  // Conditional features are decided only here (a shortfall is an exception — capabilities are
-  // never silently dropped). ADR 0021 / 0028.
-  const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
-  const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);
   const languageFeatures = readWgslLanguageFeatures(gpu);
-  const subgroupFeatures = planSubgroup32Features(
-    adapter.features,
+  // Conditional features are decided only in planDevice (a shortfall is an exception — capabilities
+  // are never silently dropped outside the documented "available").
+  const plan = planDevice(
+    adapter,
+    adapterInfo,
     languageFeatures,
+    options,
+    geometryProfile,
     options.subgroups,
   );
-  const device = await adapter.requestDevice({
-    requiredFeatures: [
-      ...REQUIRED_FEATURES,
-      ...(timestampQuery ? [TIMESTAMP_QUERY_FEATURE] : []),
-      ...(shaderF16 ? [SHADER_F16_FEATURE] : []),
-      // A WebGPU feature not in Deno's type definitions. Limited to the boundary where the
-      // adapter's advertisement was checked above.
-      ...(subgroupFeatures as readonly GPUFeatureName[]),
-    ],
-    requiredLimits: limits,
-  });
+  const device = await requestPlannedDevice(adapter, plan);
   let subgroupLanesLinear = false;
+  let unusable: Subgroup32Unusable | undefined;
   try {
-    assertLimitsGranted(limits, device.limits);
-    // MUST: confirm by running, not by the list (the silent all-0 of denoland/deno#23125).
-    if (shaderF16) await assertShaderF16Executes(device);
-    if (subgroupFeatures.length > 0) await assertSubgroup32Executes(device);
-    // The online attention's subgroup form assumes the linear lane mapping (ADR 0132 decision 5):
-    // measured, never assumed — a device whose mapping differs runs the portable form.
-    subgroupLanesLinear = subgroupFeatures.length > 0 && (await probeSubgroupLaneMapping(device));
+    if (plan.subgroupFeatures.length > 0) {
+      if (options.subgroups === "available") unusable = await subgroup32Unusable(device);
+      else await assertSubgroup32Executes(device);
+      // The online attention's subgroup form assumes the linear lane mapping (ADR 0132 decision 5):
+      // measured, never assumed — a device whose mapping differs runs the portable form.
+      subgroupLanesLinear = unusable === undefined && (await probeSubgroupLaneMapping(device));
+    }
   } catch (cause) {
     device.destroy();
     throw cause;
   }
-  return new GpuContext(
+  if (unusable === undefined) {
+    return new GpuContext(
+      device,
+      adapterInfo,
+      plan.limits,
+      languageFeatures,
+      options.onDeviceLost,
+      geometryProfile,
+      subgroupLanesLinear,
+    );
+  }
+  // MUST NOT: hand out the granted device as if it lacked the features. Every consumer reads the
+  // subgroup capability from the device's enabled features (`GpuContext.features` — Session
+  // construction, the attention route, the kernel checks, the playground records), and the raw
+  // device is public, so the only context without "usable" subgroups is one whose device was
+  // created without them.
+  device.destroy();
+  return acquireWithoutSubgroups(gpu, options, languageFeatures, geometryProfile, unusable.notice);
+};
+
+/**
+ * The `"available"` fallback after the 32-lane canary failed on a device that was granted the
+ * subgroup features: a device acquired with every other request unchanged and without the subgroup
+ * features, plus the notice once on it when there is one.
+ *
+ * MUST: take a fresh adapter. An adapter gives one device — a second `requestDevice` on a
+ * "consumed" adapter rejects (WebGPU; observed on Dawn 2026-11-14: `OperationError: adapter is
+ * "consumed"`). The plan is made again for the new adapter (its limits, the geometry profile
+ * against them, the other features), so nothing granted is assumed from the first one.
+ * NOTE: the specification does not guarantee that `requestAdapter` with the same options picks the
+ * same physical adapter (the same caveat as {@link readAdapterLimits}). The profile a
+ * `geometryProfile` callback chose from the first adapter's information is kept (the callback is
+ * called once per `acquireGpu`); the context carries the information of the adapter its device
+ * came from.
+ */
+const acquireWithoutSubgroups = async (
+  gpu: GPU,
+  options: AcquireGpuOptions,
+  languageFeatures: ReadonlySet<string>,
+  geometryProfile: GeometryProfile | undefined,
+  notice: string | undefined,
+): Promise<GpuContext> => {
+  const { adapter } = await requestAdapterOrThrow(options.adapter, gpu);
+  const adapterInfo = readAdapterInfo(adapter);
+  const plan = planDevice(adapter, adapterInfo, languageFeatures, options, geometryProfile, false);
+  const device = await requestPlannedDevice(adapter, plan);
+  const context = new GpuContext(
     device,
     adapterInfo,
-    limits,
+    plan.limits,
     languageFeatures,
     options.onDeviceLost,
     geometryProfile,
-    subgroupLanesLinear,
+    false,
   );
+  if (notice !== undefined) {
+    context[RUNTIME_INTERNAL].warnOnce(SUBGROUP32_CANARY_WARNING_KEY, notice);
+  }
+  return context;
 };
 
 /**

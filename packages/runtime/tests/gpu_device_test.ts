@@ -754,6 +754,316 @@ test("subgroups 'available' requests the features only when all three are presen
   }
 });
 
+describe("planSubgroup32Features with the adapter's subgroup size range (every subgroup kernel is 32-lane)", () => {
+  const present = new Set(["subgroups", "subgroup-size-control"]);
+  const language = new Set(["subgroup_id"]);
+
+  it("requests the features when the reported range admits 32 lanes", () => {
+    for (const [min, max] of [
+      [32, 32],
+      [4, 128],
+      [16, 64],
+    ] as const) {
+      const range = { subgroupMinSize: min, subgroupMaxSize: max };
+      assertEquals(planSubgroup32Features(present, language, "available", range), [
+        "subgroups",
+        "subgroup-size-control",
+      ]);
+      assertEquals(planSubgroup32Features(present, language, true, range), [
+        "subgroups",
+        "subgroup-size-control",
+      ]);
+    }
+  });
+
+  it("leaves an unreported range (absent fields, or readAdapterInfo's zeros) to the canary", () => {
+    for (const range of [{}, { subgroupMinSize: 0, subgroupMaxSize: 0 }, undefined]) {
+      assertEquals(planSubgroup32Features(present, language, "available", range), [
+        "subgroups",
+        "subgroup-size-control",
+      ]);
+    }
+  });
+
+  it("'available' requests nothing on a range that excludes 32 (a phone's fixed 16), and does not throw", () => {
+    for (const [min, max] of [
+      [16, 16],
+      [8, 16],
+      [64, 64],
+    ] as const) {
+      assertEquals(
+        planSubgroup32Features(present, language, "available", {
+          subgroupMinSize: min,
+          subgroupMaxSize: max,
+        }),
+        [],
+      );
+    }
+  });
+
+  it("true rejects a range that excludes 32, naming the range and the 32-lane requirement", () => {
+    const error = assertThrows(
+      () =>
+        planSubgroup32Features(present, language, true, {
+          subgroupMinSize: 16,
+          subgroupMaxSize: 16,
+        }),
+      GpuFeatureError,
+    );
+    assert(error.message.includes("[16, 16]"), error.message);
+    assert(error.message.includes("need 32 lanes"), error.message);
+  });
+});
+
+/** What the subgroups canary observes on a {@link subgroupGpu} device. */
+type SubgroupCanaryOutcome =
+  /** The known answer, and the linear lane mapping in the probe. */
+  | "pass"
+  /** The canary's pipeline creation raises a validation error (the phone's refusal of 32 lanes). */
+  | "validation"
+  /** The canary runs and every lane reads 0 (a known-answer mismatch). */
+  | "mismatch";
+
+type FakeDeviceRecord = {
+  readonly requiredFeatures: readonly string[];
+  destroyed: boolean;
+  /** The WGSL of every pipeline created on the device (the canaries are the only ones here). */
+  readonly pipelines: string[];
+};
+
+/**
+ * A fake `GPU` whose adapters advertise the subgroup features and `info` (the subgroup size range
+ * when given; absent = an adapter without `info`, read as "not reported"). Every `requestAdapter`
+ * returns a fresh adapter (an adapter gives one device in WebGPU), and every device records the
+ * features it was created with, whether it was destroyed and the pipelines created on it. The
+ * device runs the canaries for real against the fake's readback: the subgroups canary's buffer
+ * holds 32896 on every lane (or 0 for "mismatch"), the lane-mapping probe's holds 1.
+ */
+const subgroupGpu = (parts: {
+  readonly info?: Partial<GPUAdapterInfo>;
+  readonly canary: SubgroupCanaryOutcome;
+}): {
+  readonly gpu: GPU;
+  readonly adapters: () => number;
+  readonly devices: readonly FakeDeviceRecord[];
+} => {
+  const limits = Object.fromEntries(REQUIRED_LIMIT_KEYS.map((key) => [key, 1 << 20]));
+  const devices: FakeDeviceRecord[] = [];
+  let adapters = 0;
+  const createDevice = (requiredFeatures: readonly string[]): GPUDevice => {
+    const record: FakeDeviceRecord = {
+      requiredFeatures: [...requiredFeatures],
+      destroyed: false,
+      pipelines: [],
+    };
+    devices.push(record);
+    let code = "";
+    let pops = 0;
+    const buffer = {
+      destroy: (): void => {},
+      unmap: (): void => {},
+      getMappedRange: (): ArrayBuffer => {
+        const canary = code.includes("subgroupAdd");
+        const value = canary ? (parts.canary === "mismatch" ? 0 : 32896) : 1;
+        return new Float32Array(256).fill(value).buffer;
+      },
+      mapAsync: (): Promise<void> => Promise.resolve(),
+    };
+    const pass = {
+      setPipeline: (): void => {},
+      setBindGroup: (): void => {},
+      dispatchWorkgroups: (): void => {},
+      end: (): void => {},
+    };
+    return Object.assign(fakeDevice({ features: requiredFeatures }), {
+      limits,
+      destroy: (): void => {
+        record.destroyed = true;
+      },
+      createBuffer: () => buffer,
+      createShaderModule: (descriptor: GPUShaderModuleDescriptor) => {
+        code = descriptor.code;
+        return {};
+      },
+      createComputePipeline: () => {
+        record.pipelines.push(code);
+        return { getBindGroupLayout: () => ({}) };
+      },
+      createBindGroup: () => ({}),
+      createCommandEncoder: () => ({
+        beginComputePass: () => pass,
+        copyBufferToBuffer: (): void => {},
+        finish: () => ({}),
+      }),
+      // withPipelineScope pops validation first; the canary is the device's first pipeline scope.
+      popErrorScope: (): Promise<GPUError | null> => {
+        pops += 1;
+        return Promise.resolve(
+          parts.canary === "validation" && pops === 1
+            ? ({
+                message: "The subgroup_size attribute (32) is not in the allowed range ([16, 16]).",
+              } as GPUError)
+            : null,
+        );
+      },
+    });
+  };
+  const gpu = {
+    wgslLanguageFeatures: new Set(["subgroup_id"]),
+    requestAdapter: (): Promise<GPUAdapter> => {
+      adapters += 1;
+      const adapter = {
+        limits,
+        features: new Set(["subgroups", "subgroup-size-control"]),
+        ...(parts.info === undefined ? {} : { info: parts.info }),
+        requestDevice: (descriptor: GPUDeviceDescriptor): Promise<GPUDevice> =>
+          Promise.resolve(createDevice([...(descriptor.requiredFeatures ?? [])])),
+      };
+      return Promise.resolve(adapter as unknown as GPUAdapter);
+    },
+  } as unknown as GPU;
+  return { gpu, adapters: () => adapters, devices };
+};
+
+/** An adapter `info` that reports the subgroup size range [min, max]. */
+const rangeInfo = (min: number, max: number): Partial<GPUAdapterInfo> => ({
+  vendor: "acme",
+  architecture: "",
+  device: "",
+  description: "",
+  subgroupMinSize: min,
+  subgroupMaxSize: max,
+  isFallbackAdapter: false,
+});
+
+/** Replaces `console.warn` around `body` and always restores it (returns the emitted text as is). */
+const captureWarningsAsync = async <T>(
+  body: () => Promise<T>,
+): Promise<{ readonly value: T; readonly warnings: readonly string[] }> => {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    return { value: await body(), warnings };
+  } finally {
+    console.warn = original;
+  }
+};
+
+describe("acquireGpu subgroups on a device that cannot run 32 lanes (falls back under 'available')", () => {
+  it("a reported range that admits 32: the features are requested, the canary passes and the context has them", async () => {
+    const fake = subgroupGpu({ info: rangeInfo(4, 128), canary: "pass" });
+    const gpu = await acquireGpu({ gpu: fake.gpu, subgroups: "available" });
+    try {
+      assertEquals(fake.adapters(), 1);
+      assertEquals(fake.devices.length, 1);
+      assertEquals(fake.devices[0]?.requiredFeatures, ["subgroups", "subgroup-size-control"]);
+      assert(gpu.features.has("subgroups"));
+      assert(gpu.features.has("subgroup-size-control"));
+      assertEquals(gpu.subgroupLanesLinear, true);
+      assertEquals(fake.devices[0]?.pipelines.length, 2, "the canary and the lane-mapping probe");
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("a reported [16, 16] under 'available': nothing is requested, no canary runs, the context has no subgroups", async () => {
+    const fake = subgroupGpu({ info: rangeInfo(16, 16), canary: "validation" });
+    const { value: gpu, warnings } = await captureWarningsAsync(() =>
+      acquireGpu({ gpu: fake.gpu, subgroups: "available" }),
+    );
+    try {
+      assertEquals(fake.adapters(), 1);
+      assertEquals(fake.devices.length, 1);
+      assertEquals(fake.devices[0]?.requiredFeatures, []);
+      assertEquals(fake.devices[0]?.pipelines, [], "no canary pipeline on the device");
+      assertEquals(gpu.features.has("subgroups"), false);
+      assertEquals(gpu.subgroupLanesLinear, false);
+      assertEquals(warnings, [], "a device that cannot run 32 lanes is not a defect to report");
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("a reported [16, 16] under true: GpuFeatureError naming the range, before any device is requested", async () => {
+    const fake = subgroupGpu({ info: rangeInfo(16, 16), canary: "validation" });
+    const error = await assertRejects(
+      () => acquireGpu({ gpu: fake.gpu, subgroups: true }),
+      GpuFeatureError,
+    );
+    assert(error.message.includes("[16, 16]"), error.message);
+    assert(error.message.includes("need 32 lanes"), error.message);
+    assertEquals(fake.devices.length, 0);
+  });
+
+  it("an unreported range whose canary pipeline fails validation under 'available': re-acquired without the features, silently", async () => {
+    const fake = subgroupGpu({ canary: "validation" });
+    const { value: gpu, warnings } = await captureWarningsAsync(() =>
+      acquireGpu({ gpu: fake.gpu, subgroups: "available" }),
+    );
+    try {
+      assertEquals(fake.devices.length, 2);
+      const [granted, plain] = fake.devices;
+      assertEquals(granted?.requiredFeatures, ["subgroups", "subgroup-size-control"]);
+      assertEquals(granted?.destroyed, true, "the device granted the features is not handed out");
+      assertEquals(plain?.requiredFeatures, []);
+      assertEquals(plain?.destroyed, false);
+      assertEquals(
+        fake.adapters(),
+        2,
+        "a fresh adapter for the second device (an adapter gives one device)",
+      );
+      assertStrictEquals(gpu.device.features.has("subgroups"), false);
+      assertEquals(gpu.features.has("subgroups"), false);
+      assertEquals(gpu.subgroupLanesLinear, false);
+      assertEquals(warnings, []);
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("a known-answer mismatch under 'available': re-acquired without the features, and the fact is warned once", async () => {
+    const fake = subgroupGpu({ info: rangeInfo(32, 32), canary: "mismatch" });
+    const { value: gpu, warnings } = await captureWarningsAsync(() =>
+      acquireGpu({ gpu: fake.gpu, subgroups: "available" }),
+    );
+    try {
+      assertEquals(fake.devices.length, 2);
+      assertEquals(fake.devices[0]?.destroyed, true);
+      assertEquals(fake.devices[1]?.requiredFeatures, []);
+      assertEquals(gpu.features.has("subgroups"), false);
+      assertEquals(gpu.subgroupLanesLinear, false);
+      assertEquals(warnings.length, 1);
+      assert(warnings[0]?.includes("subgroups canary"), warnings[0]);
+      assert(warnings[0]?.includes("does not match the known answer"), warnings[0]);
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("under true a canary failure stays an error (mismatch and validation alike) and the device is destroyed", async () => {
+    const mismatch = subgroupGpu({ canary: "mismatch" });
+    await assertRejects(
+      () => acquireGpu({ gpu: mismatch.gpu, subgroups: true }),
+      GpuFeatureError,
+      "does not match the known answer",
+    );
+    const validation = subgroupGpu({ canary: "validation" });
+    await assertRejects(
+      () => acquireGpu({ gpu: validation.gpu, subgroups: true }),
+      GpuValidationError,
+      "subgroups canary",
+    );
+    for (const fake of [mismatch, validation]) {
+      assertEquals(fake.adapters(), 1, "no second acquisition");
+      assertEquals(fake.devices.length, 1);
+      assertEquals(fake.devices[0]?.destroyed, true);
+    }
+  });
+});
+
 test("the subgroup lane-mapping probe is true only when every lane reports the linear mapping, and does not wait on a lost device", async () => {
   assertEquals(
     await probeSubgroupLaneMapping(canaryDevice({ mapped: Array<number>(256).fill(1) })),

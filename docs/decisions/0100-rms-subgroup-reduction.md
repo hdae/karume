@@ -82,3 +82,12 @@ the features were requested and still rejects a failing device. The acquisition 
 the device maps `local_invocation_index` linearly onto subgroups (`GpuContext.subgroupLanesLinear`);
 the online attention's subgroup form depends on it and is chosen only where it holds. `true` keeps its
 rejecting meaning; the three options of this ADR are unchanged.
+
+## Addendum (2026-11-14) — the 32-lane requirement is checked against the adapter's subgroup size range
+
+Every subgroup kernel of this ADR (and of ADR [0101](0101-linear-gemv-subgroup.md) and ADR
+[0132](0132-online-int8-attention.md)) is written for 32 lanes. `subgroups: true` now also rejects an adapter whose
+reported subgroup size range (`GPUAdapterInfo.subgroupMinSize` / `subgroupMaxSize`) excludes 32, with
+`GpuFeatureError` before the device is requested; a failing known-answer check stays an error. Under `"available"` such
+a device, or one whose check fails, is acquired without the features (ADR 0132 addendum of 2026-11-14, which amends the
+"still rejects a failing device" of the addendum above).
