@@ -168,7 +168,7 @@ export const requireMossPreset = (preset: MossPreset | undefined): MossPreset =>
 
 /**
  * The `acquireGpu` options a device for `preset` asks for (module doc): the online preset requests
- * subgroups when the adapter advertises them (the models-wide rule — `../session/gpu-features.ts`).
+ * subgroups when the device can run the 32-lane form (the models-wide rule — `../session/gpu-features.ts`).
  */
 export const mossAcquireGpuOptions = (preset: MossPreset): AcquireGpuOptions =>
   toAcquireGpuOptions(undefined, preset.dit);

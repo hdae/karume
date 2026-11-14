@@ -84,7 +84,7 @@ import {
 import { type DiagnosticsSink, useWanPipeline } from "./use-wan-pipeline";
 
 /**
- * Module constants (useGpu needs stable options): subgroups when the adapter has them (the
+ * Module constants (useGpu needs stable options): subgroups when the device can run the 32-lane form (the
  * online-attention presets use them), and GPU timestamps when the "GPU timing" switch is on.
  */
 const UNTIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };

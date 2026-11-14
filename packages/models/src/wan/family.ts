@@ -636,8 +636,8 @@ const buildWan = async (
   );
 
   await settleAbort(options.signal);
-  // The online attention preset (`attentionScoreStorage: "none"`) asks for subgroups when the adapter
-  // has them (ADR 0132 decision 5); a shared GPU runs the kernel's portable form or, on a 32 KiB
+  // The online attention preset (`attentionScoreStorage: "none"`) asks for subgroups when the device
+  // can run the 32-lane form (ADR 0132 decision 5); a shared GPU runs the kernel's portable form or, on a 32 KiB
   // device without subgroups, the three dispatches.
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures, sessionOptions)));
   const ownsGpu = options.gpu === undefined;

@@ -68,7 +68,7 @@ import { type ReadingDictionaryState, useReadingDictionary } from "./use-reading
 import { type DiagnosticsSink, useSbv2Pipeline } from "./use-sbv2-pipeline";
 
 /**
- * Module constants (useGpu needs stable options): subgroups when the adapter has them, and GPU
+ * Module constants (useGpu needs stable options): subgroups when the device can run the 32-lane form, and GPU
  * timestamps when the "GPU timing" switch is on.
  */
 const UNTIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };

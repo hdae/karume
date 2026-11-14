@@ -55,7 +55,7 @@ import {
 const RECORD_FORMAT = "karume-playground-attention-bench/2";
 
 /**
- * Module constants (useGpu needs stable options): subgroups when the adapter has them (the online
+ * Module constants (useGpu needs stable options): subgroups when the device can run the 32-lane form (the online
  * kernel's sg32 form), GPU timestamps when it lists timestamp-query.
  */
 const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = {

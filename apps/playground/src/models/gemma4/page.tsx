@@ -132,7 +132,7 @@ import {
   useGemmaPipeline,
 } from "./use-gemma-pipeline";
 
-/** Module constant (useGpu needs stable options): subgroups when the adapter has them. */
+/** Module constant (useGpu needs stable options): subgroups when the device can run the 32-lane form. */
 const GPU_OPTIONS: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
 
 /**

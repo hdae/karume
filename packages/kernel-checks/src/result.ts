@@ -92,8 +92,9 @@ export type CheckProgress = {
 
 /**
  * Whether the device can run the subgroup32 variants: the runtime requests `subgroups` and
- * `subgroup-size-control` only when the adapter has both and WGSL lists `subgroup_id`
- * (`acquireGpu({ subgroups: true | "available" })`), so a device without them cannot run the checks.
+ * `subgroup-size-control` only when the adapter has both, WGSL lists `subgroup_id` and the device
+ * can run 32 lanes (`acquireGpu({ subgroups: true | "available" })`), so a device without them
+ * cannot run the checks.
  */
 export const subgroup32Available = (
   gpu: Pick<GpuContext, "features" | "wgslLanguageFeatures">,

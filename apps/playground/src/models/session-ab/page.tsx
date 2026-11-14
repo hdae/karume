@@ -144,7 +144,7 @@ import {
 import { armRow, judgementView, recordedCounts } from "./view";
 
 /**
- * Module constant (useGpu needs stable options): subgroups when the adapter has them (the MOSS-Image
+ * Module constant (useGpu needs stable options): subgroups when the device can run the 32-lane form (the MOSS-Image
  * DiT's online attention takes its subgroup form with them, its portable form without).
  */
 const GPU_OPTIONS: GpuOptions = { subgroups: "available" };

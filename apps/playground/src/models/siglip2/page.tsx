@@ -64,7 +64,7 @@ import {
 } from "./request";
 
 /**
- * Module constants (useGpu needs stable options): subgroups when the adapter has them, and GPU
+ * Module constants (useGpu needs stable options): subgroups when the device can run the 32-lane form, and GPU
  * timestamps when the "GPU timing" switch is on.
  */
 const UNTIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
