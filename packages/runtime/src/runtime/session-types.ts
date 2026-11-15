@@ -275,6 +275,18 @@ export type I8a8Dot = "dp4a" | "emu";
 export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
 
 /**
+ * **A private surface** (not exported from mod.ts — the same convention as {@link I8A8_DOT}): lets the
+ * split-K GEMM (src/kernels/linear-splitk.ts) take the linears it is eligible for.
+ *
+ * The kernel is a `reorder` strategy (ADR 0152 decision 2): only the order of the additions differs
+ * from the reference kernel. A preset cannot declare `reorder` yet, and a public option naming one
+ * kernel is what that declaration replaces, so until then the strategy is admitted only here — by the
+ * kernel's own tests and by measurements. The memory estimate does not read this option: it counts
+ * such a linear as a plain one and misses the temporary of the partial sums.
+ */
+export const LINEAR_SPLIT_K: unique symbol = Symbol("karume.linearSplitK");
+
+/**
  * **A private, test-only surface** (not exported from mod.ts — the same convention as
  * {@link I8A8_DOT}).
  *
@@ -799,6 +811,8 @@ export type SessionOptions = {
    * wgslLanguageFeatures.
    */
   readonly [I8A8_DOT]?: I8a8Dot;
+  /** Private ({@link LINEAR_SPLIT_K}). The default is off: the reference kernel. */
+  readonly [LINEAR_SPLIT_K]?: boolean;
   /**
    * Test only ({@link ROW_BLOCK_SPLIT}). The default is the count determined statically from the
    * device's limit.

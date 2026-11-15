@@ -47,6 +47,7 @@ const DEFAULTS: LinearKnobs = {
   integerGemv: false,
   linearGemvPlanes: false,
   linearGemvRowsThreadTarget: undefined,
+  linearSplitK: false,
 };
 
 const facts = (
@@ -144,6 +145,35 @@ describe("with an option that asks for another kernel", () => {
   it("takes the byte-plane GEMV for the measured i2 shape under linearGemvPlanes, in place of the i2 GEMV", () => {
     assertEquals(idOf(LM_HEAD_I2, "i2"), "gemv-m1");
     assertEquals(idOf(LM_HEAD_I2, "i2", { knobs: { linearGemvPlanes: true } }), "planes-gemv");
+  });
+});
+
+describe("with the private option that allows the split-K GEMM", () => {
+  const splitK = { knobs: { linearSplitK: true } } as const;
+
+  it("cuts the reduction of an f32-stored weight into the most slices that leave 256 terms each", () => {
+    const choice = selectLinearStrategy(facts({ m: 16, n: 64, k: 1536 }, "f32", splitK));
+    assertEquals(choice, { id: "gemm-splitk", slices: 4 });
+    assertEquals(LINEAR_STRATEGIES["gemm-splitk"].level, "reorder");
+  });
+
+  it("leaves a short reduction, another storage and another compute on their kernels", () => {
+    assertEquals(idOf({ m: 16, n: 64, k: 448 }, "f32", splitK), "gemm-f32");
+    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "f16", splitK), "gemm-f32");
+    assertEquals(
+      idOf({ m: 16, n: 64, k: 1536 }, "f32", {
+        knobs: { linearSplitK: true, linearCompute: "f16" },
+      }),
+      "gemm-f16",
+    );
+  });
+
+  it("comes after the GEMV family: one row keeps the sequential GEMV", () => {
+    assertEquals(idOf({ m: 1, n: 64, k: 1536 }, "f32", splitK), "gemv-m1");
+  });
+
+  it("is not taken without the option", () => {
+    assertEquals(idOf({ m: 16, n: 64, k: 1536 }, "f32"), "gemm-f32");
   });
 });
 

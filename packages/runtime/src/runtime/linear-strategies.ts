@@ -40,6 +40,7 @@ import {
 } from "../kernels/linear-gemv.ts";
 import type { IntegerGemvVariant } from "../kernels/linear-gemv-integer.ts";
 import type { PlanesGemvVariant } from "../kernels/linear-gemv-planes.ts";
+import { type LinearSplitKSlices, linearSplitKSlices } from "../kernels/linear-splitk.ts";
 import { quantizeRowsPrologueEligible } from "../kernels/quantize-rows.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { numel } from "../ops.ts";
@@ -77,6 +78,7 @@ export type LinearStrategyId =
   | "gemv-parallel-staged"
   | "gemv-parallel-subgroup32"
   | "planes-gemv"
+  | "gemm-splitk"
   | "gemm-f32"
   | "gemm-f16";
 
@@ -112,6 +114,11 @@ export const LINEAR_STRATEGIES: Readonly<Record<LinearStrategyId, LinearStrategy
     admittedBy: 'linearGemvReduce: "parallel-subgroup32"',
   },
   "planes-gemv": { level: "reorder", evidence: "reorder", admittedBy: "linearGemvPlanes: true" },
+  "gemm-splitk": {
+    level: "reorder",
+    evidence: "reorder",
+    admittedBy: "the internal option LINEAR_SPLIT_K",
+  },
   "gemv-parallel-packed": {
     level: "approximation",
     evidence: "mirror",
@@ -133,6 +140,12 @@ export type LinearKnobs = {
   readonly integerGemv: boolean;
   readonly linearGemvPlanes: boolean;
   readonly linearGemvRowsThreadTarget: number | undefined;
+  /**
+   * Whether the split-K GEMM may take the linears it is eligible for (the internal option
+   * `LINEAR_SPLIT_K` of session-types.ts — no public option admits it until a preset can declare
+   * `reorder`, ADR 0152 decision 2).
+   */
+  readonly linearSplitK: boolean;
 };
 
 /** Everything the selection of one linear depends on. */
@@ -164,12 +177,14 @@ export const linearKnobsOf = (options: {
   readonly integerGemv?: boolean | undefined;
   readonly linearGemvPlanes?: boolean | undefined;
   readonly linearGemvRowsThreadTarget?: number | undefined;
+  readonly linearSplitK?: boolean | undefined;
 }): LinearKnobs => ({
   linearCompute: options.linearCompute ?? "f32",
   linearGemvReduce: options.linearGemvReduce ?? "sequential",
   integerGemv: options.integerGemv ?? false,
   linearGemvPlanes: options.linearGemvPlanes ?? false,
   linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget,
+  linearSplitK: options.linearSplitK ?? false,
 });
 
 /** The strategy chosen for one linear, with what its kernel is built from. */
@@ -177,6 +192,7 @@ export type LinearChoice =
   | { readonly id: "integer-gemv"; readonly variant: IntegerGemvVariant }
   | { readonly id: "i8a8" }
   | { readonly id: "planes-gemv"; readonly variant: PlanesGemvVariant }
+  | { readonly id: "gemm-splitk"; readonly slices: LinearSplitKSlices }
   | LinearGemvChoice
   | {
       readonly id: "gemm-f32" | "gemm-f16";
@@ -421,6 +437,16 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
         k % linearGemvUnit("i8") === 0
         ? gemvChoice(linear, "i8", undefined, packed)
         : undefined;
+    },
+  },
+  // The split-K GEMM (src/kernels/linear-splitk.ts): the same products added slice by slice. Only
+  // where the internal option allows it, for an f32-stored weight under f32 compute whose reduction
+  // is long enough to cut. It comes after the GEMV family, so the few-row linears keep their kernels.
+  {
+    choose: ({ knobs, weightStorage, compute, k }) => {
+      if (!knobs.linearSplitK || weightStorage !== "f32" || compute !== "f32") return undefined;
+      const slices = linearSplitKSlices(k);
+      return slices === undefined ? undefined : { id: "gemm-splitk", slices };
     },
   },
   // The default GEMM skeleton (the reference kernel under f32 compute).

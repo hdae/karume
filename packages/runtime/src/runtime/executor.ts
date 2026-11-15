@@ -165,7 +165,12 @@ export type {
   StorageDiagnostics,
   Tensor,
 } from "./session-types.ts";
-export { DISABLED_FUSION_RULES, I8A8_DOT, ROW_BLOCK_SPLIT } from "./session-types.ts";
+export {
+  DISABLED_FUSION_RULES,
+  I8A8_DOT,
+  LINEAR_SPLIT_K,
+  ROW_BLOCK_SPLIT,
+} from "./session-types.ts";
 /**
  * Opaque reference to a lent weight (ADR 0096 decision 2). Public **as a type only** — the entry
  * point is {@link Session.exportWeight} alone; constructing it directly would bypass the

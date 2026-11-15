@@ -205,6 +205,8 @@ export type RecipeBuilderContext = {
    * session-build.ts. The executor's {@link SessionState} decides the default).
    */
   readonly linearI8a8Dot: I8a8Dot;
+  /** Whether the split-K GEMM may be selected (the private `LINEAR_SPLIT_K` of session-types.ts). */
+  readonly linearSplitK: boolean;
   readonly attentionI8a8Dot: I8a8Dot;
   /**
    * Forcing the number of row blocks (**test only** — the executor's `ROW_BLOCK_SPLIT`). The
@@ -295,6 +297,7 @@ export type RecipeBuildFace = {
     | "rmsNormReduce"
     | "linearGemvRowsThreadTarget"
     | "linearI8a8Dot"
+    | "linearSplitK"
     | "attentionI8a8Dot"
     | "rowBlockSplit"
     | "attentionRowBlockMaxBytes"

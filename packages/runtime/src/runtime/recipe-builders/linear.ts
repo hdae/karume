@@ -7,7 +7,7 @@
  * {@link RecipeBuildFace}.
  */
 
-import type { BindingSource, StepRecipeBuilder } from "../recipe.ts";
+import type { BindingSource, StepRecipeBuilder, TempSource } from "../recipe.ts";
 import {
   EMBEDDING_SCALE_BINDING,
   EMBEDDING_WORKGROUP_SIZE,
@@ -67,6 +67,7 @@ import {
 } from "../../kernels/linear-gemv-planes.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
 import type { LinearPrologue, PackedActivations } from "../fusion.ts";
+import { type LinearProgram, linearSplitKProgram, type ProgramOperand } from "../linear-program.ts";
 import { type LinearGemvChoice, selectLinearStrategy } from "../linear-strategies.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
@@ -239,6 +240,21 @@ export const buildLinear = async (
     case "planes-gemv":
       await buildLinearPlanesGemv(face, step, binds, outs, builder, choice.variant, m, n, k);
       return;
+    case "gemm-splitk":
+      await emitLinearProgram(
+        face,
+        binds,
+        outs,
+        builder,
+        linearSplitKProgram(
+          `linear split-K [${x.join(",")}] × [${weight.join(",")}]`,
+          m,
+          n,
+          k,
+          choice.slices,
+        ),
+      );
+      return;
     case "gemm-f32":
     case "gemm-f16": {
       const { v4, compute, groupSize } = choice;
@@ -287,6 +303,65 @@ export const buildLinear = async (
         choice.id === "gemv-parallel-packed" ? packedScaleOf(packed, choice.id) : undefined,
       );
   }
+};
+
+/**
+ * Turns a strategy's {@link LinearProgram} into the step's dispatches: the temporaries are allocated
+ * before the first dispatch and released after the last, each dispatch's pipeline comes from the
+ * Session's cache under its key, and its grid is checked against the device limit.
+ *
+ * MUST: a temporary larger than the device's storage binding limit fails here — binding it would be a
+ * validation error at the first run, with nothing naming the linear.
+ */
+const emitLinearProgram = async (
+  face: RecipeBuildFace,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+  program: LinearProgram,
+): Promise<void> => {
+  const { limits } = face.state.gpu;
+  const limit = limits.maxComputeWorkgroupsPerDimension;
+  const temps: TempSource[] = program.temps.map((byteLength) => {
+    if (byteLength > limits.maxStorageBufferBindingSize) {
+      throw new ExecutionError(
+        `${program.where}: a temporary of ${byteLength} bytes exceeds the device's storage binding limit ` +
+          `${limits.maxStorageBufferBindingSize}`,
+      );
+    }
+    return builder.allocTemp(byteLength);
+  });
+  const sourceOf = (operand: ProgramOperand): BindingSource => {
+    if (operand === "x") return binds[0];
+    if (operand === "weight") return binds[1];
+    if (operand === "bias") return binds[2];
+    if (operand === "out") return outs[0];
+    return temps[operand.temp];
+  };
+  for (const { key, wgsl, params, operands, grid } of program.dispatches) {
+    const { pipeline, layout, roles } = await face.state.cache.get(key, wgsl());
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      roles,
+      params: face.writeParams(params, PARAMS_UNIFORM_USAGE),
+      bindings: operands.map((operand, index) => ({
+        binding: index + 1,
+        source: sourceOf(operand),
+      })),
+      workgroups:
+        grid.kind === "tiled"
+          ? [
+              tiledWorkgroups(grid.axes[0].items, grid.axes[0].tile, limit, program.where),
+              tiledWorkgroups(grid.axes[1].items, grid.axes[1].tile, limit, program.where),
+              tiledWorkgroups(grid.axes[2].items, grid.axes[2].tile, limit, program.where),
+            ]
+          : [gridStrideWorkgroups(grid.items, grid.workgroupSize, limit), 1, 1],
+    });
+  }
+  // MUST: return the temporaries at the node boundary (the arena's invariant), last allocated first.
+  for (const temp of temps.toReversed()) builder.releaseTemp(temp);
 };
 
 /**

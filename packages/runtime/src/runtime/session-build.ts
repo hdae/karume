@@ -81,6 +81,7 @@ import {
   DISABLED_FUSION_RULES,
   I8A8_DOT,
   type I8a8Dot,
+  LINEAR_SPLIT_K,
   type LinearGemvReduce,
   type RmsNormReduce,
   ROW_BLOCK_SPLIT,
@@ -530,6 +531,8 @@ export type SessionState = {
    * hardware, Metal included — docs/known-issues.md).
    */
   readonly linearI8a8Dot: I8a8Dot;
+  /** Whether the split-K GEMM may be selected (private — {@link LINEAR_SPLIT_K}; off by default). */
+  readonly linearSplitK: boolean;
   /**
    * The i8a8 integer dot-product variant **of fused attention** (①QK / ③PV). The default is decided
    * by a per-device run-time canary (src/gpu/attention-dp4a-canary.ts — the primary decision is the
@@ -665,6 +668,7 @@ const snapshotSessionOptions = (
   expertCache: copyExpertCache(requested.expertCache),
   fusionRules: copyFusionRules(requested.fusionRules),
   [I8A8_DOT]: requested[I8A8_DOT],
+  [LINEAR_SPLIT_K]: requested[LINEAR_SPLIT_K],
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
   [DISABLED_FUSION_RULES]: copyDisabledFusionRules(requested[DISABLED_FUSION_RULES]),
 });
@@ -1407,6 +1411,7 @@ export const buildSessionState = async (
     // integers), so it is decided once here as a path choice rather than a feature detection (the
     // docstring of src/kernels/linear-i8a8.ts).
     linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),
+    linearSplitK: options[LINEAR_SPLIT_K] === true,
     // Attention decides not by enumeration but by **the run-time canary's verdict** (`attentionI8a8Dot`
     // above — the comparison with the known answer) (the original rationale, a mismatch between
     // variants on M2, has been withdrawn — the doc of SessionState.attentionI8a8Dot).
