@@ -101,11 +101,10 @@ maintainer's ruling of 2026-11-06).
 - **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
   [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted, nothing below is built; the
   maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
-  1. **Groundwork that changes no behaviour.** The link check becomes a core-lane test and learns the `SPEC:` marker; the
-     approved deletions (release history in `.claude/ACTIVE_DESIGN.md`, the removed-API history sections of
-     `limitations.md`, the sections of `known-issues.md` for retired environments); `CLAUDE.md` names `docs/spec/` as the
-     source of truth; the `deno-*` sha256 rows, which no lane can check, are deleted (the maintainer, 2026-11-15). Check:
-     the link test and the language gate are green.
+  1. *(Landed 2026-11-15: the link check in the core lane with the `SPEC:` marker, the approved deletions, `CLAUDE.md`,
+     the `deno-*` rows.)* Left from it: the sections of `known-issues.md` for the Intel Arc B570 (the OOM check), Deno's
+     `GPUDevice.destroy()` and the Pixel load failure stay until the twelve source comments and the backlog item that cite
+     them say what they need themselves.
   2. **Verification, first part.** Wan's rows at fewer frames (new case IDs, rows re-recorded); the verification cache's
      recording stage (what each file compiles and reads, predictions counted while everything still runs); rows stored
      with the kernel-set fingerprint and their artifact. Check: no existing row moves except the re-recorded Wan cases.
