@@ -98,6 +98,38 @@ maintainer's ruling of 2026-11-06).
 
 ## later
 
+- **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
+  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted, nothing below is built; the
+  maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
+  1. **Groundwork that changes no behaviour.** The link check becomes a core-lane test and learns the `SPEC:` marker; the
+     approved deletions (release history in `.claude/ACTIVE_DESIGN.md`, the removed-API history sections of
+     `limitations.md`, the sections of `known-issues.md` for retired environments); `CLAUDE.md` names `docs/spec/` as the
+     source of truth; the `deno-*` sha256 rows, which no lane can check, are deleted (the maintainer, 2026-11-15). Check:
+     the link test and the language gate are green.
+  2. **Verification, first part.** Wan's rows at fewer frames (new case IDs, rows re-recorded); the verification cache's
+     recording stage (what each file compiles and reads, predictions counted while everything still runs); rows stored
+     with the kernel-set fingerprint and their artifact. Check: no existing row moves except the re-recorded Wan cases.
+  3. **Kernel structure.** The op spec object; the strategy registry for `linear` and attention; one new kernel written
+     through the registry, modelled on a published WebGPU kernel collection, as the registry's test. Check: no pipeline
+     key and no row moves in the refactors.
+  4. **Requirement levels.** The declaration in presets and the manifest, its two scopes, selection within a level, the
+     rule for fusions that span ops; the options that name one kernel leave the public surface (breaking); the runtime's
+     regression corpus. The ADR 0147 follow-ups below that survive (items 1, 2, 4 and the derived applicability) land
+     here.
+  5. **Verification, second part.** The cache for changes outside the runtime; then, with the corpus in place, the
+     runtime's host code leaves the key of the models' e2e files and kernel changes re-run only the files that compile
+     them; the release rule changes to "an uncached full run when the environment changed".
+  6. **The harness.** Entries, the write-back of results, the public build with synthetic-tensor benchmarks; per-adapter
+     shape tables generated from its output; the Playground's measurement and check pages are removed.
+  7. **Weights from outside the exporter.** The safetensors reader and name maps, quantization at load with the block
+     sha256 test, LoRA merged before quantization (Anima, then Wan2.2); example apps per model on request. GGUF is
+     deferred.
+  - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
+    `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
+  - **Low priority**: the error messages that cite an ADR clause (about 125 string literals under `packages/*/src`) are
+    reworded; two tests assert such text.
+  - **To decide**: the open points of ADR 0152.
+
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
   accepted, nothing below is built; the order among them and against the other items is the maintainer's)**. Each code item is its
   own commit with its behaviour tests and states its blast radius:
@@ -113,7 +145,8 @@ maintainer's ruling of 2026-11-06).
     2. The same keys leave the manifest vocabulary (`SESSION_KEYS`, `SessionSpec`, `parseSession`) and the recipes' quant
        tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`); the mirrors are regenerated and `verify_dist` is green; the
        re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead (decision 5).
-    3. The Session canary for every default-on fusion: fused against unfused on a canary input as u32, a mismatch warns and
+    3. *(Not built — ADR 0152 decision 3 limits device probes to capabilities the adapter's report cannot settle.)* The
+       Session canary for every default-on fusion: fused against unfused on a canary input as u32, a mismatch warns and
        drops the rule on that device, memoised per device, with a fault-injection test (decision 9). The input size is
        decided and the start-up cost measured at implementation, and the cost is reported to the maintainer.
     4. The derived applicability check at admission replaces the twelve `FamilySessionPolicy` tables: one pure runtime
@@ -635,6 +668,11 @@ maintainer's ruling of 2026-11-06).
   gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
 
 ## parked (with revival conditions)
+
+- **Quantized weight delta as a way to ship or store a LoRA** (on hold, the maintainer 2026-11-15). The integer difference
+  between `Q(W + ΔW)` and the distributed `Q(W)`; the measurement is
+  [research 2026-11-15](research/2026-11-15-quantized-weight-delta.md). Too heavy as a replacement for a LoRA file.
+  Revival = a need to keep a converted int8 container per LoRA. Not measured then: a real LoRA file, `int4`.
 
 - **Gemma 4 MTP (speculative decoding with the official drafter)**: the source of truth for the current state and the remaining items is the K-20 row of [perf-ledger](perf-ledger.md)
   (remaining = M2 warm re-measurement of exploreMax 512, ⑥ k=7 + 3-value gate (awaiting a ruling), attribution of ⑩, 4-C docs). The history of stages 1 to 4-B and K-21 / H-15 is in

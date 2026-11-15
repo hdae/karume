@@ -22,6 +22,12 @@
 | practical profile ◆ | 実用プロファイル | 見送り（同上）。実装されれば既定で、形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない。今の既定の実用側は manifest の実用プリセット（`session` の束） | 実用層・実用経路 | 同上 |
 | reference profile ◆ | 参照プロファイル | 見送り（同上）。opt-in の knob の値として予定していた「省略値の束（自動選択なし）」。今はその状態が runtime の既定そのもの = 参照経路（次の行） | 参照層・既定経路 | 同上 |
 | reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0147 決定 1・6 |
+| requirement level △ | 要求水準 | プリセットが計算ごとに宣言する「基準カーネルからどれだけ離れてよいか」。`exact`（この機で基準カーネルと同じビット）/ `reorder`（加算順が違ってよい・op の帯の内）/ 名前つきの近似。未実装 | E / C / R / Q の 1 文字 | ADR 0152 決定 2 |
+| reference kernel △ | 基準カーネル | op ごとに 1 つ、ビットを凍結するカーネル。`exact` で走る。未実装の呼び分け（今は参照経路のカーネル） | — | ADR 0152 決定 3 |
+| strategy registry △ | 戦略の登録簿 | op ごとのカーネルの実装戦略の一覧。recipe・融合・見積もり・census・検証キャッシュが同じものを読む。未実装 | — | ADR 0152 決定 8 |
+| regression corpus △ | 回帰コーパス | 実モデルのグラフ構造 + 合成の重み + 縮小した形状で、runtime が自分の戦略を `exact` と比べる集合。未実装 | — | ADR 0152 決定 5 |
+| kernel-set fingerprint △ | カーネルの集合の指紋 | テストケースがコンパイルした WGSL のハッシュ。sha の参照値に添え、検証キャッシュのキーにも使う。未実装 | — | ADR 0152 決定 4・6 |
+| verification cache △ | 検証キャッシュ | 環境・データ・コードのキーが変わっていないテストファイルの結果を再利用する仕組み。「cached（未実行）」と別の状態で表示。未実装 | — | ADR 0152 決定 6 |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
 | q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み）、各モデルに QAT の MTP drafter が付く。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
 | mobile QAT line △ | モバイル QAT 系 | Gemma 4 の配布 `karume-gemma4-qat-mobile`（旧 `karume-gemma4-qat`）。公式モバイル版の固定 INT2 / INT4 / INT8 と SRQ を保つ E2B / E4B。契約は `gemma4-qat/1` | 「QAT 版」だけで呼ぶ（2 系統あるので取り違える） | ADR 0097 追記 10 |
