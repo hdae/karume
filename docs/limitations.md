@@ -625,6 +625,19 @@ assets on Chrome gives a wall time of 10–11 ms/token.
   on Chrome's wall time and GPU time. Root cause and measurements in the
   [decode speed investigation](research/2026-09-19-qat-speed-recon.md) §3.2.
 
+## On Deno, a destroyed device keeps its VRAM until the garbage collector runs (external constraint)
+
+Deno's `GPUDevice.destroy()` (2.9.6, wgpu-core 29) marks the device invalid and releases nothing: the device and what it
+holds (allocator blocks, driver pools, query sets) are returned when V8 collects the device's wrapper. An application
+that destroys a `GpuContext` and acquires a new one in the same process — recovery from a device loss, for example —
+therefore runs the new device with less VRAM until that collection happens. Measured on an Intel Arc B570 (2026-10-05):
+a destroyed device that had done nothing kept 0.19 GiB, and destroyed devices of a video model's test kept 0.64 GiB and
+1.54 GiB while the next case ran.
+
+- Karume has no remedy: when the collection runs is V8's behaviour, and a `GpuContext` that is still reachable is never
+  collected. Dropping every reference to the destroyed context is what an application can do.
+- How destroyed devices behave on other drivers under Deno, and under Node + Dawn or a browser, was not measured.
+
 ## Execution paths and eligibility of compressed storage — VRAM shrinks only for eligible weight slots
 
 Every codec in the codec ledger can be executed (bf16 was "declaration accepted, execution fails
