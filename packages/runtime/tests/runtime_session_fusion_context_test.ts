@@ -25,9 +25,9 @@ const outsideTheType = <T>(value: unknown): T => value as T;
 
 /** The knobs of a Session built with no options (the defaults construction fills in). */
 const DEFAULT_KNOBS: SessionFusionKnobs = {
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
+  fuseRmsNormAdd: true,
+  fuseLinearStaticQuantize: true,
+  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: false,
   integerGemv: false,
   linearGemvPlanes: false,
@@ -68,7 +68,7 @@ describe("sessionFusionContext", () => {
   it("projects the weight layouts only under the knobs whose decisions read them, every resident storage but i4f16", () => {
     assertEquals(contextOf({}).weightLayouts, undefined, "no reader");
     for (const [label, knobs] of [
-      ["linear→SRQ", { fuseLinearStaticQuantize: true }],
+      ["linear→SRQ", { linearGemvReduce: "parallel" }],
       ["packed activations", { packedStaticQuantize: true }],
       ["linear prologue", { linearCompute: "a8" }],
     ] as const) {
@@ -85,7 +85,7 @@ describe("sessionFusionContext", () => {
   });
 
   it("lists every weight not resident as f32 for the external rules, whatever the knobs: each stored form but f32, borrowed and pooled", () => {
-    for (const knobs of [{}, { fuseLinearStaticQuantize: true }] as const) {
+    for (const knobs of [{}, { linearGemvReduce: "parallel" }] as const) {
       assertEquals(
         contextOf(knobs).weightsNotF32,
         new Set(["w_i8", "w_i4", "w_bf16", "w_expert", "w_borrowed", "w_pooled"]),

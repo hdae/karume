@@ -437,7 +437,7 @@ test("the build is determined by the options at entry, and rewriting them mid-bu
   async function* noShards(): AsyncGenerator<never> {}
   const building = buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), options);
   options.packedStaticQuantize = true;
-  options.fuseRmsNormAdd = true;
+  options.integerGemv = true;
   policy.initialChunkSize = 64;
   const state = await building;
   assertEquals(
@@ -445,7 +445,7 @@ test("the build is determined by the options at entry, and rewriting them mid-bu
     false,
     "packedStaticQuantize rewritten after the check got through",
   );
-  assertEquals(state.fuseRmsNormAdd, false, "fuseRmsNormAdd rewritten after the check got through");
+  assertEquals(state.integerGemv, false, "integerGemv rewritten after the check got through");
   assertEquals(
     state.scheduler.stats.currentChunkSize,
     4,

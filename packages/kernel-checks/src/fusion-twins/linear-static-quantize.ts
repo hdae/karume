@@ -7,6 +7,7 @@
  */
 
 import type { GpuContext } from "../../../runtime/src/gpu/device.ts";
+import { DISABLED_FUSION_RULES } from "../../../runtime/src/runtime/executor.ts";
 import { linearStaticQuantizeModel } from "../../../runtime/tests/helpers/linear-static-quantize-graph.ts";
 import { checkFusionTwin } from "../fusion-twin.ts";
 import { type CheckOptions, type CheckPart, type ExpectedCases } from "../result.ts";
@@ -61,9 +62,15 @@ export const checkLinearStaticQuantizeTwins = async (
         `linear→SRQ ${storage} M${m}`,
         {
           model,
-          options: { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
+          options: { linearGemvReduce: "parallel" },
         },
-        { model, options: { linearGemvReduce: "parallel" } },
+        {
+          model,
+          options: {
+            linearGemvReduce: "parallel",
+            [DISABLED_FUSION_RULES]: ["linearStaticQuantize"],
+          },
+        },
         async ({ fused, plain }) => {
           const x = linearStaticQuantizeInput(m);
           // The second run uses the derived plan. The same scale reference is kept, and x lives

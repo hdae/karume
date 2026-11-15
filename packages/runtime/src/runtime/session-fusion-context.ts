@@ -112,9 +112,9 @@ export const sessionFusionKnobs = (
 ): SessionFusionKnobs => {
   const defaults = executionKnobDefaults(options);
   return {
-    fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
-    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
-    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
+    fuseRmsNormAdd: options.fuseRmsNormAdd ?? true,
+    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? true,
+    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? true,
     packedStaticQuantize: options.packedStaticQuantize ?? false,
     integerGemv: options.integerGemv ?? false,
     linearGemvPlanes: options.linearGemvPlanes ?? false,
@@ -239,17 +239,20 @@ const fusionWeightLayouts = (
 /**
  * The {@link FusionContext} a Session's plans are fused under.
  *
- * The weight layouts are projected only when a decision reads them: the linear→SRQ rule
- * (`fuseLinearStaticQuantize`) and the packed-activation pairing (ADR 0105 — it looks at the storage
- * of the consuming linear) read them, and so does the linear prologue (perf-ledger F-4), which
- * decides the linear's i8a8 route from the same storage under `linearCompute: "a8"`.
+ * The weight layouts are projected only when a decision reads them: the linear→SRQ rule (it applies
+ * only on the parallel GEMV, `linearGemvReduce: "parallel"`) and the packed-activation pairing
+ * (ADR 0105 — it looks at the storage of the consuming linear) read them, and so does the linear
+ * prologue (perf-ledger F-4), which decides the linear's i8a8 route from the same storage under
+ * `linearCompute: "a8"`.
  */
 export const sessionFusionContext = <Name extends string>(
   facts: SessionFusionFacts<Name>,
 ): FusionContext<Name> => {
   const { knobs } = facts;
   const weightLayouts =
-    knobs.fuseLinearStaticQuantize || knobs.packedStaticQuantize || knobs.linearCompute === "a8"
+    (knobs.fuseLinearStaticQuantize && knobs.linearGemvReduce === "parallel") ||
+    knobs.packedStaticQuantize ||
+    knobs.linearCompute === "a8"
       ? fusionWeightLayouts(facts.residentWeights)
       : undefined;
   return {

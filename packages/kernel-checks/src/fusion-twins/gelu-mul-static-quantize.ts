@@ -13,7 +13,7 @@
 import type { GpuContext } from "../../../runtime/src/gpu/device.ts";
 import type { GeluMulOrder } from "../../../runtime/src/kernels/gelu-mul-static-quantize.ts";
 import { staticQuantizeParams } from "../../../runtime/src/kernels/static-quantize.ts";
-import type { Session } from "../../../runtime/src/runtime/executor.ts";
+import { DISABLED_FUSION_RULES, type Session } from "../../../runtime/src/runtime/executor.ts";
 import {
   geluMulStaticQuantizeGraph,
   type GeluMulStaticQuantizeGraphOptions,
@@ -130,11 +130,11 @@ export const openGeluMulChain = async (
       ),
     );
     opened.push(probe);
-    const reference = await openTwinSession(gpu, `${where} reference`, chain);
-    opened.push(reference);
-    const fused = await openTwinSession(gpu, `${where} fused`, chain, {
-      fuseGeluMulStaticQuantize: true,
+    const reference = await openTwinSession(gpu, `${where} reference`, chain, {
+      [DISABLED_FUSION_RULES]: ["geluMulStaticQuantize"],
     });
+    opened.push(reference);
+    const fused = await openTwinSession(gpu, `${where} fused`, chain);
     return { options, probe, reference, fused };
   } catch (error) {
     for (const session of opened) await session.dispose();

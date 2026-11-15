@@ -12,6 +12,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/executor.ts";
 import {
   type ContainerManifest,
   containerPart0,
@@ -27,21 +28,18 @@ import {
 } from "./helpers/fusion-counts.ts";
 
 /**
- * The stacked opt-ins of the decode cases below, as a Session takes them: the linear→SRQ fusion
- * and packed activations run only on the parallel GEMV, so a Session rejects either without
- * `linearGemvReduce: "parallel"`.
+ * The decode cases below, as a Session takes them: the linear→SRQ fusion and packed activations
+ * run only on the parallel GEMV, and a Session rejects packed activations without it. Every
+ * built-in fusion applies without an option; `without` leaves rules out by name to read the plan
+ * they would otherwise take.
  */
-const LINEAR_SRQ: FusionCountOptions = {
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  linearGemvReduce: "parallel",
-};
+const PARALLEL: FusionCountOptions = { linearGemvReduce: "parallel" };
 
-const packedSrq = (fuseLinearStaticQuantize: boolean): FusionCountOptions => ({
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize,
-  packedStaticQuantize: true,
-  linearGemvReduce: "parallel",
+const PACKED: FusionCountOptions = { packedStaticQuantize: true, linearGemvReduce: "parallel" };
+
+const without = (options: FusionCountOptions, ...rules: string[]): FusionCountOptions => ({
+  ...options,
+  [DISABLED_FUSION_RULES]: rules,
 });
 
 // A thunk: the series directory is not listed at all without KARUME_SERIES=1.
@@ -90,7 +88,7 @@ if (!available) {
   );
 }
 test.skipIf(!available)(
-  `the real ${family} E2B distribution matches RoPE 50 and the opt-in RMS→add 106`,
+  `the real ${family} E2B distribution matches RoPE 50 and RMS→add 106`,
   async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
     // MUST: the storage is named — the expectations below are one container's graph (the SRQ ones
@@ -102,24 +100,26 @@ test.skipIf(!available)(
     }
     const graph = await readContainerGraph(new URL(head.path, root), "model");
     for (const rows of [1, 4, 8, 32, 40, 64]) {
-      assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
       assertEquals(
-        decodeFusionCounts(graph, rows, { fuseRmsNormAdd: true }),
+        decodeFusionCounts(graph, rows),
         { ...NONE, rope: 50, rmsNormAdd: 106 },
-        `${family} fused M=${rows}`,
+        `${family} M=${rows}`,
+      );
+      assertEquals(
+        decodeFusionCounts(graph, rows, without({}, "rmsNormAdd")),
+        { ...NONE, rope: 50 },
+        `${family} without RMS→add M=${rows}`,
       );
       // The non-QAT distribution carries no static-quantize nodes, so neither the linear→SRQ
       // fusion nor packed activations (ADR 0105) find anything at any M.
-      assertEquals(
-        decodeFusionCounts(graph, rows, LINEAR_SRQ),
-        { ...NONE, rope: 50, rmsNormAdd: 106, linearStaticQuantize: 0 },
-        `${family} linear SRQ M=${rows}`,
-      );
-      for (const fuseSrq of [false, true]) {
+      for (const [label, options] of [
+        ["parallel GEMV", PARALLEL],
+        ["packed SRQ", PACKED],
+      ] as const) {
         assertEquals(
-          decodeFusionCounts(graph, rows, packedSrq(fuseSrq)),
-          { ...NONE, rope: 50, rmsNormAdd: 106, linearStaticQuantize: 0, packedStaticQuantize: 0 },
-          `${family} packed SRQ M=${rows} fuse=${fuseSrq}`,
+          decodeFusionCounts(graph, rows, options),
+          { ...NONE, rope: 50, rmsNormAdd: 106 },
+          `${family} ${label} M=${rows}`,
         );
       }
     }

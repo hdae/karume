@@ -17,7 +17,11 @@ import { rmsNormParams } from "../../runtime/src/kernels/rms-norm.ts";
 import { rmsNormSubgroupWgsl } from "../../runtime/src/kernels/rms-norm-subgroup.ts";
 import { compareTensors, formatAllclose } from "../../runtime/src/reference/allclose.ts";
 import { applyReferenceOp, refTensor } from "../../runtime/src/reference/ops.ts";
-import { createSessionFromContainer, type Tensor } from "../../runtime/src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  DISABLED_FUSION_RULES,
+  type Tensor,
+} from "../../runtime/src/runtime/executor.ts";
 import {
   fill,
   GRAPH_NAME,
@@ -156,10 +160,10 @@ const fusionPart = async (gpu: GpuContext, options: CheckOptions): Promise<Check
       await scopedGpuWork(gpu, `RMS fusion dim=${dim}`, async () => {
         const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
           rmsNormReduce: "subgroup32",
-          fuseRmsNormAdd: true,
         });
         const separate = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
           rmsNormReduce: "subgroup32",
+          [DISABLED_FUSION_RULES]: ["rmsNormAdd"],
         });
         try {
           for (const cancel of [false, true]) {

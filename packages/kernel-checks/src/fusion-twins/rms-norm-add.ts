@@ -88,7 +88,6 @@ export const checkRmsNormAddTwins = async (
           `RMS→add ${where} rows=${rows}`,
           {
             model: await openModelBytes(rmsNormAddGraph(graph), []),
-            options: { fuseRmsNormAdd: true },
           },
           { model: await openModelBytes(rmsNormAddGraph({ ...graph, normOutput: true }), []) },
           async ({ fused, plain }) => {

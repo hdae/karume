@@ -10,6 +10,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/executor.ts";
 import {
   type ContainerManifest,
   containerPart0,
@@ -23,21 +24,18 @@ import {
 } from "./helpers/fusion-counts.ts";
 
 /**
- * The stacked opt-ins of the decode cases below, as a Session takes them: the linear→SRQ fusion
- * and packed activations run only on the parallel GEMV, so a Session rejects either without
- * `linearGemvReduce: "parallel"`.
+ * The decode cases below, as a Session takes them: the linear→SRQ fusion and packed activations
+ * run only on the parallel GEMV, and a Session rejects packed activations without it. Every
+ * built-in fusion applies without an option; `without` leaves rules out by name to read the plan
+ * they would otherwise take.
  */
-const LINEAR_SRQ: FusionCountOptions = {
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  linearGemvReduce: "parallel",
-};
+const PARALLEL: FusionCountOptions = { linearGemvReduce: "parallel" };
 
-const packedSrq = (fuseLinearStaticQuantize: boolean): FusionCountOptions => ({
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize,
-  packedStaticQuantize: true,
-  linearGemvReduce: "parallel",
+const PACKED: FusionCountOptions = { packedStaticQuantize: true, linearGemvReduce: "parallel" };
+
+const without = (options: FusionCountOptions, ...rules: string[]): FusionCountOptions => ({
+  ...options,
+  [DISABLED_FUSION_RULES]: rules,
 });
 
 // The distribution also takes its first part (part 0) from the manifest. Both the old series and
@@ -52,7 +50,7 @@ if (!available) {
   );
 }
 test.skipIf(!available)(
-  `the real ${family} E2B distribution matches RoPE 50 and the opt-in RMS→add 106`,
+  `the real ${family} E2B distribution matches RoPE 50 and RMS→add 106`,
   async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
     // MUST: the quant is named (the SRQ expectations below depend on the i2 / i4 storage and the
@@ -64,20 +62,20 @@ test.skipIf(!available)(
     }
     const graph = await readContainerGraph(new URL(head.path, root), "model");
     for (const rows of [1, 4, 8, 32, 40, 64]) {
-      assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
+      // The gelu_tanh → mul → SRQ fold (perf-ledger K-48 step 1b): one per-layer-input gate per
+      // layer (35) in a decode or verification plan (M ≤ 8, the measured form); a prefill plan
+      // keeps the plain chain. The folded SRQs feed per_layer_projection (i8 1536×256), which never
+      // takes packed activations, so no other counter moves with it.
+      const always = { rope: 50, rmsNormAdd: 106, geluMulStaticQuantize: rows <= 8 ? 35 : 0 };
+      assertEquals(decodeFusionCounts(graph, rows), { ...NONE, ...always }, `${family} M=${rows}`);
       assertEquals(
-        decodeFusionCounts(graph, rows, { fuseRmsNormAdd: true }),
-        { ...NONE, rope: 50, rmsNormAdd: 106 },
-        `${family} fused M=${rows}`,
+        decodeFusionCounts(graph, rows, without({}, "rmsNormAdd", "geluMulStaticQuantize")),
+        { ...NONE, rope: 50 },
+        `${family} without the two folds M=${rows}`,
       );
       assertEquals(
-        decodeFusionCounts(graph, rows, LINEAR_SRQ),
-        {
-          ...NONE,
-          rope: 50,
-          rmsNormAdd: 106,
-          linearStaticQuantize: rows <= 8 ? 275 : 0,
-        },
+        decodeFusionCounts(graph, rows, PARALLEL),
+        { ...NONE, ...always, linearStaticQuantize: rows <= 8 ? 275 : 0 },
         `${family} linear SRQ M=${rows}`,
       );
       // Packed activations (ADR 0105) match only those **SRQs left standalone** whose consumers
@@ -88,36 +86,23 @@ test.skipIf(!available)(
       // measurement showed no gain (l4 / l32 of i4 g512, i8, l2 of i2 12288×1536). They do not
       // overlap the 275 the linear→SRQ fusion matches (the consumers on that output side include
       // ops other than linear). A prefill plan (M ≥ 32) does not take the parallel GEMV, so it is
-      // 0. Whether the fusion is on does not move this count.
+      // 0. Whether the linear→SRQ fusion is on does not move this count.
       for (const fuseSrq of [false, true]) {
         assertEquals(
-          decodeFusionCounts(graph, rows, packedSrq(fuseSrq)),
+          decodeFusionCounts(
+            graph,
+            rows,
+            fuseSrq ? PACKED : without(PACKED, "linearStaticQuantize"),
+          ),
           {
             ...NONE,
-            rope: 50,
-            rmsNormAdd: 106,
+            ...always,
             linearStaticQuantize: fuseSrq && rows <= 8 ? 275 : 0,
             packedStaticQuantize: rows <= 8 ? 70 : 0,
           },
           `${family} packed SRQ M=${rows} fuse=${fuseSrq}`,
         );
       }
-      // The i4-fast set plus the gelu_tanh → mul → SRQ fold (perf-ledger K-48 step 1b): one
-      // per-layer-input gate per layer (35) in a decode or verification plan (M ≤ 8, the measured
-      // form); a prefill plan keeps the plain chain. No other counter moves: the folded SRQs feed
-      // per_layer_projection (i8 1536×256), which never takes packed activations.
-      assertEquals(
-        decodeFusionCounts(graph, rows, { ...packedSrq(true), fuseGeluMulStaticQuantize: true }),
-        {
-          ...NONE,
-          rope: 50,
-          rmsNormAdd: 106,
-          linearStaticQuantize: rows <= 8 ? 275 : 0,
-          packedStaticQuantize: rows <= 8 ? 70 : 0,
-          geluMulStaticQuantize: rows <= 8 ? 35 : 0,
-        },
-        `${family} gelu mul SRQ M=${rows}`,
-      );
     }
   },
 );

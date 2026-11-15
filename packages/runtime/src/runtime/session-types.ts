@@ -570,7 +570,8 @@ export type SessionOptions = {
    */
   readonly linearGemvReduce?: LinearGemvReduce;
   /**
-   * Fuses an adjacent f32 rms_norm→add (default false, ADR 0099).
+   * Fuses an adjacent f32 rms_norm→add (default true: a fusion that keeps the unfused plan's bits
+   * needs no option — ADR 0147 decision 5; ADR 0099).
    * Applies only to last dimensions 256/1536/2560, identical shapes, and intermediate values with a
    * single consumer.
    * Rounding preservation has been measured, but bit identity with the reference is not guaranteed
@@ -579,15 +580,16 @@ export type SessionOptions = {
    */
   readonly fuseRmsNormAdd?: boolean;
   /**
-   * Fuses an adjacent linear→static_quantize (default false, ADR 0103).
-   * Supported only together with linearGemvReduce: parallel / linearCompute: f32.
+   * Fuses an adjacent linear→static_quantize (default true, ADR 0103). It applies only on the
+   * parallel GEMV (linearGemvReduce: parallel / linearCompute: f32); an explicit true without it
+   * is rejected.
    * Only the accepted INT2/4/8 shapes, M=1..8, and intermediate values with a single consumer. It
    * borrows the existing scale.
    * Bit identity on unverified GPUs is not guaranteed; false returns to the unfused reference.
    */
   readonly fuseLinearStaticQuantize?: boolean;
   /**
-   * Fuses an adjacent f32 gelu_tanh→mul→static_quantize into one dispatch (default false —
+   * Fuses an adjacent f32 gelu_tanh→mul→static_quantize into one dispatch (default true —
    * perf-ledger K-48).
    * Applies only to identical shapes `[…, 256]` with 1–8 rows (no broadcast), intermediate values
    * with a single consumer, and an SRQ output that is not packed (ADR 0105). Independent of

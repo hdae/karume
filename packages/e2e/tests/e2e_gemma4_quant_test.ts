@@ -117,12 +117,13 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: family === "gemma4-qat",
             },
             {
-              // i4-gemvpar is a quant that declares only parallel, so packed is not on either.
+              // i4-gemvpar is a quant that declares only parallel, so packed is not on. The
+              // fusions need no declaration: RMS→add everywhere, linear→SRQ on the parallel GEMV.
               name: "parallel-reference",
               options: { quant: "i4-gemvpar" },
               parallel: true,
-              rms: false,
-              srq: false,
+              rms: true,
+              srq: family === "gemma4-qat",
               packed: false,
             },
             {
@@ -160,10 +161,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: family === "gemma4-qat",
             },
             {
+              // The reference quant declares nothing; RMS→add is bit-identical and still applies.
               name: "reference",
               options: { quant: "i4" },
               parallel: false,
-              rms: false,
+              rms: true,
               srq: false,
               packed: false,
             },
