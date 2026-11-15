@@ -193,7 +193,7 @@ measurements** from the pre-migration numerical E2E; they are not the current ac
 
 `transformer` being unrun is **not a graph problem**: what is emitted with `--num-layers 20`
 (5,613MiB of weights) runs to completion on a real GPU and agrees with torch (maxAbs 9.63e-5).
-Details in `docs/known-issues.md`.
+Details in `docs/limitations.md`.
 
 Eager equivalence across the patches (`--verify`):
 
@@ -271,7 +271,7 @@ path is never entered (that path itself is reachable with hand-written IR, and
 `packages/runtime/tests/gpu_f16_i8_weights_test.ts` pins it in isolation).
 
 **This is what put the full 28-layer DiT on a real GPU**: the 7,465MiB of f32 exceeded the GPUBuffer
-ceiling of 7,280MiB (`docs/known-issues.md`) and could not be loaded, whereas f16 is 3,731.5MiB,
+ceiling of 7,280MiB (`docs/limitations.md`) and could not be loaded, whereas f16 is 3,731.5MiB,
 half the ceiling. The real-GPU golden and the stage-② numbers of the end-to-end chain (DiT golden
 maxAbs 6.68e-5, stage ② raw DiT output 3.03e-5, stage ③ end-to-end 6.41e-6) are **historical
 measurements** from the pre-migration numerical E2E. The current gate is
@@ -819,5 +819,5 @@ regional indicators and emoji ZWJ sequences need no boundary rules implemented.
 
 - **A real-GPU comparison of Anima's `transformer` in f32 storage at the full 28 layers** (the
   7,465MiB of weights exceed this machine's GPU buffer limit of 7,280MiB and cannot be loaded —
-  `docs/known-issues.md`). The real-GPU E2E does run for f16 storage (3,733.5MiB) and i8 storage
+  `docs/limitations.md`). The real-GPU E2E does run for f16 storage (3,733.5MiB) and i8 storage
   (1,872.8MiB).

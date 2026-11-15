@@ -17,8 +17,7 @@
 // are pinned here by type-level bindings and their exact set by the snapshot.
 //
 // ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) decision 9 **removed**
-// `generateGreedy` / `GreedySpec` (a breaking change — the consumer-facing doc is
-// [limitations](../../../docs/limitations.md)). The implementation stays in
+// `generateGreedy` / `GreedySpec` (a breaking change). The implementation stays in
 // `src/generation/greedy.ts` as an internal helper for parity acceptance, so one line in an entry
 // would bring the public surface back.
 

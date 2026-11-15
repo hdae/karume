@@ -331,7 +331,7 @@ const processLogits = (
  * places downstream break silently — argmax passes over it and returns another token, the top-k
  * threshold rejects every later candidate once it becomes NaN, and the softmax denominator becomes
  * NaN and wipes out every probability. An out-of-range index gather contaminates a whole row with
- * NaN ([known-issues] / [limitations]), so this is a shape that really occurs.
+ * NaN (docs/limitations.md), so this is a shape that really occurs.
  *
  * Temperature 0 folds this check into the search for the maximum, and top-k into the candidate
  * scan. Everything else checks before ranking.

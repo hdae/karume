@@ -229,7 +229,7 @@ WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
 #: against the reference preset (ADR 0132 "Results" — `e2e_wan_ti2v_ab_test.ts`, RTX 3080 Ti, Node +
 #: Dawn, 2026-10-23: 4.23e-2 at 1280×704×33, inside the s16 preset's band 8.8e-2).
 #: `(preset, reference, 33 frames)`. The 121-frame check has not run (the reference preset's
-#: 121-frame step does not fit the 12 GiB device under Node + Dawn — docs/known-issues.md), and the
+#: 121-frame step did not fit the 12 GiB device under Node + Dawn — ADR 0132 "Results"), and the
 #: visual check was done for the s16 preset only; the card says both.
 WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
 #: The two presets of the int8 VAE decoder (ADR 0133 decision 6): `(reference, practical)`. Their

@@ -165,7 +165,7 @@ export * as moss from "./moss.ts";
 
 /**
  * NOTE: the fixed-length greedy generation loop (`generateGreedy` / `GreedySpec`) was **removed**
- * from here (ADR 0083 decision 9 — a breaking change; the consumer-facing doc is limitations). It
+ * from here (ADR 0083 decision 9 — a breaking change). It
  * remains in `src/generation/greedy.ts` as an internal helper for parity acceptance; the public
  * generation surface is the `sequence` of the generation-API phase.
  */

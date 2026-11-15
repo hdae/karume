@@ -169,7 +169,7 @@ test("sampler: topK rejects the first NaN even outside the candidate range", () 
 });
 
 test("sampler: a non-finite maximum logit fails instead of being folded into a token id", () => {
-  // A gather outside the position table poisons the whole row with NaN (known-issues), so the last
+  // A gather outside the position table poisons the whole row with NaN (limitations), so the last
   // row's logits become non-finite **entirely**. argmax would fold that into "a plausible token id"
   // (token 0 at the front, since NaN comparisons are always false), so this is the only place
   // before the folding.
