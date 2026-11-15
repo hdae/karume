@@ -10,19 +10,28 @@
  *
  * - The kernel record (`./kernel-record.ts`) is switched on: which WGSL texts each test dispatches,
  *   for the sha256 rows and the verification cache. It only observes three WebGPU calls.
+ * - The input record (`./input-record.ts`) is switched on: which files a test file reads, which
+ *   directories it lists and which commands it starts. When the file ends, both records are left
+ *   for the verification cache's reporter (`./verify-cache-reporter.ts`).
  *
  * `KARUME_DAWN_FLAGS` replaces the Dawn toggles (default: `disable-dawn-features=timestamp_quantization`);
  * `KARUME_NO_DAWN=1` skips Dawn entirely (no `navigator.gpu`).
  */
 
-import { afterEach, beforeEach } from "vite-plus/test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { afterAll, afterEach, beforeEach, expect } from "vite-plus/test";
 import { create, globals } from "webgpu";
+import { beginInputRecordFile, inputsOfFile, installInputRecord } from "./input-record.ts";
 import {
   beginKernelRecordFile,
   beginKernelRecordTest,
   endKernelRecordTest,
   installKernelRecord,
+  kernelsOfFile,
 } from "./kernel-record.ts";
+import { pendingPathOf } from "./verify-cache-reporter.ts";
+import type { AdapterFacts, WorkerRecord } from "./verify-cache.ts";
 
 type DawnHost = typeof globalThis & { __karumeDawnGpu?: GPU };
 
@@ -67,3 +76,43 @@ installKernelRecord({ GPUDevice, GPUComputePassEncoder });
 beginKernelRecordFile();
 beforeEach(beginKernelRecordTest);
 afterEach(endKernelRecordTest);
+
+installInputRecord();
+beginInputRecordFile();
+
+const adapterFacts = async (): Promise<AdapterFacts | undefined> => {
+  const adapter = await navigator.gpu?.requestAdapter();
+  if (adapter === undefined || adapter === null) return undefined;
+  const limits: Record<string, number> = {};
+  // GPUSupportedLimits keeps its values on the prototype, so they are read by name.
+  for (const name in adapter.limits) {
+    const value: unknown = Reflect.get(adapter.limits, name);
+    if (typeof value === "number") limits[name] = value;
+  }
+  const { vendor, architecture, device, description } = adapter.info;
+  return {
+    vendor,
+    architecture,
+    device,
+    description,
+    features: [...adapter.features].sort(),
+    limits,
+  };
+};
+
+// Registered first, so it runs after the test file's own `afterAll` hooks: what they read or
+// dispatch is still part of the file's record.
+afterAll(async () => {
+  const testPath = expect.getState().testPath;
+  if (testPath === undefined) return;
+  // The inputs are taken before the write below, which is not one of the file's reads.
+  const record: WorkerRecord = {
+    testPath,
+    kernels: kernelsOfFile(),
+    inputs: inputsOfFile(),
+    adapter: await adapterFacts(),
+  };
+  const path = pendingPathOf(testPath);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(record));
+});

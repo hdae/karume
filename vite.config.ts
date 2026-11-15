@@ -34,6 +34,9 @@ export default defineConfig({
     // No root `include`: the lanes (projects) define what runs; `extends: true` would otherwise
     // concatenate a root include into every lane.
     setupFiles: ["./packages/test-support/src/setup.ts"],
+    // The verification cache's recording stage (ADR 0152 decision 6): every file still runs; the
+    // reporter writes what each file's result depended on under `outputs/verify-cache/`.
+    reporters: ["default", "./packages/test-support/src/verify-cache-reporter.ts"],
     // GPU tests share one physical device and the sha256 reference rows assume one run at a time:
     // every file runs in a single forked worker, one file after another.
     pool: "forks",
