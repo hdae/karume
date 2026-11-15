@@ -15,8 +15,14 @@ import type { StateStorage } from "../kernels/state-storage.ts";
 import { numericLevels, numericsViolation } from "./numerics.ts";
 import { describeInputValue, ExecutionError } from "./plan.ts";
 import {
+  NO_REORDER_STRATEGIES,
+  type ReorderStrategies,
+  reorderStrategiesViolation,
+} from "./reorder-strategies.ts";
+import {
   type ComputePrecision,
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+  REORDER_STRATEGIES,
   type LinearGemvReduce,
   type SessionOptions,
   STATE_ATTENTION_REDUCES,
@@ -181,16 +187,27 @@ export const expertCacheViolation = (cache: SessionOptions["expertCache"]): stri
  * defaults in two places could split the value that was checked from the value used to build).
  */
 export const executionKnobDefaults = (options: SessionOptions) => {
+  const strategies: ReorderStrategies = options[REORDER_STRATEGIES] ?? NO_REORDER_STRATEGIES;
   // The reduction forms a level admits (`SessionOptions.numerics`): `reorder` runs the parallel
   // GEMV family on linear and the parallel reductions, with the row statistics folded into PV, on
   // states-form attention. `sequential` is the reference kernel of both.
   // The parallel GEMV family computes in f32 only: under a named linear approximation
   // (`linearCompute` `"a8"` / `"f16"`) the level has no strategy to admit, and linear keeps the
   // kernels that approximation selects.
+  // The adapter-dependent strategies (the private `REORDER_STRATEGIES`) are read under the same
+  // levels: the subgroup
+  // GEMV takes no packed activations, so a Session that asks for them keeps the workgroup form.
   const levels = numericLevels(options.numerics);
   const linearCompute = options.linearCompute ?? "f32";
+  const reorderedLinear = levels.linear === "reorder" && linearCompute === "f32";
   return {
-    rmsNormReduce: options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce,
+    rmsNormReduce:
+      options.rmsNormReduce ??
+      (levels.rms_norm === "reorder" && strategies.rmsNorm === "subgroup32"
+        ? "subgroup32"
+        : "workgroup"),
+    linearGemvPlanes:
+      options.linearGemvPlanes ?? (reorderedLinear && strategies.linearGemvPlanes === true),
     linearCompute,
     convCompute: options.convCompute ?? "f32",
     attentionCompute: options.attentionCompute ?? "f32",
@@ -200,7 +217,11 @@ export const executionKnobDefaults = (options: SessionOptions) => {
       (levels.attention === "reorder" ? "parallel-fused" : "sequential"),
     linearGemvReduce:
       options.linearGemvReduce ??
-      (levels.linear === "reorder" && linearCompute === "f32" ? "parallel" : "sequential"),
+      (!reorderedLinear
+        ? "sequential"
+        : strategies.linearGemv === "subgroup32" && options.packedStaticQuantize !== true
+          ? "parallel-subgroup32"
+          : "parallel"),
     fullStateStorage: options.fullStateStorage ?? "f32",
     planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   };
@@ -236,10 +257,18 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   // A reduction form is asked for in one way: by the level, or by the option that names the kernel.
   if (
     options.numerics !== undefined &&
-    (options.linearGemvReduce !== undefined || options.stateAttentionReduce !== undefined)
+    (options.linearGemvReduce !== undefined ||
+      options.stateAttentionReduce !== undefined ||
+      options.rmsNormReduce !== undefined ||
+      options.linearGemvPlanes !== undefined)
   ) {
-    return "options.numerics cannot be given together with linearGemvReduce / stateAttentionReduce (the level decides the reduction form)";
+    return "options.numerics cannot be given together with linearGemvReduce / stateAttentionReduce / rmsNormReduce / linearGemvPlanes (the level decides the reduction form)";
   }
+  const strategies = reorderStrategiesViolation(
+    options[REORDER_STRATEGIES],
+    "options[REORDER_STRATEGIES]",
+  );
+  if (strategies !== undefined) return strategies;
   if (
     options.fuseLinearStaticQuantize !== undefined &&
     typeof options.fuseLinearStaticQuantize !== "boolean"

@@ -66,6 +66,7 @@ import {
 } from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
 import { copyNumerics } from "./numerics.ts";
+import { copyReorderStrategies } from "./reorder-strategies.ts";
 import { sessionFusionKnobs } from "./session-fusion-context.ts";
 import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
@@ -83,6 +84,7 @@ import {
   I8A8_DOT,
   type I8a8Dot,
   LINEAR_SPLIT_K,
+  REORDER_STRATEGIES,
   type LinearGemvReduce,
   type RmsNormReduce,
   ROW_BLOCK_SPLIT,
@@ -671,6 +673,7 @@ const snapshotSessionOptions = (
   fusionRules: copyFusionRules(requested.fusionRules),
   [I8A8_DOT]: requested[I8A8_DOT],
   [LINEAR_SPLIT_K]: requested[LINEAR_SPLIT_K],
+  [REORDER_STRATEGIES]: copyReorderStrategies(requested[REORDER_STRATEGIES]),
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
   [DISABLED_FUSION_RULES]: copyDisabledFusionRules(requested[DISABLED_FUSION_RULES]),
 });

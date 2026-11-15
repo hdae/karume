@@ -11,6 +11,7 @@ import {
   numericsViolation,
 } from "../src/runtime/numerics.ts";
 import { executionKnobDefaults } from "../src/runtime/session-options-check.ts";
+import { REORDER_STRATEGIES } from "../src/runtime/session-types.ts";
 
 /** A value from a caller outside the types (a JS consumer, a manifest). */
 const untypedOptions = (value: unknown): SessionOptions => {
@@ -214,6 +215,72 @@ describe("sessionOptionsViolation with numerics", () => {
       const knobs = executionKnobDefaults(options);
       assertStrictEquals(knobs.linearGemvReduce, "sequential");
       assertStrictEquals(knobs.stateAttentionReduce, "parallel-fused");
+    }
+  });
+});
+
+describe("the adapter-dependent reorder strategies (the private REORDER_STRATEGIES key)", () => {
+  const all = { linearGemv: "subgroup32", linearGemvPlanes: true, rmsNorm: "subgroup32" } as const;
+
+  it("selects nothing by itself: a strategy runs only where the level admits it", () => {
+    const knobs = executionKnobDefaults({ [REORDER_STRATEGIES]: all });
+    assertStrictEquals(knobs.linearGemvReduce, "sequential");
+    assertStrictEquals(knobs.linearGemvPlanes, false);
+    assertStrictEquals(knobs.rmsNormReduce, "workgroup");
+  });
+
+  it("keeps the portable strategies at reorder when none is named", () => {
+    const knobs = executionKnobDefaults({ numerics: { level: "reorder" } });
+    assertStrictEquals(knobs.linearGemvReduce, "parallel");
+    assertStrictEquals(knobs.linearGemvPlanes, false);
+    assertStrictEquals(knobs.rmsNormReduce, "workgroup");
+  });
+
+  it("runs each named strategy under its own op kind's level", () => {
+    const whole = executionKnobDefaults({
+      numerics: { level: "reorder" },
+      [REORDER_STRATEGIES]: all,
+    });
+    assertStrictEquals(whole.linearGemvReduce, "parallel-subgroup32");
+    assertStrictEquals(whole.linearGemvPlanes, true);
+    assertStrictEquals(whole.rmsNormReduce, "subgroup32");
+    const linearOnly = executionKnobDefaults({
+      numerics: { ops: { linear: "reorder" } },
+      [REORDER_STRATEGIES]: all,
+    });
+    assertStrictEquals(linearOnly.linearGemvReduce, "parallel-subgroup32");
+    assertStrictEquals(linearOnly.rmsNormReduce, "workgroup");
+    const rmsOnly = executionKnobDefaults({
+      numerics: { ops: { rms_norm: "reorder" } },
+      [REORDER_STRATEGIES]: all,
+    });
+    assertStrictEquals(rmsOnly.linearGemvReduce, "sequential");
+    assertStrictEquals(rmsOnly.linearGemvPlanes, false);
+    assertStrictEquals(rmsOnly.rmsNormReduce, "subgroup32");
+  });
+
+  it("keeps the workgroup GEMV for packed int8 activations, which the subgroup form cannot take", () => {
+    const options: SessionOptions = {
+      numerics: { level: "reorder" },
+      packedStaticQuantize: true,
+      [REORDER_STRATEGIES]: { linearGemv: "subgroup32" },
+    };
+    assertEquals(sessionOptionsViolation(options), undefined);
+    assertStrictEquals(executionKnobDefaults(options).linearGemvReduce, "parallel");
+  });
+
+  it("rejects a value outside the type and a declaration beside an option that names a kernel", () => {
+    const bad: SessionOptions = {};
+    Object.defineProperty(bad, REORDER_STRATEGIES, {
+      value: { linearGemv: "subgroup16" },
+      enumerable: true,
+    });
+    assert(sessionOptionsViolation(bad)?.includes("linearGemv"));
+    for (const options of [
+      { numerics: {}, rmsNormReduce: "subgroup32" },
+      { numerics: {}, linearGemvPlanes: true },
+    ] as const) {
+      assert(sessionOptionsViolation(options)?.includes("cannot be given together"));
     }
   });
 });

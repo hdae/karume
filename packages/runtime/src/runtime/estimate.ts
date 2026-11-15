@@ -121,6 +121,7 @@ import {
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   DISABLED_FUSION_RULES,
   type GenerationContextSpec,
+  REORDER_STRATEGIES,
   type ROW_BLOCK_SPLIT,
   type SessionOptions,
   STATE_ATTENTION_REDUCES,
@@ -367,6 +368,8 @@ export type EstimateOptions = {
    * reference kernels are estimated.
    */
   readonly numerics?: SessionOptions["numerics"];
+  /** Private: the same adapter-dependent strategies as the Session ({@link REORDER_STRATEGIES}). */
+  readonly [REORDER_STRATEGIES]?: SessionOptions[typeof REORDER_STRATEGIES];
   /**
    * Values of symbolic dimensions (the graph-input side — the same bindings passed to a run).
    * States-only symbols (capacity) and the symbols of the physical chunk rows `M` are both decided
@@ -1905,6 +1908,7 @@ export const estimateGraphMemory = (
   // so do the other knobs the fusion pass reads (types and combinations — before the pass reads
   // them).
   const seatViolation = sessionOptionsViolation({
+    [REORDER_STRATEGIES]: options[REORDER_STRATEGIES],
     numerics: options.numerics,
     stateAttentionReduce: options.stateAttentionReduce,
     attentionCompute: options.attentionCompute,
@@ -1924,6 +1928,7 @@ export const estimateGraphMemory = (
   // The reduction form of states-form attention, by the derivation Session construction uses (the
   // option that names it, else the level of `numerics`).
   const { stateAttentionReduce } = executionKnobDefaults({
+    [REORDER_STRATEGIES]: options[REORDER_STRATEGIES],
     numerics: options.numerics,
     stateAttentionReduce: options.stateAttentionReduce,
   });

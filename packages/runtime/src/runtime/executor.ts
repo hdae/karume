@@ -169,6 +169,7 @@ export {
   DISABLED_FUSION_RULES,
   I8A8_DOT,
   LINEAR_SPLIT_K,
+  REORDER_STRATEGIES,
   ROW_BLOCK_SPLIT,
 } from "./session-types.ts";
 /**

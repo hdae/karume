@@ -22,7 +22,12 @@ import {
 import { describeInputValue, ExecutionError } from "./plan.ts";
 import type { SessionState } from "./session-build.ts";
 import { executionKnobDefaults } from "./session-options-check.ts";
-import { DISABLED_FUSION_RULES, ROW_BLOCK_SPLIT, type SessionOptions } from "./session-types.ts";
+import {
+  DISABLED_FUSION_RULES,
+  REORDER_STRATEGIES,
+  ROW_BLOCK_SPLIT,
+  type SessionOptions,
+} from "./session-types.ts";
 import type { WeightResidency } from "./weight-residency.ts";
 
 /**
@@ -71,6 +76,7 @@ export type SessionFusionOptions = Pick<
   | "fusionRules"
   | typeof ROW_BLOCK_SPLIT
   | typeof DISABLED_FUSION_RULES
+  | typeof REORDER_STRATEGIES
 >;
 
 /**
@@ -117,7 +123,7 @@ export const sessionFusionKnobs = (
     fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? true,
     packedStaticQuantize: options.packedStaticQuantize ?? false,
     integerGemv: options.integerGemv ?? false,
-    linearGemvPlanes: options.linearGemvPlanes ?? false,
+    linearGemvPlanes: defaults.linearGemvPlanes,
     linearGemvReduce: defaults.linearGemvReduce,
     linearCompute: defaults.linearCompute,
     attentionCompute: defaults.attentionCompute,

@@ -15,6 +15,7 @@ import type { FusionCounts, FusionRule } from "./fusion.ts";
 import type { GenerationContext } from "./generation-context.ts";
 import type { Numerics } from "./numerics.ts";
 import type { SymbolBindings } from "./plan.ts";
+import type { ReorderStrategies } from "./reorder-strategies.ts";
 import type { SharedWeight } from "./weight-residency.ts";
 
 type TensorOf<D extends IrDtype, A> = {
@@ -286,6 +287,19 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
  * such a linear as a plain one and misses the temporary of the partial sums.
  */
 export const LINEAR_SPLIT_K: unique symbol = Symbol("karume.linearSplitK");
+
+/**
+ * **A private surface** (not exported from mod.ts — the same convention as {@link I8A8_DOT}).
+ *
+ * Selects the `reorder` strategies whose gain depends on the adapter (`ReorderStrategies` in
+ * reorder-strategies.ts: the subgroup forms of the parallel GEMV and of the RMS reduction, the
+ * byte-plane GEMV). A strategy named here runs where the level of
+ * {@link SessionOptions.numerics} admits it; without the key none of them is selected. It is how
+ * the kernel checks and tests run them — no adapter is measured to gain from them yet.
+ *
+ * MUST: a subgroup form on a device without subgroups fails loudly at construction.
+ */
+export const REORDER_STRATEGIES: unique symbol = Symbol("karume.reorderStrategies");
 
 /**
  * **A private, test-only surface** (not exported from mod.ts — the same convention as
@@ -833,6 +847,8 @@ export type SessionOptions = {
   readonly [I8A8_DOT]?: I8a8Dot;
   /** Private ({@link LINEAR_SPLIT_K}). The default is off: the reference kernel. */
   readonly [LINEAR_SPLIT_K]?: boolean;
+  /** Private ({@link REORDER_STRATEGIES}). The default is none: the portable strategies. */
+  readonly [REORDER_STRATEGIES]?: ReorderStrategies;
   /**
    * Test only ({@link ROW_BLOCK_SPLIT}). The default is the count determined statically from the
    * device's limit.
