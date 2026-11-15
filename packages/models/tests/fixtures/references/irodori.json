@@ -9,8 +9,6 @@
       "node-nvidia-geforce-rtx-3080-ti": "f91af254b5cdfb02d9b3df5f81928bc4155be4ac84d08756a6053b7d59c9721c"
     },
     "no-ref": {
-      "deno-intel-graphics-bmg-g21": "35a643d355ec13c200bfd51a69a6061c12583bcfc252f2bf9f806dbe8abbe367",
-      "deno-nvidia-geforce-rtx-3080-ti": "5cc43d7fe9ae0a8733e0b06088948e33f947cdabe0934fea3988622530da3e8d",
       "node-nvidia-geforce-rtx-3080-ti": "5cc43d7fe9ae0a8733e0b06088948e33f947cdabe0934fea3988622530da3e8d"
     },
     "v4-large-caption-window": {
@@ -23,8 +21,6 @@
       "node-nvidia-geforce-rtx-3080-ti": "d2d05ff6eadf8b3b8d72d092c1c31b88e85b4a1fb360de636631d8a17d9a7dbe"
     },
     "voice-clone": {
-      "deno-intel-graphics-bmg-g21": "2d84375dcd5d921c5366be68d64112bb2415978d2f57bbbd2480ae2b756a6965",
-      "deno-nvidia-geforce-rtx-3080-ti": "05f82a9cd8bbb8055fee47b4599840097f62d3d07252c50e1a7ef7fe21631e5e",
       "node-nvidia-geforce-rtx-3080-ti": "05f82a9cd8bbb8055fee47b4599840097f62d3d07252c50e1a7ef7fe21631e5e"
     }
   }

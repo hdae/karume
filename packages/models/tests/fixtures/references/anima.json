@@ -3,64 +3,42 @@
   "kind": "sha256",
   "cases": {
     "base-cfg": {
-      "deno-intel-graphics-bmg-g21": "376a607bb87aef4a1322392004bfb1e47383ef21f3a7307b286b671321ff288f",
-      "deno-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326",
       "node-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326"
     },
     "base-cfg-bf16": {
       "node-nvidia-geforce-rtx-3080-ti": "83ccb11f867b25330910f24247f2ca6e37a22bd0c2560ee6189aef767fd16782"
     },
     "base-cfg-dpmpp": {
-      "deno-intel-graphics-bmg-g21": "7123f36248c042af15681bdc759baf6484299e56457fa4abc88444450404845a",
-      "deno-nvidia-geforce-rtx-3080-ti": "071b2ca0a97d4471e739250a54e797c11de36c36ccb81c72f7d8e2e79382ae3e",
       "node-nvidia-geforce-rtx-3080-ti": "071b2ca0a97d4471e739250a54e797c11de36c36ccb81c72f7d8e2e79382ae3e"
     },
     "base-cfg-fromAssets-shards": {
-      "deno-intel-graphics-bmg-g21": "376a607bb87aef4a1322392004bfb1e47383ef21f3a7307b286b671321ff288f",
-      "deno-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326",
       "node-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326"
     },
     "bf16-1024": {
       "node-nvidia-geforce-rtx-3080-ti": "151008f280e60a94773106c919e3c6db1cb9e36905481b68f15d2a186ce65ccd"
     },
     "extra-anima-copycat-20260610-cfg": {
-      "deno-intel-graphics-bmg-g21": "a15ae777c1a39983626ec1573a65beaf32a2686020917707f798c80e1598396e",
-      "deno-nvidia-geforce-rtx-3080-ti": "73e1d0512076278ecee9717dffc8b33a32402adbca0061ad4cd0bd0bd20253a3",
       "node-nvidia-geforce-rtx-3080-ti": "73e1d0512076278ecee9717dffc8b33a32402adbca0061ad4cd0bd0bd20253a3"
     },
     "extra-anima-wai-v1.0-cfg": {
-      "deno-intel-graphics-bmg-g21": "4f5927a544048b736836eae348c1d447e18e129449165a4d91c939724a6feca3",
-      "deno-nvidia-geforce-rtx-3080-ti": "0c4828f3a87a99a2b047c5435ac5c6b4f8ade9e21c94a6168916896b0ba6f65f",
       "node-nvidia-geforce-rtx-3080-ti": "0c4828f3a87a99a2b047c5435ac5c6b4f8ade9e21c94a6168916896b0ba6f65f"
     },
     "f16+dit8-a8-attn8-s16-1024": {
-      "deno-intel-graphics-bmg-g21": "310afe7085e4716998033fcdaf8470c62e41703a0586e05fbb879728ead23f84",
-      "deno-nvidia-geforce-rtx-3080-ti": "352c4dbdc61d3dd7c60af660322536fab106e0d98ee6294581a28fd68646c463",
       "node-nvidia-geforce-rtx-3080-ti": "352c4dbdc61d3dd7c60af660322536fab106e0d98ee6294581a28fd68646c463"
     },
     "f16+dit8-a8-attn8-s16-512": {
-      "deno-intel-graphics-bmg-g21": "914fc8d937b0a6527b52a69d6f109f51d90989dc6d6b008a5ac446ce32729535",
-      "deno-nvidia-geforce-rtx-3080-ti": "332737b4a3fb549ca160bacd4fc4c9b5a4794508f7a1e0a089ffd0a131fee203",
       "node-nvidia-geforce-rtx-3080-ti": "332737b4a3fb549ca160bacd4fc4c9b5a4794508f7a1e0a089ffd0a131fee203"
     },
     "f16+dit8-a8-attn8-s16-512-dpmpp": {
-      "deno-intel-graphics-bmg-g21": "61bea4b531f78fea3d5f36ac23638c34d1f0c3ff1a4e642830dac57a9570f81f",
-      "deno-nvidia-geforce-rtx-3080-ti": "deb14962aa6f7085363c719b361348cbce664d413bd96446d73f87881f438361",
       "node-nvidia-geforce-rtx-3080-ti": "deb14962aa6f7085363c719b361348cbce664d413bd96446d73f87881f438361"
     },
     "f16-1024": {
-      "deno-intel-graphics-bmg-g21": "d81e8db82a028b7869c7bea419e173dce5d1e4b0e7841d4e2eb6245fb1cfb36f",
-      "deno-nvidia-geforce-rtx-3080-ti": "856124aaf5074e55731947be595f07c21d34113f4584862b09cf8ae9c2a569b0",
       "node-nvidia-geforce-rtx-3080-ti": "856124aaf5074e55731947be595f07c21d34113f4584862b09cf8ae9c2a569b0"
     },
     "fromPretrained-512": {
-      "deno-intel-graphics-bmg-g21": "914fc8d937b0a6527b52a69d6f109f51d90989dc6d6b008a5ac446ce32729535",
-      "deno-nvidia-geforce-rtx-3080-ti": "332737b4a3fb549ca160bacd4fc4c9b5a4794508f7a1e0a089ffd0a131fee203",
       "node-nvidia-geforce-rtx-3080-ti": "332737b4a3fb549ca160bacd4fc4c9b5a4794508f7a1e0a089ffd0a131fee203"
     },
     "onEvent-1024": {
-      "deno-intel-graphics-bmg-g21": "310afe7085e4716998033fcdaf8470c62e41703a0586e05fbb879728ead23f84",
-      "deno-nvidia-geforce-rtx-3080-ti": "352c4dbdc61d3dd7c60af660322536fab106e0d98ee6294581a28fd68646c463",
       "node-nvidia-geforce-rtx-3080-ti": "352c4dbdc61d3dd7c60af660322536fab106e0d98ee6294581a28fd68646c463"
     }
   }
