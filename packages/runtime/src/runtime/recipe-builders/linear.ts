@@ -24,7 +24,7 @@ import {
   expertLinearWgsl,
 } from "../../kernels/expert-linear.ts";
 import { ExecutionError, type NodePlan } from "../plan.ts";
-import { type GemmCompute, gemmUsesVec4 } from "../../kernels/gemm.ts";
+import { gemmUsesVec4 } from "../../kernels/gemm.ts";
 import {
   LINEAR_ACT_SCALE_BINDING,
   LINEAR_I8A8_MAX_K,
@@ -36,13 +36,8 @@ import {
   linearI8a8Wgsl,
 } from "../../kernels/linear-i8a8.ts";
 import {
-  defaultLinearGemvRowsVariant,
-  defaultLinearGemvVariant,
-  LINEAR_GEMV_MAX_ROWS,
   linearGemvKey,
-  linearGemvPackedEligible,
   linearGemvParallelKey,
-  linearGemvParallelLanes,
   linearGemvParallelPackedKey,
   linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
@@ -52,10 +47,8 @@ import {
   linearGemvParams,
   linearGemvRowsKey,
   linearGemvRowsWgsl,
-  linearGemvStagedEligible,
   linearGemvSubgroupKey,
   linearGemvSubgroupWgsl,
-  linearGemvUnit,
   linearGemvWgsl,
 } from "../../kernels/linear-gemv.ts";
 import {
@@ -74,11 +67,7 @@ import {
 } from "../../kernels/linear-gemv-planes.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
 import type { LinearPrologue, PackedActivations } from "../fusion.ts";
-import {
-  linearIntegerGemvVariant,
-  linearPlanesGemvVariant,
-  linearTakesI8a8,
-} from "../linear-route.ts";
+import { type LinearGemvChoice, selectLinearStrategy } from "../linear-strategies.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
 import {
@@ -100,7 +89,6 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
-  quantizeRowsPrologueEligible,
   quantizeRowsPrologueKey,
   quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
@@ -202,6 +190,9 @@ export const buildBmm = async (
  * linear (a fused op — ADR 0012). Flattens the leading dimensions and lowers to the 2D GEMM
  * `[m,k] × [k,n] + bias`. The kernel reads the weight in its transposed `[n,k]` layout as is (no
  * transposing copy).
+ *
+ * Which kernel computes it is decided in one place, {@link selectLinearStrategy}
+ * (src/runtime/linear-strategies.ts) — this function only builds what that returns.
  * MUST: the same "one workgroup = one tile" as matmul, so exceeding the limit fails loudly.
  */
 export const buildLinear = async (
@@ -219,240 +210,72 @@ export const buildLinear = async (
   const k = weight[1];
   const m = numel(x.slice(0, -1));
   const weightStorage = face.weightStorage(step);
-  if (weightStorage === "i2" && face.state.linearCompute !== "f32") {
-    throw new ExecutionError("linear: i2 residency supports only linearCompute 'f32' (ADR 0097)");
-  }
-  // An integer GEMV linear (`SessionOptions.integerGemv`): decided by the one function the packed
-  // pairing reads (src/runtime/linear-route.ts). It takes the integer kernel only when its
-  // activation arrives packed; otherwise it keeps the paths below.
-  const integer = linearIntegerGemvVariant(
-    face.state.integerGemv,
-    step,
+  const choice = selectLinearStrategy({
+    plan: step,
     weightStorage,
-    weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
-  );
-  // A byte-plane GEMV linear (`SessionOptions.linearGemvPlanes`): decided by the one function the
-  // packed pairing and the linear→SRQ rule read (src/runtime/linear-route.ts). Its branch is below,
-  // in place of the i2 GEMV family.
-  const planes = linearPlanesGemvVariant(face.state.linearGemvPlanes, step, weightStorage);
-  // If a linear declared to receive packed activations (ADR 0105) lands on neither the parallel
-  // GEMV's packed variant nor the integer GEMV, f32 words flow into the `vec4<u32>` binding = a
-  // silent wrong value with no exception. The pairing is accepted in one place, fusion.ts, but it is
-  // checked here too **with the same predicates** (fail loudly).
-  if (packed !== undefined) {
-    // The opposite case of the byte-plane GEMV: it binds f32 quads, so packed words there would be
-    // read as f32. The pairing never packs for such a linear (the same predicate); fail loudly.
-    if (planes !== undefined) {
-      throw new ExecutionError(
-        `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-          "declared as packed activations (ADR 0105) but is a byte-plane GEMV linear, which reads f32 activations",
-      );
-    }
-    const eligible =
-      packed.role === "read" &&
-      face.state.linearGemvReduce === "parallel" &&
-      face.state.linearCompute === "f32" &&
-      (integer !== undefined ||
-        linearGemvPackedEligible(
-          weightStorage,
-          m,
-          n,
-          k,
-          weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
-        ) !== undefined);
-    if (!eligible) {
-      throw new ExecutionError(
-        `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-          "declared as packed activations (ADR 0105) but lands on neither the parallel GEMV nor the integer GEMV",
-      );
-    }
-    if (integer !== undefined) {
+    groupSize: weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
+    knobs: face.state,
+    packed,
+    prologue,
+  });
+  switch (choice.id) {
+    case "integer-gemv":
       await buildLinearIntegerGemv(
         face,
         step,
         binds,
         outs,
         builder,
-        integer,
+        choice.variant,
         m,
         n,
         k,
-        packed.scale,
+        choice.activationScale,
       );
       return;
+    case "i8a8":
+      await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage, prologue);
+      return;
+    case "planes-gemv":
+      await buildLinearPlanesGemv(face, step, binds, outs, builder, choice.variant, m, n, k);
+      return;
+    case "gemm-f32":
+    case "gemm-f16": {
+      const { v4, compute, groupSize } = choice;
+      // MUST: the tile geometry is the bucket of the flattened row count m (the adapter's profile —
+      // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to key, WGSL and
+      // dispatch.
+      const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+      const key = linearKey(weightStorage, v4, compute, m, groupSize, geometry);
+      const { pipeline, layout, roles } = await face.state.cache.get(
+        key,
+        linearWgsl(weightStorage, v4, compute, m, groupSize, geometry),
+      );
+      const params = face.writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
+      const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+      const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
+      builder.dispatch({
+        key,
+        pipeline,
+        layout,
+        roles,
+        params,
+        bindings: [
+          ...binds.map((source, index) => ({ binding: index + 1, source })),
+          { binding: 4, source: outs[0] },
+          ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
+        ],
+        workgroups: [
+          tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+          tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+          1,
+        ],
+      });
+      return;
     }
+    default:
+      await buildLinearGemv(face, step, binds, outs, builder, choice, m, n, k);
   }
-  // The integer dot-product path (opt-in × integer residency × k > 0 × k % 4 == 0). The predicate
-  // and its MUSTs live in one function shared with the fusion pass (src/runtime/linear-route.ts).
-  const i8a8 = linearTakesI8a8(face.state.linearCompute, weightStorage, k);
-  // If a linear declared to absorb its producer (perf-ledger F-4) does not take the i8a8 path with
-  // a row the prologue kernel accepts, the producer's op would never run = a silent wrong value. The
-  // fold is accepted in one place, fusion.ts, but it is checked here too **with the same predicate**
-  // (fail loudly).
-  if (prologue !== undefined && !(i8a8 && quantizeRowsPrologueEligible(k))) {
-    throw new ExecutionError(
-      `linear [${x.join(",")}] × [${weight.join(",")}]: declared with a ${prologue.op} prologue` +
-        " (perf-ledger F-4) but does not take the i8a8 path with a prologue-eligible row",
-    );
-  }
-  if (i8a8) {
-    await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage, prologue);
-    return;
-  }
-  // The f16 compute variant (ADR 0028). **It cannot be combined with i8-resident weights** (w8a16
-  // is not implemented), so it fails here instead of silently dropping to f32 — dropping would give
-  // "f16 has no effect on the i8 layers only", which nobody notices without looking at the
-  // diagnostic keys.
-  const compute: GemmCompute = face.state.linearCompute === "f16" ? "f16" : "f32";
-  if (compute === "f16" && weightStorage === "i8") {
-    throw new ExecutionError(
-      `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-        "linearCompute 'f16' cannot be combined with i8-resident weights (w8a16 is not implemented — ADR 0028). " +
-        "Set linearCompute to 'a8', or store this weight as f32 / f16",
-    );
-  }
-  // The same for i4 (w4a16 is not implemented — ADR 0069; the reason for not silently dropping to
-  // f32 compute is the same as for i8).
-  if (compute === "f16" && weightStorage === "i4") {
-    throw new ExecutionError(
-      `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-        "linearCompute 'f16' cannot be combined with i4-resident weights (w4a16 is not implemented — ADR 0069). " +
-        "Set linearCompute to 'a8', or store this weight as f32 / f16",
-    );
-  }
-  const v4 = gemmUsesVec4(k, n);
-  // For i4 the group length affects both the key and the WGSL (the baked-in shift) (ADR 0069 —
-  // codegen determinism: same key → byte-identical WGSL).
-  const groupSize = weightStorage === "i4" ? face.weightGroupSize(step) : undefined;
-  // **Small M (1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS) branches to the GEMV family** (ADR 0082 —
-  // perf-ledger K-11 / i8 is K-16 / row blocks for M ≥ 2 are K-21). In the bucket M ≤ 64 (M16N16)
-  // the default GEMM skeleton has only 4 of its 64 threads write output, and the double barrier
-  // per K tile of 16 exposes the weight-read latency serially (proportional to k, independent of
-  // n, the same with L2-resident shapes — not bandwidth starvation). This cost does not depend on
-  // M (the GEMM path stays at 65–67 ms for M=2–16 — research 2026-09-07 §7.2). On gemma4 E2B
-  // decode: ×8.45 against the default, ×5.0 at M=8, ×2.8 at M=32, ×2.7 at M=64 (census-weighted —
-  // research 2026-09-07-gemv-rows-k21).
-  // MUST: the reduction order, the spelling of the multiply-add and the order of adding bias are
-  // the same as the default path = **bit-identical** (the numeric contract of
-  // src/kernels/linear-gemv.ts; the check is tests/gpu_linear_gemv_test.ts).
-  // The eligibility conditions:
-  // - `1 ≤ m ≤ LINEAR_GEMV_MAX_ROWS` — the range measured with one thread owning the whole
-  //   reduction of one output column (× row block). Outside the limit, the default GEMM skeleton
-  //   stays.
-  // - `i2` / `i4` / `i8` storage × `f32` compute. f16 / f32 storage is taken by the M=1-only
-  //   check below. i8 × f16 compute (w8a16) has already failed above.
-  // - `groupSize % <unit> === 0` (i4 only) — the condition that the 32 elements of one weight word
-  //   do not cross a group (crossing would need more than one scale per word, a silent wrong
-  //   value). An i8 scale is one per output channel, so there is nothing to cross.
-  // - `k % <unit> === 0` — 16 B alignment of the `vec4<u32>` weight binding (the unit depends on
-  //   storage = 32 elements for i4 / 16 for i8). For i4 it follows from the declaration layer's
-  //   "row length is a multiple of group_size" (ADR 0069 decision 2), but it is restated as a
-  //   binding requirement.
-  // - `v4` is **not** a GEMV requirement (the output is written as scalars, so n need not divide),
-  //   but every swept real shape was v4, so the eligibility stays inside the measured range. M=1
-  //   with n % 4 != 0 keeps the default scalar variant (same values, only the speed as before).
-  // f16 / bf16 / f32 storage also go to the same skeleton, at M=1 only (ADR 0082 addenda 6 and 7;
-  // bf16 is ADR 0131). Compute stays f32; one weight word = 8 elements for f16 / bf16, 4 for f32.
-  // Row blocks and f16 compute are outside this variant's acceptance range.
-  if (
-    m === 1 &&
-    (weightStorage === "f16" || weightStorage === "bf16" || weightStorage === "f32") &&
-    compute === "f32" &&
-    v4 &&
-    k > 0 &&
-    k % linearGemvUnit(weightStorage) === 0
-  ) {
-    await buildLinearGemv(
-      face,
-      step,
-      binds,
-      outs,
-      builder,
-      weightStorage,
-      m,
-      n,
-      k,
-      undefined,
-      undefined,
-    );
-    return;
-  }
-  // The byte-plane GEMV (opt-in `linearGemvPlanes` — src/kernels/linear-gemv-planes.ts): an i2
-  // linear of a measured shape at M = 1..8 takes it in place of the i2 GEMV family below (today the
-  // M = 1 sequential GEMV or the row-block variant: no parallel GEMV row is a byte-plane shape). Its
-  // activation is f32 here (a packed one failed above), and i2 computes in f32 (checked at the top),
-  // which is all the kernel reads.
-  if (planes !== undefined) {
-    await buildLinearPlanesGemv(face, step, binds, outs, builder, planes, m, n, k);
-    return;
-  }
-  const i4Unit = linearGemvUnit("i4");
-  const gemvRows = m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
-  if (
-    gemvRows &&
-    weightStorage === "i2" &&
-    compute === "f32" &&
-    v4 &&
-    k % linearGemvUnit("i2") === 0
-  ) {
-    await buildLinearGemv(face, step, binds, outs, builder, "i2", m, n, k, undefined, packed);
-    return;
-  }
-
-  if (
-    gemvRows &&
-    weightStorage === "i4" &&
-    compute === "f32" &&
-    v4 &&
-    groupSize !== undefined &&
-    groupSize % i4Unit === 0 &&
-    k % i4Unit === 0
-  ) {
-    await buildLinearGemv(face, step, binds, outs, builder, "i4", m, n, k, groupSize, packed);
-    return;
-  }
-  // i8 storage (lm_head — perf-ledger K-16). The same family and variant as i4; the only
-  // differences are the element count per word (16) and how the scale is read (one per output
-  // channel = bound once, outside the reduction).
-  if (
-    gemvRows &&
-    weightStorage === "i8" &&
-    compute === "f32" &&
-    v4 &&
-    k % linearGemvUnit("i8") === 0
-  ) {
-    await buildLinearGemv(face, step, binds, outs, builder, "i8", m, n, k, undefined, packed);
-    return;
-  }
-  // MUST: the tile geometry is the bucket of the flattened row count m (the adapter's profile —
-  // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to key, WGSL and
-  // dispatch.
-  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
-  const key = linearKey(weightStorage, v4, compute, m, groupSize, geometry);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    linearWgsl(weightStorage, v4, compute, m, groupSize, geometry),
-  );
-  const params = face.writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
-  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-  const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
-  builder.dispatch({
-    key,
-    pipeline,
-    layout,
-    roles,
-    params,
-    bindings: [
-      ...binds.map((source, index) => ({ binding: index + 1, source })),
-      { binding: 4, source: outs[0] },
-      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-    ],
-    workgroups: [
-      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-      1,
-    ],
-  });
 };
 
 /**
@@ -465,11 +288,10 @@ export const buildLinear = async (
  * which splits K for the eligible shapes.
  * The K reduction order per output element stays sequential in ascending k, so it is
  * **bit-identical** (the numeric contract of src/kernels/linear-gemv.ts).
- * MUST: M=1 is the M=1 variant (decode output does not move); M ≥ 2 is the row-block variant, whose
- * row count `rows` is the pure function `defaultLinearGemvRowsVariant` of (storage, m, n, the
- * parallelism target) (part of the key). The target is a static knob fixed at Session creation
- * (`SessionOptions.linearGemvRowsThreadTarget`).
- * MUST: pass `groupSize` only for i4 (i8 has no groups — the kernel checks the pairing).
+ * Which member runs (the M = 1 column form, the row-block form whose row count is part of the key,
+ * the parallel forms) was decided by `selectLinearStrategy`; this function turns that choice into
+ * the key, the WGSL, the uniform and the dispatch.
+ * MUST: `groupSize` is set only for i4 (i8 has no groups — the kernel checks the pairing).
  * MUST: one thread, one output (column × row block), so the dispatch is
  * `[ceil(n / cols), ceil(m / rows), 1]`.
  * It is not grid-stride, so exceeding the limit fails loudly (the same discipline as the default
@@ -481,40 +303,19 @@ const buildLinearGemv = async (
   binds: readonly BindingSource[],
   outs: readonly BindingSource[],
   builder: StepRecipeBuilder,
-  storage: WeightStorage,
+  /** The member of the family {@link selectLinearStrategy} chose, with its lanes and row form. */
+  choice: LinearGemvChoice,
   m: number,
   n: number,
   k: number,
-  groupSize: number | undefined,
-  /** The packed int8 activation pair (ADR 0105). Can be set only for the parallel variant. */
-  packed: PackedActivations | undefined,
 ): Promise<void> => {
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const [x, weight] = step.inputShapes;
   const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
-  // A choice that changes numerics happens only when explicitly requested. The reference path's
-  // choice and WGSL stay as before.
-  const subgroup = face.state.linearGemvReduce === "parallel-subgroup32";
-  const lanes =
-    face.state.linearGemvReduce !== "sequential"
-      ? linearGemvParallelLanes(storage, m, n, k, groupSize)
-      : undefined;
-  const rowsVariant =
-    m === 1 || lanes !== undefined
-      ? undefined
-      : defaultLinearGemvRowsVariant(storage, m, n, face.state.linearGemvRowsThreadTarget);
-  const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
+  const { storage, groupSize, lanes, variant, rowsVariant, packedScale } = choice;
+  const subgroup = choice.id === "gemv-parallel-subgroup32";
+  const staged = choice.id === "gemv-parallel-staged";
   const rows = rowsVariant?.rows ?? 1;
-  // Only the parallel (non-subgroup) variant has a packed activation variant. Having passed
-  // `buildLinear`'s guard, this is always `lanes !== undefined && !subgroup`.
-  const packedScale = packed === undefined ? undefined : packed.scale;
-  // The staged-activation variant (K-90) is bit-identical to the plain parallel one, so it is taken
-  // wherever the measured table marks the shape, without a separate opt-in.
-  const staged =
-    lanes !== undefined &&
-    !subgroup &&
-    packedScale === undefined &&
-    linearGemvStagedEligible(storage, m, n, k, groupSize) !== undefined;
   const key =
     lanes !== undefined
       ? subgroup
