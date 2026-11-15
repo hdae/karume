@@ -2,8 +2,8 @@
  * Waits for the release of destroyed buffers (the clean-up of real-GPU e2e — an empty `submit` →
  * `onSubmittedWorkDone`, raced against device loss).
  *
- * WHY: on the B570 (Linux xe / wgpu) the release by `destroy()` is delayed until the next device
- * poll (docs/known-issues.md, section "Intel Arc B570"). Measured on 2026-10-02 (plain WebGPU):
+ * WHY: on the Intel Arc B570 (Linux xe / wgpu) the release by `destroy()` is delayed until the
+ * next device poll. Measured on 2026-10-02 (plain WebGPU):
  * destroying 7 GiB and allocating it again on the same device is an OOM, and passes after this
  * wait. Dropping the device without waiting makes 7 GiB on another device an OOM (the memory stays
  * unreleased and keeps eating the budget); dropping it after the wait passes. So e2e that hold

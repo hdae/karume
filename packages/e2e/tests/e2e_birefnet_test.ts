@@ -878,7 +878,7 @@ for (const series of SERIES) {
           const gpu = await acquireGpu();
           // MUST: the device is destroyed on failures of the adapter check and `createSession` too.
           // Missing that, the rest of the run carries on holding a device that is never destroyed,
-          // and later tests turn red with OOM (the delayed release of known-issues).
+          // and later tests turn red with OOM.
           try {
             // This route keeps reference values and results as this machine's rows, so check here
             // that the adapter the key was taken from is the running adapter (mixing them up on a
@@ -960,7 +960,7 @@ for (const series of SERIES) {
       const gpu = await acquireGpu();
       // MUST: the device is destroyed on a failure of `createSession` too. Missing that, the rest
       // of the run carries on holding a device that is never destroyed, and later tests turn red
-      // with OOM (the delayed release of known-issues).
+      // with OOM.
       try {
         const session = await parsed.createContainerSession(gpu);
         try {

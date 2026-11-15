@@ -66,7 +66,8 @@
  * withdrawn on 2026-10-18 — ADR 0118 decision 7). The wait after the I2V encoder stage is specified by
  * ADR 0121 decision 11 and was not measured on the B570):
  * on the B570 (Intel / wgpu) the release of `destroy()` can be delayed until the next device poll
- * (docs/known-issues.md, section "Intel Arc B570 (Linux / Vulkan ANV / xe)"), but in the measurement of
+ * (a plain-WebGPU probe: a 1 GiB allocation right after destroying nine 1 GiB buffers is an OOM,
+ * and succeeds after `onSubmittedWorkDone` and 200 ms), but in the measurement of
  * 2026-10-02 (832×480, 33 frames, a two-step run end to end, fdinfo `drm-total-vram0`) the DiT stage's
  * 5.75 GiB peak had already dropped to 0.43 GiB (0.19 GiB before the first stage) **right after the DiT
  * Session was closed** (the `stage` `end`, before the VAE stage is created). The switch's peak is the

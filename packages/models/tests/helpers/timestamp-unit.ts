@@ -2,8 +2,9 @@
  * The table that converts one unit of a timestamp-query value to ns (per environment key — shared
  * by the Wan DiT / umT5 e2e).
  *
- * Deno returns wgpu's raw ticks without converting them (docs/known-issues.md, section "Intel Arc B570" — on the B570
- * 1 tick = 52.0833 ns). The conversion of an environment that is not in the table is not guessed: callers that check
+ * Deno returns wgpu's raw ticks without converting them to ns, and the WebGPU API does not expose the period (on the
+ * Intel Arc B570 1 tick = 52.0833 ns, its Vulkan `timestampPeriod`). The conversion of an environment that is not in
+ * the table is not guessed: callers that check
  * times fail loudly through {@link timestampUnitNs}, and callers that only record them see `undefined` from
  * {@link lookupTimestampUnitNs} and skip the conversion.
  *
@@ -34,7 +35,7 @@ export const timestampUnitNs = (key: string | undefined): number => {
   if (unit === undefined) {
     throw new Error(
       `TIMESTAMP_UNIT_NS has no ns-per-timestamp-unit row for the environment key '${key}'` +
-        " (the conversion is not guessed — see docs/known-issues.md and add a row)",
+        " (the conversion is not guessed — measure the ns per unit on this environment and add a row)",
     );
   }
   return unit;

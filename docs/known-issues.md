@@ -23,12 +23,12 @@ Ordinary local CLI and browser comparisons do not use this pseudo-HF server.
 On machines where the models are large relative to VRAM, feeding GB-class models in succession **rarely produces
 `GpuOutOfMemoryError` / `GpuDeviceLostError`**. The failing test differs every time (not a defect specific to one test),
 and **re-running the failed file alone is green**. It appears in the same form not only in full runs but also **when lanes
-are run back to back without a gap** (on some machines the release is delayed until the next device poll — the
-"Intel Arc B570" section below).
+are run back to back without a gap** (on some machines the release by `destroy()` is delayed until the next device
+poll — measured on an Intel Arc B570 under Linux xe / wgpu).
 
 Operational workaround = **leave a few minutes between lanes**, or **re-run the failed file alone to confirm**
 (green means a flake). However, in an environment that panics instead of raising an exception on device lost
-(Deno 2.9.6 — same section), the whole process disappears, so the run itself stops there before any standalone re-run.
+(Deno 2.9.6 — its ext/webgpu unwraps the result of the device poll), the whole process disappears, so the run itself stops there before any standalone re-run.
 
 ## On Metal (Apple GPU), the GPU output of attention i8a8 is 1 ULP off the TS reference (+ 4 conv1d/conv2d parity tests + 2 gru_scan parity tests + 1 linear GEMV u32 check)
 
@@ -302,76 +302,6 @@ allocation succeed, the experiment comes before the change (ruling of 2026-09-03
 accepted that 1 census check of verify stays red on M2** (Linux / Vulkan green; the equivalence of parallel and
 sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does not require timing).
 
-## Intel Arc B570 (Linux / Vulkan ANV / xe): the OOM check is red + Deno's timestamp unit and the device-lost panic (measured 2026-09-20, recorded only)
-
-Of the results of running the full verify after swapping the development machine's GPU from RTX 3080 Ti to
-**Intel Arc B570** (BMG G21, VRAM 9.93 GiB, Mesa 25.0.7, Linux xe driver, Deno 2.9.6), these are the ones kept **as
-records only** while unresolved (ruling 2026-09-20). The mismatches of 16 sha256 reference checks are the by-design case
-of the limitations section "The sha256 reference check is for the reference environment only", and **were resolved by
-changing the reference values to rows per environment key** (ADR
-[0106](decisions/0106-device-keyed-references.md) — the B570 row `deno-intel-graphics-bmg-g21` has been created, so
-the checks on this machine again point only at "a regression on this machine"). The BiRefNet 2048² device lost is
-explicitly SKIPped by the held row of this machine's environment key (`HELD_SERIES` in `e2e_birefnet_test.ts` — the
-full run does not stop at this family; limitations section "BiRefNet"),
-`sin` of golden `activations` was resolved by moving the tolerance toward the WGSL specification band
-(`OUTPUT_TOLERANCE` in `e2e_golden_test.ts`), and the `createResident` limit check was a hole in a test premise
-(`maxBufferSize` being a multiple of 4) and is fixed.
-
-- **The OOM check (`gpu_generation_context_test.ts` "state allocation failure fails loudly via the out-of-memory
-  errorScope") is red**: the 64 GiB state allocation fails with `GpuOutOfMemoryError` as expected, but the
-  survivor (1 GiB) right after it also fails with `not enough memory left`. **Not a leak on the karume side** —
-  reproduced with a probe of plain WebGPU only (OOM at 1 GiB × 9 → a 1 GiB allocation right after `destroy()` of all of
-  them is OOM → a 1 GiB allocation after `onSubmittedWorkDone` + 200 ms succeeds). On Intel / wgpu, the release of
-  `destroy()` is delayed until the next device poll. The test is not changed (taking the survivor after a poll would
-  weaken the meaning of the check, "detect an implementation that failed to return the release"). A different kind from
-  Metal's "errorScope silence" (here it is the side that fails).
-  **It is red only inside a full run and green when run alone** (re-confirmed in the full verify of 2026-09-27; red 10
-  times out of 12). Whether it turns red depends on the VRAM headroom at that moment.
-  **2026-10-01**: red 4 / 4 times both in `deno task test:core` and in a run of this test file alone (no `--filter`,
-  26 tests) (both at HEAD `feb6d8fe` and at `7c2c22e`, where the full verify was green — not a code regression). Green
-  when only 1 test is selected with `--filter`.
-  The same delayed release also appears as **a flake when lanes are run back to back without a gap** (2026-09-21:
-  running the sbv2 lane right after the anima lane (9 minutes), the 12 tests from the runtime golden `i8 / flow / p512`
-  on are OOM — the later ones fail in `requestDevice` itself with `Not enough memory left`. 20 seconds is sometimes not
-  enough; running alone after a gap of a few minutes, all 198 tests are green).
-  **The same form appears without crossing lanes** (measured 2026-09-22): even the tiny golden (the 32 models of
-  `e2e_golden_test.ts`), which repeats acquiring and destroying a device more than 30 times within one process,
-  sometimes has its last cases go red with `Not enough memory left` from `requestDevice` or `GpuOutOfMemoryError` on
-  weight upload, and running the same file again in succession increases the number of reds (2 on the 1st run, 7 on the
-  2nd right after). Standalone runs (`--filter`) are green, and it recovers after a few minutes. **Up to here is
-  observation**.
-  **Inference (isolation not finished)**: the number of reds is the amount of release delay accumulated by that run,
-  not the size of a regression. However, at the time this observation was taken, the tests had paths that did not guard
-  the span from `acquireGpu` to `gpu.destroy()` with try/finally (if Session construction throws, destruction is never
-  reached, and the rest of that run proceeds holding a device that is never destroyed), which was mixed in as **a
-  separate path that increases the count within the same run**. The destruction leak itself is closed (`e2e_golden` /
-  `e2e_sbv2` / `e2e_gemma4` / `e2e_minicpm5`), so the next time the same form appears, the pattern of counts is measured
-  again to narrow the cause to one.
-  The operational workaround is canonical in the section above on full runs that rarely flake.
-- **Deno does not convert timestamp-query values to ns** (ext/webgpu returns wgpu's raw ticks as is; the WebGPU
-  specification says ns). The B570's Vulkan `timestampPeriod` is 52.0833 ns, so the breakdowns of
-  `lastRunTiming` / `--diagnostics` on Deno are **×52 too small** (BiRefNet 1024² GPU total raw 64.8 ms
-  × 52.08 ≒ 3,375 ms, matching the wall-clock measurement window of 3,452 ms). On RTX the period is 1 ns, so it did not
-  surface.
-  **2026-10-06, measured on RTX 3080 Ti (NVIDIA driver 615.71)**: 1 tick = 1 ns (in passes of 133–153 ms, raw ticks
-  matched wall clock − the fixed cost of submit (about 11 ms) within 1%; with both disposable and reused query sets) → a
-  row was added to `TIMESTAMP_UNIT_NS`. Probe =
-  `tools/diag/timestamp-period-probe.ts` (removed in 0.15).
-  Chrome (Dawn) converts. karume cannot correct it (the WebGPU API does not expose the period), so
-  when reading the GPU breakdown on Deno, beware of GPUs with period ≠ 1. No issue has been filed with Deno yet.
-- **Deno 2.9.6 panics on device lost instead of raising an exception** (`device_poll(...).unwrap()` of ext/webgpu
-  — buffer.rs:247 (mapAsync) / queue.rs:109 (onSubmittedWorkDone) crash on `Err(Device(Lost))`).
-  The whole process disappears before reaching karume's `GpuDeviceLostError` path, so when a device lost occurs during a
-  full verify run, the run stops there (an environment where the symptom of the section above on full runs that rarely
-  flake is "the process disappears" rather than "one red test"). The completion marker of the in-flight submit bound
-  (ADR 0123 — an `onSubmittedWorkDone` every 64 submits between fences — placed only by run) also goes through this path,
-  so in a long run the loss surfaces in the synchronous part of the marker and panics.
-- **Destroying a device and creating a new one reduces the total that can be allocated on the next device** (observed
-  only, 2026-09-26; cause not investigated). In a probe of plain WebGPU, repeating "fill the device up, destroy it,
-  wait 500 ms" reduced the total allocatable on the next device as 9 → 8 → 7 → 6 GiB
-  ([research 2026-09-26](research/2026-09-26-anima-residency-bench.md)). It may be the same lineage as the flake
-  "`requestDevice` itself fails with `Not enough memory left`" above (speculation).
-
 ## EmbeddingGemma batch>1 export does not pass the conversion stage
 
 `python -m embeddinggemma.export --batch N` (N>1, on the tools/export-recipes side — the launch form follows the
@@ -391,20 +321,6 @@ recipe separation of ADR 0065) fails loudly in core's `karume/convert.py`
 The root fix is a generalisation on the convert/normalize side (turning bool constants into f32/i32, or extending
 initializer dtypes + supporting mask folding for batch>1), which needs a design decision on the core conversion
 foundation. The `--batch` flag itself is kept in a form that can be used as is once the generalisation lands.
-
-## On Pixel (8GB-class Android Chrome), loading anima turbo i4 fails — true cause not identified
-
-The error text of the hardware report "BodyStreamBuffer was aborted" is a fixed text that Chrome substitutes for the
-reason of a collateral abort, not the true cause (the diagnostic bug where hub surfaced the collateral side was fixed on
-2026-08-25 — restoring the true cause + byte budget + serialising verification. **Released in 0.7.0**).
-The leading hypothesis is memory pressure (even turbo i4 is ~2.56GiB resident at completion + verification temporaries;
-with i8 a forced browser termination was reported), but it looks identical to a connection drop or an app-side abort, so
-it cannot be confirmed until `err.cause` is observed on the hardware with the fixed version. Reducing residency itself
-came with the shard-split distribution of 0.7.0 (the R1 integration phase), and is currently replaced by block-level
-fetching of containers and Session construction (the browser source is seek-type —
-ADR [0108](decisions/0108-container-format.md) addendum 5). anima's HF distribution has been re-uploaded as
-`karume/5` (the 0.13.0 re-upload, 2026-09-24). Remaining task = re-observation on the hardware only (the Pixel item of
-"User hardware" in the [backlog](backlog.md) now section).
 
 ## hub: narrowing weights to `drafter` only in `evictCachedAssets` still deletes the shared assets (tokenizer)
 
@@ -457,107 +373,6 @@ This is a state that lacks the check of "consistency between the quant preset an
   f32 (the embedding buffer about 4×) passes the check and can fail in this way.
 - Fix candidates (ruling needed): check the replacement preset's `requiredLimits` / `gpuFeatures` together with the
   original preset's (take the larger), or reject in admission a replacement whose preset differs.
-
-## Deno: `GPUDevice.destroy()` does not return VRAM, and the remainder accumulates over a sequence of tests that create and discard devices — the practical preset at S = 32,760 OOMs in the Wan lane (2026-10-04 to 05; cause established; a test-side symptomatic fix is in; the root fix is not done)
-
-In `deno task test:models:wan`, the step of `e2e_wan_dit_test.ts` "practical preset `f16+dit8-a8-attn8-s16`, normal
-mode, S = 32,760" fails with
-**`GpuOutOfMemoryError: run encoding and readback: not enough memory left`**. In the lane it failed 2 times out of 2
-(385 passed, 1 failed / 394 passed, 1 failed); running the same file alone with `--filter 実用席` is green 2 times out
-of 2. The failing step only records time and allocation, and all sha row and band comparisons pass.
-
-- **Cause (established from the upstream source and measurements)**: on the development machine before the hardware
-  swap (B570), with Deno 2.9.6 (wgpu-core 29), `GPUDevice.destroy()` only marks the device invalid and releases
-  nothing. The device and its resources (blocks the allocator keeps, the zero buffer, the driver pools, query sets)
-  are returned when V8's GC collects the device's wrapper. The tests repeat `acquireGpu` → `settleReleases` →
-  `destroy()` per test, so destroyed devices remain until GC and keep eating the VRAM limit of the same process (about
-  9.6 GiB on the B570). `settleReleases` returns only explicitly destroyed buffers and has no effect on per-device
-  remains. That they remain after `gc()` within a file is because the runner keeps the function passed to a step ("Why
-  it remains" under "What remains" below).
-- **Measurements** (`outputs/bench/2026-10-05_dead-device/`, B570):
-  - A probe that creates and discards a device 5 times in plain WebGPU: per destroyed device that did nothing, one DRM
-    client remains and keeps holding vram0 0.192 GiB and gtt 64 MiB (1.15 GiB / 384 MiB after 5 times). One `gc()` call
-    does not reduce it, and **everything returns on the second** (the clients go back to the single fd of the physical
-    device). Waiting (settle) before the destruction makes no difference.
-  - A run of the 3 tests of `e2e_wan_dit_test.ts` (full-size normal mode → practical-preset timing mode →
-    practical-preset normal mode), recorded per DRM client from outside: while S = 32,760 of the practical-preset normal
-    mode was running, **2 destroyed devices kept holding 0.64 GiB and 1.54 GiB**
-    (peak total 8.34 GiB = 0.64 + 1.54 + its own 6.16). The allocation at the start of this step was 2.37 GiB, more than
-    in a standalone run (1.73 GiB). In the lane, more devices had been discarded before this, and it exceeds the limit.
-  - A query set in timing mode is about 4.1 KiB each (41 MiB for 10,000). `GPUQuerySet.destroy()` does nothing on Deno,
-    and it is returned by GC.
-- **Symptomatic fix applied** (user ruling 2026-10-05 — a symptomatic fix is acceptable; deep investigation and an
-  upstream report are postponed): the tests' GPU acquisition entry point
-  `acquireTestGpu` (`packages/models/tests/helpers/gpu.ts`) awaits `collectDestroyedDevices`
-  (`packages/models/tests/helpers/collect-destroyed-devices.ts`) before `acquireGpu`. It does `gc()` → 100 ms → `gc()`
-  → 100 ms, with the count and the waits matched to the probe measurement above (everything returned within the 100 ms
-  after the second). Since `gc` is needed, the Vitest configuration passes `--expose-gc` to its workers (`execArgv` in
-  `vite.config.ts`; `packages/runtime/tests/verify_lanes_test.ts` fails if it does not). Only `acquireGpu` of the e2e
-  tests of the Wan lanes (`models:wan` / `models:wan-ti2v`) goes through it.
-  Whether collection happened is not checked.
-- **What remains**:
-  - Root fix: the upstream (Deno) report and a check before acquisition that the DRM clients of destroyed devices have
-    gone (naming and failing if any remain) are postponed. Test-side candidate = the relay step (worked on the B570 in
-    experiment E4 below; proposal on hold — ruling below). The GC timing is the behaviour of the V8 / cppgc
-    implementation, not a guarantee of a specification.
-  - A run started without `--expose-gc` (outside the Vitest configuration) has no `gc`, and the mitigation does
-    nothing.
-  - Tests outside the Wan lanes and devices that the pipeline takes internally (loads that do not pass `gpu`) do not go
-    through the entry point (the GC before the next acquisition through the entry point collects what was discarded
-    until then together).
-  - Product side: the same remains appear in usage that recreates a device after `GpuContext.destroy()` (recovery from
-    device lost, etc.). No remedy.
-  - The re-run of the lane with the mitigation (2026-10-05, `outputs/bench/karume-wan2.1/2026-10-05_stage3-gpu-rerun/`)
-    was 395 passed, 0 failed. However,
-    **the headroom is only about 0.15 GiB**: the allocation at the start of the step that used to fail was 3.48 GiB, the
-    peak 9.44 GiB (limit about 9.6 GiB). In the external record, the mitigation collected only the devices of the
-    previous file and one destroyed device within the same file. The 3 devices from the timing-mode device on remained
-    after `gc()` (1.62 + 0.64 + 1.03 = 3.29 GiB at the peak) and disappeared together at the end of the file.
-  - Why it remains (established with a plain-WebGPU probe, 2026-10-05): the `deno test` runner keeps the function
-    passed to `t.step` until the file ends. If that function holds the test scope's `gpu`, the destroyed device's
-    wrapper is not collected however many times `gc()` is called, and the VRAM remains until the end of the file.
-    Probe = `outputs/diag/step-retention-probe_test.ts`, log =
-    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/step-retention-probe2.log` (A: no step → the DRM client
-    disappears after 2 `gc()` calls / B: the step closure holds the device → remains even after 4 / E: relay step (only
-    the relay function is passed to the runner, and the body is released at the end of the step) → collected). This is
-    why the current symptomatic fix (2 `gc()` calls before acquisition) does not work for devices held by the function
-    passed to a step.
-  - **It recurred even with the mitigation** (2026-10-05, the final state of ADR 0121 stages 5 / 6 `128b511e`,
-    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/`):
-    `test:models:wan` was 403 passed, 1 failed, failing at the same step with the same exception. On the same frozen
-    copy, a standalone re-run with `--filter 実用席` was 2 passed, 0 failed
-    (S = 32,760 normal mode allocated 5.46 GiB). The thinness of the headroom was re-confirmed. A re-run of the lane on
-    the same frozen copy was also 403 passed, 1 failed, 78 min 59 s
-    (same step, same exception — 2 out of 2). Running only `e2e_wan_dit_test.ts` gave 12 passed, 1 failed (same step);
-    on the B570, splitting by file is not enough.
-  - **Experiments** (B570, frozen copy, `oom-e2/` / `oom-e4/` in the same location): in E2 (3 reduced tests + the
-    current symptomatic fix), 2 destroyed devices (0.64 / 1.54 GiB) remained until the end of the file. In E4 (an
-    experimental version of `e2e_wan_dit_test.ts` with its 8 `t.step` sites replaced by relay steps), the whole file was
-    13 passed, 0 failed, 36 min 17 s. The VRAM at the start of the step that used to fail was 0.192 GiB (2.38–4.15 GiB
-    before the remedy), the peak 5.883 GiB (limit 9.375 GiB), and the destroyed devices disappeared every time before
-    the next acquisition.
-- **User ruling (2026-10-05, the B570 lane)**: no remedy to make the lane pass on the B570 environment. The relay-step
-  proposal (helper + replacing 72 sites in the 10 Wan e2e files + a check that fails direct writes) has not been approved
-  (on hold — not rejected). The lane is to be run on the RTX 3080 Ti after the development-machine swap, and the sha rows
-  of the new GPU are created with `KARUME_REFERENCE=write` on the frozen copy `128b511e` and then compared at HEAD (the
-  B570 rows are kept — ruling 2026-10-06, ADR 0121 addendum "the development machine changed"). The swap was completed on
-  2026-10-06 (RTX 3080 Ti 12,288 MiB,
-  environment key `deno-nvidia-geforce-rtx-3080-ti`). **On 2026-10-06 it was run on the RTX 3080 Ti and passed without
-  the remedy** (frozen copy `128b511e`: 2.1 = 401 passed, 2.2 = 40 passed (the only red was a missing row in the
-  conversion table of the timing check); in the full verify at HEAD `b744a9fd`, both Wan lanes all green — ADR 0121
-  addendum "RTX 3080 Ti lanes and full verify").
-  How destroyed devices remain on the NVIDIA driver has not been measured.
-- **Operational workaround** (Deno era; the practical-preset normal-mode case it re-runs was dropped on 2026-10-17 by `466b7196`): for a run where only this step still fails with OOM after the mitigation, re-run
-  `e2e_wan_dit_test.ts` alone with the test-name filter `-t 実用席`. When running outside the Vitest configuration,
-  pass `--expose-gc` (the configuration does it through `execArgv` in `vite.config.ts`; without it the mitigation does
-  not work). On machines after the swap, first run the lane without the remedy and look at the result. The NVIDIA driver
-  does not emit `drm-total-*` in DRM fdinfo, so the tests' VRAM observation (`helpers/drm-usage.ts`) becomes
-  `n/a` (an observation, not a check — it does not turn red). VRAM is watched from outside with `nvidia-smi`.
-- **Existing items the same mechanism could explain (speculation, unverified)**: "destroying a device and creating a
-  new one reduces the total that can be allocated on the next device" and
-  "the OOM at the end of the tiny golden that piles up acquisitions and destructions" in the B570 section above.
-- The investigation record is `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json` (not tracked by git), and the
-  experiment procedure is `outputs/diag/dead-device-README.md`.
 
 ## Adapter matching of reference values: the 4 families whose pipeline acquires the GPU internally do not match the GPU of the actual run (only on multi-GPU machines; filed only)
 

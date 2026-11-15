@@ -94,8 +94,7 @@ test.skipIf(!GPU_AVAILABLE)(
   async () => {
     const gpu = await acquireGpu();
     // MUST: device destruction also covers a failing `createSession`. If it is missed, the rest of
-    // the run carries an undestroyed device and later tests go red with OOM (deferred release in
-    // known-issues).
+    // the run carries an undestroyed device and later tests go red with OOM.
     try {
       const session = await createSessionFromContainer(gpu, model(), "model");
       try {
@@ -175,8 +174,7 @@ test.skipIf(!GPU_AVAILABLE)(
   async () => {
     const gpu = await acquireGpu();
     // MUST: device destruction also covers a failing `createSession`. If it is missed, the rest of
-    // the run carries an undestroyed device and later tests go red with OOM (deferred release in
-    // known-issues).
+    // the run carries an undestroyed device and later tests go red with OOM.
     try {
       const session = await createSessionFromContainer(gpu, model(), "model");
       try {

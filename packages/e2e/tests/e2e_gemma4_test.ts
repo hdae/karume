@@ -442,7 +442,7 @@ const withGoldenSession = async (
   const gpu = await acquireGpu();
   // MUST: destroying the device also covers failures of the adapter check and of
   // `createSession`. If missed, the rest of that run proceeds holding an undestroyed device and
-  // later tests go red with OOM (the deferred release in known-issues).
+  // later tests go red with OOM.
   try {
     // This path records reference values and results as this machine's rows, so the identity of
     // the adapter the key was taken from and the adapter that runs is checked here (a mix-up on a
@@ -696,8 +696,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
     const gpu = await acquireGpu();
     // MUST: destroying the device also covers a failure of `createSession`. If missed, the rest of
-    // that run proceeds holding an undestroyed device and later tests go red with OOM (the deferred
-    // release in known-issues).
+    // that run proceeds holding an undestroyed device and later tests go red with OOM.
     try {
       const session = await parsed.createContainerSession(gpu);
       try {

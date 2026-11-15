@@ -7,7 +7,8 @@
  * return its VRAM; the device and its resources are released only when V8's GC collects the
  * device's wrapper. The tests create and drop one device per test, so destroyed devices that
  * survive until the GC eat the process's VRAM and make a later test's large allocation OOM
- * (docs/known-issues.md "Deno: `GPUDevice.destroy()` does not return VRAM…").
+ * (measured on an Intel Arc B570, 2026-10-05: a destroyed device that did nothing kept 0.19 GiB,
+ * and two destroyed devices of the Wan DiT e2e kept 0.64 GiB and 1.54 GiB while the next case ran).
  *
  * NOTE: what this does not guarantee:
  * - When collection happens is V8 / cppgc implementation behaviour, not a spec guarantee. That

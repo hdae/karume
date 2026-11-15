@@ -333,8 +333,8 @@ export type ChunkBudgetStats = {
    * serializes CPU encoding and GPU execution — the MUST in the module doc).
    *
    * NOTE: the unit is the timestamp value itself (the same as {@link GpuTimingEntry.ns} — ns per
-   * the specification. Deno returns wgpu's raw ticks without conversion; on the B570 1 tick = 52.08
-   * ns — the "Intel Arc B570" section of docs/known-issues.md). **Not used for control** (chunk
+   * the specification. Deno returns wgpu's raw ticks without conversion; on the Intel Arc B570
+   * 1 tick = 52.08 ns, its Vulkan `timestampPeriod`). **Not used for control** (chunk
    * boundaries do not change with this value).
    */
   readonly submitGpuTime?: {
@@ -982,8 +982,9 @@ export class SubmitScheduler {
    * piece of work submitted so far has completed" (research 2026-08-04 §4.1). On that
    * implementation the GPU catches up when the marker is placed, and meanwhile the GPU idles
    * waiting for the next chunk (the wait's Promise only waits for something already resolved). If
-   * the loss happens in this synchronous part, Deno panics instead of throwing (same as flush — the
-   * Deno device-lost entry in docs/known-issues.md).
+   * the loss happens in this synchronous part, Deno panics instead of throwing (same as flush — its
+   * ext/webgpu unwraps the result of the device poll, so `Err(Device(Lost))` takes the whole process
+   * down before `GpuDeviceLostError` can be raised).
    * NOTE: a rejection is only counted as settled here and is not thrown. The waiting side awaits
    * the same Promise through `raceDeviceLost`, so the rejection surfaces there. The rejection of a
    * marker dropped without waiting is failed by the fence of that run / section on the same device

@@ -349,7 +349,7 @@
 | generation bundle (`WanFamilySpec`) | 世代の束 | class ごとに違う値をまとめた値 | — | `packages/models/src/wan/family.ts` |
 | generation script (the first Wan2.2 video) | 生成スクリプト | 製品の class ができる前に Wan2.2 の動画を出した git 追跡外の台本（以後は使わない） | — | ADR 0121 追記 |
 | frozen copy (GPU check) | 凍結コピー | 対象コミットを `git archive` で取り出し、資産へリンクを張ったディレクトリ | — | ADR 0121 追記 |
-| relay step (test VRAM) | 中継の step | `t.step` へ中継の関数だけを渡し、GPU を掴む本体を step の終了時に手放す形 | — | ADR 0121 追記・known-issues |
+| relay step (test VRAM) | 中継の step | `t.step` へ中継の関数だけを渡し、GPU を掴む本体を step の終了時に手放す形 | — | ADR 0121 追記 |
 | generation table (Wan distribution recipe) | 世代の表 | Wan2.1 / 2.2 で違う配布の事実を集めた frozen dataclass | — | `tools/export-recipes/wan/distribution.py` |
 | seams (of the DiT pass) | 切れ目 | Wan の DiT の 1 step の中で GPU が DiT の計算をしていない部分 | — | research 2026-10-15・perf-ledger H-37 |
 

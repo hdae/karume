@@ -102,9 +102,8 @@ maintainer's ruling of 2026-11-06).
   [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted, nothing below is built; the
   maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
   1. *(Landed 2026-11-15: the link check in the core lane with the `SPEC:` marker, the approved deletions, `CLAUDE.md`,
-     the `deno-*` rows.)* Left from it: the sections of `known-issues.md` for the Intel Arc B570 (the OOM check), Deno's
-     `GPUDevice.destroy()` and the Pixel load failure stay until the twelve source comments and the backlog item that cite
-     them say what they need themselves.
+     the `deno-*` rows; the sections of `known-issues.md` for the Intel Arc B570, Deno's `GPUDevice.destroy()` and the
+     Pixel load failure, once the comments and the items that cited them said what they need themselves.)*
   2. *(Landed 2026-11-15: the record of the WGSL a test dispatches; `outputs/references/`, which keeps the artifact and
      the kernels of each matching run and adds them to a mismatch's message; the verification cache's recording stage
      under `outputs/verify-cache/`; Wan2.2's seed-path cases at 9 frames.)* Left from it:
@@ -310,7 +309,11 @@ maintainer's ruling of 2026-11-06).
   results of users running a sample collection on several environments (**filed only** — the items collected, the
   location and the opt-in form are not designed; the per-run JSON records of `apps/playground` are the nearest existing
   piece).
-- Re-assessing `err.cause` on Pixel (8 GB class Android Chrome) — [known-issues](known-issues.md).
+- Re-assessing `err.cause` on Pixel (8 GB class Android Chrome): loading anima turbo `i4` failed there and the true
+  cause is not identified. The reported "BodyStreamBuffer was aborted" is the text Chrome substitutes for a collateral
+  abort; the hub has surfaced the true cause since 0.7.0, and the distribution has since moved to block-level fetching.
+  The leading hypothesis is memory pressure (about 2.56 GiB resident at completion), which a connection drop or an
+  app-side abort cannot be told from until `err.cause` is read on the hardware. Left: that one observation.
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
   2026-10-29)**.
   - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority).

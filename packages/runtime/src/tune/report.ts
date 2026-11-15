@@ -50,9 +50,9 @@ export const WALL_TIMING_NOTE =
 
 /**
  * The time unit. `ns` = timestamp-query (Chrome / Dawn give ns as the specification says);
- * `deno-raw-tick` = timestamp-query taken on Deno (wgpu does not convert raw ticks —
- * docs/known-issues.md section "Intel Arc B570 (Linux / Vulkan ANV / xe)"; 1 tick = 52.08 ns on
- * B570); `wall` = the wall clock from submit to `onSubmittedWorkDone` (ns) on a device without
+ * `deno-raw-tick` = timestamp-query taken on Deno (wgpu does not convert raw ticks; 1 tick is the
+ * device's Vulkan `timestampPeriod` — 52.08 ns on the Intel Arc B570, 1 ns on the RTX 3080 Ti);
+ * `wall` = the wall clock from submit to `onSubmittedWorkDone` (ns) on a device without
  * timestamp-query.
  */
 export type TimingUnit = "ns" | "deno-raw-tick" | "wall";

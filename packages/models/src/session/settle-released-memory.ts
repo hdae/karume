@@ -14,8 +14,8 @@ import type { GpuContext } from "@karume/runtime";
  * loss).
  *
  * WHY: on Intel / wgpu (B570) the release by `destroy()` is delayed until the next device poll, and
- * re-allocating right after a teardown can hit OOM (docs/known-issues.md, the "Intel Arc B570"
- * section). In a plain WebGPU probe this wait alone let the re-allocation succeed
+ * re-allocating right after a teardown can hit OOM. In a plain WebGPU probe this wait alone let
+ * the re-allocation succeed
  * (docs/research/2026-09-26-anima-residency-bench.md). No fixed sleep is added.
  * The empty submit is there to flush wgpu's pending destroys, and to surface here the loss of a
  * device invalidated by a fatal OOM (Deno resolves `device.lost` only on a call that checks

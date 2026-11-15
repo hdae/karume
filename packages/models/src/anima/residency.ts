@@ -322,7 +322,7 @@ export type ResidencyHooks<T> = {
   /**
    * After disposing on an eviction (OOM / not enough headroom), waits for the release to reach the
    * device. On Intel / wgpu the release by `destroy()` is deferred to the next device poll
-   * (docs/known-issues.md, Intel Arc B570 section), so re-running without waiting can hit the same
+   * (measured on an Intel Arc B570), so re-running without waiting can hit the same
    * OOM (the grounds for the shape of the wait and the unverified range are in the doc of the
    * pipeline-side implementation). The wait also surfaces the loss of a device already invalidated
    * by a fatal OOM (the pipeline-side implementation issues an empty submit before waiting — a

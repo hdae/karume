@@ -298,7 +298,7 @@ for (const model of MODELS) {
           const gpu = await acquireGpu();
           // MUST: device destruction also covers a failing adapter check and a failing
           // `createSession`. If it is missed, the rest of the run carries an undestroyed device and
-          // later tests go red with OOM (deferred release in known-issues).
+          // later tests go red with OOM.
           try {
             // This path records reference values and results as this machine's row, so it checks
             // here that the adapter the key was taken from and the adapter that runs are the same

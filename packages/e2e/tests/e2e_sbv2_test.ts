@@ -916,8 +916,7 @@ const runGoldenCase = async (
 
   const gpu = await acquireGpu();
   // MUST: the device is destroyed even when the adapter check or `createSession` fails. Missing
-  // that, the rest of the run carries an undestroyed device and later cases go red with OOM (the
-  // deferred release in known-issues).
+  // that, the rest of the run carries an undestroyed device and later cases go red with OOM.
   try {
     // This path keeps the reference values and results as this machine's rows, so check here that
     // the adapter the key was taken from is the one running (mixing them up on a multi-GPU machine

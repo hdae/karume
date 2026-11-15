@@ -500,7 +500,7 @@ even with 1 dispatch = 1 submit (splitting submits by time budget (ADR 0004) doe
 1024² (output `[1,256,512,512]`), so 2048² with 4 times the elements is expected at ≈ 6.6 s. The two
 1024² series (birefnet-hr / lucida) are all green even on the B570. Deno does not turn this device
 lost into an exception but panics, stopping the following tests along with the whole process
-(known-issues, "Intel Arc B570" section). For this reason, `HELD_SERIES` in
+(Deno 2.9.6's ext/webgpu unwraps the result of the device poll). For this reason, `HELD_SERIES` in
 `packages/e2e/tests/e2e_birefnet_test.ts` has rows for the 3 series of 2048² (birefnet-hr's f16,
 lucida's f32 / f16) × the B570 environment key (`deno-intel-graphics-bmg-g21`), and on this machine
 the tests that use the GPU (golden comparison, geometry discrimination) are explicitly SKIPped

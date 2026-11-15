@@ -657,7 +657,7 @@ for (const target of TARGETS) {
           const gpu = await acquireGpu();
           // MUST: destroying the device also covers failures of the adapter check and of
           // `createSession`. If missed, the rest of that run proceeds holding an undestroyed device
-          // and later tests go red with OOM (the deferred release in known-issues).
+          // and later tests go red with OOM.
           try {
             // This path records reference values and results as this machine's rows, so the
             // identity of the adapter the key was taken from and the adapter that runs is checked

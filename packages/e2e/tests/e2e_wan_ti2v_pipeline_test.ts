@@ -137,7 +137,7 @@
  * KARUME_WAN_TI2V_121F=1 vp test packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts -t "121 frames"
  * ```
  *
- * ## Device use (B570's `destroy()` does not return VRAM — docs/known-issues.md)
+ * ## Device use (on Deno a destroyed device kept its VRAM until V8 collected it — measured on the B570)
  *
  * The one `describe` of the default lane takes a single device (in its `beforeAll`) and runs every case as an `it`
  * (with `settleReleases` between cases). The opt-in 50 steps and 121 frames likewise use one device and run as a

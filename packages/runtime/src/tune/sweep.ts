@@ -199,8 +199,8 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
 
 /**
  * The unit of timestamp differences. Deno's WebGPU (wgpu) returns timestamps as raw ticks without
- * converting them to ns (docs/known-issues.md section "Intel Arc B570 (Linux / Vulkan ANV / xe)" —
- * 1 tick = 52.08 ns on B570), hence `deno-raw-tick`; everything else (Chrome / Dawn) is `ns` as the
+ * converting them to ns (1 tick = 52.08 ns on the Intel Arc B570, its Vulkan `timestampPeriod`; 1 ns
+ * on the RTX 3080 Ti), hence `deno-raw-tick`; everything else (Chrome / Dawn) is `ns` as the
  * specification says. The implementation is told apart by `navigator.userAgent` (Deno returns
  * `Deno/<version>`).
  */
