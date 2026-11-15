@@ -43,7 +43,7 @@ import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { RUNTIME_SUPPORT, WEIGHT_SLOTS } from "../src/ops.ts";
 import { assertRuntimeSupport } from "../src/ops/support.ts";

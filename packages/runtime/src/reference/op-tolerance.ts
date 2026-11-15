@@ -12,6 +12,10 @@
  * generic band" is why this table exists. Per-case exceptions are an `OpCase.tolerance` override
  * (the escape hatch for ill-conditioned inputs — the table stays unchanged).
  *
+ * It lives beside the reference implementations (`./ops.ts`): an op's meaning is its oracle plus the
+ * band a kernel must stay inside, and the checks outside this package's tests (`packages/kernel-checks`,
+ * the browser check pages) read both from here. It is not part of the public surface.
+ *
  * NOTE: among the "exact (0, 0)" ops, the GEMM / reduction ones are exact only because **the
  * inputs of this corpus lie on a binary lattice** (the lattice argument of the research §2 — it
  * holds for any implementation conforming to IEEE-754 f32). For general inputs the band of the
@@ -19,7 +23,7 @@
  * exactness as a separate test.
  */
 
-import type { Tolerance } from "../../src/reference/allclose.ts";
+import type { Tolerance } from "./allclose.ts";
 
 const EXACT: Tolerance = { atol: 0, rtol: 0 };
 /** Single division op (measured 1 ULP; 6.4× the spec's 2.5 ULP). */

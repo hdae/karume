@@ -23,7 +23,7 @@ import type { OpenedContainer } from "../src/format/container/open.ts";
 import { decodeI4 } from "../src/format/i4.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";

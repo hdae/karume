@@ -7,7 +7,7 @@ import {
   linearGemvWgsl,
 } from "../src/kernels/linear-gemv.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 
 // The WGSL chosen for the large-vocabulary shape does not bake N. The edge columns and the edge of
 // the prefetched words are checked at a small shape; the real shape 262144×1536 is verified by the

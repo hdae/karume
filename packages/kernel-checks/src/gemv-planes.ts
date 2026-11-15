@@ -42,7 +42,7 @@ import {
   planesGemvWgsl,
   planesGemvWorkgroups,
 } from "../../runtime/src/kernels/linear-gemv-planes.ts";
-import { GEMM_TOLERANCE } from "../../runtime/tests/helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../../runtime/src/reference/op-tolerance.ts";
 import {
   type CheckCase,
   type CheckOptions,

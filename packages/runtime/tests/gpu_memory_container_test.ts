@@ -40,7 +40,7 @@ import {
   prepareContainer,
   type Tensor,
 } from "../src/runtime/executor.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { f32Bytes, fill, type FilledTensor } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeF16 } from "./helpers/f16.ts";

@@ -18,7 +18,7 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./helpers/pipeline-census.ts";
 
 type Storage = "i2" | "i4" | "i8";

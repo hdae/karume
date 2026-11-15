@@ -42,7 +42,7 @@ import {
   UPSAMPLE_CASES,
   UPSAMPLE_FRACTIONAL_CASES,
 } from "./helpers/gpu_op_cases.ts";
-import { BIT_IDENTICAL_OPS, opTolerance } from "./helpers/op-tolerance.ts";
+import { BIT_IDENTICAL_OPS, opTolerance } from "../src/reference/op-tolerance.ts";
 import {
   type DeclarationJson,
   fill,
@@ -118,7 +118,7 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
         const label = expected.length === 1 ? testCase.name : `${testCase.name} output ${slot}`;
         assertEquals(tensor.shape, expected[slot].shape, label);
         assertEquals(tensor.dtype, expected[slot].dtype, `${label}: dtype`);
-        // f32 uses the per-op tolerance table (helpers/op-tolerance.ts — an op missing from the table fails loudly);
+        // f32 uses the per-op tolerance table (src/reference/op-tolerance.ts — an op missing from the table fails loudly);
         // for i32 / bool, compareTensors picks exact equality by dtype (ADR 0009)
         const report = compareTensors(
           tensor,

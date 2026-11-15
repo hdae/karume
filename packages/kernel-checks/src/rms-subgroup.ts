@@ -24,7 +24,7 @@ import {
   openModelBytes,
   singleOpDeclaration,
 } from "../../runtime/tests/helpers/model-fixture.ts";
-import { opTolerance } from "../../runtime/tests/helpers/op-tolerance.ts";
+import { opTolerance } from "../../runtime/src/reference/op-tolerance.ts";
 import { rmsNormAddGraph } from "../../runtime/tests/helpers/rms-norm-add-graph.ts";
 import {
   type CheckCase,

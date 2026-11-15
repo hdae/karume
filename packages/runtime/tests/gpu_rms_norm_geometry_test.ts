@@ -22,7 +22,7 @@ import {
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
-import { opTolerance } from "./helpers/op-tolerance.ts";
+import { opTolerance } from "../src/reference/op-tolerance.ts";
 
 const direct = async (
   gpu: GpuContext,

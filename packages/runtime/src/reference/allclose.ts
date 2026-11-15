@@ -27,7 +27,7 @@ export type Tolerance = {
  * The default band when none is given. **It is no longer the check of the op vocabulary sweep**
  * (2026-08-31 — the M1 follow-up done): the sweep (checkAll in tests/gpu_ops_test.ts) and the GEMM
  * comparisons explicitly use the per-op table derived from measurement
- * (tests/helpers/op-tolerance.ts; source of truth =
+ * (./op-tolerance.ts; source of truth =
  * docs/research/2026-08-31-op-tolerance-measurement.md).
  * What remains is "a temporary value until the caller has its own band" and the default of wiring
  * tests; **do not use this default for a new numeric check** (add a row to the table, or pass an

@@ -35,7 +35,7 @@ import {
   GRAPH_NAME,
   memoryModel,
 } from "./helpers/model-fixture.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { type CensusRow, countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 
 describe.skipIf(!GPU_AVAILABLE)("byte-plane GEMV: the class-R check (real GPU)", () => {

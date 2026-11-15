@@ -146,7 +146,7 @@ Applies to `FUSION_RULES` entries (`FusedStep` rules). Consumer annotations foll
 - [ ] Land the contract set as one set (MUST); a torch golden SHOULD be added, the TS oracle is required (ADR 0007; ADR 0005 stage 3). The golden coverage test still fails for an emittable op without one (`tools/exporter/tests/test_goldens.py:102-115`). File list of a full set: ADR 0055 and 0056 Consequences, commit `a1922e43`.
 - [ ] Exporter side: a handler in `tools/exporter/src/karume/aten_handlers.py`; for `karume::`, the custom op (section 3 side rules); Python `ops.py` / `shapes.py` / `fixtures/op-contracts.json`; golden `COVERAGE` and the README coverage ledger (ADR 0056 d6; `test_goldens.py:102-115`).
 - [ ] Write the CPU reference in a different form from the WGSL (MUST NOT share index computation) (`packages/runtime/src/reference/ops.ts:11-17`).
-- [ ] Add a measured row to the op tolerance table; there is no default band (`packages/runtime/tests/helpers/op-tolerance.ts:1-19`).
+- [ ] Add a measured row to the op tolerance table; there is no default band (`packages/runtime/src/reference/op-tolerance.ts`).
 - [ ] Transcendentals, division or rsqrt: derive the f32 breakdown range and keep permanent canary inputs in the GPU tests (MUST); prefer a structural rewrite to a cutoff ("if (1) can be used, do not choose (2)"); a bare built-in needs a derivation that the hazard range is unreachable (`docs/op-vocabulary.md:550-570`).
 - [ ] Reuse `packages/runtime/src/codegen/numerics-wgsl.ts` primitives instead of copies (ADR 0056 d3(c)).
 - [ ] Enable dtypes per op, only in measured forms (MUST); `RUNTIME_SUPPORT` stays derived from the contract table (MUST) (`packages/runtime/src/ops.ts:5-10`).

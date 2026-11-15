@@ -65,7 +65,7 @@ const EPS = 1e-6;
 
 /**
  * The f64 band of e (①) — this test's own band, not an ADR 0110 decision 4 rule (R's band would be
- * the op's COMPOSITE class of `helpers/op-tolerance.ts`, which this one is far inside). Derived
+ * the op's COMPOSITE class of `src/reference/op-tolerance.ts`, which this one is far inside). Derived
  * from the six decision cases below on an RTX 3080 Ti (Node + Dawn, 2026-10-27): measured e 1.290
  * / 0.940 / 1.117 / 1.117 / 1.363 / 1.363, worst 1.363 (`[1,96,128,96]`) → × 4 = 5.45 → 5.5 (two
  * significant digits, rounded up). The theoretical bound for the summation depth of these shapes

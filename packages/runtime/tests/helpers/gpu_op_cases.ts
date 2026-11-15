@@ -20,8 +20,8 @@ export type OpCase = {
   readonly attrs?: Record<string, unknown>;
   /**
    * Per-case tolerance override (the escape hatch for ill-conditioned inputs — the table of
-   * helpers/op-tolerance.ts stays unchanged). Default: the per-op table (`opTolerance` of
-   * {@link "./op-tolerance.ts"}).
+   * src/reference/op-tolerance.ts stays unchanged). Default: the per-op table (`opTolerance` of
+   * {@link "../../src/reference/op-tolerance.ts"}).
    */
   readonly tolerance?: Tolerance;
 };
@@ -1610,7 +1610,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
  * same time.
  *
  * MUST: **not mixed into** {@link UPSAMPLE_CASES}. Those also feed the bit-identity check of
- * `BIT_IDENTICAL_OPS` in {@link "./op-tolerance.ts"}, which inexact scales cannot meet by
+ * `BIT_IDENTICAL_OPS` in {@link "../../src/reference/op-tolerance.ts"}, which inexact scales cannot meet by
  * definition — the GPU rounds every stage in f32, while the CPU reference keeps `top` / `bottom` in
  * f64 and rounds only once at the end, so on this shape 11 of 48 elements differ by 1 ulp
  * (measured). The comparison band is the measured table of `upsample_bilinear2d` (SMALL_REDUCE),

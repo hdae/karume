@@ -37,7 +37,7 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 
 const E = 6;
 const K = 2;

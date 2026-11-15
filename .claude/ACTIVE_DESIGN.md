@@ -82,7 +82,7 @@ Pitfalls that sat inside this file's records of finished work. They stay here un
 
 - Zero module side effects, Web standard APIs, TS/WGSL and the public barrel boundary are in [CLAUDE.md](../CLAUDE.md).
 - The public names of `@karume/models`: the subpaths export bare names (`Pipeline`, `SOURCES`), the barrel the shared surface plus one namespace per family (`sbv2.Pipeline`) — [ADR 0136](../docs/decisions/0136-models-public-naming.md).
-- Op tolerances are in `packages/runtime/tests/helpers/op-tolerance.ts`; WGSL for the same codegen key is byte-identical. Do not update reference goldens to match the speed-up defaults.
+- Op tolerances are in `packages/runtime/src/reference/op-tolerance.ts`; WGSL for the same codegen key is byte-identical. Do not update reference goldens to match the speed-up defaults.
 - The manifest is `karume/5` ([ADR 0109](../docs/decisions/0109-manifest-v5-container.md)); the distribution is the container `krm` (block ≤ 32 MiB, part ≤ 1024 MiB; [container-v1](../docs/container-v1.md)). The old shards (256 MiB cap, tensor pieces — [ADR 0090](../docs/decisions/0090-shard-spec-v3-tensor-pieces.md)) are retired.
   Memory fit is checked against the device's absolute limits, without guessing the physical free VRAM ([ADR 0089](../docs/decisions/0089-memory-limits-preflight.md)).
 - The source of truth for the published revisions is each family's `SOURCES` table. Do not duplicate changes into docs; source resolution follows [ADR 0086](../docs/decisions/0086-distribution-source.md).
