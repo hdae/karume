@@ -1,6 +1,6 @@
 /**
- * check-doc-links: relative links and `DECIDED:` pointers resolve to files and headings; the rest is
- * reported with its reason.
+ * check-doc-links: relative links and `DECIDED:` / `SPEC:` pointers resolve to files and headings; the
+ * rest is reported with its reason.
  */
 
 import { assertEquals } from "@std/assert";
@@ -12,9 +12,12 @@ import {
   headingSlugs,
   linkTargets,
   slugOf,
+  specPointers,
 } from "../check-doc-links.ts";
 
 const MARKER = ["DECIDED", ":"].join("");
+// Assembled for the same reason as MARKER: the repository-wide check must not read these as pointers.
+const SPEC_MARKER = ["SPEC", ":"].join("");
 
 describe("slugOf / headingSlugs", () => {
   it("follows GitHub's rule, including Japanese headings and duplicates", () => {
@@ -97,5 +100,67 @@ describe("checkLinks", () => {
     );
     // 5 Markdown links checked (web skipped by scheme, asset skipped) + 3 pointers.
     assertEquals(report.checked, 9);
+  });
+});
+
+describe("specPointers", () => {
+  it("extracts paths under docs/spec with their fragment, several per line", () => {
+    const source = `// ${SPEC_MARKER} docs/spec/numerics.md#requirement-levels, ${SPEC_MARKER} docs/spec/ir.md\n`;
+    assertEquals(
+      specPointers(source).map((t) => `${t.line} ${t.target}`),
+      ["1 docs/spec/numerics.md#requirement-levels", "1 docs/spec/ir.md"],
+    );
+  });
+
+  it("leaves the sentence's punctuation out of the fragment", () => {
+    assertEquals(
+      specPointers(`# ${SPEC_MARKER} docs/spec/ir.md#shape-rules.\n`).map((t) => t.target),
+      ["docs/spec/ir.md#shape-rules"],
+    );
+  });
+
+  it("does not read an identifier or a path outside docs/spec as a pointer", () => {
+    const source = `const SPEC: FixtureSpec = {};\n// ${SPEC_MARKER} docs/decisions/0001-first.md\n`;
+    assertEquals(specPointers(source), []);
+  });
+});
+
+describe("checkLinks on SPEC pointers", () => {
+  let root = "";
+
+  beforeAll(async () => {
+    root = await makeTempDir();
+    await mkdir(`${root}/docs/spec`, { recursive: true });
+    await mkdir(`${root}/src`, { recursive: true });
+    await writeTextFile(`${root}/docs/spec/numerics.md`, "# Numerics\n\n## Requirement levels\n");
+    await writeTextFile(
+      `${root}/src/kernel.ts`,
+      [
+        `// ${SPEC_MARKER} docs/spec/numerics.md#requirement-levels`,
+        `// ${SPEC_MARKER} docs/spec/numerics.md#renamed-section`,
+        `// ${SPEC_MARKER} docs/spec/moved.md`,
+      ].join("\n"),
+    );
+    await writeTextFile(
+      `${root}/src/export.py`,
+      `"""Quantizes weights.\n\n${SPEC_MARKER} docs/spec/numerics.md\n${SPEC_MARKER} docs/spec/gone.md#x\n"""\n`,
+    );
+  });
+
+  afterAll(async () => {
+    await remove(root, { recursive: true });
+  });
+
+  it("passes a pointer whose file and heading exist, in TypeScript and in Python", () => {
+    const report = checkLinks(root, [], ["src/kernel.ts", "src/export.py"]);
+    assertEquals(report.checked, 5);
+    assertEquals(
+      report.broken.map((b) => `${b.file}:${b.line} ${b.reason} ${b.target}`),
+      [
+        "src/kernel.ts:2 missing heading docs/spec/numerics.md#renamed-section",
+        "src/kernel.ts:3 missing file docs/spec/moved.md",
+        "src/export.py:4 missing file docs/spec/gone.md#x",
+      ],
+    );
   });
 });

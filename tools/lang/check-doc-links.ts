@@ -1,13 +1,16 @@
 /**
- * Checks that relative Markdown links and `DECIDED:` pointers resolve: the target file exists and, when
- * the link carries a `#fragment`, the target has a heading with that slug (GitHub's slug rule). A
- * renamed file or a translated heading turns up here before it turns up as a dead link.
+ * Checks that relative Markdown links and the `DECIDED:` / `SPEC:` pointers of source files resolve: the
+ * target file exists and, when the link carries a `#fragment`, the target has a heading with that slug
+ * (GitHub's slug rule). A renamed file or a reworded heading turns up here before it turns up as a dead
+ * link.
  *
  * Usage (from the repository root):
  *   node tools/lang/check-doc-links.ts [--root <dir>]      exit 1 when anything is broken
  *
- * Scope: every tracked `*.md` file, and every `DECIDED:` line in tracked `*.ts` files. Links under the
- * local asset roots (`models/`, `outputs/`, `inputs/` — untracked by design) are skipped and counted.
+ * Scope: every tracked `*.md` file, and every `DECIDED:` line and `SPEC: docs/spec/…` pointer in tracked
+ * `*.ts` and `*.py` files. Links under the local asset roots (`models/`, `outputs/`, `inputs/` —
+ * untracked by design) are skipped and counted. `tests/repository_links_test.ts` runs the same check on
+ * the repository in the core lane.
  */
 
 import { execFileSync } from "node:child_process";
@@ -90,7 +93,7 @@ export const linkTargets = (markdown: string): Occurrence[] => {
 const DECIDED_PATH = /docs\/decisions\/([0-9]{4}-[\w.-]+?\.md)(#[^\s)）、。」]+)?/g;
 const DECIDED_ADR = /\bADR\s*0*([0-9]{1,4})\b/g;
 
-/** `DECIDED:` pointers of a TypeScript source: decision-record paths and `ADR nnnn` numbers. */
+/** `DECIDED:` pointers of a source text: decision-record paths and `ADR nnnn` numbers. */
 export const decidedPointers = (source: string): Occurrence[] => {
   const targets: Occurrence[] = [];
   const lines = source.split("\n");
@@ -105,6 +108,22 @@ export const decidedPointers = (source: string): Occurrence[] => {
     const withoutPaths = rest.replace(DECIDED_PATH, "");
     for (const match of withoutPaths.matchAll(DECIDED_ADR)) {
       targets.push({ line: index + 1, target: `adr:${match[1].padStart(4, "0")}` });
+    }
+  }
+  return targets;
+};
+
+// A pointer to the rule in force is the marker followed by a path under `docs/spec/`. Requiring the path
+// in the pattern keeps an identifier such as `const SPEC: Type` from reading as a pointer.
+const SPEC_POINTER = /\bSPEC:\s+(docs\/spec\/[\w./-]+?\.md)(#[\p{L}\p{N}-]+)?/gu;
+
+/** `SPEC:` pointers of a source text: paths under `docs/spec/`, with their heading fragment if any. */
+export const specPointers = (source: string): Occurrence[] => {
+  const targets: Occurrence[] = [];
+  const lines = source.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const match of lines[index].matchAll(SPEC_POINTER)) {
+      targets.push({ line: index + 1, target: `${match[1]}${match[2] ?? ""}` });
     }
   }
   return targets;
@@ -147,14 +166,14 @@ export const trackedFiles = (root: string, prefixes: readonly string[] = []): st
 };
 
 /**
- * Checks the links of the given Markdown files and the `DECIDED:` pointers of the given TypeScript
+ * Checks the links of the given Markdown files and the `DECIDED:` / `SPEC:` pointers of the given source
  * files (both repository-relative). Exported with explicit file lists so that a test can run it on a
  * temporary directory without git.
  */
 export const checkLinks = (
   root: string,
   markdownFiles: readonly string[],
-  typescriptFiles: readonly string[] = [],
+  sourceFiles: readonly string[] = [],
 ): LinkReport => {
   headingCache.clear();
   const broken: BrokenLink[] = [];
@@ -162,7 +181,7 @@ export const checkLinks = (
   let skipped = 0;
   const adrs = adrFiles(root);
 
-  // Markdown links are relative to their file; `DECIDED:` pointers are repository-relative paths.
+  // Markdown links are relative to their file; `DECIDED:` and `SPEC:` pointers are repository-relative paths.
   const checkTarget = (file: string, line: number, target: string, base: string): void => {
     if (target.startsWith("adr:")) {
       checked += 1;
@@ -195,12 +214,34 @@ export const checkLinks = (
     const base = dirname(join(root, file));
     for (const { line, target } of linkTargets(text)) checkTarget(file, line, target, base);
   }
-  for (const file of typescriptFiles) {
+  for (const file of sourceFiles) {
     const text = readFileSync(join(root, file), "utf8");
     for (const { line, target } of decidedPointers(text)) checkTarget(file, line, target, root);
+    for (const { line, target } of specPointers(text)) checkTarget(file, line, target, root);
   }
   return { checked, skipped, broken };
 };
+
+export type RepositoryLinkReport = LinkReport & {
+  readonly markdownFiles: number;
+  readonly sourceFiles: number;
+};
+
+/** The check over every tracked Markdown file and every tracked `*.ts` / `*.py` file under `root`. */
+export const checkRepository = (root: string): RepositoryLinkReport => {
+  const tracked = trackedFiles(root);
+  const markdown = tracked.filter((file) => file.endsWith(".md"));
+  const sources = tracked.filter((file) => file.endsWith(".ts") || file.endsWith(".py"));
+  return {
+    ...checkLinks(root, markdown, sources),
+    markdownFiles: markdown.length,
+    sourceFiles: sources.length,
+  };
+};
+
+/** One line per broken link: where it is, why it is broken, what it points at. */
+export const describeBroken = (broken: readonly BrokenLink[]): string[] =>
+  broken.map((link) => `${link.file}:${link.line}: ${link.reason}: ${link.target}`);
 
 const main = (argv: readonly string[]): void => {
   let root = process.cwd();
@@ -210,16 +251,10 @@ const main = (argv: readonly string[]): void => {
       i += 1;
     }
   }
-  root = normalize(root);
-  const tracked = trackedFiles(root);
-  const markdown = tracked.filter((file) => file.endsWith(".md"));
-  const typescript = tracked.filter((file) => file.endsWith(".ts"));
-  const report = checkLinks(root, markdown, typescript);
-  for (const link of report.broken) {
-    console.log(`${link.file}:${link.line}: ${link.reason}: ${link.target}`);
-  }
+  const report = checkRepository(normalize(root));
+  for (const line of describeBroken(report.broken)) console.log(line);
   console.log(
-    `checked ${report.checked} links in ${markdown.length} Markdown files and DECIDED: pointers in ${typescript.length} TypeScript files; skipped ${report.skipped} under local asset roots; broken ${report.broken.length}`,
+    `checked ${report.checked} links in ${report.markdownFiles} Markdown files and DECIDED: / SPEC: pointers in ${report.sourceFiles} source files; skipped ${report.skipped} under local asset roots; broken ${report.broken.length}`,
   );
   if (report.broken.length > 0) process.exitCode = 1;
 };
