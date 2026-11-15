@@ -32,8 +32,8 @@
 //
 // The seat is the regular line's `bf16` preset (its one preset since 2026-11-04). The census of the
 // summation-order seats reads the q4_0 QAT line's mirror (`models/karume-gemma4-qat/`) instead —
-// the same `gemma4` pipeline with the same `i4` / `i4-gemvpar` / `i4-fast` declarations, the line
-// that keeps them.
+// the same `gemma4` pipeline with the same `i4` / `i4-fast` declarations, the line that keeps
+// them.
 //
 // NOTE: the test borrows the tool from `examples/` so that there are not two spellings of the
 // fake HF server (neither `packages/models/tests/` nor `examples/` is published). The fetch layer
@@ -300,11 +300,11 @@ const QAT_FAST_SEAT = { quant: "i4-fast" } as const;
  * - `i4` (empty `session`) runs on the reference path ③ and not a single ③' key appears (a preset
  *   without a declaration is back on the reference path — red if a family code default sneaks in
  *   again).
- * - On `i4-gemvpar` (declares `numerics: { level: "reorder" }`) an explicit
+ * - On `i4-fast` (declares `numerics: { level: "reorder" }`) an explicit
  *   `numerics: { ops: { attention: "exact" } }` beats the declaration for attention (the way back
  *   still works) and runs on ③.
- * - `i4-fast` (declares `level: "reorder"` too, which attention resolves to `"parallel-fused"`)
- *   shows no ③ key. Whether the fused kernel (`attention_state_stats_pv`) is chosen depends on the
+ * - `i4-fast` without that override (its `level: "reorder"` resolves attention to
+ *   `"parallel-fused"`) shows no ③ key. Whether the fused kernel (`attention_state_stats_pv`) is chosen depends on the
  *   column limit, so either ③' or the fused kernel running is enough.
  *
  * NOTE: the preset now affects **only the decode (M = 1) dispatches** (perf-ledger K-13 step 2).
@@ -329,8 +329,8 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
         expect: "sequential",
       },
       {
-        name: "i4-gemvpar + explicit exact attention → reference path",
-        options: { quant: "i4-gemvpar", numerics: { ops: { attention: "exact" } } },
+        name: "i4-fast + explicit exact attention → reference path",
+        options: { quant: "i4-fast", numerics: { ops: { attention: "exact" } } },
         expect: "sequential",
       },
       {

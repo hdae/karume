@@ -730,7 +730,7 @@ spellings of `tokenizer_config.json`) and `hiddenSize`. E2B and E4B have neither
 are unchanged by 12B's presence.
 
 26B A4B ships in the same line with the `model` role alone: its entry reads `gemma4-26b-product` and
-its own `gemma4-26b-tokenizer`, declares the line's three quants (the routed experts keep their
+its own `gemma4-26b-tokenizer`, declares the line's two quants (the routed experts keep their
 sequential order in each) and 12B's dialect, and has no drafter and no vision embedder, so a load
 that asks for `speculative` is refused at weights resolution. Its expert weights are the line's
 one `i4f16` storage (the grid's codes with f16 steps — ADR
@@ -830,8 +830,8 @@ Both models carry one quant, `bf16`, their default (the maintainer's ruling of 2
 `model` weights' one container — every weight and the PLE table as the checkpoint's bf16 bits, PLE
 index schema 5 — in the reference summation order (`session` empty: GEMV and attention run the
 runtime's reference path). E2B's `bf16` also names the int8 drafter, which borrows the bf16
-target's `model.lm_head.weight`. The int4 seats at the numeric level `reorder` (`i4-gemvpar` /
-`i4-fast`, both `numerics: { level: "reorder" }`) are the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
+target's `model.lm_head.weight`. The int4 seat at the numeric level `reorder` (`i4-fast`,
+`numerics: { level: "reorder" }`) is the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
 
 Explicit runtime options override each quant setting. Reassembling into a new output directory
 updates the metadata without requantizing weights. Existing distributions and pinned public

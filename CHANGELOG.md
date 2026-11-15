@@ -44,6 +44,9 @@ measurements in `docs/research/`.
   `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `linearGemvPlanes` and `rmsNormReduce` are removed, and
   `numerics` is added. An explicit `numerics` composes with the selected preset's per field: an explicit
   `{ ops: { attention: "exact" } }` keeps the levels the preset declares for the other op kinds.
+- `karume-gemma4-qat` (Gemma 4 E2B / E4B / 12B / 26B): the `i4-gemvpar` preset is removed, because it declares the same
+  numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
+  `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
 
 ## [0.22.0] - 2026-11-14
 

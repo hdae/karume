@@ -7,9 +7,9 @@
 // table whose scale is split on the table's pieces (ADR 0108 addendum 15). The cases, per model:
 //
 // ① the manifest entry (no GPU): weights `model` + `drafter`, one storage `i4` each; the default
-//    seat `i4` (session {}) and the regular line's parallel and fused seats
-//    `i4-gemvpar` / `i4-fast` (their session flags over the same containers), every seat naming
-//    both roles as `i4`; 12B keeps its dialect and suppressed ids
+//    seat `i4` (session {}) and the parallel and fused seat `i4-fast` (its session flags over
+//    the same containers), every seat naming both roles as `i4`; 12B keeps its dialect and
+//    suppressed ids
 // ② the drafter container (no GPU): the admission the pipeline runs pairs it with its target —
 //    the four external slots are the target's last sliding / full owner layers with the target's
 //    shapes (12B: `l46` [1,8,1032,256] / `l47` [1,1,C,512]), the one shared initializer is the
@@ -18,7 +18,7 @@
 //    drafter Session on the borrowed table, and a greedy chat turn with `speculative: "always"`
 //    gives the same text, stop token and token count as the same turn without it, with at least
 //    one draft accepted (the speculative path really ran) — for every seat of the model, the
-//    parallel and fused ones included (the regular line's check of its `i4-fast` seat: the
+//    parallel and fused one included (the regular line's check of its `i4-fast` seat: the
 //    verify rows M = k + 1 and the decode row M = 1 take the same summation order)
 // ④ greedy parity (real GPU): the greedy chain of each golden case of the product series, run
 //    through the mirror both without and with speculation, equals the torch golden token for token
@@ -111,17 +111,16 @@ const VISION_STORAGE = "bf16";
 const QUANT = "i4";
 /**
  * The seats per model (`gemma4/distribution.py` — `gemma4_qat_q4_0_quants`): the reference seat
- * `i4` and the parallel and fused seats over the same containers.
+ * `i4` and the parallel and fused seat over the same containers.
  */
 const SEATS: Record<Model, readonly string[]> = {
-  e2b: [QUANT, "i4-gemvpar", "i4-fast"],
-  e4b: [QUANT, "i4-gemvpar", "i4-fast"],
-  "12b": [QUANT, "i4-gemvpar", "i4-fast"],
+  e2b: [QUANT, "i4-fast"],
+  e4b: [QUANT, "i4-fast"],
+  "12b": [QUANT, "i4-fast"],
 };
 /** The session each seat declares (`GEMMA4_QAT_Q4_0_PARALLEL_QUANTS`). */
 const SEAT_SESSIONS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
   [QUANT]: {},
-  "i4-gemvpar": { numerics: { level: "reorder" } },
   "i4-fast": { numerics: { level: "reorder" } },
 };
 /** The table the drafter borrows (its name is the lender's initializer name — docs/ir-v2.md). */
@@ -418,7 +417,7 @@ for (const model of MODELS) {
     },
   );
 
-  // The parallel and fused seats: one load each, the seat named (the default is `i4`).
+  // The parallel and fused seat: one load, the seat named (the default is `i4`).
   for (const quant of SEATS[model].filter((name) => name !== QUANT)) {
     describe.skipIf(!PRESENT[model] || !GPU_AVAILABLE)(
       `gemma4-qat ${model} ${quant}: a speculative greedy chat turn equals the plain one (real GPU)`,

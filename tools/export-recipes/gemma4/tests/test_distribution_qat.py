@@ -318,8 +318,8 @@ class TestQatLayout:
     def test_it_ships_the_model_and_its_drafter_as_int4_under_one_storage(
         self, tmp_path: Path
     ) -> None:
-        """One int4 storage per role; every seat loads both (the parallel and fused seats are
-        session settings over the same containers), and the reference seat `i4` is the default."""
+        """One int4 storage per role; every seat loads both (the parallel and fused seat is a
+        session setting over the same containers), and the reference seat `i4` is the default."""
         out_dir, manifest = _assemble(tmp_path)
         entry: Mapping[str, Any] = manifest["models"]["e2b"]
 
@@ -327,7 +327,7 @@ class TestQatLayout:
             GEMMA4_ROLE: ["i4"],
             GEMMA4_DRAFTER_ROLE: ["i4"],
         }
-        assert list(entry["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert list(entry["quants"]) == ["i4", "i4-fast"]
         assert entry["defaultQuant"] == "i4"
         for name, quant in entry["quants"].items():
             assert quant["weights"] == {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i4"}, name
@@ -351,21 +351,20 @@ class TestQatLayout:
         assert entry["pipelineConfig"]["suppressTokens"] == sorted(SUPPRESSED)
 
 
-#: The session settings of the parallel and fused seats (ADR 0098 / 0104).
+#: The session settings of the parallel and fused seat (ADR 0098 / 0104).
 PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
-    "i4-gemvpar": {"numerics": {"level": "reorder"}},
     "i4-fast": {"numerics": {"level": "reorder"}},
 }
 
 
 class TestQatParallelSeats:
-    """Every model carries the parallel and fused seats over the line's int4 storage."""
+    """Every model carries the parallel and fused seat over the line's int4 storage."""
 
     @pytest.mark.parametrize("model", ["e2b", "e4b", "12b", "26b"])
     def test_the_seats_declare_the_parallel_and_fused_session_settings(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
 
-        assert list(quants) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert list(quants) == ["i4", "i4-fast"]
         assert quants["i4"]["session"] == {}
         for name, session in PARALLEL_SESSIONS.items():
             # The order too: the manifest serialises the table as it is.
@@ -377,10 +376,10 @@ class TestQatParallelSeats:
             ), name
             assert model.upper() in quants[name]["description"], name
 
-    def test_12b_assembles_all_three_seats(self, tmp_path: Path) -> None:
+    def test_12b_assembles_both_seats(self, tmp_path: Path) -> None:
         _, manifest = _assemble(tmp_path, ("12b",))
 
-        assert list(manifest["models"]["12b"]["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert list(manifest["models"]["12b"]["quants"]) == ["i4", "i4-fast"]
 
     def test_the_descriptions_name_the_output_head_only_where_it_stays_sequential(self) -> None:
         for model, excluded in (("e2b", True), ("e4b", True), ("12b", False), ("26b", False)):
@@ -734,7 +733,7 @@ class TestQatVision:
         entry = manifest["models"]["12b"]
 
         assert sorted(entry["weights"][GEMMA4_VISION_ROLE]) == ["bf16"]
-        assert list(entry["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert list(entry["quants"]) == ["i4", "i4-fast"]
         for name, quant in entry["quants"].items():
             assert quant["weights"] == {
                 GEMMA4_ROLE: "i4",
@@ -1077,14 +1076,14 @@ class TestQatLegalText:
 class TestQat26B:
     """26B's plan (its one line — ADR 0145): 12B's graph form and dialect, its pins, no drafter
     (so `speculative` is refused at weights resolution), no vision, the reference seat and the
-    parallel and fused seats."""
+    parallel and fused seat."""
 
     def test_it_ships_the_model_role_alone_with_12b_s_dialect(self, tmp_path: Path) -> None:
         out_dir, manifest = _assemble(tmp_path, ("26b",))
         entry = manifest["models"]["26b"]
 
         assert sorted(entry["weights"]) == [GEMMA4_ROLE]
-        assert list(entry["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert list(entry["quants"]) == ["i4", "i4-fast"]
         assert entry["defaultQuant"] == "i4"
         for name, quant in entry["quants"].items():
             assert quant["weights"] == {GEMMA4_ROLE: "i4"}, name

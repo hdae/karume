@@ -154,10 +154,7 @@ for (const quant of ["i4", "i4-fast"] as const) {
   );
 }
 
-for (const [quant, session] of [
-  ["i4-gemvpar", { numerics: { level: "reorder" } }],
-  ["i4-fast", { numerics: { level: "reorder" } }],
-] as const) {
+for (const [quant, session] of [["i4-fast", { numerics: { level: "reorder" } }]] as const) {
   test.skipIf(!PRESENT || !GPU_AVAILABLE)(
     `12B ${quant}: the planned kernels equal the census table's row (real GPU)`,
     async () => {

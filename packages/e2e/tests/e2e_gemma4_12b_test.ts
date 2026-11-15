@@ -265,7 +265,7 @@ test.skipIf(!MODEL_PRESENT)(
   () => {
     const entry = entryOf(MANIFEST, CHOICE.model);
     assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline contract");
-    assertEquals(entry.available.quants, [CHOICE.quant, "i4-gemvpar", "i4-fast"], "quants");
+    assertEquals(entry.available.quants, [CHOICE.quant, "i4-fast"], "quants");
     assertEquals(entry.defaultQuant, CHOICE.quant, "defaultQuant");
     assertEquals(entry.quants[CHOICE.quant].session, {}, "the i4 seat carries no session knobs");
     // The product graph, its QAT drafter and the image embedder; PLE would be assets of `model`, and

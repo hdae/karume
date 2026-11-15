@@ -8,8 +8,8 @@
  * places — its own fixture, because the case ids (`<model>/<quant>`) are the regular line's
  * spellings, and its own results folder. The seats are enumerated from the mirror's manifest
  * (`mirrorSeats`): the seat `i4` of every model, a reference row (its `session` is empty), and
- * the parallel and fused seats `i4-gemvpar` / `i4-fast`, practical rows (their `session` declares
- * the regular line's flags).
+ * the parallel and fused seat `i4-fast`, a practical row (its `session` declares the regular
+ * line's flags).
  * The seats run without the drafter — speculation selects the same tokens (the identity is pinned
  * by `e2e_gemma4_qat_mirror_test.ts` ③), so a speculative row would fix the same ids twice.
  * One more row, `e2b/i4-fast@16k`, runs a long document at capacity 16384, so a later change that
@@ -69,12 +69,6 @@ const HOLDS: ReferenceHolds = {
       "26B A4B's 13.4 GiB of text weights exceed this 12 GB GPU: the load fails with GpuOutOfMemoryError" +
       " (VK_ERROR_OUT_OF_DEVICE_MEMORY, observed 2026-11-08); its numbers are checked here on the" +
       " 12-layer cut (e2e_gemma4_26b_cut_test.ts — ADR 0145 decision 6)",
-  },
-  "26b/i4-gemvpar": {
-    "node-nvidia-geforce-rtx-3080-ti":
-      "the same weights as 26b/i4, which this 12 GB GPU cannot hold resident; the parallel GEMV rows" +
-      " are checked here on the 12-layer cut (e2e_gemma4_26b_cut_test.ts ⑦e), and the preset's" +
-      " unfused states-form attention has no 26B run on this machine",
   },
   "26b/i4-fast": {
     "node-nvidia-geforce-rtx-3080-ti":

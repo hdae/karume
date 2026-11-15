@@ -513,8 +513,8 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // The distribution mirror's `i4-gemvpar` and `i4-fast` (both declare `level: "reorder"`; ③'s
-    // parallel-fused is not derived — file header).
+    // The distribution mirror's `i4-fast` (it declares `level: "reorder"`; ③'s parallel-fused is
+    // not derived — file header).
     family: "gemma4",
     models: E2B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
@@ -534,8 +534,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
   // --- gemma4 E4B (the q4_0 mirror, with its QAT drafter) -------------------
   {
-    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
-    // file header).
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
     models: E4B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
@@ -555,8 +554,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
   // --- gemma4 12B (the q4_0 mirror; its drafter's rows are not derived) ------
   {
-    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
-    // file header).
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
     models: TWELVE_B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
@@ -569,8 +567,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
   // --- gemma4 26B (the q4_0 mirror; it ships no drafter) ---------------------
   {
-    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
-    // file header).
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
     models: TWENTY_SIX_B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },

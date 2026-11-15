@@ -8,9 +8,6 @@
     "12b/i4-fast": {
       "node-nvidia-geforce-rtx-3080-ti": "4ebf317e4bed5d48fca3c7c4dc165db73ad7cc2cbed0776d3d93ca33297cc2a2"
     },
-    "12b/i4-gemvpar": {
-      "node-nvidia-geforce-rtx-3080-ti": "4ebf317e4bed5d48fca3c7c4dc165db73ad7cc2cbed0776d3d93ca33297cc2a2"
-    },
     "e2b/i4": {
       "node-nvidia-geforce-rtx-3080-ti": "df8e40f71e0efbeea138ec9a27eb2ab41a221a5e7760e55be0c15c54caceff12"
     },
@@ -20,16 +17,10 @@
     "e2b/i4-fast@16k": {
       "node-nvidia-geforce-rtx-3080-ti": "dbd77c9084604c428124a000003769af353009115b0107d166d700f82205e4fe"
     },
-    "e2b/i4-gemvpar": {
-      "node-nvidia-geforce-rtx-3080-ti": "df8e40f71e0efbeea138ec9a27eb2ab41a221a5e7760e55be0c15c54caceff12"
-    },
     "e4b/i4": {
       "node-nvidia-geforce-rtx-3080-ti": "2c9eb83dc687bc8f541afbcbb3d276a4fcf831454c8519e5b824e2906c1065c2"
     },
     "e4b/i4-fast": {
-      "node-nvidia-geforce-rtx-3080-ti": "2c9eb83dc687bc8f541afbcbb3d276a4fcf831454c8519e5b824e2906c1065c2"
-    },
-    "e4b/i4-gemvpar": {
       "node-nvidia-geforce-rtx-3080-ti": "2c9eb83dc687bc8f541afbcbb3d276a4fcf831454c8519e5b824e2906c1065c2"
     }
   }

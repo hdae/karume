@@ -138,7 +138,7 @@ describe("the table's key is determined by the effective settings obtained by pa
     // crept into the resolution this would not be empty.
     assertEquals(bundleKey(censusSeats(effectiveSessionOptions("gemma4", {}, {}, where))), "");
     // An explicit reference level beats the declaration for its op kind and drops out of the key
-    // (i4-gemvpar, with attention set back to exact, is a GEMV-only bundle).
+    // (i4-fast, with attention set back to exact, is a GEMV-only bundle).
     const reverted = effectiveSessionOptions(
       "gemma4",
       declared,
