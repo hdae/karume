@@ -190,7 +190,11 @@ test("mixing external and non-external is rejected (the borrower has no slots of
   );
   // It fails on "readonly reads a non-external slot" before the mixing check (both the same layer
   // and type).
-  assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 stage 2 §1.1");
+  assertThrows(
+    () => validateGraphContracts(graph),
+    ExecutionError,
+    "readonly is only for slots of the context borrowed from",
+  );
 });
 
 test("a slot declared external with neither a readonly reader nor an append fails the reference check", () => {

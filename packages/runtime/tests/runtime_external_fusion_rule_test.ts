@@ -900,7 +900,7 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
     assertThrows(
       () => planWith(sessionFusionRules([once])),
       ExecutionError,
-      "fusion rules: the plan changed between the two planning scans (the packed int8 activations of ADR 0105" +
+      "fusion rules: the plan changed between the two planning scans (the packed int8 activations" +
         " were planned as 'xq' from the first scan, and the final plan gives none): a rule's matcher is not a" +
         " pure function of its arguments — the external rules in the list are 'test/once'",
     );

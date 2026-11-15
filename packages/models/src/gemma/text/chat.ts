@@ -724,7 +724,7 @@ const assertMessage = (message: unknown, where: string, parts = false): ChatMess
   if (Object.hasOwn(message, "tool_responses")) {
     throw new ModelInputError(
       `${where}: the legacy field tool_responses is out of scope — send each result as a role ` +
-        `'tool' message after the assistant message with tool_calls (ADR 0084 addendum 2026-11-04)`,
+        `'tool' message after the assistant message with tool_calls`,
     );
   }
   if (Object.hasOwn(message, "thinking")) {
@@ -1528,7 +1528,7 @@ export const gemma4StopTokens = (tokenizer: Tokenizer): number[] => {
     if (id === undefined) {
       throw new Error(
         `gemma4StopTokens: stop token '${spelling}' is not in the tokenizer asset's added vocabulary` +
-          ` (the chat format and the EOS set come from the same digest set — ADR 0084 decision 5)`,
+          ` (the chat format and the EOS set come from the same digest set)`,
       );
     }
     stops.push(id);

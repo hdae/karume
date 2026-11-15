@@ -200,7 +200,12 @@ describe("expertCache: the options alone", () => {
         ModelInputError,
         `expertCache cannot be combined with ${named}`,
       );
-      assert(error.message.includes("ADR 0146"), error.message);
+      assert(
+        error.message.includes(
+          "a run under the cache runs alone, deferred, until it misses no expert",
+        ),
+        error.message,
+      );
     }
   });
 

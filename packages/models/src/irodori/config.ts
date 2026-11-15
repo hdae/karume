@@ -335,14 +335,14 @@ const parseRfSampler = (
       "speakerUncondMode",
       where,
       SPEAKER_UNCOND_MODE,
-      "uncond is expressed as 'the cond state + every mask of that segment False' (ADR 0047 decision 1)",
+      "uncond is expressed as 'the cond state + every mask of that segment False'",
     ),
     cfgGuidanceMode: readOnly(
       raw,
       "cfgGuidanceMode",
       where,
       CFG_GUIDANCE_MODE,
-      "the CFG combination is limited to the form `v_cond + Σ s_k(v_cond − v_k)` (ADR 0047 decision 1)",
+      "the CFG combination is limited to the form `v_cond + Σ s_k(v_cond − v_k)`",
     ),
   };
   // A declaration with an empty / reversed interval stays silent as "CFG never applies" (only the
@@ -369,7 +369,7 @@ export const parseIrodoriPipelineConfig = (
       throw new Error(
         `${where}: a '${IRODORI_FLOW_MEANFLOW}' distribution declares the RF-only key(s)` +
           ` ${ignored.map((key) => `'${key}'`).join(", ")} — the MeanFlow sampler has no CFG and no` +
-          " initial scale, so the value would be ignored (ADR 0150)",
+          " initial scale, so the value would be ignored",
       );
     }
   }

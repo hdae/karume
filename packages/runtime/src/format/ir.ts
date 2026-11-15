@@ -309,8 +309,8 @@ const asStateDtype = (value: unknown, where: string): IrStateDtype => {
   const dtype = asNonEmptyString(value, where);
   if (RESERVED_STATE_DTYPES.some((reserved) => reserved === dtype)) {
     throw new IrError(
-      `${where}: state slot dtype '${dtype}' is not supported (a slot reserved by ADR 0066 addendum 5 — ` +
-        `needs a numerics-contract opt-in)`,
+      `${where}: state slot dtype '${dtype}' is not supported (a reserved dtype — declare the slot f32; ` +
+        `the f16 storage of a full slot is the Session option fullStateStorage)`,
     );
   }
   if (!isStateDtype(dtype)) {
@@ -693,7 +693,7 @@ const checkSymbolBindability = (
       if (!fromStates.has(symbol) || fromInputs.has(symbol)) continue;
       throw new IrError(
         `graph.values['${name}']: states-only symbol '${symbol}' appears in a value shape` +
-          ` (only bindings from inputs resolve value shapes — ADR 0066 addendum 7)`,
+          ` (only bindings from inputs resolve value shapes)`,
       );
     }
   }

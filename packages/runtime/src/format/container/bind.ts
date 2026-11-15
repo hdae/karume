@@ -530,12 +530,12 @@ const planSupply = (
   if (entry.grouping === "group") {
     if (!isPowerOfTwo(groupSize) || groupSize < MIN_GROUP_SIZE) {
       fail(
-        `${where}: groupSize ${groupSize} is not a power of two that is at least ${MIN_GROUP_SIZE} (ADR 0069 decision 2)`,
+        `${where}: groupSize ${groupSize} is not a power of two that is at least ${MIN_GROUP_SIZE}`,
       );
     }
     if (rowLength % groupSize !== 0) {
       fail(
-        `${where}: row length ${rowLength} (= numel / shape[${rowAxis}]) is not divisible by groupSize ${groupSize} (ADR 0069 decision 2)`,
+        `${where}: row length ${rowLength} (= numel / shape[${rowAxis}]) is not divisible by groupSize ${groupSize}`,
       );
     }
   }

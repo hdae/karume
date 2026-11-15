@@ -2020,7 +2020,9 @@ const linearVariantWgsl = (
   // there is demand. Silently falling back to f32 compute would be a silence of the form "the f16
   // variant has no effect only with i8 assets", so it is rejected at the generation entry point.
   if (compute === "f16" && weight === "i2") {
-    throw new CodegenError("linear: i2 weight storage × f16 compute is not supported (ADR 0097)");
+    throw new CodegenError(
+      "linear: i2 weight storage × f16 compute is not supported (i2 runs with f32 compute only)",
+    );
   }
   if (compute === "f16" && weight === "i8") {
     throw new CodegenError(
@@ -2967,7 +2969,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute, spec.weightGroupShift);
     case "conv1d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv1d: i2 weight storage is not supported (ADR 0097)");
+        throw new CodegenError(
+          "conv1d: i2 weight storage is not supported (the only i2 execution paths are linear / embedding)",
+        );
       }
       // MUST: the log2 of the group length is one-to-one with i4 (same as linear — generating
       // without it emits WGSL with a broken scale index; having it on anything other than i4 is a
@@ -2980,7 +2984,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       return conv1dIgemmWgsl(geometry, spec.weight, spec.v4, spec.weightGroupShift);
     case "conv2d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv2d: i2 weight storage is not supported (ADR 0097)");
+        throw new CodegenError(
+          "conv2d: i2 weight storage is not supported (the only i2 execution paths are linear / embedding)",
+        );
       }
       // MUST: conv2d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
       // conv1d). The A-side unroller is shared by 1D / 2D, so **generation would go through** —
@@ -2988,20 +2994,22 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       // the generation entry point (closing the silent wrong value of a direct call).
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
-          "conv2d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1) (ADR 0069 decision 5)",
+          "conv2d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1)",
         );
       }
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "conv3d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv3d: i2 weight storage is not supported (ADR 0097)");
+        throw new CodegenError(
+          "conv3d: i2 weight storage is not supported (the only i2 execution paths are linear / embedding)",
+        );
       }
       // MUST: conv3d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
       // conv1d). The A-side unroller is shared by 1D / 2D / 3D, so generation would go through — as
       // with conv2d, it is also rejected at the generation entry point.
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
-          "conv3d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1) (ADR 0069 decision 5)",
+          "conv3d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1)",
         );
       }
       return conv3dIgemmWgsl(geometry, spec.weight, spec.v4);

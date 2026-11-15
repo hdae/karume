@@ -1041,7 +1041,7 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     if (node.ins.length !== found.readonlyArity) {
       throw new OpContractError(
         `${where}: op '${node.op}' readonly (past-only) form takes exactly ${found.readonlyArity} inputs` +
-          ` (${node.ins.length} given — this step's k / v are not taken; ADR 0096 stage 2 §1.2)`,
+          ` (${node.ins.length} given — this step's k / v are not taken)`,
       );
     }
   } else {
@@ -1051,7 +1051,7 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
       throw new OpContractError(
         `${where}: op '${node.op}' states form takes exactly ${found.arity} inputs` +
-          ` (${node.ins.length} given — no optional trailing input; ADR 0067 decision 4)`,
+          ` (${node.ins.length} given — no optional trailing input)`,
       );
     }
     assertArity(found, node.ins.length, "input count", where);
@@ -1154,7 +1154,7 @@ const assertReadonlyForm = (
   if (found.readonlyArity === undefined) {
     throw new OpContractError(
       `${where}: op '${found.name}' has no attrs.readonly (only the states-form attention has ` +
-        "a form that reads the past only — ADR 0096 stage 2 §1.2)",
+        "a form that reads the past only)",
     );
   }
   if (stateKeys.length === 0) {

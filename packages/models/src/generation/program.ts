@@ -507,7 +507,7 @@ const assertLogitsOutput = (
     throw new Error(
       `logits output '${name}' has shape ${showShape(info.shape)}, not ` +
         `[1,${rowSymbol},${vocabSize}]` +
-        ` (it must be an output of the selected **rows** only — ADR 0083 decision 6)`,
+        ` (it must be an output of the selected **rows** only)`,
     );
   }
 };
@@ -620,7 +620,7 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
   if (fromInputs.has(capacitySymbol)) {
     throw new Error(
       `Capacity symbol ${capacitySymbol} is a symbol determined by an input shape` +
-        ` (the capacity symbol of the state slots is the one symbol that does not appear in the inputs — ADR 0066 addendum 7)`,
+        ` (the capacity symbol of the state slots is the one symbol that does not appear in the inputs)`,
     );
   }
   const unresolved = graph.symbols.filter(
@@ -629,7 +629,7 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
   if (unresolved.length > 0) {
     throw new Error(
       `Symbols ${unresolved.join(" / ")} are determined neither by an input shape nor by the capacity symbol` +
-        ` (the state slots have exactly one capacity symbol — ADR 0066 addendum 7)`,
+        ` (the state slots have exactly one capacity symbol)`,
     );
   }
 };

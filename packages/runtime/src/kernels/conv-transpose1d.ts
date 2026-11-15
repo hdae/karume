@@ -84,11 +84,13 @@ export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
  */
 const assertGatherWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
-    throw new CodegenError("convolution: i2 weight storage is not supported (ADR 0097)");
+    throw new CodegenError(
+      "convolution: i2 weight storage is not supported (the only i2 execution paths are linear / embedding)",
+    );
   }
   if (weight === "i4") {
     throw new CodegenError(
-      "conv_transpose1d: i4 weight storage is not supported — the only i4 execution paths are linear / embedding / the implicit GEMM of conv1d(groups==1) (ADR 0069 decision 5)",
+      "conv_transpose1d: i4 weight storage is not supported — the only i4 execution paths are linear / embedding / the implicit GEMM of conv1d(groups==1)",
     );
   }
 };

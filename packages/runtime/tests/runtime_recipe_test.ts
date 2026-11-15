@@ -659,7 +659,10 @@ test("the baked path fails on a dispatch that has not been through the context-s
     ExecutionError,
   );
   assert(error.message.includes("dispatch 'attn.qk'"), error.message);
-  assert(error.message.includes("ADR 0066 decision 5"), error.message);
+  assert(
+    error.message.includes("bind groups that bind state are baked separately, on the context side"),
+    error.message,
+  );
   assertEquals(log, []);
 
   // Control: with the hole filled, it does not throw and one dispatch is enqueued (proof that the

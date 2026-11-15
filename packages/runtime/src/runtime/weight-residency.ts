@@ -49,7 +49,7 @@ import {
  * byte count. The layout has its own residency class, `i4f16`, which only `expert_linear` binds.
  */
 const f16StepsRefusal = (where: string): string =>
-  `${where}: int4-sym-g-f16 (f16 steps) is read by expert_linear only — ADR 0145`;
+  `${where}: int4-sym-g-f16 (f16 steps) is read by expert_linear only`;
 
 /** The storage layouts `expert_linear` reads at its weight slot (ADR 0145 decisions 2 and 3). */
 const EXPERT_LINEAR_LAYOUTS: ReadonlySet<CodecLayout> = new Set(["f32", "i4", "i4f16"]);
@@ -206,8 +206,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     const expert = expertWeights.has(name);
     if (expert && !EXPERT_LINEAR_LAYOUTS.has(layout)) {
       throw new ExecutionError(
-        `${where}: expert_linear reads f32 / int4-sym-g / int4-sym-g-f16 weights only, not '${codec}'` +
-          " (ADR 0145 decision 2)",
+        `${where}: expert_linear reads f32 / int4-sym-g / int4-sym-g-f16 weights only, not '${codec}'`,
       );
     }
     // MUST: before any residency class — not even `expanded` (the CPU expansion reads the scale as
@@ -237,7 +236,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       // expert_linear, so the same holds for it).
       if (expert || layout === "i4f16") {
         throw new ExecutionError(
-          `${where}: an expert_linear weight is never expanded to f32 on the host (ADR 0145 decision 2),` +
+          `${where}: an expert_linear weight is never expanded to f32 on the host,` +
             ` and this ${codec} weight cannot stay resident (it is also consumed outside a weight slot,` +
             " by an op without an i4 decode path, or is a graph output)",
         );
@@ -416,7 +415,7 @@ export const resolveSharedWeights = (
       `options.sharedWeights does not match the graph's shared declarations: missing [${missing.join(
         ", ",
       )}] / extra [${surplus.join(", ")}]` +
-        " (exactly one per shared declaration, none missing or extra, MUST — ADR 0096 step 2 §2.2)",
+        " (exactly one per shared declaration, none missing or extra, MUST)",
     );
   }
   return declared.map((name) => {

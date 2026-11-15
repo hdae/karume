@@ -219,7 +219,7 @@ export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> =>
   }
   if (dims.groups !== 1) {
     throw new CodegenError(
-      `conv3d igemm params: groups must be 1 (${dims.groups}) — there is no GPU execution path for groups > 1 (ADR 0118 decision 1)`,
+      `conv3d igemm params: groups must be 1 (${dims.groups}) — there is no GPU execution path for groups > 1`,
     );
   }
   const n = dims.timeOut * dims.heightOut * dims.widthOut;

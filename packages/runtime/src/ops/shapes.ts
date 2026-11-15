@@ -167,7 +167,7 @@ const stateSlotShape = (
   if (shape === undefined) {
     throw new OpContractError(
       `${where}: state slot '${name}' shape is not resolved` +
-        ` (running a node that references state requires a GenerationContext — ADR 0066 decision 1)`,
+        ` (running a node that references state requires a GenerationContext)`,
     );
   }
   return { name, shape };
@@ -270,13 +270,13 @@ const readonlyStateAttentionShape = (
   if (kvHeads < 1 || q[1] < kvHeads || q[1] % kvHeads !== 0) {
     throw new OpContractError(
       `${where}: readonly attention H ${q[1]} is not a positive integer multiple of Hkv ${kvHeads}` +
-        ` (GQA needs H % Hkv == 0 and H ≥ Hkv ≥ 1 — ADR 0067 decision 1) ${show}`,
+        ` (GQA needs H % Hkv == 0 and H ≥ Hkv ≥ 1) ${show}`,
     );
   }
   if (q[2] !== 1) {
     throw new OpContractError(
       `${where}: readonly attention needs q M (axis 2) of exactly 1 (${q[2]}) — ` +
-        "it reads only the one row at logical position P−1 (ADR 0096 stage 2 §1.2)",
+        "it reads only the one row at logical position P−1",
     );
   }
   const window = stateWindow(context.attrs ?? {}, where);
@@ -347,7 +347,7 @@ const gatedDeltaScanShape = (
   if (keyHeads < 1 || valueHeads < keyHeads || valueHeads % keyHeads !== 0) {
     throw new OpContractError(
       `${where}: ${found.name} Hv ${valueHeads} is not a positive integer multiple of Hk ${keyHeads}` +
-        ` (the head broadcast needs Hv % Hk == 0 and Hv ≥ Hk ≥ 1 — ADR 0135 decision 1): ${show}`,
+        ` (the head broadcast needs Hv % Hk == 0 and Hv ≥ Hk ≥ 1): ${show}`,
     );
   }
   return [batch, time, valueHeads, valueDim];
@@ -1015,7 +1015,7 @@ export const computeOutputShape = (
       if (k[1] < 1) {
         throw new OpContractError(
           `${where}: attention Hkv ${k[1]} is not positive (H must be a positive integer multiple of Hkv — GQA needs` +
-            ` H % Hkv == 0 and H ≥ Hkv ≥ 1; ADR 0067 decision 1) ${show}`,
+            ` H % Hkv == 0 and H ≥ Hkv ≥ 1) ${show}`,
         );
       }
       // GQA = **divisible broadcast** (ADR 0067 decision 1). Only `H % Hkv == 0` and `H ≥ Hkv` are
@@ -1028,7 +1028,7 @@ export const computeOutputShape = (
       if (q[1] !== k[1] && (q[1] < k[1] || q[1] % k[1] !== 0)) {
         throw new OpContractError(
           `${where}: attention H ${q[1]} is not a positive integer multiple of Hkv ${k[1]} (GQA needs` +
-            ` H % Hkv == 0 and H ≥ Hkv — ADR 0067 decision 1) ${show}`,
+            ` H % Hkv == 0 and H ≥ Hkv) ${show}`,
         );
       }
       // MUST: D is the same for all three (allowing a different length on the v side alone would let
@@ -1046,7 +1046,7 @@ export const computeOutputShape = (
         // and the conformance table come through here.
         if (mask !== undefined) {
           throw new OpContractError(
-            `${where}: states-form attention takes no mask (causal is fixed — ADR 0067 decision 4)` +
+            `${where}: states-form attention takes no mask (causal is fixed)` +
               ` ${show} + mask [${mask.join(",")}]`,
           );
         }
@@ -1447,7 +1447,7 @@ export const computeOutputShape = (
         throw new OpContractError(
           `${where}: ${found.name} hidden width H ${hidden} is outside 1..${GRU_SCAN_MAX_HIDDEN} (h0 [${initial.join(
             ",",
-          )}] — the limit of the one-lane-per-hidden-unit assignment; ADR 0056 decision 5)`,
+          )}] — the limit of the one-lane-per-hidden-unit assignment)`,
         );
       }
       if (batch !== initialBatch) {

@@ -730,7 +730,7 @@ const parseCrossRepo = (
   if (repo === ownRepo) {
     throw fail.format(
       `${where}.repo: the cross-repo reference points at '${repo}', the repo the manifest was loaded from` +
-        ` (files of the own repo are referenced without 'repo' / 'revision' — ADR 0038 addendum 2026-10-11)`,
+        ` (files of the own repo are referenced without 'repo' / 'revision')`,
     );
   }
   return { repo, revision };
@@ -900,7 +900,7 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
         : cross !== undefined && cross.repo === head.repo && cross.revision === head.revision;
     if (!agrees) {
       throw fail.format(
-        `${where}.parts[${index}]: cross-repo references are per container — ADR 0109 decision 3` +
+        `${where}.parts[${index}]: cross-repo references are per container` +
           ` (part 0 is ${head === undefined ? "own repo" : `${head.repo}@${head.revision}`} /` +
           ` this part is ${cross === undefined ? "own repo" : `${cross.repo}@${cross.revision}`})`,
       );

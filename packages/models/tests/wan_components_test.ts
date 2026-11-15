@@ -499,7 +499,10 @@ describe("replacing Wan's text_encoder (mock HF — a cross-referenced slot)", (
       Error,
       "text_encoder initializer 'embed' has storage int4-sym-g, which is not accepted",
     );
-    assertStringIncludes(error.message, "ADR 0119 decision 5");
+    assertStringIncludes(
+      error.message,
+      "(only i8 per-channel weights and f32 tables are accepted)",
+    );
 
     // The descriptor (part 0) was fetched for admission, but no weight part was fetched.
     const [descriptor, ...weightParts] = rig.parts.replacementI4;

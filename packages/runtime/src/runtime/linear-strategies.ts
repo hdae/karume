@@ -284,7 +284,7 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   {
     refuse: ({ weightStorage, knobs }) =>
       weightStorage === "i2" && knobs.linearCompute !== "f32"
-        ? "linear: i2 residency supports only linearCompute 'f32' (ADR 0097)"
+        ? "linear: i2 residency supports only linearCompute 'f32'"
         : undefined,
   },
   // A linear declared to receive packed activations (ADR 0105) that lands on neither the parallel
@@ -295,7 +295,7 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   {
     refuse: ({ packed, planes, where }) =>
       packed !== undefined && planes !== undefined
-        ? `${where}: declared as packed activations (ADR 0105) but is a byte-plane GEMV linear, which reads f32 activations`
+        ? `${where}: declared as packed activations but is a byte-plane GEMV linear, which reads f32 activations`
         : undefined,
   },
   {
@@ -310,7 +310,7 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
           linearGemvPackedEligible(weightStorage, m, n, k, groupSize) !== undefined);
       return eligible
         ? undefined
-        : `${where}: declared as packed activations (ADR 0105) but lands on neither the parallel GEMV nor the integer GEMV`;
+        : `${where}: declared as packed activations but lands on neither the parallel GEMV nor the integer GEMV`;
     },
   },
   // The integer GEMV (`integerGemv`): only when the activation does arrive packed; a linear the route
@@ -337,14 +337,14 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   {
     refuse: ({ compute, weightStorage, where }) =>
       compute === "f16" && weightStorage === "i8"
-        ? `${where}: linearCompute 'f16' cannot be combined with i8-resident weights (w8a16 is not implemented — ADR 0028). ` +
+        ? `${where}: linearCompute 'f16' cannot be combined with i8-resident weights (w8a16 is not implemented). ` +
           "Set linearCompute to 'a8', or store this weight as f32 / f16"
         : undefined,
   },
   {
     refuse: ({ compute, weightStorage, where }) =>
       compute === "f16" && weightStorage === "i4"
-        ? `${where}: linearCompute 'f16' cannot be combined with i4-resident weights (w4a16 is not implemented — ADR 0069). ` +
+        ? `${where}: linearCompute 'f16' cannot be combined with i4-resident weights (w4a16 is not implemented). ` +
           "Set linearCompute to 'a8', or store this weight as f32 / f16"
         : undefined,
   },

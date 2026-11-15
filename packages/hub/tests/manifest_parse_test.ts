@@ -1151,7 +1151,7 @@ describe("parseManifest: the cross-repository fields repo / revision of a file r
         `${JSON.stringify(parts)} passed`,
       );
       assert(
-        error.message.includes("per container — ADR 0109 decision 3"),
+        error.message.includes("cross-repo references are per container (part 0 is"),
         `${error.message} does not name the per-container rule`,
       );
     }

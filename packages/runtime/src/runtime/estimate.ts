@@ -738,14 +738,13 @@ const planBindings = (
   for (const sym of Object.keys(resolved)) {
     if (statesOnly.has(sym)) {
       throw new ExecutionError(
-        `Binding '${sym}' is a states-only symbol — give it in options.generation.bindings` +
-          " (binding point 2 of ADR 0066 addendum 7)",
+        `Binding '${sym}' is a states-only symbol — give it in options.generation.bindings`,
       );
     }
     if (chunkSymbols.has(sym)) {
       throw new ExecutionError(
         `Binding '${sym}' is the physical chunk-row symbol M — its values are derived from options.generation.chunkLength` +
-          " (prefill shape) and 1 (decode shape) (the two execution shapes of ADR 0066 decision 4)",
+          " (prefill shape) and 1 (decode shape) (the two execution shapes)",
       );
     }
   }
@@ -779,7 +778,7 @@ const bindChunkRows = (
     if (solved === undefined) {
       throw new ExecutionError(
         `Scenario '${scenario}': physical chunk row count ${rows} does not have the declared form '${dim}'` +
-          ` (needs a row count divisible by ${expr.coeff} and at least ${expr.offset} — ADR 0066 decision 4)`,
+          ` (needs a row count divisible by ${expr.coeff} and at least ${expr.offset})`,
       );
     }
     if (Object.hasOwn(bindings, expr.sym) && bindings[expr.sym] !== solved) {
@@ -984,7 +983,7 @@ const stateAttentionTemps = (
   if (limit === undefined) {
     throw new ExecutionError(
       `${where}: the temporaries of states-form attention need options.maxStorageBufferBindingSize` +
-        " (the row-block count is decided by the device's granted limit alone — ADR 0060 / ADR 0022)",
+        " (the row-block count is decided by the device's granted limit alone)",
     );
   }
   const [batch, heads, chunkRows] = q;
@@ -1261,7 +1260,7 @@ export const estimateFusionFacts = (
   ) {
     throw new ExecutionError(
       "options.fusionRules needs options.maxStorageBufferBindingSize and options.maxComputeWorkgroupsPerDimension" +
-        " (an external rule's matcher may read the device limits and decline a window — ADR 0148)",
+        " (an external rule's matcher may read the device limits and decline a window)",
     );
   }
   return {
@@ -1307,7 +1306,7 @@ const fusedAttentionBlocks = (
       throw new ExecutionError(
         `${where}: the temporaries of fused attention do not fit in one block under the WebGPU core default binding limit (${core}B), so` +
           " options.maxStorageBufferBindingSize is needed (the row-block count changes with the device's granted" +
-          " limit — ADR 0124 decision 7 / ADR 0022)",
+          " limit)",
       );
     }
   }
@@ -1344,7 +1343,7 @@ const assertRowBlockWindowCount = (
   throw new ExecutionError(
     `Estimate: row-block attention '${step.outputName}': the score S (${scoreBytes}B) does not fit in one block under the WebGPU core default binding limit (${core}B), so` +
       " options.maxStorageBufferBindingSize is needed (the row-block count changes with the device's granted" +
-      " limit — ADR 0124 decision 7 / ADR 0060)",
+      " limit)",
   );
 };
 
@@ -1902,7 +1901,7 @@ export const estimateGraphMemory = (
   if (passedDevice === undefined && options.attentionScoreStorage === "none") {
     throw new ExecutionError(
       "attentionScoreStorage 'none' needs options.attentionDevice" +
-        " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit — ADR 0132)",
+        " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit)",
     );
   }
   if (passedDevice !== undefined) {

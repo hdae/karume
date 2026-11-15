@@ -537,7 +537,7 @@ const PLAIN_RUN: RunHooks<RunOutputs> = {
 /** The refusal of the plain surfaces under `SessionOptions.expertCache` (ADR 0146). */
 const expertCacheRefusal = (surface: string): string =>
   `Session.${surface} is refused under SessionOptions.expertCache: a pick whose expert is not resident` +
-  " contributes 0, so run through session.expertCache.run, which returns the routing and the miss count (ADR 0146)";
+  " contributes 0, so run through session.expertCache.run, which returns the routing and the miss count";
 
 /**
  * A generation run as the body executes it: the copy taken at issue plus, for a chained run, the

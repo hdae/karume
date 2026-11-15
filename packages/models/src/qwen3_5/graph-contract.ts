@@ -176,13 +176,13 @@ export const qwen3_5GraphContract = (
     else if (layout !== "f32") {
       throw new Error(
         `${owner}: text_encoder initializer '${name}' has storage ${initializer.storage.codec}, which is not accepted` +
-          " (only i8 per-channel weights and f32 tensors are verified — ADR 0137 decision 5)",
+          " (only i8 per-channel weights and f32 tensors are verified)",
       );
     }
   }
   if (quantized === 0) {
     throw new Error(
-      `${owner}: text_encoder has no i8 weights at all (only the i8 series is verified — ADR 0137 decision 5)`,
+      `${owner}: text_encoder has no i8 weights at all (only the i8 series is verified)`,
     );
   }
   return { output, hiddenSize, vocabularySize };

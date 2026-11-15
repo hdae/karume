@@ -127,7 +127,7 @@ const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
   if (graph.outputs.length !== GRAPH_OUTPUTS) {
     throw new Error(
       `${entry}: the graph has ${graph.outputs.length} outputs` +
-        ` (the product graph has ${GRAPH_OUTPUTS} outputs, logits + hidden — ADR 0083 decision 6)`,
+        ` (the product graph has ${GRAPH_OUTPUTS} outputs, logits + hidden)`,
     );
   }
   const name = graph.outputs[0];

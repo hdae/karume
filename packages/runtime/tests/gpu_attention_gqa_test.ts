@@ -493,7 +493,10 @@ test.skipIf(!GPU_AVAILABLE)(
         ExecutionError,
         "GQA",
       );
-      assert(error.message.includes("ADR 0067"), `the guidance is insufficient: ${error.message}`);
+      assert(
+        error.message.includes("set attentionCompute to 'f32' or 'f16'"),
+        `the guidance is insufficient: ${error.message}`,
+      );
       // The rejection reason on a shape eligible for i8a8 in both ① and ③ (D=8 / N=8). The
       // ineligible shapes below fail with **the identical** reason (only the display of H / Hkv / r
       // changes per shape).

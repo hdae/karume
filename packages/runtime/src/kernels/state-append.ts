@@ -183,9 +183,7 @@ export const stateAppendParams = (
     );
   }
   if (window > capacity) {
-    throw new CodegenError(
-      `state_append params: window ${window} exceeds capacity ${capacity} (ADR 0067 decision 4 ③)`,
-    );
+    throw new CodegenError(`state_append params: window ${window} exceeds capacity ${capacity}`);
   }
   const params = new Uint32Array(8);
   params[0] = kvPlanes;

@@ -132,7 +132,7 @@ export const assertGemma4ExpertCacheOptions = (
   }
   const refuse = (other: string, why: string): never => {
     throw new ModelInputError(
-      `${where}: expertCache cannot be combined with ${other} (${why}; a run under the cache runs alone, deferred, until it misses no expert — ADR 0146)`,
+      `${where}: expertCache cannot be combined with ${other} (${why}; a run under the cache runs alone, deferred, until it misses no expert)`,
     );
   };
   if ((options.decodeAhead ?? 1) >= 2) {

@@ -155,8 +155,6 @@ maintainer's ruling of 2026-11-06).
      deferred.
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
-  - **Low priority**: the error messages that cite an ADR clause (about 125 string literals under `packages/*/src`) are
-    reworded; two tests assert such text.
   - **To decide**: the open points of ADR 0152.
 
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)

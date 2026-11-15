@@ -1740,9 +1740,7 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
   }
   if (stateSliding(window)) {
     if (window > capacity) {
-      throw new CodegenError(
-        `${where}: window ${window} exceeds capacity ${capacity} (ADR 0067 decision 4 ③)`,
-      );
+      throw new CodegenError(`${where}: window ${window} exceeds capacity ${capacity}`);
     }
     const need = window - 1 + chunkRows;
     if (colCap < need) {

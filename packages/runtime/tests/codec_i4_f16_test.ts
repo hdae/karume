@@ -28,7 +28,7 @@ import { openGraph, weight } from "./helpers/estimate-graphs.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 
-const REFUSAL = "int4-sym-g-f16 (f16 steps) is read by expert_linear only — ADR 0145";
+const REFUSAL = "int4-sym-g-f16 (f16 steps) is read by expert_linear only";
 
 const zeros = (length: number): Uint8Array<ArrayBuffer> => new Uint8Array(new ArrayBuffer(length));
 

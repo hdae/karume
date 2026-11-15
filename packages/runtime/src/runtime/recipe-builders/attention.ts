@@ -565,7 +565,7 @@ export const fusedAttentionViolation = (
   if (kvRepeat > 1 && i8a8) {
     return (
       `${where}: GQA (H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}) × i8a8 is not supported` +
-      " (ADR 0067 decision 3, support planned — set attentionCompute to 'f32' or 'f16')"
+      " (support planned — set attentionCompute to 'f32' or 'f16')"
     );
   }
   // MUST: the reduction guard fails loudly (letting it pass would garble values, sign included,
@@ -604,7 +604,7 @@ export const stateAttentionVariantViolation = (
   if (seats.attentionCompute !== "f32") {
     return form === "states"
       ? `${where}: states-form attention cannot be combined with attentionCompute '${seats.attentionCompute}'` +
-          " (only the separate f32 kernel family — ADR 0067 decisions 3 / 4)"
+          " (only the separate f32 kernel family)"
       : `${where}: readonly attention cannot be combined with attentionCompute ` +
           `'${seats.attentionCompute}' (only the separate f32 kernel family)`;
   }

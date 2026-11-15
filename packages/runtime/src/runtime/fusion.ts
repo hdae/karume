@@ -457,7 +457,7 @@ const takesOnlineRoute = (attention: NodePlan, context: FusionContext): boolean 
       throw new ExecutionError(
         `attention permute: attention [${q.join(",")}] × [${k.join(",")}]: attentionScoreStorage 'none'` +
           " needs attentionDevice (whether the attention takes the online kernel, the one route that" +
-          " stores O token-major, depends on the device's subgroups and workgroup-storage limit — ADR 0132)",
+          " stores O token-major, depends on the device's subgroups and workgroup-storage limit)",
       );
     }
     device = UNREAD_ATTENTION_DEVICE;
@@ -758,7 +758,7 @@ const assertPackedPairsUntouched = (
       throw new ExecutionError(
         `fusion rule '${hit.step.rule}': its step folds the '${plan.node.op}' node that ` +
           `${plan.node.ins.includes(touched) ? "reads" : "writes"} '${touched}', a value handed over as packed int8` +
-          " activations (ADR 0105) on the first scan; an external step may neither take nor produce one",
+          " activations on the first scan; an external step may neither take nor produce one",
       );
     }
   }
@@ -1030,7 +1030,7 @@ const assertPackedFixpoint = (
   const names = (values: ReadonlyMap<string, number>): string =>
     values.size === 0 ? "none" : [...values.keys()].map((name) => `'${name}'`).join(", ");
   throw new ExecutionError(
-    "fusion rules: the plan changed between the two planning scans (the packed int8 activations of ADR 0105" +
+    "fusion rules: the plan changed between the two planning scans (the packed int8 activations" +
       ` were planned as ${names(planned)} from the first scan, and the final plan gives ${names(given)}):` +
       " a rule's matcher is not a pure function of its arguments — " +
       (external.length === 0

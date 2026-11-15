@@ -230,7 +230,7 @@ export const gruScanParams = (dims: GruScanDims): Uint32Array<ArrayBuffer> => {
   }
   if (hidden > GRU_SCAN_MAX_HIDDEN) {
     throw new CodegenError(
-      `gru_scan params: hidden ${hidden} exceeds the limit ${GRU_SCAN_MAX_HIDDEN} (1 lane = 1 hidden unit — ADR 0056 decision 5)`,
+      `gru_scan params: hidden ${hidden} exceeds the limit ${GRU_SCAN_MAX_HIDDEN} (1 lane = 1 hidden unit)`,
     );
   }
   return new Uint32Array([time, batch, hidden, 0]);

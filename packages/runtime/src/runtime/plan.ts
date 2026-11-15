@@ -194,7 +194,7 @@ const assertConv3dSubset = (node: IrNode, where: string): void => {
   if (groups !== 1) {
     throw new ExecutionError(
       `${where}: conv3d groups ${groups} cannot run on the GPU (the implemented subset is the groups == 1` +
-        " implicit GEMM only — ADR 0118 decision 1; the CPU reference holds the semantics)",
+        " implicit GEMM only; the CPU reference holds the semantics)",
     );
   }
 };
@@ -219,7 +219,7 @@ const assertGatedDeltaScanSubset = (graph: IrGraph, node: IrNode, where: string)
     if (dim !== GATED_DELTA_SCAN_HEAD_DIM) {
       throw new ExecutionError(
         `${where}: gated_delta_scan head dim of ${name} ${JSON.stringify(dim)} cannot run on the GPU` +
-          ` (the implemented subset is dk = dv = ${GATED_DELTA_SCAN_HEAD_DIM} — ADR 0135 decision 1;` +
+          ` (the implemented subset is dk = dv = ${GATED_DELTA_SCAN_HEAD_DIM};` +
           " the CPU reference holds the semantics)",
       );
     }
@@ -243,7 +243,7 @@ const assertExpertLinearIndex = (graph: IrGraph, node: IrNode, where: string): v
   const experts = declarationOf(graph, node.ins[2]).shape[0];
   const rule =
     `an ${node.op} index MUST be output 1 of a topk over the weight's E` +
-    ` (${JSON.stringify(experts)}) — ADR 0145 decision 2`;
+    ` (${JSON.stringify(experts)})`;
   const producer = graph.nodes.find((candidate) => candidate.outs.includes(index));
   if (producer === undefined) {
     const kind = graph.inputs.some((spec) => spec.name === index)
@@ -296,7 +296,7 @@ const assertExpertLinearSubset = (graph: IrGraph, node: IrNode, where: string): 
     throw new ExecutionError(
       `${where}: ${node.op} input width ${JSON.stringify(inFeatures)} of weight '${name}' (${layout}` +
         `${group === undefined ? "" : `, group ${group}`}) cannot run on the GPU (the implemented subset` +
-        ` is a multiple of ${word}${group === undefined ? "" : ` and of the group`} — ADR 0145 decision 4;` +
+        ` is a multiple of ${word}${group === undefined ? "" : ` and of the group`};` +
         " the CPU reference holds the semantics)",
     );
   }
@@ -336,16 +336,16 @@ const assertStateOwnership = (graph: IrGraph): void => {
       if (readonly && !isExternal) {
         throw new ExecutionError(
           `${where}: a readonly attention reads the non-external state slot '${slot}'` +
-            " (readonly is only for slots of the context borrowed from — ADR 0096 stage 2 §1.1)",
+            " (readonly is only for slots of the context borrowed from)",
         );
       }
       if (readonly || !isExternal) continue;
       throw new ExecutionError(
         node.op === STATE_APPEND_OP
           ? `State slot '${slot}': external, yet ${STATE_APPEND_OP} (${where}) is present` +
-              " (only the lender may write to a borrowed slot — ADR 0096 stage 2 §1.1)"
+              " (only the lender may write to a borrowed slot)"
           : `${where}: external state slot '${slot}' is read by the non-readonly ${node.op}` +
-              " (the only readers of an external slot are attentions with attrs.readonly — ADR 0096 stage 2 §1.1)",
+              " (the only readers of an external slot are attentions with attrs.readonly)",
       );
     }
   });
@@ -355,7 +355,7 @@ const assertStateOwnership = (graph: IrGraph): void => {
       ", ",
     )}] / own: [${names
       .filter((name) => !graph.states[name].external)
-      .join(", ")}]) — a borrowing context has no slots of its own (ADR 0096 stage 2 §1.1)`,
+      .join(", ")}]) — a borrowing context has no slots of its own`,
   );
 };
 
@@ -419,7 +419,7 @@ const assertStateOrder = (graph: IrGraph): void => {
       throw new ExecutionError(
         `State slot '${slot}': ${STATE_APPEND_OP} appears ${appends.length} times (nodes[${appends
           .map((touch) => touch.index)
-          .join("], nodes[")}]) — at most once per step (ADR 0067 decision 5b)`,
+          .join("], nodes[")}]) — at most once per step`,
       );
     }
     if (appends.length === 0) {
@@ -429,7 +429,7 @@ const assertStateOrder = (graph: IrGraph): void => {
           .join(
             "], nodes[",
           )}] only) — a slot with readers MUST have exactly one terminal ${STATE_APPEND_OP}` +
-          ` (ADR 0067 decision 5b; without a writer the readers read an uninitialised past and only the logical length advances)`,
+          ` (without a writer the readers read an uninitialised past and only the logical length advances)`,
       );
     }
     // Here there is exactly one append (the two branches above failed zero and two or more).
@@ -439,7 +439,7 @@ const assertStateOrder = (graph: IrGraph): void => {
         `State slot '${slot}': after ${STATE_APPEND_OP} (nodes[${
           appends[0].index
         }]) comes the reader nodes[${last.index}] (${last.op})` +
-          ` (the append MUST be the last node touching the slot — ADR 0067 decision 5b)`,
+          ` (the append MUST be the last node touching the slot)`,
       );
     }
     assertSameWindow(slot, list);
@@ -459,7 +459,7 @@ const assertSameWindow = (slot: string, list: readonly StateTouch[]): void => {
     `nodes[${touch.index}] (${touch.op}): ${touch.window ?? "undeclared"}`;
   throw new ExecutionError(
     `State slot '${slot}': attrs.window disagrees (${show(first)} / ${show(mismatch)})` +
-      ` — the logical col → physical row mapping MUST use the same formula for reads and writes (ADR 0067 decision 4)`,
+      ` — the logical col → physical row mapping MUST use the same formula for reads and writes`,
   );
 };
 
@@ -884,7 +884,7 @@ export const assertGenerationBindings = (
       throw new ExecutionError(
         `Symbol '${sym}' differs between the GenerationContext binding ${value} and the run's resolved value ` +
           `${runBindings[sym]} (a symbol that appears in both states and inputs must have the same value at` +
-          " both binding points — ADR 0066 addendum 7)",
+          " both binding points)",
       );
     }
   }
@@ -940,7 +940,7 @@ export const bindSymbols = (
     if (statesOnly.has(sym)) {
       throw new ExecutionError(
         `Binding '${sym}' is a states-only symbol — its binding point is createGenerationContext(spec.bindings)` +
-          " (ADR 0066 addendum 7); it cannot be given in the run / enqueue bindings",
+          "; it cannot be given in the run / enqueue bindings",
       );
     }
     bindings[sym] = assertExtent(value, `Binding '${sym}'`);

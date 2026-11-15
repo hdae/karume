@@ -926,7 +926,7 @@ export class RecipeBuilder {
     const storage = this.#residentWeight(step)?.storage ?? "f32";
     if (storage === "i4f16") {
       throw new ExecutionError(
-        `${step.node.op}: weight '${this.#weightSlotName(step)}' has f16 steps (int4-sym-g-f16), read by expert_linear only — ADR 0145`,
+        `${step.node.op}: weight '${this.#weightSlotName(step)}' has f16 steps (int4-sym-g-f16), read by expert_linear only`,
       );
     }
     return storage;
@@ -940,7 +940,7 @@ export class RecipeBuilder {
     const storage = this.#residentWeight(step)?.storage ?? "f32";
     if (storage === "f32" || storage === "i4" || storage === "i4f16") return storage;
     throw new ExecutionError(
-      `${step.node.op}: weight '${this.#weightSlotName(step)}' is resident as ${storage}; expert_linear reads f32 / i4 / i4f16 only (ADR 0145 decision 2)`,
+      `${step.node.op}: weight '${this.#weightSlotName(step)}' is resident as ${storage}; expert_linear reads f32 / i4 / i4f16 only`,
     );
   }
 

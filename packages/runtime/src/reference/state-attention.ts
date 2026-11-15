@@ -139,9 +139,7 @@ const assertShape = (shape: StateAttentionRefShape): void => {
     );
   }
   if (heads % kvHeads !== 0) {
-    throw new ReferenceOpError(
-      `H=${heads} is not divisible by Hkv=${kvHeads} (ADR 0067 decision 1)`,
-    );
+    throw new ReferenceOpError(`H=${heads} is not divisible by Hkv=${kvHeads}`);
   }
   assertQuery(query, chunkRows);
   if (stateSliding(window)) {
@@ -150,7 +148,7 @@ const assertShape = (shape: StateAttentionRefShape): void => {
     }
   } else if (past + query > capacity) {
     throw new ReferenceOpError(
-      `In a full slot, pastLength ${past} + queryLength ${query} exceeds capacity ${capacity} (ADR 0067 decision 4 ④)`,
+      `In a full slot, pastLength ${past} + queryLength ${query} exceeds capacity ${capacity} (a slot that is not sliding does not wrap)`,
     );
   }
 };
@@ -386,9 +384,7 @@ export const referenceStateAttentionReadonly = (
     );
   }
   if (heads % kvHeads !== 0) {
-    throw new ReferenceOpError(
-      `H=${heads} is not divisible by Hkv=${kvHeads} (ADR 0067 decision 1)`,
-    );
+    throw new ReferenceOpError(`H=${heads} is not divisible by Hkv=${kvHeads}`);
   }
   if (stateSliding(window) ? window > capacity : past > capacity) {
     throw new ReferenceOpError(

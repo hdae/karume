@@ -389,8 +389,7 @@ export const assertChunkRowsAllowed = (
     const prefill = [...allowedRows].filter((allowed) => allowed !== 1);
     throw new ExecutionError(
       `the physical chunk row count ${rows} of the state node does not match the fixed chunk contract` +
-        ` (only the prefill form's {${prefill.join(", ")}} or the decode form's 1 is allowed — ` +
-        "ADR 0066 decision 4 / addendum 10, buckets)",
+        ` (only the prefill form's {${prefill.join(", ")}} or the decode form's 1 is allowed)`,
     );
   }
 };
@@ -424,7 +423,7 @@ export const assertGenerationRun = (
     if (queryLength > rows) {
       throw new ExecutionError(
         `queryLength ${queryLength} exceeds the physical chunk row count ${rows} of the state node` +
-          " (prefill is a fixed-length chunk + pad, decode is 1 — ADR 0066 decision 4)",
+          " (prefill is a fixed-length chunk + pad, decode is 1)",
       );
     }
   }
@@ -432,7 +431,7 @@ export const assertGenerationRun = (
     if (pastLength + queryLength > capacity) {
       throw new ExecutionError(
         `state '${name}': pastLength ${pastLength} + queryLength ${queryLength} exceeds the full slot's` +
-          ` capacity ${capacity} (ADR 0067 decision 4 ④ — a slot that is not sliding does not wrap)`,
+          ` capacity ${capacity} (a slot that is not sliding does not wrap)`,
       );
     }
   }
@@ -925,7 +924,7 @@ const dispatchBakedStep = (
     if (bindGroup === undefined) {
       throw new ExecutionError(
         `dispatch '${dispatch.key}': the bind group that binds objects owned by the GenerationContext` +
-          " is not baked (the split baking of ADR 0066 decision 5 — reached the baked path without" +
+          " is not baked (bind groups that bind state are baked separately, on the context side — reached the baked path without" +
           " the context-side baking)",
       );
     }

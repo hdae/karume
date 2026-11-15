@@ -399,14 +399,12 @@ export const gatedDeltaScanParams = (dims: GatedDeltaScanDims): Uint32Array<Arra
   const { time, batch, keyHeads, valueHeads, keyDim, valueDim } = dims;
   assertU32Params("gated_delta_scan params", { time, batch, keyHeads, valueHeads });
   if (time < 1 || batch < 1) {
-    throw new CodegenError(
-      `gated_delta_scan params: T ${time} and B ${batch} must be positive (ADR 0135 decision 1)`,
-    );
+    throw new CodegenError(`gated_delta_scan params: T ${time} and B ${batch} must be positive`);
   }
   if (keyDim !== GATED_DELTA_SCAN_HEAD_DIM || valueDim !== GATED_DELTA_SCAN_HEAD_DIM) {
     throw new CodegenError(
       `gated_delta_scan params: head dims dk ${keyDim} / dv ${valueDim} are outside the GPU's implemented subset` +
-        ` (dk = dv = ${GATED_DELTA_SCAN_HEAD_DIM} only — ADR 0135 decision 1)`,
+        ` (dk = dv = ${GATED_DELTA_SCAN_HEAD_DIM} only)`,
     );
   }
   if (keyHeads < 1 || valueHeads < keyHeads || valueHeads % keyHeads !== 0) {

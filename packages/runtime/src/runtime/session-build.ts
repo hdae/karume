@@ -1185,7 +1185,7 @@ export const buildSessionState = async (
             }
           } else if (layout === "i4f16") {
             throw new ExecutionError(
-              `initializer '${name}': int4-sym-g-f16 planned as '${seat.seat}' (broken bookkeeping — ADR 0145)`,
+              `initializer '${name}': int4-sym-g-f16 planned as '${seat.seat}' (broken bookkeeping)`,
             );
           } else {
             // The range (power of 2 ≥ 16, divisibility) is guaranteed by the merge layer. Presence is

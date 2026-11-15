@@ -191,9 +191,7 @@ const pooledWeight = (
       },
     };
   }
-  throw new ExecutionError(
-    `${where}: planned as '${seat?.seat}' (f32 / i4 / i4f16 only — ADR 0145 decision 2)`,
-  );
+  throw new ExecutionError(`${where}: planned as '${seat?.seat}' (f32 / i4 / i4f16 only)`);
 };
 
 /**
@@ -324,9 +322,7 @@ export const planExpertGraph = (
   // The index of every expert_linear is a topk output (the producer rule of plan.ts); a direct build
   // that skipped the contract checks lands here instead of planning a table nobody writes.
   if (experts === undefined || picks === undefined || layers.length !== routed.size) {
-    throw new ExecutionError(
-      `${where}: an expert_linear index is not the index output of a topk (ADR 0145 decision 2)`,
-    );
+    throw new ExecutionError(`${where}: an expert_linear index is not the index output of a topk`);
   }
   for (const [at, layer] of layers.entries()) {
     if (layer.slots < picks || layer.slots > experts) {

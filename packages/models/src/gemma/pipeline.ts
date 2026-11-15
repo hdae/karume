@@ -1061,7 +1061,7 @@ export const resolveGemma4PleResidency = (
   if (options.speculative !== undefined) {
     throw new ModelInputError(
       `${where}: pleResidency: "gpu" and speculative cannot be combined` +
-        ` (the drafter's per-layer inputs are outside the scope of GPU residency — ADR 0085 addendum, GPU residency)`,
+        ` (the drafter's per-layer inputs are outside the scope of GPU residency)`,
     );
   }
   return residency;
@@ -1893,7 +1893,7 @@ export class GemmaPipeline {
     if (plePlan.residency === "gpu" && gpu.gpuTimingEnabled) {
       throw new Error(
         `${entry}: pleResidency: "gpu" cannot be used on a device with gpuTiming enabled` +
-          ` (the on-GPU gather is queued into a batch, but a batch cannot be opened while timing — ADR 0021)`,
+          ` (the on-GPU gather is queued into a batch, but a batch cannot be opened while timing)`,
       );
     }
     // The supplier is **the same one** admission looked at (the earlier and later steps do not hold

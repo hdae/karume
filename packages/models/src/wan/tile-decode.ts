@@ -216,7 +216,7 @@ const borrowedInitializers = (
   if (owned.length > 0) {
     throw new Error(
       `${where}: ${owned.length} initializers are not shared (${owned.slice(0, 3).join(", ")}…) —` +
-        " the tile-32 decoder pair borrows every weight from the tile-16 pair (ADR 0134)",
+        " the tile-32 decoder pair borrows every weight from the tile-16 pair",
     );
   }
   const unbacked = names.filter(

@@ -48,6 +48,12 @@ measurements in `docs/research/`.
   numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
   `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
 
+### Changed
+
+- Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the
+  cause and, where the caller can act, what to do. Code that matched on such a citation in a message needs another
+  substring.
+
 ## [0.22.0] - 2026-11-14
 
 ### Added

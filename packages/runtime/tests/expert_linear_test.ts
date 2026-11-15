@@ -205,7 +205,7 @@ describe("the producer rule of an expert_linear index (at Session construction)"
       assertThrows(
         () => validateGraphContracts(mergeGraph(expertGraph(source))),
         ExecutionError,
-        `${message}; an expert_linear index MUST be output 1 of a topk over the weight's E (4) — ADR 0145 decision 2`,
+        `${message}; an expert_linear index MUST be output 1 of a topk over the weight's E (4)`,
       );
     });
   }
@@ -299,7 +299,7 @@ describe("the residency of an expert_linear weight", () => {
     assertThrows(
       () => planWeightResidency(mergeGraph(expertGraph("topk", { extra: "linear" }), { w: I4F16 })),
       ExecutionError,
-      "initializer 'w': int4-sym-g-f16 (f16 steps) is read by expert_linear only — ADR 0145",
+      "initializer 'w': int4-sym-g-f16 (f16 steps) is read by expert_linear only",
     );
   });
 

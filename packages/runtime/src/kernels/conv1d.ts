@@ -89,11 +89,13 @@ export const CONV1D_SCALE_BINDING = 5;
  */
 const assertDirectWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
-    throw new CodegenError("convolution: i2 weight storage is not supported (ADR 0097)");
+    throw new CodegenError(
+      "convolution: i2 weight storage is not supported (the only i2 execution paths are linear / embedding)",
+    );
   }
   if (weight === "i4") {
     throw new CodegenError(
-      "conv1d direct kernel: i4 weight storage is not supported — i4 conv1d is limited to the implicit GEMM with groups == 1 (ADR 0069 decision 5)",
+      "conv1d direct kernel: i4 weight storage is not supported — i4 conv1d is limited to the implicit GEMM with groups == 1",
     );
   }
 };

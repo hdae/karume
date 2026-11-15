@@ -260,7 +260,7 @@ describe("resolveLinearStrategy (the same decision, for a caller that asks befor
       facts({ m: 1, n: 64, k: 64 }, "i2", { knobs: { linearCompute: "a8" } }),
     );
     assertEquals(resolution, {
-      refusal: "linear: i2 residency supports only linearCompute 'f32' (ADR 0097)",
+      refusal: "linear: i2 residency supports only linearCompute 'f32'",
     });
   });
 

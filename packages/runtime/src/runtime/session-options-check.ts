@@ -124,7 +124,7 @@ const executionKnobsViolation = (
   return (
     `SessionOptions: execution knobs outside the accepted set: ${violations.length} (no silent fallback to the default):\n` +
     `${violations.join("\n")}\n` +
-    "Check the spelling (linearCompute 'i8a8' was renamed to 'a8' in 0.5.0 — ADR 0074 decision 3)"
+    "Check the spelling (linearCompute 'i8a8' was renamed to 'a8' in 0.5.0)"
   );
 };
 

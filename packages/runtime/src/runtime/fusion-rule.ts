@@ -866,7 +866,7 @@ const assertDeclarations = (
   const contract: unknown = rule.contract;
   if (typeof contract !== "string" || !Object.hasOwn(CONTRACT_CLASSES, contract)) {
     throw new ExecutionError(
-      `fusion rule '${String(rule.name)}': contract must be "E", "C", "R" or "Q" (ADR 0147 decision 2), got ${String(contract)}`,
+      `fusion rule '${String(rule.name)}': contract must be "E", "C", "R" or "Q", got ${String(contract)}`,
     );
   }
   const internals: unknown = rule.internals;

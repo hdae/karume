@@ -388,7 +388,7 @@ const slidingSlackRows = (
     const rows = shape[2] - window;
     if (rows < 0) {
       throw new ExecutionError(
-        `state '${name}': window ${window} exceeds the row capacity ${shape[2]} (ADR 0067 decision 4 ③)`,
+        `state '${name}': window ${window} exceeds the row capacity ${shape[2]}`,
       );
     }
     slack = slack === undefined ? rows : Math.min(slack, rows);
@@ -408,7 +408,7 @@ export const assertChunkLength = (chunkLength: number): void => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 1 || chunkLength > MAX_LOGICAL_LENGTH) {
     throw new ExecutionError(
       `chunkLength ${chunkLength} is not an integer in 1..${MAX_LOGICAL_LENGTH}` +
-        " (the row count of the fixed-length prefill chunk, carried in a u32 — ADR 0066 decision 4 / addendum 4)",
+        " (the row count of the fixed-length prefill chunk, carried in a u32)",
     );
   }
 };
@@ -438,7 +438,7 @@ export const assertChunkBuckets = (
     if (!Number.isSafeInteger(rows) || rows < 2 || rows >= chunkLength) {
       throw new ExecutionError(
         `chunkBuckets[${index}] ${rows} is not an integer in 2..${chunkLength - 1}` +
-          " (1 is the decode shape and chunkLength is the prefill shape itself — ADR 0066 decision 4 / addendum 10, buckets)",
+          " (1 is the decode shape and chunkLength is the prefill shape itself)",
       );
     }
     if (rows <= previous) {
@@ -567,7 +567,7 @@ export const assertSlotWithinLimits = (
     if (limit !== undefined && byteLength > limit) {
       throw new ExecutionError(
         `state '${name}': capacity [${shape.join(",")}] takes ${byteLength} bytes, which exceeds ` +
-          `${limitName} ${limit} bytes (ADR 0066 addendum 5). ` +
+          `${limitName} ${limit} bytes. ` +
           "Lower the capacity, or split the slot and rebuild the graph",
       );
     }
@@ -748,8 +748,7 @@ export class GenerationContext {
         this.#assertUsable(where);
         if (this.#borrow !== undefined) {
           throw new ExecutionError(
-            `${where}: a borrowing context cannot be a lender (borrowing is not chained — ` +
-              "ADR 0096 stage 2 §2.1)",
+            `${where}: a borrowing context cannot be a lender (borrowing is not chained)`,
           );
         }
       },
@@ -896,15 +895,14 @@ export class GenerationContext {
     if (external.length > 0 && spec.borrow === undefined) {
       throw new ExecutionError(
         `This graph has external state slots [${external.join(", ")}]` +
-          " (the borrowed storage lives in the lender context, so createGenerationContext({ borrow }) is needed" +
-          " — ADR 0096 stage 2 §2.1)",
+          " (the borrowed storage lives in the lender context, so createGenerationContext({ borrow }) is needed)",
       );
     }
     if (spec.borrow !== undefined) {
       if (external.length === 0) {
         throw new ExecutionError(
           "borrow can only be given for a graph whose slots are all external" +
-            ` (this graph has own slots [${names.join(", ")}] — ADR 0096 stage 2 §2.1)`,
+            ` (this graph has own slots [${names.join(", ")}])`,
         );
       }
       return await GenerationContext.#createBorrowed(host, spec, spec.borrow, names);
@@ -1013,7 +1011,7 @@ export class GenerationContext {
     if (spec.chunkLength !== 1) {
       throw new ExecutionError(
         `createGenerationContext(borrow): chunkLength ${spec.chunkLength} must be exactly 1` +
-          " (a borrower's only execution shape is a single decode — ADR 0096 stage 2 §2.1)",
+          " (a borrower's only execution shape is a single decode)",
       );
     }
     if (spec.bindings !== undefined) {
@@ -1030,7 +1028,7 @@ export class GenerationContext {
       if (backing === undefined) {
         throw new ExecutionError(
           `state '${name}': the lender context has no slot of the same name` +
-            " (an external slot MUST be declared with the same name as the lender's — ADR 0096 stage 2 §2.1)",
+            " (an external slot MUST be declared with the same name as the lender's)",
         );
       }
       // MUST: the window agrees with the lender's **in presence and value** (the same read/write
@@ -1043,7 +1041,7 @@ export class GenerationContext {
         throw new ExecutionError(
           `state '${name}': attrs.window disagrees with the lender (lender ${show(lent)} / borrower ${show(
             window,
-          )}) — the logical col → physical row mapping MUST use the same formula for reads and writes (ADR 0067 decision 4)`,
+          )}) — the logical col → physical row mapping MUST use the same formula for reads and writes`,
         );
       }
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
@@ -1288,7 +1286,7 @@ export class GenerationContext {
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
         `commit: pastLength ${pending.pastLength} + accepted row count ${rows} = ${next} exceeds ` +
-          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32 — ADR 0066 addendum 4)`,
+          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32)`,
       );
     }
     // MUST: updating the logical length and clearing the pending commit are indivisible (clearing
@@ -1336,8 +1334,8 @@ export class GenerationContext {
         `rewind: a context with sliding slots [${[...this.#slidingSlots.keys()].join(
           ", ",
         )}] cannot be rewound` +
-          " (after eviction the ring's physical layout no longer matches the logical range — ADR 0066 " +
-          "addendum 2). Only a context whose slots are all non-sliding can rewind; recovery is a new context",
+          " (after eviction the ring's physical layout no longer matches the logical range). " +
+          "Only a context whose slots are all non-sliding can rewind; recovery is a new context",
       );
     }
     if (!Number.isSafeInteger(position) || position < 0) {
@@ -1386,7 +1384,7 @@ export class GenerationContext {
       if (this.#borrow !== undefined) {
         throw new ExecutionError(
           "fork: a borrowing context cannot be forked (its slots belong to the lender — to branch, fork the lender " +
-            "and reopen the borrower against the copy; ADR 0066 addendum of 2026-10-11)",
+            "and reopen the borrower against the copy)",
         );
       }
       if (this.#runKind === "batch") {
@@ -1573,7 +1571,7 @@ export class GenerationContext {
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
         `advance: pastLength ${this.#pastLength} + queryLength ${queryLength} = ${next} exceeds ` +
-          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32 — ADR 0066 addendum 4)`,
+          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32)`,
       );
     }
     this.#pastLength = next;
@@ -1660,7 +1658,7 @@ export class GenerationContext {
     if (rows > this.chunkLength) {
       throw new ExecutionError(
         `run: the chained run would leave ${rows} rows uncommitted, more than chunkLength ${this.chunkLength}` +
-          " (a chain is bounded like one deferred run of its total rows — ADR 0066 decision 4)",
+          " (a chain is bounded like one deferred run of its total rows)",
       );
     }
     // MUST: the provisional end fits u32 too (`writeLengths` carries the position in a u32 and would
@@ -1668,7 +1666,7 @@ export class GenerationContext {
     if (start + queryLength > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
         `run: the chained run ends at ${start + queryLength}, beyond the u32 limit ${MAX_LOGICAL_LENGTH}` +
-          " (the logical length is carried in a u32 — ADR 0066 addendum 4)",
+          " (the logical length is carried in a u32)",
       );
     }
     // Frozen: the later checks trust these two values as the run's placement.
@@ -1814,7 +1812,7 @@ export class GenerationContext {
     if (this.#borrow === undefined) return;
     throw new ExecutionError(
       `${where}: a borrowing context has no logical length (advancing and rewinding happen on the` +
-        " lender context's side — ADR 0096 stage 2 §2.1)",
+        " lender context's side)",
     );
   }
 
@@ -1867,7 +1865,7 @@ export class GenerationContext {
     if (queryLength > this.chunkLength) {
       throw new ExecutionError(
         `${where}: queryLength ${queryLength} exceeds chunkLength ${this.chunkLength}` +
-          " (prefill is a fixed-length chunk + pad, decode is 1 — ADR 0066 decision 4)",
+          " (prefill is a fixed-length chunk + pad, decode is 1)",
       );
     }
   }
