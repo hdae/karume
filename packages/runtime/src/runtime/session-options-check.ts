@@ -12,6 +12,7 @@
 
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
+import { numericLevels, numericsViolation } from "./numerics.ts";
 import { describeInputValue, ExecutionError } from "./plan.ts";
 import {
   type ComputePrecision,
@@ -179,17 +180,31 @@ export const expertCacheViolation = (cache: SessionOptions["expertCache"]): stri
  * and `buildSessionState` in session-build.ts read them through this one function — spelling the
  * defaults in two places could split the value that was checked from the value used to build).
  */
-export const executionKnobDefaults = (options: SessionOptions) => ({
-  rmsNormReduce: options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce,
-  linearCompute: options.linearCompute ?? "f32",
-  convCompute: options.convCompute ?? "f32",
-  attentionCompute: options.attentionCompute ?? "f32",
-  attentionScoreStorage: options.attentionScoreStorage ?? "f32",
-  stateAttentionReduce: options.stateAttentionReduce ?? "sequential",
-  linearGemvReduce: options.linearGemvReduce ?? "sequential",
-  fullStateStorage: options.fullStateStorage ?? "f32",
-  planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
-});
+export const executionKnobDefaults = (options: SessionOptions) => {
+  // The reduction forms a level admits (`SessionOptions.numerics`): `reorder` runs the parallel
+  // GEMV family on linear and the parallel reductions, with the row statistics folded into PV, on
+  // states-form attention. `sequential` is the reference kernel of both.
+  // The parallel GEMV family computes in f32 only: under a named linear approximation
+  // (`linearCompute` `"a8"` / `"f16"`) the level has no strategy to admit, and linear keeps the
+  // kernels that approximation selects.
+  const levels = numericLevels(options.numerics);
+  const linearCompute = options.linearCompute ?? "f32";
+  return {
+    rmsNormReduce: options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce,
+    linearCompute,
+    convCompute: options.convCompute ?? "f32",
+    attentionCompute: options.attentionCompute ?? "f32",
+    attentionScoreStorage: options.attentionScoreStorage ?? "f32",
+    stateAttentionReduce:
+      options.stateAttentionReduce ??
+      (levels.attention === "reorder" ? "parallel-fused" : "sequential"),
+    linearGemvReduce:
+      options.linearGemvReduce ??
+      (levels.linear === "reorder" && linearCompute === "f32" ? "parallel" : "sequential"),
+    fullStateStorage: options.fullStateStorage ?? "f32",
+    planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+  };
+};
 
 /**
  * Decides in one pass the acceptance conditions of {@link SessionOptions} that **do not depend on GPU
@@ -216,6 +231,15 @@ export const executionKnobDefaults = (options: SessionOptions) => ({
  * checks the range at its own entry first.
  */
 export const sessionOptionsViolation = (options: SessionOptions): string | undefined => {
+  const numerics = numericsViolation(options.numerics);
+  if (numerics !== undefined) return numerics;
+  // A reduction form is asked for in one way: by the level, or by the option that names the kernel.
+  if (
+    options.numerics !== undefined &&
+    (options.linearGemvReduce !== undefined || options.stateAttentionReduce !== undefined)
+  ) {
+    return "options.numerics cannot be given together with linearGemvReduce / stateAttentionReduce (the level decides the reduction form)";
+  }
   if (
     options.fuseLinearStaticQuantize !== undefined &&
     typeof options.fuseLinearStaticQuantize !== "boolean"

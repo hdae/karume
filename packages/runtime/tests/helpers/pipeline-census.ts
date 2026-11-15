@@ -41,6 +41,7 @@ import { integerGemvKey } from "../../src/kernels/linear-gemv-integer.ts";
 import { planesGemvKey } from "../../src/kernels/linear-gemv-planes.ts";
 import { linearI8a8Key } from "../../src/kernels/linear-i8a8.ts";
 import { RMS_NORM_KEY, rmsNormAddKey } from "../../src/kernels/rms-norm.ts";
+import { executionKnobDefaults } from "../../src/runtime/session-options-check.ts";
 import { rmsNormSubgroupKey } from "../../src/kernels/rms-norm-subgroup.ts";
 import { scoreKeyPart } from "../../src/kernels/score-storage.ts";
 import {
@@ -79,9 +80,12 @@ export type KeyPredicate = (key: string) => boolean;
  * ADR 0124 decisions 3 / 4). `expertCache` is exact: a run with no miss matches full residency bit
  * for bit (ADR 0146 decision 1). `fusionRules` is not one seat with one reference value and one key
  * signature: each rule it carries declares its own contract class (ADR 0147 decision 2), and a class
- * E rule is u32-identical to the plan without it (ADR 0148).
+ * E rule is u32-identical to the plan without it (ADR 0148). `numerics` is not a seat of its own
+ * either: a level resolves to the reduction seats, and {@link assertSeatsApplied} reads it through
+ * them.
  */
 type NonNumericField =
+  | "numerics"
   | "submitPolicy"
   | "sharedWeights"
   | "planBackingBudgetBytes"
@@ -418,8 +422,18 @@ export const assertSeatsApplied = (
   where: string,
 ): void => {
   const census = requireCensus(rows, where);
+  // A level given through `numerics` is checked as the reduction seats it resolves to (the
+  // derivation Session construction uses).
+  const resolved: SessionOptions =
+    options.numerics === undefined
+      ? options
+      : (({ stateAttentionReduce, linearGemvReduce }) => ({
+          ...options,
+          stateAttentionReduce,
+          linearGemvReduce,
+        }))(executionKnobDefaults(options));
   for (const seat of NUMERIC_SEATS) {
-    const value = options[seat];
+    const value = resolved[seat];
     if (value === undefined) continue;
     const variants: Readonly<Record<string, KeyPredicate>> = SEAT_SIGNATURES[seat];
     if (value === SEAT_REFERENCE[seat]) {

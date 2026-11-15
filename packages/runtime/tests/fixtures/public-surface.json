@@ -255,6 +255,18 @@
         "kind": "typeAlias"
       },
       {
+        "name": "NumericLevel",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NumericOpKind",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Numerics",
+        "kind": "typeAlias"
+      },
+      {
         "name": "OpContractError",
         "kind": "class"
       },

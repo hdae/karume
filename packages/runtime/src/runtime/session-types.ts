@@ -13,6 +13,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
 import type { FusionCounts, FusionRule } from "./fusion.ts";
 import type { GenerationContext } from "./generation-context.ts";
+import type { Numerics } from "./numerics.ts";
 import type { SymbolBindings } from "./plan.ts";
 import type { SharedWeight } from "./weight-residency.ts";
 
@@ -376,6 +377,23 @@ export type SessionOptions = {
    * DEFAULT_SUBMIT_POLICY.
    */
   readonly submitPolicy?: SubmitPolicy;
+  /**
+   * The numeric requirement: how far each kind of op may stand from its reference kernel (default:
+   * `exact` everywhere — the reference kernel's bits on this device).
+   *
+   * `{ level: "reorder" }` lets every op kind run a kernel that sums in another order where one is
+   * eligible; `ops` overrides the model's level per op kind (`linear` / `attention` / `rms_norm`),
+   * and the narrower scope wins. Which kernel runs is the runtime's choice within the level and
+   * shows in the diagnostic pipeline keys; an op kind with no such kernel for its shape runs the
+   * reference kernel. A `reorder` result stays inside the op's band against an f64 evaluation and
+   * is bit-identical between two runs on one device, but the generated sequence may differ from
+   * `exact`.
+   *
+   * A level never selects an approximation: int8 activations, f16 compute and the like are asked
+   * for by their own options below.
+   * MUST: the default is `exact` — a model's preset is what relaxes it (ADR 0152 decision 2).
+   */
+  readonly numerics?: Numerics;
   /**
    * The execution form of linear (default `"f32"` = the original behaviour).
    *

@@ -1066,3 +1066,46 @@ test.skipIf(!GPU_AVAILABLE)(
     }
   },
 );
+
+test.skipIf(!GPU_AVAILABLE)(
+  "a numeric requirement is checked at build time, and a level with nothing to select runs the reference kernels",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      const rejected: readonly (readonly [SessionOptions, string])[] = [
+        [
+          { numerics: { level: "reorder" }, linearGemvReduce: "parallel" },
+          "cannot be given together",
+        ],
+        [jsCallerOptions({ numerics: "reorder" }), "options.numerics must be an object"],
+      ];
+      const opened = await openChainModel();
+      for (const [options, text] of rejected) {
+        await assertRejects(
+          () => createSessionFromContainer(gpu, opened, "model", options),
+          ExecutionError,
+          text,
+        );
+      }
+      const x = fill([5, 4], (i) => ((i % 11) - 5) * 0.5);
+      const outputs: Uint32Array<ArrayBuffer>[] = [];
+      for (const options of [{}, { numerics: { level: "reorder" } }] as const) {
+        const session = await createSessionFromContainer(
+          gpu,
+          await openChainModel(),
+          "model",
+          options,
+        );
+        try {
+          const y = (await session.run({ x }))["y"];
+          outputs.push(new Uint32Array(Float32Array.from(y.data).buffer));
+        } finally {
+          await session.dispose();
+        }
+      }
+      assertEquals(outputs[1], outputs[0]);
+    } finally {
+      gpu.destroy();
+    }
+  },
+);

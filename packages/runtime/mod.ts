@@ -209,6 +209,12 @@ export { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "./src/runtime/session-types.t
  */
 export { sessionOptionsViolation } from "./src/runtime/session-options-check.ts";
 /**
+ * The numeric requirement of `SessionOptions.numerics`: the level each kind of op may run at
+ * (`exact`: the reference kernel's bits on this device; `reorder`: another summation order inside
+ * the op's band), for the whole model and per op kind.
+ */
+export type { NumericLevel, NumericOpKind, Numerics } from "./src/runtime/numerics.ts";
+/**
  * The entry point of admission before fetching weights (ADR 0070 decision 5 / graph-first). A
  * two-step boundary that rejects "cannot run" from the graph declaration of the opened container
  * alone, estimates the memory needed, and turns it into a Session:

@@ -65,6 +65,7 @@ import {
   sessionFusionRules,
 } from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
+import { copyNumerics } from "./numerics.ts";
 import { sessionFusionKnobs } from "./session-fusion-context.ts";
 import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
@@ -647,6 +648,7 @@ const snapshotSessionOptions = (
 ): { readonly [K in keyof Required<SessionOptions>]: SessionOptions[K] } => ({
   submitPolicy:
     requested.submitPolicy === undefined ? undefined : copySubmitPolicy(requested.submitPolicy),
+  numerics: copyNumerics(requested.numerics),
   linearCompute: requested.linearCompute,
   convCompute: requested.convCompute,
   attentionCompute: requested.attentionCompute,

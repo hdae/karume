@@ -55,6 +55,7 @@ export type SessionFusionKnobs = Pick<
  */
 export type SessionFusionOptions = Pick<
   SessionOptions,
+  | "numerics"
   | "fuseRmsNormAdd"
   | "fuseLinearStaticQuantize"
   | "fuseGeluMulStaticQuantize"

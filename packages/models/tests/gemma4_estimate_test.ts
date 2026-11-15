@@ -556,6 +556,7 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
      * symbols aside). Written out; the type below fails to compile when the runtime adds one.
      */
     const FUSION_KEYS = [
+      "numerics",
       "fuseRmsNormAdd",
       "fuseLinearStaticQuantize",
       "fuseGeluMulStaticQuantize",

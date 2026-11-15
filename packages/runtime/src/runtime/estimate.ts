@@ -153,7 +153,7 @@ import {
   planAttentionOnlineWindows,
   stateAttentionVariantViolation,
 } from "./recipe-builders/attention.ts";
-import { sessionOptionsViolation } from "./session-options-check.ts";
+import { executionKnobDefaults, sessionOptionsViolation } from "./session-options-check.ts";
 import {
   plannedResidentWeights,
   type SessionFusionFacts,
@@ -362,6 +362,11 @@ export type EstimateOptions = {
    * reference path are estimated.
    */
   readonly stateAttentionReduce?: SessionOptions["stateAttentionReduce"];
+  /**
+   * The same numeric requirement as the Session (`SessionOptions.numerics`). When omitted, the
+   * reference kernels are estimated.
+   */
+  readonly numerics?: SessionOptions["numerics"];
   /**
    * Values of symbolic dimensions (the graph-input side — the same bindings passed to a run).
    * States-only symbols (capacity) and the symbols of the physical chunk rows `M` are both decided
@@ -1846,15 +1851,20 @@ export const estimateGraphMemory = (
   // inputs' semantic dtypes) also run at this point. `PreparedModel.estimate` thus runs them a
   // second time after construction, but both are pure, idempotent and cost one graph scan.
   validateGraphContracts(graph);
-  const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
-  if (typeof stateAttentionReduce !== "string") {
+  if (
+    options.stateAttentionReduce !== undefined &&
+    typeof options.stateAttentionReduce !== "string"
+  ) {
     throw new ExecutionError(
-      `options.stateAttentionReduce must be a string (${typeof stateAttentionReduce})`,
+      `options.stateAttentionReduce must be a string (${typeof options.stateAttentionReduce})`,
     );
   }
-  if (!Object.hasOwn(STATE_ATTENTION_REDUCES, stateAttentionReduce)) {
+  if (
+    options.stateAttentionReduce !== undefined &&
+    !Object.hasOwn(STATE_ATTENTION_REDUCES, options.stateAttentionReduce)
+  ) {
     throw new ExecutionError(
-      "options.stateAttentionReduce '" + stateAttentionReduce + "' is not supported",
+      "options.stateAttentionReduce '" + options.stateAttentionReduce + "' is not supported",
     );
   }
   // MUST: check the ranges here, regardless of the graph's shape. Checking only inside
@@ -1895,6 +1905,8 @@ export const estimateGraphMemory = (
   // so do the other knobs the fusion pass reads (types and combinations — before the pass reads
   // them).
   const seatViolation = sessionOptionsViolation({
+    numerics: options.numerics,
+    stateAttentionReduce: options.stateAttentionReduce,
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
     linearCompute: options.linearCompute,
@@ -1909,6 +1921,12 @@ export const estimateGraphMemory = (
     rmsNormReduce: options.rmsNormReduce,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
+  // The reduction form of states-form attention, by the derivation Session construction uses (the
+  // option that names it, else the level of `numerics`).
+  const { stateAttentionReduce } = executionKnobDefaults({
+    numerics: options.numerics,
+    stateAttentionReduce: options.stateAttentionReduce,
+  });
   // The device facts are checked here regardless of the graph's shape (the rule of
   // {@link assertLimitOption}), before the fusion pass reads them.
   // MUST: "none" without them fails loudly with this message whatever the graph — the route (and
