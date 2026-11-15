@@ -60,7 +60,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
   },
   { path: "docs/perf-ledger.md", why: `${RESEARCH_ANCHORS}; quoted commit subjects`, maxLines: 24 },
   { path: "docs/backlog.md", why: RESEARCH_ANCHORS, maxLines: 3 },
-  { path: ".claude/ACTIVE_DESIGN.md", why: RESEARCH_ANCHORS, maxLines: 2 },
   {
     path: "docs/known-issues.md",
     why: "an error message quoted as it was observed (2026-10) and test-name filters of the tests still in Japanese",

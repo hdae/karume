@@ -43,105 +43,6 @@ The same failure still also shows up in the enqueue's returned Promise as before
 through two paths, the same as `run`). `ExecutionError` and the like coming out of `finish()` is a
 **breaking behaviour change** relative to 0.7.0 and earlier.
 
-## `generateGreedy` left the public surface (demoted to an internal helper for parity acceptance)
-
-`generateGreedy` and `GreedySpec`, which the `@karume/models` barrel (`mod.ts`) exported, were
-**removed** (ADR [0083](decisions/0083-generation-api-surface.md) decision 9 — a **breaking change**
-to the public surface of 0.7.0 and earlier). The implementation remains in
-`src/generation/greedy.ts`, and the parity check that compares the token sequences of the existing
-goldens lives on as a path, but **it cannot be imported from outside the package**.
-
-The reason is the nature of the surface: this function is the one deterministic path for "acceptance
-against a fixed token id sequence" (there is a MUST that it carries **neither** sampling nor EOS
-stopping). Static wiring and the request live in one type, and the lifetime of the
-`GenerationContext` leaks to the caller, so building a multi-turn chat on top of this surface
-reproduces on the consumer side the accident of "the last token of the previous assistant turn is
-dropped" (ADR 0083 Context / decision 4). "Keep it public for now and remove it in the next breaking
-wave" was not adopted.
-
-The replacement is `GenerationSequence` from the generation API wave (ADR 0083 decisions 1–5 —
-`AsyncIterable<GenerationEvent>` / `AbortSignal` / multi-turn), and host-side sampling is
-`src/generation/sampler.ts` (the same ADR, decisions 7–8). The `@karume/models` barrel exports
-`GenerationSequence` as a type, and the implementation is returned by `gemma.Pipeline.sequence()`.
-
-## The pin constants `*_CURRENT` are gone from the public surface (replaced by per-family source tables, 0.9.0)
-
-`ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` / `IRODORI_V4_SMALL_CURRENT` /
-`IRODORI_V4_1_SMALL_CURRENT` / `SBV2_JVNV_CURRENT` / `GEMMA4_CURRENT`, which `@karume/models`
-exported, were **removed** (a **breaking change** to the public surface of 0.8.0 and earlier — ADR
-[0092](decisions/0092-distribution-repos-and-sources.md). No compatibility re-export is kept). The
-replacement is a per-family table whose key is the basename of the HF repository name with `karume-`
-dropped:
-
-| Up to 0.8.0                  | 0.9.0 – 0.14.x                          | From 0.15.0 (ADR 0136)                  |
-| ---------------------------- | --------------------------------------- | --------------------------------------- |
-| `ANIMA_CURRENT`              | `ANIMA_SOURCES["anima"]`                | `anima.SOURCES["anima"]`                |
-| `ANIMA_EXTRA_CURRENT`        | `ANIMA_SOURCES["anima-extra"]`          | `anima.SOURCES["anima-extra"]`          |
-| `IRODORI_V4_SMALL_CURRENT`   | `IRODORI_SOURCES["irodori-v4-small"]`   | `irodori.SOURCES["irodori-v4-small"]`   |
-| `IRODORI_V4_1_SMALL_CURRENT` | `IRODORI_SOURCES["irodori-v4.1-small"]` | `irodori.SOURCES["irodori-v4.1-small"]` |
-| `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             | `sbv2.SOURCES["sbv2-jvnv"]`             |
-| `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              | `gemma.SOURCES["gemma4"]`               |
-
-The gemma4 entry **also renamed the repository** — `karume-gemma4-e2b` → `karume-gemma4` (to make it
-a container that E4B / 12B can share — ADR 0092 decision 1. Done at the 0.9.0 publication). HF's
-rename redirects the old name (HTTP 307 for both the API and resolve), so pins baked into
-`GEMMA4_CURRENT` up to 0.8.0 keep resolving.
-
-The value (`{ repo, revision }`) has the same shape as before and can be passed as is as the first
-argument of `fromPretrained`. The barrel (`@karume/models`) additionally exports `KARUME_SOURCES`,
-which folds all families together (**same keys, same values**) — a surface for callers that walk all
-public repositories; a consumer that uses only one family takes the family table of its subpath.
-
-`*_CURRENT` was "one constant = one repository": every new repository required inventing a constant
-name (version spellings like `_V4_1_` leaked into identifiers), and there was no way to get "the list
-of repositories this family publishes" from code. As a table, the list comes from `Object.entries`,
-and the key derives mechanically from the repository name (`"karume-" + key` gives back the repo
-basename — checked by `packages/models/tests/sources_test.ts`).
-There is still **no** default entry (the caller spells out which entry to use — the 2026-08-25
-withdrawal in ADR 0073).
-
-## The generation API changed in 7 points before publication (breaking changes to the first-edition text of ADR 0083 / 0084)
-
-The generation API (`GenerationSequence` / `gemma.Pipeline`) reached JSR **for the first time in
-0.9.0** (`@karume/models` of 0.8.0 does not export `./gemma`). The ADRs, examples and demo scripts
-were written against the surface mid-wave, so the 7 points that changed **before publication** while
-working through the public surface review (2026-08-31 / second wave 2026-09-02) are kept here.
-The canonical record of the addenda is ADR
-[0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md).
-
-- **`generate` after `dispose()` throws synchronously** (previously the first iteration produced a
-  generic message from the `GenerationContext` side, and the real cause (you disposed it yourself)
-  could not be read). Only the lifetime check is synchronous; the budget checks (position table,
-  capacity) still become `GenerationCapacityError` on the iteration side as before.
-- **`GenerationStop` gained a `tokens` field** (the number of tokens that turn generated; the stop
-  token of `eos` counts as 1). Code that wrote equality assertions on `done` has to follow the added
-  field.
-- **The constructor of `GenerationCapacityError` takes 2 arguments** and carries structured fields
-  (`constraint` / `pastLength` / `promptLength` / `requestedNewTokens` / `limit` / `maxNewTokens`).
-- **The wiring fields left the public `GenerationProgram`** (graph input / output names, symbol
-  bindings and `derivedInputs` were split off into the internal type `GenerationWiring`). What remains
-  is `chunkLength` / `capacity` / `maxPosition` / `vocabSize` / `stopTokens`; the surface is frozen
-  and `stopTokens` is a frozen copy (this closed the hole through which a consumer's `sort()` /
-  `length = 0` rewrote the stop set of the generation loop).
-- **`SamplerSpec.logitBias` went from a `Map` to an array of tuples** (`readonly [token, bias][]` —
-  2026-09-02). Code that wrote `new Map([[id, bias]])` is rewritten to `[[id, bias]]`. `JSON.stringify`
-  collapses a `Map` to `{}`, so a setting saved and restored as configuration had **silently become an
-  empty bias**. In addition, **writing the same token twice is a `ModelInputError`** (the
-  last-one-wins folding of `Map` is gone).
-- **`gemma.Pipeline.sampler` was renamed to `defaultSampler`**, and the type of
-  `gemma.PipelineConfig.sampler` shrank from `SamplerSpec` to `gemma.DefaultSampler` (the 3 fields
-  `temperature` / `topK` / `topP` required). In addition, `fromAssets` now runs the same checks as
-  `fromPretrained` (unknown keys, value ranges, `chunkLength ≤ maxChunkLength`,
-  `chunkLength ≤ capacity ≤ maxPosition`) before opening the bytes, so **an invalid declaration
-  fails before the 3.7GiB load finishes** (previously it first became a `RangeError` at the first
-  `generate`).
-- **The union of stop reasons gained `stop-token`, and the type of `gemma.ChatStream.done` widened to
-  `gemma.ChatStop`** (2026-09-02 — per-request stop conditions). Code that wrote
-  `switch (stop.reason)` exhaustively has to follow the added branch (the `chat` side additionally
-  gains `stop-string`). In addition, `gemma.ChatStream` gained `text()`, so **one stream can be
-  consumed only one way** (mixing iteration with `text()`, or iterating twice, throws synchronously —
-  previously the second `for await` silently ended after 0 iterations).
-
 ## Only `chat` can stop on a stop **string** (`sequence()` stops on tokens)
 
 `gemma.ChatOptions.stopStrings` (stop when it appears in the decoded text) is **a knob of the chat
@@ -2116,23 +2017,6 @@ NOTE: only `attention` is an exception: degenerate axes (B = 0 / M = 0 / N = 0) 
 (`OpContractError`). The reason is that the row-block planner (`planRowBlocks`) requires positive integers, so letting them through would give
 an `ExecutionError` that does not name attention. That zero-element dimensions are contract-valid applies to
 the remaining ops, such as the linear family.
-
-## Public surface: 3 points where the rejected set grew after 0.9.0 (the accepted set is unchanged)
-
-Each is a change that makes inputs which "until now silently fell back to something else or failed late" fail loudly at the
-entry. The behaviour of correct calls does not change by a single bit.
-
-- **The 4 execution-form knobs of `SessionOptions`** (`linearCompute` / `attentionCompute` /
-  `attentionScoreStorage` / `stateAttentionReduce`) reject spellings outside the union at `Session` construction
-  (one `ExecutionError` that lists them all). Previously they silently fell back to the default (f32 / sequential),
-  so `linearCompute: "i8a8"` (the old spelling renamed to `"a8"` in 0.5.0) ran on f32 without any exception or warning.
-- **The range check of `EstimateOptions.maxStorageBufferBindingSize`** (a positive safe integer) runs at the
-  **entry** of `estimateGraphMemory` (`PreparedModel.estimate` is the same implementation). Previously it existed only inside the path that counts
-  the temporaries of states-form attention, and in graphs without the states form −1 / 1.5 / NaN were silently
-  accepted (they were not read, so the numbers did not change).
-- **The effective upper limit of `SubmitPolicy.maxChunkSize` is 1,024 on a device with gpuTiming enabled** (query 2,048 =
-  querySet capacity). A policy that exceeds it fails at Session construction (construction of the `SubmitScheduler`) with `SubmitPolicyError`
-  (up to 0.9.0 it failed in the middle of a run).
 
 ## GitHub CI does not exercise tests that depend on local assets (`outputs/`) (a constraint on verification coverage)
 

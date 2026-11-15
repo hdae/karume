@@ -406,24 +406,6 @@ ADR [0108](decisions/0108-container-format.md) addendum 5). anima's HF distribut
 `karume/5` (the 0.13.0 re-upload, 2026-09-24). Remaining task = re-observation on the hardware only (the Pixel item of
 "User hardware" in the [backlog](backlog.md) now section).
 
-## On Pixel (Mali-G715, Android Chrome 154), Anima's per-stage GPU time exceeds the wall clock — suspected broken timestamp reads (observed 2026-10-01, recorded only)
-
-In the user's Pixel 10a record (adapter `arm` / `valhall` / `Mali-G715`, gpu-lab's Anima tab, 512²,
-`residency: transformer`)
-`outputs/bench-browser/anima-residency-browser-f16-2026-10-01T10-43-00.425Z.json`, the per-stage `gpu.totalNs` far
-exceeds the wall clock:
-text_encoder 186.7 s vs 49.8 s (3.7×), transformer 94,533 s vs 234 s (400×), vae_decoder 1,295 s vs 20 s (64×).
-In the breakdown, a single strided / elementwise dispatch shows 4–5 seconds (impossible). On the same device the
-geometry sweep (repeating 1 pass = 1 dispatch;
-`…geometry-sweep-browser-2026-10-01T09-37-40.824Z.json`) has GPU time matching the wall clock (e.g. 89.8 ms vs 92.6 ms),
-so the sweep path is correct, and it breaks only on Anima's diagnostic path, which gathers many timestamp queries into
-one run. `clampedNegativeSamples` is 0.
-**This device's per-stage GPU time (`lastRunTiming` / gpu-lab's GPU column) cannot be trusted; look at the wall clock
-only.**
-Inference (isolation not finished): Mali timestamp overflow, or a resolve error on the Dawn / driver side when the
-number of queries is large. Isolation needs a minimal reproduction on the same device that varies the query count (does
-not occur on M2 / RTX / B570).
-
 ## hub: narrowing weights to `drafter` only in `evictCachedAssets` still deletes the shared assets (tokenizer)
 
 `evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` can be written with the intent "keep the main model,
@@ -450,27 +432,6 @@ hand** (`protect` cannot work around it). Fix proposal = keep the shared assets 
 (either remove the assets from the reference set of the "narrowed selection", or count the rest of the same label as the
 target on the protecting side). Both change the definition of the granularity of "deletion per selection", so a design
 ruling is needed — filed only here.
-
-## Intel Arc B570: the "GPU time per submit ≤ 1 s" check at Wan DiT full size exceeded once after a long continuous load (2026-10-03, recorded only)
-
-Running `deno task test:models:wan` for the acceptance of ADR [0118](decisions/0118-wan21-video-generation.md) step 8,
-the timing mode at S = 32,760 produced **a maximum GPU time per submit of 1,268.6 ms** (check 1,000 ms) and went red
-(`e2e_wan_dit_test.ts`). The one exceeding was 1 of 28,410 submits, containing a single linear dispatch
-(`linear:v2:f32:reg128x128r8x8w16v4:wf16`). The same dispatch took 192 ms in the other 13 forwards of the same run, the
-maximum of the 255 unbacked submits was 458.6 ms, the same as the previous run, and only that forward went from 68 s to
-80 s of GPU time. Just before (after about 10 hours of continuous GPU load),
-sysfs showed `freq0/throttle/reasons = thermal`. Re-running the same test alone gave 459.3 ms (7 passed), and the
-records every 5 seconds during the re-run (332 records) showed act_freq 2,683–2,750 MHz, max temperature 68 ℃, and only
-`pl` (power limit) as the throttle reason.
-
-- Attribution (inference): not a problem of the plan (how chunks are cut) but a transient stall on the GPU side (clock
-  drop from heat or power, context switch). If it were a plan problem the unbacked maximum would move, and it did not.
-- Operational workaround = for a run where the timing check failed, look at the throttling reason and temperature with
-  `tools/diag/gpu-busy-xe.zsh` (`throttle=` field added on 2026-10-03), and re-run alone after cooling (green means a
-  flake). When running lanes in succession, avoid doing so right after heavy GPU jobs (a 50-step full run, mass
-  production for visual checks).
-- Whether to change the check's statistic (the unbacked maximum + the window mean after backing, etc.) is a design
-  ruling — filed only here.
 
 ## Component replacement: replacing a component with a larger one makes `fromPretrained` succeed and the first `generate()` fail (ADR 0122 decision 7, item 5; filed only)
 
@@ -597,24 +558,6 @@ of 2. The failing step only records time and allocation, and all sha row and ban
   "the OOM at the end of the tiny golden that piles up acquisitions and destructions" in the B570 section above.
 - The investigation record is `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json` (not tracked by git), and the
   experiment procedure is `outputs/diag/dead-device-README.md`.
-
-## RTX 3080 Ti (Deno): the duration of some e2e tests splits into two peaks (observed 2026-10-07, cause not investigated)
-
-Found in the before/after speed comparison of ADR 0123. Values (sha256, bands) do not change; only the duration jumps
-2–3× depending on the run.
-
-- The decode of the tall 9 frames (`accept`) of the Wan2.1 VAE tile e2e (`packages/e2e/tests/e2e_wan_vae_tiles_test.ts`)
-  splits into around 12 s and 20–37 s. The wide 33 frames (`band`) do not split.
-- The prefill of 598 tokens (`context-en`) of the Gemma 4 sequence e2e
-  (`packages/e2e/tests/e2e_gemma4_sequence_test.ts`) splits into around 8 s and the 13 s range (34 s vs 55 s for the
-  whole test).
-- Both also appear with the code before ADR 0123 (`b3fa0d34`) (VAE 1 in 4 runs, Gemma 1 in 9). Unrelated to ADR 0123's
-  completion marker (the VAE path does not place markers with enqueue; in the whole Gemma test there is 1 marker and 0
-  waits).
-- Working hypothesis (speculation, unconfirmed): fluctuation in the estimate of the submit time-budget split (measured
-  window ÷ workgroup count) changes how chunks are cut from run to run.
-  Confounding with thermal limiting (this GPU has weak cooling and runs around 93 ℃) is also possible.
-- Record: `.claude/reviews/2026-10-07_submit-inflight/ab-vae-tiles.log`, `ab-gemma.log` (not tracked by git).
 
 ## Adapter matching of reference values: the 4 families whose pipeline acquires the GPU internally do not match the GPU of the actual run (only on multi-GPU machines; filed only)
 
