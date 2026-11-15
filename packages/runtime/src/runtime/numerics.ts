@@ -11,6 +11,8 @@
  * (`linearCompute: "a8"`, `attentionScoreStorage: "f16"`, …) and is never implied by a level.
  *
  * Pure and device-free (the memory estimate reads the same functions as Session construction).
+ *
+ * SPEC: docs/spec/numerics.md#the-declaration
  */
 
 import { describeInputValue } from "./plan.ts";

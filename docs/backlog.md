@@ -133,7 +133,7 @@ maintainer's ruling of 2026-11-06).
      kind (`linear`, `attention`, `rms_norm`), the narrower scope winning — in the runtime, the manifest's `session`
      and the Gemma 4 pipeline options, composed per field between a preset and an explicit value; the seven options that
      named a reduction form or a fusion left the public surface (breaking); the three bit-identical fusions always
-     apply; the Gemma 4 QAT presets declare `numerics`.)* Left from it:
+     apply; the Gemma 4 QAT presets declare `numerics`; the spec is [spec/numerics.md](spec/numerics.md).)* Left from it:
      - The runtime's regression corpus.
      - The derived applicability check that replaces the `FamilySessionPolicy` tables (ADR 0147 follow-ups, code item 4).
      - No per-adapter table: the subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder`

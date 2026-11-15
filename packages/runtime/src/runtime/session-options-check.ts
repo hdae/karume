@@ -172,6 +172,8 @@ export const expertCacheViolation = (cache: SessionOptions["expertCache"]): stri
  * The values with runtime defaults filled into omitted execution knobs ({@link sessionOptionsViolation}
  * and `buildSessionState` in session-build.ts read them through this one function — spelling the
  * defaults in two places could split the value that was checked from the value used to build).
+ *
+ * SPEC: docs/spec/numerics.md#what-a-level-selects
  */
 export const executionKnobDefaults = (options: SessionOptions) => {
   const strategies: ReorderStrategies = options[REORDER_STRATEGIES] ?? NO_REORDER_STRATEGIES;
