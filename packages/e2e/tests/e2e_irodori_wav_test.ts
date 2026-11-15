@@ -453,6 +453,7 @@ const runCase = async (
       : undefined;
   const check = references.check(item.name, actual);
   announceCheck(item.name, check, actual);
+  const evidence = references.observe(item.name, actual, check, dumped);
   const expected = expectedOf(check);
   await results.record({
     id: resultId,
@@ -465,7 +466,9 @@ const runCase = async (
   });
   if (twinMismatch !== undefined) throw new Error(`${item.name}: ${twinMismatch}`);
   if (check.status === "fail") {
-    throw new Error(await mismatchReport(item, config, audio, wav, check.expected, actual, dumped));
+    throw new Error(
+      (await mismatchReport(item, config, audio, wav, check.expected, actual, dumped)) + evidence,
+    );
   }
   return { audio, sha: actual };
 };

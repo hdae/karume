@@ -413,6 +413,7 @@ const settleCase = async (
   await writeFile(dumped, wav);
   const check = references.check(caseId, actual);
   announceCheck(caseId, check, actual);
+  const evidence = references.observe(caseId, actual, check, dumped);
   const expected = expectedOf(check);
   await results.record({
     id: caseId,
@@ -424,7 +425,8 @@ const settleCase = async (
   });
   if (check.status === "fail") {
     throw new Error(
-      await mismatchReport(audio, wav, actual, check.expected, defaults, quant, model, dumped),
+      (await mismatchReport(audio, wav, actual, check.expected, defaults, quant, model, dumped)) +
+        evidence,
     );
   }
 };

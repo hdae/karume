@@ -217,6 +217,7 @@ describe.skipIf(!RUNNABLE)(
         );
         const check = references.check(item.id, actual);
         announceCheck(item.id, check, actual);
+        const evidence = references.observe(item.id, actual, check, dumped);
         const expected = expectedOf(check);
         await results.record({
           id: item.id,
@@ -231,7 +232,8 @@ describe.skipIf(!RUNNABLE)(
           throw new Error(
             `${item.id}: the output WAV's sha256 does not match the reference (expected ${check.expected}` +
               ` / actual ${actual} / S ${audio.frames} / artifact ${dumped.pathname}) — find the cause` +
-              " before re-baking the row",
+              " before re-baking the row" +
+              evidence,
           );
         }
       });

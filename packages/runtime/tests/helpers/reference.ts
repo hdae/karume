@@ -48,12 +48,22 @@
  * Both call {@link References.warnMissing} and {@link registerReferenceGate} at the end of the
  * file. An artifact that is an f32 tensor is built with {@link f32ArtifactBytes} (one safetensors
  * file, no metadata).
+ *
+ * ## What a reference value was taken from
+ *
+ * A row is only a sha256. {@link References.observe} keeps, outside git, the artifact of every run
+ * that matched or created a row and the WGSL texts that run dispatched (`reference-store.ts`), and
+ * on a mismatch it returns what that tells: whether the kernels changed, and how the bytes differ.
+ * {@link settleReference} calls it; a test that calls {@link References.check} itself calls it right
+ * after. It never changes the verdict.
  */
 
 import { readTextFileSync, writeFile, writeTextFileSync } from "@karume/test-support/fs";
+import { type KernelUse, kernelsInUse } from "@karume/test-support/kernel-record";
 import { test } from "vite-plus/test";
 import { fail } from "@std/assert";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
+import { mismatchEvidence, openReferenceStore, type ReferenceStore } from "./reference-store.ts";
 import type { ResultEntry, Results } from "./results.ts";
 import { buildSafetensors } from "./safetensors.ts";
 
@@ -140,6 +150,15 @@ export type References = {
   record(caseId: string, sha256: string): "written" | "rewritten";
   /** Compares according to the mode, writing the row if needed. */
   check(caseId: string, sha256: string): ReferenceCheck;
+  /**
+   * Tells the store the outcome of {@link check} for the artifact this run wrote.
+   *
+   * A run that matched or created the row has its artifact and its kernels kept under the reference
+   * value. A mismatch keeps nothing and returns the evidence as text to append to the failure
+   * message (each line indented on its own line); every other outcome returns `""`. Without a store
+   * (see {@link OpenReferencesOptions.store}) it does nothing and returns `""`.
+   */
+  observe(caseId: string, sha256: string, check: ReferenceCheck, artifactUrl: URL): string;
   /** Warns once about cases without a reference value (called at registration). */
   warnMissing(caseIds: readonly string[]): void;
   /** Location of the fixture (shown in diagnostics). */
@@ -235,6 +254,17 @@ export type OpenReferencesOptions = {
    * `KARUME_REFERENCE=write` the unit tests would run in write mode.
    */
   readonly mode?: ReferenceMode | undefined;
+  /**
+   * Where the artifacts and kernels of matching runs are kept.
+   *
+   * MUST: when omitted, the store under `outputs/references/` is used **only if `environment` is
+   * omitted too**. A caller that injects an environment is a unit test with made-up rows, and its
+   * artifacts must not land in the store the real rows are read from; such a caller gets a store
+   * only by passing one.
+   */
+  readonly store?: ReferenceStore | undefined;
+  /** The kernels behind the running test's output (default: the kernel record of the test setup). */
+  readonly kernels?: () => readonly KernelUse[];
 };
 
 /**
@@ -249,6 +279,12 @@ export const openReferences = (
 ): References => {
   const environment = options.environment ?? ENVIRONMENT;
   const mode = Object.hasOwn(options, "mode") ? options.mode : REFERENCE_MODE;
+  const store = Object.hasOwn(options, "store")
+    ? options.store
+    : options.environment === undefined
+      ? openReferenceStore()
+      : undefined;
+  const kernels = options.kernels ?? kernelsInUse;
   const { cases } = readDocument(fixtureUrl);
   const { key } = environment;
   const requireKey = (): string => {
@@ -310,6 +346,16 @@ export const openReferences = (
         return { status: "rewritten", previous: expected };
       }
       return { status: sha256 === expected ? "pass" : "fail", expected };
+    },
+    observe: (caseId, sha256, check, artifactUrl): string => {
+      if (store === undefined) return "";
+      if (check.status === "fail") {
+        return mismatchEvidence(store, check.expected, { kernels: kernels(), artifactUrl })
+          .map((line) => `\n  ${line}`)
+          .join("");
+      }
+      store.keep({ sha256, caseId, environment: requireKey(), artifactUrl, kernels: kernels() });
+      return "";
     },
     warnMissing: (caseIds: readonly string[]): void => {
       if (mode !== undefined) return;
@@ -496,6 +542,8 @@ export type ReferenceSettlement = {
   readonly check: ReferenceCheck;
   /** Location of the artifact (inside the results directory). */
   readonly artifactUrl: URL;
+  /** What the store tells about a mismatch ({@link References.observe}); absent or `""` otherwise. */
+  readonly evidence?: string;
 };
 
 /**
@@ -531,7 +579,8 @@ export const settleReference = async (
   const sha256 = await sha256Hex(settled.bytes);
   const check = references.check(settled.id, sha256);
   announceCheck(settled.id, check, sha256);
-  return { sha256, check, artifactUrl };
+  const evidence = references.observe(settled.id, sha256, check, artifactUrl);
+  return { sha256, check, artifactUrl, evidence };
 };
 
 /**
@@ -669,6 +718,7 @@ export const referenceMismatchMessage = (
     `  artifact ${settlement.artifactUrl.pathname} (the reference is only a sha256, not the bytes, so the position of the first difference cannot be reported)\n` +
     `  reference values ${references.fixtureUrl.pathname}\n` +
     "  do not fall back to a tolerance — if the change is intended, be able to say what changed, then " +
-    "re-record with KARUME_REFERENCE=rewrite"
+    "re-record with KARUME_REFERENCE=rewrite" +
+    (settlement.evidence ?? "")
   );
 };

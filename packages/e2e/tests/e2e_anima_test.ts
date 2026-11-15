@@ -405,6 +405,7 @@ const settlePng = async (
         "the other route does not produce the same bytes";
   const check = references.check(label, actual);
   announceCheck(label, check, actual);
+  const evidence = references.observe(label, actual, check, dumped);
   const expected = expectedOf(check);
   await results.record({
     id: label,
@@ -417,7 +418,7 @@ const settlePng = async (
   });
   if (twinMismatch !== undefined) throw new Error(`${label}'s PNG ${twinMismatch}`);
   if (check.status === "fail") {
-    throw new Error(mismatchReport(label, image, png, check.expected, actual, dumped));
+    throw new Error(mismatchReport(label, image, png, check.expected, actual, dumped) + evidence);
   }
 };
 
