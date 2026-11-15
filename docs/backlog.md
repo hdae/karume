@@ -115,9 +115,18 @@ maintainer's ruling of 2026-11-06).
      - The cache's records are read by nobody yet: collect a few full runs and count wrong predictions before item 5.
      - Inputs the record does not see: files read outside the repository (`/sys`, temporary directories), the clock and
        randomness. A file whose every case is skipped writes no record.
-  3. **Kernel structure.** The op spec object; the strategy registry for `linear` and attention; one new kernel written
-     through the registry, modelled on a published WebGPU kernel collection, as the registry's test. Check: no pipeline
-     key and no row moves in the refactors.
+  3. *(Landed 2026-11-15: the per-op tolerance table beside the reference ops; the selection of a linear's kernel as one
+     ordered table that the recipe builder, the fusion pass and the estimate all ask
+     (`packages/runtime/src/runtime/linear-strategies.ts`); the split-K linear, a `reorder` strategy behind a private
+     option and the first strategy written as a dispatch program
+     ([research 2026-11-15](research/2026-11-15-linear-splitk.md)).)* Left from it:
+     - No op spec object was made: nothing would read it yet. Attention was not reshaped: `attentionRoute` is already
+       the one decision its five consumers call; its levels are recorded when item 4 selects by them.
+     - The other linear strategies are still built by device-bound functions; they move to dispatch programs one at a
+       time. The linear→static_quantize rule keeps its own conditions.
+     - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`
+       (so no browser check); slower than the reference kernel at K = 1536. A fast form would reuse the GEMM skeleton.
+     - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
   4. **Requirement levels.** The declaration in presets and the manifest, its two scopes, selection within a level, the
      rule for fusions that span ops; the options that name one kernel leave the public surface (breaking); the runtime's
      regression corpus. The ADR 0147 follow-ups below that survive (items 1, 2, 4 and the derived applicability) land

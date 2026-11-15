@@ -24,7 +24,8 @@
 | reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0147 決定 1・6 |
 | requirement level △ | 要求水準 | プリセットが計算ごとに宣言する「基準カーネルからどれだけ離れてよいか」。`exact`（この機で基準カーネルと同じビット）/ `reorder`（加算順が違ってよい・op の帯の内）/ 名前つきの近似。未実装 | E / C / R / Q の 1 文字 | ADR 0152 決定 2 |
 | reference kernel △ | 基準カーネル | op ごとに 1 つ、ビットを凍結するカーネル。`exact` で走る。未実装の呼び分け（今は参照経路のカーネル） | — | ADR 0152 決定 3 |
-| strategy registry △ | 戦略の登録簿 | op ごとのカーネルの実装戦略の一覧。recipe・融合・見積もり・census・検証キャッシュが同じものを読む。未実装 | — | ADR 0152 決定 8 |
+| strategy registry △ | 戦略の登録簿 | op ごとのカーネルの実装戦略の一覧。recipe・融合・見積もり・census・検証キャッシュが同じものを読む。`linear` には有り（`linear-strategies.ts`）・ほかの op は未実装 | — | ADR 0152 決定 8 |
+| split-K linear △ | split-K の linear | K 方向の積和をスライスに分けて部分和を出し、あとで足し合わせる `linear` の戦略（reorder）。内部オプションでだけ選べる | — | `linear-splitk.ts`・research 2026-11-15 |
 | regression corpus △ | 回帰コーパス | 実モデルのグラフ構造 + 合成の重み + 縮小した形状で、runtime が自分の戦略を `exact` と比べる集合。未実装 | — | ADR 0152 決定 5 |
 | kernel-set fingerprint △ | カーネルの集合の指紋 | テストケースがコンパイルした WGSL のハッシュ。sha の参照値に添え、検証キャッシュのキーにも使う。未実装 | — | ADR 0152 決定 4・6 |
 | verification cache △ | 検証キャッシュ | 環境・データ・コードのキーが変わっていないテストファイルの結果を再利用する仕組み。「cached（未実行）」と別の状態で表示。未実装 | — | ADR 0152 決定 6 |
