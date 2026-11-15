@@ -120,8 +120,11 @@ maintainer's ruling of 2026-11-06).
      (`packages/runtime/src/runtime/linear-strategies.ts`); the split-K linear, a `reorder` strategy behind a private
      option and the first strategy written as a dispatch program
      ([research 2026-11-15](research/2026-11-15-linear-splitk.md)).)* Left from it:
-     - No op spec object was made: nothing would read it yet. Attention was not reshaped: `attentionRoute` is already
-       the one decision its five consumers call; its levels are recorded when item 4 selects by them.
+     - No op spec object was made: nothing would read it yet.
+     - Attention: the states-form attention's stage forms are selected in one place
+       (`packages/runtime/src/runtime/state-attention-strategies.ts`, with their levels). The fused attention was not
+       reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies` are already the single
+       decisions its consumers call; its levels are recorded when item 4 selects by them.
      - The other linear strategies are still built by device-bound functions; they move to dispatch programs one at a
        time. The linear→static_quantize rule keeps its own conditions.
      - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`

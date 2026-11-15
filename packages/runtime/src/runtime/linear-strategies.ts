@@ -16,7 +16,7 @@
  * GEMV, and the default GEMM is last.
  *
  * {@link LINEAR_STRATEGIES} states, per strategy, how far its numbers may stand from the reference
- * kernel ({@link RequirementLevel}) and what kind of evidence it carries ({@link EvidenceForm}) — the
+ * kernel and what kind of evidence it carries (the vocabulary of src/runtime/strategy-level.ts) — the
  * vocabulary of ADR 0152 decisions 2 and 3. Nothing selects by level yet; a strategy is still admitted
  * by the Session option named in its row.
  *
@@ -52,21 +52,7 @@ import {
 } from "./linear-route.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
-
-/**
- * How far a strategy's numbers may stand from the reference kernel (ADR 0152 decision 2).
- *
- * - `exact`: the reference kernel, or a kernel checked to give its bits.
- * - `reorder`: only the summation order differs; the error stays inside the op's band.
- * - `approximation`: anything else — it is named, by the Session option value that asks for it.
- */
-export type RequirementLevel = "exact" | "reorder" | "approximation";
-
-/**
- * The kind of evidence a strategy carries (ADR 0152 decision 3; the classes of
- * docs/quantization.md Table 2-b spelled out).
- */
-export type EvidenceForm = "reference" | "mirror" | "composition" | "reorder" | "approximation";
+import type { StrategyInfo } from "./strategy-level.ts";
 
 export type LinearStrategyId =
   | "integer-gemv"
@@ -82,19 +68,12 @@ export type LinearStrategyId =
   | "gemm-f32"
   | "gemm-f16";
 
-export type LinearStrategyInfo = {
-  readonly level: RequirementLevel;
-  readonly evidence: EvidenceForm;
-  /** The Session option value that admits the strategy today (`undefined`: no option — the default). */
-  readonly admittedBy: string | undefined;
-};
-
 /**
  * What each strategy is, by the rule: `exact` only for the reference kernel and the kernels whose
  * numeric contract is its bits; `reorder` only where the recorded evidence is a summation-order band;
  * everything else is an approximation named by its option.
  */
-export const LINEAR_STRATEGIES: Readonly<Record<LinearStrategyId, LinearStrategyInfo>> = {
+export const LINEAR_STRATEGIES: Readonly<Record<LinearStrategyId, StrategyInfo>> = {
   "gemm-f32": { level: "exact", evidence: "reference", admittedBy: undefined },
   "gemv-m1": { level: "exact", evidence: "mirror", admittedBy: undefined },
   "gemv-rows": { level: "exact", evidence: "mirror", admittedBy: undefined },

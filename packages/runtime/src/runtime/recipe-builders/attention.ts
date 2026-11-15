@@ -74,6 +74,7 @@ import {
   rowBlockLimit,
 } from "../fusion.ts";
 import { planStateAttention, stateFusesStatsPv } from "../state-attention-plan.ts";
+import { selectStateAttention } from "../state-attention-strategies.ts";
 import {
   quantizeRowsBshdKey,
   quantizeRowsBshdParams,
@@ -105,7 +106,6 @@ import {
   stateAppendWorkgroups,
 } from "../../kernels/state-append.ts";
 import {
-  assertStateQkFold,
   stateAttentionParams,
   statePvKey,
   statePvParallelKey,
@@ -114,7 +114,6 @@ import {
   statePvParallelReadonlyWorkgroups,
   statePvParallelWgsl,
   statePvParallelWorkgroups,
-  statePvTiledEligible,
   statePvTiledKey,
   statePvTiledParams,
   statePvTiledWorkgroups,
@@ -123,16 +122,13 @@ import {
   stateQkFoldedKey,
   stateQkFoldedWgsl,
   stateQkFoldedWorkgroups,
-  stateQkFoldHeads,
   stateQkKey,
-  stateQkParallelEligible,
   stateQkParallelKey,
   stateQkParallelReadonlyKey,
   stateQkParallelReadonlyWgsl,
   stateQkParallelReadonlyWorkgroups,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
-  stateQkTiledEligible,
   stateQkTiledKey,
   stateQkTiledParams,
   stateQkTiledWorkgroups,
@@ -1169,103 +1165,58 @@ export const buildStateAttention = async (
     face.state.rowBlockSplit,
   );
 
-  // The reduction forms of ①QK / ③PV share **the same** opt-in option (ADR 0058; the 2026-09-06
-  // ruling kept a single knob).
-  // ①' / ③' both have bindings and params identical to the reference path; only three things
-  // change: key, WGSL and the workgroup computation (the key's `:par` is the census check's
-  // marker).
-  const parallel = face.state.stateAttentionReduce !== "sequential";
-  // Only ①' has an **eligibility condition** on the option: it is chosen only when this plan's `M`
-  // (= chunkRows) is 8 or less (decode's M=1 and speculative verify's M ≤ 8).
-  // WHY: ①' shortens the latency of one invocation's D-serial loop, and that is the bottleneck only
-  // in decode (M=1), where the active invocations are just "live columns × 1 row". In prefill
-  // (M=768) ① is already filled with rows × columns, and ①' only drops the row tile width from 4 to
-  // 1, stacking 4× the workgroups and barriers. Measured (2026-09-06): decode gained ×1.55–1.72,
-  // while prefill's ①QK GPU time grew 1.5–1.9× and prefill as a whole regressed by +30–60%. verify
-  // (M=4) was neutral (2026-09-09).
-  // The condition **stays inside the measured range** (the same discipline as ADR 0082 decision 4).
-  // On the ③' side only plans with `M < 16` take it (`M ≥ 16` takes ③ₜ whatever the option — see
-  // below), so one option keeps covering two stages with different ranges.
-  // MUST: the decision inputs are only static values fixed at plan time (`chunkRows` comes from the
-  // declared shape) — branching on the run-time logical length would make the same plan key point
-  // at a different pipeline per run.
-  const qkParallel = parallel && stateQkParallelEligible(chunkRows);
-  // The folded ①' (perf-ledger K-55): on full-attention plans whose (r = kv_repeat, D, M) is a
-  // selected class (Gemma 4 E2B at M = 1 / 4 / 8, MiniCPM5 at M = 1), one workgroup serves the
-  // F = r query heads of one kv plane and reads each K element once. On those classes it was
-  // observed **bit-identical to ①'** on every backend checked (the same terms in the same order —
-  // the section "①' folded over the query heads of one kv plane" of
-  // src/kernels/state-attention.ts), so it rides on ①''s selection without an option,
-  // and plans of one model may differ in the choice (verify vs decode) without moving a word; the
-  // condition and the WHY are in `stateQkFoldHeads`. The inputs are plan-time static values like
-  // the rest of this selection.
-  // MUST: `F | r` is checked before the folded pipeline is selected — r travels in the uniform and
-  // F in the key, and a workgroup whose heads span two kv planes reads another plane's K for the
-  // heads past the boundary with neither an exception nor NaN.
-  const qkFold = qkParallel ? stateQkFoldHeads(sliding, kvRepeat, depth, chunkRows) : 1;
-  if (qkFold > 1) assertStateQkFold(qkFold, kvRepeat, where);
-  // ①ₜ (K row-tile sharing in the GEMM skeleton — perf-ledger K-13) is **bit-identical to ①**, so
-  // it does not depend on the option and is chosen by default for plans with `M ≥ 16` (the
-  // eligibility condition and the WHY are in `stateQkTiledEligible`). The two eligibility
-  // conditions do not overlap (1 < 16), so this priority order exists only for readability.
-  // MUST: **this is the only place** that holds the priority order of the three ①QK paths and ①''s
-  // fold (the four points key, WGSL, params and workgroups line up here). Scattering it would allow
-  // pairs like "key is ①ₜ, dispatch uses ①'s edges", with tiles missing and no exception.
-  const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
-  // A block is only ever as long as an image's soft tokens, far over ①ₜ's M ≥ 16, so only ①ₜ has the
-  // predicate of `bidirectionalRows` (ADR 0144 decision 3); full layers stay causal.
-  const qkBidirectional = sliding && states.bidirectional;
-  if (qkBidirectional && !qkTiled) {
-    throw new ExecutionError(
-      `${where}: generation.bidirectionalRows needs a plan of at least 16 rows (this one has ${chunkRows})`,
-    );
-  }
-  // ③ₜ (V row-tile sharing in the GEMM skeleton — perf-ledger K-13 step 2) is also **bit-identical
-  // to ③**, so it does not depend on the option and is chosen by default for plans with `M ≥ 16`.
-  // Unlike ①ₜ, the point here is that **it takes priority over the option**: a prefill plan whose
-  // option is `"parallel"` gets ③ₜ (= the reference path's values), not ③'.
-  // WHY: ③''s gain is confined to decode, and on the prefill side K-12 measured it within noise,
-  // while ③ₜ cuts traffic. Being able to put a bit-identical path as the default keeps the numeric
-  // contract simpler.
-  // MUST: **this is also the only place** that holds the priority order of the three ③PV paths (as
-  // for ①QK — the four points key, WGSL, params and workgroups line up here).
-  const pvTiled = statePvTiledEligible(chunkRows);
-  const pvParallel = parallel && !pvTiled;
-  const qkKey = qkParallel
-    ? qkFold > 1
-      ? stateQkFoldedKey(qkFold, storage)
-      : stateQkParallelKey(sliding, gqa, storage)
-    : qkTiled
-      ? stateQkTiledKey(sliding, gqa, chunkRows, storage, qkBidirectional)
-      : stateQkKey(sliding, gqa, storage);
+  // Which form each stage takes is decided in one place, `selectStateAttention`
+  // (src/runtime/state-attention-strategies.ts — the priority order between the forms of ①QK and of
+  // ③PV, and the reasons, live there). MUST: key, WGSL, uniform and workgroup count of a stage are
+  // all read off its one choice below; a key of one form with the grid of another leaves tiles
+  // unwritten without an exception.
+  const { qk: qkChoice, pv: pvChoice } = selectStateAttention({
+    where,
+    chunkRows,
+    depth,
+    kvRepeat,
+    sliding,
+    reduce: face.state.stateAttentionReduce,
+    fusedStatsPv,
+    bidirectionalRows: states.bidirectional,
+  });
+  const qkKey =
+    qkChoice.id === "qk-folded"
+      ? stateQkFoldedKey(qkChoice.heads, storage)
+      : qkChoice.id === "qk-parallel"
+        ? stateQkParallelKey(sliding, gqa, storage)
+        : qkChoice.id === "qk-tiled"
+          ? stateQkTiledKey(sliding, gqa, chunkRows, storage, qkChoice.bidirectional)
+          : stateQkKey(sliding, gqa, storage);
   const statsKey = stateStatsKey(sliding);
-  const pvKey = fusedStatsPv
-    ? stateStatsPvKey(sliding, gqa)
-    : pvTiled
-      ? statePvTiledKey(sliding, gqa, chunkRows, storage)
-      : pvParallel
-        ? statePvParallelKey(sliding, gqa, storage)
-        : statePvKey(sliding, gqa, storage);
+  const pvKey =
+    pvChoice.id === "stats-pv-fused"
+      ? stateStatsPvKey(sliding, gqa)
+      : pvChoice.id === "pv-tiled"
+        ? statePvTiledKey(sliding, gqa, chunkRows, storage)
+        : pvChoice.id === "pv-parallel"
+          ? statePvParallelKey(sliding, gqa, storage)
+          : statePvKey(sliding, gqa, storage);
   const qk = await face.state.cache.get(
     qkKey,
-    qkParallel
-      ? qkFold > 1
-        ? stateQkFoldedWgsl(qkFold, storage)
-        : stateQkParallelWgsl(sliding, gqa, storage)
-      : qkTiled
-        ? stateQkTiledWgsl(sliding, gqa, chunkRows, storage, qkBidirectional)
-        : stateQkWgsl(sliding, gqa, storage),
+    qkChoice.id === "qk-folded"
+      ? stateQkFoldedWgsl(qkChoice.heads, storage)
+      : qkChoice.id === "qk-parallel"
+        ? stateQkParallelWgsl(sliding, gqa, storage)
+        : qkChoice.id === "qk-tiled"
+          ? stateQkTiledWgsl(sliding, gqa, chunkRows, storage, qkChoice.bidirectional)
+          : stateQkWgsl(sliding, gqa, storage),
   );
   const stats = fusedStatsPv
     ? undefined
     : await face.state.cache.get(statsKey, stateStatsWgsl(sliding));
   const pv = await face.state.cache.get(
     pvKey,
-    fusedStatsPv
+    pvChoice.id === "stats-pv-fused"
       ? stateStatsPvWgsl(sliding, gqa)
-      : pvTiled
+      : pvChoice.id === "pv-tiled"
         ? statePvTiledWgsl(sliding, gqa, chunkRows, storage)
-        : pvParallel
+        : pvChoice.id === "pv-parallel"
           ? statePvParallelWgsl(sliding, gqa, storage)
           : statePvWgsl(sliding, gqa, storage),
   );
@@ -1293,12 +1244,14 @@ export const buildStateAttention = async (
     // **the same static geometry in a different word order** (③ₜ does not read `neg_inf` / `scale`,
     // so the word count differs too). The word order shared by ①③ does not move — ③ and the
     // estimate read the same table.
-    const qkParams = qkTiled
-      ? face.writeParams(stateQkTiledParams(geometry), PARAMS_UNIFORM_USAGE)
-      : sharedParams();
-    const pvParams = pvTiled
-      ? face.writeParams(statePvTiledParams(geometry), PARAMS_UNIFORM_USAGE)
-      : sharedParams();
+    const qkParams =
+      qkChoice.id === "qk-tiled"
+        ? face.writeParams(stateQkTiledParams(geometry), PARAMS_UNIFORM_USAGE)
+        : sharedParams();
+    const pvParams =
+      pvChoice.id === "pv-tiled"
+        ? face.writeParams(statePvTiledParams(geometry), PARAMS_UNIFORM_USAGE)
+        : sharedParams();
     const dispatchGeometry = {
       batchHeads,
       rowsBlock: block.rows,
@@ -1325,20 +1278,27 @@ export const buildStateAttention = async (
         { binding: 5, source: { kind: "lengths" } },
       ],
       workgroups: (past, query) =>
-        qkParallel
-          ? qkFold > 1
-            ? stateQkFoldedWorkgroups(dispatchGeometry, qkFold, past, query, limit, `${where} ①QK`)
-            : stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
-          : qkTiled
-            ? stateQkTiledWorkgroups(
-                dispatchGeometry,
-                chunkRows,
-                past,
-                query,
-                limit,
-                `${where} ①QK`,
-              )
-            : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
+        qkChoice.id === "qk-folded"
+          ? stateQkFoldedWorkgroups(
+              dispatchGeometry,
+              qkChoice.heads,
+              past,
+              query,
+              limit,
+              `${where} ①QK`,
+            )
+          : qkChoice.id === "qk-parallel"
+            ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
+            : qkChoice.id === "qk-tiled"
+              ? stateQkTiledWorkgroups(
+                  dispatchGeometry,
+                  chunkRows,
+                  past,
+                  query,
+                  limit,
+                  `${where} ①QK`,
+                )
+              : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
     });
 
     if (stats !== undefined && rowStats !== undefined) {
@@ -1379,11 +1339,14 @@ export const buildStateAttention = async (
         { binding: 5, source: outs[0] },
         { binding: 6, source: { kind: "lengths" } },
       ],
-      workgroups: pvTiled
-        ? statePvTiledWorkgroups(dispatchGeometry, chunkRows, limit, `${where} ③PV`)
-        : pvParallel
-          ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
-          : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
+      // The fused ②③ runs on ③''s grid: it exists only under the parallel option, on plans too short
+      // for the tiled form.
+      workgroups:
+        pvChoice.id === "pv-tiled"
+          ? statePvTiledWorkgroups(dispatchGeometry, chunkRows, limit, `${where} ③PV`)
+          : pvChoice.id === "pv-sequential"
+            ? statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
+            : statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
     });
 
     // MUST: return in reverse allocation order (the same order as the plan's replay).
