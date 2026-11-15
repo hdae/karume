@@ -7,7 +7,8 @@
  * weight, on the Session's options and on what the fusion pass declared for it (packed activations, a
  * folded producer).
  *
- * {@link selectLinearStrategy} is the only place that decides it. It walks {@link LINEAR_SELECTION}
+ * {@link resolveLinearStrategy} is the only place that decides it ({@link selectLinearStrategy} is the
+ * same decision for a caller that fails on a refusal). It walks {@link LINEAR_SELECTION}
  * from the top: an entry either refuses the linear (the combination is not implemented — a loud
  * failure, never a silent fall to another path) or names a strategy when the linear is its case. The
  * order is part of the meaning: a linear whose activation arrives packed must be taken by the integer
@@ -143,20 +144,37 @@ export type LinearFacts = {
   /** The i4 group length of the slot (`undefined` for any other storage). */
   readonly groupSize: number | undefined;
   readonly knobs: LinearKnobs;
-  /** The packed-activation pairing the fusion pass declared for this linear, if any (ADR 0105). */
-  readonly packed: PackedActivations | undefined;
-  /** The producer the fusion pass folded into this linear's step ①, if any (perf-ledger F-4). */
+  /**
+   * The side of the packed-activation pairing the fusion pass declared for this linear, if any
+   * (ADR 0105). The fusion pass asks with `{ role: "read" }` before it declares the pairing: "would
+   * this linear read packed words?".
+   */
+  readonly packed: Pick<PackedActivations, "role"> | undefined;
+  /**
+   * The producer the fusion pass folded into this linear's step ①, if any (perf-ledger F-4). The
+   * fusion pass asks with the producer's op before it folds: "would this linear absorb it?".
+   */
   readonly prologue: LinearPrologue | undefined;
 };
 
+/** The knobs as a consumer holds them — optional Session values — with the omitted values filled in. */
+export const linearKnobsOf = (options: {
+  readonly linearCompute?: LinearKnobs["linearCompute"] | undefined;
+  readonly linearGemvReduce?: LinearGemvReduce | undefined;
+  readonly integerGemv?: boolean | undefined;
+  readonly linearGemvPlanes?: boolean | undefined;
+  readonly linearGemvRowsThreadTarget?: number | undefined;
+}): LinearKnobs => ({
+  linearCompute: options.linearCompute ?? "f32",
+  linearGemvReduce: options.linearGemvReduce ?? "sequential",
+  integerGemv: options.integerGemv ?? false,
+  linearGemvPlanes: options.linearGemvPlanes ?? false,
+  linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget,
+});
+
 /** The strategy chosen for one linear, with what its kernel is built from. */
 export type LinearChoice =
-  | {
-      readonly id: "integer-gemv";
-      readonly variant: IntegerGemvVariant;
-      /** The producer SRQ's scale, carried by the packed pairing. */
-      readonly activationScale: number;
-    }
+  | { readonly id: "integer-gemv"; readonly variant: IntegerGemvVariant }
   | { readonly id: "i8a8" }
   | { readonly id: "planes-gemv"; readonly variant: PlanesGemvVariant }
   | LinearGemvChoice
@@ -184,8 +202,6 @@ export type LinearGemvChoice = {
   readonly variant: LinearGemvVariant;
   /** The row-block form (`undefined` unless the id is `gemv-rows`). */
   readonly rowsVariant: LinearGemvRowsVariant | undefined;
-  /** The activation scale of the packed form (`undefined` unless the id is `gemv-parallel-packed`). */
-  readonly packedScale: number | undefined;
 };
 
 /** The facts with what every entry derives from them, computed once per selection. */
@@ -225,7 +241,7 @@ const gemvChoice = (
   linear: Derived,
   storage: WeightStorage,
   groupSize: number | undefined,
-  packed: PackedActivations | undefined,
+  packed: LinearFacts["packed"],
 ): LinearGemvChoice => {
   const { m, n, k, knobs } = linear;
   const subgroup = knobs.linearGemvReduce === "parallel-subgroup32";
@@ -240,17 +256,16 @@ const gemvChoice = (
   const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
   // Only the parallel (non-subgroup) form has a packed-activation kernel; past the refusal above a
   // packed linear always has lanes and no subgroup reduction.
-  const packedScale = packed?.scale;
   const staged =
     lanes !== undefined &&
     !subgroup &&
-    packedScale === undefined &&
+    packed === undefined &&
     linearGemvStagedEligible(storage, m, n, k, groupSize) !== undefined;
   const id: LinearGemvChoice["id"] =
     lanes !== undefined
       ? subgroup
         ? "gemv-parallel-subgroup32"
-        : packedScale !== undefined
+        : packed !== undefined
           ? "gemv-parallel-packed"
           : staged
             ? "gemv-parallel-staged"
@@ -258,7 +273,7 @@ const gemvChoice = (
       : rowsVariant === undefined
         ? "gemv-m1"
         : "gemv-rows";
-  return { id, storage, groupSize, lanes, variant, rowsVariant, packedScale };
+  return { id, storage, groupSize, lanes, variant, rowsVariant };
 };
 
 /**
@@ -303,7 +318,7 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   {
     choose: ({ packed, integer }) =>
       packed !== undefined && integer !== undefined
-        ? { id: "integer-gemv", variant: integer, activationScale: packed.scale }
+        ? { id: "integer-gemv", variant: integer }
         : undefined,
   },
   // A linear declared to absorb its producer (perf-ledger F-4) that does not take the i8a8 path with a
@@ -419,13 +434,18 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   },
 ];
 
+/** The outcome of the selection: a strategy, or the message of the refusal. */
+export type LinearResolution = { readonly choice: LinearChoice } | { readonly refusal: string };
+
 /**
- * The strategy of one linear. Throws {@link ExecutionError} for a combination that is not implemented.
+ * The strategy of one linear, or why the combination is refused.
  *
- * MUST: the only decision. The recipe builder builds what it returns; nothing else re-derives which
- * kernel a linear takes.
+ * MUST: the only decision. The recipe builder builds what it returns; the fusion pass asks it whether
+ * a linear would take what it is about to declare (packed activations, a folded producer); the
+ * estimate asks it which linears have node temporaries. Nothing re-derives which kernel a linear
+ * takes.
  */
-export const selectLinearStrategy = (facts: LinearFacts): LinearChoice => {
+export const resolveLinearStrategy = (facts: LinearFacts): LinearResolution => {
   const { plan, weightStorage, groupSize, knobs } = facts;
   const [x, weight] = plan.inputShapes;
   const n = weight[0];
@@ -444,13 +464,20 @@ export const selectLinearStrategy = (facts: LinearFacts): LinearChoice => {
   };
   for (const entry of LINEAR_SELECTION) {
     if ("refuse" in entry) {
-      const message = entry.refuse(linear);
-      if (message !== undefined) throw new ExecutionError(message);
+      const refusal = entry.refuse(linear);
+      if (refusal !== undefined) return { refusal };
       continue;
     }
     const choice = entry.choose(linear);
-    if (choice !== undefined) return choice;
+    if (choice !== undefined) return { choice };
   }
   // The last entry always chooses; reaching here means the table lost it.
-  throw new ExecutionError(`${linear.where}: no linear strategy applies`);
+  return { refusal: `${linear.where}: no linear strategy applies` };
+};
+
+/** {@link resolveLinearStrategy} for a caller that fails on a refusal ({@link ExecutionError}). */
+export const selectLinearStrategy = (facts: LinearFacts): LinearChoice => {
+  const resolution = resolveLinearStrategy(facts);
+  if ("refusal" in resolution) throw new ExecutionError(resolution.refusal);
+  return resolution.choice;
 };

@@ -62,7 +62,7 @@ import {
 } from "../ops.ts";
 import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
 import { linearI8a8TempBytes } from "../kernels/linear-i8a8.ts";
-import { linearTakesI8a8 } from "./linear-route.ts";
+import { linearKnobsOf, resolveLinearStrategy } from "./linear-strategies.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
   type AttentionTokenMajor,
@@ -1511,16 +1511,17 @@ const fusedAttentionProgram = (
 type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
 
 /**
- * Whether a linear takes execution's i8a8 path (`buildLinear` in recipe-builders/linear.ts): the one
- * route predicate `linearTakesI8a8` on the Session's linear seat (the fusion facts' knobs) and the
- * storage of the weight slot from the residency plan (`plannedResidentWeights`). The branches
- * `buildLinear` tries before it (packed activations, the integer GEMV) need linearCompute `"f32"`,
- * which this predicate refuses, so under `"a8"` it alone decides. An `i4f16` weight is
+ * Whether a linear takes execution's i8a8 path: the answer of the one selection `buildLinear` builds
+ * from (`resolveLinearStrategy` in linear-strategies.ts), asked with the Session's linear seat (the
+ * fusion facts' knobs) and the storage of the weight slot from the residency plan
+ * (`plannedResidentWeights`). The pairing and the folded producer are not passed: the strategies
+ * they select need linearCompute `"f32"`, and a folded producer is declared only for a linear that is
+ * on the i8a8 path already, so neither changes this answer. An `i4f16` weight is
  * `expert_linear`'s alone (the planner admits it nowhere else), so it is read as not integer here.
- * `buildLinear`'s refusals for the weight storage are not repeated here (i2 residency under `"a8"`
- * or `"f16"`, i8 and i4 residency under `"f16"` — w8a16 / w4a16 — and, on the i8a8 path, a
- * per-channel weight's `k` above `LINEAR_I8A8_MAX_K`): the estimate counts such a linear and returns
- * a number, and the Session fails at its first run.
+ * A linear the selection refuses (i2 residency under `"a8"` or `"f16"`, i8 and i4 residency under
+ * `"f16"` — w8a16 / w4a16) is counted as a plain one, and so is, on the i8a8 path, a per-channel
+ * weight's `k` above `LINEAR_I8A8_MAX_K`: the estimate returns a number, and the Session fails at its
+ * first run.
  * NOTE: a borrowed weight (`seat: "shared"`) is absent from the plan — its storage is the lender's —
  * so its linear is counted as a plain one ({@link AdmissionReport.unaccounted}).
  */
@@ -1530,7 +1531,15 @@ const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean =>
   const resident =
     slot === undefined ? undefined : knobs.fusion.residentWeights.get(node.node.ins[slot]);
   const storage = resident === undefined || resident.storage === "i4f16" ? "f32" : resident.storage;
-  return linearTakesI8a8(knobs.fusion.knobs.linearCompute, storage, node.inputShapes[1][1]);
+  const resolution = resolveLinearStrategy({
+    plan: node,
+    weightStorage: storage,
+    groupSize: undefined,
+    knobs: linearKnobsOf(knobs.fusion.knobs),
+    packed: undefined,
+    prologue: undefined,
+  });
+  return "choice" in resolution && resolution.choice.id === "i8a8";
 };
 
 /**

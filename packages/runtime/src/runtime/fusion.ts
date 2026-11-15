@@ -131,8 +131,6 @@
  */
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
-import { linearGemvPackedEligible } from "../kernels/linear-gemv.ts";
-import { quantizeRowsPrologueEligible } from "../kernels/quantize-rows.ts";
 import { numel, permuteDims, STATIC_QUANTIZE_OP, staticQuantizeScale } from "../ops.ts";
 import { attentionRoute, UNREAD_ATTENTION_DEVICE } from "./attention-route.ts";
 import { ADALN_RULE } from "./fusion-rules/adaln.ts";
@@ -171,11 +169,7 @@ import {
   windowIsSingleOutput,
   windowTouchesState,
 } from "./fusion-rule.ts";
-import {
-  linearIntegerGemvVariant,
-  linearPlanesGemvVariant,
-  linearTakesI8a8,
-} from "./linear-route.ts";
+import { linearKnobsOf, resolveLinearStrategy } from "./linear-strategies.ts";
 import { describeInputValue, ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
@@ -365,9 +359,9 @@ export const LINEAR_PROLOGUE_OPS: readonly PrologueUnaryOp[] = ["gelu_tanh", "ge
  * 3. That use is the activation slot (`ins[0]`) of the **next** node, a `linear` — a two-node window
  *    like every other fusion, so the re-pointed input lives exactly as long as the folded value
  *    would have.
- * 4. The linear takes the i8a8 path by the recipe's own predicate ({@link linearTakesI8a8} on the
- *    weight's resident storage), and its row length fits the prologue kernel
- *    ({@link quantizeRowsPrologueEligible}).
+ * 4. The linear, asked with the producer folded in, takes the i8a8 path — the answer of the one
+ *    selection the recipe builds from ({@link resolveLinearStrategy}: the integer dot products on the
+ *    weight's resident storage, with a row length the prologue kernel accepts).
  * 5. At least one row: the prologue kernel binds `x` as `array<vec4<f32>>`, whose 16-byte minimum
  *    binding size the 4-byte buffer of an empty tensor does not meet.
  *
@@ -391,12 +385,20 @@ const linearPrologueAt = (
   if (!windowIsSingleOutput(window) || windowTouchesState(window)) return undefined;
   if (!allF32([producer]) || !internalsArePrivate(window, context)) return undefined;
   if (linear.node.ins[0] !== producer.outputs[0].name) return undefined;
-  const [x, weight] = linear.inputShapes;
-  const k = weight[1];
-  const storage = context.weightLayouts?.get(linear.node.ins[1])?.storage ?? "f32";
-  if (!linearTakesI8a8(context.linearCompute, storage, k) || !quantizeRowsPrologueEligible(k)) {
-    return undefined;
-  }
+  const [x] = linear.inputShapes;
+  const layout = context.weightLayouts?.get(linear.node.ins[1]);
+  const storage = layout?.storage ?? "f32";
+  // The selection's own answer to "this linear, with this producer folded in": it absorbs the
+  // producer only on the i8a8 path with a row the prologue kernel accepts, and refuses otherwise.
+  const resolution = resolveLinearStrategy({
+    plan: linear,
+    weightStorage: storage,
+    groupSize: layout?.storage === "i4" ? layout.groupSize : undefined,
+    knobs: linearKnobsOf(context),
+    packed: undefined,
+    prologue: { op },
+  });
+  if (!("choice" in resolution) || resolution.choice.id !== "i8a8") return undefined;
   if (numel(x.slice(0, -1)) < 1) return undefined;
   // MUST: the re-pointed input is read in the folded value's place, so it has the same shape and
   // dtype (an elementwise unary op changes neither; a mismatch is a broken plan, not a non-match).
@@ -882,16 +884,13 @@ const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, reado
  *
  * MUST: take it only in the activation slot (`ins[0]`). When the same value arrives as weight /
  * bias, that binding expects f32 words, so switching to packed gives a silent wrong value.
- * MUST: the decision is the single {@link linearGemvPackedEligible} (the same predicate as the
- * recipe-builder's check). Landing on the parallel GEMV is not enough; it is limited to **the rows
- * where packed was measured to help** (ADR 0105 addendum 1) — making forms packed where it does not
- * help is a pure loss, producer SRQ included.
- * Under `integerGemv`, an integer GEMV linear ({@link linearIntegerGemvVariant} — again the one
- * function the recipe builder's guard reads) also reads packed: the integer kernel takes nothing
- * else.
- * Under `linearGemvPlanes`, a byte-plane GEMV linear ({@link linearPlanesGemvVariant} — the function
- * the recipe builder's guard reads) never reads packed, whatever the tables below say: its kernel
- * binds f32 quads only. Checked first, so the option decides the linear's route on its own.
+ * MUST: the decision is the linear selection's ({@link resolveLinearStrategy} — what the recipe
+ * builds from), asked with the pairing declared: the linear reads packed words only when it then
+ * takes the integer GEMV or the packed form of the parallel GEMV. Landing on the parallel GEMV is
+ * not enough; the packed form is limited to **the rows where packed was measured to help** (ADR
+ * 0105 addendum 1) — making forms packed where it does not help is a pure loss, producer SRQ
+ * included. A byte-plane GEMV linear (`linearGemvPlanes`) never reads packed, whatever the tables
+ * say: its kernel binds f32 quads only, and the selection refuses the pairing for it.
  */
 const readsPackedActivation = (plan: NodePlan, name: string, context: FusionContext): boolean => {
   if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
@@ -901,16 +900,20 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
   if (!allF32([plan])) return false;
   const weight = context.weightLayouts?.get(plan.node.ins[1]);
   if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") return false;
-  if (linearPlanesGemvVariant(context.linearGemvPlanes, plan, weight.storage) !== undefined) {
-    return false;
-  }
-  const group = weight.storage === "i4" ? weight.groupSize : undefined;
-  if (linearIntegerGemvVariant(context.integerGemv, plan, weight.storage, group) !== undefined) {
-    return true;
-  }
-  const m = numel(plan.inputShapes[0].slice(0, -1));
-  const [n, k] = plan.inputShapes[1];
-  return linearGemvPackedEligible(weight.storage, m, n, k, group) !== undefined;
+  // The selection's own answer to "this linear, with packed activations declared": only the integer
+  // GEMV and the packed form of the parallel GEMV read packed words.
+  const resolution = resolveLinearStrategy({
+    plan,
+    weightStorage: weight.storage,
+    groupSize: weight.storage === "i4" ? weight.groupSize : undefined,
+    knobs: linearKnobsOf(context),
+    packed: { role: "read" },
+    prologue: undefined,
+  });
+  return (
+    "choice" in resolution &&
+    (resolution.choice.id === "integer-gemv" || resolution.choice.id === "gemv-parallel-packed")
+  );
 };
 
 /**

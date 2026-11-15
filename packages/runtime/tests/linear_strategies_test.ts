@@ -12,6 +12,8 @@ import {
   LINEAR_STRATEGIES,
   type LinearFacts,
   type LinearKnobs,
+  linearKnobsOf,
+  resolveLinearStrategy,
   selectLinearStrategy,
 } from "../src/runtime/linear-strategies.ts";
 import { ExecutionError, type NodePlan, planGraph } from "../src/runtime/plan.ts";
@@ -146,7 +148,7 @@ describe("with an option that asks for another kernel", () => {
 });
 
 describe("with packed activations declared by the fusion pass", () => {
-  const packed = { role: "read", scale: 0.5 } as const;
+  const packed = { role: "read" } as const;
   const parallel = { linearGemvReduce: "parallel" } as const;
 
   it("takes the integer GEMV before anything else when integerGemv names a variant for the shape", () => {
@@ -154,7 +156,6 @@ describe("with packed activations declared by the fusion pass", () => {
       facts(INTEGER_I2, "i2", { knobs: { ...parallel, integerGemv: true }, packed }),
     );
     assertEquals(choice.id, "integer-gemv");
-    assertEquals(choice.id === "integer-gemv" && choice.activationScale, 0.5);
   });
 
   it("keeps the same linear on the parallel GEMV that reads f32 activations when its producer was not packed", () => {
@@ -220,5 +221,57 @@ describe("combinations that are not implemented", () => {
       ExecutionError,
       "declared with a gelu_tanh prologue",
     );
+  });
+});
+
+describe("resolveLinearStrategy (the same decision, for a caller that asks before it declares)", () => {
+  it("returns the refusal's message instead of throwing", () => {
+    const resolution = resolveLinearStrategy(
+      facts({ m: 1, n: 64, k: 64 }, "i2", { knobs: { linearCompute: "a8" } }),
+    );
+    assertEquals(resolution, {
+      refusal: "linear: i2 residency supports only linearCompute 'f32' (ADR 0097)",
+    });
+  });
+
+  it("answers the fusion pass's question 'would this linear read packed words?'", () => {
+    const asked = (shape: Parameters<typeof facts>[0], knobs: Partial<LinearKnobs>): boolean => {
+      const resolution = resolveLinearStrategy(
+        facts(shape, "i2", { knobs, packed: { role: "read" } }),
+      );
+      return (
+        "choice" in resolution &&
+        (resolution.choice.id === "integer-gemv" || resolution.choice.id === "gemv-parallel-packed")
+      );
+    };
+    const parallel = { linearGemvReduce: "parallel" } as const;
+    assertEquals(asked(INTEGER_I2, { ...parallel, integerGemv: true }), true);
+    // Not a measured packed row and no integer variant: the pairing would be refused.
+    assertEquals(asked({ m: 1, n: 64, k: 64 }, parallel), false);
+    // A byte-plane GEMV linear reads f32 activations.
+    assertEquals(asked(LM_HEAD_I2, { ...parallel, linearGemvPlanes: true }), false);
+  });
+
+  it("answers the fusion pass's question 'would this linear absorb its producer?'", () => {
+    const asked = (storage: "i8" | "f32", knobs: Partial<LinearKnobs>): boolean => {
+      const resolution = resolveLinearStrategy(
+        facts({ m: 128, n: 64, k: 64 }, storage, { knobs, prologue: { op: "gelu_tanh" } }),
+      );
+      return "choice" in resolution && resolution.choice.id === "i8a8";
+    };
+    assertEquals(asked("i8", { linearCompute: "a8" }), true);
+    assertEquals(asked("i8", {}), false);
+    assertEquals(asked("f32", { linearCompute: "a8" }), false);
+  });
+});
+
+describe("linearKnobsOf", () => {
+  it("fills in the Session's omitted values", () => {
+    assertEquals(linearKnobsOf({}), DEFAULTS);
+    assertEquals(linearKnobsOf({ linearCompute: "a8", integerGemv: true }), {
+      ...DEFAULTS,
+      linearCompute: "a8",
+      integerGemv: true,
+    });
   });
 });

@@ -230,7 +230,7 @@ export const buildLinear = async (
         m,
         n,
         k,
-        choice.activationScale,
+        packedScaleOf(packed, choice.id),
       );
       return;
     case "i8a8":
@@ -274,8 +274,32 @@ export const buildLinear = async (
       return;
     }
     default:
-      await buildLinearGemv(face, step, binds, outs, builder, choice, m, n, k);
+      await buildLinearGemv(
+        face,
+        step,
+        binds,
+        outs,
+        builder,
+        choice,
+        m,
+        n,
+        k,
+        choice.id === "gemv-parallel-packed" ? packedScaleOf(packed, choice.id) : undefined,
+      );
   }
+};
+
+/**
+ * The producer SRQ's scale of a strategy that reads packed activations. The selection takes such a
+ * strategy only for a linear the pairing was declared for, so a missing pairing is a broken plan.
+ */
+const packedScaleOf = (packed: PackedActivations | undefined, strategy: string): number => {
+  if (packed === undefined) {
+    throw new ExecutionError(
+      `linear: the strategy ${strategy} was chosen without a packed pairing`,
+    );
+  }
+  return packed.scale;
 };
 
 /**
@@ -308,11 +332,13 @@ const buildLinearGemv = async (
   m: number,
   n: number,
   k: number,
+  /** The producer SRQ's scale (only for the packed form — ADR 0105). */
+  packedScale: number | undefined,
 ): Promise<void> => {
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const [x, weight] = step.inputShapes;
   const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
-  const { storage, groupSize, lanes, variant, rowsVariant, packedScale } = choice;
+  const { storage, groupSize, lanes, variant, rowsVariant } = choice;
   const subgroup = choice.id === "gemv-parallel-subgroup32";
   const staged = choice.id === "gemv-parallel-staged";
   const rows = rowsVariant?.rows ?? 1;
