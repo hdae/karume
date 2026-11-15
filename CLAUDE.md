@@ -3,8 +3,9 @@
 Monorepo of a general-purpose WebGPU NN inference stack (development on Node 24 + Dawn; the primary target is the browser;
 Deno is secondary (ADR 0127); pure TS + WGSL; zero runtime dependencies). JSR `@karume/runtime` (IR execution) /
 `@karume/hub` (HF revision resolve, download, cache, model / quant resolution) / `@karume/models` (pipelines, tokenizers) +
-PyPI `karume` (tools/exporter — torch.export → container `krm` (IR v2), managed by uv). pnpm workspace + Vite+ (`vp`). The
-design's source of truth is [docs/decisions/](docs/decisions/). The current focus and pitfalls are in
+PyPI `karume` (tools/exporter — torch.export → container `krm` (IR v2), managed by uv). pnpm workspace + Vite+ (`vp`). What
+the system does now is specified under `docs/spec/`, which is being built up (ADR 0152); until a rule has a spec there, the
+ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current focus and pitfalls are in
 [.claude/ACTIVE_DESIGN.md](.claude/ACTIVE_DESIGN.md) (required reading for review and planning tasks).
 
 ## Terms
@@ -31,7 +32,8 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
   `node tools/lang/language-gate.ts`; counts: `node tools/lang/scan-japanese.ts`.
 - Terms: English follows ordinary industry usage (no in-house coinages); the Japanese terms of the
   conversation are chosen from meaning, not by literal translation (ADR 0130 decisions 4 and 5).
-- Checks: `node tools/lang/check-doc-links.ts` (Markdown links and `DECIDED:` pointers resolve) and
+- Checks: `node tools/lang/check-doc-links.ts` (Markdown links and `DECIDED:` / `SPEC:` pointers resolve; the core lane
+  runs it as `tools/lang/tests/repository_links_test.ts`) and
   `node tools/lang/code-skeleton.ts --compare <ref>` (a comment-translation commit changed no code).
 
 ## Layout
@@ -112,7 +114,12 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
 
 ## Where docs go
 
-- `docs/decisions/` — ADRs (MADR-lite). The target of inline `DECIDED:`
+- `docs/spec/` — what the system does now: the source of truth, in the present tense, built behaviour only, edited in
+  the commit that changes the code (no addenda). Code points at a rule with `SPEC: docs/spec/<file>.md#<heading>`.
+  Written as each part of ADR 0152 lands; a decision that is not built yet is a backlog item, not spec text
+- `docs/decisions/` — ADRs (MADR-lite): a decision and its reasons at one point in time. Not the pointer for a current
+  rule and not edited to follow one; a new ADR only for a choice among alternatives. The target of inline `DECIDED:`
+  (reasons). Error messages and diagnostics do not cite ADR numbers
 - `docs/backlog.md` — **the source of truth for the order of phases, work items and their status** (now / next / later / release / parked)
 - `docs/ir-v2.md` — IR format spec / `docs/op-vocabulary.md` — op vocabulary ledger
 - `docs/glossary.md` — term → meaning → source (the meaning lives at the source; add a row when a new term enters docs) /
