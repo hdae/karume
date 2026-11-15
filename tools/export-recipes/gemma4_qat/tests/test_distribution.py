@@ -133,18 +133,11 @@ class TestQatQuants:
         assert list(modes) == ["i4", "i4-gemvpar", "i4-fast"]
         assert modes["i4"]["session"] == {}
         assert modes["i4-gemvpar"]["weights"] == modes["i4"]["weights"]
-        assert modes["i4-gemvpar"]["session"] == {
-            "linearGemvReduce": "parallel",
-            "stateAttentionReduce": "parallel",
-        }
+        assert modes["i4-gemvpar"]["session"] == {"numerics": {"level": "reorder"}}
         assert modes["i4-fast"]["weights"] == modes["i4"]["weights"]
         assert modes["i4-fast"]["session"] == {
-            "linearGemvReduce": "parallel",
-            "fuseRmsNormAdd": True,
-            "fuseLinearStaticQuantize": True,
-            "fuseGeluMulStaticQuantize": True,
+            "numerics": {"level": "reorder"},
             "packedStaticQuantize": True,
-            "stateAttentionReduce": "parallel-fused",
         }
 
     def test_only_the_e4b_fast_mode_names_its_measurement(self):

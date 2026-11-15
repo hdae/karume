@@ -830,8 +830,8 @@ Both models carry one quant, `bf16`, their default (the maintainer's ruling of 2
 `model` weights' one container — every weight and the PLE table as the checkpoint's bf16 bits, PLE
 index schema 5 — in the reference summation order (`session` empty: GEMV and attention run the
 runtime's reference path). E2B's `bf16` also names the int8 drafter, which borrows the bf16
-target's `model.lm_head.weight`. The parallel and fused int4 seats (`i4-gemvpar` / `i4-fast`)
-are the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
+target's `model.lm_head.weight`. The int4 seats at the numeric level `reorder` (`i4-gemvpar` /
+`i4-fast`, both `numerics: { level: "reorder" }`) are the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
 
 Explicit runtime options override each quant setting. Reassembling into a new output directory
 updates the metadata without requantizing weights. Existing distributions and pinned public

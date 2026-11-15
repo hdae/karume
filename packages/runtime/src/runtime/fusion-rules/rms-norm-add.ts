@@ -34,7 +34,6 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch, "rmsNormAdd">({
   contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
-    if (context.fuseRmsNormAdd !== true) return undefined;
     const norm = nodes[index],
       add = nodes[index + 1];
     if (norm?.node.op !== "rms_norm" || add?.node.op !== "add") return undefined;

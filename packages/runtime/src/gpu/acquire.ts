@@ -515,8 +515,8 @@ export const planSubgroup32Features = (
   if (excluded !== undefined) {
     throw new GpuFeatureError(
       `subgroups: true was specified, but the adapter reports subgroup sizes [${excluded[0]}, ${excluded[1]}], ` +
-        `which exclude ${SUBGROUP_LANES}: the subgroup forms (rmsNormReduce: "subgroup32", linearGemvReduce: ` +
-        `"parallel-subgroup32") need ${SUBGROUP_LANES} lanes. Omit them and subgroups to run the portable forms ` +
+        `which exclude ${SUBGROUP_LANES}: the subgroup forms of the GEMV and of the RMS reduction need ` +
+        `${SUBGROUP_LANES} lanes. Omit subgroups to run the portable forms ` +
         `(subgroups: "available" acquires without the features on such a device)`,
     );
   }
@@ -769,8 +769,8 @@ export type AcquireGpuOptions = {
    * - `false` = not requested (the same behavior as `undefined`).
    *
    * Acquiring the capability alone does not change the compute path of the other knobs. A
-   * Session's rmsNormReduce / linearGemvReduce subgroup forms are specified separately and still
-   * reject a device without the features.
+   * Session's subgroup forms of the RMS reduction and the parallel GEMV are selected separately
+   * (the private `REORDER_STRATEGIES`) and still reject a device without the features.
    */
   readonly subgroups?: boolean | "available";
   /**

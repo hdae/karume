@@ -24,8 +24,8 @@ import {
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   REORDER_STRATEGIES,
   type LinearGemvReduce,
+  type RmsNormReduce,
   type SessionOptions,
-  STATE_ATTENTION_REDUCES,
   type StateAttentionReduce,
 } from "./session-types.ts";
 
@@ -52,11 +52,6 @@ const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
 };
 const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true, none: true };
 const FULL_STATE_STORAGES: Readonly<Record<StateStorage, true>> = { f32: true, f16: true };
-const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
-  sequential: true,
-  parallel: true,
-  "parallel-subgroup32": true,
-};
 
 /**
  * Checks the spelling of the execution knobs at the entry of `Session.build` in
@@ -88,8 +83,6 @@ export const assertExecutionKnobs = (
   convCompute: NonNullable<SessionOptions["convCompute"]>,
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
-  stateAttentionReduce: StateAttentionReduce,
-  linearGemvReduce: LinearGemvReduce,
   fullStateStorage: StateStorage = "f32",
 ): void => {
   const violation = executionKnobsViolation(
@@ -97,8 +90,6 @@ export const assertExecutionKnobs = (
     convCompute,
     attentionCompute,
     attentionScoreStorage,
-    stateAttentionReduce,
-    linearGemvReduce,
     fullStateStorage,
   );
   if (violation !== undefined) throw new ExecutionError(violation);
@@ -110,8 +101,6 @@ const executionKnobsViolation = (
   convCompute: NonNullable<SessionOptions["convCompute"]>,
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
-  stateAttentionReduce: StateAttentionReduce,
-  linearGemvReduce: LinearGemvReduce,
   fullStateStorage: StateStorage,
 ): string | undefined => {
   const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
@@ -119,8 +108,6 @@ const executionKnobsViolation = (
     ["convCompute", convCompute, CONV_COMPUTES],
     ["attentionCompute", attentionCompute, ATTENTION_COMPUTES],
     ["attentionScoreStorage", attentionScoreStorage, SCORE_STORAGES],
-    ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
-    ["linearGemvReduce", linearGemvReduce, LINEAR_GEMV_REDUCES],
     ["fullStateStorage", fullStateStorage, FULL_STATE_STORAGES],
   ];
   const violations = knobs
@@ -200,28 +187,30 @@ export const executionKnobDefaults = (options: SessionOptions) => {
   const levels = numericLevels(options.numerics);
   const linearCompute = options.linearCompute ?? "f32";
   const reorderedLinear = levels.linear === "reorder" && linearCompute === "f32";
+  const rmsNormReduce: RmsNormReduce =
+    levels.rms_norm === "reorder" && strategies.rmsNorm === "subgroup32"
+      ? "subgroup32"
+      : "workgroup";
+  const stateAttentionReduce: StateAttentionReduce =
+    levels.attention !== "reorder"
+      ? "sequential"
+      : strategies.stateAttention === "parallel"
+        ? "parallel"
+        : "parallel-fused";
+  const linearGemvReduce: LinearGemvReduce = !reorderedLinear
+    ? "sequential"
+    : strategies.linearGemv === "subgroup32" && options.packedStaticQuantize !== true
+      ? "parallel-subgroup32"
+      : "parallel";
   return {
-    rmsNormReduce:
-      options.rmsNormReduce ??
-      (levels.rms_norm === "reorder" && strategies.rmsNorm === "subgroup32"
-        ? "subgroup32"
-        : "workgroup"),
-    linearGemvPlanes:
-      options.linearGemvPlanes ?? (reorderedLinear && strategies.linearGemvPlanes === true),
+    rmsNormReduce,
+    linearGemvPlanes: reorderedLinear && strategies.linearGemvPlanes === true,
     linearCompute,
     convCompute: options.convCompute ?? "f32",
     attentionCompute: options.attentionCompute ?? "f32",
     attentionScoreStorage: options.attentionScoreStorage ?? "f32",
-    stateAttentionReduce:
-      options.stateAttentionReduce ??
-      (levels.attention === "reorder" ? "parallel-fused" : "sequential"),
-    linearGemvReduce:
-      options.linearGemvReduce ??
-      (!reorderedLinear
-        ? "sequential"
-        : strategies.linearGemv === "subgroup32" && options.packedStaticQuantize !== true
-          ? "parallel-subgroup32"
-          : "parallel"),
+    stateAttentionReduce,
+    linearGemvReduce,
     fullStateStorage: options.fullStateStorage ?? "f32",
     planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   };
@@ -254,36 +243,11 @@ export const executionKnobDefaults = (options: SessionOptions) => {
 export const sessionOptionsViolation = (options: SessionOptions): string | undefined => {
   const numerics = numericsViolation(options.numerics);
   if (numerics !== undefined) return numerics;
-  // A reduction form is asked for in one way: by the level, or by the option that names the kernel.
-  if (
-    options.numerics !== undefined &&
-    (options.linearGemvReduce !== undefined ||
-      options.stateAttentionReduce !== undefined ||
-      options.rmsNormReduce !== undefined ||
-      options.linearGemvPlanes !== undefined)
-  ) {
-    return "options.numerics cannot be given together with linearGemvReduce / stateAttentionReduce / rmsNormReduce / linearGemvPlanes (the level decides the reduction form)";
-  }
   const strategies = reorderStrategiesViolation(
     options[REORDER_STRATEGIES],
     "options[REORDER_STRATEGIES]",
   );
   if (strategies !== undefined) return strategies;
-  if (
-    options.fuseLinearStaticQuantize !== undefined &&
-    typeof options.fuseLinearStaticQuantize !== "boolean"
-  ) {
-    return "options.fuseLinearStaticQuantize must be a boolean";
-  }
-  if (
-    options.fuseGeluMulStaticQuantize !== undefined &&
-    typeof options.fuseGeluMulStaticQuantize !== "boolean"
-  ) {
-    return "options.fuseGeluMulStaticQuantize must be a boolean";
-  }
-  if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
-    return "options.fuseRmsNormAdd must be a boolean";
-  }
   if (
     options.packedStaticQuantize !== undefined &&
     typeof options.packedStaticQuantize !== "boolean"
@@ -293,29 +257,17 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   if (options.integerGemv !== undefined && typeof options.integerGemv !== "boolean") {
     return "options.integerGemv must be a boolean";
   }
-  if (options.linearGemvPlanes !== undefined && typeof options.linearGemvPlanes !== "boolean") {
-    return "options.linearGemvPlanes must be a boolean";
-  }
   const expertCache = expertCacheViolation(options.expertCache);
   if (expertCache !== undefined) return expertCache;
   const {
-    rmsNormReduce,
     linearCompute,
     convCompute,
     attentionCompute,
     attentionScoreStorage,
-    stateAttentionReduce,
     linearGemvReduce,
     fullStateStorage,
     planBackingBudgetBytes,
   } = executionKnobDefaults(options);
-  if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
-    // Do not call the user's conversions in diagnostics (`String(x)` runs `Symbol.toPrimitive` /
-    // `toString`, and an object that throws would escape instead of the `ExecutionError`).
-    return `options.rmsNormReduce: unsupported value ${
-      typeof rmsNormReduce === "string" ? JSON.stringify(rmsNormReduce) : typeof rmsNormReduce
-    }`;
-  }
   // MUST: the spelling check comes right after the defaults are filled in and before every later
   // check. Once past it, the s16×c16 check and the f16 feature check only need to consider values
   // inside the union.
@@ -324,17 +276,9 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     convCompute,
     attentionCompute,
     attentionScoreStorage,
-    stateAttentionReduce,
-    linearGemvReduce,
     fullStateStorage,
   );
   if (knobs !== undefined) return knobs;
-  if (
-    options.fuseLinearStaticQuantize === true &&
-    (linearGemvReduce !== "parallel" || linearCompute !== "f32")
-  ) {
-    return "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32";
-  }
   // Only the parallel GEMV family has the packed-activation variant (ADR 0105). Falling back silently
   // to the f32 path would make it an option that "does nothing when set", so it is rejected the same
   // way as the fusion.
@@ -342,16 +286,13 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     options.packedStaticQuantize === true &&
     (linearGemvReduce !== "parallel" || linearCompute !== "f32")
   ) {
-    return "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32";
+    return 'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32": it is a form of the parallel GEMV';
   }
   // The integer GEMV reads only packed int8 activations (src/kernels/linear-gemv-integer.ts), so
   // without the packed pairing it could never run: rejected rather than accepted as a no-op. The
-  // packed check above already holds packedStaticQuantize to parallel / f32.
+  // packed check above already holds packedStaticQuantize to the parallel GEMV in f32.
   if (options.integerGemv === true && options.packedStaticQuantize !== true) {
-    return "integerGemv requires packedStaticQuantize: true (with linearGemvReduce: parallel / linearCompute: f32)";
-  }
-  if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
-    return `linearGemvReduce: ${linearGemvReduce} supports only linearCompute: f32`;
+    return 'integerGemv requires packedStaticQuantize: true (with linear at the level "reorder" and linearCompute "f32")';
   }
   // Range checks (which do not read the union) come after the spelling check — the wording matches
   // the same check in estimate.ts.

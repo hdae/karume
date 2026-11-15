@@ -22,7 +22,7 @@
 | practical profile ◆ | 実用プロファイル | 見送り（同上）。実装されれば既定で、形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない。今の既定の実用側は manifest の実用プリセット（`session` の束） | 実用層・実用経路 | 同上 |
 | reference profile ◆ | 参照プロファイル | 見送り（同上）。opt-in の knob の値として予定していた「省略値の束（自動選択なし）」。今はその状態が runtime の既定そのもの = 参照経路（次の行） | 参照層・既定経路 | 同上 |
 | reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0147 決定 1・6 |
-| requirement level △ | 要求水準 | プリセットが計算ごとに宣言する「基準カーネルからどれだけ離れてよいか」。`exact`（この機で基準カーネルと同じビット）/ `reorder`（加算順が違ってよい・op の帯の内）/ 名前つきの近似。未実装 | E / C / R / Q の 1 文字 | ADR 0152 決定 2 |
+| requirement level △ | 要求水準 | プリセットが計算ごとに宣言する「基準カーネルからどれだけ離れてよいか」。`exact`（この機で基準カーネルと同じビット）/ `reorder`（加算順が違ってよい・op の帯の内）/ 名前つきの近似。`exact` / `reorder` は `SessionOptions.numerics`（`level` = モデル全体・`ops` = op の種類ごと: linear / attention / rms_norm）と manifest の `session.numerics` で宣言する。近似は個別のオプションのまま | E / C / R / Q の 1 文字 | ADR 0152 決定 2 |
 | reference kernel △ | 基準カーネル | op ごとに 1 つ、ビットを凍結するカーネル。`exact` で走る。未実装の呼び分け（今は参照経路のカーネル） | — | ADR 0152 決定 3 |
 | strategy registry △ | 戦略の登録簿 | op ごとのカーネルの実装戦略の一覧。recipe・融合・見積もり・census・検証キャッシュが同じものを読む。`linear`（`linear-strategies.ts`）と states 系の attention（`state-attention-strategies.ts`）には有り・ほかの op は未実装 | — | ADR 0152 決定 8 |
 | split-K linear △ | split-K の linear | K 方向の積和をスライスに分けて部分和を出し、あとで足し合わせる `linear` の戦略（reorder）。内部オプションでだけ選べる | — | `linear-splitk.ts`・research 2026-11-15 |
@@ -53,7 +53,7 @@
 | w4a8 | w4a8 | 重み i4 × 活性 per-token i8 の整数内積の経路 | — | ADR 0076 |
 | integer dot product | 整数内積 | 量子化した整数どうしを int32 累算で掛け合わせる実行形 | — | ADR 0025 / 0076 |
 | integer GEMV (`integerGemv`) △ | 整数 GEMV | packed 活性の SRQ コードと重みの整数コードの積をグループごとに厳密な整数で足し、scale は最後に決まった順で 1 回だけ掛ける decode 用 GEMV（opt-in・QAT E2B の計測した形だけ） | — | ADR 0140 |
-| byte-plane GEMV (`linearGemvPlanes`) △ | バイトプレーン GEMV | i2 の重みの語をバイトプレーンに分け、`unpack4x8unorm` と厳密な変換で −2..1 の値にして f32 の活性と掛けて足す decode 用 GEMV。参照との違いは足す順と、チャネルの scale を和の後で 1 回掛けることだけ（契約クラス R・opt-in・QAT E2B の lm_head の形だけ） | — | ADR 0141 |
+| byte-plane GEMV (`linearGemvPlanes`) △ | バイトプレーン GEMV | i2 の重みの語をバイトプレーンに分け、`unpack4x8unorm` と厳密な変換で −2..1 の値にして f32 の活性と掛けて足す decode 用 GEMV。参照との違いは足す順と、チャネルの scale を和の後で 1 回掛けることだけ（契約クラス R・linear が `reorder` のときに private な Session キー `[REORDER_STRATEGIES]` でだけ選ぶ・QAT E2B の lm_head の形だけ） | — | ADR 0141 |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
 | fake-quant | fake-quant | 重みを量子化格子へ丸めて f32 のまま持つ処理 | — | `tools/exporter/src/karume/quantize.py` |
 | quality measurement (`quality.json`) | 品質計測 | export 時に torch CPU で測る量子化誤差の記録 | — | ADR 0113 決定 4・5 |

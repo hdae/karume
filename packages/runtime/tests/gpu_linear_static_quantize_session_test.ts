@@ -1,7 +1,7 @@
 // The twin cases of the linear→SRQ Session fusion live in @karume/kernel-checks
 // (checkLinearStaticQuantizeTwins), which the playground's /kernel-check page runs on the browser's
-// backend too; the row identity across M, the borrowed scale's lifetimes and the construction
-// rejections stay here.
+// backend too; the row identity across M, the borrowed scale's lifetimes and the Session with the
+// rule left out stay here.
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -14,8 +14,7 @@ import {
   linearStaticQuantizeWidth,
 } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSessionFromContainer } from "../src/runtime/executor.ts";
-import type { SessionOptions } from "../src/runtime/session-types.ts";
+import { createSessionFromContainer, DISABLED_FUSION_RULES } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
@@ -51,7 +50,7 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
             gpu,
             linearStaticQuantizeModel({ storage, n, m }),
             GRAPH_NAME,
-            { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
+            { numerics: { ops: { linear: "reorder" } } },
           );
           try {
             const x = input(m);
@@ -79,7 +78,7 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
           gpu,
           linearStaticQuantizeModel({ storage, n }),
           GRAPH_NAME,
-          { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
+          { numerics: { ops: { linear: "reorder" } } },
         );
         try {
           const expected = await owner.run(input(4));
@@ -88,8 +87,7 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
             linearStaticQuantizeModel({ storage, n, sharedWeight: true }),
             GRAPH_NAME,
             {
-              linearGemvReduce: "parallel",
-              fuseLinearStaticQuantize: true,
+              numerics: { ops: { linear: "reorder" } },
               sharedWeights: { w: owner.exportWeight("w") },
             },
           );
@@ -112,38 +110,12 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
       gpu.destroy();
     }
   });
-  it("rejects invalid types and unsupported compute modes at construction", async () => {
+  it("runs the unfused path when the rule is left out", async () => {
     const gpu = await acquireGpu();
     try {
       const model = linearStaticQuantizeModel();
-      for (const value of [null, 0, 1, "true", [], {}]) {
-        const options: SessionOptions = { linearGemvReduce: "parallel" };
-        Object.defineProperty(options, "fuseLinearStaticQuantize", { value });
-        await assertRejects(
-          () => createSessionFromContainer(gpu, model, GRAPH_NAME, options),
-          ExecutionError,
-          "fuseLinearStaticQuantize",
-        );
-      }
-      for (const options of [
-        {},
-        { linearGemvReduce: "sequential" },
-        { linearGemvReduce: "parallel-subgroup32" },
-        { linearGemvReduce: "parallel", linearCompute: "f16" },
-        { linearGemvReduce: "parallel", linearCompute: "a8" },
-      ] satisfies SessionOptions[]) {
-        await assertRejects(
-          () =>
-            createSessionFromContainer(gpu, model, GRAPH_NAME, {
-              ...options,
-              fuseLinearStaticQuantize: true,
-            }),
-          ExecutionError,
-          "fuseLinearStaticQuantize",
-        );
-      }
       const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-        fuseLinearStaticQuantize: false,
+        [DISABLED_FUSION_RULES]: ["linearStaticQuantize"],
       });
       try {
         const result = await session.run(input(4));

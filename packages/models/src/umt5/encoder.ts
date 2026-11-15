@@ -201,18 +201,13 @@ export type Encoding = {
  * equivalence of the distribution mirror (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: false,
   linearCompute: false,
   convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /** The material the family admission ({@link admitUmt5}) settles. */

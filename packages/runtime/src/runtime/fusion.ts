@@ -34,7 +34,7 @@
  *   silent wrong value with no exception.
  * - MUST: fusion collapses the op sequence but **does not change values**. Preserving the rounding
  *   points is the kernel's job, and each kernel's docstring states that the means (a rounding
- *   barrier through a workgroup-memory round trip) is not a spec guarantee. The opt-in rmsNormAdd
+ *   barrier through a workgroup-memory round trip) is not a spec guarantee. The built-in rmsNormAdd
  *   is limited to the acceptance range of ADR 0099 and keeps the reference path on unverified
  *   GPUs.
  * - MUST: only nodes whose **contract has exactly one output** are grabbed
@@ -922,9 +922,10 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  *
  * Five conditions for acceptance:
  *
- * 1. The option (`packedStaticQuantize`) is set, with `linearGemvReduce: parallel` /
- *    `linearCompute: f32` (only the parallel GEMV family has packed variants; the integer GEMV,
- *    which reads nothing else, is admitted only on top of these settings).
+ * 1. The option (`packedStaticQuantize`) is set, with linear at the level `reorder` (the resolved
+ *    `linearGemvReduce: parallel`) and `linearCompute: f32` (only the parallel GEMV family has
+ *    packed variants; the integer GEMV, which reads nothing else, is admitted only on top of these
+ *    settings).
  * 2. A `static_quantize` **left as a plain node**. An SRQ swallowed by the linear→SRQ fusion
  *    (ADR 0103) is an output-side epilogue, and packed output is out of scope here, so it does not
  *    qualify — which is why this decision takes the result of the first scan (`steps`) as input.

@@ -1,5 +1,5 @@
 /**
- * The byte-plane GEMV (`SessionOptions.linearGemvPlanes`) on a real GPU:
+ * The byte-plane GEMV (`REORDER_STRATEGIES.linearGemvPlanes` with linear at `reorder`) on a real GPU:
  *
  * 1. The class-R check of `@karume/kernel-checks` (the cases the playground's kernel-check page
  *    runs): the f64 band, the A/B band against the sequential GEMV and the structural checks.
@@ -23,7 +23,7 @@ import { acquireGpu } from "../src/gpu/device.ts";
 import { linearGemvKey } from "../src/kernels/linear-gemv.ts";
 import { planesGemvKey } from "../src/kernels/linear-gemv-planes.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
-import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, REORDER_STRATEGIES } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
@@ -217,7 +217,14 @@ describe.skipIf(!GPU_AVAILABLE)("linearGemvPlanes through a Session (real GPU)",
 
   it("runs the byte-plane key at the lm_head shape, every output within the f64 band", async () => {
     const where = "lm_head 262144×1536 (option on)";
-    const { y, census } = await runTwice(fixtureFor(), { linearGemvPlanes: true }, where);
+    const { y, census } = await runTwice(
+      fixtureFor(),
+      {
+        numerics: { ops: { linear: "reorder" } },
+        [REORDER_STRATEGIES]: { linearGemvPlanes: true },
+      },
+      where,
+    );
     assertEquals(countDispatches(census, planesGemvKey({ lanes: 8, rows: 4 })), 1, where);
     assertEquals(countDispatches(census, linearGemvKey("i2")), 0, where);
     const { reference } = fixtureFor();
@@ -243,16 +250,19 @@ describe.skipIf(!GPU_AVAILABLE)("linearGemvPlanes through a Session (real GPU)",
     assertEquals(countDispatches(census, isPlanes), 0, where);
   });
 
-  it("rejects a non-boolean linearGemvPlanes at construction", async () => {
+  it("rejects a linearGemvPlanes strategy other than true at construction", async () => {
     const gpu = await acquireGpu();
     try {
       const { model } = fixtureOf(64, 64);
-      const options: SessionOptions = {};
-      Object.defineProperty(options, "linearGemvPlanes", { value: 1, enumerable: true });
+      const options: SessionOptions = { numerics: { ops: { linear: "reorder" } } };
+      Object.defineProperty(options, REORDER_STRATEGIES, {
+        value: { linearGemvPlanes: 1 },
+        enumerable: true,
+      });
       await assertRejects(
         () => createSessionFromContainer(gpu, model, GRAPH_NAME, options),
         ExecutionError,
-        "options.linearGemvPlanes must be a boolean",
+        "options[REORDER_STRATEGIES].linearGemvPlanes must be true or omitted",
       );
     } finally {
       gpu.destroy();

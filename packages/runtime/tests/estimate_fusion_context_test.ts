@@ -22,8 +22,10 @@ import {
   sessionFusionKnobs,
   sharedOrPooledWeights,
 } from "../src/runtime/session-fusion-context.ts";
+import type { ReorderStrategies } from "../src/runtime/reorder-strategies.ts";
 import {
   DISABLED_FUSION_RULES,
+  REORDER_STRATEGIES,
   ROW_BLOCK_SPLIT,
   type SessionOptions,
 } from "../src/runtime/session-types.ts";
@@ -87,14 +89,10 @@ describe("estimateFusionFacts", () => {
       { linearCompute: "a8" },
       { attentionCompute: "a8", attentionScoreStorage: "none", attentionRowBlockMaxBytes: 4096 },
       {
-        linearGemvReduce: "parallel",
+        numerics: { ops: { linear: "reorder", rms_norm: "reorder" } },
         packedStaticQuantize: true,
         integerGemv: true,
-        fuseLinearStaticQuantize: true,
-        fuseRmsNormAdd: true,
-        fuseGeluMulStaticQuantize: true,
-        linearGemvPlanes: true,
-        rmsNormReduce: "subgroup32",
+        [REORDER_STRATEGIES]: { linearGemvPlanes: true, rmsNorm: "subgroup32" },
         fusionRules: [watchingRule()],
         [DISABLED_FUSION_RULES]: ["silu", "test/watch_bmm"],
         maxStorageBufferBindingSize: CORE_LIMIT,
@@ -207,17 +205,17 @@ describe("the estimate given the Session options the fusion pass reads", () => {
     const model = openGraph(decomposedAttentionGraph(SMALL_SCORES));
     for (const [options, message] of [
       [
-        { fuseRmsNormAdd: outsideTheType<boolean>("yes") },
-        "options.fuseRmsNormAdd must be a boolean",
+        { numerics: outsideTheType<EstimateOptions["numerics"]>({ level: "fast" }) },
+        'options.numerics.level "fast" must be "exact" or "reorder"',
       ],
       [{ integerGemv: true }, "integerGemv requires packedStaticQuantize: true"],
       [
         { packedStaticQuantize: true },
-        "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+        'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"',
       ],
       [
-        { rmsNormReduce: outsideTheType<"workgroup">("warp") },
-        'options.rmsNormReduce: unsupported value "warp"',
+        { [REORDER_STRATEGIES]: outsideTheType<ReorderStrategies>({ rmsNorm: "warp" }) },
+        'options[REORDER_STRATEGIES].rmsNorm must be "subgroup32" or omitted',
       ],
       [
         { maxComputeWorkgroupsPerDimension: 0 },

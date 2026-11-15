@@ -347,10 +347,10 @@ test("gemma4 fromAssets: an explicit quant execution knob also fails with the sa
           model: [junk],
           tokenizer: junk,
         },
-        { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" },
+        { packedStaticQuantize: true, numerics: { ops: { linear: "exact" } } },
       ),
     ModelInputError,
-    "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+    'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"',
   );
   assertEquals(error.message.includes("fromAssets"), true, error.message);
 });

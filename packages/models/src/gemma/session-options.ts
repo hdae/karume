@@ -10,14 +10,7 @@ import {
 
 type GemmaSessionOptions = Pick<
   SessionOptions,
-  | "linearGemvReduce"
-  | "stateAttentionReduce"
-  | "fuseRmsNormAdd"
-  | "fuseLinearStaticQuantize"
-  | "fuseGeluMulStaticQuantize"
-  | "packedStaticQuantize"
-  | "integerGemv"
-  | "linearGemvPlanes"
+  "numerics" | "packedStaticQuantize" | "integerGemv"
 >;
 
 /**
@@ -26,14 +19,14 @@ type GemmaSessionOptions = Pick<
  * {@link resolveSessionOptions}, shared by all families; this only decides the accepted set.
  *
  * The linear / attention execution forms (`linearCompute` / `attentionCompute` /
- * `attentionScoreStorage`) are not accepted because Gemma's distribution declares only five fields —
- * parallel GEMV, the reduction form of states-form attention, and fusion — and any other declaration
- * is an unverified combination (ADR 0104).
+ * `attentionScoreStorage`) are not accepted because Gemma's distribution declares only the numeric
+ * requirement and the two int8 forms of the parallel GEMV, and any other declaration is an
+ * unverified combination (ADR 0104).
  *
- * `stateAttentionReduce` follows the same rule as the other fields (ADR 0104 addendum 2026-09-26): a
- * quant preset with no declaration (the reference `i4`) and `fromAssets`, which has no manifest, run
- * on the runtime's reference path `"sequential"`. The family keeps no code default — one would take
- * even presets with an empty `session` off the reference path.
+ * `numerics` follows the same rule as the other fields: a quant preset with no declaration (the
+ * reference `i4`) and `fromAssets`, which has no manifest, run every op kind at `exact`. The
+ * family keeps no code default — one would take even presets with an empty `session` off the
+ * reference kernels.
  *
  * `integerGemv` (the integer GEMV of the decode linears at its measured shapes — i2 and i4 of QAT
  * E2B, ADR 0140) is accepted for the same reason as `packedStaticQuantize`, which it requires:
@@ -41,26 +34,17 @@ type GemmaSessionOptions = Pick<
  * at those shapes, so on regular Gemma 4 it changes nothing beyond what its required packed
  * activations do.
  *
- * `linearGemvPlanes` (the byte-plane GEMV of the i2 linears at its measured shapes — the QAT E2B
- * lm_head) is accepted for the same reason: only the QAT graphs have i2 linears at those shapes, so
- * on regular Gemma 4 it changes nothing.
- *
  * NOTE: `export` is because the equivalence test runs every quant of the mirror through the same
  * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: true,
   linearCompute: false,
   convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
-  linearGemvReduce: true,
-  stateAttentionReduce: true,
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
-  linearGemvPlanes: true,
 };
 
 /**

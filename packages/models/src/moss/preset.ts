@@ -100,18 +100,13 @@ export const mossPreset = (name: string): MossPreset => {
  * NOTE: `export` is for the host tests (not on a public surface).
  */
 export const MOSS_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: false,
   linearCompute: true,
   convCompute: false,
   attentionCompute: true,
   attentionScoreStorage: true,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /** The same knobs (keys and values) in both. */

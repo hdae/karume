@@ -1,8 +1,8 @@
 // The twin cases of the RMS→add fusion live in @karume/kernel-checks (checkRmsNormAddTwins), which
 // the playground's /kernel-check page runs on the browser's backend too; the row identity across
-// row counts, the forced grid-stride dispatch and the option's rejection stay here.
+// row counts and the forced grid-stride dispatch stay here.
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
   checkRmsNormAddTwins,
@@ -13,11 +13,7 @@ import {
   rmsNormAddInputs,
 } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
-import {
-  createSessionFromContainer,
-  type SessionOptions,
-  type Tensor,
-} from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import { rmsNormAddWgsl, rmsNormParams } from "../src/kernels/rms-norm.ts";
 import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
@@ -50,7 +46,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
               gpu,
               await openModelBytes(rmsNormAddGraph({ rows, dim, normFirst }), []),
               GRAPH_NAME,
-              { fuseRmsNormAdd: true },
+              {},
             );
             try {
               const row = words((await fused.run(rmsNormAddInputs(rows, dim, "finite"))).y).slice(
@@ -161,24 +157,6 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
       for (const b of owned) b.destroy();
       gpu.destroy();
       assertEquals(error, null);
-    }
-  });
-  it("does not silently accept a non-boolean", async () => {
-    const gpu = await acquireGpu();
-    const opened = await openModelBytes(rmsNormAddGraph(), []);
-    try {
-      for (const value of [null, 0, "true"]) {
-        const options: SessionOptions = {};
-        // Inject an invalid value at the public boundary; the type alone is not a guard.
-        Reflect.set(options, "fuseRmsNormAdd", value);
-        await assertRejects(
-          () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
-          Error,
-          "fuseRmsNormAdd",
-        );
-      }
-    } finally {
-      gpu.destroy();
     }
   });
 });

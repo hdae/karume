@@ -1339,7 +1339,7 @@ export const buildStateAttention = async (
         { binding: 5, source: outs[0] },
         { binding: 6, source: { kind: "lengths" } },
       ],
-      // The fused ②③ runs on ③''s grid: it exists only under the parallel option, on plans too short
+      // The fused ②③ runs on ③''s grid: it exists only under the parallel forms, on plans too short
       // for the tiled form.
       workgroups:
         pvChoice.id === "pv-tiled"

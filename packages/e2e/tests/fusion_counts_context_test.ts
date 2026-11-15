@@ -16,7 +16,10 @@ import {
   sessionFusionKnobs,
   sharedOrPooledWeights,
 } from "../../runtime/src/runtime/session-fusion-context.ts";
-import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
+import {
+  DISABLED_FUSION_RULES,
+  REORDER_STRATEGIES,
+} from "../../runtime/src/runtime/session-types.ts";
 import { planWeightResidency } from "../../runtime/src/runtime/weight-residency.ts";
 import { mergeGraph } from "../../runtime/tests/helpers/merged-graph.ts";
 import type { DeclarationJson } from "../../runtime/tests/helpers/model-fixture.ts";
@@ -45,11 +48,10 @@ describe("planDistributionFusions", () => {
       {},
       { linearCompute: "a8" },
       {
-        linearGemvReduce: "parallel",
+        numerics: { ops: { linear: "reorder", rms_norm: "reorder" } },
         packedStaticQuantize: true,
         integerGemv: true,
-        fuseRmsNormAdd: true,
-        rmsNormReduce: "subgroup32",
+        [REORDER_STRATEGIES]: { rmsNorm: "subgroup32" },
         [DISABLED_FUSION_RULES]: ["silu"],
       },
       { [DISABLED_FUSION_RULES]: "all" },

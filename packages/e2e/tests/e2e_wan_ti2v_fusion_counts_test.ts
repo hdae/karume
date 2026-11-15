@@ -77,8 +77,8 @@ const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 10
  *   `rms_norm` over the 3,072-wide token row → two reshapes → the pair-form RoPE, each folded into
  *   one dispatch (perf-ledger F-3 stage 3). So **rope 0**: every pair-form RoPE of this DiT (60 —
  *   the `rope` count before 2026-10-25) now folds with its rms_norm; the rms_norm takes the 256-wide
- *   workgroup kernel here (`rmsNormReduce` is not set), and under `"subgroup32"` the RoPEs would
- *   fold alone again (rope 60).
+ *   workgroup kernel here (`rms_norm` is at `exact`), and under the subgroup RMS (`REORDER_STRATEGIES`
+ *   `rmsNorm: "subgroup32"`) the RoPEs would fold alone again (rope 60).
  * - **adaln 61**: the per-token adaLN (`where` picks the condition / generation vector per token)
  *   before the self-attention and before the FFN of the 30 blocks, plus the head's.
  * - **gatedResidual 60**: the per-token gated residual after the self-attention output projection

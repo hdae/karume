@@ -13,10 +13,7 @@ import type { RunArm } from "../src/models/gemma4-bench/run.ts";
 
 /** The QAT `i4-fast` declaration (the packed activations and what they need). */
 const FAST: SessionSpec = {
-  linearGemvReduce: "parallel",
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  fuseGeluMulStaticQuantize: true,
+  numerics: { level: "reorder" },
   packedStaticQuantize: true,
 };
 
@@ -62,15 +59,24 @@ describe("the integer GEMV switch", () => {
       expect(integerGemvSession({})).toEqual({
         integerGemv: true,
         packedStaticQuantize: true,
-        linearGemvReduce: "parallel",
+        numerics: { ops: { linear: "reorder" } },
       });
-      expect(integerGemvSession({ linearGemvReduce: "parallel" })).toEqual({
+      expect(integerGemvSession({ numerics: { ops: { linear: "reorder" } } })).toEqual({
         integerGemv: true,
         packedStaticQuantize: true,
       });
       expect(
-        integerGemvSession({ linearGemvReduce: "parallel", packedStaticQuantize: false }),
+        integerGemvSession({
+          numerics: { ops: { linear: "reorder" } },
+          packedStaticQuantize: false,
+        }),
       ).toEqual({ integerGemv: true, packedStaticQuantize: true });
+      expect(
+        integerGemvSession({
+          numerics: { level: "reorder", ops: { linear: "exact" } },
+          packedStaticQuantize: true,
+        }),
+      ).toEqual({ integerGemv: true, numerics: { ops: { linear: "reorder" } } });
     });
   });
 
@@ -84,7 +90,7 @@ describe("the integer GEMV switch", () => {
       expect(plain.ok && plain.arm.session).toEqual({
         integerGemv: true,
         packedStaticQuantize: true,
-        linearGemvReduce: "parallel",
+        numerics: { ops: { linear: "reorder" } },
       });
       for (const integerGemv of [false, undefined]) {
         const off = resolveArm(draft({ integerGemv }), { "gemma4-qat-mobile": manifest });

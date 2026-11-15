@@ -139,6 +139,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "NumericLevel",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NumericsSpec",
+        "kind": "typeAlias"
+      },
+      {
         "name": "PipelineId",
         "kind": "typeAlias"
       },

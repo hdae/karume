@@ -64,6 +64,8 @@ export type {
   RequiredLimitName,
   RequiredLimitsSpec,
   ScoreStorage,
+  NumericLevel,
+  NumericsSpec,
   SessionSpec,
   WeightContainer,
   WeightEntry,

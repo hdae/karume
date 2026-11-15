@@ -16,6 +16,7 @@ import type { GpuFeaturesSpec, SessionSpec } from "@karume/hub";
 import type { SessionOptions } from "@karume/runtime";
 import {
   type CensusRow,
+  censusSeats,
   countDispatches,
   type KeyPredicate,
   type NumericSeat,
@@ -372,9 +373,10 @@ const NUMERIC_SEATS = Object.keys(SEAT_REFERENCE) as readonly NumericSeat[];
 export const describeBundleCensus = (
   rows: readonly CensusRow[],
   declared: SessionOptions,
-): string =>
-  NUMERIC_SEATS.flatMap((seat) => {
-    const value = declared[seat];
+): string => {
+  const seats = censusSeats(declared);
+  return NUMERIC_SEATS.flatMap((seat) => {
+    const value = seats[seat];
     if (value === undefined || value === SEAT_REFERENCE[seat]) return [];
     const signatures: Readonly<Record<string, KeyPredicate>> = SEAT_SIGNATURES[seat];
     const predicate = Object.hasOwn(signatures, String(value))
@@ -384,6 +386,7 @@ export const describeBundleCensus = (
       predicate === undefined ? "no predicate" : String(countDispatches(rows, predicate));
     return [`${seat}=${String(value)} ×${count}`];
   }).join(" / ");
+};
 
 /**
  * One entry for the results (`comparisons` of `results.json`). It is recorded **before** the verdict

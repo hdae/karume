@@ -81,7 +81,7 @@ type PlanesGemvShape = {
   readonly variant: PlanesGemvVariant;
 };
 
-// DECIDED: only measured shapes are eligible for the opt-in option (the parallel GEMV's rule).
+// DECIDED: only measured shapes are eligible for the strategy (the parallel GEMV's rule).
 // docs/decisions/0098-linear-gemv-parallel.md
 const PLANES_GEMV_SHAPES: readonly PlanesGemvShape[] = [
   // E2B QAT lm_head (M2, research 2026-11-03): 2383 µs median against 2973 for the sequential GEMV.

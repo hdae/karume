@@ -168,7 +168,7 @@ const CODEC: Readonly<Record<Storage, CodecName>> = {
 };
 
 describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV in a Session (real GPU)", () => {
-  it("runs only on the marked rows under linearGemvReduce: 'parallel', with the same words for M = 1 / 4 / 8", async () => {
+  it("runs only on the marked rows with linear at 'reorder', with the same words for M = 1 / 4 / 8", async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of [
@@ -229,7 +229,7 @@ describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV in a Session (r
             await openModelBytes(graph, tensors),
             GRAPH_NAME,
             {
-              linearGemvReduce: "parallel",
+              numerics: { ops: { linear: "reorder" } },
             },
           );
           try {

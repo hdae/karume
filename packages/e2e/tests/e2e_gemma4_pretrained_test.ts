@@ -300,11 +300,12 @@ const QAT_FAST_SEAT = { quant: "i4-fast" } as const;
  * - `i4` (empty `session`) runs on the reference path ③ and not a single ③' key appears (a preset
  *   without a declaration is back on the reference path — red if a family code default sneaks in
  *   again).
- * - `i4-gemvpar` (declares `stateAttentionReduce: "parallel"`) runs on ③' and no ③ key appears.
- * - On the same preset an explicit `"sequential"` beats the declaration (the way back still works).
- * - `i4-fast` (declares `"parallel-fused"`) shows no ③ key. Whether the fused kernel
- *   (`attention_state_stats_pv`) is chosen depends on the column limit, so either ③' or the fused
- *   kernel running is enough.
+ * - On `i4-gemvpar` (declares `numerics: { level: "reorder" }`) an explicit
+ *   `numerics: { ops: { attention: "exact" } }` beats the declaration for attention (the way back
+ *   still works) and runs on ③.
+ * - `i4-fast` (declares `level: "reorder"` too, which attention resolves to `"parallel-fused"`)
+ *   shows no ③ key. Whether the fused kernel (`attention_state_stats_pv`) is chosen depends on the
+ *   column limit, so either ③' or the fused kernel running is enough.
  *
  * NOTE: the preset now affects **only the decode (M = 1) dispatches** (perf-ledger K-13 step 2).
  * A prefill plan (M = `chunkLength` ≥ 16) picks ③ₜ regardless of the preset (shared V row tiles;
@@ -328,13 +329,8 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
         expect: "sequential",
       },
       {
-        name: "i4-gemvpar (declares parallel) → ③'",
-        options: { quant: "i4-gemvpar" },
-        expect: "parallel",
-      },
-      {
-        name: "i4-gemvpar + explicit sequential → reference path",
-        options: { quant: "i4-gemvpar", stateAttentionReduce: "sequential" },
+        name: "i4-gemvpar + explicit exact attention → reference path",
+        options: { quant: "i4-gemvpar", numerics: { ops: { attention: "exact" } } },
         expect: "sequential",
       },
       {
@@ -425,14 +421,6 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
           assert(sequential.length > 0, `no ③ (sequential) key ran (${pv.join(" / ")})`);
           assertEquals(parallel, [], `③' keys mixed into what should be the reference path`);
           assertEquals(fused, [], `fused keys mixed into what should be the reference path`);
-        } else if (one.expect === "parallel") {
-          assert(parallel.length > 0, `no ③' key ran (${pv.join(" / ")})`);
-          assertEquals(
-            sequential,
-            [],
-            `③ (sequential) keys mixed in despite the parallel declaration`,
-          );
-          assertEquals(fused, [], `fused keys mixed in despite the parallel declaration`);
         } else {
           assert(
             parallel.length + fused.length > 0,
@@ -446,7 +434,7 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
         }
         // If the bundle's census table has a row, check the preset's exact counts per phase and
         // per run (the split of ③ paths is held by the checks above; the table holds the counts
-        // of the parallel GEMV, the RMS→add fusion and ①'③').
+        // of the parallel GEMV and the RMS→add fusion).
         if (row !== undefined) {
           const checked = assertRowCensus(row, byPhase, gemmaComponentOf, one.name);
           assert(checked > 0, `${one.name}: no run was compared against the table's expectation`);

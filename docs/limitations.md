@@ -722,8 +722,8 @@ weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer res
 `k` over the i8a8 reduction guard) is counted and gets a number, and an external rule's dispatch is
 not checked for its workgroup counts or params. Such a Session fails at its first run.
 **The in-node temporaries of attention are counted** — the score S and the row statistics of the
-states form (the row statistics only for plans that `stateAttentionReduce` requires; 0 bytes for
-plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization
+states form (the row statistics only for plans whose resolved attention form requires them; 0 bytes
+for plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization
 intermediates of the fused attention op (ADR
 [0124](decisions/0124-attention-row-block-budget.md) decision 7). The options of the fused attention
 op are passed through `attentionCompute` / `attentionScoreStorage` of `EstimateOptions`; if omitted,
@@ -844,7 +844,7 @@ gemma4's prefill runs each chunk with the physical row count of "the smallest bu
   `estimateSessionMemory` passes the buckets.
 - **Buckets below 16 do not take K-13's tiled path**: ①ₜ / ③ₜ of states-form attention are chosen
   only for plans with M ≥ 16, and below that they fall to the reference path ① / ③ (with
-  `stateAttentionReduce: "parallel"`, ③′, and for M ≤ 8 also ①′ — K-14). The values are correct but
+  attention at the level `reorder`, ③′, and for M ≤ 8 also ①′ — K-14). The values are correct but
   slow, and for `parallel` × M ∈ [2, 16) the only measured shapes are the speculative verify shapes
   (M = 4 / 8). Of gemma4's default buckets (`gemma.CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256),
   4 and 8 fall into this range.
@@ -955,30 +955,31 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   not measured (stage 4).
 - **The exact match "with speculation = without speculation" is pinned by e2e checks, including the
   default preset** (on 2026-09-26 the claim that "it can rarely split with the default preset" was
-  withdrawn). Even with gemma4's default `"parallel"`, the reduction order of attention is the same for
-  M=1 and M=4 (①′ applies for M ≤ 8 and ③′ for M < 16, so both decode and verify are ①′ + ③′).
+  withdrawn). Even with attention at the level `reorder`, the reduction order of attention is the same
+  for M=1 and M=4 (①′ applies for M ≤ 8 and ③′ for M < 16, so both decode and verify are ①′ + ③′).
   Identity including the other paths whose shape changes with M (the row blocks of the GEMV family and
   so on) is checked in 2 tiers by `e2e_gemma4_speculative_test.ts` — speculation ⑤ = u32 equality of
-  verify row 0 and the decode logits (the combinations of 3 attention variants ×
-  `linearGemvReduce: "parallel"`, attention `"sequential"` / `"parallel"` × GEMV `"sequential"`, and
-  RMS→add fusion (with the linear→SRQ setting)), and speculation ① / ② = equality of the generated
+  verify row 0 and the decode logits (the combinations of 3 attention forms × the parallel GEMV,
+  attention `"sequential"` / `"parallel"` × the sequential GEMV, each with the RMS→add fusion (and the
+  linear→SRQ fusion) applied or left out), and speculation ① / ② = equality of the generated
   token sequences (① = the `"sequential"` setting, ② = 3 cases × 200 tokens with `i4-fast`, the default
   preset of the regular E2B distribution at the time, gated = always; since 2026-11-04 the regular line
-  ships `bf16` alone and ② runs on the q4_0 QAT E2B's `i4-fast`, which declares the same three flags. The attention at the time of the B570
+  ships `bf16` alone and ② runs on the q4_0 QAT E2B's `i4-fast`, which declares the level `reorder`
+  (the parallel GEMV and `"parallel-fused"` attention; the RMS→add fusion applies without a declaration). The attention at the time of the B570
   measurement below was `"parallel"` (the old family default), and on the same day the declaration of
   `i4-fast` moved to `"parallel-fused"` — re-measurement with the new declaration is not done). The
   Intel Arc B570 measurement of 2026-09-26 matched for every combination, with 0/200 × 3 cases
   differing for the default preset
   ([research 2026-09-26](research/2026-09-26-gemma4-speculative-determinism.md)). The u32 check covers
-  all 12 combinations of 3 attention variants × 2 GEMV kinds × RMS→add fusion (+ the linear→SRQ
-  setting) (widened to all combinations on 2026-09-26).
+  all 12 combinations of 3 attention variants × 2 GEMV kinds × RMS→add fusion applied or left out (+ the
+  linear→SRQ fusion) (widened to all combinations on 2026-09-26).
 - **The guarantee is per device**. The checks confirm only the device of the machine that ran the
   gemma4 lane, and on a machine where the check is red, differences between M=1 and M=4 really exist
   (the execution order of reductions changes because the grid-stride split depends on the device's
   limits, so no claim is made across machines).
   If exact reproducibility is needed on such a machine, choose `speculative: "always"` (no gate) or
-  `stateAttentionReduce: "sequential"` (the runtime's reference path, where M=1 and M=4 use the same
-  reduction kernel). There is no canary that confirms identity at run time on the user's device.
+  attention at the level `exact` (`numerics: { ops: { attention: "exact" } }` — the runtime's reference
+  path, where M=1 and M=4 use the same reduction kernel). There is no canary that confirms identity at run time on the user's device.
 - **The self-tuning gate is on by default, and what switches it is wall-clock time** (stage 4-B ④, the
   default of `speculative: true`). The gate measures the wall time of a cycle and of one decode step at
   run time, and while speculation is losing it falls back to the M=1 decode shape (it decides after
@@ -994,8 +995,8 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   always. The handling of devices where the check is red is as in the item above.
   The number of steps that fell back is `GenerationStop.speculation.plainSteps` and the number of
   switches is `switches` (with `"always"`, neither field exists).
-- **`stateAttentionReduce` does not affect the drafter's readonly attention (①′ ③′) — it is fixed to
-  parallel** (the option affects only the target's states-form attention). The exact match above is a
+- **The attention level does not affect the drafter's readonly attention (①′ ③′) — it is fixed to
+  parallel** (the level affects only the target's states-form attention). The exact match above is a
   check of the target's identity, so this does not break it: the drafter's reduction order affects only
   the content of the draft (= the acceptance rate = speed), and the committed token sequence is decided
   by the target's per-row logits and `sampler.next`.
@@ -2351,11 +2352,11 @@ required total — it does not compare with the free side).
   32 / 256 / 512 / 768 matched, but a step with a small margin can flip. Acceptance goldens are taken with the distribution's
   declared values.
 - **`capacity` does not affect the token sequence** (the work is cut by the logical length, and the values do not depend on the capacity — with a bit-identity check).
-- **The reduction form of decode attention is decided by the quant preset's declaration** (on 2026-09-26 the models code default `"parallel"` was removed
-  and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-gemvpar` and QAT E2B's `i4-fast` use
-  the parallel reduction `"parallel"` (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
-  decode and speculative verify; widened from M=1 on 2026-09-09)), the `i4-fast` of the gemma4 pipeline (the q4_0 QAT line's; the regular line's until 2026-11-04) uses `"parallel-fused"` (fuses the row statistics
-  and PV in the same addition order — the "row-statistics/PV fusion" section below), and `i4` without a declaration and `fromAssets` use the runtime's reference path `"sequential"`.
+- **The reduction form of decode attention follows the attention level the quant preset declares** (on 2026-09-26 the models code default `"parallel"` was removed
+  and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-gemvpar` and `i4-fast` of both QAT lines declare
+  `reorder`, which resolves to `"parallel-fused"` — the parallel reductions (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
+  decode and speculative verify; widened from M=1 on 2026-09-09)) with the row statistics and PV fused in the same addition order where the fold applies
+  (the "row-statistics/PV fusion" section below) — and `i4` without a declaration and `fromAssets` use the runtime's reference path `"sequential"`.
   Prefill plans (M ≥ 16) use the tiled paths of the GEMM skeleton
   ①ₜ / ③ₜ regardless of the preset (K-13, bit-identical to the reference path — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)). The band of ①′ is a difference from ①
   of 3.58e-7 / a difference from the f64 reference of 4.17e-7 (band 5e-6, [research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)).
@@ -2364,7 +2365,7 @@ required total — it does not compare with the free side).
   The measured range of the band is reduction lengths live 1–16,384 (the check in `gpu_state_attention_parallel_test.ts` — the worst value appears on the side
   of small live) + 65,536 (measured by hand): at live 4,096 / 16,384 / 65,536, ③' vs f64 = 8.6e-9 / 1.5e-8 /
   1.8e-8 (1/100 of the band, measured in the 2026-09-03 review).
-  `gemma.PipelineOptions.stateAttentionReduce: "sequential"` (or quant `i4`) returns to the reference path.
+  `gemma.PipelineOptions.numerics: { ops: { attention: "exact" } }` (or quant `i4`) returns to the reference path.
   The default of the low-level surface (consumers who call `createSessionFromContainer` / `createContainerSession` themselves) stays the runtime's `"sequential"`.
 - The upper limit of `chunkLength` is the trace limit of the baked symbol `M`, which the distribution declares as `pipelineConfig.maxChunkLength`
   (768 for E2B). A larger value fails at the declaration check (measured 2026-09-03: before the declaration existed,
@@ -2594,12 +2595,12 @@ embed_vision 1, embed_audio 1). This count is a guide to the size of the phase t
 
 ## Parallel addition in GEMV (2026-09-12)
 
-`linearGemvReduce: "parallel"` is an optional setting of [ADR 0098](decisions/0098-linear-gemv-parallel.md).
+The parallel GEMV is the `reorder` strategy of linear (`numerics` with linear at `reorder` — [ADR 0098](decisions/0098-linear-gemv-parallel.md)).
 It covers the measured quantized matrices and physical M=1..8, with f32 arithmetic only. It is not bit-identical to the default sequential addition, and for QAT the generated sequence can change too.
 M>8 and shapes outside the targets use the former path, and the diagnostic keys show the range it applies to. It does not mean an across-the-board speed-up of E4B or other models.
-The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when `parallel` is specified. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
+The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when linear is at `reorder`. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
 [The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
-The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares parallel GEMV and RMS→add fusion plus linear→SRQ fusion and packed int8 activations ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) ship one preset, `bf16`, since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there; their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its E2B / E4B `i4-fast` (parallel GEMV and RMS→add fusion) is chosen by name. The parallel-only `i4-gemvpar` is also kept where `i4-fast` exists.
+The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares the level `reorder` and packed int8 activations; the RMS→add and linear→SRQ fusions apply wherever they match, without a declaration ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) ship one preset, `bf16`, since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there; their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its `i4-gemvpar` / `i4-fast` (both declare the level `reorder` — the same settings) are chosen by name.
 The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
 The shapes of the gemma4 drafters (`[256,3072]` / `[262144,256]` and so on — i8 for the regular E2B, i4 g32 for the q4_0 QAT E2B / E4B) are not in the table, and even with `i4-fast` 66 of their 68 linears run sequentially (the bundle's census table pins 66 for the reference on the q4_0 QAT drafters — perf-ledger K-59).
 
@@ -2611,23 +2612,22 @@ QAT E2B's `i4-fast` declares it by default (regular Gemma 4 has no `static_quant
 - **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of `PARALLEL_SHAPES` whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
 - **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted for the opt-in: [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2 classes `packedStaticQuantize` as E on finite values and states this NaN saturation.
 - **The allocation does not become 1/4**. The output tensor's storage is allocated at the declared shape, and only 1/4 of it is actually written. This is a choice to keep the arena buckets unchanged, not a VRAM saving.
-- **Only the combination of `linearGemvReduce: "parallel"` and `linearCompute: "f32"` is accepted**. Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.
+- **It is accepted only with linear at the level `reorder` and `linearCompute: "f32"`** (it is a form of the parallel GEMV). Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.
 
 ## Scope of RMS fusion and the subgroup optimizations (organized 2026-09-14)
 
-`fuseRmsNormAdd` defaults to false and is a setting independent of the submission limit ([ADR 0099](decisions/0099-rms-norm-add-fusion.md)).
-That the comparison page's fusion + submission of 768 was used does not mean it became the default of the models, the CLI or the quants.
+The RMS→add fusion is bit-identical to the unfused plan and applies wherever it matches, without an option; it is independent of the submission limit ([ADR 0099](decisions/0099-rms-norm-add-fusion.md)).
 
-`rmsNormReduce: "subgroup32"` and `linearGemvReduce: "parallel-subgroup32"` are optional settings.
+The subgroup forms of the RMS reduction and of the parallel GEMV are `reorder` strategies that no Session selects by itself: only the private Session key `[REORDER_STRATEGIES]` (`rmsNorm: "subgroup32"` / `linearGemv: "subgroup32"`, used by the kernel checks and tests) runs them, each only where its op kind is at the level `reorder`.
 When an external GPU is passed, request the required features with `acquireGpu({ subgroups: true })`.
 They need WebGPU's subgroups / subgroup-size-control, WGSL's subgroup_id and the 32-lane known-answer check, and are rejected when anything is missing.
 Deno 2.9.6 did not provide the required features; on Node + Dawn (0.15) they are exposed and the variants run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). Running in Chrome and the follow-up test on the M2 are done, but adopting them as the M2 default is deferred.
-They are not included in the stored vocabulary of quant.session. The existing workgroup / parallel can be chosen again.
+Neither a manifest's `quant.session` nor a public option can name them.
 For the numbers, target shapes and the range not yet accepted, see [ADR 0100](decisions/0100-rms-subgroup-reduction.md) and [0101](decisions/0101-linear-gemv-subgroup.md).
 
 ## Subgroup forms are 32-lane only (devices with another fixed subgroup size run the portable forms)
 
-Every subgroup kernel — `rmsNormReduce: "subgroup32"`, `linearGemvReduce: "parallel-subgroup32"` and the online
+Every subgroup kernel — the subgroup32 RMS reduction, the subgroup32 parallel GEMV and the online
 attention's `sg32` form — is written for 32 lanes (`@subgroup_size(32)`), and the acquisition's known-answer check is
 a 32-lane reduction. A device whose subgroup size cannot be 32 (phones with a fixed size of 16, for example) advertises
 the features but cannot run these forms. `acquireGpu({ subgroups: "available" })` acquires such a device without the
@@ -2644,7 +2644,7 @@ measured and adopted; none is scheduled.
 
 > Manual procedure since 2026-10-28: the playground's `/kernel-check` page ([apps/playground/README.md](../apps/playground/README.md#the-kernel-check-page)). It runs the same checks as the node GPU tests (one implementation, the private package `@karume/kernel-checks`) on the browser's backend — D3D12 in Chrome, Metal — which the node lanes (Dawn / Vulkan) do not reach: the GEMV and RMS subgroup32 checks below (RMS now with its full test criteria rather than the round trip) and the K-55 / K-91 states-attention rewrites. A device without the subgroup features shows those two as "not available", never PASS. The `/check.html` and round-trip procedure below is the 0.14.0 record.
 
-The real-execution checks of `rmsNormReduce: "subgroup32"` and `linearGemvReduce: "parallel-subgroup32"`
+The real-execution checks of the subgroup32 RMS reduction and the subgroup32 parallel GEMV
 (the cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that actually run the subgroup instructions) SKIP explicitly
 on a device without the required features. Deno 2.9.6 did not provide `subgroups`, so in the Deno-era full verify and in CI they
 **were not executed in any run**. There is no all-skip guard that turns the SKIP red either (something like `gpu_gate_test.ts`, which turns a missing GPU adapter red).
@@ -2668,10 +2668,10 @@ Only the range used by the code that `vp check` type-checks fails indirectly whe
 
 ## Row-statistics/PV fusion of states attention (2026-09-15)
 
-`stateAttentionReduce: "parallel-fused"` is an optional setting of [ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md).
+The fold of the row statistics into PV (`"parallel-fused"`) is what attention at the level `reorder` resolves to ([ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)).
 It fuses only the states form with M<=8 and a static column limit <=1024; out-of-scope shapes and readonly keep the former parallel path.
 Acceptance of RTX/Chrome and of the kernel numbers was done; performance acceptance on the M2 remains. On 2026-09-26 regular gemma4's `i4-fast` declared it
-(B570 measurements show no slowdown against the reference, about the same as parallel — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)); since 2026-11-04 the q4_0 QAT line's E2B / E4B `i4-fast` carries that declaration (the regular line ships `bf16` alone). The M2 and the other presets are unchanged.
+(B570 measurements show no slowdown against the reference, about the same as parallel — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)); today every preset that declares attention at `reorder` runs it — the `i4-gemvpar` / `i4-fast` of both QAT lines (the regular line ships `bf16` alone).
 
 ## gemma4: what the GPU-resident PLE option needs (2026-09-19, opt-in)
 

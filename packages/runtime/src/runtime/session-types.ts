@@ -364,24 +364,22 @@ export const DISABLED_FUSION_RULES: unique symbol = Symbol("karume.disabledFusio
 export type ComputePrecision = "f32" | "f16" | "a8";
 
 /**
- * The reduction form of ①QK / ③PV of states-form attention ({@link
- * SessionOptions.stateAttentionReduce}).
+ * The reduction form of ①QK / ③PV of states-form attention a Session runs: `sequential` at
+ * `exact`; at `reorder` `parallel-fused` (both stages split the reduction across 16 lanes and
+ * fold it in a fixed-order tree, and the row statistics fold into PV where the shape admits it), or
+ * `parallel` without that fold when the private `REORDER_STRATEGIES` asks for it.
  */
 export type StateAttentionReduce = "sequential" | "parallel" | "parallel-fused";
 
-/** The value set shared by execution and the memory estimate. */
-export const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
-  sequential: true,
-  parallel: true,
-  "parallel-fused": true,
-};
-
-/** The K summation order of the quantized GEMV (ADR 0098). */
+/**
+ * The K summation order of the quantized GEMV a Session runs (ADR 0098): `sequential` at `exact`,
+ * `parallel` at `reorder`, its subgroup form through the private `REORDER_STRATEGIES`.
+ */
 export type LinearGemvReduce = "sequential" | "parallel" | "parallel-subgroup32";
 
 /**
- * The reduction method of RMS normalization. subgroup32 sums in a different order from the
- * reference (ADR 0100).
+ * The reduction method of RMS normalization a Session runs. subgroup32 sums in a different order
+ * from the reference (ADR 0100) and runs at `reorder` through the private `REORDER_STRATEGIES`.
  */
 export type RmsNormReduce = "workgroup" | "subgroup32";
 
@@ -401,7 +399,10 @@ export type SessionOptions = {
    * shows in the diagnostic pipeline keys; an op kind with no such kernel for its shape runs the
    * reference kernel. A `reorder` result stays inside the op's band against an f64 evaluation and
    * is bit-identical between two runs on one device, but the generated sequence may differ from
-   * `exact`.
+   * `exact`. Today `reorder` runs the parallel GEMV on quantized linears at their measured shapes
+   * with 1 to 8 rows, and on states-form attention the parallel reductions of QK and PV with the
+   * row statistics folded into PV (decode and verification plans; a prefill plan keeps kernels
+   * that give the reference bits).
    *
    * A level never selects an approximation: int8 activations, f16 compute and the like are asked
    * for by their own options below.
@@ -514,44 +515,6 @@ export type SessionOptions = {
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**
-   * The **reduction form of ①QK and ③PV** of states-form attention (ADR 0067 decision 4 — the form
-   * that reads the KV slots of a generation context; default `"sequential"` = the reference path).
-   * **One knob switches both stages together** (ruling of 2026-09-06 — no separate option per
-   * stage).
-   *
-   * `"parallel"` is the variant in which **both stages split the reduction across 16 lanes of a
-   * workgroup and fold it in a fixed-order tree**:
-   * - ③PV splits along the KV length (perf-ledger K-12 — the "③' KV-parallel reduction variant"
-   *   section of src/kernels/state-attention.ts). It removes the shape in which, for decode (M=1),
-   *   one thread's sequential length grows with the KV length.
-   * - ①QK splits along D of the dot product (perf-ledger K-14 — the "①' D-parallel reduction
-   *   variant" section of the same file). It shortens the latency of one invocation summing D
-   *   products sequentially.
-   *
-   * **The two stages apply to different shapes** (still one option): **①' is chosen only for plans
-   * whose `M` (physical chunk row count) is 8 or less** (decode's M=1 and speculative verify's
-   * M ≤ 8); a prefill plan (M > 8) does not choose ①' even when `"parallel"` is given. In prefill,
-   * ① already fills rows × columns, and switching to ①' was measured to be slower (2026-09-06 — the
-   * conditions and measurements are in the WHY of `stateQkParallelEligible`). The QK path splits
-   * three ways by M: M ≤ 8 is ①', 9 to 15 is ① (sequential), and M ≥ 16 is ①ₜ regardless of the
-   * option (K-row tile sharing on the GEMM skeleton, bit-identical to ① — `stateQkTiledEligible`).
-   * **③' is chosen only for plans with `M < 16`**; `M ≥ 16` takes ③ₜ regardless of the option (V-row
-   * tile sharing on the GEMM skeleton — perf-ledger K-13 step 2). ③ₜ is **bit-identical** to ③, so
-   * even when the option is `"parallel"`, a prefill plan produces the values of the reference path
-   * (a decode plan, M = 1, uses ③' as before).
-   *
-   * Both change the reduction order, so they are **not bit-identical to the reference path**
-   * (determinism is kept). They are a separate family from fused attention (`attentionCompute`) and
-   * orthogonal to it.
-   * MUST: the default is `"sequential"` (ADR 0058 decision 2 — no automatic selection of a path that
-   * changes the numbers).
-   *
-   * parallel-fused keeps parallel's summation order and fuses the row statistics with PV only for
-   * states shapes with M<=8 and a column limit <=1024. readonly and other shapes use the parallel
-   * path. ADR 0102.
-   */
-  readonly stateAttentionReduce?: StateAttentionReduce;
-  /**
    * The storage of **full** state slots (default `"f32"`). `"f16"` halves their bytes and needs no
    * `shader-f16`. The graph keeps declaring f32 states, so nothing is re-exported. Sliding slots never
    * change: their cost is fixed by the window, not by the capacity.
@@ -565,58 +528,17 @@ export type SessionOptions = {
    * MUST: a full slot's `D` is even (one append invocation owns one word). An odd `D` fails loudly at
    * `createGenerationContext` and in the estimate. A borrowing Session must use the same value as its
    * lender, or `createGenerationContext({ borrow })` fails loudly.
-   * `stateAttentionReduce: "parallel-fused"` runs as `"parallel"` on an f16 slot.
+   * At `reorder`, states-form attention on an f16 slot runs the parallel reductions without
+   * folding the row statistics into PV.
    *
    * DECIDED: docs/decisions/0143-f16-full-state-storage.md
    */
   readonly fullStateStorage?: StateStorage;
   /**
-   * The summation order of the quantized GEMV (default sequential). parallel is an optional setting
-   * limited to the measured INT2/4/8 shapes and M=1..8. f32 compute only; other shapes and storage
-   * use the original path (distinguished by the diagnostic key).
-   * The summation order changes, so the generated sequence may differ from the default, including
-   * with QAT re-quantization. M=1 and M=4/8 use the same summation order. No extra weight copy.
-   * ADR 0098.
-   * parallel-subgroup32 runs the same partition and summation tree as parallel through value
-   * exchange within 32 lanes (ADR 0101).
-   * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic
-   * fallback to parallel.
-   */
-  readonly linearGemvReduce?: LinearGemvReduce;
-  /**
-   * Fuses an adjacent f32 rms_norm→add (default true: a fusion that keeps the unfused plan's bits
-   * needs no option — ADR 0147 decision 5; ADR 0099).
-   * Applies only to last dimensions 256/1536/2560, identical shapes, and intermediate values with a
-   * single consumer.
-   * Rounding preservation has been measured, but bit identity with the reference is not guaranteed
-   * on unverified GPUs.
-   * submitPolicy is an independent setting; this option alone does not change the submission limit.
-   */
-  readonly fuseRmsNormAdd?: boolean;
-  /**
-   * Fuses an adjacent linear→static_quantize (default true, ADR 0103). It applies only on the
-   * parallel GEMV (linearGemvReduce: parallel / linearCompute: f32); an explicit true without it
-   * is rejected.
-   * Only the accepted INT2/4/8 shapes, M=1..8, and intermediate values with a single consumer. It
-   * borrows the existing scale.
-   * Bit identity on unverified GPUs is not guaranteed; false returns to the unfused reference.
-   */
-  readonly fuseLinearStaticQuantize?: boolean;
-  /**
-   * Fuses an adjacent f32 gelu_tanh→mul→static_quantize into one dispatch (default true —
-   * perf-ledger K-48).
-   * Applies only to identical shapes `[…, 256]` with 1–8 rows (no broadcast), intermediate values
-   * with a single consumer, and an SRQ output that is not packed (ADR 0105). Independent of
-   * linearGemvReduce / linearCompute.
-   * The two stored values of the unfused chain keep their rounding through a run-time XOR barrier;
-   * bit identity was measured on Vulkan / NVIDIA, and on unverified GPUs it is not guaranteed —
-   * false returns to the unfused reference.
-   */
-  readonly fuseGeluMulStaticQuantize?: boolean;
-  /**
    * Passes fixed-SRQ activations to the parallel GEMV as packed int8 (four int8 codes in one u32
    * word) (default false, ADR 0105).
-   * Supported only together with linearGemvReduce: parallel / linearCompute: f32.
+   * It is a form of the parallel GEMV, so it needs linear at `reorder` (`numerics`) with
+   * `linearCompute: "f32"`; any other combination is rejected at construction.
    * It applies only to "linear activations from a plain static_quantize node whose consumers all go
    * to the parallel GEMV"; a shape with even one other consumer, a shape whose k is not a multiple
    * of 16, and scale 0 (identity) stay in f32 as before.
@@ -631,14 +553,14 @@ export type SessionOptions = {
   /**
    * Runs the eligible decode linears on the **integer GEMV** (default false — ADR 0140; the kernel
    * is src/kernels/linear-gemv-integer.ts).
-   * Supported only together with packedStaticQuantize: true (which itself requires
-   * linearGemvReduce: parallel / linearCompute: f32); any other combination is rejected at
-   * construction, with no silent fallback.
+   * Supported only together with packedStaticQuantize: true (which itself needs linear at
+   * `reorder` with `linearCompute: "f32"`); any other combination is rejected at construction,
+   * with no silent fallback.
    * It applies only to "a linear with i2 / i4 / i8 weights, M = 1..8 and a measured shape (today
    * i2 and i4 of QAT E2B) whose activation
    * arrives as packed int8 from a plain static_quantize node"; such a linear also counts as a
    * packed consumer, so its producer SRQ is packed even where the parallel GEMV's table does not
-   * pack it. With the linear→SRQ fusion (fuseLinearStaticQuantize) the output SRQ runs as the
+   * pack it. With the linear→SRQ fusion the output SRQ runs as the
    * kernel's epilogue. Every other linear keeps its path.
    * The kernel sums the integer products of the weight and activation codes exactly per group,
    * then applies each group's weight scale (groups in ascending order), the activation scale and
@@ -648,27 +570,6 @@ export type SessionOptions = {
    * against its CPU mirror).
    */
   readonly integerGemv?: boolean;
-  /**
-   * Runs the eligible i2 linears on the **byte-plane GEMV** (default false — the kernel is
-   * src/kernels/linear-gemv-planes.ts). Needs no other option.
-   * It applies only to "a linear with i2 weights, M = 1..8 and a measured shape (today the QAT E2B
-   * lm_head, 262144 × 1536) whose activation arrives as f32"; such a linear never takes packed int8
-   * activations and is never folded into the linear→SRQ fusion. Every other linear keeps its path.
-   * The kernel adds the same exact products in another order and applies the channel scale once
-   * after the sum — contract class R of ADR 0110 (the reference op band against an f64 evaluation),
-   * so the generated sequence may differ from the option off. Two runs of the same input on one
-   * device are bit-identical.
-   */
-  readonly linearGemvPlanes?: boolean;
-  /**
-   * The RMS reduction method (default workgroup). subgroup32 applies to RMS wider than 128 and to
-   * the optional RMS→add fusion.
-   * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic
-   * fallback to the reference.
-   * The summation order changes, so the generated sequence may differ from the reference. Adoption
-   * on M2 and for speculative generation is accepted separately.
-   */
-  readonly rmsNormReduce?: RmsNormReduce;
   /**
    * The **parallelism target** of the row-block gemv (the GEMV family of linear, M ≥ 2) (thread
    * count = output columns n × y tiles). Default 16384 = the saturation point of the reference

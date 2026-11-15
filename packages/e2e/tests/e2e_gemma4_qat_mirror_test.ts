@@ -121,12 +121,8 @@ const SEATS: Record<Model, readonly string[]> = {
 /** The session each seat declares (`GEMMA4_QAT_Q4_0_PARALLEL_QUANTS`). */
 const SEAT_SESSIONS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
   [QUANT]: {},
-  "i4-gemvpar": { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
-  "i4-fast": {
-    linearGemvReduce: "parallel",
-    fuseRmsNormAdd: true,
-    stateAttentionReduce: "parallel-fused",
-  },
+  "i4-gemvpar": { numerics: { level: "reorder" } },
+  "i4-fast": { numerics: { level: "reorder" } },
 };
 /** The table the drafter borrows (its name is the lender's initializer name — docs/ir-v2.md). */
 const SHARED_WEIGHT = "model.lm_head.weight";

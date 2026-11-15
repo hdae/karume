@@ -156,10 +156,12 @@ def qat_quants(model: str) -> Mapping[str, Any]:
     0104).
 
     `i4` keeps `session` empty = both GEMV and attention take the runtime's reference path.
-    `i4-gemvpar` parallelizes GEMV and attention (no fusion); `i4-fast` has every flag that
-    showed no slowdown on its own, with attention `"parallel-fused"`, whose GPU decode was faster
-    than `parallel` (ADR 0104 addendum 2026-09-26). E2B and E4B have the same three presets with
-    the same declarations.
+    `i4-gemvpar` declares the numeric level `reorder` (parallel GEMV and the states-form
+    attention's parallel reductions with the row statistics folded into PV); `i4-fast` adds packed
+    int8 activations (`packedStaticQuantize`, a form of the parallel GEMV that needs that level),
+    the default by measurement (ADR 0104 addendum 2026-09-26). The built-in fusions are
+    bit-identical and apply wherever they match (the linear-to-SRQ one on the parallel GEMV only),
+    so no preset declares them. E2B and E4B have the same three presets with the same declarations.
     """
     checkpoint_name(model)
     quant = {
@@ -174,7 +176,7 @@ def qat_quants(model: str) -> Mapping[str, Any]:
         "i4": quant,
         "i4-gemvpar": {
             **quant,
-            "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
+            "session": {"numerics": {"level": "reorder"}},
             "label": "Fixed mixed QAT with parallel GEMV and attention",
             "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV and "
             "attention summation. Rounding and generated tokens can differ. "
@@ -182,18 +184,10 @@ def qat_quants(model: str) -> Mapping[str, Any]:
         },
         "i4-fast": {
             **quant,
-            "session": {
-                "linearGemvReduce": "parallel",
-                "fuseRmsNormAdd": True,
-                "fuseLinearStaticQuantize": True,
-                "fuseGeluMulStaticQuantize": True,
-                "packedStaticQuantize": True,
-                "stateAttentionReduce": "parallel-fused",
-            },
-            "label": "Fixed mixed QAT with parallel GEMV and fusion",
-            "description": "Same QAT weights; parallel GEMV, fused parallel attention, RMS-add "
-            "and linear-SRQ fusion, packed int8 activations. Use i4 for reference sums. "
-            "Needs fusion-option support." + QAT_FAST_MEASURED_NOTE[model],
+            "session": {"numerics": {"level": "reorder"}, "packedStaticQuantize": True},
+            "label": "Fixed mixed QAT with parallel GEMV and packed int8",
+            "description": "Same QAT weights; parallel GEMV and attention, packed int8 "
+            "activations. Use i4 for reference sums." + QAT_FAST_MEASURED_NOTE[model],
         },
     }
 

@@ -2356,7 +2356,7 @@ test("unaccounted names the linear i8a8 quantized intermediates and says attenti
 });
 
 // ---------------------------------------------------------------------------
-// stateAttentionReduce
+// numerics: attention
 // ---------------------------------------------------------------------------
 
 test("the parallel-fused temporary estimate removes only the row-statistics allocation", () => {
@@ -2368,7 +2368,7 @@ test("the parallel-fused temporary estimate removes only the row-statistics allo
   const plain = model.estimate(options);
   const fused = model.estimate({
     ...options,
-    stateAttentionReduce: "parallel-fused",
+    numerics: { ops: { attention: "reorder" } },
   });
   const { prefill, decode } = bothScenarios(fused);
   assertEquals(prefill.workspaceBytes, 512 + 1024);
@@ -2377,11 +2377,11 @@ test("the parallel-fused temporary estimate removes only the row-statistics allo
   assertEquals(prefill.ioBytes, plain.scenarios[0].ioBytes);
   const outside = { ...options, generation: { chunkLength: 16, bindings: { C: 1025 } } };
   assertEquals(
-    model.estimate({ ...outside, stateAttentionReduce: "parallel-fused" }),
+    model.estimate({ ...outside, numerics: { ops: { attention: "reorder" } } }),
     model.estimate(outside),
   );
-  Object.defineProperty(options, "stateAttentionReduce", { value: "unsupported" });
-  assertThrows(() => model.estimate(options), ExecutionError, "stateAttentionReduce");
+  Object.defineProperty(options, "numerics", { value: { ops: { attention: "unsupported" } } });
+  assertThrows(() => model.estimate(options), ExecutionError, "options.numerics.ops.attention");
 });
 
 test("attention estimate settings reject wrong types before converting to a string", () => {
@@ -2395,8 +2395,8 @@ test("attention estimate settings reject wrong types before converting to a stri
   };
   for (const value of [["parallel-fused"], object, false, 0, 1n, Symbol("parallel-fused")]) {
     const options = { bindings: { T: 2 } };
-    Object.defineProperty(options, "stateAttentionReduce", { value });
-    assertThrows(() => model.estimate(options), ExecutionError, "stateAttentionReduce");
+    Object.defineProperty(options, "numerics", { value: { ops: { attention: value } } });
+    assertThrows(() => model.estimate(options), ExecutionError, "options.numerics.ops.attention");
   }
   assertEquals(conversions, 0);
 });

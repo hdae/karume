@@ -78,8 +78,8 @@
  * gemm-geometry, **an empirical claim** (the check = exact u32 match in tests/gpu_linear_gemv_test.ts).
  *
  * MUST NOT: the form that splits k and adds partial sums back together (split-K) changes the
- * reduction order, so it is not put into this family. The separate opt-in kernel
- * `linearGemvParallelWgsl` follows ADR 0098.
+ * reduction order, so it is not put into this family. The separate kernel
+ * `linearGemvParallelWgsl` (linear at the level `reorder`) follows ADR 0098.
  *
  * ## Relation to the geometry (the reach of gemm-geometry's "only selection point" MUST)
  *
@@ -936,8 +936,8 @@ type ParallelShape = {
   readonly stagedActivations?: true;
 };
 
-// DECIDED: only measured shapes are eligible for the opt-in option. Not an automatic selection by
-// GPU name.
+// DECIDED: only measured shapes are eligible for the parallel GEMV (linear at the level `reorder`).
+// Not an automatic selection by GPU name.
 // docs/decisions/0098-linear-gemv-parallel.md
 const PARALLEL_SHAPES: readonly ParallelShape[] = [
   { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
@@ -1263,11 +1263,11 @@ export const linearGemvParallelKey = (
 ): string => `linear_gemv_parallel${weightKeyPart(storage)}${i4GroupKeyPart(group)}:l${lanes}`;
 
 /**
- * The opt-in version that distributes compressed words over K lanes round-robin. Dequantisation and
- * the multiply-adds within a word are shared with the sequential version, but the addition order
- * across words differs. It completes with a tree reduction inside 128 threads and requires no extra
- * feature. M is not baked into the shader, so decode and speculative verification of a few rows use
- * the same key and the same arithmetic.
+ * The `reorder` version that distributes compressed words over K lanes round-robin.
+ * Dequantisation and the multiply-adds within a word are shared with the sequential version, but
+ * the addition order across words differs. It completes with a tree reduction inside 128 threads
+ * and requires no extra feature. M is not baked into the shader, so decode and speculative
+ * verification of a few rows use the same key and the same arithmetic.
  * DECIDED: docs/decisions/0098-linear-gemv-parallel.md
  */
 export const linearGemvParallelWgsl = (

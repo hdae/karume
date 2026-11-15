@@ -12,6 +12,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type SessionOptions, sessionOptionsViolation } from "../mod.ts";
+import { REORDER_STRATEGIES } from "../src/runtime/session-types.ts";
 
 /**
  * Reproduces a field from a caller outside the types (a JS consumer) — TS types do not guard this
@@ -28,9 +29,7 @@ describe("sessionOptionsViolation", () => {
     assertEquals(sessionOptionsViolation({}), undefined);
     assertEquals(
       sessionOptionsViolation({
-        linearGemvReduce: "parallel",
-        fuseRmsNormAdd: true,
-        fuseLinearStaticQuantize: true,
+        numerics: { ops: { linear: "reorder" } },
         packedStaticQuantize: true,
       }),
       undefined,
@@ -50,27 +49,27 @@ describe("sessionOptionsViolation", () => {
     // of construction's check.
     assertEquals(sessionOptionsViolation({ linearCompute: "f16" }), undefined);
     assertEquals(sessionOptionsViolation({ attentionCompute: "f16" }), undefined);
-    assertEquals(sessionOptionsViolation({ linearGemvReduce: "parallel-subgroup32" }), undefined);
-    assertEquals(sessionOptionsViolation({ rmsNormReduce: "subgroup32" }), undefined);
+    assertEquals(
+      sessionOptionsViolation({
+        numerics: { ops: { linear: "reorder" } },
+        [REORDER_STRATEGIES]: { linearGemv: "subgroup32" },
+      }),
+      undefined,
+    );
+    assertEquals(
+      sessionOptionsViolation({
+        numerics: { ops: { rms_norm: "reorder" } },
+        [REORDER_STRATEGIES]: { rmsNorm: "subgroup32" },
+      }),
+      undefined,
+    );
   });
 
   it("returns a combination violation with the same wording as construction", () => {
     const cases: readonly (readonly [SessionOptions, string])[] = [
       [
-        { fuseLinearStaticQuantize: true },
-        "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
-      ],
-      [
-        { linearGemvReduce: "parallel", linearCompute: "a8", fuseLinearStaticQuantize: true },
-        "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
-      ],
-      [
-        { packedStaticQuantize: true, linearGemvReduce: "sequential" },
-        "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
-      ],
-      [
-        { linearGemvReduce: "parallel", linearCompute: "a8" },
-        "linearGemvReduce: parallel supports only linearCompute: f32",
+        { packedStaticQuantize: true },
+        'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32": it is a form of the parallel GEMV',
       ],
     ];
     for (const [options, message] of cases) {
@@ -95,13 +94,9 @@ describe("sessionOptionsViolation", () => {
         return "parallel";
       },
     };
-    assertEquals(
-      sessionOptionsViolation(withValue("fuseRmsNormAdd", 1)),
-      "options.fuseRmsNormAdd must be a boolean",
-    );
     assert(
-      sessionOptionsViolation(withValue("linearGemvReduce", object))?.includes(
-        "linearGemvReduce: object",
+      sessionOptionsViolation(withValue("numerics", { level: object }))?.includes(
+        "options.numerics.level object",
       ),
     );
     assert(

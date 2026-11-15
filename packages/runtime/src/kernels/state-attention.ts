@@ -4,12 +4,12 @@
  * | Step | Key                                      | Role                                                    |
  * | ---- | ---------------------------------------- | ------------------------------------------------------- |
  * | ①    | `attention_state_qk:v1:f32:wg16x4`       | **materialises** `S` over logical cols in row-block windows |
- * | ①'   | `attention_state_qk:v1:f32:wg16x16:par`  | **D-parallel reduction** variant of ① (opt-in — below)  |
+ * | ①'   | `attention_state_qk:v1:f32:wg16x16:par`  | **D-parallel reduction** variant of ① (level `reorder` — below) |
  * | ①' fold | `attention_state_qk:v1:f32:wg8x16:par:fold<F>:gqa` | ①' with **F query heads per workgroup** (below) |
  * | ①ₜ   | `attention_state_qk:v1:f32:reg<geometry>` | **K row-tile sharing** variant of ① (default — below)   |
  * | ②    | `attention_state_stats:v2:f32:wg256`     | per-row `m = amax S` and `inv = 1/Σexp(S−m)`            |
  * | ③    | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V` (`P = exp(S−m)·inv` is **not materialised**) |
- * | ③'   | `attention_state_pv:v2:f32:wg16x16:par`  | **KV-parallel reduction** variant of ③ (opt-in — below) |
+ * | ③'   | `attention_state_pv:v2:f32:wg16x16:par`  | **KV-parallel reduction** variant of ③ (level `reorder` — below) |
  * | ③ₜ   | `attention_state_pv:v1:f32:reg<geometry>` | **V row-tile sharing** variant of ③ (default — below)   |
  *
  * A **separate family** from the existing fused attention (src/kernels/attention.ts + the GEMM
@@ -29,8 +29,9 @@
  * construction — ADR 0067 decision 6; substituting a finite sentinel is MUST NOT) are no longer a
  * reason for the separate family, since the existing ② took the same form in v2.
  *
- * The QK path splits three ways by M (physical chunk rows): ①' for M ≤ 8 when the option is
- * parallel ({@link stateQkParallelEligible}), ①ₜ for M ≥ 16 regardless of the option
+ * The QK path splits three ways by M (physical chunk rows): ①' for M ≤ 8 when the Session's
+ * resolved reduction form (`stateAttentionReduce`, from attention's numeric level) is parallel
+ * ({@link stateQkParallelEligible}), ①ₜ for M ≥ 16 regardless of the form
  * ({@link stateQkTiledEligible}), and ① otherwise (9 to 15, and M ≤ 8 with sequential).
  *
  * MUST: **the bit-identity contract (agreement with the decomposed path) does not apply to the
@@ -38,10 +39,11 @@
  * Instead **determinism** applies as before: same key → byte-identical WGSL, same input → same
  * output (the reduction is fixed as a sequential pass in ascending col).
  *
- * ## ③' KV-parallel reduction variant (`SessionOptions.stateAttentionReduce: "parallel"` — perf-ledger K-12)
+ * ## ③' KV-parallel reduction variant (the resolved form `stateAttentionReduce: "parallel"` — perf-ledger K-12)
  *
- * `"parallel-fused"` selects ③' as the same option value (on eligible plans it replaces ② and ③'
- * with the fused stats-PV — ADR 0102, state-attention-stats-pv.ts).
+ * `"parallel-fused"` (what attention at the level `reorder` resolves to) selects ③' too (on
+ * eligible plans it replaces ② and ③' with the fused stats-PV — ADR 0102,
+ * state-attention-stats-pv.ts).
  *
  * In ③ one invocation accumulates one element of O in a **sequential loop** over the live columns,
  * so in decode (M=1) the active invocations are fixed at `D × B·H` (4,096 on the full layers of
@@ -54,14 +56,14 @@
  * workgroup increase).
  *
  * MUST: the reduction order differs from ③, so it is **not bit-identical** (determinism holds —
- * same input → same output). It is an opt-in option value under ADR 0058, and the default is ③
- * (the reference path). The checks come as a set of three (the reference path's checks unchanged,
- * the A/B tolerance check of ③' = tests/gpu_state_attention_parallel_test.ts, the census check =
+ * same input → same output). It runs only at the level `reorder` (ADR 0058), and the default
+ * (`exact`) is ③ (the reference path). The checks come as a set of three (the reference path's
+ * checks unchanged, the A/B tolerance check of ③' = tests/gpu_state_attention_parallel_test.ts, the census check =
  * tests/gpu_state_execution_test.ts).
  * SHOULD: **③' is selected only for plans with `M < 16`** (the condition is the other side of
  * {@link statePvTiledEligible}) (re-graded 2026-10-18 — ADR 0067, geometry-table addendum of
- * 2026-09-06). `M ≥ 16` is taken by ③ₜ regardless of the option (below, bit-identical to ③) — even
- * with the option `"parallel"`, prefill plans produce the reference path's values. In the K-12
+ * 2026-09-06). `M ≥ 16` is taken by ③ₜ regardless of the form (below, bit-identical to ③) — even
+ * with the form `"parallel"`, prefill plans produce the reference path's values. In the K-12
  * measurements the gain of ③' was confined to decode (prefill within noise —
  * docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md), so preferring ③ₜ, which cuts
  * traffic, loses nothing.
@@ -93,10 +95,10 @@
  * each stay latency-bound, while the other heads' re-reads of V mostly hit L2 (speculation consistent
  * with the numbers).
  *
- * ## ①' D-parallel reduction variant (**the same option value as ③'**, `stateAttentionReduce: "parallel"` — perf-ledger K-14)
+ * ## ①' D-parallel reduction variant (**the same resolved form as ③'**, `stateAttentionReduce: "parallel"` — perf-ledger K-14)
  *
- * `"parallel-fused"` selects ①' as the same option value (the fusion is on the ③ side only — ADR
- * 0102, state-attention-stats-pv.ts).
+ * `"parallel-fused"` selects ①' too (the fusion is on the ③ side only — ADR 0102,
+ * state-attention-stats-pv.ts).
  *
  * In ① one invocation owns one element of S (`(local row, live column)`) and the dot product is a
  * **sequential loop** over `D` (one thread does D multiply-adds). In decode (M=1) the invocation
@@ -112,14 +114,14 @@
  * "valid rows").
  *
  * MUST: the reduction order differs from ①, so it is **not bit-identical** (determinism holds).
- * **The option value is the same single one as ③'** (specifying `"parallel"` selects ①' and ③'
- * together — the ruling of 2026-09-06; no new knob).
+ * **The resolved form is the same single one as ③'** (`"parallel"` selects ①' and ③' together —
+ * the ruling of 2026-09-06; no new knob).
  * MUST: **①' is selected only for plans with `M ≤ 8`** (the condition is
  * {@link stateQkParallelEligible} — decode's M=1 and speculative verify with M ≤ 8). Plans with
- * `M ≥ 9` run ① even with the option `"parallel"` — in prefill ① is already filled by rows ×
+ * `M ≥ 9` run ① even with the form `"parallel"` — in prefill ① is already filled by rows ×
  * columns, and ①' was measured slower by the narrower row tile and the added barriers (2026-09-06
  * — details in that function's WHY). On the ③' side only plans with `M < 16` take it (`M ≥ 16`
- * takes ③ₜ regardless of the option), so **one option value covers two steps with different
+ * takes ③ₜ regardless of the form), so **one form covers two steps with different
  * ranges** (for decode / verify with `M ≤ 8`, ①' and ③' are selected together).
  * MUST: not one of ①'s contracts moves — outside the predicate (causal + sliding lower bound) but
  * inside the live range, **−inf is always written** (so ② does not consume leftovers); columns with
@@ -169,7 +171,7 @@
  * (live ≤ 511 + M) the fold was neutral to slower (≤ ×1.07, F ≥ 4 slower), so they keep ①'. Plans
  * outside the classes keep ①'.
  *
- * ## ①ₜ K row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13)
+ * ## ①ₜ K row-tile sharing variant (**the default path regardless of the resolved form** — perf-ledger K-13)
  *
  * In ① one invocation = one element of S, so one row of K is re-read **once per row**. In prefill
  * (M = 768), on a 14.7K-token chunk, ①QK is a traffic-bound 40% of the chunk's GPU time (breakdown
@@ -184,7 +186,7 @@
  * a sequential pass in ascending `d` (K tiles of 16 in ascending order — ADR 0022 decision 3),
  * exactly matching the sequential pass of ①'s `stateScoreFn`. The half scale is also matched in the
  * one-term expression (`(q·scale) · (k·scale)`) (q side in the A loader, k side in the B loader).
- * That is why it can be selected as the **default path** regardless of the option
+ * That is why it can be selected as the **default path** regardless of the resolved form
  * (`stateAttentionReduce`) — unlike ①', which changes the reduction order.
  * MUST: the effective `N` is **the run-time live**. The skeleton's `Dims.n` gets the static upper
  * bound `col_cap`, but the B loader reads only columns with `cl < live` and the store writes only
@@ -196,10 +198,10 @@
  * safe, and the value is discarded by the `select` at the store).
  * SHOULD: the condition is {@link stateQkTiledEligible} (`M ≥ 16`) (re-graded 2026-10-18 — ADR
  * 0067, geometry-table addendum of 2026-09-06). The priority is `M ≤ 8` (decode's M=1 and verify)
- * with the option `"parallel"` / `"parallel-fused"` → ①' / `M ≥ 16` → ①ₜ / otherwise → ① (decided
+ * with the form `"parallel"` / `"parallel-fused"` → ①' / `M ≥ 16` → ①ₜ / otherwise → ① (decided
  * in one place on the runtime side, `buildStateAttention`).
  *
- * ## ③ₜ V row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13 step 2)
+ * ## ③ₜ V row-tile sharing variant (**the default path regardless of the resolved form** — perf-ledger K-13 step 2)
  *
  * In ③ one invocation = one element of O, so one row of V is re-read **once per row** (the same
  * traffic bound that ①ₜ removed on the K side is still there on the V side in prefill). ③ₜ is the
@@ -214,7 +216,7 @@
  * reduction is fixed by the skeleton as a **sequential pass in ascending col** (K tiles of 16 in
  * ascending order — ADR 0022 decision 3), so the summation order exactly matches ③'s sequential
  * ascending-col pass. That is why it can be selected as the **default path** regardless of the
- * option (`stateAttentionReduce`).
+ * resolved form (`stateAttentionReduce`).
  * MUST: the effective `K` (reduction length) is **the run-time live**. The skeleton's `Dims.k`
  * gets S's column stride `col_cap`, but the K tile loop bound is built from live (looping up to
  * `col_cap` makes the work proportional to the capacity and fails the acceptance condition of ADR
@@ -230,7 +232,7 @@
  * of the inner `workgroupBarrier`.
  * SHOULD: the condition is {@link statePvTiledEligible} (`M ≥ 16`) (re-graded 2026-10-18 — ADR
  * 0067, geometry-table addendum of 2026-09-06). The priority is `M ≥ 16` → ③ₜ (regardless of the
- * option) / `M < 16` with the option `"parallel"` → ③' / otherwise → ③ (decided in one place on the
+ * form) / `M < 16` with the form `"parallel"` → ③' / otherwise → ③ (decided in one place on the
  * runtime side, `buildStateAttention`).
  *
  * ## Symbols (source of truth = ADR 0067 decision 4)
@@ -393,9 +395,9 @@ export const stateQkParallelKey = (
 
 /**
  * **Eligibility** of ①' — only plans whose `M` (physical chunk rows) is 8 or less. Even with the
- * option (`stateAttentionReduce`) set to `"parallel"`, plans that fail this condition run ① (the
- * option itself is checked on the runtime side by `buildStateAttention`; this is a pure function
- * that looks only at the shape of the plan).
+ * resolved form (`stateAttentionReduce`) `"parallel"`, plans that fail this condition run ① (the
+ * form itself is read on the runtime side by `buildStateAttention`; this is a pure function that
+ * looks only at the shape of the plan).
  *
  * WHY: what ①' shortens is "the latency of one invocation running `D` multiply-adds
  * sequentially", and that is the bottleneck only in decode (M=1), where the active invocations are
@@ -406,8 +408,8 @@ export const stateQkParallelKey = (
  * GPU time grew 1.5–1.9× and prefill as a whole regressed by +30–60%.
  * For speculative verify (M = k+1 ≤ 8, MTP stage 4-B ⑤, measured 2026-09-09 — research 2026-09-09
  * §6.2) it was neutral: RTX, P≈4.8K, M=4, ①QK full 3.32 → 3.87 ms, sliding 1.87 → 1.09 ms (−0.2 ms
- * in total), wall −2% (within noise). It is widened even though neutral because with the default
- * option value (parallel) verify's row 0 and decode then share **the same reduction order** (u32
+ * in total), wall −2% (within noise). It is widened even though neutral because with the parallel
+ * form verify's row 0 and decode then share **the same reduction order** (u32
  * match), so row 0's logits do not move wherever speculation switches on or off.
  * SHOULD: keep the condition **inside the measured range** (the same rule as ADR 0082 decision 4 —
  * do not widen it by extrapolating "a small M is probably a gain". M=1 (a gain) and M=4 (neutral)
@@ -554,7 +556,7 @@ export const stateQkTiledKey = (
  * of the tile runs empty: the same traffic as ① plus the cost of barriers and shared memory.
  * MUST: **bit-identical to ①** (the summation order per output element matches as a sequential
  * pass in ascending d — the numeric contract of ADR 0022 decision 3 is an invariant of the
- * skeleton). That is why it is the **default path** regardless of the option
+ * skeleton). That is why it is the **default path** regardless of the resolved form
  * (`stateAttentionReduce`), unlike ①', which changes the reduction order.
  * MUST: for plans with `M ≤ 8` (decode's M=1 and verify) it does not overlap ①'s condition
  * ({@link stateQkParallelEligible}) (8 < 16). The priority is held in one place on the runtime
@@ -634,10 +636,10 @@ export const statePvTiledKey = (
  * MUST: **bit-identical to ③** (the one-term expression is the same `exp(S − m)·inv`, and the
  * summation order matches as a sequential pass in ascending col — the numeric contract of ADR 0022
  * decision 3 is an invariant of the skeleton). That is why it is the **default path** regardless of
- * the option (`stateAttentionReduce`), unlike ③', which changes the reduction order.
+ * the resolved form (`stateAttentionReduce`), unlike ③', which changes the reduction order.
  * MUST: the threshold is **the same 16** as ①ₜ ({@link stateQkTiledEligible}), but the function is
  * kept separate (①ₜ and ③ₜ are separate kernels, so the range of one can move on its own). Decode
- * with `M = 1` meets neither condition, so ①' / ③' are selected per the option.
+ * with `M = 1` meets neither condition, so ①' / ③' are selected per the resolved form.
  */
 export const statePvTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
 

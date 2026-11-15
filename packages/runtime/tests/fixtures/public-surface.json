@@ -235,10 +235,6 @@
         "kind": "class"
       },
       {
-        "name": "LinearGemvReduce",
-        "kind": "typeAlias"
-      },
-      {
         "name": "MemoryContainerInput",
         "kind": "typeAlias"
       },
@@ -307,10 +303,6 @@
         "kind": "class"
       },
       {
-        "name": "RmsNormReduce",
-        "kind": "typeAlias"
-      },
-      {
         "name": "RunInput",
         "kind": "typeAlias"
       },
@@ -365,10 +357,6 @@
       {
         "name": "SharedWeight",
         "kind": "class"
-      },
-      {
-        "name": "StateAttentionReduce",
-        "kind": "typeAlias"
       },
       {
         "name": "StateBackingStats",

@@ -326,12 +326,15 @@ describe("pairing of packed int8 activations (ADR 0105)", () => {
   });
 
   it("an SRQ swallowed by the linear→SRQ fusion is not a packed target (the output side is out of scope)", () => {
-    const fused = plan({ afterLinear: true }, { fuseLinearStaticQuantize: true });
+    const fused = plan({ afterLinear: true });
     assertEquals(fused.counts.linearStaticQuantize, 1);
     assertEquals(fused.counts.packedStaticQuantize, 0);
     assertEquals(roles(fused.steps), []);
     // With fusion off it goes back to a plain node, and the same SRQ becomes a packed target.
-    const unfused = plan({ afterLinear: true }, { fuseLinearStaticQuantize: false });
+    const unfused = plan(
+      { afterLinear: true },
+      { disabledRules: new Set(["linearStaticQuantize"]) },
+    );
     assertEquals(unfused.counts.packedStaticQuantize, 1);
     assertEquals(roles(unfused.steps), ["static_quantize:write", "linear:read"]);
   });
@@ -358,7 +361,6 @@ describe("pairing of packed int8 activations (ADR 0105)", () => {
         maxComputeWorkgroupsPerDimension: 65535,
       },
       packedStaticQuantize: true,
-      fuseLinearStaticQuantize: true,
       linearGemvReduce: "parallel",
       linearCompute: "f32",
       weightLayouts: new Map([["w", { storage: "i2" }]]),
@@ -472,7 +474,7 @@ describe("generated code for packed activations (ADR 0105)", () => {
   });
 });
 
-/** Plans the `x → linear → static_quantize` graph with the linear→SRQ fusion (ADR 0103) enabled. */
+/** Plans the `x → linear → static_quantize` graph on the parallel GEMV, where the linear→SRQ fusion (ADR 0103) applies. */
 const fuseLinearStaticQuantize = (
   o: LinearStaticQuantizeOptions = {},
   context: Partial<Parameters<typeof planFusions>[1]> = {},
@@ -492,7 +494,6 @@ const fuseLinearStaticQuantize = (
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxComputeWorkgroupsPerDimension: 65535,
     },
-    fuseLinearStaticQuantize: true,
     linearGemvReduce: "parallel",
     linearCompute: "f32",
     weightLayouts: new Map([["w", weight]]),
@@ -526,10 +527,9 @@ describe("optional linear→static_quantize fusion", () => {
       }
     }
   });
-  it("leaves no opt-in, another compute method, expanded weights and unvalidated shapes on the existing path", () => {
+  it("leaves the rule left out, another compute method, expanded weights and unvalidated shapes on the existing path", () => {
     for (const context of [
-      { fuseLinearStaticQuantize: undefined },
-      { fuseLinearStaticQuantize: false },
+      { disabledRules: new Set(["linearStaticQuantize"]) },
       { linearGemvReduce: "sequential" },
       { linearGemvReduce: "parallel-subgroup32" },
       { linearCompute: "a8" },

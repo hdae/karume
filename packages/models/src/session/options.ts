@@ -29,9 +29,8 @@ import { ModelInputError } from "../errors.ts";
  * The type of the fields the user can override explicitly (the same key set as the manifest
  * vocabulary; the values take the runtime's value range).
  *
- * NOTE: the value range is the runtime's rather than `SessionSpec`'s because the user may also pick
- * execution forms the distribution does not declare (e.g. `linearGemvReduce: "parallel-subgroup32"`
- * — depends on the device's subgroups).
+ * NOTE: the value range is the runtime's rather than `SessionSpec`'s (the two vocabularies are kept
+ * equal by {@link WRITERS}; the runtime's is the one a Session checks).
  */
 export type SessionOverrides = Partial<Pick<SessionOptions, keyof SessionSpec>>;
 
@@ -66,26 +65,16 @@ type SpecWriter = (source: SessionOverrides) => SessionOptions;
  * copied.
  */
 const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
+  numerics: ({ numerics }) => (numerics === undefined ? {} : { numerics }),
   linearCompute: ({ linearCompute }) => (linearCompute === undefined ? {} : { linearCompute }),
   convCompute: ({ convCompute }) => (convCompute === undefined ? {} : { convCompute }),
   attentionCompute: ({ attentionCompute }) =>
     attentionCompute === undefined ? {} : { attentionCompute },
   attentionScoreStorage: ({ attentionScoreStorage }) =>
     attentionScoreStorage === undefined ? {} : { attentionScoreStorage },
-  linearGemvReduce: ({ linearGemvReduce }) =>
-    linearGemvReduce === undefined ? {} : { linearGemvReduce },
-  stateAttentionReduce: ({ stateAttentionReduce }) =>
-    stateAttentionReduce === undefined ? {} : { stateAttentionReduce },
-  fuseRmsNormAdd: ({ fuseRmsNormAdd }) => (fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
-  fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
-    fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize },
-  fuseGeluMulStaticQuantize: ({ fuseGeluMulStaticQuantize }) =>
-    fuseGeluMulStaticQuantize === undefined ? {} : { fuseGeluMulStaticQuantize },
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined ? {} : { packedStaticQuantize },
   integerGemv: ({ integerGemv }) => (integerGemv === undefined ? {} : { integerGemv }),
-  linearGemvPlanes: ({ linearGemvPlanes }) =>
-    linearGemvPlanes === undefined ? {} : { linearGemvPlanes },
 };
 
 /** Builds `SessionOptions` holding only the set fields (an unset key gets no field at all). */
@@ -115,11 +104,6 @@ const ATTENTION_COMPUTES: Readonly<Record<NonNullable<SessionOptions["attentionC
   { f32: true, f16: true, a8: true };
 const SCORE_STORAGES: Readonly<Record<NonNullable<SessionOptions["attentionScoreStorage"]>, true>> =
   { f32: true, f16: true, none: true };
-const LINEAR_GEMV_REDUCES: Readonly<Record<NonNullable<SessionOptions["linearGemvReduce"]>, true>> =
-  { sequential: true, parallel: true, "parallel-subgroup32": true };
-const STATE_ATTENTION_REDUCES: Readonly<
-  Record<NonNullable<SessionOptions["stateAttentionReduce"]>, true>
-> = { sequential: true, parallel: true, "parallel-fused": true };
 
 /**
  * The value-range check of one field (passes when the field is absent).
@@ -134,6 +118,9 @@ const STATE_ATTENTION_REDUCES: Readonly<
 const VALUE_GATES: {
   readonly [K in keyof Required<SessionSpec>]: (options: SessionOptions) => string | undefined;
 } = {
+  // The runtime's `sessionOptionsViolation` checks the declaration first and in full, `null`
+  // included (only `undefined` is "not given" there), so no range is repeated here.
+  numerics: () => undefined,
   linearCompute: ({ linearCompute }) =>
     linearCompute === undefined || isOneOf(LINEAR_COMPUTES, linearCompute)
       ? undefined
@@ -150,26 +137,6 @@ const VALUE_GATES: {
     attentionScoreStorage === undefined || isOneOf(SCORE_STORAGES, attentionScoreStorage)
       ? undefined
       : "attentionScoreStorage is invalid",
-  linearGemvReduce: ({ linearGemvReduce }) =>
-    linearGemvReduce === undefined || isOneOf(LINEAR_GEMV_REDUCES, linearGemvReduce)
-      ? undefined
-      : "linearGemvReduce is invalid",
-  stateAttentionReduce: ({ stateAttentionReduce }) =>
-    stateAttentionReduce === undefined || isOneOf(STATE_ATTENTION_REDUCES, stateAttentionReduce)
-      ? undefined
-      : "stateAttentionReduce is invalid",
-  fuseRmsNormAdd: ({ fuseRmsNormAdd }) =>
-    fuseRmsNormAdd === undefined || typeof fuseRmsNormAdd === "boolean"
-      ? undefined
-      : "fuseRmsNormAdd must be a boolean",
-  fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
-    fuseLinearStaticQuantize === undefined || typeof fuseLinearStaticQuantize === "boolean"
-      ? undefined
-      : "fuseLinearStaticQuantize must be a boolean",
-  fuseGeluMulStaticQuantize: ({ fuseGeluMulStaticQuantize }) =>
-    fuseGeluMulStaticQuantize === undefined || typeof fuseGeluMulStaticQuantize === "boolean"
-      ? undefined
-      : "fuseGeluMulStaticQuantize must be a boolean",
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined || typeof packedStaticQuantize === "boolean"
       ? undefined
@@ -178,18 +145,14 @@ const VALUE_GATES: {
     integerGemv === undefined || typeof integerGemv === "boolean"
       ? undefined
       : "integerGemv must be a boolean",
-  linearGemvPlanes: ({ linearGemvPlanes }) =>
-    linearGemvPlanes === undefined || typeof linearGemvPlanes === "boolean"
-      ? undefined
-      : "linearGemvPlanes must be a boolean",
 };
 
 /**
  * Checks value range, type and combination in **one place** (the canonical acceptance condition —
  * conditions are not split by origin).
  *
- * Combinations (`fuseLinearStaticQuantize` needs `linearGemvReduce: parallel`, etc.) borrow the
- * runtime's `sessionOptionsViolation` as is — Session construction rejects with the same function,
+ * Combinations (`packedStaticQuantize` needs linear at `reorder`, etc.) borrow the runtime's
+ * `sessionOptionsViolation` as is — Session construction rejects with the same function,
  * so a copy here could split the two accepted sets. Conditions that need GPU capabilities
  * (shader-f16 / subgroups) are not decided here (they fail at the step that looks at the device).
  */
@@ -199,6 +162,30 @@ const optionsViolation = (options: SessionOptions): string | undefined => {
     if (violation !== undefined) return violation;
   }
   return sessionOptionsViolation(options);
+};
+
+/**
+ * The `numerics` of the effective settings when both sides give one: explicit over declared, per
+ * field. With one side only the ordinary per-key rule already gives it, so nothing is returned.
+ *
+ * MUST: an explicit value the runtime rejects is not merged — it stays as given and fails in the
+ * check that follows. Merging it would hide the fault: a `null` level would fall back to the
+ * declaration, and an unknown field or an `ops` that is not an object would be dropped.
+ */
+const composeNumerics = (
+  declared: SessionSpec["numerics"],
+  explicit: SessionOptions["numerics"],
+): Pick<SessionOptions, "numerics"> => {
+  if (declared === undefined || explicit === undefined) return {};
+  if (sessionOptionsViolation({ numerics: explicit }) !== undefined) return {};
+  const level = explicit.level ?? declared.level;
+  const ops = { ...declared.ops, ...explicit.ops };
+  return {
+    numerics: {
+      ...(level === undefined ? {} : { level }),
+      ...(Object.keys(ops).length === 0 ? {} : { ops }),
+    },
+  };
 };
 
 /** Looks up the acceptance table by name (to accept string keys from `Object.keys`, outside the type). */
@@ -215,6 +202,9 @@ const accepts = (policy: FamilySessionPolicy, key: string): boolean => {
  * - Per key: **the explicit value if any, else the declaration, and with neither no field at all**
  *   (runtime default). An explicit `false` beats a declared `true` (only `undefined` means "not
  *   given").
+ * - `numerics` composes by the same rule one level down, per field: the explicit `level` if any,
+ *   else the declared one; per op kind the explicit level if any, else the declared one. An explicit
+ *   `{ ops: { attention: "exact" } }` therefore keeps the levels a preset declares for the rest.
  * - An invalid explicit value (`null` / non-boolean / a spelling outside the accepted set) does not
  *   fall back to the declaration; it is a `ModelInputError`.
  * - A key the `policy` does not accept, declared by the manifest, is a plain `Error` (an asset
@@ -251,7 +241,11 @@ export const resolveSessionOptions = (
   }
   // ?? is not used because it would send null back to the declaration — an explicit field overrides
   // the declaration whatever its value, and an invalid value fails in the check right after.
-  const effective: SessionOptions = { ...writeOptions(declared), ...explicit };
+  const effective: SessionOptions = {
+    ...writeOptions(declared),
+    ...explicit,
+    ...composeNumerics(declared.numerics, explicit.numerics),
+  };
   const violation = optionsViolation(effective);
   if (violation !== undefined) {
     // Only the thrown type is split by origin (ADR 0107 decision 2). The decision compares the

@@ -124,7 +124,6 @@ import {
   REORDER_STRATEGIES,
   type ROW_BLOCK_SPLIT,
   type SessionOptions,
-  STATE_ATTENTION_REDUCES,
   type StateAttentionReduce,
 } from "./session-types.ts";
 import {
@@ -359,11 +358,6 @@ export type AdmissionReport = {
  */
 export type EstimateOptions = {
   /**
-   * The same states attention setting as the Session. When omitted, the temporaries of the
-   * reference path are estimated.
-   */
-  readonly stateAttentionReduce?: SessionOptions["stateAttentionReduce"];
-  /**
    * The same numeric requirement as the Session (`SessionOptions.numerics`). When omitted, the
    * reference kernels are estimated.
    */
@@ -480,7 +474,7 @@ export type EstimateOptions = {
   readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
   /**
    * The compute form of fused attention (the same value as `SessionOptions.attentionCompute`;
-   * omitted = `"f32"`, the runtime default — the same precedent as `stateAttentionReduce`).
+   * omitted = `"f32"`, the runtime default — the same precedent as `numerics`).
    *
    * It affects the in-node temporaries of fused attention ops (the width of one S element, whether
    * i8a8 quantisation temporaries exist — ADR 0124 decision 7), and with `"a8"` the estimate sees the
@@ -505,8 +499,8 @@ export type EstimateOptions = {
   /**
    * The storage of full state slots (the same value as `SessionOptions.fullStateStorage`; omitted =
    * `"f32"`). `"f16"` halves the bytes of the full slots and leaves the sliding slots alone (the same
-   * single function as the allocation), and on an f16 slot `stateAttentionReduce: "parallel-fused"`
-   * counts the temporaries of the unfused kernels, as execution runs them.
+   * single function as the allocation), and on an f16 slot the resolved attention form
+   * `"parallel-fused"` counts the temporaries of the unfused kernels, as execution runs them.
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
    */
   readonly fullStateStorage?: SessionOptions["fullStateStorage"];
@@ -558,30 +552,18 @@ export type EstimateOptions = {
    */
   readonly expertCache?: SessionOptions["expertCache"];
   /**
-   * The fusion opt-ins and the reduction forms the fusion pass reads (the same values as the
-   * `SessionOptions` fields of these names; omitted = the runtime default, as for the Session).
+   * The packed int8 activations and the integer GEMV (the same values as the `SessionOptions`
+   * fields of these names; omitted = off, as for the Session).
    *
-   * The estimate plans fusion with them, as execution does, through the same mapping and the same
-   * checks as Session construction (`sessionOptionsViolation`, so a combination no Session accepts
-   * fails loudly here too), and counts the windows these fusions take in their post-fusion form
-   * ({@link AdmissionScenario.workspaceBytes}). A knob omitted is planned at the runtime default, as
-   * for the Session.
+   * The estimate plans fusion with them and with the levels of {@link numerics}, as execution does,
+   * through the same mapping and the same checks as Session construction
+   * (`sessionOptionsViolation`, so a combination no Session accepts fails loudly here too), and
+   * counts the windows the fusions take in their post-fusion form
+   * ({@link AdmissionScenario.workspaceBytes}).
    */
-  readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
-  /** See {@link fuseRmsNormAdd}. */
-  readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
-  /** See {@link fuseRmsNormAdd}. */
-  readonly fuseGeluMulStaticQuantize?: SessionOptions["fuseGeluMulStaticQuantize"];
-  /** See {@link fuseRmsNormAdd}. */
   readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
-  /** See {@link fuseRmsNormAdd}. */
+  /** See {@link packedStaticQuantize}. */
   readonly integerGemv?: SessionOptions["integerGemv"];
-  /** See {@link fuseRmsNormAdd}. */
-  readonly linearGemvPlanes?: SessionOptions["linearGemvPlanes"];
-  /** See {@link fuseRmsNormAdd}. */
-  readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
-  /** See {@link fuseRmsNormAdd}. */
-  readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /**
    * The fusion rules written outside the runtime (the same value as `SessionOptions.fusionRules` —
    * ADR 0148). The estimate plans with them first and in their order, as a Session given them does,
@@ -1854,22 +1836,6 @@ export const estimateGraphMemory = (
   // inputs' semantic dtypes) also run at this point. `PreparedModel.estimate` thus runs them a
   // second time after construction, but both are pure, idempotent and cost one graph scan.
   validateGraphContracts(graph);
-  if (
-    options.stateAttentionReduce !== undefined &&
-    typeof options.stateAttentionReduce !== "string"
-  ) {
-    throw new ExecutionError(
-      `options.stateAttentionReduce must be a string (${typeof options.stateAttentionReduce})`,
-    );
-  }
-  if (
-    options.stateAttentionReduce !== undefined &&
-    !Object.hasOwn(STATE_ATTENTION_REDUCES, options.stateAttentionReduce)
-  ) {
-    throw new ExecutionError(
-      "options.stateAttentionReduce '" + options.stateAttentionReduce + "' is not supported",
-    );
-  }
   // MUST: check the ranges here, regardless of the graph's shape. Checking only inside
   // stateAttentionTemps would silently accept -1 / 1.5 / NaN for graphs without states-form
   // attention.
@@ -1910,27 +1876,19 @@ export const estimateGraphMemory = (
   const seatViolation = sessionOptionsViolation({
     [REORDER_STRATEGIES]: options[REORDER_STRATEGIES],
     numerics: options.numerics,
-    stateAttentionReduce: options.stateAttentionReduce,
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
     linearCompute: options.linearCompute,
     fullStateStorage: options.fullStateStorage,
-    fuseRmsNormAdd: options.fuseRmsNormAdd,
-    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize,
-    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize,
     packedStaticQuantize: options.packedStaticQuantize,
     integerGemv: options.integerGemv,
-    linearGemvPlanes: options.linearGemvPlanes,
-    linearGemvReduce: options.linearGemvReduce,
-    rmsNormReduce: options.rmsNormReduce,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
   // The reduction form of states-form attention, by the derivation Session construction uses (the
-  // option that names it, else the level of `numerics`).
+  // level of `numerics`).
   const { stateAttentionReduce } = executionKnobDefaults({
     [REORDER_STRATEGIES]: options[REORDER_STRATEGIES],
     numerics: options.numerics,
-    stateAttentionReduce: options.stateAttentionReduce,
   });
   // The device facts are checked here regardless of the graph's shape (the rule of
   // {@link assertLimitOption}), before the fusion pass reads them.

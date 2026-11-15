@@ -13,6 +13,7 @@ import {
   assertExecutionKnobs,
   sessionOptionsViolation,
 } from "../src/runtime/session-options-check.ts";
+import { REORDER_STRATEGIES } from "../src/runtime/session-types.ts";
 import { bothScenarios, openGraph } from "./helpers/estimate-graphs.ts";
 import { fullStateGraph } from "./helpers/full-state-graph.ts";
 
@@ -55,8 +56,7 @@ describe("fullStateStorage spelling", () => {
 
   it("the knob check names it with the other knobs", () => {
     assertThrows(
-      () =>
-        assertExecutionKnobs("f32", "f32", "f32", "f32", "sequential", "sequential", "f8" as "f16"),
+      () => assertExecutionKnobs("f32", "f32", "f32", "f32", "f8" as "f16"),
       ExecutionError,
       'fullStateStorage: "f8"',
     );
@@ -148,25 +148,28 @@ describe("the fused stats + PV under f16", () => {
     graph: ReturnType<typeof fullStateGraph>,
     options: Omit<EstimateOptions, "generation">,
   ): number => bothScenarios(estimate(graph, options)).decode.workspaceBytes;
+  /** Attention at `reorder`: the parallel reductions with the row statistics folded into PV. */
+  const fused = { numerics: { ops: { attention: "reorder" } } } as const;
+  /** The same parallel reductions without the fold. */
+  const parallel = { ...fused, [REORDER_STRATEGIES]: { stateAttention: "parallel" } } as const;
 
   it("an f16 full slot counts the statistics temporary the fused kernel has none of", () => {
     const graph = fullStateGraph({ ...SHAPE, slots: "full" });
     assert(
-      decodeBytes(graph, { stateAttentionReduce: "parallel-fused" }) <
-        decodeBytes(graph, { stateAttentionReduce: "parallel" }),
+      decodeBytes(graph, fused) < decodeBytes(graph, parallel),
       "the fixture does not fuse on f32, so this case would prove nothing",
     );
     assertEquals(
-      decodeBytes(graph, { stateAttentionReduce: "parallel-fused", fullStateStorage: "f16" }),
-      decodeBytes(graph, { stateAttentionReduce: "parallel", fullStateStorage: "f16" }),
+      decodeBytes(graph, { ...fused, fullStateStorage: "f16" }),
+      decodeBytes(graph, { ...parallel, fullStateStorage: "f16" }),
     );
   });
 
   it("a sliding slot keeps the fusion under f16", () => {
     const graph = fullStateGraph({ ...SHAPE, slots: "sliding" });
     assertEquals(
-      decodeBytes(graph, { stateAttentionReduce: "parallel-fused", fullStateStorage: "f16" }),
-      decodeBytes(graph, { stateAttentionReduce: "parallel-fused" }),
+      decodeBytes(graph, { ...fused, fullStateStorage: "f16" }),
+      decodeBytes(graph, fused),
     );
   });
 });

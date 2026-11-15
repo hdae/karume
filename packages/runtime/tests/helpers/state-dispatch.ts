@@ -287,7 +287,7 @@ export const runStateAttention = async (
      * Reduction form of ① (default sequential = reference path; parallel = the D-parallel
      * reduction variant ①').
      *
-     * NOTE: the Session option (`stateAttentionReduce`) switches ① and ③ **together**, but this
+     * NOTE: a Session's level for attention (`numerics`) switches ① and ③ **together**, but this
      * direct dispatch harness can pick the two stages **separately**. Without pinning ③ to the
      * reference path while measuring the band of ①', a difference could not be attributed to ①' or
      * to ③'.

@@ -1,8 +1,9 @@
 // The check of the per-bundle census table (`helpers/census-table.ts`) (needs neither a GPU nor
 // weights — it reads only the manifests and the table).
 //
-// ① Consistency of the table itself: each row's bundle passes the family's resolution, and the
-//   options it writes are only the bundle's non-reference options.
+// ① Consistency of the table itself: each row's bundle is made of seats the family accepts and holds
+//   no reference value, and the counts it writes are only for the bundle's non-reference seats (and
+//   the built-in fusions, which apply in every bundle).
 // ② Where the key comes from: the table's key is determined by the **effective** SessionOptions
 //   obtained by passing the manifest's `session` through the family's resolution (before
 //   stateAttentionReduce was promoted, gemma added models' defaults outside the resolution, so a
@@ -21,6 +22,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest, type SessionSpec } from "@karume/hub";
 import { resolveGemmaSessionOptions } from "../src/gemma/session-options.ts";
+import { censusSeats, SEAT_REFERENCE } from "../../runtime/tests/helpers/pipeline-census.ts";
 import {
   type BundleCensusRow,
   bundleKey,
@@ -28,9 +30,21 @@ import {
   censusRowOf,
   effectiveSessionOptions,
   phaseExpectations,
+  SESSION_POLICIES,
 } from "./helpers/census-table.ts";
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
+
+/**
+ * The seats a level of `numerics` resolves to (the rest are approximation options, each its own key
+ * of the manifest vocabulary).
+ */
+const RESOLVED_SEATS: ReadonlySet<string> = new Set([
+  "linearGemvReduce",
+  "stateAttentionReduce",
+  "linearGemvPlanes",
+  "rmsNormReduce",
+]);
 
 /** Lists every (component, phase) of the rows. */
 const phasesOf = (row: BundleCensusRow): readonly (readonly [string, string])[] =>
@@ -39,14 +53,23 @@ const phasesOf = (row: BundleCensusRow): readonly (readonly [string, string])[] 
   );
 
 describe("consistency of the census table rows (no GPU, no assets)", () => {
-  it("each row's bundle passes the family's resolution as is, and the key is not the reference bundle (empty)", () => {
+  it("each row's bundle is made of seats the family accepts, holds no reference value, and is not the reference bundle (empty)", () => {
     for (const row of CENSUS_TABLE) {
-      const where = `${row.family} [${bundleKey(row.session)}]`;
-      // Passed through the resolution as an explicit choice — keys the family does not accept and
-      // invalid combinations fail here.
-      const effective = effectiveSessionOptions(row.family, {}, row.session, where);
-      assertEquals(bundleKey(effective), bundleKey(row.session), where);
-      assert(bundleKey(row.session) !== "", `${where}: the reference bundle needs no census row`);
+      const where = `${row.family} [${bundleKey(row.seats)}]`;
+      const policy: Readonly<Record<string, boolean>> = SESSION_POLICIES[row.family];
+      for (const [seat, value] of Object.entries(row.seats)) {
+        // A resolved form comes from the family's `numerics`, an approximation from its own key.
+        const key = RESOLVED_SEATS.has(seat) ? "numerics" : seat;
+        assert(
+          Object.hasOwn(policy, key) && policy[key],
+          `${where}: the family does not accept ${key} (seat ${seat})`,
+        );
+        assert(
+          value !== (SEAT_REFERENCE as Readonly<Record<string, unknown>>)[seat],
+          `${where}: seat ${seat} is written at its reference value`,
+        );
+      }
+      assert(bundleKey(row.seats) !== "", `${where}: the reference bundle needs no census row`);
     }
   });
 
@@ -54,16 +77,16 @@ describe("consistency of the census table rows (no GPU, no assets)", () => {
     const seen = new Set<string>();
     for (const row of CENSUS_TABLE) {
       for (const model of row.models) {
-        const key = `${row.family} / ${model} / ${bundleKey(row.session)}`;
+        const key = `${row.family} / ${model} / ${bundleKey(row.seats)}`;
         assert(!seen.has(key), `the census table has a duplicate row: ${key}`);
         seen.add(key);
       }
     }
   });
 
-  it("each row has at least one phase, expects only the bundle's non-reference options, and its counts are non-negative integers", () => {
+  it("each row has at least one phase, expects only the bundle's non-reference seats, and its counts are non-negative integers", () => {
     for (const row of CENSUS_TABLE) {
-      const where = `${row.family} [${bundleKey(row.session)}]`;
+      const where = `${row.family} [${bundleKey(row.seats)}]`;
       const phases = phasesOf(row);
       assert(
         phases.length > 0,
@@ -82,55 +105,58 @@ describe("consistency of the census table rows (no GPU, no assets)", () => {
     }
   });
 
-  it("a row that writes a count for an option not in the bundle fails when the expectation is built", () => {
+  it("a row that writes a count for a seat not in the bundle fails when the expectation is built", () => {
     const broken: BundleCensusRow = {
       family: "sbv2",
       models: ["F1"],
-      session: { linearCompute: "a8" },
+      seats: { linearCompute: "a8" },
       census: { front: { run: { linearGemvReduce: { variant: 1, reference: 0 } } } },
     };
     assertThrows(() => phaseExpectations(broken, "front", "run"), Error, "linearGemvReduce");
   });
 
   it("an unfilled phase returns no expectation (it does not turn into an assertion of 0)", () => {
-    const row = censusRowOf("gemma4", "e2b", { linearGemvReduce: "parallel" });
+    const row = censusRowOf("gemma4", "12b", { numerics: { level: "reorder" } });
     assert(row !== undefined);
-    assertEquals(phaseExpectations(row, "target", "prefill"), undefined);
+    assertEquals(phaseExpectations(row, "target", "verify"), undefined);
   });
 });
 
 describe("the table's key is determined by the effective settings obtained by passing the manifest's session through the family's resolution", () => {
   it("gemma's declaration resolves to the same value the entry resolves, and a preset without a declaration is the reference bundle", () => {
     const where = "census: gemma4 e2b";
-    const declared: SessionSpec = {
-      linearGemvReduce: "parallel",
-      stateAttentionReduce: "parallel",
-    };
+    const declared: SessionSpec = { numerics: { level: "reorder" } };
     const effective = effectiveSessionOptions("gemma4", declared, {}, where);
     // The resolution the table uses and the value gemma's entry (`resolveGemmaSessionOptions`)
     // passes to the Session are the same single path.
     assertEquals(effective, resolveGemmaSessionOptions(declared, {}, where));
-    assertEquals(bundleKey(effective), "linearGemvReduce=parallel,stateAttentionReduce=parallel");
+    assertEquals(
+      bundleKey(censusSeats(effective)),
+      "linearGemvReduce=parallel,stateAttentionReduce=parallel-fused",
+    );
     // A preset without a declaration (`i4`) is the reference bundle — if the family's code defaults
     // crept into the resolution this would not be empty.
-    assertEquals(bundleKey(effectiveSessionOptions("gemma4", {}, {}, where)), "");
-    // An explicit reference value beats the declaration and drops out of the key (i4-gemvpar, with
-    // ③ set back to sequential, is a GEMV-only bundle).
+    assertEquals(bundleKey(censusSeats(effectiveSessionOptions("gemma4", {}, {}, where))), "");
+    // An explicit reference level beats the declaration for its op kind and drops out of the key
+    // (i4-gemvpar, with attention set back to exact, is a GEMV-only bundle).
     const reverted = effectiveSessionOptions(
       "gemma4",
       declared,
       {
-        stateAttentionReduce: "sequential",
+        numerics: { ops: { attention: "exact" } },
       },
       where,
     );
-    assertEquals(bundleKey(reverted), "linearGemvReduce=parallel");
-    assertEquals(censusRowOf("gemma4", "e2b", reverted)?.session, { linearGemvReduce: "parallel" });
+    assertEquals(bundleKey(censusSeats(reverted)), "linearGemvReduce=parallel");
+    assertEquals(censusRowOf("gemma4", "e2b", reverted)?.seats, { linearGemvReduce: "parallel" });
   });
 
   it("a bundle without a row and an unknown series cannot be looked up", () => {
     assertEquals(censusRowOf("irodori", "v4-small", { linearCompute: "f16" }), undefined);
-    assertEquals(censusRowOf("gemma4", "e4b", { linearGemvReduce: "parallel" }), undefined);
+    assertEquals(
+      censusRowOf("gemma4", "e4b", { numerics: { ops: { linear: "reorder" } } }),
+      undefined,
+    );
     assertThrows(() => effectiveSessionOptions("unknown-family", {}), Error, "unknown-family");
   });
 });
@@ -184,10 +210,11 @@ describe.skipIf(MIRRORS.length === 0)(
           for (const [quantName, quant] of Object.entries(entry.quants)) {
             const where = `${mirror} ${modelName} '${quantName}'`;
             const effective = effectiveSessionOptions(family, quant.session, {}, where);
-            if (bundleKey(effective) === "") continue;
+            const key = bundleKey(censusSeats(effective));
+            if (key === "") continue;
             bundles++;
             if (censusRowOf(family, modelName, effective) === undefined) {
-              missing.push(`${where}: ${family} [${bundleKey(effective)}]`);
+              missing.push(`${where}: ${family} [${key}]`);
             }
           }
         }

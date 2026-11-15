@@ -99,8 +99,8 @@ maintainer's ruling of 2026-11-06).
 ## later
 
 - **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
-  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted, nothing below is built; the
-  maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
+  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted; each item states what
+  has landed; the maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
   1. *(Landed 2026-11-15: the link check in the core lane with the `SPEC:` marker, the approved deletions, `CLAUDE.md`,
      the `deno-*` rows; the sections of `known-issues.md` for the Intel Arc B570, Deno's `GPUDevice.destroy()` and the
      Pixel load failure, once the comments and the items that cited them said what they need themselves.)*
@@ -129,10 +129,22 @@ maintainer's ruling of 2026-11-06).
      - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`
        (so no browser check); slower than the reference kernel at K = 1536. A fast form would reuse the GEMM skeleton.
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
-  4. **Requirement levels.** The declaration in presets and the manifest, its two scopes, selection within a level, the
-     rule for fusions that span ops; the options that name one kernel leave the public surface (breaking); the runtime's
-     regression corpus. The ADR 0147 follow-ups below that survive (items 1, 2, 4 and the derived applicability) land
-     here.
+  4. **Requirement levels.** *(Landed 2026-11-15: `SessionOptions.numerics` — a level for the whole model and per op
+     kind (`linear`, `attention`, `rms_norm`), the narrower scope winning — in the runtime, the manifest's `session`
+     and the Gemma 4 pipeline options, composed per field between a preset and an explicit value; the seven options that
+     named a reduction form or a fusion left the public surface (breaking); the three bit-identical fusions always
+     apply; the Gemma 4 QAT presets declare `numerics`.)* Left from it:
+     - The runtime's regression corpus.
+     - The derived applicability check that replaces the `FamilySessionPolicy` tables (ADR 0147 follow-ups, code item 4).
+     - No per-adapter table: the subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder`
+       strategies with no end-to-end gain measured on any adapter, so no Session selects them; they run through the
+       private key `REORDER_STRATEGIES` (the kernel checks and tests). A measured gain lists a strategy in a table.
+     - `reorder` beside `linearCompute: "a8"` / `"f16"` is accepted and leaves linear on the approximation's kernels.
+     - The fused attention's kernels are not selected by level (item 3's note).
+     - The distribution mirrors of `gemma4-qat` and `gemma4-qat-mobile` are regenerated locally; the re-upload, the
+       source pins and the published smoke wait for the maintainer's explicit go-ahead.
+     - The fusions at `exact` on a backend where a fused kernel does not give the unfused bits: recorded and accepted
+       (the Metal ruling of 2026-11-11/12); no run-time check drops a rule.
   5. **Verification, second part.** The cache for changes outside the runtime; then, with the corpus in place, the
      runtime's host code leaves the key of the models' e2e files and kernel changes re-run only the files that compile
      them; the release rule changes to "an uncached full run when the environment changed".
@@ -148,20 +160,21 @@ maintainer's ruling of 2026-11-06).
   - **To decide**: the open points of ADR 0152.
 
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
-  accepted, nothing below is built; the order among them and against the other items is the maintainer's)**. Each code item is its
+  accepted; code items 1 and 2 are built, the rest is not; the order among them and against the other items is the maintainer's)**. Each code item is its
   own commit with its behaviour tests and states its blast radius:
   - **Code** (the decisions name what each changes):
-    1. The three fusion keys leave `SessionOptions`, the type checks and the combination rule; the fusions run by default
-       (decision 5). The test-only switch that disables the fusion rules has landed (`DISABLED_FUSION_RULES`, with
+    1. *(Landed 2026-11-15 with item 4 of the restructuring above.)* The three fusion keys leave `SessionOptions`, the
+       type checks and the combination rule; the fusions run by default (decision 5). The test-only switch that disables the fusion rules has landed (`DISABLED_FUSION_RULES`, with
        `checkFusionTwin` in `packages/kernel-checks` as the comparison — 2026-11-11); the tests that obtain the unfused
        plan by omitting the option (the Session baseline of `gpu_linear_static_quantize_session_test.ts`, the references
        of `gpu_rms_norm_add_fusion_test.ts` and `gpu_gelu_mul_static_quantize_fusion_test.ts`, and the grid-stride
        reference of the RMS→add kernel check) move to it in this change. The reference sha rows stay; the fusion-count
        tests, `EXPECTED_FUSIONS` and the census rows that pin fused counts change. Breaking (surface snapshot, CHANGELOG); a
        cross-cutting change, so the full `vp test`.
-    2. The same keys leave the manifest vocabulary (`SESSION_KEYS`, `SessionSpec`, `parseSession`) and the recipes' quant
-       tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`); the mirrors are regenerated and `verify_dist` is green; the
-       re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead (decision 5).
+    2. *(Landed 2026-11-15 in the code and the recipes.)* The same keys leave the manifest vocabulary (`SESSION_KEYS`,
+       `SessionSpec`, `parseSession`) and the recipes' quant tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`).
+       Left: the re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead
+       (decision 5).
     3. *(Not built — ADR 0152 decision 3 limits device probes to capabilities the adapter's report cannot settle.)* The
        Session canary for every default-on fusion: fused against unfused on a canary input as u32, a mismatch warns and
        drops the rule on that device, memoised per device, with a fault-injection test (decision 9). The input size is
@@ -174,14 +187,12 @@ maintainer's ruling of 2026-11-06).
        the `session` each preset declares in the distribution mirror with the knob values its checks were run on.
     5. The public applicability query API (user story, export diff, surface snapshot, CHANGELOG) and one line on how to query
        in the model card; the fixed override type covering every numerics option of `SessionOptions` replaces
-       `SessionOverrides`, and gemma's explicit `rmsNormReduce` / `fullStateStorage` fold into it (decision 7).
-    6. Device fallbacks become warned switches: f16 without `shader-f16` → `"f32"` (the throw is removed); `parallel-subgroup32`
-       → `"parallel"` and `rmsNormReduce: "subgroup32"` → `"workgroup"` without subgroups; a warning on online attention's
-       three-dispatch fallback; a shared GPU warns at admission, a self-acquired device requests only the available features;
+       `SessionOverrides`, and gemma's explicit `fullStateStorage` folds into it (decision 7).
+    6. Device fallbacks become warned switches: f16 without `shader-f16` → `"f32"` (the throw is removed); a warning on
+       online attention's three-dispatch fallback; a shared GPU warns at admission, a self-acquired device requests only the available features;
        a manifest's `gpuFeatures` is a request; the attention dp4a canary with both arms outside the band warns and runs that
-       attention in f32, and its `emu-exact` verdict warns once (decision 8). Today `sessionGpuFeatures` covers only
-       `shader-f16`, so a subgroup32 option on a shared GPU without subgroups throws at construction after the fetch; this item
-       removes that.
+       attention in f32, and its `emu-exact` verdict warns once (decision 8). The subgroup forms are no public option
+       since 2026-11-15, so their fallback is decided when a per-adapter table lists one.
     7. Run-time canaries for linear and conv3d a8's dp4a choice and for online attention's `sg32` / `wg` choice on devices
        where the path is requested (decisions 6 and 9).
     8. `/kernel-check` covers the fusions (fused against unfused, u32) and the default kernels; the tune sweep record and
@@ -195,7 +206,7 @@ maintainer's ruling of 2026-11-06).
     9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
        (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
     10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).
-    11. `packedStaticQuantize`, `integerGemv` and `linearGemvPlanes` assessed against decision 6's test (certainly on / off);
+    11. `packedStaticQuantize` and `integerGemv` assessed against decision 6's test (certainly on / off);
         each that fails becomes a string union at the next breaking change of this area or at 1.0, whichever comes first.
     12. GPU checks: no grid-stride kernel's numbers depend on the workgroup count (a `LIMIT_CAPS` Uint32 test); bit identity
         under an injected geometry profile (decision 8, device-driven choices).

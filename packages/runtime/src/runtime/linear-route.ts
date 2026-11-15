@@ -81,7 +81,7 @@ export const linearIntegerGemvVariant = (
 
 /**
  * The **only pure function** that decides whether a linear is a **byte-plane GEMV linear**
- * (`SessionOptions.linearGemvPlanes`) and with which variant: the option is on, the weight is
+ * (`REORDER_STRATEGIES.linearGemvPlanes`) and with which variant: the strategy is on, the weight is
  * i2-resident, M = numel(input shape without its last dimension) is 1..8, and
  * {@link planesGemvVariantFor} names a measured variant for (M, n, k).
  *

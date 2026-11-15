@@ -22,35 +22,23 @@ const inputViolationOf = (run: () => void): string | undefined => {
 };
 
 describe("Gemma's quant execution settings", () => {
-  const fast = {
-    linearGemvReduce: "parallel",
-    fuseRmsNormAdd: true,
-    fuseLinearStaticQuantize: true,
-  } as const;
+  /** The shipped `i4-fast` declaration of the q4_0 line. */
+  const fast = { numerics: { level: "reorder" } } as const;
+  /** The mobile QAT line's `i4-fast`: the same level with the packed activations. */
+  const packedFast = { ...fast, packedStaticQuantize: true } as const;
+  /** The packed message the runtime gives (`sessionOptionsViolation`). */
+  const packedNeedsReorder =
+    'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"';
   it("distinguishes unset, the quant declaration and an explicit override", () => {
     assertEquals(resolve({}, {}, "test"), {});
     assertEquals(resolve(fast, {}, "test"), fast);
-    assertEquals(resolve(fast, { fuseRmsNormAdd: undefined }, "test"), fast);
-    assertEquals(resolve(fast, { fuseRmsNormAdd: false }, "test"), {
-      ...fast,
-      fuseRmsNormAdd: false,
+    assertEquals(resolve(fast, { numerics: undefined }, "test"), fast);
+    assertEquals(resolve(fast, { numerics: { ops: { attention: "exact" } } }, "test"), {
+      numerics: { level: "reorder", ops: { attention: "exact" } },
     });
-    assertEquals(resolve(fast, { fuseLinearStaticQuantize: false }, "test"), {
-      ...fast,
-      fuseLinearStaticQuantize: false,
-    });
-    const reference = {
-      linearGemvReduce: "sequential",
-      fuseRmsNormAdd: false,
-      fuseLinearStaticQuantize: false,
-    } as const;
+    const reference = { numerics: { level: "exact" } } as const;
     assertEquals(resolve(fast, reference, "test"), reference);
-    assertEquals(resolve({ fuseRmsNormAdd: false }, { fuseRmsNormAdd: true }, "test"), {
-      fuseRmsNormAdd: true,
-    });
-    assertEquals(resolve({}, { linearGemvReduce: "parallel-subgroup32" }, "test"), {
-      linearGemvReduce: "parallel-subgroup32",
-    });
+    assertEquals(resolve(reference, fast, "test"), fast);
   });
   it("does not hide an unsupported declaration behind an override, and rejects invalid combinations of the effective settings", () => {
     assertThrows(
@@ -58,78 +46,73 @@ describe("Gemma's quant execution settings", () => {
       Error,
       "session.linearCompute",
     );
-    for (const linearGemvReduce of ["sequential", "parallel-subgroup32"] as const) {
-      assertThrows(
-        () => resolve(fast, { linearGemvReduce }, "test"),
-        ModelInputError,
-        "supports only linearGemvReduce: parallel / linearCompute: f32",
-      );
-      assertEquals(
-        resolve(
-          fast,
-          {
-            linearGemvReduce,
-            fuseLinearStaticQuantize: false,
-          },
-          "test",
-        ),
-        { ...fast, linearGemvReduce, fuseLinearStaticQuantize: false },
-      );
-    }
     assertThrows(
-      () => resolve({}, { fuseLinearStaticQuantize: true }, "test"),
+      () => resolve(packedFast, { numerics: { ops: { linear: "exact" } } }, "test"),
       ModelInputError,
-      "supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
     assertEquals(
       resolve(
-        { fuseLinearStaticQuantize: true },
+        packedFast,
         {
-          linearGemvReduce: "parallel",
+          numerics: { ops: { linear: "exact" } },
+          packedStaticQuantize: false,
         },
         "test",
       ),
-      { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
+      { numerics: { level: "reorder", ops: { linear: "exact" } }, packedStaticQuantize: false },
+    );
+    assertThrows(
+      () => resolve({}, { packedStaticQuantize: true }, "test"),
+      ModelInputError,
+      packedNeedsReorder,
+    );
+    assertEquals(
+      resolve(
+        { packedStaticQuantize: true },
+        {
+          numerics: { ops: { linear: "reorder" } },
+        },
+        "test",
+      ),
+      { numerics: { ops: { linear: "reorder" } }, packedStaticQuantize: true },
     );
   });
-  it("packedStaticQuantize comes from the quant declaration, an explicit false wins, and anything but parallel is rejected", () => {
-    // ADR 0105 addendum 2 (promotion into the vocabulary) — the same 4 fields as the shipped i4-fast pass through from the declaration.
-    const packedFast = { ...fast, packedStaticQuantize: true } as const;
+  it("packedStaticQuantize comes from the quant declaration, an explicit false wins, and anything but linear at reorder is rejected", () => {
+    // ADR 0105 addendum 2 (promotion into the vocabulary) — the fields of the shipped mobile i4-fast pass through from the declaration.
     assertEquals(resolve(packedFast, {}, "test"), packedFast);
     assertEquals(resolve(packedFast, { packedStaticQuantize: false }, "test"), {
       ...packedFast,
       packedStaticQuantize: false,
     });
     assertEquals(resolve(fast, { packedStaticQuantize: true }, "test"), packedFast);
-    // A declaration without parallel is rejected even when it comes from the quant (i4-fast declares parallel).
+    // A declaration without linear at reorder is rejected even when it comes from the quant (i4-fast declares the level).
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
       Error,
-      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
     assertThrows(
       () => resolve({}, { packedStaticQuantize: true }, "test"),
       ModelInputError,
-      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
     assertThrows(
       () =>
         resolve(
           fast,
           {
-            linearGemvReduce: "sequential",
-            fuseLinearStaticQuantize: false,
+            numerics: { level: "exact" },
             packedStaticQuantize: true,
           },
           "test",
         ),
       ModelInputError,
-      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
   });
   it("takes integerGemv explicitly on top of a preset that declares the packed activations", () => {
     // The QAT i4-fast form: the preset declares the packed activations, the caller adds integerGemv.
-    const packedFast = { ...fast, packedStaticQuantize: true } as const;
     assertEquals(resolve(packedFast, { integerGemv: true }, "test"), {
       ...packedFast,
       integerGemv: true,
@@ -146,76 +129,52 @@ describe("Gemma's quant execution settings", () => {
       "integerGemv requires packedStaticQuantize: true",
     );
     assertGemmaSessionOverrides(
-      { linearGemvReduce: "parallel", packedStaticQuantize: true, integerGemv: true },
+      {
+        numerics: { ops: { linear: "reorder" } },
+        packedStaticQuantize: true,
+        integerGemv: true,
+      },
       "test",
     );
   });
-  it("takes linearGemvPlanes explicitly on any preset, alone, at both entry points", () => {
-    // The byte-plane GEMV needs no other option: it joins the QAT i4-fast declaration or none.
-    assertEquals(resolve(fast, { linearGemvPlanes: true }, "test"), {
-      ...fast,
-      linearGemvPlanes: true,
-    });
-    assertEquals(resolve({}, { linearGemvPlanes: true }, "test"), { linearGemvPlanes: true });
-    assertGemmaSessionOverrides({ linearGemvPlanes: true }, "test");
-  });
-  it("stateAttentionReduce resolves by the same rules as the other fields and creates no field without a declaration", () => {
-    // There is no family code default (ADR 0104 addendum 2026-09-26). No field = the runtime's reference path
-    // `"sequential"` — the `i4` preset with an empty `session` and presets that declare only GEMV take this shape.
+  it("numerics resolves by the same rules as the other fields and creates no field without a declaration", () => {
+    // There is no family code default (ADR 0104 addendum 2026-09-26). No field = every op kind at `exact` — the `i4`
+    // preset with an empty `session` takes this shape.
     assertEquals(resolve({}, {}, "test"), {});
-    assertEquals(resolve({ linearGemvReduce: "parallel" }, {}, "test"), {
-      linearGemvReduce: "parallel",
+    assertEquals(resolve({ numerics: { ops: { linear: "reorder" } } }, {}, "test"), {
+      numerics: { ops: { linear: "reorder" } },
     });
-    // The same declaration as regular E2B's i4-fast — all 3 fields pass through from the declaration.
-    const fastE2b = {
-      linearGemvReduce: "parallel",
-      stateAttentionReduce: "parallel-fused",
-      fuseRmsNormAdd: true,
-    } as const;
-    assertEquals(resolve(fastE2b, {}, "test"), fastE2b);
-    // An explicit value wins over the declaration (the way back to the reference path).
-    assertEquals(resolve(fastE2b, { stateAttentionReduce: "sequential" }, "test"), {
-      ...fastE2b,
-      stateAttentionReduce: "sequential",
+    // The same declaration as the q4_0 line's i4-fast passes through from the declaration.
+    assertEquals(resolve(fast, {}, "test"), fast);
+    // An explicit value wins over the declaration per field (the way back to the reference path for attention).
+    assertEquals(resolve(fast, { numerics: { ops: { attention: "exact" } } }, "test"), {
+      numerics: { level: "reorder", ops: { attention: "exact" } },
     });
-    assertEquals(resolve({}, { stateAttentionReduce: "parallel" }, "test"), {
-      stateAttentionReduce: "parallel",
+    assertEquals(resolve({}, { numerics: { ops: { attention: "reorder" } } }, "test"), {
+      numerics: { ops: { attention: "reorder" } },
     });
-    // The surface without a declaration (fromAssets) accepts all 3 values too.
-    for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
-      assertGemmaSessionOverrides({ stateAttentionReduce }, "test");
+    // The surface without a declaration (fromAssets) accepts both levels, for the model and per op kind.
+    for (const level of ["exact", "reorder"] as const) {
+      assertGemmaSessionOverrides({ numerics: { level } }, "test");
+      assertGemmaSessionOverrides({ numerics: { ops: { attention: level } } }, "test");
     }
   });
   it("every key of SessionSpec appears either in the allow table or on the rejection path", () => {
     // The hub's SESSION_KEYS and the models' WRITERS are exhaustive tables over `Required<SessionSpec>`, so a new knob
-    // fails the type check. Only Gemma uses 4 hand-written string comparisons (ADR 0104's 3 fields + ADR 0105
-    // addendum 2's packed), so the type check does not fail and a missed update shows only as a runtime rejection.
+    // fails the type check. Gemma accepts 3 of the keys (the numeric requirement and the 2 int8 GEMV booleans), and a
+    // missed update of that set shows only as a runtime rejection.
     // Here, from a spec with every key filled (a new key makes this declaration fail the type check), each key is
     // confirmed to pass / fail one at a time.
     const full: Required<SessionSpec> = {
+      numerics: { level: "exact" },
       linearCompute: "f16",
       convCompute: "a8",
       attentionCompute: "f16",
       attentionScoreStorage: "f16",
-      linearGemvReduce: "sequential",
-      stateAttentionReduce: "sequential",
-      fuseRmsNormAdd: false,
-      fuseLinearStaticQuantize: false,
-      fuseGeluMulStaticQuantize: false,
       packedStaticQuantize: false,
       integerGemv: false,
-      linearGemvPlanes: false,
     };
-    const accepted = [
-      "linearGemvReduce",
-      "stateAttentionReduce",
-      "fuseRmsNormAdd",
-      "fuseLinearStaticQuantize",
-      "fuseGeluMulStaticQuantize",
-      "packedStaticQuantize",
-      "integerGemv",
-      "linearGemvPlanes",
-    ];
+    const accepted = ["numerics", "packedStaticQuantize", "integerGemv"];
     const rejected: string[] = [];
     for (const key of Object.keys(full) as (keyof typeof full)[]) {
       const spec = { [key]: full[key] } satisfies SessionSpec;
@@ -239,14 +198,8 @@ describe("Gemma's quant execution settings", () => {
     // The expected messages are pinned too so that a "swapped reason" — failing in the combination check instead of
     // the type check — does not pass (resolve throws for 4 different reasons).
     const invalid = [
-      ["linearGemvReduce", "linearGemvReduce is invalid"],
-      ["stateAttentionReduce", "stateAttentionReduce is invalid"],
-      ["fuseRmsNormAdd", "fuseRmsNormAdd must be a boolean"],
-      ["fuseLinearStaticQuantize", "fuseLinearStaticQuantize must be a boolean"],
-      ["fuseGeluMulStaticQuantize", "fuseGeluMulStaticQuantize must be a boolean"],
       ["packedStaticQuantize", "packedStaticQuantize must be a boolean"],
       ["integerGemv", "integerGemv must be a boolean"],
-      ["linearGemvPlanes", "linearGemvPlanes must be a boolean"],
     ] as const;
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {
@@ -255,6 +208,17 @@ describe("Gemma's quant execution settings", () => {
         Object.defineProperty(overrides, key, { value, enumerable: true });
         assertThrows(() => resolve(fast, overrides, "test"), ModelInputError, message);
       }
+    }
+    // `numerics` is an object, so only its non-object values are invalid as a whole (its fields have their own cases
+    // in session_options_test.ts).
+    for (const value of [null, 0, 1, []]) {
+      const overrides = {};
+      Object.defineProperty(overrides, "numerics", { value, enumerable: true });
+      assertThrows(
+        () => resolve(fast, overrides, "test"),
+        ModelInputError,
+        "options.numerics must be an object",
+      );
     }
     assertEquals(conversions, 0);
   });
@@ -269,32 +233,22 @@ describe("Gemma's quant execution settings", () => {
   });
   it("the same condition is caused by the input once an override is involved", () => {
     // The other side. If a declaration that passes on the quant alone fails once combined with an explicit override, the remedy is "fix the setting".
-    assertEquals(resolve({ linearGemvReduce: "sequential" }, {}, "test"), {
-      linearGemvReduce: "sequential",
-    });
+    const exactLinear = { numerics: { ops: { linear: "exact" } } } as const;
+    assertEquals(resolve(exactLinear, {}, "test"), exactLinear);
     assertThrows(
-      () => resolve({ linearGemvReduce: "sequential" }, { fuseLinearStaticQuantize: true }, "test"),
+      () => resolve(exactLinear, { packedStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
-    assertEquals(
-      resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {}, "test"),
-      {
-        packedStaticQuantize: true,
-        linearGemvReduce: "parallel",
-      },
-    );
+    const packedReorder = {
+      packedStaticQuantize: true,
+      numerics: { ops: { linear: "reorder" } },
+    } as const;
+    assertEquals(resolve(packedReorder, {}, "test"), packedReorder);
     assertThrows(
-      () =>
-        resolve(
-          { packedStaticQuantize: true, linearGemvReduce: "parallel" },
-          {
-            linearGemvReduce: "sequential",
-          },
-          "test",
-        ),
+      () => resolve(packedReorder, exactLinear, "test"),
       ModelInputError,
-      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      packedNeedsReorder,
     );
   });
 });
@@ -303,29 +257,29 @@ describe("Gemma's quant execution settings (the check of explicit settings only)
   it("rejects with the same ranges, types and combinations on a surface without a quant declaration", () => {
     // fromAssets has no manifest, so the verdict is the same as when compared with the default {}.
     assertGemmaSessionOverrides({}, "test");
-    assertGemmaSessionOverrides({ linearGemvReduce: "parallel-subgroup32" }, "test");
+    assertGemmaSessionOverrides({ numerics: { level: "reorder" } }, "test");
     assertThrows(
-      () => assertGemmaSessionOverrides({ fuseLinearStaticQuantize: true }, "test"),
+      () => assertGemmaSessionOverrides({ packedStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"',
     );
     const bogus = {};
-    Object.defineProperty(bogus, "fuseRmsNormAdd", { value: 1, enumerable: true });
+    Object.defineProperty(bogus, "packedStaticQuantize", { value: 1, enumerable: true });
     assertThrows(
       () => assertGemmaSessionOverrides(bogus, "test"),
       ModelInputError,
-      "fuseRmsNormAdd must be a boolean",
+      "packedStaticQuantize must be a boolean",
     );
   });
   it("agrees with the verdict resolve gives on the same explicit settings", () => {
     // Pins that the 2 entry points go through the same check by the agreement of their verdicts (no loosening of only one side).
     const explicit = [
       {},
-      { linearGemvReduce: "parallel" },
-      { stateAttentionReduce: "parallel-fused" },
-      { fuseLinearStaticQuantize: true },
-      { packedStaticQuantize: true, linearGemvReduce: "sequential" },
-      { packedStaticQuantize: true, linearGemvReduce: "parallel" },
+      { numerics: { ops: { linear: "reorder" } } },
+      { numerics: { ops: { attention: "reorder" } } },
+      { packedStaticQuantize: true },
+      { packedStaticQuantize: true, numerics: { ops: { linear: "exact" } } },
+      { packedStaticQuantize: true, numerics: { ops: { linear: "reorder" } } },
     ] as const;
     for (const overrides of explicit) {
       const viaGate = inputViolationOf(() => assertGemmaSessionOverrides(overrides, "test"));

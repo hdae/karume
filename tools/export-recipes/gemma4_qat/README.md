@@ -48,20 +48,20 @@ on Hugging Face as `hdae/karume-gemma4-qat` (0.15.1) and renamed on 2026-11-04, 
 went to the q4_0 QAT line (`gemma4/README.md`); it was uploaded under the new name on 2026-11-04,
 and the subpath's `SOURCES["gemma4-qat-mobile"]` pins it. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference summation for GEMV and attention. Both models
-default to `i4-fast`, which uses the same weights and declares parallel GEMV, fused parallel
-attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, the per-layer-input gate
-folded into one dispatch (`fuseGeluMulStaticQuantize` — gelu_tanh, mul and SRQ), and packed int8
-activations.
-`i4-gemvpar` retains parallel GEMV and parallel attention without the fusions or packed
-activations. On an Intel Arc B570, `i4-fast` cut GPU decode time per step by 49% (E2B) and 42%
-(E4B) against `i4`; no single flag was slower on its own. A manifest that declares
-`stateAttentionReduce` needs a reader that knows that key (the release after 0.13.0); older
-readers reject it. Likewise a manifest that declares `fuseGeluMulStaticQuantize` needs a reader
-that knows that key (0.15.1 and later).
-Explicit runtime options override quant settings, including
-setting a fusion flag back to `false`. To use sequential GEMV with
-`i4-fast`, also set `fuseLinearStaticQuantize: false` and `packedStaticQuantize: false`,
-or select `i4`.
+default to `i4-fast`, which uses the same weights and declares the numeric level `reorder`
+(`numerics: { level: "reorder" }` — parallel GEMV, and the states-form attention's parallel
+reductions with the row statistics folded into PV) and packed int8 activations
+(`packedStaticQuantize: true`).
+`i4-gemvpar` declares the same level without packed activations. The built-in fusions (RMS-add,
+linear-to-SRQ on the parallel GEMV, and the per-layer-input gate's gelu_tanh, mul and SRQ in one
+dispatch) are bit-identical and apply in every preset wherever they match; no quant declares them.
+On an Intel Arc B570, `i4-fast` cut GPU decode time per step by 49% (E2B) and 42% (E4B) against
+`i4`. A manifest that declares `numerics` needs a reader that knows that key; older readers
+reject it.
+Explicit runtime options override quant settings; `numerics` is overridden per op kind, so the
+levels the quant declares for the others stay. To use sequential GEMV with `i4-fast`, set
+`numerics: { ops: { linear: "exact" } }` and `packedStaticQuantize: false` (packed activations
+are a form of the parallel GEMV), or select `i4`.
 Rebuild the distribution to obtain the new declaration; no checkpoint requantization
 is needed. Submission policy and prefill buckets remain separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).

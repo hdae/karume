@@ -47,11 +47,14 @@ const INT4_SEAT = { quant: "i4-fast" } as const;
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat";
 
 /**
- * The two reduction orders compared. **Both are passed explicitly** (the effective value when it
- * is omitted — quant declaration → reference path — is the census's job; this file only checks
- * that "the two paths produce the same sequence").
+ * The two reduction orders compared, as the level of attention (`numerics.ops.attention`; the
+ * seat's declared level stays on linear). **Both are passed explicitly** (the effective value when
+ * it is omitted — quant declaration → reference path — is the census's job; this file only checks
+ * that "the two paths produce the same sequence"). `reorder` runs the parallel reductions with the
+ * row statistics folded into PV where the shape admits it, the same addition order as the parallel
+ * form without the fold (ADR 0102); `exact` runs the reference path.
  */
-const REDUCERS = ["parallel", "sequential"] as const;
+const REDUCERS = ["reorder", "exact"] as const;
 
 /**
  * Acceptance cases. The prompt is the token sequence of the chat fixture as is (the source of
@@ -139,11 +142,11 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     });
 
     for (const reduce of REDUCERS) {
-      it(`stateAttentionReduce = ${reduce}`, async () => {
+      it(`attention at ${reduce}`, async () => {
         const pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
           ...INT4_SEAT,
           maxResidentPleBytes,
-          stateAttentionReduce: reduce,
+          numerics: { ops: { attention: reduce } },
         });
         try {
           const collected: Run[] = [];

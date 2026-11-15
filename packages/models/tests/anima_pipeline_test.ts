@@ -322,16 +322,16 @@ test("fromAssets: an invalid explicit value and a knob Anima does not accept giv
     ModelInputError,
     "linearCompute is invalid",
   );
-  // Parallel GEMV is outside Anima's acceptance table — silently dropping it would mean "I chose it
-  // but it has no effect".
+  // The numeric requirement is outside Anima's acceptance table — silently dropping it would mean "I
+  // chose it but it has no effect".
   await assertRejects(
     () =>
       Pipeline.fromAssets(
         { manifest, assets: emptyAssets },
-        optionsWith("linearGemvReduce", "parallel"),
+        optionsWith("numerics", { level: "reorder" }),
       ),
     ModelInputError,
-    "linearGemvReduce cannot be specified for this family",
+    "numerics cannot be specified for this family",
   );
 });
 

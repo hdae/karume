@@ -1,6 +1,6 @@
 /**
- * The byte-plane GEMV (`SessionOptions.linearGemvPlanes`) without a GPU: the kernel's eligibility,
- * key, params and WGSL contract, the option check, the one eligibility function
+ * The byte-plane GEMV (`REORDER_STRATEGIES.linearGemvPlanes` with linear at `reorder`) without a
+ * GPU: the kernel's eligibility, key, params and WGSL contract, the strategy check, the one eligibility function
  * (`linearPlanesGemvVariant`), the fusion plan around a byte-plane linear, and the linear recipe's
  * route — read off a `StepRecipeBuilder` with a stand-in for the GPU surface. The kernel's numerics
  * on a GPU are gpu_linear_gemv_planes_test.ts.
@@ -41,7 +41,7 @@ import { type BindingSource, StepRecipeBuilder } from "../src/runtime/recipe.ts"
 import type { RecipeBuildFace } from "../src/runtime/recipe-builder.ts";
 import { buildLinear } from "../src/runtime/recipe-builders/linear.ts";
 import { sessionOptionsViolation } from "../src/runtime/session-options-check.ts";
-import type { SessionOptions } from "../src/runtime/session-types.ts";
+import { REORDER_STRATEGIES, type SessionOptions } from "../src/runtime/session-types.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 
@@ -151,23 +151,22 @@ describe("byte-plane GEMV kernel: params and grid", () => {
   });
 });
 
-describe("linearGemvPlanes option check", () => {
-  it("accepts linearGemvPlanes alone or with any other option, and false anywhere", () => {
-    assertEquals(sessionOptionsViolation({ linearGemvPlanes: true }), undefined);
-    assertEquals(sessionOptionsViolation({ linearGemvPlanes: false }), undefined);
+describe("linearGemvPlanes strategy check", () => {
+  it("accepts linearGemvPlanes alone or with any other option", () => {
+    const planes = { [REORDER_STRATEGIES]: { linearGemvPlanes: true } } as const;
+    assertEquals(sessionOptionsViolation(planes), undefined);
     assertEquals(
       sessionOptionsViolation({
-        linearGemvReduce: "parallel",
-        fuseLinearStaticQuantize: true,
+        ...planes,
+        numerics: { ops: { linear: "reorder" } },
         packedStaticQuantize: true,
         integerGemv: true,
-        linearGemvPlanes: true,
       }),
       undefined,
     );
   });
 
-  it("rejects a value that is not a boolean, without converting it", () => {
+  it("rejects a value other than true, without converting it", () => {
     let conversions = 0;
     const object = {
       [Symbol.toPrimitive](): boolean {
@@ -177,8 +176,14 @@ describe("linearGemvPlanes option check", () => {
     };
     for (const value of [null, 1, "true", [], object]) {
       const options: SessionOptions = {};
-      Object.defineProperty(options, "linearGemvPlanes", { value, enumerable: true });
-      assertEquals(sessionOptionsViolation(options), "options.linearGemvPlanes must be a boolean");
+      Object.defineProperty(options, REORDER_STRATEGIES, {
+        value: { linearGemvPlanes: value },
+        enumerable: true,
+      });
+      assertEquals(
+        sessionOptionsViolation(options),
+        "options[REORDER_STRATEGIES].linearGemvPlanes must be true or omitted",
+      );
     }
     assertEquals(conversions, 0);
   });
@@ -327,7 +332,6 @@ const planText = (plan: FusionPlan): string =>
 const FUSING: Partial<Context> = {
   linearGemvReduce: "parallel",
   linearCompute: "f32",
-  fuseLinearStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
 };

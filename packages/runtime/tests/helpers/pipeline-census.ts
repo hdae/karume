@@ -54,7 +54,14 @@ import {
 import { stateStatsPvKey } from "../../src/kernels/state-attention-stats-pv.ts";
 import { stateStorageKeyPart } from "../../src/kernels/state-storage.ts";
 import { STATIC_QUANTIZE_PACKED_KEY } from "../../src/kernels/static-quantize.ts";
-import type { SessionDiagnostics, SessionOptions } from "../../src/runtime/session-types.ts";
+import type { NumericOpKind } from "../../src/runtime/numerics.ts";
+import type {
+  LinearGemvReduce,
+  RmsNormReduce,
+  SessionDiagnostics,
+  SessionOptions,
+  StateAttentionReduce,
+} from "../../src/runtime/session-types.ts";
 
 /** A census row (an element of `lastRunPipelines`). */
 export type CensusRow = NonNullable<SessionDiagnostics["lastRunPipelines"]>[number];
@@ -81,8 +88,8 @@ export type KeyPredicate = (key: string) => boolean;
  * for bit (ADR 0146 decision 1). `fusionRules` is not one seat with one reference value and one key
  * signature: each rule it carries declares its own contract class (ADR 0147 decision 2), and a class
  * E rule is u32-identical to the plan without it (ADR 0148). `numerics` is not a seat of its own
- * either: a level resolves to the reduction seats, and {@link assertSeatsApplied} reads it through
- * them.
+ * either: a level resolves to the forms of {@link ResolvedSeats}, and {@link censusSeats} reads it
+ * through them.
  */
 type NonNumericField =
   | "numerics"
@@ -95,11 +102,36 @@ type NonNumericField =
   | "fusionRules";
 
 /**
- * Options of `SessionOptions` that change numerics (the string keys minus {@link NonNumericField}).
+ * Options of `SessionOptions` that change numerics and name what they select (the string keys minus
+ * {@link NonNumericField}): the approximations.
  */
-export type NumericSeat = Exclude<Extract<keyof SessionOptions, string>, NonNumericField>;
+type OptionSeat = Exclude<Extract<keyof SessionOptions, string>, NonNumericField>;
 
-type SeatValue<Seat extends NumericSeat> = NonNullable<SessionOptions[Seat]>;
+/**
+ * The forms a level of `SessionOptions.numerics` resolves to (with the private
+ * `REORDER_STRATEGIES`): the census reads a level through them, under the names the execution knobs
+ * carry (`executionKnobDefaults` in src/runtime/session-options-check.ts).
+ */
+type ResolvedSeats = {
+  readonly stateAttentionReduce: StateAttentionReduce;
+  readonly linearGemvReduce: LinearGemvReduce;
+  readonly linearGemvPlanes: boolean;
+  readonly rmsNormReduce: RmsNormReduce;
+};
+
+/**
+ * What a census is checked against: the approximation options as a Session takes them, and the
+ * resolved forms of the levels. {@link censusSeats} derives it from `SessionOptions`; a table of
+ * expectations states it directly.
+ */
+export type CensusSeats = { readonly [Seat in OptionSeat]?: NonNullable<SessionOptions[Seat]> } & {
+  readonly [Seat in keyof ResolvedSeats]?: ResolvedSeats[Seat];
+};
+
+/** A seat of the census: an approximation option or a resolved form. */
+export type NumericSeat = OptionSeat | keyof ResolvedSeats;
+
+type SeatValue<Seat extends NumericSeat> = NonNullable<CensusSeats[Seat]>;
 
 /**
  * Reference value of each option (= the runtime's value when omitted — the same values as the
@@ -114,9 +146,6 @@ export const SEAT_REFERENCE = {
   stateAttentionReduce: "sequential",
   fullStateStorage: "f32",
   linearGemvReduce: "sequential",
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
   linearGemvPlanes: false,
@@ -282,15 +311,6 @@ export const SEAT_SIGNATURES: SeatSignatures = {
     parallel: (key) => isGemvParallel(key) && !hasFragment(key, GEMV_SUBGROUP),
     "parallel-subgroup32": (key) => isGemvParallel(key) && hasFragment(key, GEMV_SUBGROUP),
   },
-  fuseRmsNormAdd: {
-    true: (key) => familyOf(key) === RMS_NORM_ADD_FAMILY,
-  },
-  fuseLinearStaticQuantize: {
-    true: (key) => isGemvParallel(key) && hasFragment(key, GEMV_STATIC_QUANTIZE),
-  },
-  fuseGeluMulStaticQuantize: {
-    true: (key) => familyOf(key) === GELU_MUL_STATIC_QUANTIZE_FAMILY,
-  },
   packedStaticQuantize: {
     // True on both the producer side (the packed variant of standalone SRQ) and the consumer side
     // (the packed variant of parallel GEMV).
@@ -306,6 +326,50 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   rmsNormReduce: {
     subgroup32: (key) => RMS_FAMILIES.has(familyOf(key)) && hasFragment(key, RMS_SUBGROUP),
   },
+};
+
+/**
+ * Built-in fusion rule → predicate on the key showing "the fused kernel ran" (the three fusions
+ * that apply without an option; a Session leaves one out only through `DISABLED_FUSION_RULES`).
+ */
+export const FUSION_SIGNATURES = {
+  rmsNormAdd: (key) => familyOf(key) === RMS_NORM_ADD_FAMILY,
+  linearStaticQuantize: (key) => isGemvParallel(key) && hasFragment(key, GEMV_STATIC_QUANTIZE),
+  geluMulStaticQuantize: (key) => familyOf(key) === GELU_MUL_STATIC_QUANTIZE_FAMILY,
+} as const satisfies Readonly<Record<string, KeyPredicate>>;
+
+/**
+ * The seats a Session built with `options` is checked against: every approximation option given,
+ * and, for each op kind whose level the declaration gives (through `level` or `ops`), the form
+ * that level resolves to — by the derivation Session construction uses.
+ *
+ * An op kind the declaration does not reach is not a seat (the rule of {@link assertSeatsApplied}:
+ * what the caller did not state is not assumed to be the reference).
+ */
+export const censusSeats = (options: SessionOptions): CensusSeats => {
+  const { numerics } = options;
+  const reaches = (kind: NumericOpKind): boolean =>
+    numerics?.level !== undefined || numerics?.ops?.[kind] !== undefined;
+  const resolved = executionKnobDefaults(options);
+  const { linearCompute, convCompute, attentionCompute, attentionScoreStorage } = options;
+  const { fullStateStorage, packedStaticQuantize, integerGemv } = options;
+  return {
+    ...(linearCompute === undefined ? {} : { linearCompute }),
+    ...(convCompute === undefined ? {} : { convCompute }),
+    ...(attentionCompute === undefined ? {} : { attentionCompute }),
+    ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
+    ...(fullStateStorage === undefined ? {} : { fullStateStorage }),
+    ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
+    ...(integerGemv === undefined ? {} : { integerGemv }),
+    ...(reaches("linear")
+      ? {
+          linearGemvReduce: resolved.linearGemvReduce,
+          linearGemvPlanes: resolved.linearGemvPlanes,
+        }
+      : {}),
+    ...(reaches("attention") ? { stateAttentionReduce: resolved.stateAttentionReduce } : {}),
+    ...(reaches("rms_norm") ? { rmsNormReduce: resolved.rmsNormReduce } : {}),
+  } satisfies { readonly [Seat in OptionSeat]?: unknown };
 };
 
 // ---------------------------------------------------------------------------
@@ -418,22 +482,12 @@ const NUMERIC_SEATS = Object.keys(SEAT_REFERENCE) as readonly NumericSeat[];
  */
 export const assertSeatsApplied = (
   rows: SessionDiagnostics["lastRunPipelines"],
-  options: SessionOptions,
+  seats: CensusSeats,
   where: string,
 ): void => {
   const census = requireCensus(rows, where);
-  // A level given through `numerics` is checked as the reduction seats it resolves to (the
-  // derivation Session construction uses).
-  const resolved: SessionOptions =
-    options.numerics === undefined
-      ? options
-      : (({ stateAttentionReduce, linearGemvReduce }) => ({
-          ...options,
-          stateAttentionReduce,
-          linearGemvReduce,
-        }))(executionKnobDefaults(options));
   for (const seat of NUMERIC_SEATS) {
-    const value = resolved[seat];
+    const value = seats[seat];
     if (value === undefined) continue;
     const variants: Readonly<Record<string, KeyPredicate>> = SEAT_SIGNATURES[seat];
     if (value === SEAT_REFERENCE[seat]) {

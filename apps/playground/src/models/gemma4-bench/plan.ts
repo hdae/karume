@@ -1,9 +1,8 @@
 /**
  * What the decode bench runs: the prompt set, the arms (a model of one of the two Gemma 4
  * distributions × a preset × the tap on, on and split per dispatch, or off × the integer GEMV on or
- * off × the byte-plane GEMV on or off × the PLE on the host or the GPU × the decode run-ahead
- * depth), the workload form (chats, new tokens, rounds, sampler) and the order the arms are visited
- * in. Pure, so `vp test` covers it.
+ * off × the PLE on the host or the GPU × the decode run-ahead depth), the workload form (chats,
+ * new tokens, rounds, sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
@@ -80,8 +79,6 @@ export type ArmDraft = {
   readonly split?: boolean;
   /** Run the eligible decode linears on the integer GEMV (the Session option `integerGemv`). */
   readonly integerGemv?: boolean;
-  /** Run the QAT lm_head on the byte-plane GEMV (the Session option `linearGemvPlanes`). */
-  readonly linearGemvPlanes?: boolean;
   /** Keep the PLE on the GPU and gather it there (the pipeline option `pleResidency: "gpu"`). */
   readonly pleOnGpu?: boolean;
   /** Greedy decode steps per GPU batch (the pipeline option `decodeAhead`; absent = 1). */
@@ -111,19 +108,24 @@ export type ArmPipelineOptions = Pick<FromPretrainedOptions, "pleResidency" | "d
  */
 export type ArmSessionOptions = Pick<
   FromPretrainedOptions,
-  "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
+  "integerGemv" | "packedStaticQuantize" | "numerics"
 >;
 
 /**
  * The explicit options of the integer GEMV switch: `integerGemv: true`, plus what it requires —
- * packed activations, which need the parallel GEMV — where the preset does not declare it already
- * (QAT `i4-fast` declares both, so it passes `integerGemv` alone).
+ * packed activations, which need linear at the level `reorder` (the parallel GEMV) — where the
+ * preset does not declare it already (mobile QAT `i4-fast` declares both, so it passes
+ * `integerGemv` alone). Only the linear level is passed: the pipeline composes `numerics` per
+ * field, so the levels the preset declares for the other op kinds stay.
  */
-export const integerGemvSession = (declared: SessionSpec): ArmSessionOptions => ({
-  integerGemv: true,
-  ...(declared.packedStaticQuantize === true ? {} : { packedStaticQuantize: true }),
-  ...(declared.linearGemvReduce === "parallel" ? {} : { linearGemvReduce: "parallel" }),
-});
+export const integerGemvSession = (declared: SessionSpec): ArmSessionOptions => {
+  const linearLevel = declared.numerics?.ops?.linear ?? declared.numerics?.level;
+  return {
+    integerGemv: true,
+    ...(declared.packedStaticQuantize === true ? {} : { packedStaticQuantize: true }),
+    ...(linearLevel === "reorder" ? {} : { numerics: { ops: { linear: "reorder" } } }),
+  };
+};
 
 /** One arm, checked against the manifests. */
 export type BenchArm = {
@@ -158,7 +160,7 @@ export const armLabel = (
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
     arm.session?.integerGemv === true ? " (integer)" : ""
-  }${arm.session?.linearGemvPlanes === true ? " (planes)" : ""}${
+  }${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
     arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"
@@ -218,13 +220,10 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
     ...(draft.pleOnGpu === true ? { pleResidency: "gpu" } : {}),
     ...(decodeAhead >= 2 ? { decodeAhead } : {}),
   };
-  // The byte-plane GEMV needs no other option, so it joins whatever the integer switch passes.
-  const session: ArmSessionOptions = {
-    ...(draft.integerGemv === true
+  const session: ArmSessionOptions =
+    draft.integerGemv === true
       ? integerGemvSession(manifest.models[model].quants[preset.name].session)
-      : {}),
-    ...(draft.linearGemvPlanes === true ? { linearGemvPlanes: true } : {}),
-  };
+      : {};
   return {
     ok: true,
     arm: {

@@ -185,15 +185,6 @@ describe("sessionOptionsViolation with numerics", () => {
     assert(sessionOptionsViolation(options)?.startsWith("options.numerics.level"));
   });
 
-  it("rejects a declaration given together with an option that names the reduction form", () => {
-    for (const options of [
-      { numerics: {}, linearGemvReduce: "parallel" },
-      { numerics: { level: "reorder" }, stateAttentionReduce: "sequential" },
-    ] as const) {
-      assert(sessionOptionsViolation(options)?.includes("cannot be given together"));
-    }
-  });
-
   it("holds the packed int8 activations to a linear level of reorder", () => {
     assertEquals(
       sessionOptionsViolation({ numerics: { level: "reorder" }, packedStaticQuantize: true }),
@@ -269,18 +260,12 @@ describe("the adapter-dependent reorder strategies (the private REORDER_STRATEGI
     assertStrictEquals(executionKnobDefaults(options).linearGemvReduce, "parallel");
   });
 
-  it("rejects a value outside the type and a declaration beside an option that names a kernel", () => {
+  it("rejects a value outside the type", () => {
     const bad: SessionOptions = {};
     Object.defineProperty(bad, REORDER_STRATEGIES, {
       value: { linearGemv: "subgroup16" },
       enumerable: true,
     });
     assert(sessionOptionsViolation(bad)?.includes("linearGemv"));
-    for (const options of [
-      { numerics: {}, rmsNormReduce: "subgroup32" },
-      { numerics: {}, linearGemvPlanes: true },
-    ] as const) {
-      assert(sessionOptionsViolation(options)?.includes("cannot be given together"));
-    }
   });
 });

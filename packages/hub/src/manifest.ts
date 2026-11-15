@@ -184,8 +184,13 @@ const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const CONV_COMPUTE: readonly ConvCompute[] = ["f32", "a8"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16", "none"];
-const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
-const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as const;
+const NUMERIC_LEVEL: readonly NumericLevel[] = ["exact", "reorder"];
+/** The op kinds `session.numerics.ops` can address — an exhaustive table of the type's keys. */
+const NUMERIC_OP_KINDS: Readonly<Record<keyof Required<NonNullable<NumericsSpec["ops"]>>, true>> = {
+  linear: true,
+  attention: true,
+  rms_norm: true,
+};
 /**
  * The key allowlist of `session` — held as **an exhaustive table** of `Required<SessionSpec>`.
  *
@@ -195,18 +200,33 @@ const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as c
  * a knob only to `SessionSpec` (as a missing field) both make this declaration fail type checking.
  */
 const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
+  numerics: true,
   linearCompute: true,
   convCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
-  linearGemvReduce: true,
-  stateAttentionReduce: true,
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
-  linearGemvPlanes: true,
+};
+
+/**
+ * A numeric requirement level: `exact` = the reference kernel's bits on the device that runs,
+ * `reorder` = the summation order may differ, inside the op's band.
+ */
+export type NumericLevel = "exact" | "reorder";
+
+/**
+ * The numeric requirement a quant declares (the runtime's `SessionOptions.numerics`): the level of
+ * the whole model and, per op kind, a level that wins over it. Without a declaration the reader
+ * runs every op kind at `exact`.
+ */
+export type NumericsSpec = {
+  readonly level?: NumericLevel;
+  readonly ops?: {
+    readonly linear?: NumericLevel;
+    readonly attention?: NumericLevel;
+    readonly rms_norm?: NumericLevel;
+  };
 };
 
 export type LinearCompute = "f32" | "a8" | "f16";
@@ -368,25 +388,19 @@ export type WeightEntry = Readonly<Record<string, WeightContainer>>;
 
 /** The manifest-owned vocabulary of execution knobs (ADR 0038 §3 / 0098 / 0104). */
 export type SessionSpec = {
+  /**
+   * How far each kind of op may stand from its reference kernel. A level admits kernels and names
+   * none; the approximations below are asked for by their own keys.
+   */
+  readonly numerics?: NumericsSpec;
   readonly linearCompute?: LinearCompute;
   readonly convCompute?: ConvCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
-  readonly linearGemvReduce?: "sequential" | "parallel";
-  /**
-   * The reduction form of (1) QK / (3) PV of states-shaped attention (ADR 0104 addendum 2026-09-26,
-   * promotion to the vocabulary). Without a declaration the reader runs on the runtime's reference
-   * path (`"sequential"`).
-   */
-  readonly stateAttentionReduce?: "sequential" | "parallel" | "parallel-fused";
-  readonly fuseRmsNormAdd?: boolean;
-  readonly fuseLinearStaticQuantize?: boolean;
-  /** Folds gelu_tanh → mul → static_quantize into one dispatch (perf-ledger K-48). */
-  readonly fuseGeluMulStaticQuantize?: boolean;
   /**
    * Packs the int8 activations of fixed SRQ into u32 and hands them to the parallel GEMV (ADR 0105
-   * addendum 2, promotion to the vocabulary). The consumer rejects a declaration without
-   * `linearGemvReduce: "parallel"`.
+   * addendum 2, promotion to the vocabulary). The consumer rejects a declaration whose linear level
+   * is not `reorder`.
    */
   readonly packedStaticQuantize?: boolean;
   /**
@@ -395,12 +409,6 @@ export type SessionSpec = {
    * declaration without `packedStaticQuantize: true`.
    */
   readonly integerGemv?: boolean;
-  /**
-   * Runs the eligible i2 linears (the measured shapes — today the QAT E2B lm_head) on the byte-plane
-   * GEMV, which reads f32 activations (the runtime's `SessionOptions.linearGemvPlanes`). Needs no
-   * other key.
-   */
-  readonly linearGemvPlanes?: boolean;
 };
 
 /** GPU features needed before device creation (`shaderF16` only — ADR 0038 §3). */
@@ -969,6 +977,42 @@ const readBoolean = (
   return value;
 };
 
+const parseNumericLevel = (
+  fail: Fail,
+  raw: Record<string, unknown>,
+  key: string,
+  where: string,
+): NumericLevel | undefined => readEnum(fail, raw, key, NUMERIC_LEVEL, where);
+
+/**
+ * `session.numerics`: an object of `level` and `ops` only, every level one of the two.
+ *
+ * MUST: an unknown field or op kind fails. Read as "not declared", a misspelled op kind would run
+ * the model's level where the distribution asked for another one.
+ */
+const parseNumerics = (fail: Fail, raw: unknown, where: string): NumericsSpec | undefined => {
+  if (raw === undefined) return undefined;
+  const at = `${where}.numerics`;
+  if (!isRecord(raw)) throw fail.format(`${at}: not an object`);
+  assertAllowedKeys(fail, raw, ["level", "ops"], at);
+  const level = parseNumericLevel(fail, raw, "level", at);
+  const opsRaw = raw["ops"];
+  if (opsRaw === undefined) return level === undefined ? {} : { level };
+  if (!isRecord(opsRaw)) throw fail.format(`${at}.ops: not an object`);
+  assertAllowedKeys(fail, opsRaw, Object.keys(NUMERIC_OP_KINDS), `${at}.ops`);
+  const linear = parseNumericLevel(fail, opsRaw, "linear", `${at}.ops`);
+  const attention = parseNumericLevel(fail, opsRaw, "attention", `${at}.ops`);
+  const rmsNorm = parseNumericLevel(fail, opsRaw, "rms_norm", `${at}.ops`);
+  return {
+    ...(level === undefined ? {} : { level }),
+    ops: {
+      ...(linear === undefined ? {} : { linear }),
+      ...(attention === undefined ? {} : { attention }),
+      ...(rmsNorm === undefined ? {} : { rms_norm: rmsNorm }),
+    },
+  };
+};
+
 const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   if (raw === undefined) return {};
   if (!isRecord(raw)) throw fail.format(`${where}.session: not an object`);
@@ -978,33 +1022,17 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const convCompute = readEnum(fail, raw, "convCompute", CONV_COMPUTE, at);
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);
   const attentionScoreStorage = readEnum(fail, raw, "attentionScoreStorage", SCORE_STORAGE, at);
-  const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
-  const stateAttentionReduce = readEnum(
-    fail,
-    raw,
-    "stateAttentionReduce",
-    STATE_ATTENTION_REDUCE,
-    at,
-  );
-  const fuseRmsNormAdd = readBoolean(fail, raw, "fuseRmsNormAdd", at);
-  const fuseLinearStaticQuantize = readBoolean(fail, raw, "fuseLinearStaticQuantize", at);
-  const fuseGeluMulStaticQuantize = readBoolean(fail, raw, "fuseGeluMulStaticQuantize", at);
+  const numerics = parseNumerics(fail, raw["numerics"], at);
   const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
   const integerGemv = readBoolean(fail, raw, "integerGemv", at);
-  const linearGemvPlanes = readBoolean(fail, raw, "linearGemvPlanes", at);
   return {
+    ...(numerics === undefined ? {} : { numerics }),
     ...(linearCompute === undefined ? {} : { linearCompute }),
     ...(convCompute === undefined ? {} : { convCompute }),
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
     ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
-    ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
-    ...(stateAttentionReduce === undefined ? {} : { stateAttentionReduce }),
-    ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
-    ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
-    ...(fuseGeluMulStaticQuantize === undefined ? {} : { fuseGeluMulStaticQuantize }),
     ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
     ...(integerGemv === undefined ? {} : { integerGemv }),
-    ...(linearGemvPlanes === undefined ? {} : { linearGemvPlanes }),
   };
 };
 

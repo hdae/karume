@@ -842,7 +842,6 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
           maxComputeWorkgroupsPerDimension: 65535,
         },
         packedStaticQuantize: true,
-        fuseLinearStaticQuantize: true,
         linearGemvReduce: "parallel",
         linearCompute: "f32",
         weightLayouts: new Map([

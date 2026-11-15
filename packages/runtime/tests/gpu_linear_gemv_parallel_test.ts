@@ -312,7 +312,7 @@ describe.skipIf(!GPU_AVAILABLE)("where the parallel GEMV accumulation applies (r
               gpu,
               await openModelBytes(graph, tensors),
               GRAPH_NAME,
-              parallel ? { linearGemvReduce: "parallel" } : {},
+              parallel ? { numerics: { ops: { linear: "reorder" } } } : {},
             );
             try {
               const input = Float32Array.from(

@@ -2507,7 +2507,6 @@ test("geluMulStaticQuantize and the linear prologue never accept the same gelu_t
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
     ...A8_I8,
-    fuseGeluMulStaticQuantize: true,
   });
   assertEquals(outline(plan.steps), ["linear", "fused:geluMulStaticQuantize"]);
   assertEquals(plan.counts, builtInCounts({ linearPrologue: 1, geluMulStaticQuantize: 1 }));
@@ -3251,7 +3250,6 @@ const RMS_NORM_ROPE_SEQUENCE = 5;
 
 type RmsNormRopeContext = {
   readonly rmsNormReduce?: "workgroup" | "subgroup32";
-  readonly fuseRmsNormAdd?: boolean;
 };
 
 /** The planned nodes of {@link rmsNormRopeGraph} and the fusion context the executor would pass. */
@@ -3492,7 +3490,7 @@ test("rmsNormAdd and rmsNormRope share the head rms_norm but never accept the sa
     ["one normalised value, both consumers", shared, { rmsNormAdd: 0, rmsNormRope: 0, rope: 1 }],
   ] as const) {
     graph.requires.ops = [...new Set(graph.nodes.map((step) => step.op))].sort();
-    const { nodes, context } = planRmsNormRope(graph, { fuseRmsNormAdd: true });
+    const { nodes, context } = planRmsNormRope(graph);
     const scan = {
       ...context,
       packedValues: new Map<string, number>(),

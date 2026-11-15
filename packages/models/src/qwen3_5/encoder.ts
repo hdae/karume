@@ -69,18 +69,13 @@ const OWNER = "Qwen3_5TextEncoder";
  * NOTE: the `export` is for the host test that pins "no key accepted" (not on any public surface).
  */
 export const QWEN3_5_TEXT_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: false,
   linearCompute: false,
   convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /** The part of a Session the encoder uses (narrow, so a test can stand in for the GPU). */

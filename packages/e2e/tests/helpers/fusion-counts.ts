@@ -38,6 +38,7 @@ import {
 import { sessionOptionsViolation } from "../../../runtime/src/runtime/session-options-check.ts";
 import {
   DISABLED_FUSION_RULES,
+  type REORDER_STRATEGIES,
   type SessionOptions,
 } from "../../../runtime/src/runtime/session-types.ts";
 import { planWeightResidency } from "../../../runtime/src/runtime/weight-residency.ts";
@@ -119,7 +120,8 @@ export const readDistributionGraph = (
  * The opt-in rules and annotations fire only under their options: the linear prologue (perf-ledger
  * F-4) under `linearCompute: "a8"`, the attention's absorbed permutes (perf-ledger F-3 / F-8) on
  * the a8 attention seat, the output permute only on the online route (`attentionScoreStorage:
- * "none"` with the device facts). The test-only {@link DISABLED_FUSION_RULES} plans with rules
+ * "none"` with the device facts). `numerics` and the private {@link REORDER_STRATEGIES} select the
+ * reduction forms as they do on a Session. The test-only {@link DISABLED_FUSION_RULES} plans with rules
  * left out (`"all"` = fusion off — the annotation folds stay, as on a Session), so a control can
  * plan the same graph unfused through the same path. `fusionRules` plans with rules written outside
  * the runtime, first and in their order, as a Session given them would (ADR 0148).
@@ -127,17 +129,13 @@ export const readDistributionGraph = (
 export type FusionCountOptions = Pick<
   SessionOptions,
   | "fusionRules"
-  | "fuseRmsNormAdd"
-  | "fuseLinearStaticQuantize"
-  | "fuseGeluMulStaticQuantize"
+  | "numerics"
   | "packedStaticQuantize"
   | "integerGemv"
-  | "linearGemvPlanes"
-  | "linearGemvReduce"
   | "linearCompute"
   | "attentionCompute"
   | "attentionScoreStorage"
-  | "rmsNormReduce"
+  | typeof REORDER_STRATEGIES
   | typeof DISABLED_FUSION_RULES
 >;
 

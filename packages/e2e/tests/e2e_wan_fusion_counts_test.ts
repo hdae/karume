@@ -90,7 +90,8 @@ const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 10
  *     numbers (the **pair form** — swap of adjacent pairs + elementwise products with cos / sin;
  *     `recipe wan/dit_patch.py`) — each folded into one dispatch (perf-ledger F-3 stage 3).
  *   - rope 0: those 60 pair-form RoPEs (ROPE_RULE's second form, the `rope` count of 2026-10-24)
- *     now fold with their rms_norm; with `rmsNormReduce: "subgroup32"` they would fold alone again.
+ *     now fold with their rms_norm; with the subgroup RMS (`REORDER_STRATEGIES` `rmsNorm: "subgroup32"`)
+ *     they would fold alone again.
  *   - adaln 0: the modulation vectors are sliced **before** the layer_norm, so the 2–3 reshapes
  *     right after the layer_norm that ADALN_RULE's broadcast form requires are absent, and there is
  *     no `where` of the per-token form (perf-ledger K-73).

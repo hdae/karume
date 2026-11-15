@@ -70,7 +70,6 @@ import {
   type SessionDiagnostics,
   type SessionOptions,
   type SharedWeight,
-  type StateAttentionReduce,
 } from "@karume/runtime";
 import {
   type DistributionSource,
@@ -449,58 +448,28 @@ export type PipelineOptions = {
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
   /**
-   * The reduction form of states-form attention ①QK / ③PV. Resolved in the order explicit value →
-   * the selected quant's session → the runtime's reference path `"sequential"` (the same rule as the
-   * other quant execution knobs — ADR 0104 addendum 2026-09-26). fromAssets has no quant, so it is
-   * sequential when unspecified. The family keeps no code default.
+   * The numeric requirement of the language-model Sessions: how far each kind of op may stand from
+   * its reference kernel (`exact` or `reorder`, for the whole model and per op kind — the runtime's
+   * `SessionOptions.numerics` is the source of truth for its meaning). Resolved per field in the
+   * order explicit value → the selected quant's session → `exact`, so an explicit
+   * `{ ops: { attention: "exact" } }` keeps the levels the quant declares for the rest. fromAssets
+   * has no quant, so every op kind is `exact` when unspecified. The family keeps no code default.
+   * Passed to both target and drafter.
    *
-   * `"parallel"` is the variant that splits the KV-length direction over 16 lanes (perf-ledger K-12),
-   * removing decode attention's growth in proportion to the KV length (82 → 41 ms/token at P=16K).
-   * The reduction order differs, so it is not bit-identical to `"sequential"` (the runtime's reference
-   * path), but gemma4's greedy / chat goldens are identical under both (ADR 0058 decision 6, ADR 0067
-   * addendum 2026-09-03). `"sequential"` is the way back for parity comparisons or when "suspecting
-   * an order-dependent difference".
-   * `"parallel-fused"` is an optional setting that fuses the row statistics and PV for few rows and a
-   * short column limit (ADR 0102). Its addition order is the same as parallel, and shapes outside its
-   * target use the parallel path.
+   * At `reorder` the decode and verification plans run the parallel GEMV on the quantized linears
+   * and the parallel reductions of states-form attention (16 lanes over the KV length, removing
+   * decode attention's growth in proportion to it: 82 → 41 ms/token at P=16K — perf-ledger K-12).
+   * The summation order differs, so the logits are not bit-identical to `exact`; gemma4's greedy /
+   * chat goldens are identical under both (ADR 0058 decision 6, ADR 0067 addendum 2026-09-03), and
+   * on the mobile QAT line (its activations are re-quantized) the generated sequence may change.
+   * `exact` is the way back for parity comparisons or when suspecting an order-dependent difference.
    */
-  readonly stateAttentionReduce?: StateAttentionReduce;
-  /**
-   * The addition order of the quantized GEMV. Resolved in the order explicit value → the selected
-   * quant's session → sequential. fromAssets has no quant, so it is sequential when unspecified. No
-   * automatic selection by model configuration. The runtime's SessionOptions is the source of truth
-   * for the meaning and the shapes it applies to. Passed to both target and drafter (ADR 0098).
-   * Especially for the mobile QAT line (its activations are re-quantized), the generated sequence
-   * may change.
-   */
-  readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
-  /**
-   * The optional RMS→add fusion. The runtime setting of the same name is the source of truth for its
-   * meaning and scope (ADR 0099). Resolved in the order explicit value → the selected quant's session
-   * → the runtime default, and passed to both target and drafter (ADR 0104). fromAssets has no quant,
-   * so it is the runtime default when unspecified.
-   */
-  readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
-  /**
-   * The optional linear→fixed-SRQ fusion. The runtime setting of the same name is the source of
-   * truth for its meaning and scope (ADR 0103). Rejected unless the effective `linearGemvReduce` is
-   * `"parallel"`. Resolved in the order explicit value → the selected quant's session → the runtime
-   * default, and passed to both target and drafter (ADR 0104). fromAssets has no quant, so it is the
-   * runtime default when unspecified.
-   */
-  readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
-  /**
-   * The optional gelu_tanh→mul→fixed-SRQ fusion (the mobile QAT per-layer-input gate). The runtime
-   * setting of the same name is the source of truth for its meaning and scope (perf-ledger K-48). Resolved
-   * in the order explicit value → the selected quant's session → the runtime default, and passed to
-   * both target and drafter. fromAssets has no quant, so it is the runtime default when unspecified.
-   */
-  readonly fuseGeluMulStaticQuantize?: SessionOptions["fuseGeluMulStaticQuantize"];
+  readonly numerics?: SessionOptions["numerics"];
   /**
    * Passes the fixed-SRQ activations to the parallel GEMV as packed int8. The runtime setting of the
-   * same name is the source of truth for its meaning and scope (ADR 0105). Rejected unless the
-   * effective `linearGemvReduce` is `"parallel"`. The manifest vocabulary has no field for it, so it
-   * enters **only through the caller's explicit option**, and is passed to both target and drafter.
+   * same name is the source of truth for its meaning and scope (ADR 0105). Rejected unless linear
+   * runs at `reorder`. Resolved in the order explicit value → the selected quant's session → the
+   * runtime default, and passed to both target and drafter.
    */
   readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
   /**
@@ -513,19 +482,6 @@ export type PipelineOptions = {
    * unspecified.
    */
   readonly integerGemv?: SessionOptions["integerGemv"];
-  /**
-   * Runs the eligible i2 linears (the mobile QAT E2B lm_head, at its measured shape) on the
-   * byte-plane GEMV. The runtime setting of the same name is the source of truth for its meaning and scope; it
-   * needs no other option. Resolved in the order explicit value → the selected quant's session → the
-   * runtime default, and passed to both target and drafter. Only the mobile QAT graphs have i2
-   * linears at that shape; fromAssets has no quant, so it is the runtime default when unspecified.
-   */
-  readonly linearGemvPlanes?: SessionOptions["linearGemvPlanes"];
-  /**
-   * The optional RMS reduction. subgroup32 requires a supporting GPU and changes the addition order
-   * from the reference (ADR 0100).
-   */
-  readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /**
    * The storage of the full state slots (`"f16"` halves them; default `"f32"`). The runtime setting
    * of the same name is the source of truth for its meaning, and it needs no re-export or GPU feature.
@@ -747,7 +703,7 @@ export type SequenceOptions = {
    * clock**, but the e2e test (`e2e_gemma4_speculative_test.ts`) pins their identity (u32 match of
    * the logits, and sequence match between gated and always) with a check per device, so the
    * wall-clock choice does not change the output (ADR 0096 addendum 2026-09-26).
-   * `"always"` and `stateAttentionReduce: "sequential"` remain as options for A/B and acceptance (on a
+   * `"always"` and `numerics: { ops: { attention: "exact" } }` remain as options for A/B and acceptance (on a
    * device where the check is red the difference is real, so choose these two there —
    * `docs/limitations.md`).
    */
@@ -877,11 +833,10 @@ export type Gemma4State = {
   readonly ownsGpu: boolean;
   readonly session: Session;
   /**
-   * The immutable setting used to build the Session. The same value goes to the intermediate memory
-   * estimate (unspecified = no field = the estimate also reads the runtime default).
+   * The storage of the full slots the Session was built with. The same value goes to the
+   * intermediate memory estimate (unspecified = no field = the estimate also reads the runtime
+   * default); {@link speculativeSetup} reads it too.
    */
-  readonly stateAttentionReduce?: StateAttentionReduce;
-  /** Likewise for the storage of the full slots; {@link speculativeSetup} reads it too. */
   readonly fullStateStorage?: SessionOptions["fullStateStorage"];
   /**
    * Likewise for the expert cache (its slots and host tier — present exactly when
@@ -1389,20 +1344,12 @@ export const gemma4EstimateGenerations = (
 
 /**
  * The options of the language-model Sessions (the target and the drafter) that the runtime's fusion
- * pass reads: the resolved fusion and GEMV knobs, the row-block budget and the experimental rules.
+ * pass reads: the resolved numeric requirement and int8 forms of the GEMV, the row-block budget and
+ * the experimental rules.
  */
 type GemmaFusionOptions = Pick<
   SessionOptions,
-  | "fuseRmsNormAdd"
-  | "fuseLinearStaticQuantize"
-  | "fuseGeluMulStaticQuantize"
-  | "packedStaticQuantize"
-  | "integerGemv"
-  | "linearGemvPlanes"
-  | "linearGemvReduce"
-  | "rmsNormReduce"
-  | "attentionRowBlockMaxBytes"
-  | "fusionRules"
+  "numerics" | "packedStaticQuantize" | "integerGemv" | "attentionRowBlockMaxBytes" | "fusionRules"
 >;
 
 /**
@@ -1420,20 +1367,11 @@ type GemmaFusionOptions = Pick<
  * them, and its estimate none either.
  */
 const gemmaFusionOptions = (options: PipelineOptions): GemmaFusionOptions => ({
-  ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
-  ...(options.fuseLinearStaticQuantize === undefined
-    ? {}
-    : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
-  ...(options.fuseGeluMulStaticQuantize === undefined
-    ? {}
-    : { fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize }),
+  ...(options.numerics === undefined ? {} : { numerics: options.numerics }),
   ...(options.packedStaticQuantize === undefined
     ? {}
     : { packedStaticQuantize: options.packedStaticQuantize }),
   ...(options.integerGemv === undefined ? {} : { integerGemv: options.integerGemv }),
-  ...(options.linearGemvPlanes === undefined ? {} : { linearGemvPlanes: options.linearGemvPlanes }),
-  ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
-  ...(options.linearGemvReduce === undefined ? {} : { linearGemvReduce: options.linearGemvReduce }),
   ...(options.attentionRowBlockMaxBytes === undefined
     ? {}
     : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
@@ -1928,14 +1866,7 @@ export class GemmaPipeline {
       options.speculative === undefined
         ? undefined
         : assertSpeculative("gemma.Pipeline", options.speculative);
-    const gpu =
-      options.gpu ??
-      (await acquireGpu({
-        ...toAcquireGpuOptions(requested.gpuFeatures),
-        subgroups:
-          options.rmsNormReduce === "subgroup32" ||
-          options.linearGemvReduce === "parallel-subgroup32",
-      }));
+    const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(requested.gpuFeatures)));
     const ownsGpu = options.gpu === undefined;
     // The quant execution knobs (including the ③PV reduction form) pass only the composed values
     // (explicit > quant declaration); unspecified ones are not passed at all (copying defaults here
@@ -1949,9 +1880,6 @@ export class GemmaPipeline {
         ? {}
         : { fullStateStorage: options.fullStateStorage }),
       submitPolicy: gemmaSubmitPolicy(options.submitPolicy),
-      ...(options.stateAttentionReduce === undefined
-        ? {}
-        : { stateAttentionReduce: options.stateAttentionReduce }),
       ...(options.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
@@ -2079,9 +2007,6 @@ export class GemmaPipeline {
         session,
         ...(cacheSession === undefined ? {} : { expertCache: cacheSession }),
         ...(expertCacheOptions === undefined ? {} : { expertCacheOptions }),
-        ...(sessionOptions.stateAttentionReduce === undefined
-          ? {}
-          : { stateAttentionReduce: sessionOptions.stateAttentionReduce }),
         ...(sessionOptions.fullStateStorage === undefined
           ? {}
           : { fullStateStorage: sessionOptions.fullStateStorage }),
@@ -2624,7 +2549,7 @@ export class GemmaPipeline {
     // and state enter the report (its run is listed as unaccounted), so there the options move no
     // reported number; they decide only whether that estimate refuses. For the same reason it moves
     // no reported number that the drafter's estimate still lacks what its Session also gets
-    // (`stateAttentionReduce`, `fullStateStorage`, and the borrowed weight's storage through
+    // (`fullStateStorage`, and the borrowed weight's storage through
     // `sharedWeights`).
     const { fusionOptions } = this.#state;
     const generations = gemma4EstimateGenerations(wiring, {
@@ -2647,9 +2572,6 @@ export class GemmaPipeline {
       generation: generations.target,
       ...limits,
       ...fusionOptions,
-      ...(this.#state.stateAttentionReduce === undefined
-        ? {}
-        : { stateAttentionReduce: this.#state.stateAttentionReduce }),
       ...(this.#state.fullStateStorage === undefined
         ? {}
         : { fullStateStorage: this.#state.fullStateStorage }),

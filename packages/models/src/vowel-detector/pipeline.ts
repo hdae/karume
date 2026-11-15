@@ -420,18 +420,13 @@ type VowelDetectorState = {
  * exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: false,
   linearCompute: false,
   convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /** Material settled by the family admission ({@link admitVowelDetector}). */

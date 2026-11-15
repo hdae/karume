@@ -60,6 +60,7 @@ import {
   assertSeatsApplied,
   type CensusRow,
   countDispatches,
+  FUSION_SIGNATURES,
   type KeyPredicate,
   mergeCensus,
   type NumericSeat,
@@ -137,18 +138,6 @@ const REPRESENTATIVES: {
     parallel: [linearGemvParallelKey("i4", 32, 4), linearGemvStaticQuantizeKey("i2", undefined, 8)],
     "parallel-subgroup32": [linearGemvSubgroupKey("i8", undefined, 16)],
   },
-  fuseRmsNormAdd: {
-    true: [rmsNormAddKey("residual-norm", 1536), rmsNormSubgroupKey("norm-residual")],
-  },
-  fuseLinearStaticQuantize: {
-    true: [
-      linearGemvStaticQuantizeKey("i4", 512, 4),
-      linearGemvStaticQuantizePackedKey("i8", undefined, 2),
-    ],
-  },
-  fuseGeluMulStaticQuantize: {
-    true: [geluMulStaticQuantizeKey("gelu-other"), geluMulStaticQuantizeKey("other-gelu")],
-  },
   packedStaticQuantize: {
     true: [STATIC_QUANTIZE_PACKED_KEY, linearGemvParallelPackedKey("i4", 32, 8)],
   },
@@ -169,6 +158,24 @@ const REPRESENTATIVES: {
   rmsNormReduce: {
     subgroup32: [rmsNormSubgroupKey(), rmsNormSubgroupKey("residual-norm")],
   },
+};
+
+/**
+ * Representative keys per built-in fusion (the real ones returned by src's key functions): the keys
+ * {@link FUSION_SIGNATURES} reads as "the fused kernel ran".
+ */
+const FUSION_REPRESENTATIVES: {
+  readonly [Rule in keyof typeof FUSION_SIGNATURES]: readonly string[];
+} = {
+  rmsNormAdd: [rmsNormAddKey("residual-norm", 1536), rmsNormSubgroupKey("norm-residual")],
+  linearStaticQuantize: [
+    linearGemvStaticQuantizeKey("i4", 512, 4),
+    linearGemvStaticQuantizePackedKey("i8", undefined, 2),
+  ],
+  geluMulStaticQuantize: [
+    geluMulStaticQuantizeKey("gelu-other"),
+    geluMulStaticQuantizeKey("other-gelu"),
+  ],
 };
 
 /**
@@ -238,6 +245,29 @@ describe("SEAT_SIGNATURES", () => {
         for (const key of keys) {
           assertEquals(predicate(key), false, `${seat}=${value} matches ${other}'s '${key}'`);
         }
+      }
+    }
+  });
+});
+
+describe("FUSION_SIGNATURES", () => {
+  const fusions: Readonly<Record<string, KeyPredicate>> = FUSION_SIGNATURES;
+  const fusionKeys: Readonly<Record<string, readonly string[]>> = FUSION_REPRESENTATIVES;
+
+  it("each fusion's predicate matches every representative key of that fusion", () => {
+    for (const [rule, predicate] of Object.entries(fusions)) {
+      const keys = fusionKeys[rule] ?? [];
+      assertEquals(keys.length > 0, true, `${rule}: no representative keys`);
+      for (const key of keys) {
+        assertEquals(predicate(key), true, `${rule} does not match '${key}'`);
+      }
+    }
+  });
+
+  it("no fusion's predicate matches the reference path's keys", () => {
+    for (const [rule, predicate] of Object.entries(fusions)) {
+      for (const key of REFERENCE_KEYS) {
+        assertEquals(predicate(key), false, `${rule} matches the reference key '${key}'`);
       }
     }
   });
@@ -347,12 +377,12 @@ describe("assertSeatsApplied", () => {
     assertThrows(
       () =>
         assertSeatsApplied(
-          rows([sequential, 3], [rmsNormAddKey("norm-residual", 1536), 1]),
-          { fuseRmsNormAdd: false },
+          rows([sequential, 3], [rmsNormSubgroupKey("norm-residual"), 1]),
+          { rmsNormReduce: "workgroup" },
           "where",
         ),
       Error,
-      "fuseRmsNormAdd is the reference value false yet the true variant ran",
+      'rmsNormReduce is the reference value "workgroup" yet the subgroup32 variant ran',
     );
   });
 
@@ -361,7 +391,6 @@ describe("assertSeatsApplied", () => {
       rows([sequential, 3], [RMS_NORM_KEY, 1]),
       {
         linearGemvReduce: "sequential",
-        fuseRmsNormAdd: false,
         rmsNormReduce: "workgroup",
       },
       "where",
@@ -382,15 +411,11 @@ describe("assertSeatsApplied", () => {
   });
 
   it("options not passed are not checked (the caller decides the effective value when omitted)", () => {
-    assertSeatsApplied(rows([parallel, 1]), { fuseRmsNormAdd: false }, "where");
+    assertSeatsApplied(rows([parallel, 1]), { rmsNormReduce: "workgroup" }, "where");
   });
 
-  it("fails on an empty census even when only fields that do not change numerics are given", () => {
-    assertThrows(
-      () => assertSeatsApplied([], { planBackingBudgetBytes: 0 }, "where"),
-      Error,
-      "the census is empty",
-    );
+  it("fails on an empty census even when no seat is given", () => {
+    assertThrows(() => assertSeatsApplied([], {}, "where"), Error, "the census is empty");
   });
 });
 

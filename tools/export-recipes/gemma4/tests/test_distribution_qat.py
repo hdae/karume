@@ -319,7 +319,7 @@ class TestQatLayout:
         self, tmp_path: Path
     ) -> None:
         """One int4 storage per role; every seat loads both (the parallel and fused seats are
-        session flags over the same containers), and the reference seat `i4` is the default."""
+        session settings over the same containers), and the reference seat `i4` is the default."""
         out_dir, manifest = _assemble(tmp_path)
         entry: Mapping[str, Any] = manifest["models"]["e2b"]
 
@@ -351,14 +351,10 @@ class TestQatLayout:
         assert entry["pipelineConfig"]["suppressTokens"] == sorted(SUPPRESSED)
 
 
-#: The session flags of the parallel and fused seats (ADR 0098 / 0104).
+#: The session settings of the parallel and fused seats (ADR 0098 / 0104).
 PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
-    "i4-gemvpar": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
-    "i4-fast": {
-        "linearGemvReduce": "parallel",
-        "fuseRmsNormAdd": True,
-        "stateAttentionReduce": "parallel-fused",
-    },
+    "i4-gemvpar": {"numerics": {"level": "reorder"}},
+    "i4-fast": {"numerics": {"level": "reorder"}},
 }
 
 
@@ -366,7 +362,7 @@ class TestQatParallelSeats:
     """Every model carries the parallel and fused seats over the line's int4 storage."""
 
     @pytest.mark.parametrize("model", ["e2b", "e4b", "12b", "26b"])
-    def test_the_seats_declare_the_parallel_and_fused_session_flags(self, model: str) -> None:
+    def test_the_seats_declare_the_parallel_and_fused_session_settings(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
 
         assert list(quants) == ["i4", "i4-gemvpar", "i4-fast"]
@@ -402,10 +398,10 @@ class TestQatParallelSeats:
         """A manifest built for one model cannot alter the line's declaration (each table is a
         copy)."""
         quants = gemma4_distribution.gemma4_qat_q4_0_quants("e2b")
-        quants["i4-fast"]["session"]["fuseRmsNormAdd"] = False
+        quants["i4-fast"]["session"]["numerics"]["level"] = "exact"
 
         declared = gemma4_distribution.GEMMA4_QAT_Q4_0_PARALLEL_QUANTS["i4-fast"]["session"]
-        assert declared["fuseRmsNormAdd"] is True
+        assert declared["numerics"]["level"] == "reorder"
         again = gemma4_distribution.gemma4_qat_q4_0_quants("e4b")
         assert again["i4-fast"]["session"] == PARALLEL_SESSIONS["i4-fast"]
 
@@ -981,15 +977,16 @@ class TestQatCard:
         assert "The linear weights and the embedding table (also the output head) are" in card
         assert "per-layer embeddings of" not in card
 
-    def test_a_session_boolean_is_spelled_as_the_manifest_spells_it(self, tmp_path: Path) -> None:
-        """A session boolean is spelled in the same JSON notation as the manifest — a Python `True`
-        would disagree with the spelling of TypeScript that a reader pastes as is."""
+    def test_a_session_object_is_spelled_as_the_manifest_spells_it(self, tmp_path: Path) -> None:
+        """A session object is spelled in the same JSON notation as the manifest — a Python
+        `{'level': ...}` would disagree with the spelling of TypeScript that a reader pastes as
+        is."""
         out_dir, _ = _assemble(tmp_path)
         card = (out_dir / "README.md").read_text(encoding="utf-8")
 
         fast = next(line for line in card.splitlines() if line.startswith("| `i4-fast`"))
-        assert "`fuseRmsNormAdd` = `true`" in fast
-        assert "True" not in fast
+        assert '`numerics` = `{"level": "reorder"}`' in fast
+        assert "'level'" not in fast
 
     def test_the_usage_points_function_calling_and_thinking_at_the_session(
         self, tmp_path: Path

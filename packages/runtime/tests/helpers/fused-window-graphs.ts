@@ -192,7 +192,7 @@ const rope = (): FusedWindowCase => {
 
 // -------------------------------------------------------------------------------- rmsNormAdd
 
-/** `add(r, rms_norm(x, w))` on `[4, 256]` (fuseRmsNormAdd). */
+/** `add(r, rms_norm(x, w))` on `[4, 256]` (rmsNormAdd). */
 const rmsNormAdd = (): FusedWindowCase => {
   const graph = declaration({
     inputs: [
@@ -214,7 +214,7 @@ const rmsNormAdd = (): FusedWindowCase => {
     graph,
     tensors: [],
     inputs: inputsOf(graph),
-    options: { fuseRmsNormAdd: true },
+    options: {},
   };
 };
 
@@ -394,7 +394,7 @@ const gatedResidual = (): FusedWindowCase => {
 // ---------------------------------------------------------------------- linearStaticQuantize
 
 /**
- * `static_quantize(linear(x [4, 1536], w i8 [256, 1536], b))` (fuseLinearStaticQuantize with the
+ * `static_quantize(linear(x [4, 1536], w i8 [256, 1536], b))` (linearStaticQuantize on the
  * parallel GEMV) — the step binds the weight's resident scale (`weightScale`).
  */
 const linearStaticQuantize = (): FusedWindowCase => {
@@ -415,13 +415,13 @@ const linearStaticQuantize = (): FusedWindowCase => {
     graph,
     tensors: linearStaticQuantizeTensors(),
     inputs: inputsOf(graph),
-    options: { fuseLinearStaticQuantize: true, linearGemvReduce: "parallel" },
+    options: { numerics: { ops: { linear: "reorder" } } },
   };
 };
 
 // --------------------------------------------------------------------- geluMulStaticQuantize
 
-/** `static_quantize(mul(gelu_tanh(gate), other))` on `[1, 4, 256]` (fuseGeluMulStaticQuantize). */
+/** `static_quantize(mul(gelu_tanh(gate), other))` on `[1, 4, 256]` (geluMulStaticQuantize). */
 const geluMulStaticQuantize = (): FusedWindowCase => {
   const row = [1, 4, 256];
   const graph = declaration({
@@ -444,7 +444,7 @@ const geluMulStaticQuantize = (): FusedWindowCase => {
     graph,
     tensors: [],
     inputs: inputsOf(graph),
-    options: { fuseGeluMulStaticQuantize: true },
+    options: {},
   };
 };
 

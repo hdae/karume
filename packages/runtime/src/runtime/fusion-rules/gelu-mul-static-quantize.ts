@@ -38,20 +38,20 @@ type GeluMulStaticQuantizeMatch = FusionMatch & {
  * Three consecutive nodes `gelu_tanh(gate) → mul(gelu, other) → static_quantize(product)` (either
  * operand order of the mul).
  *
- * Accepted only on an exact match (ADR 0040 decision 2):
+ * Accepted only on an exact match (ADR 0040 decision 2), with no option (a built-in rule that is
+ * bit-identical to the unfused chain applies wherever it matches):
  *
- * 1. The session option (`fuseGeluMulStaticQuantize`) is set.
- * 2. The gelu value's and the product's single consumers are the next node, and neither is a graph
+ * 1. The gelu value's and the product's single consumers are the next node, and neither is a graph
  *    output (the declared `internals: "private"`, which `defineRule` applies).
- * 3. Every slot is f32, and the gate, the gelu value, the mul's other operand, the product and the
+ * 2. Every slot is f32, and the gate, the gelu value, the mul's other operand, the product and the
  *    SRQ output have one shape: `[…, 256]` with 1 to 8 rows (no broadcast). The kernel reads the
  *    other operand as `other[i]`, the element order the plain mul reads a same-shape operand in.
  *    An alias the planner makes (a reshape, a permute that keeps the element order, an identity
  *    expand — ADR 0011) is the source's buffer in that same order (the QAT operand is a reshape of
  *    a materialised slice), so any same-shape value reads correctly.
- * 4. The other operand is not the gate (each binding is one value — a duplicate bind is not the
+ * 3. The other operand is not the gate (each binding is one value — a duplicate bind is not the
  *    measured form).
- * 5. The SRQ output is not handed over as packed int8 (ADR 0105): the kernel writes the f32 path's
+ * 4. The SRQ output is not handed over as packed int8 (ADR 0105): the kernel writes the f32 path's
  *    words. NOTE: `planFusions` packs only SRQs left as plain nodes by the first scan, so a folded
  *    SRQ is never packed; the check keeps the invariant local to the rule.
  *
@@ -67,7 +67,6 @@ export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<
   contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
-    if (context.fuseGeluMulStaticQuantize !== true) return undefined;
     const gelu = nodes[index],
       mul = nodes[index + 1],
       srq = nodes[index + 2];

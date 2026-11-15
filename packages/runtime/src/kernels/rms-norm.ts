@@ -277,7 +277,7 @@ export type RmsNormKernel = "workgroup128" | "workgroup256" | "subgroup32";
 
 /**
  * The plain rms_norm kernel a row of `dim` elements runs: the 128-wide workgroup form for dim ≤ 128,
- * else the subgroup form when the Session asks for it (`rmsNormReduce: "subgroup32"`), else the
+ * else the subgroup form when the Session resolved it (`rmsNormReduce: "subgroup32"`), else the
  * 256-wide workgroup form ({@link rmsNormWorkgroupKey} — v1 or its bit-identical prefetch form).
  *
  * MUST: this is the one decision — `buildRmsNorm` (runtime/recipe-builders/norm.ts) and the fusion
@@ -291,7 +291,7 @@ export const rmsNormKernel = (
   dim > 0 && dim <= 128 ? "workgroup128" : reduce === "subgroup32" ? "subgroup32" : "workgroup256";
 
 /**
- * Opt-in RMS → add fusion (DECIDED: docs/decisions/0099-rms-norm-add-fusion.md).
+ * Built-in RMS → add fusion (DECIDED: docs/decisions/0099-rms-norm-add-fusion.md).
  * Connected directly, the last multiply and the add fuse and the rounding changes, so an integer
  * XOR with a uniform 0 is inserted. The value is the fourth word of rmsNormParams (0). Do not
  * simplify it into a constant-expression bitcast round trip.

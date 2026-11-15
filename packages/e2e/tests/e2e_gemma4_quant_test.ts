@@ -18,7 +18,13 @@ import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { chatPrompt, Pipeline, type RunPhase } from "../../models/gemma.ts";
 import * as gemma4QatMobile from "../../models/gemma4-qat-mobile.ts";
-import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import {
+  assertSeatsApplied,
+  type CensusRow,
+  countDispatches,
+  FUSION_SIGNATURES,
+  mergeCensus,
+} from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
 import {
   assertRowCensus,
@@ -31,6 +37,17 @@ import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Checks the built-in fusions from both sides: RMS→add ran (it applies in every Session), and the
+ * linear→SRQ fusion ran exactly when `srq` says so (it applies only on the parallel GEMV).
+ */
+const assertFusionsApplied = (rows: readonly CensusRow[], srq: boolean, where: string): void => {
+  const rms = countDispatches(rows, FUSION_SIGNATURES.rmsNormAdd);
+  assert(rms > 0, `${where}: no RMS→add pair fused`);
+  const fused = countDispatches(rows, FUSION_SIGNATURES.linearStaticQuantize);
+  assert(srq ? fused > 0 : fused === 0, `${where}: linear→SRQ fused ${fused} times`);
+};
 
 /**
  * The number of SRQs that become packed in a QAT E2B decode plan (the same value as
@@ -65,18 +82,17 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
         assert(isRecord(entry) && isRecord(entry.quants));
         const reference = parsed.models.e2b.quants.i4;
         assertEquals(reference.session, {}, "the reference i4's definition has changed");
+        // Linear at `reorder` (the parallel GEMV), attention left at `exact`; the fusions need
+        // no declaration.
         const fastSession = {
-          linearGemvReduce: "parallel",
-          fuseRmsNormAdd: true,
-          ...(family === "gemma4-qat"
-            ? { fuseLinearStaticQuantize: true, packedStaticQuantize: true }
-            : {}),
+          numerics: { ops: { linear: "reorder" } },
+          ...(family === "gemma4-qat" ? { packedStaticQuantize: true } : {}),
         } as const;
         // The quant preset declarations of the replaced manifest (also the material of the key
         // that looks up the bundle's census table).
         const quantSessions = {
           i4: reference.session,
-          "i4-gemvpar": { linearGemvReduce: "parallel" },
+          "i4-gemvpar": { numerics: { ops: { linear: "reorder" } } },
           "i4-fast": fastSession,
         } as const;
         const manifest = {
@@ -112,17 +128,16 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               name: "default",
               options: {},
               parallel: true,
-              rms: true,
               srq: family === "gemma4-qat",
               packed: family === "gemma4-qat",
             },
             {
-              // i4-gemvpar is a quant that declares only parallel, so packed is not on. The
-              // fusions need no declaration: RMS→add everywhere, linear→SRQ on the parallel GEMV.
+              // i4-gemvpar is a quant that declares only linear at reorder, so packed is not on.
+              // The fusions need no declaration: RMS→add everywhere, linear→SRQ on the parallel
+              // GEMV.
               name: "parallel-reference",
               options: { quant: "i4-gemvpar" },
               parallel: true,
-              rms: true,
               srq: family === "gemma4-qat",
               packed: false,
             },
@@ -130,34 +145,16 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               name: "explicit-fast",
               options: { quant: "i4", ...fastSession },
               parallel: true,
-              rms: true,
               srq: family === "gemma4-qat",
               packed: family === "gemma4-qat",
             },
             {
-              name: "disable-rms",
-              options: { fuseRmsNormAdd: false },
+              // An explicit level for another op kind keeps the level the quant declares for
+              // linear (numerics composes per field).
+              name: "explicit-other-kind",
+              options: { numerics: { ops: { attention: "exact" } } },
               parallel: true,
-              rms: false,
               srq: family === "gemma4-qat",
-              packed: family === "gemma4-qat",
-            },
-            {
-              // Packed matches the SRQs left standalone, so it is on independently of the
-              // linear→SRQ fusion.
-              name: "disable-srq",
-              options: { fuseLinearStaticQuantize: false },
-              parallel: true,
-              rms: true,
-              srq: false,
-              packed: family === "gemma4-qat",
-            },
-            {
-              name: "disable-both",
-              options: { fuseRmsNormAdd: false, fuseLinearStaticQuantize: false },
-              parallel: true,
-              rms: false,
-              srq: false,
               packed: family === "gemma4-qat",
             },
             {
@@ -165,22 +162,19 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               name: "reference",
               options: { quant: "i4" },
               parallel: false,
-              rms: true,
               srq: false,
               packed: false,
             },
             {
-              // This switches to sequential, so packed is turned off with an explicit false too
-              // (even a true from the quant is rejected because it requires parallel).
+              // An explicit exact beats the declared level of linear, so packed is turned off with
+              // an explicit false too (even a true from the quant is rejected because it needs
+              // linear at reorder). RMS→add still applies.
               name: "override",
               options: {
-                linearGemvReduce: "sequential",
-                fuseRmsNormAdd: false,
-                fuseLinearStaticQuantize: false,
+                numerics: { ops: { linear: "exact" } },
                 packedStaticQuantize: false,
               },
               parallel: false,
-              rms: false,
               srq: false,
               packed: false,
             },
@@ -246,12 +240,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   merged,
                   {
                     linearGemvReduce: mode.parallel ? "parallel" : "sequential",
-                    fuseRmsNormAdd: mode.rms,
-                    fuseLinearStaticQuantize: mode.srq,
                     packedStaticQuantize: mode.packed,
                   },
                   mode.name,
                 );
+                assertFusionsApplied(merged, mode.srq, mode.name);
                 // If the bundle's census table has a row, check the exact counts per phase and per
                 // run (if some shapes drop out of the parallel GEMV eligibility table and fall to
                 // sequential, the at-least-one check above passes but this one goes red).
@@ -269,13 +262,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          for (const name of [
-            "parallel-reference",
-            "explicit-fast",
-            "disable-rms",
-            "disable-srq",
-            "disable-both",
-          ]) {
+          for (const name of ["parallel-reference", "explicit-fast", "explicit-other-kind"]) {
             assertEquals(runs.get("default"), runs.get(name), name);
           }
           assertEquals(runs.get("reference"), runs.get("override"));
@@ -290,11 +277,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 maxResidentPleBytes: 0,
                 speculative: { k: 3 },
                 // Exact agreement between speculative and non-speculative decoding is guaranteed
-                // only with sequential (the "speculative decoding" section of docs/limitations.md).
-                // The default parallel has a different QK reduction order in decode and verify, and
-                // argmax can split on tokens with close values, so this switches to the setting
-                // whose agreement the check relies on.
-                stateAttentionReduce: "sequential",
+                // only with attention at exact (the "speculative decoding" section of
+                // docs/limitations.md). At reorder the QK reduction order differs in decode and
+                // verify, and argmax can split on tokens with close values, so this switches to the
+                // setting whose agreement the check relies on.
+                numerics: { ops: { attention: "exact" } },
                 onRunDiagnostics: (d, phase) => {
                   const phaseRuns = phaseCensus.get(phase.kind) ?? [];
                   phaseRuns.push(d.lastRunPipelines);
@@ -337,17 +324,17 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   const phaseRuns = phaseCensus.get(phase);
                   assert(phaseRuns !== undefined, phase);
                   // The RMS fusion is checked on the target's decode/verify.
-                  assertSeatsApplied(
-                    mergeCensus(phaseRuns, phase),
-                    {
-                      linearGemvReduce: "parallel",
-                      ...(phase === "draft" ? {} : { fuseRmsNormAdd: true }),
-                    },
-                    phase,
-                  );
+                  const merged = mergeCensus(phaseRuns, phase);
+                  assertSeatsApplied(merged, { linearGemvReduce: "parallel" }, phase);
+                  if (phase !== "draft") {
+                    assert(
+                      countDispatches(merged, FUSION_SIGNATURES.rmsNormAdd) > 0,
+                      `${phase}: no RMS→add pair fused`,
+                    );
+                  }
                 }
                 // If the bundle's census table (the default quant's declaration + the explicit
-                // sequential) has a row, check the exact counts per phase and per run (this also
+                // exact attention) has a row, check the exact counts per phase and per run (this also
                 // pins how many of the drafter's linears fall back to the sequential GEMV).
                 const row = censusRowOf(
                   family,
@@ -356,7 +343,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     family,
                     quantSessions["i4-fast"],
                     {
-                      stateAttentionReduce: "sequential",
+                      numerics: { ops: { attention: "exact" } },
                     },
                     "speculative",
                   ),
@@ -416,10 +403,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             await assertRejects(
               () =>
                 gemma4QatMobile.Pipeline.fromPretrained(noWeightsSource, {
-                  linearGemvReduce: "sequential",
+                  numerics: { ops: { linear: "exact" } },
                 }),
               Error,
-              "supports only linearGemvReduce: parallel / linearCompute: f32",
+              'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"',
             );
           }
           assert(requested.includes("karume.json"));

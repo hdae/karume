@@ -9,6 +9,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
 import type { SessionSpec } from "@karume/hub";
 import { sessionOptionsViolation } from "@karume/runtime";
+import { numericLevels } from "../../runtime/src/runtime/numerics.ts";
 import { ANIMA_SESSION_POLICY } from "../src/anima/pipeline.ts";
 import { BIREFNET_SESSION_POLICY } from "../src/birefnet/pipeline.ts";
 import { DEPTH_ANYTHING_SESSION_POLICY } from "../src/depth-anything/pipeline.ts";
@@ -30,11 +31,11 @@ import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
 test("toSessionOptions: maps the declared keys one by one (an unspecified key creates no field at all)", () => {
   assertEquals(toSessionOptions({}), {});
-  assertEquals(toSessionOptions({ linearGemvReduce: "parallel" }), {
-    linearGemvReduce: "parallel",
+  assertEquals(toSessionOptions({ numerics: { level: "reorder" } }), {
+    numerics: { level: "reorder" },
   });
-  assertEquals(toSessionOptions({ linearGemvReduce: "sequential" }), {
-    linearGemvReduce: "sequential",
+  assertEquals(toSessionOptions({ numerics: { ops: { linear: "exact" } } }), {
+    numerics: { ops: { linear: "exact" } },
   });
   assertEquals(toSessionOptions({ linearCompute: "a8" }), { linearCompute: "a8" });
   assertEquals(toSessionOptions({ attentionCompute: "f16" }), { attentionCompute: "f16" });
@@ -73,32 +74,23 @@ test("toSessionOptions: maps every key of SessionSpec (detects a key left behind
   // type would pass the type check) — it passes a spec with every key filled and confirms that the
   // resulting key set equals the input's.
   const full: Required<SessionSpec> = {
+    numerics: { level: "reorder", ops: { attention: "exact" } },
     linearCompute: "f16",
     convCompute: "a8",
     attentionCompute: "f16",
     attentionScoreStorage: "f16",
-    linearGemvReduce: "sequential",
-    stateAttentionReduce: "parallel-fused",
-    fuseRmsNormAdd: false,
-    fuseLinearStaticQuantize: false,
-    fuseGeluMulStaticQuantize: false,
     packedStaticQuantize: false,
     integerGemv: false,
-    linearGemvPlanes: false,
   };
   const mapped = toSessionOptions(full) as Record<string, unknown>;
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
 });
 
-test("toSessionOptions: keeps explicit false and true for the fusions", () => {
+test("toSessionOptions: keeps explicit false and true for the int8 GEMV booleans", () => {
   for (const value of [false, true]) {
     const spec = {
-      fuseRmsNormAdd: value,
-      fuseLinearStaticQuantize: value,
-      fuseGeluMulStaticQuantize: value,
       packedStaticQuantize: value,
       integerGemv: value,
-      linearGemvPlanes: value,
     };
     assertEquals(toSessionOptions(spec), spec);
   }
@@ -108,54 +100,39 @@ test("toSessionOptions: keeps explicit false and true for the fusions", () => {
 // ----
 
 /**
- * A policy table that accepts all 8 keys (to look at the rules themselves, apart from any family's
+ * A policy table that accepts all 7 keys (to look at the rules themselves, apart from any family's
  * table).
  */
 const ALL: FamilySessionPolicy = {
+  numerics: true,
   linearCompute: true,
   convCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
-  linearGemvReduce: true,
-  stateAttentionReduce: true,
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
-  linearGemvPlanes: true,
 };
 
 /** A table that accepts only the linear execution form (the same shape as irodori / sbv2). */
 const LINEAR_ONLY: FamilySessionPolicy = {
   ...ALL,
+  numerics: false,
   convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /** A spec with every key filled (a new key fails this declaration's type check). */
 const FULL: Required<SessionSpec> = {
+  numerics: { level: "reorder" },
   linearCompute: "f32",
   convCompute: "f32",
   attentionCompute: "f32",
   attentionScoreStorage: "f32",
-  linearGemvReduce: "parallel",
-  stateAttentionReduce: "parallel",
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /**
@@ -191,26 +168,120 @@ describe("resolveSessionOptions: precedence per key", () => {
   });
 
   it("an explicit false wins over a declared true, and undefined means 'not specified' so the declaration stays", () => {
-    const declared = { linearGemvReduce: "parallel", fuseRmsNormAdd: true } as const;
-    assertEquals(resolveSessionOptions(ALL, declared, { fuseRmsNormAdd: false }, "test"), {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: false,
+    const declared = {
+      numerics: { ops: { linear: "reorder" } },
+      packedStaticQuantize: true,
+    } as const;
+    assertEquals(resolveSessionOptions(ALL, declared, { packedStaticQuantize: false }, "test"), {
+      numerics: { ops: { linear: "reorder" } },
+      packedStaticQuantize: false,
     });
     assertEquals(
-      resolveSessionOptions(ALL, declared, { fuseRmsNormAdd: undefined }, "test"),
+      resolveSessionOptions(ALL, declared, { packedStaticQuantize: undefined }, "test"),
       declared,
     );
   });
 
-  it("does not reject values that depend on GPU capabilities (f16 compute, subgroup variants) at this layer", () => {
+  it("does not reject values that depend on GPU capabilities (f16 compute) at this layer", () => {
     assertEquals(resolveSessionOptions(ALL, {}, { linearCompute: "f16" }, "test"), {
       linearCompute: "f16",
     });
+  });
+});
+
+describe("resolveSessionOptions: numerics composes per field", () => {
+  it("an explicit level wins over the declared level", () => {
     assertEquals(
-      resolveSessionOptions(ALL, {}, { linearGemvReduce: "parallel-subgroup32" }, "test"),
-      { linearGemvReduce: "parallel-subgroup32" },
+      resolveSessionOptions(
+        ALL,
+        { numerics: { level: "reorder" } },
+        { numerics: { level: "exact" } },
+        "test",
+      ),
+      { numerics: { level: "exact" } },
     );
   });
+
+  it("an explicit op kind wins over the same declared op kind and keeps the other declared ones", () => {
+    assertEquals(
+      resolveSessionOptions(
+        ALL,
+        { numerics: { ops: { linear: "reorder", attention: "reorder" } } },
+        { numerics: { ops: { attention: "exact" } } },
+        "test",
+      ),
+      { numerics: { ops: { linear: "reorder", attention: "exact" } } },
+    );
+  });
+
+  it("an explicit { ops: { attention: 'exact' } } keeps a declared level 'reorder' for linear", () => {
+    const effective = resolveSessionOptions(
+      ALL,
+      { numerics: { level: "reorder" } },
+      { numerics: { ops: { attention: "exact" } } },
+      "test",
+    );
+    assertEquals(effective, { numerics: { level: "reorder", ops: { attention: "exact" } } });
+    assertEquals(numericLevels(effective.numerics), {
+      linear: "reorder",
+      attention: "exact",
+      rms_norm: "reorder",
+    });
+  });
+
+  it("an explicit level keeps the declared op kinds (the narrower scope still wins)", () => {
+    const effective = resolveSessionOptions(
+      ALL,
+      { numerics: { ops: { attention: "exact" } } },
+      { numerics: { level: "reorder" } },
+      "test",
+    );
+    assertEquals(effective, { numerics: { level: "reorder", ops: { attention: "exact" } } });
+    assertEquals(numericLevels(effective.numerics), {
+      linear: "reorder",
+      attention: "exact",
+      rms_norm: "reorder",
+    });
+  });
+
+  it("with one side only, that side is the value as given", () => {
+    assertEquals(resolveSessionOptions(ALL, { numerics: { level: "reorder" } }, {}, "test"), {
+      numerics: { level: "reorder" },
+    });
+    assertEquals(
+      resolveSessionOptions(ALL, {}, { numerics: { ops: { linear: "reorder" } } }, "test"),
+      { numerics: { ops: { linear: "reorder" } } },
+    );
+  });
+
+  it("an explicit null or non-object numerics is a ModelInputError, not a fall-back to the declaration", () => {
+    for (const value of [null, 0, "reorder", true, []]) {
+      assertThrows(
+        () => resolveSessionOptions(ALL, FULL, overridesWith("numerics", value), "test"),
+        ModelInputError,
+        "test: options.numerics must be an object",
+      );
+    }
+  });
+
+  for (const [numerics, message] of [
+    [{ level: "parallel" }, "options.numerics.level"],
+    [{ level: null }, "options.numerics.level"],
+    [{ ops: null }, "options.numerics.ops must be an object"],
+    [{ ops: "exact" }, "options.numerics.ops must be an object"],
+    [{ ops: [] }, "options.numerics.ops must be an object"],
+    [{ ops: { attention: "parallel" } }, "options.numerics.ops.attention"],
+    [{ ops: { gemv: "reorder" } }, "options.numerics.ops.gemv is not an op kind"],
+    [{ levle: "exact" }, "options.numerics.levle is not a field"],
+  ] as const) {
+    it(`an explicit ${JSON.stringify(numerics)} is a ModelInputError, not a fall-back to the declaration`, () => {
+      assertThrows(
+        () => resolveSessionOptions(ALL, FULL, overridesWith("numerics", numerics), "test"),
+        ModelInputError,
+        `test: ${message}`,
+      );
+    });
+  }
 });
 
 describe("resolveSessionOptions: settings that cannot be accepted", () => {
@@ -222,19 +293,14 @@ describe("resolveSessionOptions: settings that cannot be accepted", () => {
         return "f32";
       },
     };
-    const messages: Readonly<Record<keyof SessionSpec, string>> = {
+    // `numerics` has its own cases above (its diagnostic is the runtime's, per field).
+    const messages: Readonly<Record<Exclude<keyof SessionSpec, "numerics">, string>> = {
       linearCompute: "linearCompute is invalid",
       convCompute: "convCompute is invalid",
       attentionCompute: "attentionCompute is invalid",
       attentionScoreStorage: "attentionScoreStorage is invalid",
-      linearGemvReduce: "linearGemvReduce is invalid",
-      stateAttentionReduce: "stateAttentionReduce is invalid",
-      fuseRmsNormAdd: "fuseRmsNormAdd must be a boolean",
-      fuseLinearStaticQuantize: "fuseLinearStaticQuantize must be a boolean",
-      fuseGeluMulStaticQuantize: "fuseGeluMulStaticQuantize must be a boolean",
       packedStaticQuantize: "packedStaticQuantize must be a boolean",
       integerGemv: "integerGemv must be a boolean",
-      linearGemvPlanes: "linearGemvPlanes must be a boolean",
     };
     for (const [key, message] of Object.entries(messages)) {
       for (const value of [null, 0, "bogus", [], object]) {
@@ -251,7 +317,7 @@ describe("resolveSessionOptions: settings that cannot be accepted", () => {
   });
 
   it("a declared key the policy table rejects is a plain Error before fetching (even when hidden by an explicit value)", () => {
-    for (const key of ["attentionCompute", "linearGemvReduce", "packedStaticQuantize"] as const) {
+    for (const key of ["attentionCompute", "numerics", "packedStaticQuantize"] as const) {
       const declared = { [key]: FULL[key] } satisfies SessionSpec;
       const error = assertThrows(
         () => resolveSessionOptions(LINEAR_ONLY, declared, {}, "test"),
@@ -318,23 +384,31 @@ describe("resolveSessionOptions: settings that cannot be accepted", () => {
   });
 
   it("passes when an explicit setting resolves a violation in the declaration", () => {
-    // Even a combination runtime rejects from the declaration alone (parallel GEMV × a8) passes if
-    // the effective settings are accepted (the accepted set is decided by the effective settings
-    // alone).
-    const declared = { linearCompute: "a8", linearGemvReduce: "parallel" } as const;
+    // Even a combination runtime rejects from the declaration alone (packed activations × a8)
+    // passes if the effective settings are accepted (the accepted set is decided by the effective
+    // settings alone).
+    const declared = {
+      linearCompute: "a8",
+      numerics: { ops: { linear: "reorder" } },
+      packedStaticQuantize: true,
+    } as const;
     assertThrows(
       () => resolveSessionOptions(ALL, declared, {}, "test"),
       Error,
-      "supports only linearCompute: f32",
+      'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32"',
     );
     assertEquals(resolveSessionOptions(ALL, declared, { linearCompute: "f32" }, "test"), {
       linearCompute: "f32",
-      linearGemvReduce: "parallel",
+      numerics: { ops: { linear: "reorder" } },
+      packedStaticQuantize: true,
     });
   });
 
   it("accepts an explicit integerGemv only on top of the packed activations it requires", () => {
-    const packed = { linearGemvReduce: "parallel", packedStaticQuantize: true } as const;
+    const packed = {
+      numerics: { ops: { linear: "reorder" } },
+      packedStaticQuantize: true,
+    } as const;
     assertEquals(resolveSessionOptions(ALL, packed, { integerGemv: true }, "test"), {
       ...packed,
       integerGemv: true,
@@ -359,17 +433,6 @@ describe("resolveSessionOptions: settings that cannot be accepted", () => {
       requires,
     );
   });
-
-  it("accepts an explicit linearGemvPlanes on its own: it requires no other option", () => {
-    assertEquals(resolveSessionOptions(ALL, {}, { linearGemvPlanes: true }, "test"), {
-      linearGemvPlanes: true,
-    });
-    // An explicit false wins over a declaration, as for every key.
-    assertEquals(
-      resolveSessionOptions(ALL, { linearGemvPlanes: true }, { linearGemvPlanes: false }, "test"),
-      { linearGemvPlanes: false },
-    );
-  });
 });
 
 describe("assertSessionOverrides", () => {
@@ -378,8 +441,10 @@ describe("assertSessionOverrides", () => {
       {},
       { linearCompute: "f16" },
       { attentionCompute: "f16", attentionScoreStorage: "f16" },
-      { fuseLinearStaticQuantize: true },
+      { packedStaticQuantize: true },
+      { numerics: { level: "reorder" } },
       overridesWith("linearCompute", null),
+      overridesWith("numerics", null),
     ];
     const verdict = (run: () => void): string | undefined => {
       try {

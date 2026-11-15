@@ -49,7 +49,7 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     id: "gemv-subgroup32",
     title: "GEMV subgroup32",
     summary:
-      'linearGemvReduce: "parallel-subgroup32" against the parallel reduction, u32 identity (i2 / i4 / i8, 5 lane counts, M = 1 / 4 / 8), plus the FP64 band (ADR 0101).',
+      'The parallel GEMV\'s subgroup32 reduction (REORDER_STRATEGIES.linearGemv: "subgroup32", linear at reorder) against the plain parallel reduction, u32 identity (i2 / i4 / i8, 5 lane counts, M = 1 / 4 / 8), plus the FP64 band (ADR 0101).',
     needsSubgroups: true,
     run: async (gpu, options) => ({
       parts: [await checkGemvSubgroup(gpu, options)],
@@ -60,7 +60,7 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     id: "rms-subgroup32",
     title: "RMS subgroup32",
     summary:
-      'rmsNormReduce: "subgroup32" through real Sessions: the rms_norm tolerance of the CPU reference, row 0 identical at every M, fused rms_norm + add identical to unfused, grid-stride (ADR 0100).',
+      'REORDER_STRATEGIES.rmsNorm: "subgroup32" (rms_norm at reorder) through real Sessions: the rms_norm tolerance of the CPU reference, row 0 identical at every M, fused rms_norm + add identical to unfused, grid-stride (ADR 0100).',
     needsSubgroups: true,
     run: async (gpu, options) => ({
       parts: await checkRmsSubgroup(gpu, options),
@@ -105,7 +105,7 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     id: "gemv-planes",
     title: "Byte-plane GEMV",
     summary:
-      "The byte-plane GEMV (linearGemvPlanes) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0147 decision 2, class R).",
+      "The byte-plane GEMV (REORDER_STRATEGIES.linearGemvPlanes, linear at reorder) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0147 decision 2, class R).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkPlanesGemv(gpu, options)],

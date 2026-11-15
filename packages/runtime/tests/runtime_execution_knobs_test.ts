@@ -18,25 +18,16 @@ const jsCallerAssert = assertExecutionKnobs as unknown as (...knobs: readonly un
 /**
  * Spellings inside the accepted set (this order is {@link assertExecutionKnobs}'s argument order).
  */
-const VALID: readonly [string, string, string, string, string, string] = [
-  "f32",
-  "f32",
-  "f32",
-  "f32",
-  "parallel-fused",
-  "parallel",
-];
-const NAMES: readonly [string, string, string, string, string, string] = [
+const VALID: readonly [string, string, string, string] = ["f32", "f32", "f32", "f32"];
+const NAMES: readonly [string, string, string, string] = [
   "linearCompute",
   "convCompute",
   "attentionCompute",
   "attentionScoreStorage",
-  "stateAttentionReduce",
-  "linearGemvReduce",
 ];
 
-test("spellings inside the accepted set pass for all 6 knobs (proof that the tests below are not 'fails whatever is passed')", () => {
-  assertExecutionKnobs("f32", "a8", "f32", "f32", "parallel-fused", "parallel");
+test("spellings inside the accepted set pass for all 4 knobs (proof that the tests below are not 'fails whatever is passed')", () => {
+  assertExecutionKnobs("f32", "a8", "f32", "f32");
 });
 
 test("non-string execution knobs fail before the accepted set is looked up, and the diagnostic does not call the caller's conversions", () => {
@@ -72,7 +63,7 @@ test("spellings outside the union are all listed and fail at once", () => {
   // `"i8a8"` is the spelling renamed to `"a8"` in 0.5.0 (ADR 0074 decision 3, no compatibility
   // shim).
   const error = assertThrows(
-    () => jsCallerAssert("i8a8", "f32", "f32", "s16", "parallel-fused", "parallel"),
+    () => jsCallerAssert("i8a8", "f32", "f32", "s16"),
     ExecutionError,
     "outside the accepted set: 2",
   );

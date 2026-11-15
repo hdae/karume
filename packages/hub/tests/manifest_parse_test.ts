@@ -1283,92 +1283,85 @@ describe("parseManifest: the cross-repository fields repo / revision of a file r
   });
 });
 
-describe("parseManifest: keeps a quant's GEMV reduction setting and tells omission from invalid values", () => {
-  for (const linearGemvReduce of ["sequential", "parallel"] as const) {
-    it(linearGemvReduce, () => {
+describe("parseManifest: keeps a quant's numeric requirement and tells omission from invalid values", () => {
+  for (const numerics of [
+    { level: "exact" },
+    { level: "reorder" },
+    { ops: { linear: "reorder" } },
+    { ops: { attention: "reorder", rms_norm: "exact" } },
+    { level: "reorder", ops: { attention: "exact" } },
+  ] as const) {
+    it(JSON.stringify(numerics), () => {
       const manifest = parseManifest(
         withModel({
-          quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce } } },
+          quants: { q: { weights: { net: "f16" }, session: { numerics } } },
         }),
       );
-      assertEquals(manifest.models.m.quants.q.session, { linearGemvReduce });
+      assertEquals(manifest.models.m.quants.q.session, { numerics });
     });
   }
-  // These assertions sat in the former test body outside any step; each is now its own it.
   it("when not declared, the field is absent", () => {
     assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
   });
-  for (const value of ["auto", "Parallel", 1, true, null]) {
-    it(`${JSON.stringify(value)} is rejected`, () => {
-      assertThrows(
-        () =>
-          parseManifest(
-            withModel({
-              quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
-            }),
-          ),
-        HubError,
-      );
-    });
-  }
-});
-
-describe("parseManifest: keeps a quant's attention reduction form and tells omission from invalid values", () => {
-  for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
-    it(stateAttentionReduce, () => {
-      const manifest = parseManifest(
-        withModel({
-          quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce } } },
-        }),
-      );
-      assertEquals(manifest.models.m.quants.q.session, { stateAttentionReduce });
-    });
-  }
-  // This assertion sat in the former test body outside any step; it is now its own it.
-  it("when not declared, the field is absent", () => {
-    assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
-  });
-  // `parallel-subgroup32` belongs to the GEMV vocabulary and does not exist for attention (a
-  // mixed-up spelling is not let through).
-  for (const value of ["auto", "Parallel", "parallel-subgroup32", 1, true, null]) {
-    it(`${JSON.stringify(value)} is rejected`, () => {
-      assertThrows(
-        () =>
-          parseManifest(
-            withModel({
-              quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce: value } } },
-            }),
-          ),
-        HubError,
-      );
-    });
-  }
-  // Pins one case with the same shape as the shipped regular E2B i4-fast (declared together with
-  // GEMV and RMS fusion).
-  it("can be declared together with linearGemvReduce and fuseRmsNormAdd", () => {
-    const session = {
-      linearGemvReduce: "parallel",
-      stateAttentionReduce: "parallel-fused",
-      fuseRmsNormAdd: true,
-    } as const;
-    const manifest = parseManifest(
-      withModel({
-        quants: { q: { weights: { net: "f16" }, session } },
-      }),
-    );
-    assertEquals(manifest.models.m.quants.q.session, session);
-  });
-});
-
-describe("parseManifest: keeps the fusion booleans and tells them from omission and invalid values", () => {
-  for (const key of [
-    "fuseRmsNormAdd",
-    "fuseLinearStaticQuantize",
-    "fuseGeluMulStaticQuantize",
-    "packedStaticQuantize",
-    "integerGemv",
-    "linearGemvPlanes",
+  // A level is "exact" or "reorder"; the reduction forms a level resolves to are not levels (a
+  // spelling of the former vocabulary is not let through).
+  for (const numerics of [
+    null,
+    "reorder",
+    [],
+    { level: "parallel" },
+    { level: "Reorder" },
+    { level: null },
+    { level: 1 },
+    { levels: "reorder" },
+    { ops: "reorder" },
+    { ops: { linear: "parallel" } },
+    { ops: { gemv: "reorder" } },
+    { ops: { attention: true } },
   ]) {
+    it(`${JSON.stringify(numerics)} is rejected`, () => {
+      assertThrows(
+        () =>
+          parseManifest(
+            withModel({
+              quants: { q: { weights: { net: "f16" }, session: { numerics } } },
+            }),
+          ),
+        HubError,
+      );
+    });
+  }
+});
+
+describe("parseManifest: the reduction forms and fusions are not session keys", () => {
+  // The level decides the reduction form and the bit-identical fusions always apply, so a
+  // declaration of the former keys is an unknown key rather than a setting read as absent.
+  for (const [key, value] of [
+    ["linearGemvReduce", "parallel"],
+    ["stateAttentionReduce", "parallel-fused"],
+    ["rmsNormReduce", "subgroup32"],
+    ["linearGemvPlanes", true],
+    ["fuseRmsNormAdd", true],
+    ["fuseLinearStaticQuantize", true],
+    ["fuseGeluMulStaticQuantize", true],
+  ] as const) {
+    it(`${key} is rejected`, () => {
+      assertThrows(
+        () =>
+          parseManifest(
+            withModel({
+              quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
+            }),
+          ),
+        HubError,
+        `unknown key '${key}'`,
+      );
+    });
+  }
+});
+
+describe("parseManifest: keeps the int8 GEMV booleans and tells them from omission and invalid values", () => {
+  for (const key of ["packedStaticQuantize", "integerGemv"]) {
     for (const value of [false, true]) {
       it(`${key}=${value}`, () => {
         const session = { [key]: value };
@@ -1396,16 +1389,10 @@ describe("parseManifest: keeps the fusion booleans and tells them from omission 
       });
     }
   }
-  // Pins one case with the same shape as the shipped i4-fast (the GEMV setting declared together
-  // with the 3 boolean fields).
-  it("can be declared together with linearGemvReduce", () => {
-    const session = {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      fuseLinearStaticQuantize: true,
-      fuseGeluMulStaticQuantize: true,
-      packedStaticQuantize: true,
-    } as const;
+  // Pins one case with the same shape as the shipped mobile i4-fast (the numeric requirement
+  // declared together with the packed activations).
+  it("can be declared together with numerics", () => {
+    const session = { numerics: { level: "reorder" }, packedStaticQuantize: true } as const;
     const manifest = parseManifest(
       withModel({
         quants: { q: { weights: { net: "f16" }, session } },
@@ -1415,8 +1402,7 @@ describe("parseManifest: keeps the fusion booleans and tells them from omission 
   });
   it("keeps integerGemv declared next to the packed activations it requires", () => {
     const session = {
-      linearGemvReduce: "parallel",
-      fuseLinearStaticQuantize: true,
+      numerics: { ops: { linear: "reorder" } },
       packedStaticQuantize: true,
       integerGemv: true,
     } as const;

@@ -10,13 +10,20 @@
  *
  * ## Key
  *
- * A bundle's key is made by {@link bundleKey} from the **effective** SessionOptions (the result of
- * passing the quant preset's `session` from the manifest and the explicit overrides through the
- * family's merge `resolveSessionOptions` — ADR 0111). It is not looked up by the literal `session`
- * of the manifest because a value added outside the merge (as gemma's models default did before
- * stateAttentionReduce was promoted) would make the table key and the bundle that actually runs
- * diverge. Fields at their reference value are dropped from the key (an explicit
- * `linearGemvReduce: "sequential"` is the same bundle as leaving it unset).
+ * A bundle is a `CensusSeats` (pipeline-census.ts): the approximation options and the forms the
+ * levels of `numerics` resolve to, under the names the execution knobs carry (`linearGemvReduce`,
+ * `stateAttentionReduce`, …). A row states its bundle directly; a run's bundle is `censusSeats` of
+ * the **effective** SessionOptions (the result of passing the quant preset's `session` from the
+ * manifest and the explicit overrides through the family's merge `resolveSessionOptions` — ADR
+ * 0111). It is not looked up by the literal `session` of the manifest because a value added outside
+ * the merge (as gemma's models default did before the reduction form was promoted) would make the
+ * table key and the bundle that actually runs diverge. {@link bundleKey} drops the seats at their
+ * reference value (an explicit `numerics: { ops: { linear: "exact" } }` is the same bundle as
+ * leaving it unset).
+ *
+ * The built-in fusions (`FUSION_SIGNATURES` — RMS→add, linear→SRQ, gelu_tanh→mul→SRQ) apply in
+ * every bundle wherever they match, so they are not seats: a phase writes their counts under the
+ * rule name, and they hold in that bundle as in any other with the same linear form.
  *
  * ## Where the values come from (as of 2026-09-26, all derived without a GPU)
  *
@@ -43,6 +50,8 @@
  *   row count (the bucket). Prefill carries only the M-independent fusion (RMS→add).
  * - `stateAttentionReduce: "parallel-fused"`: whether the fused kernel is taken depends on the
  *   column limit of the full layers (= the capacity).
+ * - `stateAttentionReduce: "parallel"` (the parallel reductions without the fold): only the private
+ *   `REORDER_STRATEGIES` selects it, which no pipeline passes, so no bundle has it.
  * - `attentionCompute` / `attentionScoreStorage`: the number of row blocks of non-states-form
  *   attention depends on the device's `maxStorageBufferBindingSize` (the S of anima DiT at 1024px
  *   does not fit in one).
@@ -63,6 +72,9 @@ import { statePvKey, stateQkKey } from "../../../runtime/src/kernels/state-atten
 import {
   assertPipelineCensus,
   type CensusExpectation,
+  type CensusSeats,
+  censusSeats,
+  FUSION_SIGNATURES,
   type KeyPredicate,
   type NumericSeat,
   SEAT_REFERENCE,
@@ -138,16 +150,16 @@ export const effectiveSessionOptions = (
 const NUMERIC_SEATS = (Object.keys(SEAT_REFERENCE) as NumericSeat[]).toSorted();
 
 /**
- * Effective SessionOptions → the bundle key (only the fields of the number-changing options that
- * hold a **non-reference value**, as `option=value` joined with `,` in option-name order). The
- * empty string when every option is at its reference value (= the reference bundle).
+ * A bundle → its key (only the seats that hold a **non-reference value**, as `seat=value` joined
+ * with `,` in seat-name order). The empty string when every seat is at its reference value (= the
+ * reference bundle). A run's bundle is `censusSeats(effective)`.
  *
  * NOTE: fields that do not change numbers (`submitPolicy` and so on — `NonNumericField` in
- * pipeline-census.ts) do not affect the census, so they are not in the key.
+ * pipeline-census.ts) are not seats, so they are not in the key.
  */
-export const bundleKey = (options: SessionOptions): string =>
+export const bundleKey = (seats: CensusSeats): string =>
   NUMERIC_SEATS.flatMap((seat) => {
-    const value = options[seat];
+    const value = seats[seat];
     return value === undefined || value === SEAT_REFERENCE[seat] ? [] : [`${seat}=${value}`];
   }).join(",");
 
@@ -192,9 +204,9 @@ const STATE_SEQUENTIAL_KEYS: ReadonlySet<string> = new Set(
  *
  * Zero when fully eligible (ADR 0110 decision 5 ①). A bundle with a non-zero count records the
  * number of out-of-scope shapes that fall to the sequential path as is (a shape that leaves the
- * eligibility table moves it upwards — Fable review I8-02). The boolean fusion options have none,
- * because "nodes that were not fused" always remain by construction (a miss is visible from the
- * variant count alone).
+ * eligibility table moves it upwards — Fable review I8-02). The fusions and the boolean options have
+ * none, because "nodes that were not fused" always remain by construction (a miss is visible from
+ * the variant count alone).
  */
 type ReferenceSeat = "linearCompute" | "linearGemvReduce" | "stateAttentionReduce";
 
@@ -224,14 +236,20 @@ type SeatCount<Seat extends NumericSeat> = Seat extends ReferenceSeat
     }
   : { readonly variant: number };
 
+/** A built-in fusion rule (`FUSION_SIGNATURES` — the fused kernel's key predicate). */
+type FusionRule = keyof typeof FUSION_SIGNATURES;
+
 /**
- * The expectations of one phase (only the bundle's non-reference options are written — the bundle's
- * `session` decides the value).
+ * The expectations of one phase: the bundle's non-reference seats (the bundle's `seats` decide the
+ * value) and the fused-kernel counts of the built-in fusions (by rule name — they apply in every
+ * bundle).
  *
- * NOTE: an option that is not written (not derived) has no count check in this phase. The e2e tests
- * keep checking it with `assertSeatsApplied`'s at least one / zero.
+ * NOTE: a seat or fusion that is not written (not derived) has no count check in this phase. The
+ * e2e tests keep checking a seat with `assertSeatsApplied`'s at least one / zero.
  */
-export type PhaseCensus = { readonly [Seat in NumericSeat]?: SeatCount<Seat> };
+export type PhaseCensus = { readonly [Seat in NumericSeat]?: SeatCount<Seat> } & {
+  readonly [Rule in FusionRule]?: { readonly variant: number };
+};
 
 /**
  * Per family, component → phase (the component names and phase spellings `onRunDiagnostics`
@@ -277,8 +295,8 @@ type FamilyBundleRow<Family extends CensusFamily> = {
   readonly family: Family;
   /** The models with the same graph (the same counts) (keys of the manifest's models). */
   readonly models: readonly string[];
-  /** The bundle (effective SessionOptions — the key is {@link bundleKey}). */
-  readonly session: SessionOverrides;
+  /** The bundle (the seats of the effective SessionOptions — the key is {@link bundleKey}). */
+  readonly seats: CensusSeats;
   readonly census: ComponentCensus<Family>;
 };
 
@@ -330,16 +348,6 @@ const GEMMA4_QAT_E2B_GELU_MUL_SRQ = { variant: 35 } as const;
  * consumer's kernel family, but both carry the packed fragment).
  */
 const GEMMA4_QAT_E2B_PACKED = { variant: 140 } as const;
-/**
- * States-form attention: the product graph's 35 layers × one each of ①' / ③' (M ≤ 8, one row
- * block).
- */
-const GEMMA4_E2B_STATE_PARALLEL = { variant: 70, reference: 0 } as const;
-/**
- * The drafter's 12 readonly attention nodes × one each of ①' / ③' (readonly is always the parallel
- * form, whatever the option).
- */
-const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
 /**
  * 12B (product graph, 48 layers), read from a real run's `lastRunPipelines` at decode rather than
@@ -348,7 +356,6 @@ const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const
  */
 const GEMMA4_12B_GEMV = { variant: 329, reference: 0 } as const;
 const GEMMA4_12B_RMS_ADD = { variant: 96 } as const;
-const GEMMA4_12B_STATE_PARALLEL = { variant: 96, reference: 0 } as const;
 
 /**
  * 26B A4B (product graph, 30 layers — the mixture of experts), read from a real run of the mirror at
@@ -360,7 +367,6 @@ const GEMMA4_12B_STATE_PARALLEL = { variant: 96, reference: 0 } as const;
  */
 const GEMMA4_26B_GEMV = { variant: 236, reference: 0 } as const;
 const GEMMA4_26B_RMS_ADD = { variant: 90 } as const;
-const GEMMA4_26B_STATE_PARALLEL = { variant: 60, reference: 0 } as const;
 
 /**
  * gemma4-qat E4B (product graph, 42 layers): of the 344 linears, 342 take the parallel GEMV — the
@@ -383,11 +389,6 @@ const GEMMA4_QAT_E4B_GELU_MUL_SRQ = { variant: 42 } as const;
  * the same way as E2B's 70 + 70).
  */
 const GEMMA4_QAT_E4B_PACKED = { variant: 168 } as const;
-/**
- * States-form attention: the product graph's 42 layers × one each of ①' / ③' (M ≤ 8, one row
- * block).
- */
-const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 
 /**
  * gemma4 E4B (product graph, 42 layers — the q4_0 mirror, derived with the E2B rows above): of the
@@ -397,7 +398,6 @@ const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
  */
 const GEMMA4_E4B_GEMV = { variant: 343, reference: 1 } as const;
 const GEMMA4_E4B_RMS_ADD = { variant: 127 } as const;
-const GEMMA4_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 /**
  * The E4B QAT drafter (the regular E4B shipped none, so these columns are new): of its 68 linears
  * (all i4 g32) only `post_projection` 2560×256 (twice) is in the parallel GEMV table — the other 66
@@ -406,7 +406,6 @@ const GEMMA4_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
  */
 const GEMMA4_E4B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
 const GEMMA4_E4B_DRAFTER_RMS_ADD = { variant: 24 } as const;
-const GEMMA4_E4B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
@@ -493,326 +492,187 @@ const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
 export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   // --- gemma4 E2B (the q4_0 mirror, with its QAT drafter) -------------------
   {
-    // The `i4-gemvpar` override preset of e2e_gemma4_quant_test / `i4-gemvpar` with ③ set back by
-    // an explicit sequential.
+    // Linear at `reorder`, attention at `exact`: the `i4-gemvpar` / `i4-fast` override presets of
+    // e2e_gemma4_quant_test (its speculation check included) and the mirror's presets with attention
+    // set back to `exact`.
     family: "gemma4",
     models: E2B,
-    session: { linearGemvReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel" },
     census: {
       target: {
-        decode: { linearGemvReduce: GEMMA4_E2B_GEMV },
-        verify: { linearGemvReduce: GEMMA4_E2B_GEMV },
-      },
-      drafter: { draft: { linearGemvReduce: GEMMA4_E2B_DRAFTER_GEMV } },
-    },
-  },
-  {
-    // The `i4-fast` override preset of e2e_gemma4_quant_test (the speculation check sets ③ to an
-    // explicit sequential).
-    family: "gemma4",
-    models: E2B,
-    session: { linearGemvReduce: "parallel", fuseRmsNormAdd: true },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-        decode: { linearGemvReduce: GEMMA4_E2B_GEMV, fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-        verify: { linearGemvReduce: GEMMA4_E2B_GEMV, fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
       },
       drafter: {
         draft: {
           linearGemvReduce: GEMMA4_E2B_DRAFTER_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
+          rmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
         },
       },
     },
   },
   {
-    // The distribution mirror's `i4-gemvpar`.
+    // The distribution mirror's `i4-gemvpar` and `i4-fast` (both declare `level: "reorder"`; ③'s
+    // parallel-fused is not derived — file header).
     family: "gemma4",
     models: E2B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
       target: {
-        decode: {
-          linearGemvReduce: GEMMA4_E2B_GEMV,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
-        },
-        verify: {
-          linearGemvReduce: GEMMA4_E2B_GEMV,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
-        },
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
       },
       drafter: {
         draft: {
           linearGemvReduce: GEMMA4_E2B_DRAFTER_GEMV,
-          stateAttentionReduce: GEMMA4_E2B_DRAFTER_STATE_PARALLEL,
-        },
-      },
-    },
-  },
-  {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
-    family: "gemma4",
-    models: E2B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      stateAttentionReduce: "parallel-fused",
-    },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-        decode: { linearGemvReduce: GEMMA4_E2B_GEMV, fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-        verify: { linearGemvReduce: GEMMA4_E2B_GEMV, fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-      },
-      drafter: {
-        draft: {
-          linearGemvReduce: GEMMA4_E2B_DRAFTER_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
+          rmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
         },
       },
     },
   },
   // --- gemma4 E4B (the q4_0 mirror, with its QAT drafter) -------------------
   {
-    // The distribution mirror's `i4-gemvpar`.
+    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
+    // file header).
     family: "gemma4",
     models: E4B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
       target: {
-        decode: {
-          linearGemvReduce: GEMMA4_E4B_GEMV,
-          stateAttentionReduce: GEMMA4_E4B_STATE_PARALLEL,
-        },
-        verify: {
-          linearGemvReduce: GEMMA4_E4B_GEMV,
-          stateAttentionReduce: GEMMA4_E4B_STATE_PARALLEL,
-        },
+        prefill: { rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
       },
       drafter: {
         draft: {
           linearGemvReduce: GEMMA4_E4B_DRAFTER_GEMV,
-          stateAttentionReduce: GEMMA4_E4B_DRAFTER_STATE_PARALLEL,
-        },
-      },
-    },
-  },
-  {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
-    family: "gemma4",
-    models: E4B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      stateAttentionReduce: "parallel-fused",
-    },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
-        decode: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
-        verify: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
-      },
-      drafter: {
-        draft: {
-          linearGemvReduce: GEMMA4_E4B_DRAFTER_GEMV,
-          fuseRmsNormAdd: GEMMA4_E4B_DRAFTER_RMS_ADD,
+          rmsNormAdd: GEMMA4_E4B_DRAFTER_RMS_ADD,
         },
       },
     },
   },
   // --- gemma4 12B (the q4_0 mirror; its drafter's rows are not derived) ------
   {
-    // The distribution mirror's `i4-gemvpar`.
+    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
+    // file header).
     family: "gemma4",
     models: TWELVE_B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
       target: {
-        decode: {
-          linearGemvReduce: GEMMA4_12B_GEMV,
-          stateAttentionReduce: GEMMA4_12B_STATE_PARALLEL,
-        },
-      },
-    },
-  },
-  {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
-    family: "gemma4",
-    models: TWELVE_B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      stateAttentionReduce: "parallel-fused",
-    },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
-        decode: { linearGemvReduce: GEMMA4_12B_GEMV, fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_12B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_12B_GEMV, rmsNormAdd: GEMMA4_12B_RMS_ADD },
       },
     },
   },
   // --- gemma4 26B (the q4_0 mirror; it ships no drafter) ---------------------
   {
-    // The distribution mirror's `i4-gemvpar`.
+    // The distribution mirror's `i4-gemvpar` and `i4-fast` (③'s parallel-fused is not derived —
+    // file header).
     family: "gemma4",
     models: TWENTY_SIX_B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
       target: {
-        decode: {
-          linearGemvReduce: GEMMA4_26B_GEMV,
-          stateAttentionReduce: GEMMA4_26B_STATE_PARALLEL,
-        },
-      },
-    },
-  },
-  {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
-    family: "gemma4",
-    models: TWENTY_SIX_B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      stateAttentionReduce: "parallel-fused",
-    },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_26B_RMS_ADD },
-        decode: { linearGemvReduce: GEMMA4_26B_GEMV, fuseRmsNormAdd: GEMMA4_26B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_26B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_26B_GEMV, rmsNormAdd: GEMMA4_26B_RMS_ADD },
       },
     },
   },
   // --- gemma4-qat E2B (no drafter) -----------------------------------------
   {
-    // The `i4-gemvpar` override preset of e2e_gemma4_quant_test.
+    // The `i4-gemvpar` override preset of e2e_gemma4_quant_test (linear at `reorder` only).
     family: "gemma4-qat",
     models: E2B,
-    session: { linearGemvReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel" },
     census: {
       target: {
-        decode: { linearGemvReduce: GEMMA4_QAT_E2B_GEMV },
-        verify: { linearGemvReduce: GEMMA4_QAT_E2B_GEMV },
-      },
-    },
-  },
-  {
-    // The distribution mirror's `i4-gemvpar`.
-    family: "gemma4-qat",
-    models: E2B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
-    census: {
-      target: {
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
         decode: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
         },
       },
     },
   },
   {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
+    // The distribution mirror's `i4-gemvpar` (`level: "reorder"`; ③'s parallel-fused is not
+    // derived — file header).
     family: "gemma4-qat",
     models: E2B,
-    session: {
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
+    census: {
+      target: {
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        decode: {
+          linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
+        },
+        verify: {
+          linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
+        },
+      },
+    },
+  },
+  {
+    // The distribution mirror's `i4-fast` (`level: "reorder"` with the packed activations; ③'s
+    // parallel-fused is not derived — file header).
+    family: "gemma4-qat",
+    models: E2B,
+    seats: {
       linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      fuseLinearStaticQuantize: true,
-      fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
       stateAttentionReduce: "parallel-fused",
     },
     census: {
       target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
         decode: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
-          fuseGeluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
-          fuseGeluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
         },
       },
     },
   },
   {
-    // The `i4-fast` override preset of e2e_gemma4_quant_test (default / explicit-fast).
+    // The `i4-fast` override preset of e2e_gemma4_quant_test (linear at `reorder` with the packed
+    // activations — its default / explicit-fast / override-attention modes).
     family: "gemma4-qat",
     models: E2B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      fuseLinearStaticQuantize: true,
-      packedStaticQuantize: true,
-    },
+    seats: { linearGemvReduce: "parallel", packedStaticQuantize: true },
     census: {
       target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
         decode: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
-          packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
-        },
-      },
-    },
-  },
-  {
-    // disable-rms of e2e_gemma4_quant_test.
-    family: "gemma4-qat",
-    models: E2B,
-    session: {
-      linearGemvReduce: "parallel",
-      fuseLinearStaticQuantize: true,
-      packedStaticQuantize: true,
-    },
-    census: {
-      target: {
-        decode: {
-          linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
-          packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
-        },
-      },
-    },
-  },
-  {
-    // disable-srq of e2e_gemma4_quant_test (the packed consumer is the packed variant of the plain
-    // parallel GEMV).
-    family: "gemma4-qat",
-    models: E2B,
-    session: { linearGemvReduce: "parallel", fuseRmsNormAdd: true, packedStaticQuantize: true },
-    census: {
-      target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD },
-        decode: {
-          linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
-          fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
-          packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
-        },
-      },
-    },
-  },
-  {
-    // disable-both of e2e_gemma4_quant_test.
-    family: "gemma4-qat",
-    models: E2B,
-    session: { linearGemvReduce: "parallel", packedStaticQuantize: true },
-    census: {
-      target: {
-        decode: {
-          linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
+          rmsNormAdd: GEMMA4_E2B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
         },
       },
@@ -820,50 +680,54 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
   // --- gemma4-qat E4B (no drafter) -----------------------------------------
   {
-    // The distribution mirror's `i4-gemvpar`.
+    // The distribution mirror's `i4-gemvpar` (`level: "reorder"`; ③'s parallel-fused is not
+    // derived — file header).
     family: "gemma4-qat",
     models: E4B,
-    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
       target: {
+        prefill: { rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD },
         decode: {
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
-          stateAttentionReduce: GEMMA4_QAT_E4B_STATE_PARALLEL,
+          rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
-          stateAttentionReduce: GEMMA4_QAT_E4B_STATE_PARALLEL,
+          rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
         },
       },
     },
   },
   {
-    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
+    // The distribution mirror's `i4-fast` (`level: "reorder"` with the packed activations; ③'s
+    // parallel-fused is not derived — file header).
     family: "gemma4-qat",
     models: E4B,
-    session: {
+    seats: {
       linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      fuseLinearStaticQuantize: true,
-      fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
       stateAttentionReduce: "parallel-fused",
     },
     census: {
       target: {
-        prefill: { fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD },
+        prefill: { rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD },
         decode: {
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
-          fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
-          fuseGeluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
+          rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
-          fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
-          fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
-          fuseGeluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
+          rmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          linearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          geluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
         },
       },
@@ -873,7 +737,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     family: "irodori",
     models: ["v4-small", "v4.1-small"],
-    session: { linearCompute: "a8" },
+    seats: { linearCompute: "a8" },
     census: {
       dit: { step: { linearCompute: IRODORI_DIT_A8 } },
       "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
@@ -882,7 +746,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     family: "irodori",
     models: ["v4.1-small-mf"],
-    session: { linearCompute: "a8" },
+    seats: { linearCompute: "a8" },
     census: {
       dit: { step: { linearCompute: IRODORI_MEANFLOW_DIT_A8 } },
       "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
@@ -891,7 +755,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     family: "irodori",
     models: ["v4-large"],
-    session: { linearCompute: "a8" },
+    seats: { linearCompute: "a8" },
     census: {
       dit: { step: { linearCompute: IRODORI_V4_LARGE_DIT_A8 } },
       "dit-context": { run: { linearCompute: IRODORI_V4_LARGE_DIT_CONTEXT_A8 } },
@@ -901,21 +765,21 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     family: "anima",
     models: ANIMA_MODELS,
-    session: { linearCompute: "a8" },
+    seats: { linearCompute: "a8" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
     // attentionCompute is not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
-    session: { linearCompute: "a8", attentionCompute: "a8" },
+    seats: { linearCompute: "a8", attentionCompute: "a8" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
     // attentionCompute / attentionScoreStorage are not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
-    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
@@ -923,7 +787,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // attentionCompute is not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
-    session: { linearCompute: "f16", attentionCompute: "f16" },
+    seats: { linearCompute: "f16", attentionCompute: "f16" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   // --- sbv2 (the preset's session reaches only front / voice) ---------------
@@ -931,7 +795,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // front has 2 linears and voice 4 (the rest are conv1d, outside linearCompute's scope).
     family: "sbv2",
     models: SBV2_MODELS,
-    session: { linearCompute: "a8" },
+    seats: { linearCompute: "a8" },
     census: {
       front: { run: { linearCompute: { variant: 2, reference: 0 } } },
       voice: { run: { linearCompute: { variant: 4, reference: 0 } } },
@@ -943,7 +807,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // attentionCompute / attentionScoreStorage are not derived (file header).
     family: "wan",
     models: ["t2v-1.3b"],
-    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { pass: { linearCompute: WAN_DIT_LINEARS } } },
   },
   {
@@ -952,7 +816,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // 2.1 row (file header).
     family: "wan-ti2v",
     models: ["ti2v-5b"],
-    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
   },
   {
@@ -962,7 +826,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // online route through `assertAttentionSeatsComplete` with the "none" seat.
     family: "wan-ti2v",
     models: ["ti2v-5b"],
-    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
     census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
   },
   {
@@ -972,7 +836,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // them).
     family: "wan-ti2v",
     models: ["ti2v-5b"],
-    session: {
+    seats: {
       linearCompute: "a8",
       attentionCompute: "a8",
       attentionScoreStorage: "none",
@@ -990,7 +854,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // and its own exact online-dispatch count.
     family: "moss-image",
     models: ["sft"],
-    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
     census: {
       dit: { pass: { linearCompute: MOSS_DIT_LINEARS } },
       dit_skip22: { pass: { linearCompute: MOSS_DIT_SKIP22_LINEARS } },
@@ -1010,9 +874,9 @@ export const censusRowOf = (
   model: string,
   effective: SessionOptions,
 ): BundleCensusRow | undefined => {
-  const key = bundleKey(effective);
+  const key = bundleKey(censusSeats(effective));
   return CENSUS_TABLE.find(
-    (row) => row.family === family && row.models.includes(model) && bundleKey(row.session) === key,
+    (row) => row.family === family && row.models.includes(model) && bundleKey(row.seats) === key,
   );
 };
 
@@ -1034,9 +898,9 @@ const phaseOf = (
 /**
  * The expectations of the row's (component, phase). `undefined` when the phase is not filled in.
  *
- * Per option it yields "exactly `variant` variant keys of the non-reference value" and, for options
- * with a reference-variant predicate, also "exactly `reference` keys left on that option's
- * reference path".
+ * Per seat it yields "exactly `variant` variant keys of the non-reference value" and, for seats
+ * with a reference-variant predicate, also "exactly `reference` keys left on that seat's reference
+ * path"; per fusion rule, "exactly `variant` fused-kernel keys".
  */
 export const phaseExpectations = (
   row: BundleCensusRow,
@@ -1045,17 +909,31 @@ export const phaseExpectations = (
 ): readonly CensusExpectation[] | undefined => {
   const census = phaseOf(row, component, phase);
   if (census === undefined) return undefined;
-  return NUMERIC_SEATS.flatMap((seat): CensusExpectation[] => {
+  const fusions = (Object.keys(FUSION_SIGNATURES) as FusionRule[]).flatMap(
+    (rule): CensusExpectation[] => {
+      const count = census[rule];
+      return count === undefined
+        ? []
+        : [
+            {
+              label: `fused kernel of ${rule}`,
+              match: FUSION_SIGNATURES[rule],
+              count: count.variant,
+            },
+          ];
+    },
+  );
+  const seats = NUMERIC_SEATS.flatMap((seat): CensusExpectation[] => {
     const count: { readonly variant: number; readonly reference?: number } | undefined =
       census[seat];
     if (count === undefined) return [];
-    const value = row.session[seat as keyof SessionOverrides];
+    const value = row.seats[seat];
     const signatures: Readonly<Record<string, KeyPredicate>> = SEAT_SIGNATURES[seat];
     const predicate = value === undefined ? undefined : signatures[String(value)];
     if (predicate === undefined) {
       throw new Error(
-        `census table: ${row.family} [${bundleKey(row.session)}]: ${component}/${phase} holds a ` +
-          `count for option ${seat}, which the bundle does not set (or sets to its reference value)`,
+        `census table: ${row.family} [${bundleKey(row.seats)}]: ${component}/${phase} holds a ` +
+          `count for seat ${seat}, which the bundle does not set (or sets to its reference value)`,
       );
     }
     const variant: CensusExpectation = {
@@ -1074,6 +952,7 @@ export const phaseExpectations = (
       },
     ];
   });
+  return [...seats, ...fusions];
 };
 
 /**

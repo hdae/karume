@@ -92,10 +92,10 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
         armLabel({
           ...arm,
           tap: false,
-          session: { linearGemvPlanes: true },
+          session: { integerGemv: true },
           pipeline: { pleResidency: "gpu" },
         }),
-      ).toBe("mobile QAT e2b i4 (planes) (PLE GPU) (tap off)");
+      ).toBe("mobile QAT e2b i4 (integer) (PLE GPU) (tap off)");
     });
   });
 

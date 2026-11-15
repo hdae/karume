@@ -65,7 +65,7 @@
 //    Session's bytes at those chunk rows, the pipeline's greedy tokens are those without the cache,
 //    and on the stress mix self-speculation at depth 1 (the most its smallest layer allows) gives
 //    them at temperature 0 and 1; and (7e) the parallel forms 26B's `i4-fast` preset declares
-//    (`linearGemvReduce: "parallel"`, `fuseRmsNormAdd`, `stateAttentionReduce: "parallel-fused"` —
+//    (`numerics: { level: "reorder" }` — the parallel GEMV and the parallel-fused attention —
 //    passed explicitly, the cut has no manifest) on both sides: 7c's 64 slots depth 4, every expert
 //    in the host tier, generates each golden prompt's tokens at temperature 0 and 1 equal to the
 //    pipeline's without the cache with the same options at the same chunk rows, with misses, loads,
@@ -166,6 +166,7 @@ import { linearGemvKey } from "../../runtime/src/kernels/linear-gemv.ts";
 import {
   type CensusRow,
   countDispatches,
+  FUSION_SIGNATURES,
   requireCensus,
   SEAT_SIGNATURES,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
@@ -1307,11 +1308,7 @@ const LAYER_SPECULATION = { name: "stress", depth: 1 } as const;
  * ⑦e's Session options: the parallel forms 26B's `i4-fast` preset declares. The cut has no manifest,
  * so both pipelines take them explicitly.
  */
-const PARALLEL_FORMS = {
-  linearGemvReduce: "parallel",
-  fuseRmsNormAdd: true,
-  stateAttentionReduce: "parallel-fused",
-} as const;
+const PARALLEL_FORMS = { numerics: { level: "reorder" } } as const;
 /** ⑦e's self-speculation: 7c's run at 64 slots (every expert in the host tier). */
 const PARALLEL_SPECULATION = { slots: 64, depth: 4 } as const;
 /** The family of a pipeline key (before the first `:`). */
@@ -1350,10 +1347,10 @@ const parallelFormFailures = (
   const sequential = count((key) => keyFamily(key) === SEQUENTIAL_GEMV_FAMILY);
   const gemm = count((key) => keyFamily(key) === GEMM_FAMILY);
   if (sequential + gemm !== 0) fail(`${sequential} sequential GEMV and ${gemm} GEMM dispatches`);
-  if (count(SEAT_SIGNATURES.fuseRmsNormAdd.true) === 0) fail("no RMS→add pair fused");
+  if (count(FUSION_SIGNATURES.rmsNormAdd) === 0) fail("no RMS→add pair fused");
   // A node runs ①QK on a parallel key and ②+③ either fused (one dispatch) or as the row statistics
   // plus a parallel ③PV (the fused form takes only some shapes and keeps the same order —
-  // `SessionOptions.stateAttentionReduce`): two dispatches on the parallel-or-fused keys per node,
+  // `StateAttentionReduce`): two dispatches on the parallel-or-fused keys per node,
   // and one row-statistics dispatch per node that is not fused. A sequential ①QK or ③PV would add
   // to the total without being among them.
   const fused = count(SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]);

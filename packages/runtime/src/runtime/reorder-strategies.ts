@@ -32,6 +32,12 @@ export type ReorderStrategies = {
   readonly linearGemvPlanes?: true;
   /** The RMS reduction through 32-lane subgroups: another summation order than the workgroup form. */
   readonly rmsNorm?: "subgroup32";
+  /**
+   * States-form attention's parallel reductions without folding the row statistics into PV — the
+   * form an f16 slot and a shape outside the fold's range run anyway. Not adapter-dependent: it is
+   * here for the checks that compare the fold against it.
+   */
+  readonly stateAttention?: "parallel";
 };
 
 /** No adapter-dependent strategy: every op kind keeps its portable choice. */
@@ -44,13 +50,15 @@ export const NO_REORDER_STRATEGIES: ReorderStrategies = Object.freeze({});
 export const reorderStrategiesViolation = (value: unknown, where: string): string | undefined => {
   if (value === undefined) return undefined;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return `${where} must be an object { linearGemv?, linearGemvPlanes?, rmsNorm? }`;
+    return `${where} must be an object { linearGemv?, linearGemvPlanes?, rmsNorm?, stateAttention? }`;
   }
   const record: Readonly<Record<string, unknown>> = { ...value };
   for (const [key, field] of Object.entries(record)) {
     if (field === undefined) continue;
     if (key === "linearGemv" || key === "rmsNorm") {
       if (field !== "subgroup32") return `${where}.${key} must be "subgroup32" or omitted`;
+    } else if (key === "stateAttention") {
+      if (field !== "parallel") return `${where}.stateAttention must be "parallel" or omitted`;
     } else if (key === "linearGemvPlanes") {
       if (field !== true) return `${where}.linearGemvPlanes must be true or omitted`;
     } else {

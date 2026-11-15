@@ -1,7 +1,6 @@
 /**
- * The rms_norm + add fusion (`fuseRmsNormAdd`, the rule rmsNormAdd — the runtime's
- * src/runtime/fusion.ts) against the same graph run without the option (the norm also an output, so
- * nothing fuses) on the same backend, over widths, both addition orders, row counts and value
+ * The rms_norm + add fusion (the rule rmsNormAdd — the runtime's src/runtime/fusion.ts) against
+ * the same graph with the norm also an output (so nothing fuses) on the same backend, over widths, both addition orders, row counts and value
  * patterns (finite, cancelling to ±0, special words, signed zeros): y and the later consumer of x
  * u32-identical with NaN by class, rmsNormAdd at 1 and 0, the fused side in 2 dispatches.
  */
@@ -68,8 +67,8 @@ const PART = "fusion-rms-norm-add";
 export const RMS_NORM_ADD_TWIN_CASES = { [PART]: 200 } as const satisfies ExpectedCases;
 
 /**
- * Every width, order, row count and pattern: the Session with `fuseRmsNormAdd` against the one
- * without it (checkFusionTwin, NaN by class) on y and the later consumer of x (`copy`), rmsNormAdd
+ * Every width, order, row count and pattern: the fused Session against the unfused one
+ * (checkFusionTwin, NaN by class) on y and the later consumer of x (`copy`), rmsNormAdd
  * at 1 and 0, the fused side in 2 dispatches.
  */
 export const checkRmsNormAddTwins = async (

@@ -557,17 +557,11 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
      */
     const FUSION_KEYS = [
       "numerics",
-      "fuseRmsNormAdd",
-      "fuseLinearStaticQuantize",
-      "fuseGeluMulStaticQuantize",
       "packedStaticQuantize",
       "integerGemv",
-      "linearGemvPlanes",
-      "linearGemvReduce",
       "linearCompute",
       "attentionCompute",
       "attentionScoreStorage",
-      "rmsNormReduce",
       "attentionRowBlockMaxBytes",
       "fusionRules",
     ] as const satisfies readonly (keyof SessionFusionOptions)[];
@@ -579,18 +573,13 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
     assert(everyKeyListed);
 
     /**
-     * The `session` of the mobile QAT manifest's `i4-fast` (its every knob), plus the two integer
-     * GEMV knobs that preset leaves to an explicit option, so each one Gemma accepts is declared.
+     * The `session` of the mobile QAT manifest's `i4-fast` (its every knob), plus the integer GEMV
+     * knob that preset leaves to an explicit option, so each one Gemma accepts is declared.
      */
     const I4_FAST = {
-      linearGemvReduce: "parallel",
-      fuseRmsNormAdd: true,
-      fuseLinearStaticQuantize: true,
-      fuseGeluMulStaticQuantize: true,
+      numerics: { level: "reorder" },
       packedStaticQuantize: true,
       integerGemv: true,
-      linearGemvPlanes: true,
-      stateAttentionReduce: "parallel-fused",
     } as const;
 
     /** The options of each estimator call `run` makes, in call order. */
@@ -618,13 +607,9 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
       assertEquals(calls.length, 2, "the target's estimate and the drafter's");
       // Not vacuous: the Sessions got every declared knob, the limit and the rules.
       assertEquals(fusionPart(sessionOptions[0]), {
-        linearGemvReduce: "parallel",
-        fuseRmsNormAdd: true,
-        fuseLinearStaticQuantize: true,
-        fuseGeluMulStaticQuantize: true,
+        numerics: { level: "reorder" },
         packedStaticQuantize: true,
         integerGemv: true,
-        linearGemvPlanes: true,
         attentionRowBlockMaxBytes: 16 * MIB,
         fusionRules,
       });
@@ -642,13 +627,12 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
     it("explicit knobs instead of a declaration reach both estimates the same way", async () => {
       const pipeline = await load({
         speculative: {},
-        linearGemvReduce: "parallel",
-        fuseRmsNormAdd: true,
+        numerics: { ops: { linear: "reorder" } },
       });
       const calls = estimateCalls(() => pipeline.estimateSessionMemory());
       assertEquals(calls.length, 2);
       for (const [index, options] of calls.entries()) {
-        assertEquals(fusionPart(options), { linearGemvReduce: "parallel", fuseRmsNormAdd: true });
+        assertEquals(fusionPart(options), { numerics: { ops: { linear: "reorder" } } });
         assertEquals(fusionPart(options), fusionPart(sessionOptions[index]));
       }
     });

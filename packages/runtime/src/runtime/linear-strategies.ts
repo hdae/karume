@@ -80,19 +80,23 @@ export const LINEAR_STRATEGIES: Readonly<Record<LinearStrategyId, StrategyInfo>>
   "gemv-parallel": {
     level: "reorder",
     evidence: "reorder",
-    admittedBy: 'linearGemvReduce: "parallel"',
+    admittedBy: 'numerics: linear at "reorder"',
   },
   "gemv-parallel-staged": {
     level: "reorder",
     evidence: "reorder",
-    admittedBy: 'linearGemvReduce: "parallel"',
+    admittedBy: 'numerics: linear at "reorder"',
   },
   "gemv-parallel-subgroup32": {
     level: "reorder",
     evidence: "reorder",
-    admittedBy: 'linearGemvReduce: "parallel-subgroup32"',
+    admittedBy: 'numerics: linear at "reorder" with REORDER_STRATEGIES.linearGemv',
   },
-  "planes-gemv": { level: "reorder", evidence: "reorder", admittedBy: "linearGemvPlanes: true" },
+  "planes-gemv": {
+    level: "reorder",
+    evidence: "reorder",
+    admittedBy: 'numerics: linear at "reorder" with REORDER_STRATEGIES.linearGemvPlanes',
+  },
   "gemm-splitk": {
     level: "reorder",
     evidence: "reorder",
@@ -224,11 +228,12 @@ const gemvRows = (m: number): boolean => m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
 
 /**
  * A member of the GEMV family for this storage (one thread = one output column × row block, no shared
- * tile). Which member: the parallel forms only when `linearGemvReduce` asks for them and the measured
- * table has lanes for the shape; otherwise M = 1 takes the column form and M ≥ 2 the row-block form.
+ * tile). Which member: the parallel forms only when the resolved `linearGemvReduce` asks for them
+ * (linear at the level `reorder`) and the measured table has lanes for the shape; otherwise M = 1
+ * takes the column form and M ≥ 2 the row-block form.
  *
- * MUST: a choice that changes numbers happens only when explicitly requested — with
- * `linearGemvReduce: "sequential"` the reference path's kernel and WGSL stay as they are.
+ * MUST: a choice that changes numbers happens only when explicitly requested — at the level `exact`
+ * (`linearGemvReduce: "sequential"`) the reference path's kernel and WGSL stay as they are.
  * The staged-activation form (K-90) is bit-identical to the plain parallel one, so it is taken wherever
  * the measured table marks the shape, without an option of its own.
  */
@@ -366,9 +371,9 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
         : undefined;
     },
   },
-  // The byte-plane GEMV (opt-in `linearGemvPlanes`): an i2 linear of a measured shape at M = 1..8 takes
-  // it in place of the i2 GEMV family below. Its activation is f32 here (a packed one was refused
-  // above), and i2 computes in f32 (the first entry).
+  // The byte-plane GEMV (`REORDER_STRATEGIES.linearGemvPlanes`, linear at `reorder`): an i2 linear
+  // of a measured shape at M = 1..8 takes it in place of the i2 GEMV family below. Its activation
+  // is f32 here (a packed one was refused above), and i2 computes in f32 (the first entry).
   {
     choose: ({ planes }) =>
       planes !== undefined ? { id: "planes-gemv", variant: planes } : undefined,

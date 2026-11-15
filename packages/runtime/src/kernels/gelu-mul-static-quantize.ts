@@ -12,7 +12,8 @@
  * **The barrier is measured behaviour, not a WGSL guarantee** (0 differing words over 786,432
  * adversarial words on Vulkan / NVIDIA, with mask injection after gelu and after the mul both
  * changing the output — perf-ledger K-48); if a backend update breaks the QAT sha256 regression
- * checks, suspect this fusion first (`fuseGeluMulStaticQuantize: false` isolates it).
+ * checks, suspect this fusion first (the test-only `DISABLED_FUSION_RULES` key naming
+ * `geluMulStaticQuantize` isolates it).
  *
  * MUST: every expression is the product's own text — the gelu_tanh value from
  * {@link prologueUnaryWgsl} (the elementwise generator's), the product from

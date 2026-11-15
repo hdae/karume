@@ -57,6 +57,7 @@ import type { BakedGroups } from "../src/runtime/recipe.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { type DeclarationJson, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
+import { stateAttentionReduceOptions } from "./helpers/state-attention-options.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { injectOutOfMemory } from "./helpers/oom-injection.ts";
@@ -817,7 +818,8 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **Census** (ADR 0058 decision 4 ③) — with `stateAttentionReduce: "parallel"`, checks that the
+ * **Census** (ADR 0058 decision 4 ③) — with attention at `reorder` (the parallel reductions without
+ * the fold — `REORDER_STRATEGIES.stateAttention: "parallel"`), checks that the
  * ①' and ③' keys (`:par`) **actually run in the expected plans** and that not one of their
  * sequential counterparts appears. Conversely, the default produces only ① ③ (closing both
  * directions: the opt-in silently falling back to the default / the default silently moving up to
@@ -850,7 +852,7 @@ test.skipIf(!GPU_AVAILABLE)(
         ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
         ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
       ] as const) {
-        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const session = await stateSession(gpu, model, stateAttentionReduceOptions(reduce));
         // chunkLength is the row's M itself (both the M=1 decode shape and the M=9 prefill shape
         // are inside the same context contract).
         const context = await session.createGenerationContext({
@@ -954,7 +956,7 @@ test.skipIf(!GPU_AVAILABLE)(
       ] as const) {
         const capacity = model.capacity;
         if (typeof capacity !== "number") throw new Error(`${label}: needs a numeric capacity`);
-        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const session = await stateSession(gpu, model, stateAttentionReduceOptions(reduce));
         const context = await session.createGenerationContext({ chunkLength: 4 });
         const state = newOracle(model, capacity);
         try {
@@ -1042,7 +1044,7 @@ test.skipIf(!GPU_AVAILABLE)(
         ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
         ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],
       ] as const) {
-        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const session = await stateSession(gpu, model, stateAttentionReduceOptions(reduce));
         const context = await session.createGenerationContext({ chunkLength: chunkRows });
         try {
           await runStep(
@@ -2506,10 +2508,10 @@ test.skipIf(!GPU_AVAILABLE)(
  * the oracle within the band" and "stays in the same band across the options".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "stateAttentionReduce:'parallel' matches the reference chain through Session.run too (real GPU)",
+  "the parallel reductions of states-form attention match the reference chain through Session.run too (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    const parallel = await stateSession(gpu, GQA, { stateAttentionReduce: "parallel" });
+    const parallel = await stateSession(gpu, GQA, stateAttentionReduceOptions("parallel"));
     const sequential = await stateSession(gpu, GQA);
     const parallelContext = await parallel.createGenerationContext({ chunkLength: 4 });
     const sequentialContext = await sequential.createGenerationContext({ chunkLength: 4 });
@@ -2599,8 +2601,8 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const [chunkRows, capacity, window] of FUSION_CASES) {
         const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
         const sessions = [
-          await stateSession(gpu, model, { stateAttentionReduce: "parallel" }),
-          await stateSession(gpu, model, { stateAttentionReduce: "parallel-fused" }),
+          await stateSession(gpu, model, stateAttentionReduceOptions("parallel")),
+          await stateSession(gpu, model, stateAttentionReduceOptions("parallel-fused")),
         ];
         const contexts = await Promise.all(
           sessions.map((s) => s.createGenerationContext({ chunkLength: chunkRows })),
@@ -2653,9 +2655,11 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
         const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
-        const session = await stateSession(gpu, model, {
-          stateAttentionReduce: "parallel-fused",
-        });
+        const session = await stateSession(
+          gpu,
+          model,
+          stateAttentionReduceOptions("parallel-fused"),
+        );
         const context = await session.createGenerationContext({ chunkLength: chunkRows });
         try {
           await runStep(

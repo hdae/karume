@@ -23,7 +23,6 @@ import {
   planFusions,
 } from "../src/runtime/fusion.ts";
 import { countUses, type NodePlan, planGraph } from "../src/runtime/plan.ts";
-import { sessionOptionsViolation } from "../src/runtime/session-options-check.ts";
 import {
   geluMulStaticQuantizeGraph,
   type GeluMulStaticQuantizeGraphOptions,
@@ -49,15 +48,12 @@ const planned = (options: GeluMulStaticQuantizeGraphOptions = {}) => {
   return { nodes: planGraph(graph, {}).nodes, context };
 };
 
-/** Plans with `fuseGeluMulStaticQuantize: true`, or the option given (`"omit"` leaves it unset). */
-const fuse = (
-  options: GeluMulStaticQuantizeGraphOptions = {},
-  enabled: boolean | "omit" = true,
-): FusionPlan => {
+/** Plans with every built-in rule, or with `geluMulStaticQuantize` left out (`enabled: false`). */
+const fuse = (options: GeluMulStaticQuantizeGraphOptions = {}, enabled = true): FusionPlan => {
   const { nodes, context } = planned(options);
   return planFusions(nodes, {
     ...context,
-    ...(enabled === "omit" ? {} : { fuseGeluMulStaticQuantize: enabled }),
+    ...(enabled ? {} : { disabledRules: new Set(["geluMulStaticQuantize"]) }),
   });
 };
 
@@ -120,19 +116,11 @@ describe("geluMulStaticQuantize: the accepted chain", () => {
     assertEquals(step.dispatches[0].params[4 + 258], 1);
   });
 
-  it("keeps the plain chain when the option is omitted or false", () => {
-    for (const enabled of ["omit", false] as const) {
-      const plan = fuse({}, enabled);
-      assertEquals(plan.counts.geluMulStaticQuantize, 0);
-      assertEquals(outline(plan), [
-        "slice",
-        "reshape",
-        "gelu_tanh",
-        "mul",
-        "static_quantize",
-        "neg",
-      ]);
-    }
+  it("applies without an option, and keeps the plain chain when the rule is left out", () => {
+    assertEquals(fuse({}).counts.geluMulStaticQuantize, 1);
+    const plan = fuse({}, false);
+    assertEquals(plan.counts.geluMulStaticQuantize, 0);
+    assertEquals(outline(plan), ["slice", "reshape", "gelu_tanh", "mul", "static_quantize", "neg"]);
   });
 });
 
@@ -169,7 +157,7 @@ describe("geluMulStaticQuantize: forms that stay on the plain chain", () => {
     const rewritten = nodes.map((node): NodePlan =>
       node.node.op === "mul" ? { ...node, inputDtypes: ["f32", "i32"] } : node,
     );
-    const plan = planFusions(rewritten, { ...context, fuseGeluMulStaticQuantize: true });
+    const plan = planFusions(rewritten, context);
     assertEquals(plan.counts.geluMulStaticQuantize, 0);
   });
 
@@ -177,7 +165,6 @@ describe("geluMulStaticQuantize: forms that stay on the plain chain", () => {
     const { nodes, context } = planned({ other: "input" });
     const scan = {
       ...context,
-      fuseGeluMulStaticQuantize: true,
       matchContext: fusionMatchContext(context),
     };
     assert(
@@ -207,21 +194,5 @@ describe("geluMulStaticQuantize: the kernel text", () => {
       assert(wgsl.includes(`quantize(bitcast<u32>(${product}) ^ params.mask_mul)`), order);
     }
     assert(geluMulStaticQuantizeKey("gelu-other") !== geluMulStaticQuantizeKey("other-gelu"));
-  });
-});
-
-describe("fuseGeluMulStaticQuantize option", () => {
-  it("accepts a boolean on its own and rejects anything else", () => {
-    for (const value of [true, false]) {
-      assertEquals(sessionOptionsViolation({ fuseGeluMulStaticQuantize: value }), undefined);
-    }
-    for (const value of [null, 0, "true"]) {
-      const options = {};
-      Reflect.set(options, "fuseGeluMulStaticQuantize", value);
-      assertEquals(
-        sessionOptionsViolation(options),
-        "options.fuseGeluMulStaticQuantize must be a boolean",
-      );
-    }
   });
 });

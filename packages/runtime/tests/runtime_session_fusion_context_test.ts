@@ -17,7 +17,11 @@ import {
   sessionFusionKnobs,
   sharedOrPooledWeights,
 } from "../src/runtime/session-fusion-context.ts";
-import { DISABLED_FUSION_RULES, ROW_BLOCK_SPLIT } from "../src/runtime/session-types.ts";
+import {
+  DISABLED_FUSION_RULES,
+  REORDER_STRATEGIES,
+  ROW_BLOCK_SPLIT,
+} from "../src/runtime/session-types.ts";
 import type { WeightResidency } from "../src/runtime/weight-residency.ts";
 
 /** A JavaScript caller's value outside the type. */
@@ -25,9 +29,6 @@ const outsideTheType = <T>(value: unknown): T => value as T;
 
 /** The knobs of a Session built with no options (the defaults construction fills in). */
 const DEFAULT_KNOBS: SessionFusionKnobs = {
-  fuseRmsNormAdd: true,
-  fuseLinearStaticQuantize: true,
-  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: false,
   integerGemv: false,
   linearGemvPlanes: false,
@@ -119,31 +120,24 @@ describe("sessionFusionKnobs", () => {
     assertEquals(sessionFusionKnobs({}, FUSION_RULES), DEFAULT_KNOBS);
   });
 
-  it("maps every option the fusion pass reads to the knob of the same name, the test-only symbols included", () => {
+  it("maps every option the fusion pass reads to its knob, the levels and the test-only symbols included", () => {
     assertEquals(
       sessionFusionKnobs(
         {
-          fuseRmsNormAdd: true,
-          fuseLinearStaticQuantize: true,
-          fuseGeluMulStaticQuantize: true,
+          numerics: { ops: { linear: "reorder", rms_norm: "reorder" } },
           packedStaticQuantize: true,
           integerGemv: true,
-          linearGemvPlanes: true,
-          linearGemvReduce: "parallel",
           linearCompute: "f32",
           attentionCompute: "a8",
           attentionScoreStorage: "none",
-          rmsNormReduce: "subgroup32",
           attentionRowBlockMaxBytes: 4096,
+          [REORDER_STRATEGIES]: { linearGemvPlanes: true, rmsNorm: "subgroup32" },
           [ROW_BLOCK_SPLIT]: 2,
           [DISABLED_FUSION_RULES]: ["silu", "rope"],
         },
         FUSION_RULES,
       ),
       {
-        fuseRmsNormAdd: true,
-        fuseLinearStaticQuantize: true,
-        fuseGeluMulStaticQuantize: true,
         packedStaticQuantize: true,
         integerGemv: true,
         linearGemvPlanes: true,

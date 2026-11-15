@@ -1,6 +1,6 @@
 /**
- * Check 2 — the subgroup32 RMS reduction (`rmsNormReduce: "subgroup32"`, ADR 0100) through real
- * Sessions:
+ * Check 2 — the subgroup32 RMS reduction (rms_norm at the level `reorder` with
+ * `REORDER_STRATEGIES.rmsNorm: "subgroup32"`, ADR 0100) through real Sessions:
  *
  * - rows: ragged widths, M = 1 / 4 / 8 / 19 — within the `rms_norm` tolerance of the CPU reference,
  *   and row 0 word-identical at every M;
@@ -20,6 +20,7 @@ import { applyReferenceOp, refTensor } from "../../runtime/src/reference/ops.ts"
 import {
   createSessionFromContainer,
   DISABLED_FUSION_RULES,
+  REORDER_STRATEGIES,
   type Tensor,
 } from "../../runtime/src/runtime/executor.ts";
 import {
@@ -115,7 +116,10 @@ const rowsPart = async (gpu: GpuContext, options: CheckOptions): Promise<CheckPa
           gpu,
           await openModelBytes(graph, []),
           GRAPH_NAME,
-          { rmsNormReduce: "subgroup32" },
+          {
+            numerics: { ops: { rms_norm: "reorder" } },
+            [REORDER_STRATEGIES]: { rmsNorm: "subgroup32" },
+          },
         );
         try {
           return (await session.run({ x0: x, x1: w })).y;
@@ -159,10 +163,12 @@ const fusionPart = async (gpu: GpuContext, options: CheckOptions): Promise<Check
       const model = await openModelBytes(rmsNormAddGraph({ rows, dim, normFirst }), []);
       await scopedGpuWork(gpu, `RMS fusion dim=${dim}`, async () => {
         const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-          rmsNormReduce: "subgroup32",
+          numerics: { ops: { rms_norm: "reorder" } },
+          [REORDER_STRATEGIES]: { rmsNorm: "subgroup32" },
         });
         const separate = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-          rmsNormReduce: "subgroup32",
+          numerics: { ops: { rms_norm: "reorder" } },
+          [REORDER_STRATEGIES]: { rmsNorm: "subgroup32" },
           [DISABLED_FUSION_RULES]: ["rmsNormAdd"],
         });
         try {

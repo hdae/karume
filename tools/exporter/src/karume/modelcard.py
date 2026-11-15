@@ -338,9 +338,10 @@ def _session(quant: Mapping[str, Any]) -> str:
     MUST: values are written **in JSON notation**. `render_card` receives the in-memory dict
     before it is written as JSON, so filling it in raw would print booleans as Python's `True` /
     `False`, a spelling that disagrees with both the manifest (`true`) and the TypeScript users
-    paste as is (a cell meant as `false` reads as truthy). Only strings are written without the
-    double quotes of `json.dumps` — the option values are enums such as `parallel`, matching the
-    table's other spellings (`` `i4` `` and the like).
+    paste as is (a cell meant as `false` reads as truthy), and objects (`numerics`) as Python's
+    `{'level': ...}`. Only strings are written without the double quotes of `json.dumps` — the
+    option values are enums such as `a8`, matching the table's other spellings (`` `i4` `` and the
+    like).
     """
     session = quant["session"]
     features = quant.get("gpuFeatures", {})

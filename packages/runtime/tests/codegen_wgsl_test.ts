@@ -1085,8 +1085,8 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["attention_state_qk_gqa.wgsl", stateQkWgsl(false, true)],
     ["attention_state_qk_sliding.wgsl", stateQkWgsl(true, false)],
     ["attention_state_qk_sliding_gqa.wgsl", stateQkWgsl(true, true)],
-    // The ①' D-parallel reduction variant (opt-in — **the same option** as ③',
-    // `stateAttentionReduce: "parallel"`, perf-ledger K-14).
+    // The ①' D-parallel reduction variant (opt-in — **the same level** as ③', attention at
+    // `reorder`, perf-ledger K-14).
     ["attention_state_qk_par.wgsl", stateQkParallelWgsl(false, false)],
     ["attention_state_qk_par_gqa.wgsl", stateQkParallelWgsl(false, true)],
     ["attention_state_qk_par_sliding.wgsl", stateQkParallelWgsl(true, false)],
@@ -1124,7 +1124,7 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["attention_state_pv_gqa.wgsl", statePvWgsl(false, true)],
     ["attention_state_pv_sliding.wgsl", statePvWgsl(true, false)],
     ["attention_state_pv_sliding_gqa.wgsl", statePvWgsl(true, true)],
-    // The ③' KV-parallel reduction variant (opt-in — `stateAttentionReduce: "parallel"`,
+    // The ③' KV-parallel reduction variant (opt-in — attention at `reorder`,
     // perf-ledger K-12).
     ["attention_state_pv_par.wgsl", statePvParallelWgsl(false, false)],
     ["attention_state_pv_par_gqa.wgsl", statePvParallelWgsl(false, true)],

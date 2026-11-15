@@ -187,9 +187,9 @@ export type RecipeBuilderContext = {
    */
   readonly integerGemv: boolean;
   /**
-   * Whether the eligible i2 linears run on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`;
-   * the linear reads it through `linearPlanesGemvVariant`, the same function as the packed pairing
-   * and the linear→SRQ rule).
+   * Whether the eligible i2 linears run on the byte-plane GEMV
+   * (`REORDER_STRATEGIES.linearGemvPlanes`; the linear reads it through `linearPlanesGemvVariant`,
+   * the same function as the packed pairing and the linear→SRQ rule).
    */
   readonly linearGemvPlanes: boolean;
   readonly rmsNormReduce: RmsNormReduce;

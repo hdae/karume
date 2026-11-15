@@ -510,11 +510,11 @@ export type SessionState = {
    */
   readonly attentionDevice: AttentionDeviceFacts;
   /**
-   * The reduction form of states-form attention ①QK / ③PV (opt-in —
-   * {@link SessionOptions.stateAttentionReduce}). Even with `"parallel"`, **①' is chosen only for
-   * plans with M ≤ 8** (decode and speculative verify — prefill plans stay on ①), and **③' only for
-   * plans with M < 16** (M ≥ 16 takes the tiled path, bit-identical with ③ₜ = ③ regardless of the
-   * option — a single option value).
+   * The reduction form of states-form attention ①QK / ③PV (resolved from attention's level in
+   * {@link SessionOptions.numerics} — `executionKnobDefaults`). Even with `"parallel"`, **①' is
+   * chosen only for plans with M ≤ 8** (decode and speculative verify — prefill plans stay on ①),
+   * and **③' only for plans with M < 16** (M ≥ 16 takes the tiled path, bit-identical with ③ₜ = ③
+   * regardless of the form — a single form).
    */
   readonly stateAttentionReduce: StateAttentionReduce;
   /** The storage of full state slots (opt-in — {@link SessionOptions.fullStateStorage}). */
@@ -575,10 +575,6 @@ export type SessionState = {
    * correspond to a single table is the basis for looking up the plan cache without the profile).
    */
   readonly geometryProfile: GeometryProfile;
-  readonly fuseRmsNormAdd: boolean;
-  readonly fuseLinearStaticQuantize: boolean;
-  /** Fuses gelu_tanh → mul → static_quantize into one dispatch (perf-ledger K-48). */
-  readonly fuseGeluMulStaticQuantize: boolean;
   /** Passes the activations of fixed SRQ to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize: boolean;
   /**
@@ -586,7 +582,7 @@ export type SessionState = {
    * together with {@link packedStaticQuantize} — the entry check).
    */
   readonly integerGemv: boolean;
-  /** Runs the eligible i2 linears on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`). */
+  /** Runs the eligible i2 linears on the byte-plane GEMV (`REORDER_STRATEGIES.linearGemvPlanes`). */
   readonly linearGemvPlanes: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
@@ -655,16 +651,9 @@ const snapshotSessionOptions = (
   convCompute: requested.convCompute,
   attentionCompute: requested.attentionCompute,
   attentionScoreStorage: requested.attentionScoreStorage,
-  stateAttentionReduce: requested.stateAttentionReduce,
   fullStateStorage: requested.fullStateStorage,
-  linearGemvReduce: requested.linearGemvReduce,
-  fuseRmsNormAdd: requested.fuseRmsNormAdd,
-  fuseLinearStaticQuantize: requested.fuseLinearStaticQuantize,
-  fuseGeluMulStaticQuantize: requested.fuseGeluMulStaticQuantize,
   packedStaticQuantize: requested.packedStaticQuantize,
   integerGemv: requested.integerGemv,
-  linearGemvPlanes: requested.linearGemvPlanes,
-  rmsNormReduce: requested.rmsNormReduce,
   linearGemvRowsThreadTarget: requested.linearGemvRowsThreadTarget,
   planBackingBudgetBytes: requested.planBackingBudgetBytes,
   attentionRowBlockMaxBytes: requested.attentionRowBlockMaxBytes,
@@ -738,7 +727,9 @@ export const buildSessionState = async (
       !gpu.features.has("subgroup-size-control") ||
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
-    throw new ExecutionError("rmsNormReduce: subgroup32 requires acquireGpu({ subgroups: true })");
+    throw new ExecutionError(
+      "the subgroup RMS reduction (REORDER_STRATEGIES.rmsNorm) requires acquireGpu({ subgroups: true })",
+    );
   }
   if (
     linearGemvReduce === "parallel-subgroup32" &&
@@ -747,7 +738,7 @@ export const buildSessionState = async (
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
     throw new ExecutionError(
-      "linearGemvReduce: parallel-subgroup32 requires acquireGpu({ subgroups: true })",
+      "the subgroup GEMV (REORDER_STRATEGIES.linearGemv) requires acquireGpu({ subgroups: true })",
     );
   }
   // MUST: when f16 compute is requested on a device without the feature, **fail here**. Falling back
@@ -1421,7 +1412,7 @@ export const buildSessionState = async (
     // above — the comparison with the known answer) (the original rationale, a mismatch between
     // variants on M2, has been withdrawn — the doc of SessionState.attentionI8a8Dot).
     attentionI8a8Dot,
-    // The fusion knobs (the linear / attention seats, the reductions, the fusion opt-ins and the
+    // The fusion knobs (the linear / attention seats, the reductions, packed activations and the
     // test-only row-block split and disabled rules) — the values the checks above read.
     ...fusionKnobs,
     fusionRules,

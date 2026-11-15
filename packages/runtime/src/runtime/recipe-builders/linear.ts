@@ -383,8 +383,8 @@ const packedScaleOf = (packed: PackedActivations | undefined, strategy: string):
  *
  * Bindings, uniform and output storage are the same as the default path; only "which thread owns
  * which output" changes (one thread = one output column (× row block for M ≥ 2), no shared tile
- * and no barrier). The exception is the explicitly requested linearGemvReduce: parallel (ADR 0098),
- * which splits K for the eligible shapes.
+ * and no barrier). The exception is the parallel GEMV that linear at the level `reorder` resolves
+ * to (`linearGemvReduce: parallel` — ADR 0098), which splits K for the eligible shapes.
  * The K reduction order per output element stays sequential in ascending k, so it is
  * **bit-identical** (the numeric contract of src/kernels/linear-gemv.ts).
  * Which member runs (the M = 1 column form, the row-block form whose row count is part of the key,
@@ -528,8 +528,9 @@ const buildLinearIntegerGemv = async (
 };
 
 /**
- * linear's **byte-plane GEMV** (`SessionOptions.linearGemvPlanes` — src/kernels/linear-gemv-planes.ts):
- * an i2 linear of a measured shape whose activation arrives as f32.
+ * linear's **byte-plane GEMV** (`REORDER_STRATEGIES.linearGemvPlanes` —
+ * src/kernels/linear-gemv-planes.ts): an i2 linear of a measured shape whose activation arrives as
+ * f32.
  *
  * The bindings keep the linear's numbering (1 x / 2 w = the i2 words / 3 bias / 4 out / 5 the
  * per-channel weight scale); a linear always binds its bias (arity 3).

@@ -36,9 +36,6 @@ import type { WeightResidency } from "./weight-residency.ts";
  */
 export type SessionFusionKnobs = Pick<
   SessionState,
-  | "fuseRmsNormAdd"
-  | "fuseLinearStaticQuantize"
-  | "fuseGeluMulStaticQuantize"
   | "packedStaticQuantize"
   | "integerGemv"
   | "linearGemvPlanes"
@@ -53,25 +50,20 @@ export type SessionFusionKnobs = Pick<
 >;
 
 /**
- * The {@link SessionOptions} fields a Session's fusion context derives from: the knobs of
- * {@link SessionFusionKnobs} under their option names, the rule list (`fusionRules`) and the two
- * test-only symbols. A field the fusion pass reads is added here, so every caller that takes these
- * options (the memory estimate's `EstimateOptions` among them) sees it in its type.
+ * The {@link SessionOptions} fields a Session's fusion context derives from: the options the knobs
+ * of {@link SessionFusionKnobs} resolve from (`numerics`, the private `REORDER_STRATEGIES` and the
+ * named options), the rule list (`fusionRules`) and the two test-only symbols. A field the fusion
+ * pass reads is added here, so every caller that takes these options (the memory estimate's
+ * `EstimateOptions` among them) sees it in its type.
  */
 export type SessionFusionOptions = Pick<
   SessionOptions,
   | "numerics"
-  | "fuseRmsNormAdd"
-  | "fuseLinearStaticQuantize"
-  | "fuseGeluMulStaticQuantize"
   | "packedStaticQuantize"
   | "integerGemv"
-  | "linearGemvPlanes"
-  | "linearGemvReduce"
   | "linearCompute"
   | "attentionCompute"
   | "attentionScoreStorage"
-  | "rmsNormReduce"
   | "attentionRowBlockMaxBytes"
   | "fusionRules"
   | typeof ROW_BLOCK_SPLIT
@@ -118,9 +110,6 @@ export const sessionFusionKnobs = (
 ): SessionFusionKnobs => {
   const defaults = executionKnobDefaults(options);
   return {
-    fuseRmsNormAdd: options.fuseRmsNormAdd ?? true,
-    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? true,
-    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? true,
     packedStaticQuantize: options.packedStaticQuantize ?? false,
     integerGemv: options.integerGemv ?? false,
     linearGemvPlanes: defaults.linearGemvPlanes,
@@ -256,7 +245,7 @@ export const sessionFusionContext = <Name extends string>(
 ): FusionContext<Name> => {
   const { knobs } = facts;
   const weightLayouts =
-    (knobs.fuseLinearStaticQuantize && knobs.linearGemvReduce === "parallel") ||
+    knobs.linearGemvReduce === "parallel" ||
     knobs.packedStaticQuantize ||
     knobs.linearCompute === "a8"
       ? fusionWeightLayouts(facts.residentWeights)
@@ -267,9 +256,6 @@ export const sessionFusionContext = <Name extends string>(
       ? {}
       : { disabledRules: knobs.disabledFusionRules }),
     useCounts: facts.useCounts,
-    fuseRmsNormAdd: knobs.fuseRmsNormAdd,
-    fuseLinearStaticQuantize: knobs.fuseLinearStaticQuantize,
-    fuseGeluMulStaticQuantize: knobs.fuseGeluMulStaticQuantize,
     packedStaticQuantize: knobs.packedStaticQuantize,
     integerGemv: knobs.integerGemv,
     linearGemvPlanes: knobs.linearGemvPlanes,

@@ -431,7 +431,6 @@ test("the build is determined by the options at entry, and rewriting them mid-bu
     maxChunkSize: 1024,
   };
   const options: { -readonly [K in keyof SessionOptions]: SessionOptions[K] } = {
-    linearGemvReduce: "sequential",
     submitPolicy: policy,
   };
   async function* noShards(): AsyncGenerator<never> {}
@@ -473,13 +472,13 @@ test("the build entry's copy also reads non-enumerable and prototype fields, and
   // Taking the copy with spread copies only own enumerable fields, so non-enumerable and inherited
   // fields silently turn into defaults and pass.
   const nonEnumerable: SessionOptions = {};
-  Object.defineProperty(nonEnumerable, "stateAttentionReduce", { value: "bogus" });
-  const inherited: SessionOptions = Object.create({ stateAttentionReduce: "bogus" });
+  Object.defineProperty(nonEnumerable, "numerics", { value: "bogus" });
+  const inherited: SessionOptions = Object.create({ numerics: "bogus" });
   for (const options of [nonEnumerable, inherited]) {
     await assertRejects(
       () => buildSession(fakeGpu(), emptyGraph(), options),
       ExecutionError,
-      "stateAttentionReduce",
+      "options.numerics must be an object",
     );
   }
 });

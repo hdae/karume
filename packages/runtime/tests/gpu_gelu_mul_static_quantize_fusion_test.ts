@@ -1,6 +1,6 @@
 /**
- * The `geluMulStaticQuantize` fusion on a real GPU (perf-ledger K-48 step 1b): a Session with
- * `fuseGeluMulStaticQuantize` on returns the unfused Session's SRQ words as u32 — values landing on
+ * The `geluMulStaticQuantize` fusion on a real GPU (perf-ledger K-48 step 1b): a Session with the
+ * rule returns the unfused Session's SRQ words as u32 — values landing on
  * SRQ boundaries after `gelu_tanh(gate) · ple`, ±0, ±inf, NaN payloads, subnormals, several scales
  * including 0 (the identity SRQ) — and a direct dispatch with the rounding masks injected proves both
  * barriers execute.

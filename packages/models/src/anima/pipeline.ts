@@ -365,18 +365,13 @@ export const latentSnapshot =
  * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
+  numerics: false,
   linearCompute: true,
   convCompute: false,
   attentionCompute: true,
   attentionScoreStorage: true,
-  linearGemvReduce: false,
-  stateAttentionReduce: false,
-  fuseRmsNormAdd: false,
-  fuseLinearStaticQuantize: false,
-  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
-  linearGemvPlanes: false,
 };
 
 /**

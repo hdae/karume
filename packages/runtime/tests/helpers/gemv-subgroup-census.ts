@@ -1,7 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import type { CodecName } from "../../src/format/container/codecs.ts";
 import type { GpuContext } from "../../src/gpu/device.ts";
-import { createSessionFromContainer } from "../../src/runtime/executor.ts";
+import { createSessionFromContainer, REORDER_STRATEGIES } from "../../src/runtime/executor.ts";
 import type { TensorInput } from "./container-write.ts";
 import { type DeclarationJson, f32Bytes, GRAPH_NAME, openModelBytes } from "./model-fixture.ts";
 import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./pipeline-census.ts";
@@ -73,7 +73,12 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
           gpu,
           await openModelBytes(graph, tensors),
           GRAPH_NAME,
-          parallel ? { linearGemvReduce: "parallel-subgroup32" } : {},
+          parallel
+            ? {
+                numerics: { ops: { linear: "reorder" } },
+                [REORDER_STRATEGIES]: { linearGemv: "subgroup32" },
+              }
+            : {},
         );
         try {
           const input = Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * 0.037) * 0.75);

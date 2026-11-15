@@ -153,7 +153,7 @@ describe("gemma4 PLE-free model: the PLE placement options are refused", () => {
 
   it("options that do not concern PLE pass (negative control)", () => {
     assertGemma4PleFreeOptions("T", {});
-    assertGemma4PleFreeOptions("T", { chunkLength: 64, stateAttentionReduce: "parallel" });
+    assertGemma4PleFreeOptions("T", { chunkLength: 64, numerics: { level: "reorder" } });
   });
 });
 

@@ -675,23 +675,19 @@ describe("referenceIntegerGemv (the CPU mirror)", () => {
 });
 
 describe("integerGemv option check", () => {
-  const packed = { linearGemvReduce: "parallel", packedStaticQuantize: true } as const;
+  const packed = { numerics: { ops: { linear: "reorder" } }, packedStaticQuantize: true } as const;
 
   it("accepts integerGemv on top of the packed activations, and false anywhere", () => {
     assertEquals(sessionOptionsViolation({ ...packed, integerGemv: true }), undefined);
-    assertEquals(
-      sessionOptionsViolation({ ...packed, fuseLinearStaticQuantize: true, integerGemv: true }),
-      undefined,
-    );
     assertEquals(sessionOptionsViolation({ integerGemv: false }), undefined);
   });
 
   it("rejects integerGemv without the packed activations it reads", () => {
     const requires =
-      "integerGemv requires packedStaticQuantize: true (with linearGemvReduce: parallel / linearCompute: f32)";
+      'integerGemv requires packedStaticQuantize: true (with linear at the level "reorder" and linearCompute "f32")';
     assertEquals(sessionOptionsViolation({ integerGemv: true }), requires);
     assertEquals(
-      sessionOptionsViolation({ linearGemvReduce: "parallel", integerGemv: true }),
+      sessionOptionsViolation({ numerics: { ops: { linear: "reorder" } }, integerGemv: true }),
       requires,
     );
     assertEquals(
@@ -701,7 +697,7 @@ describe("integerGemv option check", () => {
     // The packed activations' own requirement is named first when it is the one broken.
     assertEquals(
       sessionOptionsViolation({ packedStaticQuantize: true, integerGemv: true }),
-      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
+      'packedStaticQuantize needs linear at the level "reorder" (numerics) with linearCompute "f32": it is a form of the parallel GEMV',
     );
   });
 
@@ -999,8 +995,8 @@ describe("the packed pairing under integerGemv", () => {
       const options = shape({ outputQuantize: true });
       const { n, k } = shape === down ? DOWN : GATE_UP;
       const variant = shape === down ? DOWN.variant : GATE_UP.variant;
-      const on = planOf(options, { fuseLinearStaticQuantize: true, integerGemv: true });
-      const off = planOf(options, { fuseLinearStaticQuantize: true });
+      const on = planOf(options, { integerGemv: true });
+      const off = planOf(options);
       // The same window is grabbed either way; only the dispatch it builds differs.
       assertEquals(on.counts.linearStaticQuantize, 1);
       assertEquals(off.counts.linearStaticQuantize, 1);
@@ -1029,7 +1025,10 @@ describe("integerGemv off: the plan does not change", () => {
     ["down with an output SRQ", down({ outputQuantize: true })],
     ["gate / up with an output SRQ", gateUp({ outputQuantize: true })],
   ];
-  const contexts: readonly Partial<Context>[] = [{}, { fuseLinearStaticQuantize: true }];
+  const contexts: readonly Partial<Context>[] = [
+    { disabledRules: new Set(["linearStaticQuantize"]) },
+    {},
+  ];
 
   it("plans exactly as without the field when the option is false", () => {
     for (const [label, options] of graphs) {

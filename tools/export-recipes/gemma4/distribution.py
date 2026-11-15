@@ -93,6 +93,7 @@ driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections.abc import Callable, Mapping
@@ -2150,37 +2151,36 @@ GEMMA4_QAT_Q4_0_MOE_QUANT: Mapping[str, str] = {
 }
 
 
-#: The line's parallel and fused seats over its one int4 storage (ADR 0098 / 0104): `i4-gemvpar`
-#: sums the GEMV and the attention in parallel, `i4-fast` adds the RMS→add fusion and the fused
-#: attention. What applies (the plan of the mirror's graphs — `linearGemvParallelEligible` /
-#: `planFusions`, 2026-11-04): every linear of the E2B / E4B product but the int4 output head
-#: (`[262144, H]` — the parallel GEMV's table has no int4 row of that shape) is on the parallel
-#: GEMV's table (the int4 group-32 rows at the same shapes: E2B's measured ones and E4B's
-#: unmeasured copies of them — ADR 0098 addendum 2026-09-26), the RMS→add fusion takes 106 / 127
-#: pairs, and the drafter has two eligible linears (of 68, as the regular int8 drafter). Every
-#: linear of the 12B product, the output head included, is on the table with rows measured on 12B,
-#: and the fusion takes its width (ADR 0098 addendum 2026-11-06). The same holds for every dense
-#: linear of the 26B product, its int4 output head (`[262144, 2816]`) included, and the fusion takes
-#: width 2816; its routed experts (`expert_linear`) keep the sequential order in every seat — only
-#: the dense linears, the attention and the RMS→add pairs change.
+#: The line's parallel and fused seats over its one int4 storage (ADR 0098 / 0104): both declare
+#: the numeric level `reorder` for the whole model, which sums the eligible GEMVs in parallel and
+#: runs the states-form attention's parallel reductions with the row statistics folded into PV
+#: (`parallel-fused`). `i4-gemvpar` and `i4-fast` therefore declare the same settings. The RMS→add
+#: fusion is bit-identical and applies in every seat, `i4` included. What applies (the plan of the
+#: mirror's graphs — `linearGemvParallelEligible` / `planFusions`, 2026-11-04): every linear of the
+#: E2B / E4B product but the int4 output head (`[262144, H]` — the parallel GEMV's table has no
+#: int4 row of that shape) is on the parallel GEMV's table (the int4 group-32 rows at the same
+#: shapes: E2B's measured ones and E4B's unmeasured copies of them — ADR 0098 addendum
+#: 2026-09-26), the RMS→add fusion takes 106 / 127 pairs, and the drafter has two eligible linears
+#: (of 68, as the regular int8 drafter). Every linear of the 12B product, the output head
+#: included, is on the table with rows measured on 12B, and the fusion takes its width (ADR 0098
+#: addendum 2026-11-06). The same holds for every dense linear of the 26B product, its int4 output
+#: head (`[262144, 2816]`) included, and the fusion takes width 2816; its routed experts
+#: (`expert_linear`) keep the sequential order in every seat — only the dense linears and the
+#: attention change.
 GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     "i4-gemvpar": {
         "weights": {},
-        "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
+        "session": {"numerics": {"level": "reorder"}},
         "label": "QAT int4 grid with parallel GEMV and attention",
         "description": "Same weights as i4; parallel GEMV{head} and attention."
         " Rounding and generated tokens can differ. Select i4 for the reference order.",
     },
     "i4-fast": {
         "weights": {},
-        "session": {
-            "linearGemvReduce": "parallel",
-            "fuseRmsNormAdd": True,
-            "stateAttentionReduce": "parallel-fused",
-        },
-        "label": "QAT int4 grid with parallel GEMV, RMS fusion and fused attention",
-        "description": "Same weights as i4; parallel GEMV{head}, RMS-add"
-        " fusion, fused attention. Use i4 for reference summation. Requires fusion-option support.",
+        "session": {"numerics": {"level": "reorder"}},
+        "label": "QAT int4 grid with parallel GEMV and attention",
+        "description": "Same weights as i4; parallel GEMV{head} and attention, as i4-gemvpar."
+        " Tokens can differ; use i4 for the reference order.",
     },
 }
 
@@ -2229,7 +2229,7 @@ def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
         for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
             quants[name] = {
                 **quant,
-                "session": dict(quant["session"]),
+                "session": copy.deepcopy(quant["session"]),
                 "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model])
                 + note,
             }

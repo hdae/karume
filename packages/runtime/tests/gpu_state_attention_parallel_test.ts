@@ -1,5 +1,5 @@
 // A/B band checks (ADR 0058 decision 4 ②) for the **two parallel-reduction stages** of states-form
-// attention (one preset — `stateAttentionReduce: "parallel"`):
+// attention (one level — attention at `reorder`):
 //   ③' = KV-parallel reduction of ③PV (perf-ledger K-12)
 //   ①' = D-parallel reduction of ①QK (perf-ledger K-14)
 // The checks of the reference path (sequential ① ③) stay in gpu_state_attention_test.ts without a

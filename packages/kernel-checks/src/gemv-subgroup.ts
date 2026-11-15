@@ -1,6 +1,6 @@
 /**
- * Check 1 — the parallel GEMV's subgroup32 reduction (`linearGemvReduce: "parallel-subgroup32"`,
- * ADR 0101) against the plain parallel reduction: the same rounding and the same addition order, so
+ * Check 1 — the parallel GEMV's subgroup32 reduction (`REORDER_STRATEGIES.linearGemv:
+ * "subgroup32"`, ADR 0101) against the plain parallel reduction: the same rounding and the same addition order, so
  * every output word MUST be identical. Not a speed measurement.
  *
  * Per case (storage, K, lanes, M): the subgroup output equals the parallel output word for word; both

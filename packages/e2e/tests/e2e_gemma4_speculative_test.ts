@@ -5,7 +5,7 @@
 // drafts as torch"; this file owns the speculative loop (verify, accept, reject, commit). It looks
 // at 5 things:
 //
-// ① **Identity** (`stateAttentionReduce: "sequential"`) … speculation's only contract is "it only
+// ① **Identity** (attention at `exact`) … speculation's only contract is "it only
 //    gets faster; the output does not change". 200 tokens are generated from each of the 3 cases'
 //    golden prompts, and the token id lists and absolute position lists with and without
 //    speculation **match exactly**. A floor is also put on the common prefix with the torch
@@ -73,11 +73,12 @@ import {
   type SafetensorsFile,
   type Session,
   type SessionDiagnostics,
-  type StateAttentionReduce,
   type Tensor,
 } from "@karume/runtime";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { Pipeline, type GenerationRunPhase, type GenerationStop } from "../../models/gemma.ts";
+import { DISABLED_FUSION_RULES, REORDER_STRATEGIES } from "../../runtime/src/runtime/executor.ts";
+import type { StateAttentionReduce } from "../../runtime/src/runtime/session-types.ts";
 import { type PipelineConfig, parsePipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
 import { ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
@@ -397,7 +398,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         speculative: { k: GEMMA4_DRAFT_STEPS },
         // The reference path (the runtime's default) — the seat where decode and verify go
         // through the same reduction kernels.
-        stateAttentionReduce: "sequential",
+        numerics: { ops: { attention: "exact" } },
         maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
       });
       console.log(
@@ -1026,11 +1027,20 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       // The order of the two outputs is the contract (output 0 = logits, output 1 = the hidden
       // state after the final norm).
       const logitsName = component.graph.outputs[0];
+      // The fusions apply by default, so an unfused seat leaves its rule out by name.
+      const disabled = [
+        ...(fuseRmsNormAdd ? [] : ["rmsNormAdd"]),
+        ...(fuseLinearStaticQuantize ? [] : ["linearStaticQuantize"]),
+      ];
       const session = await component.createSession(gpu, {
-        stateAttentionReduce: reduce,
-        linearGemvReduce,
-        fuseRmsNormAdd,
-        fuseLinearStaticQuantize,
+        numerics: {
+          ops: {
+            attention: reduce === "sequential" ? "exact" : "reorder",
+            linear: linearGemvReduce === "sequential" ? "exact" : "reorder",
+          },
+        },
+        ...(reduce === "parallel" ? { [REORDER_STRATEGIES]: { stateAttention: "parallel" } } : {}),
+        ...(disabled.length === 0 ? {} : { [DISABLED_FUSION_RULES]: disabled }),
       });
       try {
         const context = await session.createGenerationContext({

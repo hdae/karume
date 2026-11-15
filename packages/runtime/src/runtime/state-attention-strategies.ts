@@ -7,7 +7,7 @@
  * reference form, a form that shares K or V row tiles, a form that splits the reduction across
  * threads, and for ① a form folded over the query heads of one kv plane; ② and ③ can also run as one
  * fused kernel. Which form a stage takes depends on the plan's row count, the layer's kind, the
- * Session's `stateAttentionReduce` and the block plan.
+ * Session's resolved `stateAttentionReduce` (from attention's numeric level) and the block plan.
  *
  * {@link resolveStateAttention} is the only place that decides it, and the only place that holds the
  * priority order between the forms. The recipe builder builds what it returns: key, WGSL, uniform and
@@ -52,24 +52,24 @@ export const STATE_ATTENTION_STRATEGIES: Readonly<
   "qk-parallel": {
     level: "reorder",
     evidence: "reorder",
-    admittedBy: 'stateAttentionReduce: "parallel"',
+    admittedBy: 'numerics: attention at "reorder"',
   },
   "qk-folded": {
     level: "reorder",
     evidence: "mirror",
-    admittedBy: 'stateAttentionReduce: "parallel"',
+    admittedBy: 'numerics: attention at "reorder"',
   },
   "pv-sequential": { level: "exact", evidence: "reference", admittedBy: undefined },
   "pv-tiled": { level: "exact", evidence: "mirror", admittedBy: undefined },
   "pv-parallel": {
     level: "reorder",
     evidence: "reorder",
-    admittedBy: 'stateAttentionReduce: "parallel"',
+    admittedBy: 'numerics: attention at "reorder"',
   },
   "stats-pv-fused": {
     level: "reorder",
     evidence: "mirror",
-    admittedBy: 'stateAttentionReduce: "parallel-fused"',
+    admittedBy: 'numerics: attention at "reorder"',
   },
 };
 
@@ -85,7 +85,7 @@ export type StateAttentionFacts = {
   /** A sliding-window layer (a ring slot); otherwise a full layer. */
   readonly sliding: boolean;
   readonly reduce: StateAttentionReduce;
-  /** The block plan fuses ② and ③ (`planStateAttention` — the option, the slot storage, the shape). */
+  /** The block plan fuses ② and ③ (`planStateAttention` — the form, the slot storage, the shape). */
   readonly fusedStatsPv: boolean;
   /** The generation declares bidirectional rows (image soft tokens — ADR 0144). */
   readonly bidirectionalRows: boolean;
@@ -114,8 +114,8 @@ export type StateAttentionResolution =
 /**
  * The form of ①QK.
  *
- * - The parallel form ①' only when the option asks for it **and** the plan has at most 8 rows
- *   (decode's M = 1 and speculative verify's M ≤ 8). ①' shortens the latency of one invocation's
+ * - The parallel form ①' only when the resolved form asks for it **and** the plan has at most 8
+ *   rows (decode's M = 1 and speculative verify's M ≤ 8). ①' shortens the latency of one invocation's
  *   D-serial loop, the bottleneck only where the active invocations are "live columns × few rows"; in
  *   prefill it only stacks workgroups and barriers (measured 2026-09-06: decode ×1.55–1.72, prefill's
  *   ①QK GPU time 1.5–1.9× longer). The condition stays inside the measured range.
@@ -144,10 +144,10 @@ const qkChoice = (facts: StateAttentionFacts, bidirectional: boolean): StateQkCh
  * The form of ③PV.
  *
  * - The fused ②③ where the block plan chose it.
- * - The tiled form ③ₜ for plans of at least 16 rows — **before the option**: a prefill plan under
- *   `"parallel"` gets ③ₜ (the reference path's values), not ③'. ③''s gain is confined to decode,
+ * - The tiled form ③ₜ for plans of at least 16 rows — **before the resolved form**: a prefill plan
+ *   under `"parallel"` gets ③ₜ (the reference path's values), not ③'. ③''s gain is confined to decode,
  *   while ③ₜ cuts traffic and is bit-identical to ③.
- * - The parallel form ③' when the option asks for it; otherwise the sequential form.
+ * - The parallel form ③' when the resolved form asks for it; otherwise the sequential form.
  */
 const pvChoice = ({ fusedStatsPv, chunkRows, reduce }: StateAttentionFacts): StatePvChoice => {
   if (fusedStatsPv) return { id: "stats-pv-fused" };

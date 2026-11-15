@@ -1,7 +1,7 @@
 /**
- * The Session fusion of linear → SRQ (`fuseLinearStaticQuantize`, the rule linearStaticQuantize —
- * the runtime's src/runtime/fusion.ts) on the parallel GEMV, against the same model without the
- * option on the same backend: INT2 / INT4 / INT8 weights at M 1 / 4 / 8 (fused) and M 9 (stays
+ * The Session fusion of linear → SRQ (the rule linearStaticQuantize — the runtime's
+ * src/runtime/fusion.ts) on the parallel GEMV, against the same model with the rule left out on the
+ * same backend: INT2 / INT4 / INT8 weights at M 1 / 4 / 8 (fused) and M 9 (stays
  * unfused), each Session run twice (the second run takes the derived plan). y and the later
  * consumer of x u32-identical with NaN by payload, linearStaticQuantize at 1 (0 at M 9) and 0.
  */
@@ -42,9 +42,9 @@ const PART = "fusion-linear-static-quantize";
 export const LINEAR_STATIC_QUANTIZE_TWIN_CASES = { [PART]: 24 } as const satisfies ExpectedCases;
 
 /**
- * Every storage and row count, twice per pair of Sessions: the Session with
- * `fuseLinearStaticQuantize` against the baseline without it, both on `linearGemvReduce:
- * "parallel"` (checkFusionTwin, NaN by payload) on y and the late x consumer, linearStaticQuantize
+ * Every storage and row count, twice per pair of Sessions: the Session with the rule against the
+ * baseline without it, both with linear at the level `reorder` (the parallel GEMV — checkFusionTwin,
+ * NaN by payload) on y and the late x consumer, linearStaticQuantize
  * at 1 for M ≤ 8 and 0 for M 9 on the fused side, 0 on the baseline.
  */
 export const checkLinearStaticQuantizeTwins = async (
@@ -62,12 +62,12 @@ export const checkLinearStaticQuantizeTwins = async (
         `linear→SRQ ${storage} M${m}`,
         {
           model,
-          options: { linearGemvReduce: "parallel" },
+          options: { numerics: { ops: { linear: "reorder" } } },
         },
         {
           model,
           options: {
-            linearGemvReduce: "parallel",
+            numerics: { ops: { linear: "reorder" } },
             [DISABLED_FUSION_RULES]: ["linearStaticQuantize"],
           },
         },

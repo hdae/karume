@@ -15,6 +15,36 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Breaking
+
+- `@karume/runtime`: a Session's numerics are declared as a requirement level instead of by options that name a
+  kernel. `SessionOptions.numerics` is `{ level?, ops? }`: `level` is `"exact"` (the reference kernel's bits on this
+  device — the default) or `"reorder"` (another summation order, inside the op's band) for the whole model, and `ops`
+  overrides it per op kind (`linear`, `attention`, `rms_norm`). The options `linearGemvReduce`, `stateAttentionReduce`,
+  `rmsNormReduce` and `linearGemvPlanes` are removed, from `SessionOptions` and from the memory estimate's options:
+  - `linearGemvReduce: "parallel"` is `numerics: { ops: { linear: "reorder" } }`;
+  - `stateAttentionReduce: "parallel"` and `"parallel-fused"` are `numerics: { ops: { attention: "reorder" } }`, which
+    folds the row statistics into PV wherever the shape admits it (the fold is checked to give the bits of the
+    unfolded form);
+  - both together are `numerics: { level: "reorder" }`;
+  - the subgroup forms (`linearGemvReduce: "parallel-subgroup32"`, `rmsNormReduce: "subgroup32"`) and the byte-plane
+    GEMV (`linearGemvPlanes`) are no longer selectable through the public surface: no adapter is measured to gain from
+    them end to end, and a level does not select a kernel that was not.
+  `packedStaticQuantize` now requires linear at `"reorder"` (it required `linearGemvReduce: "parallel"`). `"reorder"`
+  together with `linearCompute: "a8"` or `"f16"` is accepted and leaves linear on that approximation's kernels. The
+  types `LinearGemvReduce`, `StateAttentionReduce` and `RmsNormReduce` are no longer exported.
+- `@karume/runtime`: the three fusions that keep the unfused plan's bits — rms_norm→add, linear→static_quantize (on the
+  parallel GEMV) and gelu_tanh→mul→static_quantize — always apply, and their options `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize` and `fuseGeluMulStaticQuantize` are removed. Outputs do not change; the fusion counts of
+  `SessionDiagnostics.lastRunFusions` and the pipeline keys of Sessions that did not set the options do.
+- `@karume/hub`: the manifest's `session` vocabulary follows: `numerics` is added, and `linearGemvReduce`,
+  `stateAttentionReduce`, `fuseRmsNormAdd`, `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize` and
+  `linearGemvPlanes` are removed. A manifest that declares a removed key is rejected.
+- `@karume/models` (Gemma 4): the pipeline options `linearGemvReduce`, `stateAttentionReduce`, `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `linearGemvPlanes` and `rmsNormReduce` are removed, and
+  `numerics` is added. An explicit `numerics` composes with the selected preset's per field: an explicit
+  `{ ops: { attention: "exact" } }` keeps the levels the preset declares for the other op kinds.
+
 ## [0.22.0] - 2026-11-14
 
 ### Added

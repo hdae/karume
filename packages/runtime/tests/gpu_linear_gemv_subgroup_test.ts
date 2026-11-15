@@ -2,7 +2,11 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "@karume/kernel-checks";
 import { beforeAll, describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  REORDER_STRATEGIES,
+  type SessionOptions,
+} from "../src/runtime/executor.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
@@ -14,13 +18,13 @@ describe.skipIf(!GPU_AVAILABLE)("explicitly selecting the parallel GEMV subgroup
     const gpu = await acquireGpu();
     const opened = await openModelBytes(rmsNormAddGraph(), []);
     try {
-      for (const value of [false, "auto", "parallel-subgroup32"]) {
-        const options: SessionOptions = {};
-        Reflect.set(options, "linearGemvReduce", value);
+      for (const value of [false, "auto", "subgroup32"]) {
+        const options: SessionOptions = { numerics: { ops: { linear: "reorder" } } };
+        Reflect.set(options, REORDER_STRATEGIES, { linearGemv: value });
         await assertRejects(
           () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
           Error,
-          "linearGemvReduce",
+          "REORDER_STRATEGIES",
         );
       }
     } finally {

@@ -2,7 +2,11 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "@karume/kernel-checks";
 import { beforeAll, describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  REORDER_STRATEGIES,
+  type SessionOptions,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
@@ -15,12 +19,12 @@ describe.skipIf(!GPU_AVAILABLE)("explicit RMS subgroup32", () => {
     const opened = await openModelBytes(rmsNormAddGraph(), []);
     try {
       for (const value of [null, false, "auto", "subgroup32"]) {
-        const options: SessionOptions = {};
-        Reflect.set(options, "rmsNormReduce", value);
+        const options: SessionOptions = { numerics: { ops: { rms_norm: "reorder" } } };
+        Reflect.set(options, REORDER_STRATEGIES, { rmsNorm: value });
         await assertRejects(
           () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
           Error,
-          "rmsNormReduce",
+          "REORDER_STRATEGIES",
         );
       }
       // The diagnostic must not call the caller's conversion: if it ran, "boom" would escape
@@ -38,11 +42,11 @@ describe.skipIf(!GPU_AVAILABLE)("explicit RMS subgroup32", () => {
         },
       ]) {
         const options: SessionOptions = {};
-        Reflect.set(options, "rmsNormReduce", value);
+        Reflect.set(options, "numerics", { ops: { rms_norm: value } });
         const error = await assertRejects(
           () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
           ExecutionError,
-          "rmsNormReduce",
+          "options.numerics.ops.rms_norm",
         );
         // Report only the type name, not the value itself.
         assertEquals(error.message.includes("object"), true, error.message);

@@ -8,7 +8,7 @@ import { rmsNormAddKey } from "../src/kernels/rms-norm.ts";
 import { rmsNormAddGraph, type RmsNormAddGraphOptions } from "./helpers/rms-norm-add-graph.ts";
 import { GRAPH_NAME, memoryModel } from "./helpers/model-fixture.ts";
 
-const fuse = (options: RmsNormAddGraphOptions = {}, enabled?: boolean, subgroup = false) => {
+const fuse = (options: RmsNormAddGraphOptions = {}, enabled = true, subgroup = false) => {
   const graph = mergedGraph(
     memoryModel(rmsNormAddGraph(options), []).graphs[GRAPH_NAME],
     GRAPH_NAME,
@@ -21,21 +21,20 @@ const fuse = (options: RmsNormAddGraphOptions = {}, enabled?: boolean, subgroup 
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxComputeWorkgroupsPerDimension: 65535,
     },
-    ...(enabled === undefined ? {} : { fuseRmsNormAdd: enabled }),
+    ...(enabled ? {} : { disabledRules: new Set(["rmsNormAdd"]) }),
     rmsNormReduce: subgroup ? "subgroup32" : "workgroup",
   });
 };
 
-describe("opt-in RMS → add fusion", () => {
-  it("keeps the reference path when omitted or false", () => {
-    for (const enabled of [undefined, false]) {
-      const plan = fuse({}, enabled);
-      assertEquals(plan.counts.rmsNormAdd, 0);
-      assertEquals(
-        plan.steps.map((step) => step.kind),
-        ["node", "node", "node"],
-      );
-    }
+describe("RMS → add fusion", () => {
+  it("applies without an option, and keeps the reference path when the rule is left out", () => {
+    assertEquals(fuse({}).counts.rmsNormAdd, 1);
+    const plan = fuse({}, false);
+    assertEquals(plan.counts.rmsNormAdd, 0);
+    assertEquals(
+      plan.steps.map((step) => step.kind),
+      ["node", "node", "node"],
+    );
   });
   it("accepts both input orders and the measured widths, and keeps the total reference count of external inputs", () => {
     for (const dim of [256, 1536, 2560, 2816, 3840]) {

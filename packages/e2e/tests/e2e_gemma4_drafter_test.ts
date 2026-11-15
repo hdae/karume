@@ -73,6 +73,7 @@ import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 // MUST: the entry point is taken from the **public surface** (grabbing `src/...` directly would
 // keep the check green even if the surface shrank).
 import { type ChatMessage, Pipeline } from "../../models/gemma.ts";
+import { REORDER_STRATEGIES } from "../../runtime/src/runtime/executor.ts";
 import { type PipelineConfig, parsePipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
 import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
@@ -494,10 +495,12 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
   const targetOpened = await targetComponent();
   const drafterOpened = await drafterComponent();
   const gpu = await acquireGpu();
-  // ③PV runs with the parallel reduction — the order the parallel presets decode with
-  // (`i4-gemvpar`'s `"parallel"`; `i4-fast`'s `"parallel-fused"` adds in the same order — ADR
-  // 0102).
-  const sessionOptions = { stateAttentionReduce: "parallel" } as const;
+  // ③PV runs with the parallel reduction — the order the parallel presets decode with (their
+  // `reorder` folds the row statistics into PV, which adds in the same order — ADR 0102).
+  const sessionOptions = {
+    numerics: { ops: { attention: "reorder" } },
+    [REORDER_STRATEGIES]: { stateAttention: "parallel" },
+  } as const;
   const target: Session = await targetOpened.createSession(gpu, sessionOptions);
   let drafterSession: Session;
   try {

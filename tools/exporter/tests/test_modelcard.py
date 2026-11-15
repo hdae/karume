@@ -453,6 +453,21 @@ class TestQuantsSection:
             " `front` = `i8` / `tables` = `i8` | `linearCompute` = `a8` |"
         ]
 
+    def test_a_session_value_that_is_not_a_string_is_spelled_in_json(self) -> None:
+        """A boolean and an object are written as the manifest writes them (`true`, double-quoted
+        keys), not as Python's `True` / `{'level': ...}`."""
+        model = _manifest()["models"]["zeta"]
+        model["quants"]["w8"]["session"] = {
+            "numerics": {"level": "reorder"},
+            "packedStaticQuantize": True,
+        }
+
+        row = _row(quants(model), "w8")
+
+        assert row.endswith(
+            ' | `numerics` = `{"level": "reorder"}` / `packedStaticQuantize` = `true` |'
+        )
+
     def test_a_seat_without_the_presentation_fields_keeps_an_empty_cell(self) -> None:
         """The presentation fields are optional (ADR 0075 decision 1) — a preset without them is
         read by its id as is."""

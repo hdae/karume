@@ -47,6 +47,7 @@ import {
   requireCensus,
   SEAT_SIGNATURES,
 } from "./helpers/pipeline-census.ts";
+import { stateAttentionReduceOptions } from "./helpers/state-attention-options.ts";
 import { seeded } from "./helpers/state-dispatch.ts";
 
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
@@ -117,7 +118,7 @@ const withArms = async (
   const armOf = async (fullStateStorage: "f32" | "f16"): Promise<Arm> => {
     const session = await sessionOf(gpu, graph, {
       fullStateStorage,
-      stateAttentionReduce: reduce,
+      ...stateAttentionReduceOptions(reduce),
     });
     return {
       session,

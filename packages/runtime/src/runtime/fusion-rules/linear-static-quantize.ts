@@ -101,11 +101,7 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
   contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
-    if (
-      context.fuseLinearStaticQuantize !== true ||
-      context.linearGemvReduce !== "parallel" ||
-      context.linearCompute !== "f32"
-    )
+    if (context.linearGemvReduce !== "parallel" || context.linearCompute !== "f32")
       return undefined;
     const linear = nodes[index],
       srq = nodes[index + 1];
@@ -125,10 +121,10 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
     }
     // A byte-plane GEMV linear (`linearPlanesGemvVariant` — the function buildLinear reads) keeps
     // its own dispatch and the SRQ stays a node: taking the window would build the parallel GEMV in
-    // its place and leave the option silently without effect. The decision reads only the option
-    // and the linear, never the packed values, so both scans of planFusions still grab the same
-    // windows. No measured parallel row is a byte-plane shape today, so this rejects no window the
-    // rule would otherwise take.
+    // its place and leave the strategy silently without effect. The decision reads only the
+    // strategy and the linear, never the packed values, so both scans of planFusions still grab the
+    // same windows. No measured parallel row is a byte-plane shape today, so this rejects no window
+    // the rule would otherwise take.
     if (linearPlanesGemvVariant(context.linearGemvPlanes, linear, weight.storage) !== undefined) {
       return undefined;
     }

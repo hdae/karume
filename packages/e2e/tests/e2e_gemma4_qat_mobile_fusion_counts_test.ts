@@ -29,9 +29,12 @@ import {
  * built-in fusion applies without an option; `without` leaves rules out by name to read the plan
  * they would otherwise take.
  */
-const PARALLEL: FusionCountOptions = { linearGemvReduce: "parallel" };
+const PARALLEL: FusionCountOptions = { numerics: { ops: { linear: "reorder" } } };
 
-const PACKED: FusionCountOptions = { packedStaticQuantize: true, linearGemvReduce: "parallel" };
+const PACKED: FusionCountOptions = {
+  packedStaticQuantize: true,
+  numerics: { ops: { linear: "reorder" } },
+};
 
 const without = (options: FusionCountOptions, ...rules: string[]): FusionCountOptions => ({
   ...options,

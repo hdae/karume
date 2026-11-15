@@ -23,7 +23,7 @@ import {
 import { STATIC_QUANTIZE_PACKED_KEY } from "../src/kernels/static-quantize.ts";
 import { referenceIntegerGemv } from "../src/reference/linear-gemv-integer.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
-import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, DISABLED_FUSION_RULES } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
@@ -227,15 +227,18 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
 
       for (const fused of [true, false]) {
         const form = fused ? "with the SRQ epilogue" : "plain, then the SRQ node";
+        const fusion: SessionOptions = fused
+          ? {}
+          : { [DISABLED_FUSION_RULES]: ["linearStaticQuantize"] };
         it(`runs the integer key ${form} and writes the mirror's words`, async () => {
           const where = `${shape.name} ${form}`;
           const { words, census } = await runTwice(
             fixtureFor(),
             {
-              linearGemvReduce: "parallel",
+              numerics: { ops: { linear: "reorder" } },
               packedStaticQuantize: true,
               integerGemv: true,
-              fuseLinearStaticQuantize: fused,
+              ...fusion,
             },
             where,
           );
@@ -250,9 +253,9 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
           const { census } = await runTwice(
             fixtureFor(),
             {
-              linearGemvReduce: "parallel",
+              numerics: { ops: { linear: "reorder" } },
               packedStaticQuantize: true,
-              fuseLinearStaticQuantize: fused,
+              ...fusion,
             },
             where,
           );
@@ -270,13 +273,16 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
       await assertRejects(
         () =>
           createSessionFromContainer(gpu, model, GRAPH_NAME, {
-            linearGemvReduce: "parallel",
+            numerics: { ops: { linear: "reorder" } },
             integerGemv: true,
           }),
         ExecutionError,
         "integerGemv requires packedStaticQuantize: true",
       );
-      const options: SessionOptions = { linearGemvReduce: "parallel", packedStaticQuantize: true };
+      const options: SessionOptions = {
+        numerics: { ops: { linear: "reorder" } },
+        packedStaticQuantize: true,
+      };
       Object.defineProperty(options, "integerGemv", { value: 1, enumerable: true });
       await assertRejects(
         () => createSessionFromContainer(gpu, model, GRAPH_NAME, options),

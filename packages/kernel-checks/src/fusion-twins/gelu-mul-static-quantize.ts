@@ -1,6 +1,6 @@
 /**
- * The `geluMulStaticQuantize` fusion (perf-ledger K-48 step 1b): a Session with
- * `fuseGeluMulStaticQuantize` on against the same graph without it on the same backend, on values
+ * The `geluMulStaticQuantize` fusion (perf-ledger K-48 step 1b): a Session with the rule against
+ * the same graph with the rule left out on the same backend, on values
  * landing on SRQ boundaries after `gelu_tanh(gate) · ple`, ±0, ±inf, NaN payloads, subnormals and
  * several scales including 0 (the identity SRQ). The SRQ words and the gate's later consumer are
  * u32-identical with NaN by payload, geluMulStaticQuantize at 1 and 0, the fused side in 3 dispatches
@@ -281,8 +281,7 @@ const PART = "fusion-gelu-mul-static-quantize";
 export const GELU_MUL_STATIC_QUANTIZE_TWIN_CASES = { [PART]: 54 } as const satisfies ExpectedCases;
 
 /**
- * Every chain and seed: the Session with `fuseGeluMulStaticQuantize` against the one without it
- * (checkFusionTwin, NaN by payload) on the SRQ words (y) and the gate after the fold (copy),
+ * Every chain and seed: the Session with the rule against the one without it (checkFusionTwin, NaN by payload) on the SRQ words (y) and the gate after the fold (copy),
  * geluMulStaticQuantize at 1 and 0, the fused side's dispatches.
  */
 export const checkGeluMulStaticQuantizeTwins = async (

@@ -346,11 +346,6 @@ export type FusionContext<Name extends string = string> = {
    * the granted values). Omitted = no budget.
    */
   readonly attentionRowBlockMaxBytes?: number;
-  /** Fuse RMS→add only when explicitly requested (ADR 0099). */
-  readonly fuseRmsNormAdd?: boolean;
-  readonly fuseLinearStaticQuantize?: boolean;
-  /** Fuse gelu_tanh → mul → static_quantize only when explicitly requested (perf-ledger K-48). */
-  readonly fuseGeluMulStaticQuantize?: boolean;
   /** Hand fixed-SRQ activations to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize?: boolean;
   /**
@@ -359,7 +354,7 @@ export type FusionContext<Name extends string = string> = {
    */
   readonly integerGemv?: boolean;
   /**
-   * Run the eligible i2 linears on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`); which
+   * Run the eligible i2 linears on the byte-plane GEMV (a `reorder` strategy of linear); which
    * linears is decided by `linearPlanesGemvVariant` in {@link "./linear-route.ts"} alone. Such a
    * linear reads f32 activations and keeps its own dispatch, so the packed pairing and the
    * linear→SRQ rule leave it alone.

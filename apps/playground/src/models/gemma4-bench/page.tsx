@@ -508,17 +508,6 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                     </div>
                     <div className="flex items-center gap-2">
                       <Switch
-                        id={`bench-arm-${draft.id}-planes`}
-                        checked={draft.linearGemvPlanes === true}
-                        onCheckedChange={(checked) =>
-                          updateDraft(draft.id, { linearGemvPlanes: checked })
-                        }
-                        disabled={running}
-                      />
-                      <Label htmlFor={`bench-arm-${draft.id}-planes`}>Planes GEMV</Label>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Switch
                         id={`bench-arm-${draft.id}-ple-gpu`}
                         checked={draft.pleOnGpu === true}
                         onCheckedChange={(checked) => updateDraft(draft.id, { pleOnGpu: checked })}
@@ -564,22 +553,19 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 pass boundaries inflate the arm&apos;s absolute GPU and wall times, so read its
                 shares, not its totals. Integer GEMV: the arm passes the Session option{" "}
                 <code>integerGemv: true</code> (with <code>packedStaticQuantize: true</code> and{" "}
-                <code>linearGemvReduce: &quot;parallel&quot;</code> where the preset does not
+                <code>{'numerics: { ops: { linear: "reorder" } }'}</code> where the preset does not
                 declare them), so the decode linears of QAT E2B at the measured shapes (i2 gate / up
                 and down, i4 o and down) run on the integer GEMV; the label shows
-                &quot;(integer)&quot;. Other models have no linear at those shapes. Planes GEMV: the
-                arm passes the Session option <code>linearGemvPlanes: true</code> (it needs no other
-                option), so the QAT E2B lm_head (i2 262144 × 1536) runs on the byte-plane GEMV
-                instead of the sequential GEMV; the label shows &quot;(planes)&quot;. Other models
-                have no i2 linear at that shape. PLE on GPU: the arm passes the pipeline option{" "}
-                <code>pleResidency: &quot;gpu&quot;</code>, so the per-layer embeddings are uploaded
-                once at load and gathered on the GPU (QAT E2B: 1.09 GiB in one binding, which the
-                device must allow); the label shows &quot;(PLE GPU)&quot;. Decode ahead: the arm
-                passes <code>decodeAhead</code>, so a greedy chat runs that many decode steps per
-                GPU batch, each fed the token the previous step selected on the GPU, with one fence
-                and one readback per batch instead of per token; it needs PLE on GPU, and the label
-                shows &quot;(ahead N)&quot;. The token ids stay those of depth 1; each chat records
-                the batches it ran in its stop (<code>decodeAhead</code>).
+                &quot;(integer)&quot;. Other models have no linear at those shapes. PLE on GPU: the
+                arm passes the pipeline option <code>pleResidency: &quot;gpu&quot;</code>, so the
+                per-layer embeddings are uploaded once at load and gathered on the GPU (QAT E2B:
+                1.09 GiB in one binding, which the device must allow); the label shows &quot;(PLE
+                GPU)&quot;. Decode ahead: the arm passes <code>decodeAhead</code>, so a greedy chat
+                runs that many decode steps per GPU batch, each fed the token the previous step
+                selected on the GPU, with one fence and one readback per batch instead of per token;
+                it needs PLE on GPU, and the label shows &quot;(ahead N)&quot;. The token ids stay
+                those of depth 1; each chat records the batches it ran in its stop (
+                <code>decodeAhead</code>).
               </p>
             </CardContent>
           </Card>

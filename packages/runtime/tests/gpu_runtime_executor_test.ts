@@ -553,31 +553,6 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "the parallel GEMV reduction rejects an invalid spelling and unimplemented compute precisions at build time",
-  async () => {
-    const gpu = await acquireGpu();
-    const opened = await openChainModel();
-    try {
-      for (const options of [
-        jsCallerOptions({ linearGemvReduce: "paralel" }),
-        { linearGemvReduce: "parallel", linearCompute: "f16" } as const,
-        { linearGemvReduce: "parallel", linearCompute: "a8" } as const,
-        { linearGemvReduce: "parallel-subgroup32", linearCompute: "f16" } as const,
-        { linearGemvReduce: "parallel-subgroup32", linearCompute: "a8" } as const,
-      ]) {
-        await assertRejects(
-          () => createSessionFromContainer(gpu, opened, "model", options),
-          ExecutionError,
-          "linearGemvReduce",
-        );
-      }
-    } finally {
-      gpu.destroy();
-    }
-  },
-);
-
-test.skipIf(!GPU_AVAILABLE)(
   "planBackingBudgetBytes accepts only non-negative safe integers (real GPU)",
   async () => {
     const gpu = await acquireGpu();
@@ -1028,7 +1003,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// The exhaustive value sweep (5 knobs × 6 values) runs GPU-independently in
+// The exhaustive value sweep (4 knobs × 6 values) runs GPU-independently in
 // tests/runtime_execution_knobs_test.ts. Only one case stays here, "the validation is wired into
 // the real build path" (proof that `createSession` reaches `assertExecutionKnobs`, not a check of
 // the accepted set itself).
@@ -1042,7 +1017,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const object = {
         [Symbol.toPrimitive](): string {
           conversions++;
-          return "parallel-fused";
+          return "f32";
         },
         toJSON(): string {
           conversions++;
@@ -1050,7 +1025,7 @@ test.skipIf(!GPU_AVAILABLE)(
         },
       };
       const options: SessionOptions = {};
-      Object.defineProperty(options, "stateAttentionReduce", { value: object });
+      Object.defineProperty(options, "linearCompute", { value: object });
       await assertRejects(
         async () => {
           const session = await createSessionFromContainer(gpu, model, "model", options);
@@ -1058,7 +1033,7 @@ test.skipIf(!GPU_AVAILABLE)(
           await session.dispose();
         },
         ExecutionError,
-        "stateAttentionReduce",
+        "linearCompute",
       );
       assertEquals(conversions, 0);
     } finally {
@@ -1073,10 +1048,6 @@ test.skipIf(!GPU_AVAILABLE)(
     const gpu = await acquireGpu();
     try {
       const rejected: readonly (readonly [SessionOptions, string])[] = [
-        [
-          { numerics: { level: "reorder" }, linearGemvReduce: "parallel" },
-          "cannot be given together",
-        ],
         [jsCallerOptions({ numerics: "reorder" }), "options.numerics must be an object"],
       ];
       const opened = await openChainModel();

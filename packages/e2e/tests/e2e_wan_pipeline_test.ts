@@ -632,8 +632,7 @@ describe.skipIf(!DIST_PRESENT)(
       {
         // The acceptance table (WAN_SESSION_POLICY) accepts only the 3 fields of the linear / attention execution form
         // (ADR 0120 decision 7). A declaration of a knob that is valid manifest vocabulary but that Wan does not accept
-        // (the reduction of the states-form attention — meant for a decoder's decode) fails by name before the weights
-        // are fetched.
+        // (the numeric requirement — meant for a decoder's decode) fails by name before the weights are fetched.
         label: "a quant declares an execution knob not in the acceptance table",
         patch: (model) => {
           const quants = model.quants;
@@ -642,12 +641,12 @@ describe.skipIf(!DIST_PRESENT)(
             ...model,
             quants: {
               ...quants,
-              f16: { ...quants.f16, session: { stateAttentionReduce: "parallel" } },
+              f16: { ...quants.f16, session: { numerics: { level: "reorder" } } },
             },
           };
         },
         textEncoder: "precomputed",
-        message: "session.stateAttentionReduce is not supported",
+        message: "session.numerics is not supported",
       },
       {
         // The GPU path reads the tokenizer assets — without their declaration it fails before fetching umT5's part 1
