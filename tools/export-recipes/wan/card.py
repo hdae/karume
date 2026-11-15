@@ -414,10 +414,12 @@ def _wan21_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
-    """The Wan2.2 overview. The verification scope is ADR 0121 addendum "Results of step 6" (the 6
-    sha rows are all the reference preset at 17 frames — 1280×704 and 704×1280 with precomputed
-    embeddings, the GPU text path at 1280×704 only; the 50-step end-to-end runs of the product
-    class are 2 presets at 1280×704 with 33 frames). The 49 / 121-frame end-to-end runs of the
+    """The Wan2.2 overview. The verification scope is ADR 0121 addendum "Results of step 6" (the
+    reference preset's sha rows at 17 frames — 1280×704 and 704×1280 with precomputed
+    embeddings, the GPU text path at 1280×704 only; since 2026-11-15 the seed path's 1280×704
+    row runs 9 frames, and the 17-frame rows at 1280×704 are the band cases; the 50-step
+    end-to-end runs of the product class are 2 presets at 1280×704 with 33 frames). The 49 /
+    121-frame end-to-end runs of the
     generation script are stated by the accepted-inputs section ({@link _WAN22_FRAMES_CHECKED}).
     The browser has only one end-to-end run: the practical preset with the GPU umT5 at
     1280×704×121 in Chrome on an RTX 5070 Ti (ADR 0121 addendum "Chrome on the RTX 5070 Ti" —

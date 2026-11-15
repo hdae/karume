@@ -1602,9 +1602,8 @@ Consequences).
   folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9, 2026-10-03). Within one stage (one run) the
   work is indivisible, and an abort takes effect at the next boundary.
 - **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows
-  that exist today are the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti` — written from the frozen copy `128b511e` by the ruling of the ADR 0121 addendum "the development machine changed"). Since 0.15 the tests run on Node and compare with the `node-nvidia-geforce-rtx-3080-ti` rows; the `deno-*` rows stay as history, neither written nor checked (ADR 0127 addendum of 2026-10-28). On a machine without a row the sha comparison SKIPs explicitly and the reference guard turns red
-  (`KARUME_REFERENCE=write` creates your machine's rows). The 50-step rows are compared only with the opt-in
-  (`KARUME_WAN_FULL_PIPELINE=1`).
+  that exist today are those of `node-nvidia-geforce-rtx-3080-ti` (`KARUME_REFERENCE=write` creates your machine's rows). The 50-step cases are compared only with the opt-in
+  (`KARUME_WAN_FULL_PIPELINE=1`) and have no row under this key: their rows were written under the `deno-*` keys and were deleted with them on 2026-11-15.
 
 - The DiT's i8 presets (ADR [0120](decisions/0120-wan-dit-w8a8-seat.md), 2026-10-03): the reference preset `f16+dit8` and the practical preset `f16+dit8-a8-attn8-s16` were added to the distribution. The GPU numeric checks (r check, self A/B check) and the visual A/B (steps 3–6) are done (2026-10-03 to 04). The default is the practical preset (ruling of 2026-10-04 — `f16` is chosen explicitly with `quant: "f16"`). The practical preset's a8 is not faster on Metal (M2) (measured in K-70 — it becomes a preset that only costs quality). (→ 2026-10-17: when a8 is requested on a device without dp4a, the runtime warns once per device — ADR 0128 decision 5)
 - Chrome (step 9 ✅ — the range confirmed is the precomputed route (`textEncoder: "precomputed"`), the `f16` preset, 832×480, 81 frames, 50 steps. RTX 5070 Ti, ADR 0118 addendum 2026-10-04 "step 9: 81 frames × 50 steps complete in Chrome on the RTX 5070 Ti". As of the same addendum, the GPU route and the practical preset had not been run in Chrome): the default binding limit of 128 MiB is not enough even for the VAE's largest value of 192 MiB. `acquireGpu` requests the adapter values,
@@ -1695,13 +1694,9 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   the preset adopted from the maintainer's visual review (1280×704×33, 12 videos at 50 steps — 2026-10-06). In the self A/B check against the reference preset (ADR 0121 stage 7), the relRMS of the step-1 latent
   is 4.39e-2 at 33 frames and 4.92e-2 at 121 frames (bands 8.8e-2 / 9.9e-2; the 121-frame check is opt-in `KARUME_WAN_TI2V_121F=1`).
   The visual review (pairs of 12 reference-preset and 12 practical-preset videos — 2026-10-09) also shows no noticeable degradation.
-- **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the 6 cases of the 2-step end-to-end run (reference preset,
-  1280×704 / 704×1280, 17 frames) have rows for the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti`). Since 0.15 the tests run on Node and compare with the `node-nvidia-geforce-rtx-3080-ti` rows; the `deno-*` rows stay as history, neither written nor checked (ADR 0127 addendum of 2026-10-28).
-  The one practical-preset case of the same request (1280×704) has only an RTX 3080 Ti row. The 2-step × 121-frame case is opt-in (`KARUME_WAN_TI2V_121F=1`), with a row only for the RTX 3080 Ti. The 50-step end-to-end run (opt-in
-  `KARUME_WAN_TI2V_FULL_PIPELINE=1`, 1280×704, 33 frames) has rows for both presets, only for the RTX 3080 Ti. The I2V 2-step × 9-frame
-  end-to-end runs have only RTX 3080 Ti rows: default lane = boxing-cats (1280×704) for both presets; opt-in (`KARUME_WAN_TI2V_I2V_FULL=1`) = the reference preset's
-  cat-dog-baking / ferret and 704×1280. The I2V 50-step end-to-end run (same opt-in, 1280×704, 33 frames, fit crop) has rows for both presets
-  (the practical preset's row comes with the floor of differing by at least 1 bit from the reference preset on the same request), only for the RTX 3080 Ti.
+- **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows are those of `node-nvidia-geforce-rtx-3080-ti`
+  (`KARUME_REFERENCE=write` creates your machine's rows). The default lane's 2-step end-to-end run has five 17-frame cases of the reference preset (the three band cases at 1280×704, the seed path at 704×1280, the GPU text path at 1280×704) and, at 1280×704 with 9 frames, the seed path of the reference preset and of each practical preset — these share one request, so that the floor (a practical preset differs from the reference preset by at least 1 bit) is checked on it.
+  The I2V 2-step × 9-frame end-to-end run has a boxing-cats row (1280×704) for both presets. The opt-in cases — 121 frames (`KARUME_WAN_TI2V_121F=1`), the 50-step runs (`KARUME_WAN_TI2V_FULL_PIPELINE=1`) and the remaining I2V cases (`KARUME_WAN_TI2V_I2V_FULL=1`) — have no row under this key: their rows were written under the `deno-*` keys, which no lane could check, and were deleted with them on 2026-11-15.
 - **The VAE always decodes in tiles** (tiles of latent 16, overlap of latent 4, blended in patchify space and then unpatchified — ADR 0121 decision 6;
   28 tiles at 1280×704): there is an approximation difference from the official non-tiled decode (a ratio of 1.2e-1 observed on the stage-5 comparison case 480×832×9).
 - **Same as Wan2.1**: rejecting a timing (`gpuTiming`) device at construction; not keeping the DiT stage and the VAE stage resident at the same time; the seed's initial noise being
@@ -2244,15 +2239,15 @@ decision 1). The design's source of truth is ADR [0086](decisions/0086-distribut
 
 The PNG / WAV reference sha256 of the e2e tests (`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`) are
 **values recorded in that environment**, stored in `packages/models/tests/fixtures/references/<series>.json` as rows per environment key
-(`<runtime>-<adapter name slug>`, e.g. `deno-intel-graphics-bmg-g21`).
+(`<runtime>-<adapter name slug>`, e.g. `node-nvidia-geforce-rtx-3080-ti`).
 **An environment without a row SKIPs explicitly without comparing** (Metal and the like) — this is the specification, and the check
 works as "a port and regression detector **on that machine**". So that a SKIP does not become a silent green, if even one registered
 case lacks a row for the environment, **the reference guard of that series turns red** (an id without a row can be stated explicitly through the caller's held list — ADR 0106 addendum
 2026-10-03; opt-out with `KARUME_ALLOW_NO_REFERENCE`).
 **Even on the same Linux / Vulkan, different vendors do not match** (2026-09-20, full verify on an Intel Arc
 B570 / Mesa ANV: against the then single constant, all 16 mismatched; the output PNGs looked normal =
-tiny numeric differences). This measurement was the direct motivation for moving to rows per environment, and the B570 row
-(`deno-intel-graphics-bmg-g21`) has been created. How rows are made, the reference guard (opt-out with `KARUME_ALLOW_NO_REFERENCE`) and the results
+tiny numeric differences). This measurement was the direct motivation for moving to rows per environment (the B570's rows, under a
+`deno-*` key, were deleted with the other `deno-*` rows on 2026-11-15). How rows are made, the reference guard (opt-out with `KARUME_ALLOW_NO_REFERENCE`) and the results
 directory (`outputs/verify/`) are defined by ADR [0106](decisions/0106-device-keyed-references.md).
 
 9 series have rows (2026-09-26 — ADR 0106 third addendum): besides the PNG / WAV of anima / sbv2 / irodori, the goldens of siglip2 /

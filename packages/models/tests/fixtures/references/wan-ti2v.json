@@ -11,17 +11,17 @@
     "f16+dit8-2step-band-cat-dog-baking-1280x704-17f-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "b463332bedb1e17002d997e3140a7943d55fd7625e6c9194fa43dc0d39daf4ce"
     },
-    "f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "node-nvidia-geforce-rtx-3080-ti": "bc822ce80cd14e77f667dd5934cbd15ca88ba45210fb8c6432df5e17aad1b197"
+    "f16+dit8-2step-boxing-cats-seed42-1280x704-9f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "1f4cdf5772152f6f7b4a34fe51909a1f57e38634de4101948b9face4a4c12380"
     },
     "f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "493512454fed685e429ea4d3c786055214bfc7d4d041f145bcb0af9737d9a960"
     },
-    "f16+dit8-a8-attn8-online-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "node-nvidia-geforce-rtx-3080-ti": "3602833535d7545cbc1a2e29c938f7e225b1e993506f0a7f6c16e1340a6db82f"
+    "f16+dit8-a8-attn8-online-2step-boxing-cats-seed42-1280x704-9f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "19a1996fa2451719cd3c6f07701c7d6056de9c00866e884f1e1855da4ded0209"
     },
-    "f16+dit8-a8-attn8-s16-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "node-nvidia-geforce-rtx-3080-ti": "e8dd052850e13c4ed21fc9524d5265d1959dc04c2e63942fc00dcb09ef6796f3"
+    "f16+dit8-a8-attn8-s16-2step-boxing-cats-seed42-1280x704-9f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "3b43bb66064766386db9382ff41caba8cf1f08a8c0c408903ce1d9e6206956d9"
     },
     "f16+dit8-a8-attn8-s16-i2v-crop-2step-band-boxing-cats-1280x704-9f-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "b0c94f4391284e197fa91416079e4dc8e06faf31bc0d611d0b23221c74d25b3d"
@@ -32,11 +32,11 @@
     "f16+dit8-i2v-crop-2step-band-boxing-cats-1280x704-9f-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "760eb4fea2aa75d389c7edadbb146f57762cd14fbdb88e2e1331a3667d09f85f"
     },
-    "i8-a8-attn8-online-conv8-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "node-nvidia-geforce-rtx-3080-ti": "613891c44670ff1a8d3f221b21f0fe539a4d0647edde47392432727ae2aa50a4"
+    "i8-a8-attn8-online-conv8-2step-boxing-cats-seed42-1280x704-9f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "9689fcd51485f99f81df44c96f3c4d6b44fa83e5d6259cc68080e89f09fa703f"
     },
-    "i8-a8-attn8-online-conv8-vae32-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "node-nvidia-geforce-rtx-3080-ti": "04ff3861c676cd578cd63f3744859b55d8bdefad24f45366fbac29042f1aa77b"
+    "i8-a8-attn8-online-conv8-vae32-2step-boxing-cats-seed42-1280x704-9f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "5d576b7e24f037f075d6b7a212e1f3c79ad6834161d9b7fe9ffb168f68e2d3b4"
     }
   }
 }

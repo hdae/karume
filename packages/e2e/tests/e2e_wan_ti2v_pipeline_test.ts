@@ -54,7 +54,11 @@
  *   rows = the reference preset's 6 (the 3 band cases, the seed path's 1280×704 and 704×1280, and the GPU path (umT5 on
  *   the GPU — a machine without the umT5 mirror `models/karume-umt5-xxl/` SKIPs it explicitly)) and one seed-path
  *   1280×704 row for each of the two practical presets (s16 and online — ADR 0132) ({@link PRACTICAL_SEED_CASES} — the
- *   same request as the reference preset's seed-path 1280×704, only the preset differs). The rows of the opt-in 50
+ *   same request as the reference preset's seed-path 1280×704, only the preset differs). The seed path's 1280×704
+ *   cases — the reference preset's and every practical preset's — run {@link SHORT_FRAMES} frames, not 17: their checks
+ *   are completion, the floor between presets and the row, none of which needs the clip's length, and the VAE decode
+ *   that dominates a 17-frame case scales with the frame count. The band cases, the 704×1280 case and the GPU path
+ *   keep 17 frames. The rows of the opt-in 50
  *   steps and 121 frames are in the sections below. An ID carries the preset, path, step count, case, size, frame count
  *   and shift ({@link caseIdOf} — ruling F12). A machine without the row skips that case's sha comparison (the artifact
  *   and the measured sha are kept), and the reference guard turns red (the existing rule). Rows are written after the
@@ -276,6 +280,15 @@ const SHIFT = 5;
 const WIDTH = 1280;
 const HEIGHT = 704;
 const FRAMES = 17;
+/**
+ * The frame count of the seed path's 1280×704 cases (3 latent frames: one first chunk and two next chunks per tile).
+ * Not 5, the shortest clip the descriptor accepts: with a single next chunk per tile the f16 VAE decode takes 230 s
+ * against 45 s at 9 frames and 88 s at 17 on the RTX 3080 Ti (docs/known-issues.md, "Wan2.2: the VAE decode of a
+ * 5-frame clip").
+ * MUST: the reference preset's case and the practical presets' cases share it — the floor compares their outputs for
+ * the same request.
+ */
+const SHORT_FRAMES = 9;
 const LATENT_SHAPE: readonly number[] = [48, 5, 44, 80];
 
 /**
@@ -324,18 +337,20 @@ const SEED_CASES: readonly {
   readonly id: string;
   readonly width: number;
   readonly height: number;
+  readonly frames: number;
 }[] = [
-  { width: WIDTH, height: HEIGHT },
-  { width: HEIGHT, height: WIDTH },
-].map(({ width, height }) => ({
+  { width: WIDTH, height: HEIGHT, frames: SHORT_FRAMES },
+  { width: HEIGHT, height: WIDTH, frames: FRAMES },
+].map(({ width, height, frames }) => ({
   id: caseIdOf(
     `${WAN_TI2V_REFERENCE_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
     width,
     height,
-    FRAMES,
+    frames,
   ),
   width,
   height,
+  frames,
 }));
 
 /**
@@ -348,7 +363,7 @@ const PRACTICAL_SEED_CASE_ID = caseIdOf(
   `${WAN_TI2V_PRACTICAL_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
   WIDTH,
   HEIGHT,
-  FRAMES,
+  SHORT_FRAMES,
 );
 
 /**
@@ -360,7 +375,7 @@ const ONLINE_SEED_CASE_ID = caseIdOf(
   `${WAN_TI2V_ONLINE_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
   WIDTH,
   HEIGHT,
-  FRAMES,
+  SHORT_FRAMES,
 );
 
 /**
@@ -373,7 +388,7 @@ const CONV8_SEED_CASE_ID = caseIdOf(
   `${WAN_TI2V_CONV8_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
   WIDTH,
   HEIGHT,
-  FRAMES,
+  SHORT_FRAMES,
 );
 
 /**
@@ -387,7 +402,7 @@ const CONV8_VAE32_SEED_CASE_ID = caseIdOf(
   `${WAN_TI2V_CONV8_QUANT}-vae32-2step-${SEED_PROMPT}-seed${SEED}`,
   WIDTH,
   HEIGHT,
-  FRAMES,
+  SHORT_FRAMES,
 );
 
 /** The practical presets' seed cases, run in this order after the reference preset's (the s16 preset first). */
@@ -951,7 +966,7 @@ const roundUpTwoDigits = (value: number): number => {
 };
 
 describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
-  "Wan2.2 end-to-end 2 steps (real GPU): 1280×704, 17 frames, fault injection outside the band, " +
+  "Wan2.2 end-to-end 2 steps (real GPU): 1280×704, 17 frames (9 on the seed path's 1280×704), fault injection outside the band, " +
     "sha256 per-environment rows (reference preset's band cases, seed path in 2 sizes, practical presets' seed path, GPU path) — the latents and " +
     "frames inside the band of the diffusers reference only with KARUME_UPSTREAM_PARITY=1",
   () => {
@@ -982,6 +997,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       id: string,
       width: number,
       height: number,
+      frames: number,
       beforeSettle: (bytes: Uint8Array<ArrayBuffer>) => void,
       knobs: {
         readonly vaeTile?: 32;
@@ -998,6 +1014,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
             diagnostics,
             {
               ...TWO_STEP,
+              frames,
               prompt: textOf(seatPipeline.prompts, SEED_PROMPT, "prompt"),
               seed: SEED,
               width,
@@ -1009,7 +1026,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
           assert("video" in observed, "generate did not run to the end");
           assertEquals(observed.latents.length, STEPS, "denoise-step count");
           const { video } = observed;
-          assertEquals([video.frames, video.height, video.width], [FRAMES, height, width]);
+          assertEquals([video.frames, video.height, video.width], [frames, height, width]);
           const nonFinite = countNonFinite(video.data);
           const notes = [`non-finite ${nonFinite}`, ...formatObserved(observed)];
           if (knobs.conv8Record !== undefined) {
@@ -1319,13 +1336,14 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     }
 
     // The seed path's two steps (2 sizes — completion, 0 non-finite values, the sha256 per-environment row).
-    for (const { id, width, height } of SEED_CASES) {
+    for (const { id, width, height, frames } of SEED_CASES) {
       it(`${id} (seed path, sha256 per-environment row)`, () =>
         runSeedCase(
           assigned(referencePipeline, "referencePipeline"),
           id,
           width,
           height,
+          frames,
           (bytes) => {
             // Keep as the floor's partner only the artifact of the practical presets' request (1280×704).
             if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
@@ -1351,6 +1369,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
           seedCaseId,
           WIDTH,
           HEIGHT,
+          SHORT_FRAMES,
           (bytes) => {
             // The floor (ADR 0110 decision 5 — a practical preset differs by at least 1 bit from the reference preset
             // for the same request): in a regression where the preset's `session` does not reach the Session on the

@@ -659,3 +659,26 @@ the block on its own immediate chunk of a context the Session made, on sliding s
   reference's tests; the shipped image chat is unaffected.
 - Fix candidates: the context check before the block rule; the reference refusing a block on window 0 as the kernel
   builder does; a u32 bound in the block rule; measure the backing split before changing the key.
+
+## Wan2.2: the VAE decode of a 5-frame clip takes several times longer than that of a longer clip (filed 2026-11-15; cause not investigated)
+
+At 1280×704 with the f16 VAE decoder (the presets `f16+dit8` and `f16+dit8-a8-attn8-s16` / `-online`), the `vae_decoder`
+stage of a 2-step run took, on the RTX 3080 Ti (Node + Dawn, geometry `nvidia-ampere`):
+
+| Frames | Chunk runs per tile | `vae_decoder` stage | Per chunk run (28 tiles) |
+| --- | --- | --- | --- |
+| 5 | first + 1 next | 227–246 s (4 runs, one of them alone in its process) | about 4.1 s |
+| 9 | first + 2 next | 45 s | about 0.54 s |
+| 17 | first + 4 next | 81–91 s | about 0.63 s |
+
+The chunk graphs and their input shapes are the same at every length (one latent frame per run), so the work per run
+should not depend on the clip's length. In the 5-frame runs the executor reports a largest window mean of about 1.3 s for
+`vae_decoder_first` and 1.2–1.5 s for `vae_decoder_next`, with 660 and 720 windows over budget; at 9 frames it reports
+105 ms and 48 ms with 54 and 0 over budget. The int8 decoder on int8 activations (`i8-a8-attn8-online-conv8`) is not
+affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked: other sizes, Wan2.1, Chrome, other GPUs.
+
+- Impact: a 5-frame clip (the shortest the descriptor accepts) decodes in about 2.6 times the time of a 17-frame clip.
+  The outputs are finite and deterministic (the same sha256 in two runs). The default lane's short seed cases run 9 frames
+  for this reason (`SHORT_FRAMES` in `packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts`).
+- Records: `outputs/diag/restructure-2026-11-15/` (`wan-ti2v-write.log`, `wan-5f-alone.log`, `wan-9f-alone.log`; local,
+  untracked).
