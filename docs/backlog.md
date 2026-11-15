@@ -105,9 +105,16 @@ maintainer's ruling of 2026-11-06).
      the `deno-*` rows.)* Left from it: the sections of `known-issues.md` for the Intel Arc B570 (the OOM check), Deno's
      `GPUDevice.destroy()` and the Pixel load failure stay until the twelve source comments and the backlog item that cite
      them say what they need themselves.
-  2. **Verification, first part.** Wan's rows at fewer frames (new case IDs, rows re-recorded); the verification cache's
-     recording stage (what each file compiles and reads, predictions counted while everything still runs); rows stored
-     with the kernel-set fingerprint and their artifact. Check: no existing row moves except the re-recorded Wan cases.
+  2. *(Landed 2026-11-15: the record of the WGSL a test dispatches; `outputs/references/`, which keeps the artifact and
+     the kernels of each matching run and adds them to a mismatch's message; the verification cache's recording stage
+     under `outputs/verify-cache/`; Wan2.2's seed-path cases at 9 frames.)* Left from it:
+     - Wan2.1's pipeline file (`e2e_wan_pipeline_test.ts`, 687 s in the last full verify) is not shortened: its case IDs
+       carry no frame count and its cases run the default 33 frames.
+     - A mismatch reports the differing bytes of the two artifacts; a distance per artifact type (pixels, samples,
+       tensor values) is not built.
+     - The cache's records are read by nobody yet: collect a few full runs and count wrong predictions before item 5.
+     - Inputs the record does not see: files read outside the repository (`/sys`, temporary directories), the clock and
+       randomness. A file whose every case is skipped writes no record.
   3. **Kernel structure.** The op spec object; the strategy registry for `linear` and attention; one new kernel written
      through the registry, modelled on a published WebGPU kernel collection, as the registry's test. Check: no pipeline
      key and no row moves in the refactors.
