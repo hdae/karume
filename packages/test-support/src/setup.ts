@@ -8,11 +8,21 @@
  *   are globals in Deno and browsers; tests reference them directly, so install Dawn's copies.
  *   Package sources MUST NOT rely on these globals (see runtime/src/gpu/webgpu-constants.ts).
  *
+ * - The kernel record (`./kernel-record.ts`) is switched on: which WGSL texts each test dispatches,
+ *   for the sha256 rows and the verification cache. It only observes three WebGPU calls.
+ *
  * `KARUME_DAWN_FLAGS` replaces the Dawn toggles (default: `disable-dawn-features=timestamp_quantization`);
  * `KARUME_NO_DAWN=1` skips Dawn entirely (no `navigator.gpu`).
  */
 
+import { afterEach, beforeEach } from "vite-plus/test";
 import { create, globals } from "webgpu";
+import {
+  beginKernelRecordFile,
+  beginKernelRecordTest,
+  endKernelRecordTest,
+  installKernelRecord,
+} from "./kernel-record.ts";
 
 type DawnHost = typeof globalThis & { __karumeDawnGpu?: GPU };
 
@@ -49,3 +59,11 @@ if (current === undefined && host.__karumeDawnGpu !== undefined) {
     enumerable: true,
   });
 }
+
+// A setup file is evaluated once per test file: the classes are wrapped once per worker, the buckets
+// start empty for every file, and each test gets its own bucket. The classes are the globals installed
+// above (the package types `globals` as a plain object).
+installKernelRecord({ GPUDevice, GPUComputePassEncoder });
+beginKernelRecordFile();
+beforeEach(beginKernelRecordTest);
+afterEach(endKernelRecordTest);

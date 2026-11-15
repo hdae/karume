@@ -9,6 +9,7 @@
     "./setup": "./src/setup.ts",
     "./fs": "./src/fs.ts",
     "./webgpu": "./src/webgpu.ts",
+    "./kernel-record": "./src/kernel-record.ts",
     "./local-dist-server": "./src/local-dist-server.ts",
     "./module-graph": "./src/module-graph.ts",
     "./lanes": "./src/lanes.ts",
