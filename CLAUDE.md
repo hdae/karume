@@ -47,7 +47,10 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `packages/models/` — **both a barrel (mod.ts) and per-family subpath exports**
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)
 - `packages/kernel-checks/` (private) — the kernel identity checks (subgroup GEMV / RMS, the state-attention rewrites) shared by
-  the runtime GPU tests and the playground `/kernel-check` page; it drives runtime internals, so only those two may import it
+  the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
+- `apps/workbench/` (private) — the browser app and Node command that run checks and measurements on a GPU: one file is
+  one entry, one JSON record per run under `outputs/workbench/` ([docs/spec/workbench.md](docs/spec/workbench.md)).
+  `apps/playground/` (private) — the model pages
 - `packages/test-support/` (private) — the test harness (Dawn injection, fs helpers, the lane table, the port codemod).
   The porting rules are in the README of the same directory
 - `tools/exporter/` — PyPI `karume` = **the general-purpose core only** (src layout; the boundary is a machine gate —

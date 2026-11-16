@@ -1,6 +1,6 @@
 /**
- * The checks the page runs: the shared implementations of `@karume/kernel-checks` (the same cases
- * the runtime's node GPU tests run), with the page's titles and what each needs of the device.
+ * The checks the entry runs: the shared implementations of `@karume/kernel-checks` (the same cases
+ * the runtime's node GPU tests run), with the entry's titles and what each needs of the device.
  */
 
 import {
@@ -33,7 +33,7 @@ import {
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
 
-import type { CheckReport, KernelCheckId } from "./verdict";
+import type { CheckReport, KernelCheckId } from "./verdict.ts";
 
 export type KernelCheck = {
   readonly id: KernelCheckId;

@@ -1,0 +1,26 @@
+{
+  "name": "@karume/workbench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser workbench for Karume measurements and checks: one file per entry, one Run button, a JSON record per run (and the same entries under Node + Dawn).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "check": "vp check",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@karume/kernel-checks": "workspace:*",
+    "@karume/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*",
+    "@types/node": "catalog:",
+    "@webgpu/types": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

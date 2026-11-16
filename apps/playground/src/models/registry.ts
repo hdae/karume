@@ -18,7 +18,6 @@ import {
   MountainIcon,
   ScissorsIcon,
   ScaleIcon,
-  ShieldCheckIcon,
   SparklesIcon,
   TimerIcon,
   VideoIcon,
@@ -166,15 +165,6 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Benchmarks",
     icon: ScaleIcon,
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile", "moss-image", "wan22", "anima"],
-  },
-  {
-    path: "/kernel-check",
-    title: "Kernel checks",
-    summary:
-      "Word-for-word identity of the subgroup32 GEMV / RMS reductions and the K-55 / K-91 states-attention rewrites on this browser's backend (the node GPU tests' cases). Needs no distribution.",
-    group: "Benchmarks",
-    icon: ShieldCheckIcon,
-    mounts: [],
   },
 ];
 

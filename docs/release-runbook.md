@@ -173,13 +173,14 @@ after changing to the repository root, so the pin applies to it too.
       "green even with 0 rows in a recording mode" (`packages/runtime/tests/helpers/reference.ts`), so
       leaving `KARUME_REFERENCE` on the release machine makes **every sha256 check green as
       `written` without comparing anything**. Only a green run with all of them unset is used for the release decision
-- [ ] **Every release** (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) decision 9): run the playground's `/kernel-check` page
-      (**Run all**) on each GPU at hand and keep its record per vendor / architecture / backend / browser
-      ([apps/playground/README.md](../apps/playground/README.md#the-kernel-check-page) "The kernel-check page").
+- [ ] **Every release** (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) decision 9): run the workbench's `kernel-check` entry
+      (every check) on each GPU at hand; its record lands under `outputs/workbench/<host>-<adapter name>/` and names the adapter, the browser and the backend
+      ([spec/workbench.md](spec/workbench.md); in a browser, declare the backend in the page's field; on the development machine
+      `flock /tmp/karume-gpu.lock node apps/workbench/run.ts kernel-check`).
       **MUST on the two everyday environments**: Dawn / Vulkan on the RTX 3080 Ti and Chrome / D3D12 on the RTX 5070 Ti. Other GPUs (Apple M2,
       Intel, AMD, ARM Mali …) are run when at hand; a backend that was not run is recorded as not run and does not block the release.
-      The page is to cover the fusions (fused against unfused, u32) and the default kernels as well; that extension, the backend field of the
-      record and where the records are kept are filed in the backlog — until they land, the page runs the checks it has.
+      The entry is to cover the default kernels as well; that extension and where the records are kept for good are filed in the backlog —
+      until they land, the entry runs the checks it has.
       The node lanes run the same checks only on Dawn / Vulkan, and a device without the subgroup features SKIPs the subgroup ones; there is no check
       that turns that SKIP red (the "The real-execution checks of the subgroup variants do not run automatically" section of limitations).
       "not available" on the page is not a PASS, and neither is a page where a check was not run (the overall verdict then reads INCOMPLETE).

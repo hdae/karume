@@ -1,0 +1,70 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+}
+body {
+  margin: 0 auto;
+  max-width: 1200px;
+  padding: 1rem;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(14rem, 22rem) minmax(0, 1fr);
+  gap: 1.5rem;
+}
+@media (max-width: 720px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.entries button {
+  display: grid;
+  gap: 0.25rem;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  padding: 0.6rem;
+  text-align: left;
+  font: inherit;
+}
+.entries button[aria-current="true"] {
+  outline: 2px solid currentColor;
+}
+.entries span {
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+.parameters fieldset label,
+.parameters > label,
+.backend {
+  display: inline-block;
+  margin: 0.2rem 1rem 0.2rem 0;
+}
+.status {
+  font-family: ui-monospace, monospace;
+  min-height: 1.5em;
+}
+.verdict {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin: 0.5rem 0;
+}
+.verdict.pass {
+  color: #15803d;
+}
+.verdict.fail,
+.verdict.error {
+  color: #b91c1c;
+}
+pre {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 0.75rem;
+  font-size: 0.8rem;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+}

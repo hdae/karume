@@ -50,6 +50,11 @@ jobs:
         # root does not run it (ADR 0129 decision 2). It loads no Dawn setup file: every GPU in it
         # is a fake, so it needs no GPU flag.
         run: pnpm --filter @karume/playground test
+      - name: Test (workbench)
+        # The workbench suite is outside the lanes too (its own vite.config.ts). It loads no Dawn
+        # setup file and touches no GPU: the entries' pure parts and the write-back run on fakes and
+        # a temporary directory, so it needs no GPU flag.
+        run: pnpm --filter @karume/workbench test
 
   publish-dry-run:
     # `vp check` type-checks with the DOM lib and cannot see where Deno's lib differs (Deno's

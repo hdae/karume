@@ -543,7 +543,7 @@ performance item (ADR 0145 open point 1).
 **Axis B** (0064): it breaks none of single output, static shapes, full-write (every output column of every
 pick row is written), 4-byte storage and full-range write of resident tensors.
 **Numerically hazardous class**: none (a product and a sum; no transcendental). Its numeric contract is the
-kernel's own (a sequential f32 sum over `in` per output); the `/kernel-check` case `expert-linear` checks
+kernel's own (a sequential f32 sum over `in` per output); the `kernel-check` check `expert-linear` checks
 it against `linear`'s GEMV on each picked expert at the 26B shapes, word for word.
 
 ## Check for numerically hazardous classes (mandatory when adding an op — made a rule on 2026-08-31)

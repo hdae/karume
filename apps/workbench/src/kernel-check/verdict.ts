@@ -1,13 +1,13 @@
 /**
- * The verdicts and the record of the kernel-check page, from the structured results of
- * `@karume/kernel-checks` (pure: the page and `vp test` see the same functions).
+ * The verdicts and the record body of the kernel-check entry, from the structured results of
+ * `@karume/kernel-checks` (pure: the entry and `vp test` see the same functions).
  *
  * A check passes only when it ran, returned the parts, cases and mutants it exports the counts of,
  * and every criterion of every case has 0 failing words, every requirement is met and every mutant
  * mismatched (on its one case and on every case its code path runs on). A check the device cannot
- * run (a missing feature) is "not available" — never a pass — and keeps the whole page from
+ * run (a missing feature) is "not available" — never a pass — and keeps the whole run from
  * reading PASS, as does a check that was not run. A check with a part the device cannot run
- * (`CheckPart.notRun`) and nothing failing is "incomplete", which keeps the page from PASS too.
+ * (`CheckPart.notRun`) and nothing failing is "incomplete", which keeps the run from PASS too.
  */
 
 import type {
@@ -20,8 +20,6 @@ import type {
   Requirement,
   WordFailure,
 } from "@karume/kernel-checks";
-
-import type { RecordEnvironment } from "@/lib/environment";
 
 export const KERNEL_CHECK_IDS = [
   "gemv-subgroup32",
@@ -61,7 +59,7 @@ export type CheckOutcomes = Readonly<Partial<Record<KernelCheckId, CheckOutcome>
 /** `incomplete`: the check ran and nothing failed, but a part of it could not run on this device. */
 export type Verdict = "pass" | "fail" | "incomplete" | "not-available" | "error";
 
-/** The whole page: `incomplete` = nothing failed, but a check could not run here or was not run. */
+/** The whole run: `incomplete` = nothing failed, but a check could not run here or was not run. */
 export type OverallVerdict = "pass" | "fail" | "incomplete" | "none";
 
 /** The first failing word of a part, with where it is. */
@@ -205,7 +203,7 @@ export const productVerdictOf = (outcome: CheckOutcome): "pass" | "fail" | undef
     : "fail";
 };
 
-/** Over every check of the page: one that was not run counts like one that could not run. */
+/** Over every check of the entry: one that was not run counts like one that could not run. */
 export const overallVerdict = (outcomes: CheckOutcomes): OverallVerdict => {
   const verdicts = KERNEL_CHECK_IDS.map((id) => {
     const outcome = outcomes[id];
@@ -222,33 +220,6 @@ export const overallVerdict = (outcomes: CheckOutcomes): OverallVerdict => {
   }
   return "pass";
 };
-
-/** The checks without an outcome, in check order. */
-export const notRunChecks = (outcomes: CheckOutcomes): readonly KernelCheckId[] =>
-  KERNEL_CHECK_IDS.filter((id) => outcomes[id] === undefined);
-
-/** The outcomes that exist, in check order. */
-export const outcomeList = (
-  outcomes: CheckOutcomes,
-): readonly { readonly id: KernelCheckId; readonly outcome: CheckOutcome }[] =>
-  KERNEL_CHECK_IDS.flatMap((id) => {
-    const outcome = outcomes[id];
-    return outcome === undefined ? [] : [{ id, outcome }];
-  });
-
-/**
- * The outcomes without those of the checks a run is about to run: until a check settles again it
- * reads as not run, so cancelling its re-run never leaves its earlier verdict standing.
- */
-export const withoutOutcomes = (
-  outcomes: CheckOutcomes,
-  ids: readonly KernelCheckId[],
-): CheckOutcomes =>
-  Object.fromEntries(
-    outcomeList(outcomes)
-      .filter(({ id }) => !ids.includes(id))
-      .map(({ id, outcome }) => [id, outcome]),
-  );
 
 /**
  * What the subgroup checks need and the device or WGSL lacks (`acquireGpu` requests the features only
@@ -293,9 +264,6 @@ export const foldClassRows = (report: CheckReport): readonly FoldClassRow[] => {
   });
 };
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const KERNEL_CHECK_RECORD_FORMAT = "karume-playground-kernel-check/1";
-
 export type CheckRecord =
   | {
       readonly id: KernelCheckId;
@@ -331,15 +299,13 @@ export type CheckRecord =
       readonly foldClasses?: readonly FoldClassRow[];
     };
 
+/** The entry's record body (`data`): the workbench record's envelope names the entry and the environment. */
 export type KernelCheckRecord = {
-  readonly format: typeof KERNEL_CHECK_RECORD_FORMAT;
-  readonly page: "kernel-check";
-} & RecordEnvironment & {
-    /** The adapter's features (the device's are in `device.features`). */
-    readonly adapterFeatures: readonly string[];
-    readonly verdict: OverallVerdict;
-    readonly checks: readonly CheckRecord[];
-  };
+  /** The adapter's features (what the subgroup checks' "not available" reason is read against). */
+  readonly adapterFeatures: readonly string[];
+  readonly verdict: OverallVerdict;
+  readonly checks: readonly CheckRecord[];
+};
 
 const checkRecord = (id: KernelCheckId, outcome: CheckOutcome | undefined): CheckRecord => {
   if (outcome === undefined) return { id, verdict: "not-run" };
@@ -371,14 +337,10 @@ const checkRecord = (id: KernelCheckId, outcome: CheckOutcome | undefined): Chec
 };
 
 export const kernelCheckRecord = (
-  environment: RecordEnvironment,
   adapterFeatures: readonly string[],
   outcomes: CheckOutcomes,
 ): KernelCheckRecord => {
   return {
-    format: KERNEL_CHECK_RECORD_FORMAT,
-    page: "kernel-check",
-    ...environment,
     adapterFeatures: [...adapterFeatures].sort(),
     verdict: overallVerdict(outcomes),
     // Every check, a not-run one included: a record of a partial run never reads as a full one

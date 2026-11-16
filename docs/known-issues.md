@@ -145,7 +145,7 @@ epilogue do not have it yet. Making the TS reference FMA-tolerant has not been s
 
 ## In Chrome on Metal, kernel rewrites that are word-identical on Vulkan and D3D12 differ by a few ULP (measured 2026-11-11, recorded and accepted)
 
-The playground's `/kernel-check` page (Run all) on **Apple M2 and Apple M5 (the M5's adapter reports no name), Chrome 157, Metal** FAILs the
+The kernel checks (run as the Playground's `/kernel-check` page; now the workbench's `kernel-check` entry) on **Apple M2 and Apple M5 (the M5's adapter reports no name), Chrome 157, Metal** FAILs the
 checks below; on Chrome / D3D12 (RTX 5070 Ti) and on Node + Dawn / Vulkan (RTX 3080 Ti) the same cases are
 word-identical (D3D12 keeps its one known FAIL, the K-95 classes of the states-attention check). Each check compares
 two WGSL texts of the same arithmetic as u32 words; every one that FAILs has a sum over many terms in it, and the

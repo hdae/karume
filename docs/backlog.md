@@ -167,8 +167,22 @@ maintainer's ruling of 2026-11-06).
      - Kernel changes re-running only the files that compile them: the one lever for commits that touch the runtime.
        It needs the WGSL a file compiles derived without running it (an open point of ADR 0152).
      - What the key does not see (the spec lists it); a file whose every case is skipped runs each time.
-  6. **The harness.** Entries, the write-back of results, the public build with synthetic-tensor benchmarks; per-adapter
-     shape tables generated from its output; the Playground's measurement and check pages are removed.
+  6. **The workbench** (ADR 0152 calls it the harness). *(Landed 2026-11-16: the app `apps/workbench` — entries as files
+     without UI code, the record `karume-workbench/1`, the dev server's write-back under `outputs/workbench/`, the Node
+     command — and its first entry, `kernel-check`, which left the Playground;
+     [spec/workbench.md](spec/workbench.md).)* Left, in this order:
+     - The entries for the geometry sweep and the attention bench (both run on synthetic tensors through
+       `@karume/runtime/tune`), a tracked generator from sweep records to the per-adapter geometry profiles (today
+       untracked scripts write those files), and the removal of those two Playground pages.
+     - The entries that read a local distribution (the Gemma 4 decode bench, the Session A/B, the cached-expert reads of
+       the expert transfer): local only and left out of a public build; then their Playground pages go (the maintainer's
+       ruling of 2026-11-16).
+     - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
+       hosted is the maintainer's decision.
+     - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
+     - Per-adapter generation of the hand-written shape tables (`PARALLEL_SHAPES`, the integer and the byte-plane GEMV
+       tables): no sweep measures them today, so it needs a GEMV sweep on synthetic tensors, and the gain is measured
+       first.
   7. **Weights from outside the exporter.** The safetensors reader and name maps, quantization at load with the block
      sha256 test, LoRA merged before quantization (Anima, then Wan2.2); example apps per model on request. GGUF is
      deferred.
@@ -219,7 +233,10 @@ maintainer's ruling of 2026-11-06).
        cases the runtime's twin-graph tests run; so far run on Dawn only. The default kernels, the backend field and where
        the records live remain. Updated 2026-11-11: the page also runs "rms_norm: prefetch form vs runtime-trip form"
        (`checkRmsNormPrefetch`, the cases of `gpu_rms_norm_prefetch_test.ts`), and the rmsNormRope twin runs at five more
-       row widths, to tell a backend difference of the prefetch form from one of long rows.)
+       row widths, to tell a backend difference of the prefetch form from one of long rows. Updated 2026-11-16: the checks moved to the
+       workbench's `kernel-check` entry; its record carries the backend — declared by a person in a browser, read from
+       the Dawn flags under Node — and lands under `outputs/workbench/`. The default kernels and where the records are
+       kept for good remain.)
     9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
        (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
     10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).
@@ -612,7 +629,7 @@ maintainer's ruling of 2026-11-06).
 - **Spike, if needed: rounding barriers in the states-form attention for Metal** (known-issues, the Metal kernel-check
   section; ruling 2026-11-13: record first, spike later). Put the XOR rounding barrier on `q · scale` / `k · scale`
   in ①′ and the folded ①′, then on `p` in the unrolled PV forms and the read-only reader. Check that the NVIDIA words
-  and sha rows do not change, measure the Gemma 4 decode speed (drop it if it costs speed), and run `/kernel-check`
+  and sha rows do not change, measure the Gemma 4 decode speed (drop it if it costs speed), and run the workbench's `kernel-check` entry
   on the M2 and the RTX 5070 Ti. The folded side's Metal form is unknown, so it may still differ. If D3D12's F = 4
   difference (perf-ledger K-95) has the same cause, E4B could take the folded form.
 - **MoE page-fault**: PoC done in a spike outside the repository (2026-09-01) — the mechanism works (the readback of a miss

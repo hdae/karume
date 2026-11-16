@@ -1,29 +1,7 @@
 import type { CheckPart } from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
-import {
-  KERNEL_CHECK_RECORD_FORMAT,
-  kernelCheckRecord,
-} from "../src/models/kernel-check/verdict.ts";
-
-const ENVIRONMENT: RecordEnvironment = {
-  recordedAt: "2026-10-28T10:00:00.000Z",
-  userAgent: "test",
-  crossOriginIsolated: true,
-  adapter: { vendor: "nvidia", architecture: "blackwell", device: "", description: "d3d12" },
-  device: {
-    features: ["shader-f16"],
-    wgslLanguageFeatures: [],
-    subgroupLanesLinear: false,
-    gpuTimingEnabled: false,
-    limits: {
-      maxComputeWorkgroupStorageSize: 32768,
-      maxStorageBufferBindingSize: 2147483644,
-      maxBufferSize: 2147483644,
-    },
-  },
-};
+import { kernelCheckRecord } from "../src/kernel-check/verdict.ts";
 
 const PART: CheckPart = {
   id: "state-pv-unroll",
@@ -46,7 +24,7 @@ const PART: CheckPart = {
 };
 
 describe("kernelCheckRecord", () => {
-  const record = kernelCheckRecord(ENVIRONMENT, ["subgroups", "shader-f16"], {
+  const record = kernelCheckRecord(["subgroups", "shader-f16"], {
     "state-attention-rewrites": {
       kind: "done",
       seconds: 74.5,
@@ -61,11 +39,8 @@ describe("kernelCheckRecord", () => {
     "gemv-subgroup32": { kind: "not-available", reason: "no subgroups" },
   });
 
-  it("starts with the format, the page and the environment, and sorts the adapter features", () => {
-    expect(record.format).toBe(KERNEL_CHECK_RECORD_FORMAT);
-    expect(record.format).toBe("karume-playground-kernel-check/1");
-    expect(record.page).toBe("kernel-check");
-    expect(record.adapter).toEqual(ENVIRONMENT.adapter);
+  it("holds only the entry's body (the workbench envelope names the entry and the environment), and sorts the adapter features", () => {
+    expect(Object.keys(record)).toEqual(["adapterFeatures", "verdict", "checks"]);
     expect(record.adapterFeatures).toEqual(["shader-f16", "subgroups"]);
   });
 
@@ -120,7 +95,7 @@ describe("kernelCheckRecord", () => {
 });
 
 describe("kernelCheckRecord of a check with a part the device could not run", () => {
-  const record = kernelCheckRecord(ENVIRONMENT, [], {
+  const record = kernelCheckRecord([], {
     "fusion-twins": {
       kind: "done",
       seconds: 3,

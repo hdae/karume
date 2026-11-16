@@ -276,7 +276,7 @@ The attention follows upstream's masks with the block on sliding layers only, no
 `attentionScoreStorage: "f16"` stores S through `pack2x16float`, whose rounding WGSL leaves open. Vulkan on the RTX 3080 Ti rounds to
 nearest with ties to even, and D3D12 on the RTX 5070 Ti rounds toward zero, so the same input gives an S up to one f16 step apart. This
 touches the presets that end in `-s16`, Anima's and Wan2.1's defaults among them. The output within one environment stays deterministic.
-Other backends are not known: `score-f16-store` on `/kernel-check` names the rounding of the one it runs on. An integer store costs
+Other backends are not known: the `score-f16-store` check of the workbench's `kernel-check` entry names the rounding of the one it runs on. An integer store costs
 3–5% of the attention route, so it is not used (ADR [0031](decisions/0031-attention-score-f16-storage.md) addendum 2026-11-07).
 
 ## Fused attention a8 / s16 store ③PV and S in f32 for shapes whose key length N is not a multiple of 4 (in Anima, resolutions whose sides are not multiples of 32 px)
@@ -2638,11 +2638,11 @@ or the three dispatches. `subgroups: true` rejects such a device with `GpuFeatur
 [0132](decisions/0132-online-int8-attention.md) addendum of 2026-11-14). Planned lifting: a 16-lane form, if one is
 measured and adopted; none is scheduled.
 
-## The real-execution checks of the subgroup variants do not run automatically (the playground's /kernel-check page is the manual check)
+## The real-execution checks of the subgroup variants do not run automatically (the workbench's kernel-check entry is the manual check)
 
 > Resolved in 0.15 (2026-10-16): on Node + Dawn the development machine exposes `subgroups`, so the real-execution cases below run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). The text below records the Deno-era state; the manual check still applies to a machine whose adapter lacks the features.
 
-> Manual procedure since 2026-10-28: the playground's `/kernel-check` page ([apps/playground/README.md](../apps/playground/README.md#the-kernel-check-page)). It runs the same checks as the node GPU tests (one implementation, the private package `@karume/kernel-checks`) on the browser's backend — D3D12 in Chrome, Metal — which the node lanes (Dawn / Vulkan) do not reach: the GEMV and RMS subgroup32 checks below (RMS now with its full test criteria rather than the round trip) and the K-55 / K-91 states-attention rewrites. A device without the subgroup features shows those two as "not available", never PASS. The `/check.html` and round-trip procedure below is the 0.14.0 record.
+> Manual procedure: the workbench's `kernel-check` entry ([spec/workbench.md](spec/workbench.md#the-entries); until 2026-11-16 the Playground's `/kernel-check` page). It runs the same checks as the node GPU tests (one implementation, the private package `@karume/kernel-checks`) on the browser's backend — D3D12 in Chrome, Metal — which the node lanes (Dawn / Vulkan) do not reach: the GEMV and RMS subgroup32 checks below (RMS now with its full test criteria rather than the round trip) and the K-55 / K-91 states-attention rewrites. A device without the subgroup features shows those two as "not available", never PASS. The `/check.html` and round-trip procedure below is the 0.14.0 record.
 
 The real-execution checks of the subgroup32 RMS reduction and the subgroup32 parallel GEMV
 (the cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that actually run the subgroup instructions) SKIP explicitly
@@ -2656,7 +2656,7 @@ The real-execution check is manual: run the following 2 in Chrome (the procedure
 - RMS: outside the scope of `/check.html`. Use the measurement page's "round-trip comparison of the 2 RMS paths" (`fused → subgroup32 → subgroup32 → fused`) to
   see that generation does not break. The reduction order changes, so the generated text can change.
 
-When the WGSL or the selection conditions of the subgroup variants change, treat real execution on a backend as unverified until the `/kernel-check` page has run there (until 2026-10-28: these 2).
+When the WGSL or the selection conditions of the subgroup variants change, treat real execution on a backend as unverified until the workbench's `kernel-check` entry has run there (until 2026-10-28: these 2).
 
 ## The public-surface snapshot check looks only at exports added or removed — signature compatibility is not guaranteed
 

@@ -18,7 +18,6 @@
     "@hdae/yomi": "catalog:",
     "@karume/candidate-rules": "workspace:*",
     "@karume/hub": "workspace:*",
-    "@karume/kernel-checks": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",
     "@shadcn/react": "catalog:",

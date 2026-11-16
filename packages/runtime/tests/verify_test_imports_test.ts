@@ -5,8 +5,9 @@
 //   real-weight tests that run only in the family lanes; a published package's test that imports
 //   one of its helpers drags local assets and a GPU into the core lane.
 // - **Only the runtime GPU tests (`packages/runtime/tests/gpu_*_test.ts`, through their helpers)
-//   and the playground reach `@karume/kernel-checks`.** The kernel identity checks drive runtime
-//   internals; ADR 0129 names exactly those two consumers.
+//   and the workbench (`apps/workbench`) reach `@karume/kernel-checks`.** The kernel identity
+//   checks drive runtime internals; ADR 0129 names exactly two consumers: the runtime GPU tests
+//   and the browser app that runs the checks.
 //
 // `dependency_graph_test.ts` cannot see either rule: it walks the published entry points only, and
 // tests are not entry points. This gate walks the static module graph
@@ -15,7 +16,7 @@
 // helper or a fixture, reached through the tests that import it) — and fails on a root that
 // reaches a forbidden file through any chain of imports, naming the chain. Roots are the tracked
 // and the untracked-but-not-ignored files (`git ls-files --cached --others --exclude-standard`),
-// so a new test file is checked before it is added. The playground and `packages/kernel-checks`
+// so a new test file is checked before it is added. The workbench and `packages/kernel-checks`
 // themselves are not roots of the kernel-checks rule (they are its allowed side).
 //
 // MUST: an unresolvable `@karume/*` specifier throws, like the dependency graph gate — a chain
@@ -169,7 +170,7 @@ const judgeTestImports = async (workspace: Workspace): Promise<Verdict> => {
   ].map((chain) => `${describeChain(chain)} — a published package's test reaches packages/e2e`);
 
   const kernelChecksDirectory = href("packages/kernel-checks/");
-  const allowedSide = /^(apps\/playground|packages\/kernel-checks)\//;
+  const allowedSide = /^(apps\/workbench|packages\/kernel-checks)\//;
   const gpuTest = /^packages\/runtime\/tests\/gpu_[^/]*_test\.ts$/;
   const kernelRoots = roots.filter((path) => !allowedSide.test(path));
   const kernelChains = reachingRoots(
@@ -187,7 +188,7 @@ const judgeTestImports = async (workspace: Workspace): Promise<Verdict> => {
       continue;
     }
     kernelChecks.push(
-      `${describeChain(chain)} — only the runtime GPU tests and the playground may reach @karume/kernel-checks`,
+      `${describeChain(chain)} — only the runtime GPU tests and the workbench may reach @karume/kernel-checks`,
     );
   }
   return { e2e, kernelChecks, kernelChecksConsumers };
@@ -254,7 +255,7 @@ const repositoryWorkspace = (): Workspace => {
   };
 };
 
-test("no runtime, hub or models test reaches packages/e2e, and only the runtime GPU tests and the playground reach @karume/kernel-checks (ADR 0129)", async () => {
+test("no runtime, hub or models test reaches packages/e2e, and only the runtime GPU tests and the workbench reach @karume/kernel-checks (ADR 0129)", async () => {
   const verdict = await judgeTestImports(repositoryWorkspace());
   assertEquals(verdict.e2e, [], "move the shared code out of packages/e2e (ADR 0129 open point 4)");
   assertEquals(verdict.kernelChecks, [], "ADR 0129 open point 4 names the two consumers");
@@ -290,7 +291,7 @@ describe("test import gate (fabricated workspaces)", () => {
     "packages/e2e/tests/helpers/assets.ts": "export const assets = 1;",
     "packages/runtime/tests/helpers/kernel-check-assert.ts": `export { check } from "@karume/kernel-checks";`,
     "packages/runtime/tests/gpu_subgroup_test.ts": `import { check } from "./helpers/kernel-check-assert.ts";`,
-    "apps/playground/src/page.tsx": `import { check } from "@karume/kernel-checks";`,
+    "apps/workbench/src/entries/kernel-check.ts": `import { check } from "@karume/kernel-checks";`,
     "packages/hub/tests/fetch_test.ts": `import "vite-plus/test";`,
   };
 
@@ -309,7 +310,7 @@ describe("test import gate (fabricated workspaces)", () => {
     });
   };
 
-  it("passes the allowed shape: a runtime GPU test through its helper, and the playground", async () => {
+  it("passes the allowed shape: a runtime GPU test through its helper, and the workbench", async () => {
     assertEquals(await judge(), { e2e: [], kernelChecks: [], kernelChecksConsumers: 1 });
   });
 

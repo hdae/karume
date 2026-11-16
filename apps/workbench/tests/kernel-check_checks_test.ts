@@ -8,10 +8,10 @@ import {
 } from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
 
-import { KERNEL_CHECKS } from "../src/models/kernel-check/checks.ts";
-import { KERNEL_CHECK_IDS } from "../src/models/kernel-check/verdict.ts";
+import { KERNEL_CHECKS } from "../src/kernel-check/checks.ts";
+import { KERNEL_CHECK_IDS } from "../src/kernel-check/verdict.ts";
 
-describe("the kernel-check page's checks", () => {
+describe("the kernel-check entry's checks", () => {
   it("has one check per id, in the order the verdicts and the record list them", () => {
     expect(KERNEL_CHECKS.map(({ id }) => id)).toEqual([...KERNEL_CHECK_IDS]);
   });

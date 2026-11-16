@@ -6,14 +6,12 @@ import {
   countMismatches,
   foldClassRows,
   matrixRowPasses,
-  notRunChecks,
   overallVerdict,
   productVerdictOf,
   subgroupShortfall,
   summarizePart,
   verdictOf,
-  withoutOutcomes,
-} from "../src/models/kernel-check/verdict.ts";
+} from "../src/kernel-check/verdict.ts";
 
 const cleanPart = (id: string, labels: readonly string[], group?: string): CheckPart => ({
   id,
@@ -258,19 +256,6 @@ describe("overallVerdict", () => {
 
   it("is not a pass when only some checks were run, even if each of them passed", () => {
     expect(overallVerdict({ "state-attention-rewrites": passed })).toBe("incomplete");
-    expect(notRunChecks({ "state-attention-rewrites": passed })).toEqual([
-      "gemv-subgroup32",
-      "rms-subgroup32",
-      "rms-norm-prefetch",
-      "gemv-integer",
-      "gemv-planes",
-      "state-kv16",
-      "score-f16-store",
-      "state-bidirectional",
-      "expert-linear",
-      "fusion-twins",
-      "attention-online-tiled",
-    ]);
   });
 
   it("is not a pass when a check was not available", () => {
@@ -360,48 +345,6 @@ describe("a part the device cannot run (notRun)", () => {
         "attention-online-tiled": passed,
       }),
     ).toBe("incomplete");
-  });
-});
-
-describe("withoutOutcomes", () => {
-  const everyCheckPassed = {
-    "gemv-subgroup32": passed,
-    "rms-subgroup32": passed,
-    "rms-norm-prefetch": passed,
-    "state-attention-rewrites": passed,
-    "gemv-integer": passed,
-    "gemv-planes": passed,
-    "state-kv16": passed,
-    "score-f16-store": passed,
-    "state-bidirectional": passed,
-    "expert-linear": passed,
-    "fusion-twins": passed,
-    "attention-online-tiled": passed,
-  };
-
-  it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
-    expect(overallVerdict(everyCheckPassed)).toBe("pass");
-    const rerunning = withoutOutcomes(everyCheckPassed, ["rms-subgroup32"]);
-    expect(overallVerdict(rerunning)).toBe("incomplete");
-    expect(notRunChecks(rerunning)).toEqual(["rms-subgroup32"]);
-  });
-
-  it("keeps the outcomes of the checks the run leaves alone", () => {
-    expect(
-      withoutOutcomes({ ...everyCheckPassed, "gemv-subgroup32": failed }, ["rms-subgroup32"]),
-    ).toEqual({
-      "gemv-subgroup32": failed,
-      "rms-norm-prefetch": passed,
-      "state-attention-rewrites": passed,
-      "gemv-integer": passed,
-      "gemv-planes": passed,
-      "state-kv16": passed,
-      "score-f16-store": passed,
-      "state-bidirectional": passed,
-      "expert-linear": passed,
-      "fusion-twins": passed,
-      "attention-online-tiled": passed,
-    });
   });
 });
 

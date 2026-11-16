@@ -19,7 +19,6 @@ import { Route as Gemma4RouteImport } from "./routes/gemma4";
 import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
-import { Route as KernelCheckRouteImport } from "./routes/kernel-check";
 import { Route as MossImageRouteImport } from "./routes/moss-image";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
 import { Route as SessionAbRouteImport } from "./routes/session-ab";
@@ -76,11 +75,6 @@ const IrodoriRoute = IrodoriRouteImport.update({
   path: "/irodori",
   getParentRoute: () => rootRouteImport,
 } as any);
-const KernelCheckRoute = KernelCheckRouteImport.update({
-  id: "/kernel-check",
-  path: "/kernel-check",
-  getParentRoute: () => rootRouteImport,
-} as any);
 const MossImageRoute = MossImageRouteImport.update({
   id: "/moss-image",
   path: "/moss-image",
@@ -118,7 +112,6 @@ export interface FileRoutesByFullPath {
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
-  "/kernel-check": typeof KernelCheckRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
   "/session-ab": typeof SessionAbRoute;
@@ -136,7 +129,6 @@ export interface FileRoutesByTo {
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
-  "/kernel-check": typeof KernelCheckRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
   "/session-ab": typeof SessionAbRoute;
@@ -155,7 +147,6 @@ export interface FileRoutesById {
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
-  "/kernel-check": typeof KernelCheckRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
   "/session-ab": typeof SessionAbRoute;
@@ -175,7 +166,6 @@ export interface FileRouteTypes {
     | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
-    | "/kernel-check"
     | "/moss-image"
     | "/sbv2"
     | "/session-ab"
@@ -193,7 +183,6 @@ export interface FileRouteTypes {
     | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
-    | "/kernel-check"
     | "/moss-image"
     | "/sbv2"
     | "/session-ab"
@@ -211,7 +200,6 @@ export interface FileRouteTypes {
     | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
-    | "/kernel-check"
     | "/moss-image"
     | "/sbv2"
     | "/session-ab"
@@ -230,7 +218,6 @@ export interface RootRouteChildren {
   Gemma4BenchRoute: typeof Gemma4BenchRoute;
   GeometrySweepRoute: typeof GeometrySweepRoute;
   IrodoriRoute: typeof IrodoriRoute;
-  KernelCheckRoute: typeof KernelCheckRoute;
   MossImageRoute: typeof MossImageRoute;
   Sbv2Route: typeof Sbv2Route;
   SessionAbRoute: typeof SessionAbRoute;
@@ -310,13 +297,6 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IrodoriRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/kernel-check": {
-      id: "/kernel-check";
-      path: "/kernel-check";
-      fullPath: "/kernel-check";
-      preLoaderRoute: typeof KernelCheckRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
     "/moss-image": {
       id: "/moss-image";
       path: "/moss-image";
@@ -366,7 +346,6 @@ const rootRouteChildren: RootRouteChildren = {
   Gemma4BenchRoute: Gemma4BenchRoute,
   GeometrySweepRoute: GeometrySweepRoute,
   IrodoriRoute: IrodoriRoute,
-  KernelCheckRoute: KernelCheckRoute,
   MossImageRoute: MossImageRoute,
   Sbv2Route: Sbv2Route,
   SessionAbRoute: SessionAbRoute,

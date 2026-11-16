@@ -188,7 +188,8 @@
 | loop and state equivalence (G) △ | ループと状態の等価性 | チャンク prefill・decode・drafter を 1 パス実行と比べる | — | ADR 0147 決定 4 |
 | cross-implementation audit △ | 他実装との突き合わせ | 取り込み時に他実装とモデルコードを比べて記録する | — | ADR 0147 決定 4 |
 | deviation record △ | 上流との相違の記録 | 上流のバグを写さなかった箇所と、それぞれのチェック | — | ADR 0147 決定 4 |
-| per-GPU evidence record △ | GPU ごとの証拠の記録 | /kernel-check の結果を vendor / architecture / backend / browser ごとに残す | — | ADR 0147 決定 9 |
+| workbench | workbench（訳さない） | チェックと計測を GPU 上で実行し、1 回の実行につき JSON の記録を 1 つ残す private のブラウザアプリ（`apps/workbench`）。ADR 0152 が harness と呼ぶもの | ハーネス | spec/workbench.md |
+| per-GPU evidence record △ | GPU ごとの証拠の記録 | workbench の kernel-check エントリの記録を vendor / architecture / backend / browser ごとに残す | — | ADR 0147 決定 9 |
 
 ## op の語彙
 

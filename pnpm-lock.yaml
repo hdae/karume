@@ -308,9 +308,6 @@ importers:
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
-      '@karume/kernel-checks':
-        specifier: workspace:*
-        version: link:../../packages/kernel-checks
       '@karume/models':
         specifier: workspace:*
         version: link:../../packages/models
@@ -369,6 +366,31 @@ importers:
       tw-animate-css:
         specifier: 'catalog:'
         version: 1.4.0
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.2.0(@types/node@24.19.1)(@vitest/ui@5.0.4)(jiti@2.7.0)(typescript@7.0.2)
+
+  apps/workbench:
+    dependencies:
+      '@karume/kernel-checks':
+        specifier: workspace:*
+        version: link:../../packages/kernel-checks
+      '@karume/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+    devDependencies:
+      '@karume/test-support':
+        specifier: workspace:*
+        version: link:../../packages/test-support
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.1
+      '@webgpu/types':
+        specifier: 'catalog:'
+        version: 0.1.74
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
