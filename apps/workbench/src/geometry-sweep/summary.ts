@@ -81,15 +81,22 @@ const stopText = (stop: SweepStop): string | undefined => {
   }
 };
 
-/** Cases planned and finished, rows, failed rows, rows whose output differed, and why the run stopped. */
+/**
+ * Cases planned and finished, a case cut short (Cancel or a device loss stopped it midway: its rows so
+ * far are in the record, and it is not a finished case), rows, failed rows, rows whose output
+ * differed, and why the run stopped.
+ */
 const totalsLine = (
   plan: SweepPlan,
+  reports: readonly GeometrySweepReport[],
   report: GeometrySweepReport | undefined,
   stop: SweepStop,
 ): string => {
   const rows = report?.rows ?? [];
+  const cutShort = reports.filter((one) => one.aborted || one.deviceLost !== null).length;
   return joined([
-    `${report?.cases.length ?? 0} of ${plan.caseIds.length} planned cases finished`,
+    `${reports.length - cutShort} of ${plan.caseIds.length} planned cases finished`,
+    cutShort === 0 ? undefined : `${cutShort} cut short`,
     `${rows.length} rows`,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.identicalToDefault === false).length} not identical to the default`,
@@ -184,7 +191,7 @@ export const geometrySweepResult = (
     stop.kind === "deviceLost" || stop.kind === "error" ? ({ verdict: "incomplete" } as const) : {};
   if (reports.length === 0) {
     if (stop.kind === "error") throw stop.error;
-    return { ...verdict, summary: [totalsLine(plan, undefined, stop)], data: undefined };
+    return { ...verdict, summary: [totalsLine(plan, reports, undefined, stop)], data: undefined };
   }
   const report = mergeSweepReports(reports, {
     plannedCaseIds: plan.caseIds,
@@ -195,5 +202,9 @@ export const geometrySweepResult = (
     report.settings.candidateSet === K88_SET
       ? k88Lines(k88Summary(report, geometrySweepCases(K88_SET)), unit)
       : caseSummaryRows(report.rows, report.cases).map((row) => caseLine(row, unit));
-  return { ...verdict, summary: [totalsLine(plan, report, stop), ...details], data: report };
+  return {
+    ...verdict,
+    summary: [totalsLine(plan, reports, report, stop), ...details],
+    data: report,
+  };
 };

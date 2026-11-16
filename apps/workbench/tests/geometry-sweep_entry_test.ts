@@ -135,15 +135,30 @@ describe("geometrySweepResult", () => {
     });
   });
 
+  describe("when Cancel stopped the first case midway", () => {
+    it("counts that case as cut short, not as finished", async () => {
+      const controller = new AbortController();
+      const outcome = await runWith(controller.signal, () => {
+        controller.abort(new Error("Cancelled by the user"));
+        return { aborted: true };
+      });
+      const result = geometrySweepResult(PLAN, outcome);
+      expect(recordOf(result.data).aborted).toBe(true);
+      expect(result.summary[0]).toBe(
+        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
+      );
+    });
+  });
+
   describe("when the device was lost in the first case", () => {
-    it("keeps that case, names the loss and reads as incomplete", async () => {
+    it("keeps that case's rows as a case cut short, names the loss and reads as incomplete", async () => {
       const outcome = await runWith(new AbortController().signal, () => ({
         deviceLost: { reason: "unknown", message: "GPU process crashed" },
       }));
       const result = geometrySweepResult(PLAN, outcome);
       expect(recordOf(result.data).cases).toHaveLength(1);
       expect(result.summary[0]).toBe(
-        "1 of 2 planned cases finished · 2 rows · 0 with an error · 0 not identical to the default · stopped: device lost (unknown): GPU process crashed",
+        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: device lost (unknown): GPU process crashed",
       );
       expect(result.verdict).toBe("incomplete");
     });
