@@ -78,6 +78,10 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - One file: `vp test <path>`. Runs that use the GPU are serialised with other sessions through
   `flock /tmp/karume-gpu.lock`. To run without the GPU, set `KARUME_NO_DAWN=1` (the same configuration as CI — the
   all-SKIP guards are opened explicitly with `KARUME_ALLOW_NO_GPU=1` and the like)
+- **Verification cache** (opt-in): `KARUME_VERIFY_CACHE=reuse vp test …` does not run a test file whose recorded
+  result still holds (same environment, inputs and import closure, every case passed) and shows it as one skipped
+  case titled `reused`. A file named on the command line and any run with `-t` always run. The default mode records
+  only and runs everything. What the key sees and does not see: `docs/spec/verification.md`
 - **sha256 reference values are rows per environment** (ADR 0106): on Node the environment key is
   `node-<adapter device>` (e.g. `node-nvidia-geforce-rtx-3080-ti`). On a machine without a row the case SKIPs
   explicitly + the reference guard is red. `KARUME_REFERENCE=write vp test --project <lane>` creates your machine's rows

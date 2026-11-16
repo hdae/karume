@@ -141,3 +141,59 @@ Per entry and per run, with Sessions opened one after another on the same genera
 - The tool refuses to write unless the cut dispatches the same set of kernel keys as the full graph, step by step,
   under every setting of the entry, on generated weights. An entry that takes the whole graph has no such comparison.
 - The entry's rows for a machine are created with `KARUME_REFERENCE=write vp test packages/runtime/tests/gpu_corpus_test.ts`.
+
+## The verification cache
+
+The unit is one test file. After a file runs, a reporter writes a record of what its result depended on under
+`outputs/verify-cache/<environment key>/` (`packages/test-support/src/verify-cache.ts`, `verify-cache-reporter.ts`).
+
+### The key
+
+| Layer | What it holds |
+| --- | --- |
+| environment | The adapter's identity, features and limits; the Node version and platform; the lockfile and `vite.config.ts`; every `KARUME_*` variable except `KARUME_VERIFY_CACHE`. The driver version is recorded and is not part of the key. |
+| data | Each file the test read, by content hash (by size and modification time above 32 MiB); each directory it listed; each `git ls-files` it ran. |
+| code | The static import closure of the test file and the setup file, the runtime's sources included. |
+
+A record also keeps the WGSL texts the file dispatched. They are not part of the key.
+
+### When a record may be reused
+
+A record is reusable when every case that ran passed and at least one ran, and none of these held in its run:
+
+- `KARUME_REFERENCE`, `KARUME_WGSL_SNAPSHOT` or `KARUME_SURFACE` was set (a recording run);
+- `KARUME_NETWORK` or `KARUME_SERIES` was set (inputs without a pin);
+- a `KARUME_ALLOW_NO_*` variable was set (an opt-out);
+- a test name filter was set (`vp test -t`): only the cases it matches ran;
+- the file started a process the data layer cannot evaluate again. `git rev-parse`, `git status` and
+  `nvidia-smi --query-gpu=…` describe a run and are not such a process; `git ls-files` is an input of the data layer.
+
+A file whose every case is skipped writes no record.
+
+### Modes
+
+`KARUME_VERIFY_CACHE` chooses the mode. Any other value stops the run at start.
+
+| Mode | What runs | What is reported |
+| --- | --- | --- |
+| unset or `record` | Every file. | For each file with an earlier record: whether that record would have been reused, and a `WRONG prediction` line when the run contradicts a predicted reuse (another outcome, or other kernels dispatched). |
+| `reuse` | Every file except those whose record still holds. | A reused file shows one skipped case whose title names the record's commit and how many cases it passed. The summary says how many files were reused and how many ran; `last-run.json` lists both, with the reason each file ran. |
+
+- A record still holds when it is reusable and the three layers computed now, over the inputs the record lists, equal
+  the record's. The decision before a `reuse` run and the judgement after a `record` run are one rule.
+- A file named on the command line always runs. Under a test name filter no file is reused.
+- A reused file's record is kept as it is; reuse is never counted as a pass.
+- A reused file is served as a stub by a Vite plugin (`packages/test-support/src/verify-cache-plugin.ts`), so its own
+  code does not load. If a file decided as reused runs its own code after all, it is reported and recorded as run.
+- If the decision fails, the run warns and every file runs.
+
+### What the key does not see
+
+A `reuse` run cannot notice a change in any of these; a `record` run shows it as a wrong prediction only when the
+outcome or the kernels move.
+
+- Whether a path exists, asked without reading it (`existsSync`, `statSync`).
+- Files read outside the repository, and under `outputs/verify/`, `outputs/references/` and `node_modules/`.
+- The content of a file above 32 MiB whose size and modification time are unchanged.
+- A dynamic import whose specifier is not a literal.
+- Environment variables that are not `KARUME_*`; the clock; randomness; the driver version.

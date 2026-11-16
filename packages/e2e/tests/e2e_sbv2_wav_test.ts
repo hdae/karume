@@ -84,7 +84,7 @@ import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import { analyzeWithWords, VERSION as YOMI_VERSION } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
-import { encodeWav } from "../../models/mod.ts";
+import { encodeWav } from "../../models/src/audio/wav.ts";
 import {
   type GeneratedAudio,
   InputError,

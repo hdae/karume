@@ -133,7 +133,7 @@ import {
   type SafetensorsFile,
   type SessionDiagnostics,
 } from "@karume/runtime";
-import { encodePng } from "../../models/mod.ts";
+import { encodePng } from "../../models/src/image/png.ts";
 import {
   type GeneratedVideo,
   frameToRgba,

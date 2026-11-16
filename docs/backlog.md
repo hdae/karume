@@ -111,7 +111,7 @@ maintainer's ruling of 2026-11-06).
        carry no frame count and its cases run the default 33 frames.
      - A mismatch reports the differing bytes of the two artifacts; a distance per artifact type (pixels, samples,
        tensor values) is not built.
-     - The cache's records are read by nobody yet: collect a few full runs and count wrong predictions before item 5.
+     - (The reuse mode has landed — item 5.)
      - Inputs the record does not see: files read outside the repository (`/sys`, temporary directories), the clock and
        randomness. A file whose every case is skipped writes no record.
   3. *(Landed 2026-11-15: the per-op tolerance table beside the reference ops; the selection of a linear's kernel as one
@@ -154,9 +154,19 @@ maintainer's ruling of 2026-11-06).
        source pins and the published smoke wait for the maintainer's explicit go-ahead.
      - The fusions at `exact` on a backend where a fused kernel does not give the unfused bits: recorded and accepted
        (the Metal ruling of 2026-11-11/12); no run-time check drops a rule.
-  5. **Verification, second part.** The cache for changes outside the runtime; then, with the corpus in place, the
-     runtime's host code leaves the key of the models' e2e files and kernel changes re-run only the files that compile
-     them; the release rule changes to "an uncached full run when the environment changed".
+  5. **Verification, second part.** *(Landed 2026-11-16: the cache's reuse mode, `KARUME_VERIFY_CACHE=reuse`, with
+     today's key — [spec/verification.md](spec/verification.md#the-verification-cache); the default stays `record`.
+     Over the last 120 commits it would re-run 2,210 s on average of a 6,893 s full run; 18 recorded runs judged 2,560
+     predictions, 544 of them a reuse, none wrong.)* Left from it:
+     - Making `reuse` the default, after it has been used on the long end-to-end files (the predictions judged so far
+       are mostly of short files), and the release rule "an uncached full run when the environment changed".
+     - Leaving the runtime's host code out of the key of the models' e2e files (ADR 0152 decision 6) is put off (the
+       maintainer's ruling of 2026-11-16): measured on the same 120 commits it changes the mean re-run of a commit
+       that touches the runtime from 4,816 s to 4,813 s, since such commits touch kernels, tuning tables, strategy
+       selection and fusion, rarely the executor alone; a wrong classification would reuse a stale result.
+     - Kernel changes re-running only the files that compile them: the one lever for commits that touch the runtime.
+       It needs the WGSL a file compiles derived without running it (an open point of ADR 0152).
+     - What the key does not see (the spec lists it); a file whose every case is skipped runs each time.
   6. **The harness.** Entries, the write-back of results, the public build with synthetic-tensor benchmarks; per-adapter
      shape tables generated from its output; the Playground's measurement and check pages are removed.
   7. **Weights from outside the exporter.** The safetensors reader and name maps, quantization at load with the block

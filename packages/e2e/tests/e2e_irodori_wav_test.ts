@@ -84,7 +84,7 @@ import {
   Pipeline,
   type RunComponent,
 } from "../../models/irodori.ts";
-import { type DecodedWav, decodeWav, encodeWav } from "../../models/mod.ts";
+import { type DecodedWav, decodeWav, encodeWav } from "../../models/src/audio/wav.ts";
 import {
   type IrodoriRfPipelineConfig,
   parseIrodoriPipelineConfig,

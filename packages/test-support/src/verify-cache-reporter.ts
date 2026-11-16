@@ -1,5 +1,5 @@
 /**
- * The Vitest reporter of the verification cache's recording stage (see `./verify-cache.ts`).
+ * The Vitest reporter of the verification cache (see `./verify-cache.ts`).
  *
  * It runs in the main process. When a test file ends it reads what the worker observed (kernels,
  * files read, directories listed, commands started — written by the setup file), computes the three
@@ -7,8 +7,11 @@
  * `outputs/verify-cache/<environment>/<test file>.json` (untracked, safe to delete). At the end of
  * the run it prints one block and writes `last-run.json` beside the records.
  *
- * Nothing is skipped: every file runs, and no test outcome depends on this reporter. A failure in here
- * is reported as a warning and the run goes on.
+ * In a `record` run (the default) nothing is skipped. In a `reuse` run it decides, before any file
+ * runs, which files' records still hold, and registers their stubs with the plugin
+ * (`./verify-cache-plugin.ts`); a reused file's record is left as it is. No outcome of a file that runs
+ * depends on this reporter. A failure in here is reported as a warning and the run goes on (in a
+ * `reuse` run, with every file running).
  */
 
 import { execFileSync } from "node:child_process";
@@ -23,22 +26,31 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Reporter, TestModule } from "vite-plus/test/node";
+import type { Reporter, TestModule, TestSpecification, Vitest } from "vite-plus/test/node";
 import { kernelSetFingerprint } from "./kernel-record.ts";
 import { importSpecifiersOf } from "./module-graph.ts";
+import { reusedStubs } from "./verify-cache-plugin.ts";
 import {
+  type AdapterFacts,
+  cacheModeOf,
   type CacheRecord,
   type DataInput,
+  decideBeforeRun,
+  filterNamesFile,
   hashOf,
   judgePrediction,
   keyOf,
+  keyVariablesOf,
   type Layers,
   type Outcome,
   reasonsNotReusable,
   RECORD_SCHEMA,
   roleOfCommand,
   sha256Of,
+  reusedTitleOf,
+  stubModuleText,
   summarize,
+  summarizeReuse,
   type WorkerRecord,
 } from "./verify-cache.ts";
 
@@ -197,13 +209,65 @@ const readCheckout = (): { commit: string | undefined; dirty: boolean | undefine
   }
 };
 
-const karumeVariables = (): Record<string, string> => {
-  const variables: Record<string, string> = {};
-  for (const name of Object.keys(process.env).sort()) {
-    const value = process.env[name];
-    if (name.startsWith("KARUME_") && value !== undefined) variables[name] = value;
-  }
-  return variables;
+const repoPath = (path: string): string => relative(REPO_ROOT, path).split(sep).join("/");
+
+/** The data layer's inputs, each identified as it is now. */
+const dataOf = (
+  filePaths: readonly string[],
+  directoryPaths: readonly string[],
+  commands: readonly (readonly string[])[],
+): DataInput[] => [
+  ...filePaths.map((path) => ({
+    kind: "file" as const,
+    name: repoPath(path),
+    identity: identityOfFile(path),
+  })),
+  ...directoryPaths.map((path) => ({
+    kind: "directory" as const,
+    name: repoPath(path),
+    identity: identityOfDirectory(path),
+  })),
+  ...commands.map((command) => ({
+    kind: "command" as const,
+    name: command.join(" "),
+    identity: identityOfCommand(command),
+  })),
+];
+
+/** The data layer over the inputs a record lists, as they are now. */
+const dataLayerOver = (record: Pick<CacheRecord, "data">): string => {
+  const absolute = (name: string): string => join(REPO_ROOT, name);
+  return hashOf(
+    dataOf(
+      record.data.filter((input) => input.kind === "file").map((input) => absolute(input.name)),
+      record.data
+        .filter((input) => input.kind === "directory")
+        .map((input) => absolute(input.name)),
+      record.data.filter((input) => input.kind === "command").map((input) => input.name.split(" ")),
+    ),
+  );
+};
+
+const readRecord = (path: string): CacheRecord | undefined =>
+  existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as CacheRecord) : undefined;
+
+/** The run's test name filter (`vp test -t <pattern>`) as text, when it has one. */
+const testNamePatternOf = (vitest: Vitest | undefined): string | undefined =>
+  vitest?.config.testNamePattern?.source;
+
+/** The command-line filters of the run (`vp test <filter>…`), from Vitest's own field. */
+const filtersOf = (vitest: Vitest | undefined): readonly string[] => {
+  // NOTE: `filenamePattern` is internal to Vitest (set from the command line before the run starts);
+  // a shape other than `undefined` or a string array means the harness moved, and the run must not
+  // reuse a file it was asked to run.
+  const pattern: unknown =
+    vitest === undefined ? undefined : Reflect.get(vitest, "filenamePattern");
+  if (pattern === undefined) return [];
+  if (Array.isArray(pattern) && pattern.every((item) => typeof item === "string")) return pattern;
+  throw new Error(
+    "Vitest's filenamePattern is neither undefined nor a list of strings, so the files named on the " +
+      "command line cannot be told apart; update filtersOf in verify-cache-reporter.ts.",
+  );
 };
 
 const outcomeOf = (testModule: TestModule): Outcome => {
@@ -222,9 +286,10 @@ const outcomeOf = (testModule: TestModule): Outcome => {
 };
 
 export default class VerifyCacheReporter implements Reporter {
+  readonly #mode = cacheModeOf(process.env);
   readonly #closures = new ImportClosures();
   readonly #checkout = readCheckout();
-  readonly #variables = karumeVariables();
+  readonly #variables = keyVariablesOf(process.env);
   readonly #fixed = {
     node: process.version,
     platform: `${process.platform}-${process.arch}`,
@@ -232,9 +297,133 @@ export default class VerifyCacheReporter implements Reporter {
     config: identityOfFile(join(REPO_ROOT, "vite.config.ts")),
   };
   readonly #records: CacheRecord[] = [];
+  /** A `reuse` run's files not run: absolute module path → the record reused. */
+  readonly #reused = new Map<string, CacheRecord>();
+  /** A `reuse` run's files that run and why each one's record did not stand (repository-relative). */
+  readonly #notReused: { readonly file: string; readonly why: readonly string[] }[] = [];
+  #ran = 0;
+  #decisionSeconds = 0;
+  #vitest: Vitest | undefined;
   #directory: string | undefined;
 
+  onInit(vitest: Vitest): void {
+    this.#vitest = vitest;
+  }
+
+  /** The environment layer's content and hash for the adapter a worker sees. */
+  #environmentOf(adapter: AdapterFacts | undefined): { content: unknown; hash: string } {
+    const content = {
+      ...this.#fixed,
+      variables: this.#variables,
+      adapter:
+        adapter === undefined
+          ? undefined
+          : {
+              vendor: adapter.vendor,
+              architecture: adapter.architecture,
+              device: adapter.device,
+              features: adapter.features,
+              limits: adapter.limits,
+            },
+    };
+    return { content, hash: hashOf(content) };
+  }
+
+  /** The import closure of a test file (with the setup file) and the code layer's content. */
+  #codeOf(moduleId: string): {
+    modules: readonly string[];
+    code: readonly (readonly [string, string])[];
+  } {
+    const modules = this.#closures.closureOf([moduleId, SETUP_FILE]);
+    const code = modules.map(
+      (path) => [repoPath(path), this.#closures.hashOfModule(path).slice(0, 16)] as const,
+    );
+    return { modules, code };
+  }
+
+  /**
+   * The three layers computed now over the inputs `record` lists — what both the decision before a
+   * `reuse` run and the judgement after a `record` run compare with the record's layers.
+   */
+  #layersOver(
+    record: Pick<CacheRecord, "data">,
+    environmentHash: string,
+    moduleId: string,
+  ): Layers {
+    return {
+      environment: environmentHash,
+      data: dataLayerOver(record),
+      code: hashOf(this.#codeOf(moduleId).code),
+    };
+  }
+
+  async onTestRunStart(specifications: readonly TestSpecification[]): Promise<void> {
+    if (this.#mode !== "reuse") return;
+    const started = performance.now();
+    try {
+      await this.#decide(specifications);
+    } catch (cause) {
+      this.#reused.clear();
+      reusedStubs().clear();
+      console.warn(`[verify-cache] no file is reused in this run: ${String(cause)}`);
+    }
+    this.#decisionSeconds = Math.round((performance.now() - started) / 10) / 100;
+  }
+
+  async #decide(specifications: readonly TestSpecification[]): Promise<void> {
+    const stubs = reusedStubs();
+    stubs.clear();
+    // The adapter as a test worker sees it, read once here (records made without one have none).
+    const { workerAdapterFacts } = await import("./dawn.ts");
+    const environmentHash = this.#environmentOf(await workerAdapterFacts()).hash;
+    this.#directory = join(CACHE_ROOT, environmentHash.slice(0, 12));
+    const filters = filtersOf(this.#vitest);
+    const testNamePattern = testNamePatternOf(this.#vitest);
+    const decided = new Set<string>();
+    for (const { moduleId } of specifications) {
+      // A file claimed by two lanes is one record and one decision.
+      if (decided.has(moduleId)) continue;
+      decided.add(moduleId);
+      const file = repoPath(moduleId);
+      if (testNamePattern !== undefined) {
+        // Asking for cases by name is asking to run them, in whichever file they are.
+        this.#notReused.push({ file, why: [`a test name filter is set (${testNamePattern})`] });
+        continue;
+      }
+      if (filters.some((filter) => filterNamesFile(filter, moduleId, process.cwd(), REPO_ROOT))) {
+        this.#notReused.push({ file, why: ["named on the command line"] });
+        continue;
+      }
+      const record = readRecord(join(this.#directory, `${file}.json`));
+      const decision = decideBeforeRun(record, (readable) =>
+        this.#layersOver(readable, environmentHash, moduleId),
+      );
+      if (record === undefined || !decision.reuse) {
+        this.#notReused.push({ file, why: decision.why });
+        continue;
+      }
+      this.#reused.set(moduleId, record);
+      stubs.set(moduleId, stubModuleText(record));
+    }
+  }
+
   onTestModuleEnd(testModule: TestModule): void {
+    const reused = this.#reused.get(testModule.moduleId);
+    if (reused !== undefined) {
+      const cases = [...testModule.children.allTests()];
+      if (cases.length === 1 && cases[0].name === reusedTitleOf(reused)) {
+        // The stub ran in the file's place: what its worker left is not the file's, and the record stays.
+        rmSync(pendingPathOf(testModule.moduleId), { force: true });
+        return;
+      }
+      // The file's own code ran (the stub was not served): it counts and is recorded as a run.
+      this.#reused.delete(testModule.moduleId);
+      console.warn(
+        `[verify-cache] ${testModule.relativeModuleId} was to be reused but its own code ran ` +
+          "(the stub module was not served); it is recorded as a file that ran.",
+      );
+    }
+    this.#ran += 1;
     try {
       this.#record(testModule);
     } catch (cause) {
@@ -250,31 +439,10 @@ export default class VerifyCacheReporter implements Reporter {
     const observed = worker as WorkerRecord;
 
     const { adapter } = observed;
-    const environment = {
-      ...this.#fixed,
-      variables: this.#variables,
-      adapter:
-        adapter === undefined
-          ? undefined
-          : {
-              vendor: adapter.vendor,
-              architecture: adapter.architecture,
-              device: adapter.device,
-              features: adapter.features,
-              limits: adapter.limits,
-            },
-    };
-    const environmentHash = hashOf(environment);
+    const { content: environment, hash: environmentHash } = this.#environmentOf(adapter);
 
-    const modules = this.#closures.closureOf([testModule.moduleId, SETUP_FILE]);
+    const { modules, code } = this.#codeOf(testModule.moduleId);
     const inClosure = new Set(modules);
-    const code = modules.map(
-      (path) =>
-        [
-          relative(REPO_ROOT, path).split(sep).join("/"),
-          this.#closures.hashOfModule(path).slice(0, 16),
-        ] as const,
-    );
 
     const unknownCommands: string[] = [];
     const inputCommands: (readonly string[])[] = [];
@@ -289,60 +457,30 @@ export default class VerifyCacheReporter implements Reporter {
     const directories = observed.inputs.directories.filter(
       (path) => repoRelative(path) !== undefined,
     );
-    const dataOf = (
-      filePaths: readonly string[],
-      directoryPaths: readonly string[],
-      commands: readonly (readonly string[])[],
-    ): DataInput[] => [
-      ...filePaths.map((path) => ({
-        kind: "file" as const,
-        name: relative(REPO_ROOT, path).split(sep).join("/"),
-        identity: identityOfFile(path),
-      })),
-      ...directoryPaths.map((path) => ({
-        kind: "directory" as const,
-        name: relative(REPO_ROOT, path).split(sep).join("/"),
-        identity: identityOfDirectory(path),
-      })),
-      ...commands.map((command) => ({
-        kind: "command" as const,
-        name: command.join(" "),
-        identity: identityOfCommand(command),
-      })),
-    ];
     const data = dataOf(files, directories, inputCommands);
 
     const layers: Layers = { environment: environmentHash, data: hashOf(data), code: hashOf(code) };
     const outcome = outcomeOf(testModule);
     const kernelFingerprint = kernelSetFingerprint(observed.kernels);
-    const notReusable = reasonsNotReusable(outcome, this.#variables, unknownCommands);
+    const notReusable = reasonsNotReusable(
+      outcome,
+      this.#variables,
+      unknownCommands,
+      testNamePatternOf(this.#vitest),
+    );
 
     const file = testModule.relativeModuleId;
     this.#directory = join(CACHE_ROOT, environmentHash.slice(0, 12));
     const recordPath = join(this.#directory, `${file}.json`);
     let prediction: CacheRecord["prediction"];
-    if (existsSync(recordPath)) {
-      const previous = JSON.parse(readFileSync(recordPath, "utf8")) as CacheRecord;
-      if (previous.schema === RECORD_SCHEMA) {
-        // The data layer a cache could compute before the run: the previous record's inputs, as they are now.
-        const absolute = (name: string): string => join(REPO_ROOT, name);
-        const previousData = dataOf(
-          previous.data
-            .filter((input) => input.kind === "file")
-            .map((input) => absolute(input.name)),
-          previous.data
-            .filter((input) => input.kind === "directory")
-            .map((input) => absolute(input.name)),
-          previous.data
-            .filter((input) => input.kind === "command")
-            .map((input) => input.name.split(" ")),
-        );
-        prediction = judgePrediction(
-          previous,
-          { environment: environmentHash, data: hashOf(previousData), code: layers.code },
-          { notReusable, outcome, kernelFingerprint },
-        );
-      }
+    const previous = readRecord(recordPath);
+    if (previous?.schema === RECORD_SCHEMA) {
+      // The layers a cache could compute before the run: over the previous record's inputs, as they are now.
+      prediction = judgePrediction(
+        previous,
+        this.#layersOver(previous, environmentHash, testModule.moduleId),
+        { notReusable, outcome, kernelFingerprint },
+      );
     }
 
     const record: CacheRecord = {
@@ -370,6 +508,10 @@ export default class VerifyCacheReporter implements Reporter {
   }
 
   onTestRunEnd(): void {
+    if (this.#mode === "reuse") {
+      this.#endReuseRun();
+      return;
+    }
     if (this.#records.length === 0 || this.#directory === undefined) return;
     const summary = summarize(this.#records);
     writeFileSync(
@@ -382,6 +524,48 @@ export default class VerifyCacheReporter implements Reporter {
           ? ""
           : `; of ${summary.judged} with an earlier record, ${summary.reuse} would have been reused ` +
             `(${summary.reuseSeconds} s of ${summary.totalSeconds} s)`),
+      ...summary.contradicted.map(
+        (entry) => `[verify-cache] WRONG prediction for ${entry.file}: ${entry.why.join("; ")}`,
+      ),
+      `[verify-cache] records: ${pathToFileURL(this.#directory).pathname}`,
+    ];
+    console.log(lines.join("\n"));
+  }
+
+  /** The end of a `reuse` run: the reused files, the files that ran, and their records' judgement. */
+  #endReuseRun(): void {
+    if (this.#directory === undefined) return;
+    const reuse = summarizeReuse([...this.#reused.values()], this.#ran);
+    const summary = summarize(this.#records);
+    mkdirSync(this.#directory, { recursive: true });
+    writeFileSync(
+      join(this.#directory, "last-run.json"),
+      `${JSON.stringify(
+        {
+          commit: this.#checkout.commit,
+          dirty: this.#checkout.dirty,
+          mode: "reuse",
+          decisionSeconds: this.#decisionSeconds,
+          ...reuse,
+          notReused: this.#notReused,
+          ...summary,
+        },
+        undefined,
+        1,
+      )}\n`,
+    );
+    const lines = [
+      `[verify-cache] reuse: ${reuse.reused} reused (their records ran ${reuse.reusedSeconds} s), ` +
+        `${reuse.ran} ran; decided in ${this.#decisionSeconds} s`,
+      ...(summary.files === 0
+        ? []
+        : [
+            `[verify-cache] ${summary.files} recorded` +
+              (summary.judged === 0
+                ? ""
+                : `; of ${summary.judged} with an earlier record, ${summary.reuse} would have been ` +
+                  `reused (${summary.reuseSeconds} s of ${summary.totalSeconds} s)`),
+          ]),
       ...summary.contradicted.map(
         (entry) => `[verify-cache] WRONG prediction for ${entry.file}: ${entry.why.join("; ")}`,
       ),

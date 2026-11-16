@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { type GenerateRequest, Pipeline } from "../../models/irodori.ts";
-import { type DecodedWav, decodeWav, encodeWav } from "../../models/mod.ts";
+import { type DecodedWav, decodeWav, encodeWav } from "../../models/src/audio/wav.ts";
 import { parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { mirrorDirectory, mirrorHasModel, mirrorRoot } from "../../models/tests/helpers/mirror.ts";

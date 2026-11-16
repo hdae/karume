@@ -200,7 +200,7 @@ import {
   type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
-import { encodePng } from "../../models/mod.ts";
+import { encodePng } from "../../models/src/image/png.ts";
 import {
   type GeneratedVideo,
   type Rgb8Image,

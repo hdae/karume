@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import type { RunInputs } from "@karume/runtime";
 import { type GenerateRequest, Pipeline, type RunComponent } from "../../models/irodori.ts";
-import { encodeWav } from "../../models/mod.ts";
+import { encodeWav } from "../../models/src/audio/wav.ts";
 import {
   DIST_COMMAND,
   hasQuantSeat,

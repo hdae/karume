@@ -1,7 +1,11 @@
 import { defineConfig } from "vite-plus";
 import { laneProjects } from "./packages/test-support/src/lanes.ts";
+import { verifyCacheReuse } from "./packages/test-support/src/verify-cache-plugin.ts";
 
 export default defineConfig({
+  // The verification cache's `reuse` mode (KARUME_VERIFY_CACHE=reuse) serves a stub in place of a
+  // test file whose recorded result still holds; in the default `record` mode it serves nothing.
+  plugins: [verifyCacheReuse()],
   fmt: {
     ignorePatterns: [
       // Documents stay hand-formatted: the formatter would add trailing commas to the JSONC
@@ -34,8 +38,8 @@ export default defineConfig({
     // No root `include`: the lanes (projects) define what runs; `extends: true` would otherwise
     // concatenate a root include into every lane.
     setupFiles: ["./packages/test-support/src/setup.ts"],
-    // The verification cache's recording stage (ADR 0152 decision 6): every file still runs; the
-    // reporter writes what each file's result depended on under `outputs/verify-cache/`.
+    // The verification cache (ADR 0152 decision 6): the reporter writes what each file's result
+    // depended on under `outputs/verify-cache/`; every file runs unless KARUME_VERIFY_CACHE=reuse.
     reporters: ["default", "./packages/test-support/src/verify-cache-reporter.ts"],
     // GPU tests share one physical device and the sha256 reference rows assume one run at a time:
     // every file runs in a single forked worker, one file after another.

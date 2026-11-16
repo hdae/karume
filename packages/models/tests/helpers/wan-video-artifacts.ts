@@ -9,7 +9,7 @@
 
 import { writeFile } from "@karume/test-support/fs";
 import type { Results } from "../../../runtime/tests/helpers/results.ts";
-import { encodePng } from "../../mod.ts";
+import { encodePng } from "../../src/image/png.ts";
 import { type GeneratedVideo, frameToRgba } from "../../wan.ts";
 
 /**
