@@ -13,8 +13,8 @@
  * of the sweep's default row, 64 or 32 rows). A record without the field, or naming the default
  * table, is read against the sweep's default row.
  *
- * NOTE: the opt-in Node run of the same set (packages/e2e/tests/e2e_k88_gemm_sweep_test.ts)
- * computes its summary separately from the same record fields.
+ * It is the one K-88 summary: the `geometry-sweep` entry gives it for a run of the `k88` set, in a
+ * browser and under Node alike (`node apps/workbench/run.ts geometry-sweep --candidateSet=k88 …`).
  */
 
 import {
