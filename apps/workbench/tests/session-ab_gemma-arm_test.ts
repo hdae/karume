@@ -6,7 +6,6 @@ import type {
   RunPhase,
 } from "@karume/models/gemma";
 import type { SessionOptions } from "@karume/runtime";
-import { runSessionAb } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -20,12 +19,7 @@ import {
   probeCounts,
 } from "../src/session-ab/gemma-arm.ts";
 
-const ENVIRONMENT = {
-  adapter: { vendor: "test", architecture: "", device: "", description: "" },
-  userAgent: "test",
-  backend: "other",
-  date: "2026-11-11T00:00:00.000Z",
-};
+import { type SpanRunner, spanRunner } from "./helpers/session-ab-runner.ts";
 
 const RULE_KEY = "ext:candidate:gelu_mul:v1:gelu-other:f32:wg128";
 
@@ -115,28 +109,23 @@ type Rig = {
   readonly builds: { readonly onRunDiagnostics?: unknown }[];
   /** The log entries made while the runner's clock was open (inside a timed span). */
   readonly timed: string[];
-  /** The runner's clock: every read opens or closes the span. */
-  readonly clock: () => number;
+  /** The real runner, whose clock opens and closes the span {@link Rig.timed} reads. */
+  readonly run: SpanRunner["run"];
   readonly record: (entry: string) => void;
 };
 
 const newRig = (): Rig => {
   const log: string[] = [];
   const timed: string[] = [];
-  let open = false;
-  let tick = 0;
+  const runner = spanRunner();
   return {
     log,
     timed,
     builds: [],
-    clock: () => {
-      open = !open;
-      tick += 1;
-      return tick;
-    },
+    run: runner.run,
     record: (entry) => {
       log.push(entry);
-      if (open) timed.push(entry);
+      if (runner.inSpan()) timed.push(entry);
     },
   };
 };
@@ -248,7 +237,7 @@ const probesOf = async (where: Rig, request: ArmRequest, fake: FakeOptions) => {
 };
 
 const run = (where: Rig, arms: ReturnType<typeof armsOf>, openPerVisit: boolean) =>
-  runSessionAb({ arms, rounds: 3, openPerVisit, environment: ENVIRONMENT, clock: where.clock });
+  where.run(arms, 3, openPerVisit);
 
 describe("the session A/B's arm on a Gemma 4 pipeline", () => {
   describe("the options each arm builds with", () => {

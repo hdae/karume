@@ -1,11 +1,3 @@
-import {
-  ATTENTION_ONLINE_TILED_CASES,
-  FUSION_TWIN_CASES,
-  GEMV_INTEGER_CASES,
-  GEMV_PLANES_CASES,
-  RMS_NORM_PREFETCH_CASES,
-  STATE_KV16_CASES,
-} from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
 
 import { KERNEL_CHECKS } from "../src/kernel-check/checks.ts";
@@ -16,70 +8,22 @@ describe("the kernel-check entry's checks", () => {
     expect(KERNEL_CHECKS.map(({ id }) => id)).toEqual([...KERNEL_CHECK_IDS]);
   });
 
-  it("runs the rms_norm prefetch check on any device, one part per compared kernel", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "rms-norm-prefetch");
-    expect(check?.title).toBe("rms_norm: prefetch form vs runtime-trip form");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(KERNEL_CHECK_IDS.indexOf("rms-norm-prefetch")).toBe(
-      KERNEL_CHECK_IDS.indexOf("rms-subgroup32") + 1,
-    );
-    expect(Object.keys(RMS_NORM_PREFETCH_CASES)).toEqual([
-      "rms-prefetch-plain",
-      "rms-prefetch-add-norm-residual",
-      "rms-prefetch-add-residual-norm",
-    ]);
-  });
-
-  it("runs the integer GEMV check on any device, against the case count the check exports", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "gemv-integer");
-    expect(check?.title).toBe("Integer GEMV");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(GEMV_INTEGER_CASES).toEqual({ "gemv-integer": 692 });
-  });
-
-  it("runs the byte-plane GEMV check on any device, against the case count the check exports", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "gemv-planes");
-    expect(check?.title).toBe("Byte-plane GEMV");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(GEMV_PLANES_CASES).toEqual({ "gemv-planes": 240 });
-  });
-
-  it("runs the f16 full slot check on any device, against the case counts the check exports", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "state-kv16");
-    expect(check?.title).toBe("f16 full state slots");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(Object.keys(STATE_KV16_CASES)).toEqual(["state-kv16-readers", "state-kv16-append"]);
-  });
-
-  it("runs the fusion twins on any device, one part per rule in a fixed order", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "fusion-twins");
-    expect(check?.title).toBe("Fusion rules: fused vs unfused");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(Object.keys(FUSION_TWIN_CASES)).toEqual([
-      "fusion-gated-residual",
-      "fusion-silu",
-      "fusion-adaln",
-      "fusion-rope",
-      "fusion-upsample2x",
-      "fusion-rms-norm-rope",
-      "fusion-linear-prologue",
-      "fusion-attention-permute",
-      "fusion-attention-permute-sg32",
-      "fusion-row-block-attention",
-      "fusion-rms-norm-add",
-      "fusion-gelu-mul-static-quantize",
-      "fusion-linear-static-quantize",
-    ]);
-  });
-
-  it("runs the tiled key-axis candidate on any device, the producer part and one kernel part per reduction form", () => {
-    const check = KERNEL_CHECKS.find(({ id }) => id === "attention-online-tiled");
-    expect(check?.title).toBe("Online attention: tiled Vᵀ key axis (candidate)");
-    expect(check?.needsSubgroups).toBe(false);
-    expect(ATTENTION_ONLINE_TILED_CASES).toEqual({
-      "attention-online-tiled-producer": 18,
-      "attention-online-tiled-wg": 28,
-      "attention-online-tiled-sg32": 28,
+  it("needs subgroups only for the two subgroup32 reductions", () => {
+    expect(
+      Object.fromEntries(KERNEL_CHECKS.map(({ id, needsSubgroups }) => [id, needsSubgroups])),
+    ).toEqual({
+      "gemv-subgroup32": true,
+      "rms-subgroup32": true,
+      "rms-norm-prefetch": false,
+      "state-attention-rewrites": false,
+      "gemv-integer": false,
+      "gemv-planes": false,
+      "state-kv16": false,
+      "score-f16-store": false,
+      "state-bidirectional": false,
+      "expert-linear": false,
+      "fusion-twins": false,
+      "attention-online-tiled": false,
     });
   });
 });

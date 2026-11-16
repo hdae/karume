@@ -11,6 +11,7 @@ import {
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
+  STATE_KV16_CASES,
 } from "../mod.ts";
 import { compareWords, compareWordsNanClass, scopedGpuWork } from "../src/result.ts";
 
@@ -155,6 +156,8 @@ describe("the expected case counts each check exports", () => {
       "state-stats-pv-unroll": 490,
     });
     assertEquals(STATE_ATTENTION_MUTANTS, 5);
+    // The f16 slot check counts from its shape grids; its parts are pinned, not their counts
+    assertEquals(Object.keys(STATE_KV16_CASES), ["state-kv16-readers", "state-kv16-append"]);
     assertEquals(GEMV_INTEGER_CASES, { "gemv-integer": 692 });
     assertEquals(GEMV_PLANES_CASES, { "gemv-planes": 240 });
     assertEquals(ATTENTION_ONLINE_TILED_CASES, {

@@ -1,125 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { createGpuTap, TIMED_PASS_SLOTS } from "../src/gemma4-bench/tap.ts";
-
-/** What a real (fake) compute pass received, in order. */
-type Call = readonly unknown[];
-
-/**
- * A fake WebGPU that runs every command at encode time and logs what each real compute pass
- * received: a timestamped pass writes `begin` / `end` (1,000 ns apart per pass, 400 ns long) into
- * its query set when it ends, `resolveQuerySet` and `copyBufferToBuffer` copy bytes, and a mapped
- * buffer shows its bytes. A pass that ends with a debug group open throws (WebGPU's validation).
- */
-const fakeWebGpu = () => {
-  const realPasses: { descriptor?: GPUComputePassDescriptor; calls: Call[] }[] = [];
-  let clockNs = 0n;
-  const bufferBytes = new WeakMap<object, Uint8Array>();
-  const createBuffer = (descriptor: GPUBufferDescriptor) => {
-    const bytes = new Uint8Array(descriptor.size);
-    const buffer = {
-      size: descriptor.size,
-      usage: descriptor.usage,
-      mapAsync: () => Promise.resolve(),
-      getMappedRange: () => bytes.buffer,
-      unmap: () => {},
-      destroy: () => {},
-    };
-    bufferBytes.set(buffer, bytes);
-    return buffer;
-  };
-  const beginComputePass = (descriptor?: GPUComputePassDescriptor) => {
-    const calls: Call[] = [];
-    realPasses.push({ descriptor, calls });
-    let depth = 0;
-    return {
-      label: descriptor?.label ?? "",
-      setPipeline: (pipeline: GPUComputePipeline) => calls.push(["setPipeline", pipeline.label]),
-      setBindGroup: (
-        index: number,
-        group: unknown,
-        offsets?: Iterable<number> | Uint32Array,
-        start?: number,
-        length?: number,
-      ) =>
-        calls.push([
-          "setBindGroup",
-          index,
-          group,
-          start === undefined || !(offsets instanceof Uint32Array)
-            ? [...(offsets ?? [])]
-            : [...offsets.subarray(start, start + (length ?? 0))],
-        ]),
-      dispatchWorkgroups: (x: number, y?: number, z?: number) =>
-        calls.push(["dispatch", x, y ?? 1, z ?? 1]),
-      dispatchWorkgroupsIndirect: (_buffer: unknown, offset: number) =>
-        calls.push(["dispatchIndirect", offset]),
-      pushDebugGroup: (group: string) => {
-        depth += 1;
-        calls.push(["push", group]);
-      },
-      popDebugGroup: () => {
-        depth -= 1;
-        calls.push(["pop"]);
-      },
-      insertDebugMarker: (marker: string) => calls.push(["marker", marker]),
-      end: () => {
-        if (depth !== 0) throw new Error("a debug group is still open at the end of the pass");
-        calls.push(["end"]);
-        const writes = descriptor?.timestampWrites;
-        if (writes === undefined) return;
-        const { values } = writes.querySet as unknown as { values: BigUint64Array };
-        clockNs += 1000n;
-        values[writes.beginningOfPassWriteIndex ?? 0] = clockNs;
-        values[writes.endOfPassWriteIndex ?? 0] = clockNs + 400n;
-      },
-    };
-  };
-  const device = {
-    features: new Set<string>(["timestamp-query"]),
-    queue: { submit: () => {} },
-    createBuffer,
-    createQuerySet: (query: GPUQuerySetDescriptor) => ({ values: new BigUint64Array(query.count) }),
-    createCommandEncoder: () => ({
-      beginComputePass,
-      resolveQuerySet: (
-        querySet: { values: BigUint64Array },
-        first: number,
-        count: number,
-        destination: object,
-        offset: number,
-      ) => {
-        const source = querySet.values.subarray(first, first + count);
-        bufferBytes
-          .get(destination)
-          ?.set(new Uint8Array(source.buffer, source.byteOffset, source.byteLength), offset);
-      },
-      copyBufferToBuffer: (
-        source: object,
-        sourceOffset: number,
-        destination: object,
-        destinationOffset: number,
-        size: number,
-      ) => {
-        const from = bufferBytes.get(source);
-        bufferBytes
-          .get(destination)
-          ?.set(from?.subarray(sourceOffset, sourceOffset + size) ?? [], destinationOffset);
-      },
-      finish: () => ({}),
-    }),
-  };
-  const gpu = {
-    requestAdapter: () =>
-      Promise.resolve({
-        features: new Set(["timestamp-query"]),
-        requestDevice: () => Promise.resolve(device),
-      }),
-    getPreferredCanvasFormat: () => "bgra8unorm",
-    wgslLanguageFeatures: new Set<string>(),
-  } as unknown as GPU;
-  return { gpu, realPasses };
-};
+import { fakeWebGpu, type RealPass } from "./helpers/fake-webgpu.ts";
 
 /** A device acquired through a tap on the fake, with its probe enabled in split mode. */
 const splitDevice = async () => {
@@ -139,7 +21,7 @@ const pipeline = (label: string) => ({ label }) as unknown as GPUComputePipeline
 const bindGroup = (name: string) => ({ name }) as unknown as GPUBindGroup;
 
 /** The calls of every real pass, with the replayed state and dispatch only (no `end`). */
-const callsOf = (realPasses: readonly { calls: Call[] }[]) =>
+const callsOf = (realPasses: readonly RealPass[]) =>
   realPasses.map(({ calls }) => calls.filter(([name]) => name !== "end"));
 
 describe("the GPU tap in split mode", () => {
@@ -315,10 +197,6 @@ describe("the GPU tap in split mode", () => {
       undefined,
       undefined,
     ]);
-  });
-
-  it("has room for 40,000 timed passes between two resets", () => {
-    expect(TIMED_PASS_SLOTS).toBeGreaterThanOrEqual(40_000);
   });
 
   it("records no labels and keeps the product's passes in the default mode", async () => {

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Entry, EntryResult } from "../src/entry.ts";
-import { dawnBackend } from "../src/environment.ts";
 import { executeEntry } from "../src/execute.ts";
 import {
   buildRecord,
@@ -250,18 +249,5 @@ describe("executeEntry", () => {
       controller,
     );
     expect(cancelled.outcome).toBe("cancelled");
-  });
-});
-
-describe("dawnBackend", () => {
-  it("takes a backend= flag, else Dawn's default for the platform", () => {
-    expect(dawnBackend(["disable-dawn-features=x", "backend=opengl"], "linux")).toEqual({
-      name: "opengl",
-      source: "dawn-flag",
-    });
-    expect(dawnBackend([], "linux")).toEqual({ name: "vulkan", source: "dawn-default" });
-    expect(dawnBackend([], "darwin")).toEqual({ name: "metal", source: "dawn-default" });
-    expect(dawnBackend([], "win32")).toEqual({ name: "d3d12", source: "dawn-default" });
-    expect(() => dawnBackend([], "aix")).toThrow("aix");
   });
 });

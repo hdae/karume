@@ -1,15 +1,10 @@
-import { runSessionAb, type SessionAbArm } from "@karume/runtime/tune";
+import type { SessionAbArm } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { armStepLine, armStepper, fetchLine, probeStepLine } from "../src/session-ab/progress.ts";
 import { runPositions, steppedArm } from "../src/session-ab/shared.ts";
 
-const ENVIRONMENT = {
-  adapter: { vendor: "test", architecture: "", device: "", description: "" },
-  userAgent: "test",
-  backend: "other",
-  date: "2026-11-11T00:00:00.000Z",
-};
+import { spanRunner } from "./helpers/session-ab-runner.ts";
 
 describe("the session A/B status lines", () => {
   const positions = runPositions(2, 3, true);
@@ -45,17 +40,16 @@ describe("the session A/B status lines", () => {
 describe("the arm stepper", () => {
   /**
    * Runs the real runner over two fake arms wrapped by steppedArm with the stepper, and logs every
-   * run, report and yield with whether the runner's clock was open at that moment.
+   * run, report and yield. (That steppedArm reports outside the timed spans is the shared module's
+   * test.)
    */
   const observe = async (openPerVisit: boolean) => {
-    const log: { readonly entry: string; readonly timed: boolean }[] = [];
-    let clockOpen = false;
-    let tick = 0;
+    const log: string[] = [];
     const fake = (name: string): SessionAbArm => ({
       name,
       open: () => Promise.resolve(),
       run: () => {
-        log.push({ entry: `${name}:run`, timed: clockOpen });
+        log.push(`${name}:run`);
         return Promise.resolve({ outputs: { y: Float32Array.of(1, 2) } });
       },
       report: () => Promise.resolve({ fusions: {}, dispatches: 1 }),
@@ -66,41 +60,30 @@ describe("the arm stepper", () => {
       positions,
       opens: "Session",
       signal: new AbortController().signal,
-      progress: (text) => log.push({ entry: `progress:${text}`, timed: clockOpen }),
+      progress: (text) => log.push(`progress:${text}`),
       yieldTurn: () => {
-        log.push({ entry: "yield", timed: clockOpen });
+        log.push("yield");
         return Promise.resolve();
       },
     });
-    await runSessionAb({
-      arms: [steppedArm(fake("base"), onStep), steppedArm(fake("rule"), onStep)],
-      rounds: 3,
+    await spanRunner().run(
+      [steppedArm(fake("base"), onStep), steppedArm(fake("rule"), onStep)],
+      3,
       openPerVisit,
-      environment: ENVIRONMENT,
-      clock: () => {
-        clockOpen = !clockOpen;
-        tick += 1;
-        return tick;
-      },
-    });
+    );
     return { log, positions };
   };
 
   for (const openPerVisit of [true, false]) {
-    it(`reports outside the timed spans and yields once after every report (openPerVisit: ${openPerVisit})`, async () => {
+    it(`yields once after every report, and reports every run once, counted (openPerVisit: ${openPerVisit})`, async () => {
       const { log, positions } = await observe(openPerVisit);
-      const timed = log.filter(({ timed: inSpan }) => inSpan).map(({ entry }) => entry);
-      expect(timed.length).toBeGreaterThan(0);
-      expect(timed.every((entry) => entry.endsWith(":run"))).toBe(true);
-      log.forEach(({ entry }, index) => {
-        if (entry.startsWith("progress:")) expect(log[index + 1]?.entry).toBe("yield");
+      log.forEach((entry, index) => {
+        if (entry.startsWith("progress:")) expect(log[index + 1]).toBe("yield");
       });
       // Every run ends in one "ran" line; the last one counts every run.
-      const ran = log.filter(({ entry }) => entry.startsWith("progress:ran"));
+      const ran = log.filter((entry) => entry.startsWith("progress:ran"));
       expect(ran).toHaveLength(positions.length);
-      expect(ran.at(-1)?.entry).toMatch(
-        new RegExp(`· ${positions.length} / ${positions.length} runs$`),
-      );
+      expect(ran.at(-1)).toMatch(new RegExp(`· ${positions.length} / ${positions.length} runs$`));
     });
   }
 

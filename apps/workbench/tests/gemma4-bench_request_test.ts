@@ -179,36 +179,20 @@ describe("the arms resolved against the distributions", () => {
       ]);
     });
 
-    it.each([
-      [
-        "gemma4/e2b,gemma4/e9b",
-        `arm 2 "gemma4/e9b": The gemma4 manifest has no model 'e9b'; its models are e2b, e4b.`,
-      ],
-      [
-        "gemma4-qat/e2b@q4_0",
-        `arm 1 "gemma4-qat/e2b@q4_0": The gemma4-qat model 'e2b' has no preset 'q4_0'; its presets are i4, i4-fast.`,
-      ],
-      [
-        "gemma4-qat-mobile/12b",
-        `arm 1 "gemma4-qat-mobile/12b": gemma4QatMobile.Pipeline does not accept the model '12b'.`,
-      ],
-      [
-        "gemma4/e2b:ahead2",
-        `arm 1 "gemma4/e2b:ahead2": Decode ahead needs PLE on GPU (each step's token stays on the GPU, so its PLE gather must run there).`,
-      ],
-      [
-        "gemma4-qat/12b:ple-gpu",
-        `arm 1 "gemma4-qat/12b:ple-gpu": 12B has no PLE to place on the GPU.`,
-      ],
-    ])("refuse %s, naming the arm and what exists or why", async (text, reason) => {
+    it("refuse an arm the manifests refuse, naming the arm (resolveArm's refusals are the plan's test)", async () => {
       await expect(
         openBenchArms(
-          text,
+          "gemma4/e2b,gemma4/e9b",
           "cached",
           memoryDistributions({ gemma4: REGULAR, "gemma4-qat": QAT, "gemma4-qat-mobile": MOBILE }),
           SIGNAL,
         ),
-      ).rejects.toThrow(new ParameterError("arms", reason));
+      ).rejects.toThrow(
+        new ParameterError(
+          "arms",
+          `arm 2 "gemma4/e9b": The gemma4 manifest has no model 'e9b'; its models are e2b, e4b.`,
+        ),
+      );
     });
 
     it("refuse a mount whose mirror is missing, naming the first arm that reads it", async () => {

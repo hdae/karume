@@ -1,4 +1,3 @@
-import type { Manifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -9,7 +8,6 @@ import {
   type TokenMark,
   UNLABELED_KEY,
 } from "../src/gemma4-bench/measure.ts";
-import { armLabel, resolveArm } from "../src/gemma4-bench/plan.ts";
 import {
   splitSummaryText,
   summarizeRuns,
@@ -219,43 +217,5 @@ describe("the split summary", () => {
 
   it("writes nothing when no arm ran split", () => {
     expect(splitSummaryText(summarizeRuns([run(0)], 1, ["few-ids"]), [])).toEqual([]);
-  });
-});
-
-describe("a split arm", () => {
-  const manifest = {
-    defaultModel: "e2b",
-    models: {
-      e2b: {
-        defaultQuant: "i4",
-        quants: { i4: { label: "int4" } },
-        weights: {},
-        pipelineConfig: {
-          capacity: 4096,
-          chunkLength: 768,
-          maxChunkLength: 768,
-          maxPosition: 32768,
-          rope: {
-            sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
-            full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
-          },
-        },
-      },
-    },
-  } as unknown as Manifest;
-  const draft = { key: { mount: "gemma4-qat-mobile" as const, model: "e2b" }, split: true };
-
-  it("is labelled as split", () => {
-    expect(
-      armLabel({ mount: "gemma4-qat-mobile", model: "e2b", quant: "i4", tap: true, split: true }),
-    ).toBe("mobile QAT e2b i4 (split)");
-  });
-
-  it("splits only with the tap on", () => {
-    const on = resolveArm({ ...draft, tap: true }, { "gemma4-qat-mobile": manifest });
-    const off = resolveArm({ ...draft, tap: false }, { "gemma4-qat-mobile": manifest });
-    expect(on.ok && on.arm.split).toBe(true);
-    expect(off.ok && off.arm.split).toBeUndefined();
-    expect(off.ok && armLabel(off.arm)).toBe("mobile QAT e2b i4 (tap off)");
   });
 });

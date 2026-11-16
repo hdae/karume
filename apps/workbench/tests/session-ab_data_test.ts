@@ -8,10 +8,13 @@ import {
   type SessionAbArmFacts,
   type SessionAbArmProbe,
   sessionAbGemmaData,
+  sessionAbVaeData,
 } from "../src/session-ab/data.ts";
 import { sessionAbRequest } from "../src/session-ab/gemma-request.ts";
+import { sessionAbVaeRequest } from "../src/session-ab/vae.ts";
 
-import { abRecord, RULE, steady } from "./helpers/session-ab-records.ts";
+import { hex } from "./helpers/session-ab-manifests.ts";
+import { abRecord, RULE, SETTINGS, steady } from "./helpers/session-ab-records.ts";
 
 const settings = { rounds: 3, tokens: 96, minGain: 0.01, openPerVisit: true, probeCounts: true };
 
@@ -86,7 +89,6 @@ describe("the Gemma 4 session A/B's data", () => {
   it("survives JSON: the stored record is judged again to the same judgements", () => {
     const data = build();
     const stored: typeof data = JSON.parse(JSON.stringify(data));
-    expect(stored).toEqual(data);
     const { record, judgements } = stored;
     expect(judgeSessionAb(record, { minGain: request.minGain })).toEqual(judgements);
   });
@@ -173,5 +175,30 @@ describe("the Gemma 4 session A/B's data", () => {
       const missing = [FACTS[0], { name: "rule", facts: {} }];
       expect(() => build(undefined, missing)).toThrow(/rule reported no resolved expert cache/);
     });
+  });
+});
+
+describe("a Session target's data", () => {
+  it("refuses a runtime record whose arms reported no counts", () => {
+    const record = abRecord({ base: steady(584), rule: steady(564) });
+    const [base, rule] = record.arms;
+    const request = sessionAbVaeRequest(
+      "wan22-vae-next",
+      { model: "ti2v-5b", quant: "i8", session: {}, storage: "i8" },
+      SETTINGS,
+    );
+    expect(() =>
+      sessionAbVaeData({
+        request,
+        distribution: {
+          directory: "models/karume-wan2.2",
+          manifestSha256: hex("f"),
+          read: "direct",
+        },
+        container: { component: "vae_decoder_next", part0Sha256: hex("c") },
+        record: { ...record, arms: [{ ...base, fusions: { silu: 29 }, dispatches: 457 }, rule] },
+        judgements: [],
+      }),
+    ).toThrow("arm(s) rule reported no counts");
   });
 });

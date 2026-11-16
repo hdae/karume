@@ -1,4 +1,3 @@
-import type { CheckPart } from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
 
 import kernelCheck from "../src/entries/kernel-check.ts";
@@ -10,18 +9,7 @@ import {
   KERNEL_CHECK_IDS,
 } from "../src/kernel-check/verdict.ts";
 
-const cleanPart = (id: string): CheckPart => ({
-  id,
-  title: id,
-  cases: [{ label: "x", criteria: [{ name: "words (u32)", words: 16, failures: 0 }] }],
-  requirements: [],
-});
-
-const passed: CheckOutcome = {
-  kind: "done",
-  seconds: 1,
-  report: { parts: [cleanPart("a")], expectedCases: { a: 1 } },
-};
+import { allPassedExcept, cleanPart, passed } from "./helpers/kernel-check-outcomes.ts";
 
 const failed: CheckOutcome = {
   kind: "done",
@@ -51,12 +39,6 @@ const failed: CheckOutcome = {
     expectedCases: { "gemv-planes-clean": 1, "gemv-planes": 1 },
   },
 };
-
-/** Every check passed except the ones given. */
-const allPassedExcept = (overrides: CheckOutcomes): CheckOutcomes => ({
-  ...Object.fromEntries(KERNEL_CHECK_IDS.map((id) => [id, passed])),
-  ...overrides,
-});
 
 describe("the kernel-check entry", () => {
   it("declares one choices parameter over the twelve check ids, all by default", () => {
@@ -135,7 +117,5 @@ describe("kernelCheckResult", () => {
     expect(result.verdict).toBe("incomplete");
     expect(result.summary[0]).toContain("INCOMPLETE");
     expect(result.data).toMatchObject({ adapterFeatures: ["subgroups"], verdict: "incomplete" });
-    expect(kernelCheckResult([], allPassedExcept({})).verdict).toBe("pass");
-    expect(kernelCheckResult([], {}).verdict).toBe("incomplete");
   });
 });

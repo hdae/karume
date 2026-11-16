@@ -1,14 +1,8 @@
-import type { ChatOptions, ChatStop, ChatStream } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { BenchSettings } from "../src/gemma4-bench/plan.ts";
-import {
-  type BenchDependencies,
-  type BenchPipeline,
-  type BenchProbe,
-  type RunArm,
-  settleDecodeBench,
-} from "../src/gemma4-bench/run.ts";
+import { type RunArm, settleDecodeBench } from "../src/gemma4-bench/run.ts";
+import { fakeBenchDependencies } from "./helpers/gemma4-bench-fakes.ts";
 
 const arm = (model: string, tap = true): RunArm => ({
   mount: model.startsWith("qat-") ? "gemma4-qat-mobile" : "gemma4",
@@ -32,140 +26,18 @@ const SETTINGS: BenchSettings = {
   prompts: ["few-ids", "many-ids"],
 };
 
-/** A probe that records one pass of one dispatch per token while enabled. */
-type FakeProbe = BenchProbe & {
-  /** Whether the probe was enabled when each chat was sent. */
-  readonly enabledAtChat: boolean[];
-  /** Records one pass while enabled (the fake pipeline calls it per token). */
-  readonly record: () => void;
-};
-
-const fakeProbe = (): FakeProbe => {
-  let passes: { dispatches: number; beginNs?: bigint; endNs?: bigint }[] = [];
-  const probe: FakeProbe = {
-    enabled: false,
-    enabledAtChat: [],
-    passes: () => passes,
-    submits: () => passes.length,
-    readTimes: () => {
-      passes = passes.map((pass, index) => ({
-        ...pass,
-        beginNs: BigInt(index * 1000),
-        endNs: BigInt(index * 1000 + 500),
-      }));
-      return Promise.resolve();
-    },
-    reset: () => {
-      passes = [];
-    },
-    record: () => {
-      if (probe.enabled) passes.push({ dispatches: 1 });
-    },
-  };
-  return probe;
-};
-
-type World = {
-  readonly log: string[];
-  readonly resident: Set<string>;
-  readonly maxResident: { value: number };
-  readonly sentOptions: ChatOptions[];
-};
-
-/**
- * Fake pipelines: `chat` streams `newTokens − 1` tokens then a stop token, one tick of the clock per
- * token, recording a pass on the probe for every token while it is enabled.
- */
-const fakeDependencies = (
-  world: World,
-  probe: FakeProbe,
-  failChatAt?: number,
-): BenchDependencies => {
-  let clock = 0;
-  let chats = 0;
-  return {
-    probe,
-    now: () => (clock += 1),
-    sha256: (bytes) => Promise.resolve(`sha-${bytes.byteLength}`),
-    pause: () => Promise.resolve(),
-    build: (built) => {
-      world.log.push(`build ${built.model}`);
-      world.resident.add(built.model);
-      world.maxResident.value = Math.max(world.maxResident.value, world.resident.size);
-      const pipeline: BenchPipeline = {
-        encodePrompt: (messages) =>
-          Array.from({ length: messages[0].content.length }, (_, index) =>
-            (messages[0].content as string).charCodeAt(index),
-          ),
-        chat: (_messages, options) => {
-          world.sentOptions.push(options);
-          probe.enabledAtChat.push(probe.enabled);
-          const index = chats;
-          chats += 1;
-          let settle!: (stop: ChatStop) => void;
-          let reject!: (error: unknown) => void;
-          const done = new Promise<ChatStop>((resolve, fail) => {
-            settle = resolve;
-            reject = fail;
-          });
-          done.catch(() => {});
-          const stream: ChatStream = {
-            done,
-            [Symbol.asyncIterator]: () => {
-              throw new Error("the runner drains with text()");
-            },
-            text: async () => {
-              if (index === failChatAt) {
-                const error = new Error("chat failed");
-                reject(error);
-                throw error;
-              }
-              options.onPrefill?.({ chunk: 1, chunks: 1 });
-              const maxNewTokens = options.maxNewTokens;
-              if (maxNewTokens === undefined) throw new Error("the runner sets maxNewTokens");
-              for (let token = 0; token < maxNewTokens - 1; token += 1) {
-                options.signal?.throwIfAborted();
-                probe.record();
-                options.onToken?.(100 + token);
-              }
-              probe.record();
-              settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
-              return "text";
-            },
-          };
-          return stream;
-        },
-        dispose: () => {
-          world.log.push(`dispose ${built.model}`);
-          world.resident.delete(built.model);
-          return Promise.resolve();
-        },
-      };
-      return Promise.resolve(pipeline);
-    },
-  };
-};
-
-const newWorld = (): World => ({
-  log: [],
-  resident: new Set(),
-  maxResident: { value: 0 },
-  sentOptions: [],
-});
-
 const runBench = async (input: {
   readonly arms: readonly RunArm[];
   readonly settings?: BenchSettings;
   readonly failChatAt?: number;
   readonly signal?: AbortSignal;
 }) => {
-  const world = newWorld();
-  const probe = fakeProbe();
+  const { dependencies, probe, world } = fakeBenchDependencies({ failChatAt: input.failChatAt });
   const { visits, chats, stop } = await settleDecodeBench({
     arms: input.arms,
     settings: input.settings ?? SETTINGS,
     signal: input.signal ?? new AbortController().signal,
-    dependencies: fakeDependencies(world, probe, input.failChatAt),
+    dependencies,
     onProgress: () => {},
   });
   return { world, probe, visits, chats, stop };
@@ -175,7 +47,7 @@ describe("the bench loop", () => {
   it("visits the arms in ABBA order, building each pipeline only after the previous one is released", async () => {
     const { world, stop } = await runBench({ arms: [arm("e2b"), arm("qat-e2b")] });
     expect(stop).toEqual({ kind: "completed" });
-    expect(world.log).toEqual([
+    expect(world.lifecycle).toEqual([
       "build e2b",
       "dispose e2b",
       "build qat-e2b",
@@ -185,7 +57,7 @@ describe("the bench loop", () => {
       "build e2b",
       "dispose e2b",
     ]);
-    expect(world.maxResident.value).toBe(1);
+    expect(world.maxResident()).toBe(1);
   });
 
   it("runs every prompt `chats` times per visit, in the set's order, chat 0 marked cold", async () => {
@@ -211,11 +83,11 @@ describe("the bench loop", () => {
   });
 
   it("enables the probe only for a tapped arm's chats, and measures the tap only there", async () => {
-    const { probe, chats } = await runBench({
+    const { world, probe, chats } = await runBench({
       arms: [arm("e2b", true), arm("e2b-control", false)],
       settings: { ...SETTINGS, rounds: 1, prompts: ["few-ids"] },
     });
-    expect(probe.enabledAtChat).toEqual([true, true, false, false]);
+    expect(world.enabledAtChat).toEqual([true, true, false, false]);
     expect(probe.enabled).toBe(false);
     const tapped = chats.filter((chat) => chat.arm === 0);
     const control = chats.filter((chat) => chat.arm === 1);
@@ -251,7 +123,7 @@ describe("the bench loop", () => {
     it("releases the pipeline, keeps what finished, and stops failed with the chat's error", async () => {
       const { world, chats, stop } = await runBench({ arms: [arm("e2b")], failChatAt: 1 });
       expect(stop).toEqual({ kind: "failed", error: new Error("chat failed") });
-      expect(world.log).toEqual(["build e2b", "dispose e2b"]);
+      expect(world.lifecycle).toEqual(["build e2b", "dispose e2b"]);
       expect(chats).toHaveLength(1);
     });
   });
@@ -265,7 +137,7 @@ describe("the bench loop", () => {
         signal: controller.signal,
       });
       expect(stop).toEqual({ kind: "cancelled" });
-      expect(world.log).toEqual([]);
+      expect(world.lifecycle).toEqual([]);
     });
   });
 });

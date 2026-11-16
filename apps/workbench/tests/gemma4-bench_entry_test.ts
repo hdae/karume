@@ -1,4 +1,3 @@
-import type { ChatStop, ChatStream } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import gemmaBench from "../src/entries/local/gemma4-bench.ts";
@@ -6,14 +5,12 @@ import { ParameterError, parseParameters } from "../src/entry.ts";
 import type { BenchSettings } from "../src/gemma4-bench/plan.ts";
 import { benchProgressLine } from "../src/gemma4-bench/progress.ts";
 import { decodeBenchResult } from "../src/gemma4-bench/result.ts";
+import { type RunArm, settleDecodeBench } from "../src/gemma4-bench/run.ts";
 import {
-  type BenchDependencies,
-  type BenchPipeline,
-  type BenchProbe,
-  type RunArm,
-  settleDecodeBench,
-} from "../src/gemma4-bench/run.ts";
-
+  type BenchFakeOptions,
+  fakeBenchDependencies,
+  SPLIT_LABEL,
+} from "./helpers/gemma4-bench-fakes.ts";
 import { REGULAR } from "./helpers/gemma4-bench-manifests.ts";
 import { hex, memoryDistributions } from "./helpers/session-ab-manifests.ts";
 
@@ -22,8 +19,6 @@ const SIGNAL = new AbortController().signal;
 /** The typed parameters of `given` (strings, as a URL or a command line gives them). */
 const parameters = (given: Readonly<Record<string, string>> = {}) =>
   parseParameters(gemmaBench.parameters, given);
-
-const LINEAR = "linear_gemv_parallel:wi4g32:l32";
 
 const FACTS = {
   gemma4: { directory: "models/karume-gemma4", manifestSha256: hex("1"), read: "directory" },
@@ -64,124 +59,17 @@ const SETTINGS: BenchSettings = {
   prompts: ["few-ids"],
 };
 
-/**
- * A fake probe: while enabled it records one pass of one dispatch per token step (labelled with
- * {@link LINEAR} in the split mode), and `readTimes` times every pass at 0.25 ms.
- */
-const fakeProbe = (): BenchProbe & { readonly record: () => void } => {
-  let passes: { dispatches: number; label?: string; beginNs?: bigint; endNs?: bigint }[] = [];
-  const probe: BenchProbe & { readonly record: () => void } = {
-    enabled: false,
-    mode: "passes",
-    passes: () => passes,
-    submits: () => passes.length,
-    readTimes: () => {
-      passes = passes.map((pass, index) => ({
-        ...pass,
-        beginNs: BigInt(index * 1_000_000),
-        endNs: BigInt(index * 1_000_000 + 250_000),
-      }));
-      return Promise.resolve();
-    },
-    reset: () => {
-      passes = [];
-    },
-    record: () => {
-      if (probe.enabled) {
-        passes.push({ dispatches: 1, ...(probe.mode === "dispatches" ? { label: LINEAR } : {}) });
-      }
-    },
-  };
-  return probe;
-};
-
-/**
- * What a fake run does besides streaming: `failChatAt` (0-based over the run) fails that chat,
- * `failBuild` fails every build, `onPause` runs at every pause, and `events` logs the builds, the
- * pauses, the chats and the progress lines in order.
- */
-type FakeOptions = {
-  readonly failChatAt?: number;
-  readonly failBuild?: boolean;
-  readonly onPause?: () => void;
-  readonly events?: string[];
-};
-
-/**
- * Fake dependencies: a clock that ticks 1 ms per reading, and pipelines whose `chat` streams
- * `newTokens − 1` tokens then a stop token, one probe pass per step.
- */
-const fakeDependencies = (options: FakeOptions): BenchDependencies => {
-  const probe = fakeProbe();
-  let clock = 0;
-  let chats = 0;
-  return {
-    probe,
-    now: () => (clock += 1),
-    sha256: (bytes) => Promise.resolve(`sha-${bytes.byteLength}`),
-    pause: () => {
-      options.events?.push("pause");
-      options.onPause?.();
-      return Promise.resolve();
-    },
-    build: (arm) => {
-      options.events?.push(`build ${arm.model}`);
-      if (options.failBuild === true) return Promise.reject(new Error("build failed"));
-      const pipeline: BenchPipeline = {
-        encodePrompt: () => [1, 2, 3],
-        chat: (_messages, chatOptions) => {
-          options.events?.push("chat");
-          const index = chats;
-          chats += 1;
-          let settle!: (stop: ChatStop) => void;
-          let reject!: (error: unknown) => void;
-          const done = new Promise<ChatStop>((resolve, fail) => {
-            settle = resolve;
-            reject = fail;
-          });
-          done.catch(() => {});
-          const stream: ChatStream = {
-            done,
-            [Symbol.asyncIterator]: () => {
-              throw new Error("the runner drains with text()");
-            },
-            text: () => {
-              if (index === options.failChatAt) {
-                const error = new Error("chat failed");
-                reject(error);
-                return Promise.reject(error);
-              }
-              chatOptions.onPrefill?.({ chunk: 1, chunks: 1 });
-              const maxNewTokens = chatOptions.maxNewTokens ?? 0;
-              for (let token = 0; token < maxNewTokens - 1; token += 1) {
-                probe.record();
-                chatOptions.onToken?.(100 + token);
-              }
-              probe.record();
-              settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
-              return Promise.resolve("text");
-            },
-          };
-          return stream;
-        },
-        dispose: () => Promise.resolve(),
-      };
-      return Promise.resolve(pipeline);
-    },
-  };
-};
-
 /** One fake bench run of `arms` and its result. */
 const benchOf = async (
   arms: readonly RunArm[],
-  options: FakeOptions & { readonly signal?: AbortSignal } = {},
+  options: BenchFakeOptions & { readonly signal?: AbortSignal } = {},
 ) => {
   const settings = SETTINGS;
   const outcome = await settleDecodeBench({
     arms,
     settings,
     signal: options.signal ?? SIGNAL,
-    dependencies: fakeDependencies(options),
+    dependencies: fakeBenchDependencies(options).dependencies,
     onProgress: (progress) =>
       options.events?.push(benchProgressLine(progress, arms, settings.chats)),
   });
@@ -191,20 +79,6 @@ const benchOf = async (
 
 describe("the gemma4-bench entry", () => {
   describe("its parameters", () => {
-    it("are the arms, the workload, the device and the source", () => {
-      expect(gemmaBench.id).toBe("gemma4-bench");
-      expect(gemmaBench.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
-        "arms:text",
-        "chats:integer",
-        "newTokens:integer",
-        "rounds:integer",
-        "sampler:choice",
-        "prompts:choices",
-        "subgroups:boolean",
-        "source:choice",
-      ]);
-    });
-
     it("default to the default arms, 3 chats of 128 new tokens over 4 rounds, greedy, both prompts, subgroups when the device has them, cached", () => {
       expect(parameters()).toEqual({
         arms: "",
@@ -218,7 +92,7 @@ describe("the gemma4-bench entry", () => {
       });
     });
 
-    it("need a warm chat, a decode token and a round, and refuse what is not an integer", () => {
+    it("need a warm chat, a decode token and a round, and take at most 1000 chats", () => {
       expect(parameters({ chats: "2", newTokens: "2", rounds: "1" })).toMatchObject({
         chats: 2,
         newTokens: 2,
@@ -228,8 +102,6 @@ describe("the gemma4-bench entry", () => {
         ["chats", "1"],
         ["newTokens", "1"],
         ["rounds", "0"],
-        ["chats", "2.5"],
-        ["rounds", "-1"],
         ["chats", "1001"],
       ] as const) {
         expect(() => parameters({ [name]: value }), `${name}=${value}`).toThrow(
@@ -381,7 +253,7 @@ describe("the gemma4-bench entry", () => {
         "arm 1 Gemma 4 e2b bf16 (split) · Story request · 1 warm chats · GPU 0.250 ms/token (split)",
         "    ms/tok  share disp/tok  family / key",
         "     0.250 100.0%      1.0  linear",
-        `     0.250 100.0%      1.0  linear  ${LINEAR}`,
+        `     0.250 100.0%      1.0  linear  ${SPLIT_LABEL}`,
       ]);
     });
 

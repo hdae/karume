@@ -1,51 +1,44 @@
-import type { Manifest } from "@karume/hub";
+import { parseManifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   type ArmDraft,
   armLabel,
+  type ArmResolution,
   BENCH_PROMPTS,
   defaultArmDrafts,
+  integerGemvSession,
   meetsDistinctIdCondition,
   resolveArm,
   samplerOf,
   visitOrder,
 } from "../src/gemma4-bench/plan.ts";
 
-const pipelineConfig = {
-  capacity: 4096,
-  chunkLength: 768,
-  maxChunkLength: 768,
-  maxPosition: 32768,
-  rope: {
-    sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
-    full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
-  },
-  sampler: { temperature: 1, topK: 64, topP: 0.95 },
+import { MOBILE, QAT, REGULAR } from "./helpers/gemma4-bench-manifests.ts";
+
+const MANIFESTS = {
+  "gemma4-qat": parseManifest(QAT),
+  "gemma4-qat-mobile": parseManifest(MOBILE),
 };
 
-/** A manifest with the given models, each with presets `i4` and `i4-fast` (`i4-fast` the default). */
-const manifest = (defaultModel: string, models: readonly string[]): Manifest =>
-  ({
-    defaultModel,
-    models: Object.fromEntries(
-      models.map((model) => [
-        model,
-        {
-          defaultQuant: "i4-fast",
-          quants: { i4: { label: "int4" }, "i4-fast": { label: "int4 fast" } },
-          weights: {},
-          pipelineConfig,
-        },
-      ]),
-    ),
-  }) as unknown as Manifest;
-
+/** A mobile QAT E2B arm, tap on (the default preset, `i4-fast`, declares the packed activations). */
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
   key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
 });
+
+/** A QAT 12B arm (the model without a PLE), tap off. */
+const twelve = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
+  key: { mount: "gemma4-qat", model: "12b" },
+  tap: false,
+  ...patch,
+});
+
+const armOf = (resolution: ArmResolution) => {
+  if (!resolution.ok) throw new Error(resolution.error);
+  return resolution.arm;
+};
 
 describe("the prompt set", () => {
   it("has one prompt on each side of the PLE distinct-id threshold", () => {
@@ -65,8 +58,8 @@ describe("the arms", () => {
   describe("by default", () => {
     it("takes each loaded distribution's default model, regular Gemma 4 first, tap on", () => {
       const drafts = defaultArmDrafts({
-        "gemma4-qat-mobile": manifest("e2b", ["e2b", "e4b"]),
-        gemma4: manifest("e2b", ["e2b", "e4b"]),
+        "gemma4-qat-mobile": parseManifest(MOBILE),
+        gemma4: parseManifest(REGULAR),
       });
       expect(drafts.map(({ key, tap }) => ({ ...key, tap }))).toEqual([
         { mount: "gemma4", model: "e2b", tap: true },
@@ -75,77 +68,164 @@ describe("the arms", () => {
     });
 
     it("leaves out a distribution whose manifest is not loaded", () => {
-      expect(defaultArmDrafts({ "gemma4-qat-mobile": manifest("e4b", ["e4b"]) })).toEqual([
-        { key: { mount: "gemma4-qat-mobile", model: "e4b" }, tap: true },
+      expect(defaultArmDrafts({ "gemma4-qat-mobile": parseManifest(MOBILE) })).toEqual([
+        { key: { mount: "gemma4-qat-mobile", model: "e2b" }, tap: true },
       ]);
     });
   });
 
   describe("resolved against the manifests", () => {
-    const manifests = { "gemma4-qat-mobile": manifest("e2b", ["e2b", "e4b", "e12b"]) };
-
-    it("preselects the model's default preset", () => {
-      const resolved = resolveArm(draft(), manifests);
-      expect(resolved).toMatchObject({
-        ok: true,
-        arm: { quant: "i4-fast", quantLabel: "int4 fast", isDefaultQuant: true },
+    it("preselects the model's default preset with its label, and carries the distribution's declared sampler", () => {
+      expect(armOf(resolveArm(draft(), MANIFESTS))).toMatchObject({
+        quant: "i4-fast",
+        quantLabel: "i4-fast label",
+        isDefaultQuant: true,
+        declaredSampler: { temperature: 1, topK: 64, topP: 0.95 },
       });
     });
 
     it("keeps a chosen preset and says it is not the default", () => {
-      expect(resolveArm(draft({ quant: "i4" }), manifests)).toMatchObject({
-        ok: true,
-        arm: { quant: "i4", isDefaultQuant: false },
+      expect(armOf(resolveArm(draft({ quant: "i4" }), MANIFESTS))).toMatchObject({
+        quant: "i4",
+        isDefaultQuant: false,
       });
     });
 
-    it("refuses a preset the model does not have, naming its presets", () => {
-      expect(resolveArm(draft({ quant: "bf16" }), manifests)).toEqual({
-        ok: false,
-        error:
-          "The gemma4-qat-mobile model 'e2b' has no preset 'bf16'; its presets are i4, i4-fast.",
-      });
+    it("passes the Session and pipeline options of its switches, and the split as the arms parser left it", () => {
+      for (const [name, given, session, pipeline, split] of [
+        ["no switch", draft(), undefined, undefined, undefined],
+        // The default preset declares the packed activations: integerGemv alone.
+        ["integer", draft({ integerGemv: true }), { integerGemv: true }, undefined, undefined],
+        [
+          "integer on i4",
+          draft({ quant: "i4", integerGemv: true }),
+          {
+            integerGemv: true,
+            packedStaticQuantize: true,
+            numerics: { ops: { linear: "reorder" } },
+          },
+          undefined,
+          undefined,
+        ],
+        ["integer off", draft({ integerGemv: false }), undefined, undefined, undefined],
+        [
+          "PLE on GPU, ahead 4",
+          draft({ pleOnGpu: true, decodeAhead: "4" }),
+          undefined,
+          { pleResidency: "gpu", decodeAhead: 4 },
+          undefined,
+        ],
+        [
+          "PLE on GPU, ahead 1",
+          draft({ pleOnGpu: true, decodeAhead: "1" }),
+          undefined,
+          { pleResidency: "gpu" },
+          undefined,
+        ],
+        [
+          "PLE on the host, ahead 1",
+          draft({ pleOnGpu: false, decodeAhead: "1" }),
+          undefined,
+          undefined,
+          undefined,
+        ],
+        // 12B has no PLE: it runs ahead without one.
+        ["12B ahead 4", twelve({ decodeAhead: "4" }), undefined, { decodeAhead: 4 }, undefined],
+        ["split", draft({ split: true }), undefined, undefined, true],
+      ] as const) {
+        const arm = armOf(resolveArm(given, MANIFESTS));
+        expect([arm.session, arm.pipeline, arm.split], name).toEqual([session, pipeline, split]);
+      }
     });
 
-    it("carries the distribution's declared sampler", () => {
-      expect(resolveArm(draft(), manifests)).toMatchObject({
-        ok: true,
-        arm: { declaredSampler: { temperature: 1, topK: 64, topP: 0.95 } },
-      });
-    });
-
-    it("refuses a QAT model the QAT entry point does not accept", () => {
-      expect(
-        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e12b" } }), manifests),
-      ).toEqual({ ok: false, error: "gemma4QatMobile.Pipeline does not accept the model 'e12b'." });
-    });
-
-    it("refuses a model of a manifest that is not loaded, or that it does not have", () => {
-      expect(resolveArm(draft({ key: { mount: "gemma4", model: "e2b" } }), manifests).ok).toBe(
-        false,
-      );
-      expect(
-        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }), manifests).ok,
-      ).toBe(false);
-    });
-
-    it("names the models the manifest has when it refuses one", () => {
-      expect(
-        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }), manifests),
-      ).toEqual({
-        ok: false,
-        error: "The gemma4-qat-mobile manifest has no model 'e9b'; its models are e2b, e4b, e12b.",
-      });
+    it("refuses an arm it cannot run, saying why and naming what the manifest has", () => {
+      for (const [given, error] of [
+        [
+          draft({ quant: "bf16" }),
+          "The gemma4-qat-mobile model 'e2b' has no preset 'bf16'; its presets are i4, i4-gemvpar, i4-fast.",
+        ],
+        [
+          draft({ key: { mount: "gemma4-qat-mobile", model: "12b" } }),
+          "gemma4QatMobile.Pipeline does not accept the model '12b'.",
+        ],
+        [draft({ key: { mount: "gemma4", model: "e2b" } }), "The gemma4 manifest is not loaded."],
+        [
+          draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }),
+          "The gemma4-qat-mobile manifest has no model 'e9b'; its models are e2b, e4b, 12b.",
+        ],
+        [
+          draft({ decodeAhead: "2" }),
+          "Decode ahead needs PLE on GPU (each step's token stays on the GPU, so its PLE gather must run there).",
+        ],
+        [twelve({ pleOnGpu: true }), "12B has no PLE to place on the GPU."],
+      ] as const) {
+        expect(resolveArm(given, MANIFESTS)).toEqual({ ok: false, error });
+      }
     });
   });
 
-  it("labels an arm by distribution, model and preset, marking a tap-off control", () => {
-    expect(armLabel({ mount: "gemma4", model: "e2b", quant: "i4-fast", tap: true })).toBe(
-      "Gemma 4 e2b i4-fast",
-    );
-    expect(armLabel({ mount: "gemma4-qat-mobile", model: "e4b", quant: "i4", tap: false })).toBe(
-      "mobile QAT e4b i4 (tap off)",
-    );
+  it("labels an arm by distribution, model and preset, then its integer GEMV, PLE placement and depth, then the tap's own mark", () => {
+    const mobile = { mount: "gemma4-qat-mobile", model: "e2b" } as const;
+    const integer = { integerGemv: true } as const;
+    for (const [arm, label] of [
+      [{ mount: "gemma4", model: "e2b", quant: "i4-fast", tap: true }, "Gemma 4 e2b i4-fast"],
+      [{ ...mobile, model: "e4b", quant: "i4", tap: false }, "mobile QAT e4b i4 (tap off)"],
+      [{ ...mobile, quant: "i4", tap: true, split: true }, "mobile QAT e2b i4 (split)"],
+      [
+        { ...mobile, quant: "i4-fast", tap: true, session: integer },
+        "mobile QAT e2b i4-fast (integer)",
+      ],
+      [
+        { ...mobile, quant: "i4-fast", tap: true, split: true, session: integer },
+        "mobile QAT e2b i4-fast (integer) (split)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: false, session: integer },
+        "mobile QAT e2b i4 (integer) (tap off)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: true, pipeline: { pleResidency: "gpu", decodeAhead: 8 } },
+        "mobile QAT e2b i4 (PLE GPU) (ahead 8)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: false, session: integer, pipeline: { pleResidency: "gpu" } },
+        "mobile QAT e2b i4 (integer) (PLE GPU) (tap off)",
+      ],
+    ] as const) {
+      expect(armLabel(arm)).toBe(label);
+    }
+  });
+});
+
+describe("the integer GEMV switch's explicit Session options", () => {
+  it("is integerGemv alone when the preset declares the packed activations", () => {
+    expect(
+      integerGemvSession({ numerics: { level: "reorder" }, packedStaticQuantize: true }),
+    ).toEqual({ integerGemv: true });
+  });
+
+  it("adds the packed activations and the parallel GEMV a preset does not declare", () => {
+    expect(integerGemvSession({})).toEqual({
+      integerGemv: true,
+      packedStaticQuantize: true,
+      numerics: { ops: { linear: "reorder" } },
+    });
+    expect(integerGemvSession({ numerics: { ops: { linear: "reorder" } } })).toEqual({
+      integerGemv: true,
+      packedStaticQuantize: true,
+    });
+    expect(
+      integerGemvSession({
+        numerics: { ops: { linear: "reorder" } },
+        packedStaticQuantize: false,
+      }),
+    ).toEqual({ integerGemv: true, packedStaticQuantize: true });
+    expect(
+      integerGemvSession({
+        numerics: { level: "reorder", ops: { linear: "exact" } },
+        packedStaticQuantize: true,
+      }),
+    ).toEqual({ integerGemv: true, numerics: { ops: { linear: "reorder" } } });
   });
 });
 

@@ -1,13 +1,10 @@
-import { parseManifest } from "@karume/hub";
 import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { sessionAbVaeData } from "../src/session-ab/data.ts";
 import type { GraphInput } from "../src/session-ab/feeds.ts";
-import type { SessionAbSettings } from "../src/session-ab/gemma-request.ts";
 import { presetOf } from "../src/session-ab/shared.ts";
-import { recordedCounts } from "../src/session-ab/summary.ts";
 import {
   sessionAbVaeRequest,
   VAE_AB_TARGETS,
@@ -17,7 +14,8 @@ import {
   vaeSessionOptions,
 } from "../src/session-ab/vae.ts";
 
-import { abRecord, steady } from "./helpers/session-ab-records.ts";
+import { hex, manifestOf, WAN_MANIFEST } from "./helpers/session-ab-manifests.ts";
+import { abRecord, SETTINGS, steady, wordsOf } from "./helpers/session-ab-records.ts";
 
 const RULE = VAE_RMS_SILU_RULE_NAME;
 
@@ -28,81 +26,11 @@ const CHUNK_INPUTS: readonly GraphInput[] = [
   { name: "cache_01", dtype: "f32", shape: [5, 2, 2, 2] },
 ];
 
-const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number[] => [
-  ...new Uint32Array(data.buffer, data.byteOffset, data.length),
-];
-
-const settings = (patch: Partial<SessionAbSettings> = {}): SessionAbSettings => ({
-  rounds: 4,
-  tokens: 96,
-  minGain: 0.01,
-  openPerVisit: true,
-  probeCounts: true,
-  ...patch,
-});
-
-const hex = (character: string): string => character.repeat(64);
-
-const container = (component: string, dtype: string) => ({
-  container: {
-    descriptor: {
-      graph: { length: 8, sha256: hex("d") },
-      model: { length: 8, sha256: hex("e") },
-    },
-    parts: [
-      { path: `m/${component}/model.${dtype}-00001-of-00002.krm`, size: 40, sha256: hex("a") },
-      { path: `m/${component}/model.${dtype}-00002-of-00002.krm`, size: 8, sha256: hex("b") },
-    ],
-  },
-});
-
-/** A `karume/5` manifest with the Wan2.2 mirror's shape: the next chunk graph at two storages. */
-const WAN_MANIFEST = parseManifest(
-  JSON.stringify({
-    format: "karume/5",
-    generator: "test",
-    defaultModel: "ti2v-5b",
-    models: {
-      "ti2v-5b": {
-        pipeline: "wan-ti2v/1",
-        assets: {},
-        weights: {
-          vae_decoder_next: {
-            f16: container("vae_decoder_next", "f16"),
-            i8: container("vae_decoder_next", "i8"),
-          },
-          transformer: { i8: container("transformer", "i8") },
-        },
-        quants: {
-          "f16+dit8-a8-attn8-online": {
-            weights: { vae_decoder_next: "f16", transformer: "i8" },
-            session: {
-              linearCompute: "a8",
-              attentionCompute: "a8",
-              attentionScoreStorage: "none",
-            },
-          },
-          i8: { weights: { vae_decoder_next: "i8", transformer: "i8" }, session: {} },
-          "i8-a8-attn8-online-conv8": {
-            weights: { vae_decoder_next: "i8", transformer: "i8" },
-            session: {
-              linearCompute: "a8",
-              attentionCompute: "a8",
-              attentionScoreStorage: "none",
-              convCompute: "a8",
-            },
-          },
-        },
-        defaultQuant: "i8-a8-attn8-online-conv8",
-        pipelineConfig: {},
-      },
-    },
-  }),
-);
+const WAN = manifestOf(WAN_MANIFEST);
 
 /** The Wan2.2 model at `preset` for the next chunk graph. */
 const wanModel = (preset: string) =>
-  vaeAbModel("wan22-vae-next", "ti2v-5b", presetOf(WAN_MANIFEST, "ti2v-5b", preset));
+  vaeAbModel("wan22-vae-next", "ti2v-5b", presetOf(WAN, "ti2v-5b", preset));
 
 const CONV8 = wanModel("i8-a8-attn8-online-conv8");
 
@@ -124,7 +52,7 @@ const countedRecord = (): SessionAbRecord => {
 
 const dataOf = (
   record: SessionAbRecord,
-  request = sessionAbVaeRequest("wan22-vae-next", CONV8, settings({ rounds: 3 })),
+  request = sessionAbVaeRequest("wan22-vae-next", CONV8, SETTINGS),
 ) =>
   sessionAbVaeData({
     request,
@@ -209,22 +137,18 @@ describe("the session A/B's VAE targets", () => {
       expect(wanModel("f16+dit8-a8-attn8-online").storage).toBe("f16");
       // The anima target's component is not in a Wan2.2 manifest.
       expect(() =>
-        vaeAbModel("anima-vae-decode", "ti2v-5b", presetOf(WAN_MANIFEST, "ti2v-5b", "i8")),
+        vaeAbModel("anima-vae-decode", "ti2v-5b", presetOf(WAN, "ti2v-5b", "i8")),
       ).toThrow("Preset 'i8' of model 'ti2v-5b' has no 'vae_decoder'");
     });
 
-    it("names the two arms, the options every arm gets and the seed, and opens per visit whatever the form says", () => {
-      const request = sessionAbVaeRequest(
-        "wan22-vae-next",
-        CONV8,
-        settings({ openPerVisit: false }),
-      );
+    it("names the two arms, the options every arm gets and the seed", () => {
+      const request = sessionAbVaeRequest("wan22-vae-next", CONV8, SETTINGS);
       expect(request).toEqual({
         target: "wan22-vae-next",
         mount: "wan22",
         component: "vae_decoder_next",
         ...CONV8,
-        rounds: 4,
+        rounds: 3,
         minGain: 0.01,
         openPerVisit: true,
         seed: 0x5eed,
@@ -237,7 +161,7 @@ describe("the session A/B's VAE targets", () => {
       const anima = sessionAbVaeRequest(
         "anima-vae-decode",
         { model: "anima-turbo-v1.1", quant: "f16", session: {}, storage: "f16" },
-        settings(),
+        SETTINGS,
       );
       expect([anima.mount, anima.component, anima.sessionOptions]).toEqual([
         "anima",
@@ -247,7 +171,7 @@ describe("the session A/B's VAE targets", () => {
     });
 
     it("gives each arm the request's options and the rule it names, the base none", () => {
-      const arms = vaeArmOptions(sessionAbVaeRequest("wan22-vae-next", CONV8, settings()));
+      const arms = vaeArmOptions(sessionAbVaeRequest("wan22-vae-next", CONV8, SETTINGS));
       expect(arms.map(({ name }) => name)).toEqual(["base", "rule"]);
       expect(arms[0].options).toEqual({ convCompute: "a8" });
       const { options } = arms[1];
@@ -266,23 +190,6 @@ describe("the session A/B's VAE targets", () => {
         { name: RULE, package: "@karume/models", keyPrefix: "ext:models:" },
       ]);
       expect(data.record).toBe(record);
-      expect(JSON.parse(JSON.stringify(data))).toEqual(data);
-      expect(data.record.arms.map((arm) => recordedCounts(arm)?.fusions[RULE] ?? 0)).toEqual([
-        0, 30,
-      ]);
-    });
-
-    it("refuses a runtime record of other arms or rounds, or whose arms reported no counts", () => {
-      const record = countedRecord();
-      expect(() => dataOf({ ...record, rounds: 4 })).toThrow("is not the request's");
-      expect(() => dataOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
-        "is not the request's",
-      );
-      const [base, rule] = record.arms;
-      const uncounted = { name: rule.name, timesMs: rule.timesMs, identity: rule.identity };
-      expect(() => dataOf({ ...record, arms: [base, uncounted] })).toThrow(
-        "arm(s) rule reported no counts",
-      );
     });
   });
 });

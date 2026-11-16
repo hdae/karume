@@ -4,7 +4,6 @@ import { describe, expect, it } from "vite-plus/test";
 import geometrySweep from "../src/entries/geometry-sweep.ts";
 import { ParameterError, parseParameters } from "../src/entry.ts";
 import {
-  CANDIDATE_SETS,
   planSweep,
   SWEEP_CASE_IDS,
   SWEEP_OPS,
@@ -52,15 +51,14 @@ describe("the parameters", () => {
     expect(SWEEP_CASE_IDS).toEqual(tables.map(({ id }) => id));
   });
 
-  it.each([
-    [{ rounds: "0" }, "rounds"],
-    [{ rounds: "2.5" }, "rounds"],
-    [{ rounds: "" }, "rounds"],
-    [{ idleSeconds: "-1" }, "idleSeconds"],
-    [{ idleSeconds: " " }, "idleSeconds"],
-  ])("refuse %o, naming the parameter", (given, parameter) => {
-    expect(() => selectionOf(given)).toThrow(ParameterError);
-    expect(() => selectionOf(given)).toThrow(`Parameter ${parameter}:`);
+  it("take no idle at all but no fewer seconds, and at least one round", () => {
+    expect(selectionOf({ idleSeconds: "0" }).idleSeconds).toBe(0);
+    for (const [name, value] of [
+      ["idleSeconds", "-1"],
+      ["rounds", "0"],
+    ] as const) {
+      expect(() => selectionOf({ [name]: value }), name).toThrow(new RegExp(`^Parameter ${name}:`));
+    }
   });
 });
 
@@ -118,14 +116,10 @@ describe("planSweep", () => {
       expect(() => planSweep({ ...DEFAULTS, ops: [] }, CASES)).toThrow("Choose at least one case");
     });
   });
-
-  it("accepts no idle at all", () => {
-    expect(planSweep(selectionOf({ idleSeconds: "0" }), CASES).idleSeconds).toBe(0);
-  });
 });
 
 describe("a full run of the i8a8-linear family alone (ADR 0115 addendum decision 14)", () => {
-  it("with only the i8a8-linear op family under full, plans the family's 13 cases of the sweep's own table in its order (one call per case, merged into one record)", () => {
+  it("with only the i8a8-linear op family under full, plans the family's cases of the sweep's own table in its order (one call per case, merged into one record)", () => {
     const runtimeCases = geometrySweepCases();
     const plan = planSweep(
       selectionOf({ candidateSet: "full", ops: "i8a8-linear" }),
@@ -136,9 +130,6 @@ describe("a full run of the i8a8-linear family alone (ADR 0115 addendum decision
     expect(plan.caseIds).toEqual(
       runtimeCases.filter(({ op }) => op === "i8a8-linear").map(({ id }) => id),
     );
-    expect(plan.caseIds.length).toBe(13);
-    // The entry offers the sets the runtime has (the evaluation set k85 is retired)
-    expect([...CANDIDATE_SETS]).toEqual(["quick", "quick+", "full", "k88"]);
   });
 });
 

@@ -30,15 +30,30 @@ export const container = (path: string) => ({
   },
 });
 
-/** The manifest's JSON text: `models` (the first is the default), each with `presets` of `component`. */
+/**
+ * The manifest's JSON text: `models` (the first is the default), each with `presets` (name →
+ * session). A preset loads `component` at i8 unless `weights` names its own storages (component →
+ * storage); every storage a preset names has its container.
+ */
 export const manifestText = (input: {
   readonly pipeline: string;
   readonly models: readonly string[];
   readonly component: string;
   readonly presets: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  readonly weights?: Readonly<Record<string, Readonly<Record<string, string>>>>;
   readonly defaultPreset: string;
-}): string =>
-  JSON.stringify({
+}): string => {
+  const weightsOf = (preset: string): Readonly<Record<string, string>> =>
+    input.weights !== undefined && Object.hasOwn(input.weights, preset)
+      ? input.weights[preset]
+      : { [input.component]: "i8" };
+  const storages = new Map<string, Set<string>>();
+  for (const preset of Object.keys(input.presets)) {
+    for (const [component, storage] of Object.entries(weightsOf(preset))) {
+      storages.set(component, (storages.get(component) ?? new Set()).add(storage));
+    }
+  }
+  return JSON.stringify({
     format: "karume/5",
     generator: "test",
     defaultModel: input.models[0],
@@ -48,11 +63,21 @@ export const manifestText = (input: {
         {
           pipeline: input.pipeline,
           assets: {},
-          weights: { [input.component]: { i8: container(`${model}/${input.component}.krm`) } },
+          weights: Object.fromEntries(
+            [...storages].map(([component, names]) => [
+              component,
+              Object.fromEntries(
+                [...names].map((storage) => [
+                  storage,
+                  container(`${model}/${component}.${storage}.krm`),
+                ]),
+              ),
+            ]),
+          ),
           quants: Object.fromEntries(
             Object.entries(input.presets).map(([name, session]) => [
               name,
-              { weights: { [input.component]: "i8" }, session },
+              { weights: weightsOf(name), session },
             ]),
           ),
           defaultQuant: input.defaultPreset,
@@ -61,6 +86,7 @@ export const manifestText = (input: {
       ]),
     ),
   });
+};
 
 /** A Gemma-shaped distribution of `models`, each with the presets `i4` and `i4-fast` (default). */
 export const gemmaManifestText = (models: readonly string[]): string =>
@@ -101,3 +127,45 @@ export const memoryDistributions =
       facts: { directory: `models/karume-${mount}`, manifestSha256: hex("f"), read: "directory" },
     };
   };
+
+/** The MOSS-Image mirror's shape: one model, the reference preset and the practical one (default). */
+export const MOSS_MANIFEST = manifestText({
+  pipeline: "moss-image/1",
+  models: ["sft"],
+  component: "dit",
+  presets: {
+    "f32+dit8": {},
+    "f32+dit8-a8-attn8-online": {
+      linearCompute: "a8",
+      attentionCompute: "a8",
+      attentionScoreStorage: "none",
+    },
+  },
+  defaultPreset: "f32+dit8-a8-attn8-online",
+});
+
+/**
+ * The Wan2.2 mirror's shape around the next chunk graph: a preset with the f16 VAE, the i8 one,
+ * and the conv8 one (the default).
+ */
+export const WAN_MANIFEST = manifestText({
+  pipeline: "wan-ti2v/1",
+  models: ["ti2v-5b"],
+  component: "vae_decoder_next",
+  presets: {
+    "f16+dit8-a8-attn8-online": {
+      linearCompute: "a8",
+      attentionCompute: "a8",
+      attentionScoreStorage: "none",
+    },
+    i8: {},
+    "i8-a8-attn8-online-conv8": {
+      linearCompute: "a8",
+      attentionCompute: "a8",
+      attentionScoreStorage: "none",
+      convCompute: "a8",
+    },
+  },
+  weights: { "f16+dit8-a8-attn8-online": { vae_decoder_next: "f16" } },
+  defaultPreset: "i8-a8-attn8-online-conv8",
+});

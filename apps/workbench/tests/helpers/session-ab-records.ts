@@ -6,7 +6,17 @@
 
 import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
 
+import type { RoundsAndGain } from "../../src/session-ab/shared.ts";
+
 export const RULE = "candidate/gelu_mul";
+
+/** The settings of a request whose record is {@link abRecord}'s (three rounds). */
+export const SETTINGS: RoundsAndGain = { rounds: 3, minGain: 0.01 };
+
+/** A feed's or an output's words, as the runner compares them. */
+export const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number[] => [
+  ...new Uint32Array(data.buffer, data.byteOffset, data.length),
+];
 
 type Times = readonly (readonly [number, number])[];
 

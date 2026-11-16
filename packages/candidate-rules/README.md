@@ -44,5 +44,5 @@ Who imports it (every importer; keep this list complete when one is added):
 - `packages/e2e/tests/e2e_external_fusion_rule_test.ts` and `e2e_gemma4_26b_external_rule_test.ts` — the e2e tests in
   the table above.
 - `apps/workbench/src/entries/local/gemma4-session-ab.ts` — the workbench entry `gemma4-session-ab` (its rule arm
-  passes `candidate/gelu_mul`), `apps/workbench/tests/session-ab_arm_test.ts`, the test of its arms, and
+  passes `candidate/gelu_mul`), `apps/workbench/tests/session-ab_gemma-arm_test.ts`, the test of its arms, and
   `apps/workbench/tests/gemma4-session-ab_entry_test.ts`, the test of its request and result.

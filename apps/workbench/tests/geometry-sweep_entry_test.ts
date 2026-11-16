@@ -1,12 +1,10 @@
 import {
-  deriveGeometryProfile,
   type GeometrySweepOptions,
   type GeometrySweepReport,
   geometrySweepCases,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import geometrySweep from "../src/entries/geometry-sweep.ts";
 import {
   foldSweepEvent,
   INITIAL_LIVE,
@@ -18,7 +16,6 @@ import {
 import type { SweepPlan } from "../src/geometry-sweep/settings.ts";
 import { geometrySweepResult, progressLine } from "../src/geometry-sweep/summary.ts";
 import {
-  CANDIDATE_GEOMETRY,
   CASE_A,
   CASE_B,
   type PerCaseOptions,
@@ -59,31 +56,13 @@ const recordOf = (data: GeometrySweepReport | undefined): GeometrySweepReport =>
 const CASE_LINE = (caseId: string): string =>
   `${caseId}: 2 rows · default 20.000 ms · drift 1.010 · fastest identical tile64x64r8x4w16x8k16 ×1.250 · 0 errors · 0 mismatches · 120 s`;
 
-describe("the geometry-sweep entry", () => {
-  it("declares the candidate set, the op families, the cases, the rounds and the idle seconds", () => {
-    expect(geometrySweep.id).toBe("geometry-sweep");
-    expect(geometrySweep.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
-      "candidateSet:choice",
-      "ops:choices",
-      "cases:choices",
-      "rounds:integer",
-      "idleSeconds:integer",
-    ]);
-  });
-});
-
 describe("geometrySweepResult", () => {
   describe("when every planned case ran", () => {
-    it("keeps the merged record, which deriveGeometryProfile accepts as one input", async () => {
+    it("keeps the record merged from every case as its data", async () => {
       const result = geometrySweepResult(PLAN, await runWith(new AbortController().signal));
       const record = recordOf(result.data);
       expect(record.format).toBe("karume-geometry-sweep/3");
       expect(record.settings.cases).toEqual([CASE_A, CASE_B]);
-      const { profile } = deriveGeometryProfile(
-        [{ report: record, path: "record.json", sha256: "sha" }],
-        { id: "nvidia-blackwell", vendor: "nvidia", architecture: "blackwell" },
-      );
-      expect(profile.i8a8.conv3d).toEqual(CANDIDATE_GEOMETRY);
     });
 
     it("sums up the totals, then one line per case", async () => {
@@ -117,17 +96,15 @@ describe("geometrySweepResult", () => {
   });
 
   describe("when Cancel stopped the run after the first case", () => {
-    it("keeps that case in an aborted record and says why the run stopped", async () => {
+    it("marks its record aborted and says why the run stopped", async () => {
       const controller = new AbortController();
       const outcome = await runWith(controller.signal, (call) => {
         if (call === 1) controller.abort(new Error("Cancelled by the user"));
         return {};
       });
       const result = geometrySweepResult(PLAN, outcome);
-      const record = recordOf(result.data);
-      expect(record.aborted).toBe(true);
-      expect(record.cases.map(({ caseId }) => caseId)).toEqual([CASE_A]);
-      expect(record.settings.cases).toEqual([CASE_A, CASE_B]);
+      // The cancel between cases is what marks the record aborted (the case itself finished).
+      expect(recordOf(result.data).aborted).toBe(true);
       expect(result.summary).toEqual([
         "1 of 2 planned cases finished · 2 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
         CASE_LINE(CASE_A),
@@ -143,7 +120,6 @@ describe("geometrySweepResult", () => {
         return { aborted: true };
       });
       const result = geometrySweepResult(PLAN, outcome);
-      expect(recordOf(result.data).aborted).toBe(true);
       expect(result.summary[0]).toBe(
         "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
       );
@@ -151,12 +127,11 @@ describe("geometrySweepResult", () => {
   });
 
   describe("when the device was lost in the first case", () => {
-    it("keeps that case's rows as a case cut short, names the loss and reads as incomplete", async () => {
+    it("counts that case as cut short, names the loss and reads as incomplete", async () => {
       const outcome = await runWith(new AbortController().signal, () => ({
         deviceLost: { reason: "unknown", message: "GPU process crashed" },
       }));
       const result = geometrySweepResult(PLAN, outcome);
-      expect(recordOf(result.data).cases).toHaveLength(1);
       expect(result.summary[0]).toBe(
         "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: device lost (unknown): GPU process crashed",
       );

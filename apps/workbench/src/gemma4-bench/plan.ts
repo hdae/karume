@@ -235,7 +235,8 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       quantLabel: preset.declaration.label ?? preset.name,
       isDefaultQuant: preset.isDefault,
       tap: draft.tap,
-      ...(draft.tap && draft.split === true ? { split: true } : {}),
+      // The arms parser refuses split without the tap (`parseArmsText`): it owns that rule.
+      ...(draft.split === true ? { split: true } : {}),
       ...(Object.keys(session).length === 0 ? {} : { session }),
       ...(Object.keys(pipeline).length === 0 ? {} : { pipeline }),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),

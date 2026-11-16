@@ -13,16 +13,7 @@ import {
   verdictOf,
 } from "../src/kernel-check/verdict.ts";
 
-const cleanPart = (id: string, labels: readonly string[], group?: string): CheckPart => ({
-  id,
-  title: id,
-  cases: labels.map((label) => ({
-    label,
-    ...(group === undefined ? {} : { group }),
-    criteria: [{ name: "words (u32)", words: 16, failures: 0 }],
-  })),
-  requirements: [{ id: "census", name: "word classes met", met: true, detail: "{}" }],
-});
+import { allPassedExcept, cleanPart, passed } from "./helpers/kernel-check-outcomes.ts";
 
 const failingPart: CheckPart = {
   id: "state-qk-fold",
@@ -222,11 +213,6 @@ describe("verdictOf", () => {
   });
 });
 
-const passed: CheckOutcome = {
-  kind: "done",
-  seconds: 1,
-  report: { parts: [cleanPart("a", ["x"])], expectedCases: { a: 1 } },
-};
 const failed: CheckOutcome = {
   kind: "done",
   seconds: 1,
@@ -234,23 +220,8 @@ const failed: CheckOutcome = {
 };
 
 describe("overallVerdict", () => {
-  it("is PASS only when every check of the page ran and passed", () => {
-    expect(
-      overallVerdict({
-        "gemv-subgroup32": passed,
-        "rms-subgroup32": passed,
-        "rms-norm-prefetch": passed,
-        "state-attention-rewrites": passed,
-        "gemv-integer": passed,
-        "gemv-planes": passed,
-        "state-kv16": passed,
-        "score-f16-store": passed,
-        "state-bidirectional": passed,
-        "expert-linear": passed,
-        "fusion-twins": passed,
-        "attention-online-tiled": passed,
-      }),
-    ).toBe("pass");
+  it("is PASS only when every check of the run ran and passed", () => {
+    expect(overallVerdict(allPassedExcept({}))).toBe("pass");
     expect(overallVerdict({})).toBe("none");
   });
 
@@ -260,20 +231,9 @@ describe("overallVerdict", () => {
 
   it("is not a pass when a check was not available", () => {
     expect(
-      overallVerdict({
-        "gemv-subgroup32": { kind: "not-available", reason: "no subgroups" },
-        "rms-subgroup32": passed,
-        "rms-norm-prefetch": passed,
-        "state-attention-rewrites": passed,
-        "gemv-integer": passed,
-        "gemv-planes": passed,
-        "state-kv16": passed,
-        "score-f16-store": passed,
-        "state-bidirectional": passed,
-        "expert-linear": passed,
-        "fusion-twins": passed,
-        "attention-online-tiled": passed,
-      }),
+      overallVerdict(
+        allPassedExcept({ "gemv-subgroup32": { kind: "not-available", reason: "no subgroups" } }),
+      ),
     ).toBe("incomplete");
   });
 
@@ -328,22 +288,9 @@ describe("a part the device cannot run (notRun)", () => {
     ).toBe("fail");
   });
 
-  it("keeps the page from PASS when every other check passed", () => {
+  it("keeps the run from PASS when every other check passed", () => {
     expect(
-      overallVerdict({
-        "gemv-subgroup32": passed,
-        "rms-subgroup32": passed,
-        "rms-norm-prefetch": passed,
-        "state-attention-rewrites": passed,
-        "gemv-integer": passed,
-        "gemv-planes": passed,
-        "state-kv16": passed,
-        "score-f16-store": passed,
-        "state-bidirectional": passed,
-        "expert-linear": passed,
-        "fusion-twins": { kind: "done", seconds: 1, report },
-        "attention-online-tiled": passed,
-      }),
+      overallVerdict(allPassedExcept({ "fusion-twins": { kind: "done", seconds: 1, report } })),
     ).toBe("incomplete");
   });
 });

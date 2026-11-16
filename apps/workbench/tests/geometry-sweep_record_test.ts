@@ -192,7 +192,7 @@ describe("caseSummaryRows", () => {
     ]);
   });
 
-  it("shows a case that is still running without drift or seconds, in the order rows came", () => {
+  it("gives a case without a case summary (cut short) no drift or seconds, in the order rows came", () => {
     const summary = caseSummaryRows([row(CASE_B, true), row(CASE_A, true)], []);
     expect(summary.map(({ caseId }) => caseId)).toEqual([CASE_B, CASE_A]);
     expect(summary[0]).toEqual({

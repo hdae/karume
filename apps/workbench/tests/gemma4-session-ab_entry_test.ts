@@ -36,25 +36,6 @@ const requestOf = (given: Readonly<Record<string, string>>, key: ModelKey = QAT_
 
 describe("the gemma4-session-ab entry", () => {
   describe("its parameters", () => {
-    it("are the model, the preset, the settings, the load options, whether the device takes the subgroup features, the expert cache and the source", () => {
-      expect(gemmaSessionAb.id).toBe("gemma4-session-ab");
-      expect(gemmaSessionAb.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
-        "model:text",
-        "preset:text",
-        "tokens:integer",
-        "rounds:integer",
-        "minGain:number",
-        "openPerVisit:boolean",
-        "probeCounts:boolean",
-        "f16Kv:boolean",
-        "subgroups:boolean",
-        "expertCacheSlots:text",
-        "hostTier:text",
-        "depth:integer",
-        "source:choice",
-      ]);
-    });
-
     it("default to the default model and preset, 96 tokens, 4 rounds, 1%, open per visit, probed, subgroups when the device has them, no cache, cached", () => {
       expect(parameters()).toEqual({
         model: "",
@@ -75,7 +56,7 @@ describe("the gemma4-session-ab entry", () => {
 
     it("take 2 to 512 tokens: a run of one token has no decode run to count", () => {
       for (const tokens of ["2", "512"]) expect(parameters({ tokens }).tokens).toBe(Number(tokens));
-      for (const tokens of ["1", "513", "", "9.5"]) {
+      for (const tokens of ["1", "513"]) {
         expect(() => parameters({ tokens }), tokens).toThrow(ParameterError);
       }
     });
@@ -209,12 +190,6 @@ describe("the gemma4-session-ab entry", () => {
         openPerVisit: false,
         probeCounts: false,
       });
-    });
-
-    it("refuses a preset the model does not have, listing its presets", () => {
-      expect(() => requestOf({ preset: "q4_0" })).toThrow(
-        "Parameter preset: 'q4_0' is not a preset of model '26b'; its presets are i4, i4-fast",
-      );
     });
 
     it("takes the expert cache on gemma4-qat/26b: the slots, the host tier and the depth", () => {

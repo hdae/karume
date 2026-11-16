@@ -1,9 +1,5 @@
 import { BUILTIN_GEOMETRY_PROFILES, type GemmGeometry } from "@karume/runtime";
-import {
-  type GeometrySweepCase,
-  type GeometrySweepRow,
-  sweepCaseSetIds,
-} from "@karume/runtime/tune";
+import { type GeometrySweepCase, type GeometrySweepRow } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { k88Summary, k88TableGeometry } from "../src/geometry-sweep/k88.ts";
@@ -193,18 +189,5 @@ describe("k88Summary", () => {
       PROFILES,
     );
     expect(partial.sums[0]).toEqual({ unit: gemm, nodes: 30, measured: 1, planned: 2 });
-  });
-});
-
-describe("the case-set ids a record of the chosen set carries (per op family)", () => {
-  it("differ per evaluation set and are the sweep's own for the table-deriving sets", () => {
-    const sweep = sweepCaseSetIds();
-    const k88 = sweepCaseSetIds("k88");
-    expect(sweepCaseSetIds("full")).toEqual(sweep);
-    expect(Object.keys(k88).length).toBeGreaterThan(0);
-    const sweepIds = new Map(Object.entries(sweep));
-    for (const [family, id] of Object.entries(k88)) {
-      expect(id, family).not.toBe(sweepIds.get(family));
-    }
   });
 });

@@ -1,0 +1,144 @@
+import type { ChatOptions, ChatStop, ChatStream } from "@karume/models/gemma";
+
+import type { BenchDependencies, BenchPipeline, BenchProbe } from "../../src/gemma4-bench/run.ts";
+
+/** The label a pass gets in the split mode. */
+export const SPLIT_LABEL = "linear_gemv_parallel:wi4g32:l32";
+
+/**
+ * What a fake run does besides streaming: `failChatAt` (0-based over the run) fails that chat,
+ * `failBuild` fails every build, `onPause` runs at every pause, and `events` logs the builds, the
+ * pauses and the chats in order (a caller may push its progress lines into it too).
+ */
+export type BenchFakeOptions = {
+  readonly failChatAt?: number;
+  readonly failBuild?: boolean;
+  readonly onPause?: () => void;
+  readonly events?: string[];
+};
+
+/** What the fakes saw over a run. */
+export type BenchWorld = {
+  /** `build <model>` and `dispose <model>`, in order. */
+  readonly lifecycle: string[];
+  /** The most pipelines that were resident at once. */
+  readonly maxResident: () => number;
+  readonly sentOptions: ChatOptions[];
+  /** Whether the probe was enabled when each chat was sent. */
+  readonly enabledAtChat: boolean[];
+};
+
+/**
+ * Fake dependencies: a clock that ticks 1 ms per reading, a `sha-<bytes>` hash, and pipelines
+ * whose prompt is its text's char codes and whose `chat` streams `newTokens − 1` tokens then a
+ * stop token. The probe records one pass of one dispatch per token step while enabled (labelled
+ * {@link SPLIT_LABEL} in the split mode), and `readTimes` times every pass at 0.25 ms.
+ */
+export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
+  let passes: { dispatches: number; label?: string; beginNs?: bigint; endNs?: bigint }[] = [];
+  const probe: BenchProbe = {
+    enabled: false,
+    mode: "passes",
+    passes: () => passes,
+    submits: () => passes.length,
+    readTimes: () => {
+      passes = passes.map((pass, index) => ({
+        ...pass,
+        beginNs: BigInt(index * 1_000_000),
+        endNs: BigInt(index * 1_000_000 + 250_000),
+      }));
+      return Promise.resolve();
+    },
+    reset: () => {
+      passes = [];
+    },
+  };
+  const record = () => {
+    if (probe.enabled) {
+      passes.push({
+        dispatches: 1,
+        ...(probe.mode === "dispatches" ? { label: SPLIT_LABEL } : {}),
+      });
+    }
+  };
+  const resident = new Set<string>();
+  let maxResident = 0;
+  const world: BenchWorld = {
+    lifecycle: [],
+    maxResident: () => maxResident,
+    sentOptions: [],
+    enabledAtChat: [],
+  };
+  let clock = 0;
+  let chats = 0;
+  const dependencies: BenchDependencies = {
+    probe,
+    now: () => (clock += 1),
+    sha256: (bytes) => Promise.resolve(`sha-${bytes.byteLength}`),
+    pause: () => {
+      options.events?.push("pause");
+      options.onPause?.();
+      return Promise.resolve();
+    },
+    build: (arm) => {
+      options.events?.push(`build ${arm.model}`);
+      if (options.failBuild === true) return Promise.reject(new Error("build failed"));
+      world.lifecycle.push(`build ${arm.model}`);
+      resident.add(arm.model);
+      maxResident = Math.max(maxResident, resident.size);
+      const pipeline: BenchPipeline = {
+        encodePrompt: (messages) => {
+          const [first] = messages;
+          const text = typeof first?.content === "string" ? first.content : "";
+          return Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
+        },
+        chat: (_messages, chatOptions) => {
+          options.events?.push("chat");
+          world.sentOptions.push(chatOptions);
+          world.enabledAtChat.push(probe.enabled);
+          const index = chats;
+          chats += 1;
+          let settle!: (stop: ChatStop) => void;
+          let reject!: (error: unknown) => void;
+          const done = new Promise<ChatStop>((resolve, fail) => {
+            settle = resolve;
+            reject = fail;
+          });
+          done.catch(() => {});
+          const stream: ChatStream = {
+            done,
+            [Symbol.asyncIterator]: () => {
+              throw new Error("the runner drains with text()");
+            },
+            text: async () => {
+              if (index === options.failChatAt) {
+                const error = new Error("chat failed");
+                reject(error);
+                throw error;
+              }
+              chatOptions.onPrefill?.({ chunk: 1, chunks: 1 });
+              const maxNewTokens = chatOptions.maxNewTokens;
+              if (maxNewTokens === undefined) throw new Error("the runner sets maxNewTokens");
+              for (let token = 0; token < maxNewTokens - 1; token += 1) {
+                chatOptions.signal?.throwIfAborted();
+                record();
+                chatOptions.onToken?.(100 + token);
+              }
+              record();
+              settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
+              return "text";
+            },
+          };
+          return stream;
+        },
+        dispose: () => {
+          world.lifecycle.push(`dispose ${arm.model}`);
+          resident.delete(arm.model);
+          return Promise.resolve();
+        },
+      };
+      return Promise.resolve(pipeline);
+    },
+  };
+  return { dependencies, probe, world };
+};

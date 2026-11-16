@@ -1,20 +1,21 @@
-import { runSessionAb, type SessionAbArm } from "@karume/runtime/tune";
+import type { SessionAbArm } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ParameterError } from "../src/entry.ts";
-import { type ArmStep, presetOf, runPositions, steppedArm } from "../src/session-ab/shared.ts";
+import { ParameterError, parseParameters } from "../src/entry.ts";
+import {
+  type ArmStep,
+  MIN_GAIN_PARAMETER,
+  presetOf,
+  ROUNDS_PARAMETER,
+  runPositions,
+  steppedArm,
+} from "../src/session-ab/shared.ts";
 
 import { gemmaManifestText, manifestOf } from "./helpers/session-ab-manifests.ts";
+import { spanRunner } from "./helpers/session-ab-runner.ts";
 
 /** One model with the presets i4 and i4-fast (the default). */
 const MANIFEST = manifestOf(gemmaManifestText(["e2b"]));
-
-const ENVIRONMENT = {
-  adapter: { vendor: "test", architecture: "", device: "", description: "" },
-  userAgent: "test",
-  backend: "other",
-  date: "2026-11-11T00:00:00.000Z",
-};
 
 /**
  * Runs the real runner with fake arms and lists every run as the runner made it: the arm, and
@@ -27,28 +28,17 @@ const observedRuns = async (
   openPerVisit: boolean,
 ): Promise<readonly { readonly arm: number; readonly clocked: boolean }[]> => {
   const runs: { arm: number; clocked: boolean }[] = [];
-  let clockOpen = false;
-  let tick = 0;
+  const runner = spanRunner();
   const fakes: SessionAbArm[] = Array.from({ length: arms }, (_, arm) => ({
     name: `arm${arm}`,
     open: () => Promise.resolve(),
     run: () => {
-      runs.push({ arm, clocked: clockOpen });
+      runs.push({ arm, clocked: runner.inSpan() });
       return Promise.resolve({ outputs: { tokens: Int32Array.of(1, 2, 3) } });
     },
     close: () => Promise.resolve(),
   }));
-  await runSessionAb({
-    arms: fakes,
-    rounds,
-    openPerVisit,
-    environment: ENVIRONMENT,
-    clock: () => {
-      clockOpen = !clockOpen;
-      tick += 1;
-      return tick;
-    },
-  });
+  await runner.run(fakes, rounds, openPerVisit);
   return runs;
 };
 
@@ -91,43 +81,32 @@ describe("the arms' steps of a Session target (steppedArm)", () => {
   /** Runs the real runner over two fake arms wrapped by steppedArm, logging what happens when. */
   const observe = async (openPerVisit: boolean) => {
     const log: { readonly entry: string; readonly timed: boolean }[] = [];
-    let clockOpen = false;
-    let tick = 0;
+    const runner = spanRunner();
+    const note = (entry: string) => log.push({ entry, timed: runner.inSpan() });
     const fake = (name: string, dispatches: number): SessionAbArm => ({
       name,
       open: () => {
-        log.push({ entry: `${name}:open`, timed: clockOpen });
+        note(`${name}:open`);
         return Promise.resolve();
       },
       run: () => {
-        log.push({ entry: `${name}:run`, timed: clockOpen });
+        note(`${name}:run`);
         return Promise.resolve({ outputs: { y: Float32Array.of(1, 2) } });
       },
       report: () => Promise.resolve({ fusions: { silu: 1 }, dispatches }),
       close: () => {
-        log.push({ entry: `${name}:close`, timed: clockOpen });
+        note(`${name}:close`);
         return Promise.resolve();
       },
     });
     const onStep = (step: ArmStep): void => {
-      log.push({ entry: `${step.arm}:step:${step.step}`, timed: clockOpen });
+      note(`${step.arm}:step:${step.step}`);
     };
-    const record = await runSessionAb({
-      arms: [steppedArm(fake("base", 10), onStep), steppedArm(fake("rule", 7), onStep)],
-      rounds: 3,
+    const record = await runner.run(
+      [steppedArm(fake("base", 10), onStep), steppedArm(fake("rule", 7), onStep)],
+      3,
       openPerVisit,
-      environment: {
-        adapter: { vendor: "test", architecture: "", device: "", description: "" },
-        userAgent: "test",
-        backend: "other",
-        date: "2026-11-11T00:00:00.000Z",
-      },
-      clock: () => {
-        clockOpen = !clockOpen;
-        tick += 1;
-        return tick;
-      },
-    });
+    );
     return { log, record };
   };
 
@@ -157,6 +136,23 @@ describe("the arms' steps of a Session target (steppedArm)", () => {
       { name: "base", fusions: { silu: 1 }, dispatches: 10 },
       { name: "rule", fusions: { silu: 1 }, dispatches: 7 },
     ]);
+  });
+});
+
+describe("the two parameters both session A/B entries declare", () => {
+  const parse = (given: Readonly<Record<string, string>>) =>
+    parseParameters([ROUNDS_PARAMETER, MIN_GAIN_PARAMETER], given);
+
+  it("take 3 rounds or more, the runner's minimum", () => {
+    expect(parse({ rounds: "3" }).rounds).toBe(3);
+    expect(() => parse({ rounds: "2" })).toThrow(ParameterError);
+  });
+
+  it("take a minimum gain from 0 to 1, a fraction of the base's time", () => {
+    for (const minGain of ["0", "0.05", "1"]) {
+      expect(parse({ minGain }).minGain, minGain).toBe(Number(minGain));
+    }
+    expect(() => parse({ minGain: "-0.01" })).toThrow(ParameterError);
   });
 });
 

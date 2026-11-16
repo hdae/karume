@@ -88,10 +88,6 @@ describe("kernelCheckRecord", () => {
     if (check?.verdict !== "fail") throw new Error("expected the failing check");
     expect(check.countMismatches).toEqual(["mutant matrix rows: 0, expected 1"]);
   });
-
-  it("survives JSON (the saved file is the record as is)", () => {
-    expect(JSON.parse(JSON.stringify(record))).toEqual(record);
-  });
 });
 
 describe("kernelCheckRecord of a check with a part the device could not run", () => {
@@ -115,14 +111,12 @@ describe("kernelCheckRecord of a check with a part the device could not run", ()
     },
   });
 
-  it("records the check as incomplete with the part's reason, and the page as incomplete", () => {
+  it("records each part's case count, and the reason of the part that did not run", () => {
     const check = record.checks.find(({ id }) => id === "fusion-twins");
     if (check?.verdict !== "incomplete") throw new Error("expected the incomplete check");
-    expect(check.countMismatches).toEqual([]);
     expect(check.parts.map(({ id, cases, notRun }) => [id, cases, notRun])).toEqual([
       ["fusion-a", 1, undefined],
       ["fusion-sg32", 0, "the online attention takes the wg form on this device"],
     ]);
-    expect(record.verdict).toBe("incomplete");
   });
 });

@@ -1,11 +1,9 @@
 import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
-import { parseManifest } from "@karume/hub";
 import type { SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { sessionAbMossData } from "../src/session-ab/data.ts";
 import type { GraphInput } from "../src/session-ab/feeds.ts";
-import type { SessionAbSettings } from "../src/session-ab/gemma-request.ts";
 import {
   MOSS_DIT_WORK,
   mossAbModel,
@@ -15,7 +13,8 @@ import {
 import { presetOf } from "../src/session-ab/shared.ts";
 import { recordedCounts } from "../src/session-ab/summary.ts";
 
-import { abRecord, steady } from "./helpers/session-ab-records.ts";
+import { hex, manifestOf, MOSS_MANIFEST } from "./helpers/session-ab-manifests.ts";
+import { abRecord, SETTINGS, steady, wordsOf } from "./helpers/session-ab-records.ts";
 
 /** The DiT's inputs as its graph declares them, at small widths (the real ones are 128 / 3072 / 256). */
 const DIT_INPUTS: readonly GraphInput[] = [
@@ -30,64 +29,7 @@ const DIT_INPUTS: readonly GraphInput[] = [
 const IMAGE = 6;
 const TEXT = 3;
 
-const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number[] => [
-  ...new Uint32Array(data.buffer, data.byteOffset, data.length),
-];
-
-const settings = (patch: Partial<SessionAbSettings> = {}): SessionAbSettings => ({
-  rounds: 4,
-  tokens: 96,
-  minGain: 0.01,
-  openPerVisit: true,
-  probeCounts: true,
-  ...patch,
-});
-
-const hex = (character: string): string => character.repeat(64);
-
-/** A `karume/5` manifest with the MOSS-Image mirror's shape: one model, two presets of `dit`. */
-const manifest = parseManifest(
-  JSON.stringify({
-    format: "karume/5",
-    generator: "test",
-    defaultModel: "sft",
-    models: {
-      sft: {
-        pipeline: "moss-image/1",
-        assets: {},
-        weights: {
-          dit: {
-            i8: {
-              container: {
-                descriptor: {
-                  graph: { length: 8, sha256: hex("d") },
-                  model: { length: 8, sha256: hex("e") },
-                },
-                parts: [
-                  { path: "sft/dit/model-00001-of-00002.krm", size: 40, sha256: hex("a") },
-                  { path: "sft/dit/model-00002-of-00002.krm", size: 8, sha256: hex("b") },
-                ],
-              },
-            },
-          },
-        },
-        quants: {
-          "f32+dit8": { weights: { dit: "i8" }, session: {} },
-          "f32+dit8-a8-attn8-online": {
-            weights: { dit: "i8" },
-            session: {
-              linearCompute: "a8",
-              attentionCompute: "a8",
-              attentionScoreStorage: "none",
-            },
-          },
-        },
-        defaultQuant: "f32+dit8-a8-attn8-online",
-        pipelineConfig: {},
-      },
-    },
-  }),
-);
+const manifest = manifestOf(MOSS_MANIFEST);
 
 const MODEL = mossAbModel("sft", presetOf(manifest, "sft", "f32+dit8-a8-attn8-online"));
 
@@ -106,7 +48,7 @@ const countedRecord = (): SessionAbRecord => {
 
 const dataOf = (
   record: SessionAbRecord,
-  request = sessionAbMossRequest(MODEL, settings({ rounds: 3 }), EW_CHAIN_RULE_NAME),
+  request = sessionAbMossRequest(MODEL, SETTINGS, EW_CHAIN_RULE_NAME),
 ) =>
   sessionAbMossData({
     request,
@@ -175,7 +117,7 @@ describe("the session A/B's MOSS-Image DiT target", () => {
 
   describe("the request", () => {
     it("names the two arms, the knobs of the preset and the 1024 × 1024 sequence (S = 4,159)", () => {
-      const request = sessionAbMossRequest(MODEL, settings(), EW_CHAIN_RULE_NAME);
+      const request = sessionAbMossRequest(MODEL, SETTINGS, EW_CHAIN_RULE_NAME);
       expect(request).toEqual({
         target: "moss-dit-forward",
         mount: "moss-image",
@@ -183,7 +125,7 @@ describe("the session A/B's MOSS-Image DiT target", () => {
         model: "sft",
         quant: "f32+dit8-a8-attn8-online",
         session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
-        rounds: 4,
+        rounds: 3,
         minGain: 0.01,
         openPerVisit: true,
         imageTokens: 4096,
@@ -195,15 +137,6 @@ describe("the session A/B's MOSS-Image DiT target", () => {
         ],
       });
       expect(request.imageTokens + request.textTokens).toBe(4159);
-    });
-
-    it("opens per visit whatever the form says: two DiT Sessions never live together", () => {
-      const request = sessionAbMossRequest(
-        MODEL,
-        settings({ openPerVisit: false }),
-        EW_CHAIN_RULE_NAME,
-      );
-      expect(request.openPerVisit).toBe(true);
     });
 
     it("takes the knobs from the manifest's preset, none for the reference preset", () => {
@@ -227,10 +160,9 @@ describe("the session A/B's MOSS-Image DiT target", () => {
         keyPrefix: "ext:models:",
       });
       expect(data.record).toBe(record);
-      expect(JSON.parse(JSON.stringify(data))).toEqual(data);
     });
 
-    it("gives each arm's row the counts the runner's record keeps, and none for an arm without them", () => {
+    it("reads each arm's counts from the runner's record, and none for an arm without them", () => {
       const [base, rule] = countedRecord().arms;
       expect(recordedCounts(base)).toEqual({ arm: "base", fusions: { silu: 1 }, dispatches: 2466 });
       expect(recordedCounts(rule)?.fusions[EW_CHAIN_RULE_NAME]).toBe(292);
