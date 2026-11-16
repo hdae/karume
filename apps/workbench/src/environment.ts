@@ -6,27 +6,18 @@
 import type { Backend, RecordEnvironment } from "./record.ts";
 
 /** What the host knows and WebGPU does not tell. */
-export type HostFacts = {
-  readonly host: "browser" | "node";
-  readonly userAgent: string;
-  readonly crossOriginIsolated?: boolean;
-  readonly backend?: Backend;
-};
+export type HostFacts = Pick<
+  RecordEnvironment,
+  "host" | "userAgent" | "crossOriginIsolated" | "backend"
+>;
 
 /** A `GPU` whose implementation may predate `wgslLanguageFeatures`. */
 type WgslLanguageFeatureHost = GPU & { readonly wgslLanguageFeatures?: Iterable<string> };
 
-/** No adapter to describe (the shell checks for one before it offers Run). */
-export class NoAdapterError extends Error {
-  constructor() {
-    super("WebGPU returned no adapter");
-    this.name = "NoAdapterError";
-  }
-}
-
 export const readEnvironment = async (gpu: GPU, facts: HostFacts): Promise<RecordEnvironment> => {
   const adapter = await gpu.requestAdapter();
-  if (adapter === null) throw new NoAdapterError();
+  // The shell checks for an adapter before it offers Run.
+  if (adapter === null) throw new Error("WebGPU returned no adapter");
   const limits: Record<string, number> = {};
   // GPUSupportedLimits keeps its values on the prototype, so they are read by name.
   for (const name in adapter.limits) {

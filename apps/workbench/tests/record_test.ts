@@ -140,11 +140,13 @@ describe("executeEntry", () => {
   const execute = (entry: Entry, controller = new AbortController()) =>
     executeEntry({
       entry,
-      parameters: {},
-      gpuOptions: {},
-      signal: controller.signal,
-      progress: () => {},
-      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      context: {
+        parameters: {},
+        gpuOptions: {},
+        signal: controller.signal,
+        progress: () => {},
+        openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      },
       environment: ENVIRONMENT,
       checkout: CHECKOUT,
     });
@@ -172,22 +174,26 @@ describe("executeEntry", () => {
     });
     await executeEntry({
       entry,
-      parameters: {},
-      gpuOptions: {},
-      signal: new AbortController().signal,
-      progress: () => {},
-      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      context: {
+        parameters: {},
+        gpuOptions: {},
+        signal: new AbortController().signal,
+        progress: () => {},
+        openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      },
       environment: { ...ENVIRONMENT, backend: { name: "d3d12", source: "declared" } },
       checkout: CHECKOUT,
     });
     const { backend: _dropped, ...withoutBackend } = ENVIRONMENT;
     await executeEntry({
       entry,
-      parameters: {},
-      gpuOptions: {},
-      signal: new AbortController().signal,
-      progress: () => {},
-      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      context: {
+        parameters: {},
+        gpuOptions: {},
+        signal: new AbortController().signal,
+        progress: () => {},
+        openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      },
       environment: withoutBackend,
       checkout: CHECKOUT,
     });

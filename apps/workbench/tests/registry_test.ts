@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 
-import { entriesOf, listedEntries, registeredEntries, RegistryError } from "../src/entries.ts";
+import { entriesOf, registeredEntries, RegistryError } from "../src/entries.ts";
 import type { Entry } from "../src/entry.ts";
 
 const fakeEntry = (id: string): Entry => ({
@@ -12,7 +12,6 @@ const fakeEntry = (id: string): Entry => ({
   run: () => Promise.resolve({ summary: [], data: null }),
 });
 
-const localEntry = (id: string): Entry => ({ ...fakeEntry(id), readsLocalDistribution: true });
 const idsOf = (entries: readonly Entry[]): readonly string[] => entries.map(({ id }) => id);
 
 describe("the registry", () => {
@@ -47,29 +46,21 @@ describe("the registry", () => {
 });
 
 describe("the entries that read a local distribution", () => {
-  it("are the files under entries/local/, each carrying the mark, in file-name order with the rest", () => {
+  it("are the files under entries/local/, in file-name order with the rest", () => {
     expect(
       idsOf(
         entriesOf({
           "./entries/c.ts": fakeEntry("c"),
-          "./entries/local/b.ts": localEntry("b"),
+          "./entries/local/b.ts": fakeEntry("b"),
           "./entries/a.ts": fakeEntry("a"),
         }),
       ),
     ).toEqual(["a", "b", "c"]);
   });
 
-  it("throw at start when the mark and the directory disagree, or two files share a name", () => {
-    expect(() => entriesOf({ "./entries/local/a.ts": fakeEntry("a") })).toThrow(RegistryError);
-    expect(() => entriesOf({ "./entries/a.ts": localEntry("a") })).toThrow(RegistryError);
+  it("throw at start when two files share a name", () => {
     expect(() =>
-      entriesOf({ "./entries/a.ts": fakeEntry("a"), "./entries/local/a.ts": localEntry("a") }),
+      entriesOf({ "./entries/a.ts": fakeEntry("a"), "./entries/local/a.ts": fakeEntry("a") }),
     ).toThrow(RegistryError);
-  });
-
-  it("are listed by the dev server and the Node run, and left out of a production build", () => {
-    const entries = [fakeEntry("a"), localEntry("b"), fakeEntry("c")];
-    expect(idsOf(listedEntries(entries, false))).toEqual(["a", "b", "c"]);
-    expect(idsOf(listedEntries(entries, true))).toEqual(["a", "c"]);
   });
 });

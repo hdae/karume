@@ -25,8 +25,11 @@ export type Backend = {
   readonly source: "declared" | "dawn-flag" | "dawn-default";
 };
 
+/** Where a run ran: the browser shell or the Node command. */
+export type Host = "browser" | "node";
+
 export type RecordEnvironment = {
-  readonly host: "browser" | "node";
+  readonly host: Host;
   readonly userAgent: string;
   /** Browser only. */
   readonly crossOriginIsolated?: boolean;

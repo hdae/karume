@@ -192,7 +192,6 @@ describe("the gemma4-bench entry", () => {
   describe("its parameters", () => {
     it("are the arms, the workload, the device and the source, for a local distribution", () => {
       expect(gemmaBench.id).toBe("gemma4-bench");
-      expect(gemmaBench.readsLocalDistribution).toBe(true);
       expect(gemmaBench.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "arms:text",
         "chats:integer",

@@ -99,7 +99,6 @@ describe("the session-ab entry", () => {
   describe("its parameters", () => {
     it("are the target, the preset, the rounds, the minimum gain and the source, for a local distribution", () => {
       expect(sessionAb.id).toBe("session-ab");
-      expect(sessionAb.readsLocalDistribution).toBe(true);
       expect(sessionAb.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "target:choice",
         "preset:text",

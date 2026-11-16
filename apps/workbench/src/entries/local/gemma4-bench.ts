@@ -51,7 +51,6 @@ const entry: Entry = {
   title: "Gemma 4 decode bench",
   description:
     "Decode A/B of Gemma 4 arms (model × preset × GPU tap on, split per dispatch or off × integer GEMV × PLE on the GPU × decode run-ahead depth) in A B B A rounds over a fixed prompt set, one pipeline resident at a time: decode tokens/s and ms/token, and through the GPU tap the GPU time and dispatches, passes and submits per token.",
-  readsLocalDistribution: true,
   // The minima are the bench's own (a warm chat besides the cold one, a decode token after the
   // prefill's, one round); the maxima only bound a typo.
   parameters: [

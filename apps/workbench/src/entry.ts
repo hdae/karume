@@ -122,7 +122,7 @@ export type RunContext = {
   readonly signal: AbortSignal;
   /** Reports one status line (the latest replaces the previous one). */
   readonly progress: (text: string) => void;
-  /** For an entry that reads a local distribution ({@link Entry.readsLocalDistribution}). */
+  /** For an entry that reads a local distribution (a file under `src/entries/local/`). */
   readonly openDistribution: OpenDistribution;
   /**
    * The backend's name as the host knows it — what the record's `environment.backend` holds — for
@@ -149,11 +149,6 @@ export type Entry = {
   /** One or two sentences. */
   readonly description: string;
   readonly parameters: readonly Parameter[];
-  /**
-   * Marks an entry that reads a local distribution (`openDistribution`). It lives in
-   * `src/entries/local/`, and a production build, which serves no distribution, leaves it out.
-   */
-  readonly readsLocalDistribution?: true;
   readonly run: (context: RunContext) => Promise<EntryResult>;
 };
 

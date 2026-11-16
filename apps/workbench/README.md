@@ -49,9 +49,8 @@ Parameters are `--name=value` (a `choices` list is comma-separated). The registr
 load through Vite's module runner, so the run sees the same modules as the page. Dawn's toggles come
 from `KARUME_DAWN_FLAGS` as in the tests; a `backend=<name>` toggle selects the backend and is
 recorded, otherwise the record names Dawn's default for the platform (Vulkan on Linux). Progress goes
-to stderr; the outcome, the summary and the record's path go to stdout. Exit code: 0 when the run is
-done and its verdict is pass, incomplete or none; 1 for fail, error or cancelled (Ctrl-C cancels); 2
-for a command line that names no entry or a parameter that does not fit.
+to stderr; the outcome, the summary and the record's path go to stdout; Ctrl-C cancels the run. The
+exit codes are in [the spec](../../docs/spec/workbench.md#the-node-command).
 
 ## Example setups
 
@@ -117,27 +116,10 @@ flock /tmp/karume-gpu.lock node apps/workbench/run.ts gemma4-bench --arms=gemma4
 
 ## Records
 
-A record lands at `outputs/workbench/<host>-<adapter name>/<entry id>_<UTC stamp>.json` (outside git):
-`node-nvidia-geforce-rtx-3080-ti`, `browser-nvidia-geforce-rtx-5070-ti`. The adapter name is the
-description in a browser and the device under Node (Dawn puts the driver version in the description),
-else vendor-architecture. A second record in the same second gets `-1`, `-2`, …; no file is ever
-replaced. The rules are in [docs/spec/workbench.md](../../docs/spec/workbench.md).
-
-```text
-format       "karume-workbench/1"
-entry        { id, parameters }              the typed parameter values of the run
-recordedAt   when the run ended (ISO 8601)
-seconds      wall time of the entry's run
-outcome      "done" | "error" | "cancelled"   (error: the stack in `error`)
-environment  host ("browser" | "node"), userAgent, crossOriginIsolated (browser), backend
-             ({ name, source: "declared" | "dawn-flag" | "dawn-default" }, when known), the adapter
-             (vendor, architecture, device, description), its features and limits, WGSL language
-             features — read from an adapter the host requests itself
-checkout     { commit, dirty, runtimeVersion }   (dev server: at run start; build: at build time)
-verdict      "pass" | "fail" | "incomplete"   (entries that conclude something)
-summary      the lines the page shows first
-data         the entry's own record body
-```
+A run leaves one JSON record under `outputs/workbench/` (outside git), in a directory per host and
+adapter (`node-nvidia-geforce-rtx-3080-ti`, `browser-nvidia-geforce-rtx-5070-ti`); no file is ever
+replaced. The fields are in [the record](../../docs/spec/workbench.md#the-record), the path rule in
+[where records go](../../docs/spec/workbench.md#where-records-go).
 
 ## Add an entry
 
@@ -145,12 +127,13 @@ Add one file `src/entries/<id>.ts` (kebab-case) whose default export is an `Entr
 (`src/entry.ts`): `id` (the file name), `title`, a one- or two-sentence `description`, the declared
 `parameters` (`boolean`, `integer` and `number` with min / max, `text`, `choice`, `choices`) and `run`. `run` gets the
 typed parameters, `gpuOptions` to spread into `acquireGpu` (it acquires and destroys its own GPU
-context), an `AbortSignal` and `progress(text)`, and resolves to `{ verdict?, summary, data }`. An
-entry holds no UI code and no Node API: the shell and `run.ts` render and drive every entry the same
+context), an `AbortSignal`, `progress(text)`, `openDistribution` (below) and `backend` (the backend's
+name as the record's `environment.backend` holds it, absent when a browser run declared none), and
+resolves to `{ verdict?, summary, data }`. An entry holds no UI code and no Node API: the shell and `run.ts` render and drive every entry the same
 way. The registry (`src/entries.ts`) picks the file up; nothing else lists entries.
 
 An entry that reads a local distribution (a mirror under `models/`) is a file
-`src/entries/local/<id>.ts` that declares `readsLocalDistribution: true` and opens the mount with
+`src/entries/local/<id>.ts` (the directory is the declaration) and opens the mount with
 `openDistribution(mount, source)` from its run context: a reference for `loadManifest` or a family's
 `fromPretrained`, and the facts its record carries (`directory`, `manifestSha256`, `read`). In a
 browser `source` picks the cached route (`/hf/`, the hub's CacheStorage) or the direct one

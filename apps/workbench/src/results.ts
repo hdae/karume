@@ -15,7 +15,7 @@ import { type FileHandle, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ENTRY_ID } from "./entry.ts";
-import { RECORD_FORMAT, utcStamp } from "./record.ts";
+import { type Host, RECORD_FORMAT, utcStamp } from "./record.ts";
 
 /** The results directory, relative to the repository root (outside git: `outputs/` is ignored). */
 export const RESULTS_DIRECTORY = "outputs/workbench";
@@ -42,8 +42,6 @@ const slugOf = (text: string): string =>
     .replaceAll(/-+$/g, "");
 
 const textOf = (value: unknown): string => (typeof value === "string" ? value : "");
-
-export type Host = "browser" | "node";
 
 /**
  * The directory name of a host's adapter, `<host>-<adapter name>`, by the rule of the tests'

@@ -38,7 +38,6 @@ describe("the gemma4-session-ab entry", () => {
   describe("its parameters", () => {
     it("are the page's inputs of the Gemma 4 target and whether the device takes the subgroup features, for a local distribution", () => {
       expect(gemmaSessionAb.id).toBe("gemma4-session-ab");
-      expect(gemmaSessionAb.readsLocalDistribution).toBe(true);
       expect(gemmaSessionAb.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "model:text",
         "preset:text",

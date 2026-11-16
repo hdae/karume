@@ -39,7 +39,6 @@ const entry: Entry = {
   title: "Session A/B",
   description:
     "Wall-clock A/B (runSessionAb, judgeSessionAb) of one component forward with and without the fusion rule its pipeline passes by default: the MOSS-Image DiT (models/ew_chain), the Wan2.2 VAE next chunk or the anima VAE tile (models/vae_rms_silu). The verdict is output identity; the judgement is in the summary.",
-  readsLocalDistribution: true,
   parameters: [
     {
       kind: "choice",

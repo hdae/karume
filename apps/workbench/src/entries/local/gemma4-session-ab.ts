@@ -42,7 +42,6 @@ const entry: Entry = {
   title: "Gemma 4 session A/B",
   description:
     "Wall-clock A/B (runSessionAb, judgeSessionAb) of a Gemma 4 greedy decode with and without the candidate rule candidate/gelu_mul, the counts from a probe of each arm first. The verdict is token identity; the judgement is in the summary.",
-  readsLocalDistribution: true,
   parameters: [
     {
       kind: "text",

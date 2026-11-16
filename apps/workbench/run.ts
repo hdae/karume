@@ -11,9 +11,9 @@
  * process. The command's body (`node-run.ts`) is loaded through the same runner: were it loaded by
  * Node itself, the host side and the entries would each hold their own copy of the shared modules.
  *
- * Exit code: 0 for a run that is done with verdict pass, incomplete or none; 1 for fail, error or
- * cancelled (SIGINT cancels); 2 for a command line that names no entry or a parameter that does not
- * fit.
+ * The exit codes are the command body's (`node-run.ts`).
+ *
+ * SPEC: docs/spec/workbench.md#the-node-command
  */
 
 import { fileURLToPath } from "node:url";

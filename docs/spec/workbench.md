@@ -33,10 +33,9 @@ The workbench is private (not published) and is not part of the lanes: its tests
 
 ### Local distributions
 
-- An entry that reads a model distribution declares it (`readsLocalDistribution`) and lives under
-  `src/entries/local/`. The dev server and the Node command list it; a production build neither lists nor bundles it
-  (the registry's module of local entries resolves to an empty one in a build), because a production build serves no
-  distribution.
+- An entry that reads a model distribution is a file under `src/entries/local/`; the directory is the declaration.
+  The dev server and the Node command list it; a production build neither lists nor bundles it (the registry's module
+  of local entries resolves to an empty one in a build), because a production build serves no distribution.
 - Such an entry opens a mount of the shared mount table (`@karume/local-distributions`) through the function the host
   gives it, naming how a browser should read it: `cached` (the dev server's HF-compatible `/hf/` route into the hub's
   CacheStorage, so a second run does not move the weights again) or `direct` (plain requests to `/models/<mount>/`).
@@ -105,7 +104,7 @@ distributions as the Playground's dev server does (`/models/index.json`, `/model
 | Request | Answer |
 | --- | --- |
 | `POST /workbench/results` | Writes the body as a record and answers `201` with `{ "path": … }` (repository-relative). `405` for another method; `415` unless `Content-Type` is `application/json`; `403` unless the `Origin` header is the server's own origin; `413` for a body over 64 MiB (not read past the limit); `422` unless the body is JSON with the format above, a kebab-case `entry.id`, an `environment.host` of `browser` or `node` and an `environment.adapter` object. The bytes written are the body, unchanged. |
-| `GET /workbench/checkout` | The checkout at the moment of the request. |
+| `GET /workbench/checkout` | The checkout at the moment of the request. `405` for another method. |
 
 - Nothing the client sends becomes part of a path except through the two rules above (the kebab-case entry id and the
   adapter directory).
@@ -132,9 +131,13 @@ sides hold the same instance of every shared module. It uses the GPU, so it runs
 
 | Exit code | When |
 | --- | --- |
-| 0 | The run is done and its verdict is not `fail` |
-| 1 | The verdict is `fail`, `run` threw, or the run was cancelled (SIGINT) |
-| 2 | The command line names no entry, an unknown entry, or a parameter that does not fit |
+| 0 | The run is done and its verdict is `pass`, `incomplete` or none (`--list` is 0 too) |
+| 1 | The verdict is `fail`, `run` threw, the run was cancelled (SIGINT), or the command failed around the run (no adapter, a record that cannot be written) |
+| 2 | The command line names no entry, an unknown entry, an argument that is not `--name=value`, or a parameter the entry does not declare or whose value does not fit its declaration |
+
+- A value that fits its declaration but that the entry refuses when it runs (the `arms` text of `gemma4-bench`, for
+  example) is not a command-line error: `run` throws, the record's outcome is `error`, the record is written, and the
+  exit code is 1.
 
 Progress goes to stderr; the outcome, the summary and the record's path go to stdout.
 
