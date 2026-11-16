@@ -250,7 +250,7 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   rounding of `q·s` happens once on both sides). VRAM is ≈ 1/4 of f32 (+ under 1% of scale overhead). The diagnostic's
   `residentCompressedBytes` **also adds the bytes of the scale buffer**.
 - **`int4-sym-g`** (ADR 0069 decisions 2 / 3): symmetric quantization with row-wise groups, held as packed 4 bit
-  (`q ∈ [−7, 7]`, `u = q + 8`, element `2i` = the low nibble within a byte). The declared shape **stays the logical
+  (`q ∈ [−8, 7]`, `u = q + 8`, element `2i` = the low nibble within a byte). The declared shape **stays the logical
   shape**, and the payload is `numel / 2` bytes (a declaration with an odd element count fails loudly because the total bits
   do not land on a byte boundary). The decode kernel binds it as `array<u32>`.
 - **`int4-sym-g-f16`** (ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 3): the bytes of `int4-sym-g` with

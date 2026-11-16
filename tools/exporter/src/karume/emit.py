@@ -126,7 +126,8 @@ WEIGHT_DTYPES = ("f32", "f16", "bf16", "i8", "i4")
 #: alone cannot make it eligible (the maintainer's ruling of 2026-08-20: no permuted pack).
 I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP, EXPERT_LINEAR_OP})
 
-#: Offset of a packed nibble (stored value `u = q + 8`, range [1,15], 0 unused = 15 levels).
+#: Offset of a packed nibble (stored value `u = q + 8`). The quantizers here write `q ∈ [−7,7]`
+#: (u in [1,15], 15 levels); a grid import may also write −8 (u = 0), which every decode reads.
 #: Should storage ever become asymmetric, this constant is merely reread as "the default = 8 when
 #: `storage.zero_point` is omitted"; the pack format, pack order and range do not move
 #: (reservation 2 of ADR 0069 decision 3).
@@ -352,7 +353,7 @@ def unpack_int2(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
 
 
 def pack_int4(quantized: torch.Tensor) -> torch.Tensor:
-    """Pack `q ∈ [−7,7]` (held in int8, logical shape) into packed 4-bit (1-D uint8).
+    """Pack `q ∈ [−8,7]` (held in int8, logical shape) into packed 4-bit (1-D uint8).
 
     MUST: **2 elements consecutive in flat index go into one byte**, element `2i` in the **low**
     nibble and `2i+1` in the **high** nibble (ADR 0069 decision 4 — the counterpart of the decode
@@ -377,7 +378,7 @@ def pack_int4(quantized: torch.Tensor) -> torch.Tensor:
 
 
 def unpack_int4(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
-    """Unpack packed 4-bit back to `q ∈ [−7,7]` (held in int8, logical shape `shape`) (the inverse
+    """Unpack packed 4-bit back to `q ∈ [−8,7]` (held in int8, logical shape `shape`) (the inverse
     of `pack_int4`).
 
     The same mapping as the runtime's decode (WGSL / CPU decode): the element at flat index `i`
