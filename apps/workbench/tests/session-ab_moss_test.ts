@@ -1,25 +1,24 @@
 import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { parseManifest } from "@karume/hub";
-import { runSessionAb, type SessionAbArm, type SessionAbRecord } from "@karume/runtime/tune";
+import type { SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
+import { sessionAbMossData } from "../src/session-ab/data.ts";
+import type { GraphInput } from "../src/session-ab/feeds.ts";
+import type { SessionAbSettings } from "../src/session-ab/gemma-request.ts";
 import {
-  type DitInput,
   MOSS_DIT_WORK,
   mossAbModel,
   mossDitFeeds,
   sessionAbMossRequest,
-  steppedArm,
 } from "../src/session-ab/moss.ts";
-import { sessionAbMossData } from "../src/session-ab/data.ts";
-import { SESSION_AB_DEFAULTS, type SessionAbSettings } from "../src/session-ab/request.ts";
-import type { ArmStep } from "../src/session-ab/run.ts";
-import { recordedCounts } from "../src/session-ab/view.ts";
+import { presetOf } from "../src/session-ab/shared.ts";
+import { recordedCounts } from "../src/session-ab/summary.ts";
 
 import { abRecord, steady } from "./helpers/session-ab-records.ts";
 
 /** The DiT's inputs as its graph declares them, at small widths (the real ones are 128 / 3072 / 256). */
-const DIT_INPUTS: readonly DitInput[] = [
+const DIT_INPUTS: readonly GraphInput[] = [
   { name: "latent_tokens", dtype: "f32", shape: [1, "S", 4] },
   { name: "text_context", dtype: "f32", shape: [1, "S", 6] },
   { name: "is_image", dtype: "bool", shape: [1, "S", 1] },
@@ -36,7 +35,11 @@ const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number
 ];
 
 const settings = (patch: Partial<SessionAbSettings> = {}): SessionAbSettings => ({
-  ...SESSION_AB_DEFAULTS,
+  rounds: 4,
+  tokens: 96,
+  minGain: 0.01,
+  openPerVisit: true,
+  probeCounts: true,
   ...patch,
 });
 
@@ -86,7 +89,7 @@ const manifest = parseManifest(
   }),
 );
 
-const MODEL = mossAbModel(manifest, "f32+dit8-a8-attn8-online");
+const MODEL = mossAbModel("sft", presetOf(manifest, "sft", "f32+dit8-a8-attn8-online"));
 
 /** A runner record whose arms carry the counts a `sessionArm` reports. */
 const countedRecord = (): SessionAbRecord => {
@@ -113,8 +116,6 @@ const dataOf = (
       read: "direct",
     },
     container: { component: "dit", part0Sha256: hex("c") },
-    modelsVersion: "6.5.4",
-    ruleName: EW_CHAIN_RULE_NAME,
     record,
     judgements: [],
   });
@@ -205,86 +206,12 @@ describe("the session A/B's MOSS-Image DiT target", () => {
       expect(request.openPerVisit).toBe(true);
     });
 
-    it("takes the knobs from the manifest's preset, none for the reference preset, and refuses another", () => {
-      expect(mossAbModel(manifest, "f32+dit8")).toEqual({
+    it("takes the knobs from the manifest's preset, none for the reference preset", () => {
+      expect(mossAbModel("sft", presetOf(manifest, "sft", "f32+dit8"))).toEqual({
         model: "sft",
         quant: "f32+dit8",
         session: {},
       });
-      expect(() => mossAbModel(manifest, "f16")).toThrow("no preset 'f16' of model 'sft'");
-    });
-  });
-
-  describe("the arms' steps", () => {
-    /** Runs the real runner over two fake arms wrapped by steppedArm, logging what happens when. */
-    const observe = async (openPerVisit: boolean) => {
-      const log: { readonly entry: string; readonly timed: boolean }[] = [];
-      let clockOpen = false;
-      let tick = 0;
-      const fake = (name: string, dispatches: number): SessionAbArm => ({
-        name,
-        open: () => {
-          log.push({ entry: `${name}:open`, timed: clockOpen });
-          return Promise.resolve();
-        },
-        run: () => {
-          log.push({ entry: `${name}:run`, timed: clockOpen });
-          return Promise.resolve({ outputs: { y: Float32Array.of(1, 2) } });
-        },
-        report: () => Promise.resolve({ fusions: { silu: 1 }, dispatches }),
-        close: () => {
-          log.push({ entry: `${name}:close`, timed: clockOpen });
-          return Promise.resolve();
-        },
-      });
-      const onStep = (step: ArmStep): void => {
-        log.push({ entry: `${step.arm}:step:${step.step}`, timed: clockOpen });
-      };
-      const record = await runSessionAb({
-        arms: [steppedArm(fake("base", 10), onStep), steppedArm(fake("rule", 7), onStep)],
-        rounds: 3,
-        openPerVisit,
-        environment: {
-          adapter: { vendor: "test", architecture: "", device: "", description: "" },
-          userAgent: "test",
-          backend: "other",
-          date: "2026-11-11T00:00:00.000Z",
-        },
-        clock: () => {
-          clockOpen = !clockOpen;
-          tick += 1;
-          return tick;
-        },
-      });
-      return { log, record };
-    };
-
-    for (const openPerVisit of [true, false]) {
-      it(`are reported outside the timed spans, around each open, run and close (openPerVisit: ${openPerVisit})`, async () => {
-        const { log } = await observe(openPerVisit);
-        expect(log.filter(({ timed }) => timed).map(({ entry }) => entry.split(":")[1])).toEqual(
-          log.filter(({ timed }) => timed).map(() => "run"),
-        );
-        expect(log.some(({ timed }) => timed)).toBe(true);
-        const steps = log.map(({ entry }) => entry);
-        // Every open is preceded by its step, every run followed by its `ran`, every close preceded.
-        steps.forEach((entry, index) => {
-          const [arm, what] = entry.split(":");
-          if (what === "open") expect(steps[index - 1]).toBe(`${arm}:step:open`);
-          if (what === "run") expect(steps[index + 1]).toBe(`${arm}:step:ran`);
-          if (what === "close") expect(steps[index - 1]).toBe(`${arm}:step:close`);
-        });
-      });
-    }
-
-    it("pass the arm's counts through to the runner's record", async () => {
-      const { record } = await observe(true);
-      expect(
-        record.arms.map(({ name, fusions, dispatches }) => ({ name, fusions, dispatches })),
-      ).toEqual([
-        { name: "base", fusions: { silu: 1 }, dispatches: 10 },
-        { name: "rule", fusions: { silu: 1 }, dispatches: 7 },
-      ]);
     });
   });
 
@@ -301,17 +228,6 @@ describe("the session A/B's MOSS-Image DiT target", () => {
       });
       expect(data.record).toBe(record);
       expect(JSON.parse(JSON.stringify(data))).toEqual(data);
-    });
-
-    it("refuses a runtime record of other arms or rounds, or whose arms reported no counts", () => {
-      const record = countedRecord();
-      expect(() => dataOf({ ...record, rounds: 4 })).toThrow("is not the request's");
-      expect(() => dataOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
-        "is not the request's",
-      );
-      expect(() => dataOf(abRecord({ base: steady(10), rule: steady(9) }))).toThrow(
-        "reported no counts",
-      );
     });
 
     it("gives each arm's row the counts the runner's record keeps, and none for an arm without them", () => {

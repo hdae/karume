@@ -11,6 +11,7 @@ import {
 } from "@karume/runtime/tune";
 
 import type { EntryResult } from "../entry.ts";
+import { messageText } from "../record.ts";
 import { K88_SET, type K88Summary, k88Summary } from "./k88.ts";
 import { type CaseSummaryRow, caseSummaryRows, mergeSweepReports } from "./record.ts";
 import type { SweepLive, SweepRunOutcome, SweepStop } from "./run.ts";
@@ -44,7 +45,7 @@ const joined = (parts: readonly (string | undefined)[]): string =>
 export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): string => {
   const total = plan.caseIds.length;
   const position = `case ${live.caseIndex + 1} / ${total}`;
-  const done = `${live.cases.length} / ${total} cases done`;
+  const done = `${live.casesDone} / ${total} cases done`;
   if (live.deviceLost !== undefined) {
     return `device lost (${live.deviceLost.reason}): ${live.deviceLost.message} — the sweep stops after ${position}`;
   }
@@ -56,11 +57,10 @@ export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): str
       return `${done} · idle before ${position}: ${Math.max(0, (phase.until - now) / 1000).toFixed(0)} s left`;
     case "sweeping": {
       const caseId = plan.caseIds[live.caseIndex] ?? "";
-      const rows = live.rows.filter((row) => row.caseId === caseId).length;
       return joined([
         done,
         `${position} ${caseId}`,
-        `${rows} rows`,
+        `${live.caseRows} rows`,
         phase.status ?? "acquiring the device",
         live.unit === undefined ? undefined : `timing ${live.unit}, dp4a ${String(live.dp4a)}`,
       ]);
@@ -77,7 +77,7 @@ const stopText = (stop: SweepStop): string | undefined => {
     case "deviceLost":
       return `stopped: device lost (${stop.reason}): ${stop.message}`;
     case "error":
-      return `stopped: ${stop.error instanceof Error ? stop.error.message : String(stop.error)}`;
+      return `stopped: ${messageText(stop.error)}`;
   }
 };
 

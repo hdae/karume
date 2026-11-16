@@ -1,9 +1,8 @@
 import { runSessionAb, type SessionAbArm } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import { steppedArm } from "../src/session-ab/moss.ts";
 import { armStepLine, armStepper, fetchLine, probeStepLine } from "../src/session-ab/progress.ts";
-import { runPositions } from "../src/session-ab/run.ts";
+import { runPositions, steppedArm } from "../src/session-ab/shared.ts";
 
 const ENVIRONMENT = {
   adapter: { vendor: "test", architecture: "", device: "", description: "" },

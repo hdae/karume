@@ -8,15 +8,15 @@
  * No MTP drafter and no image embedder: the workbench's measurements run neither.
  */
 
-import type { DistributionSource, HubRepoRef } from "@karume/hub";
 import { type FromPretrainedOptions, Pipeline, type RunPhase } from "@karume/models/gemma";
 import * as gemma4QatMobile from "@karume/models/gemma4-qat-mobile";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 
+import type { OpenedDistribution } from "../entry.ts";
 import { entryPointOf, type ExpertCacheSlots, type GemmaMount, isQatModel } from "./settings.ts";
 
 /** What a family's `fromPretrained` takes as its first argument. */
-export type PretrainedRef = HubRepoRef | DistributionSource;
+export type PretrainedRef = OpenedDistribution["ref"];
 
 /** The model a build loads, and the load options that change what is built. */
 export type GemmaLoad = {

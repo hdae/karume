@@ -9,19 +9,17 @@ import {
   type SessionAbArmProbe,
   sessionAbGemmaData,
 } from "../src/session-ab/data.ts";
-import { SESSION_AB_DEFAULTS, sessionAbRequest } from "../src/session-ab/request.ts";
+import { sessionAbRequest } from "../src/session-ab/gemma-request.ts";
 
 import { abRecord, RULE, steady } from "./helpers/session-ab-records.ts";
 
-const settings = { ...SESSION_AB_DEFAULTS, rounds: 3 };
+const settings = { rounds: 3, tokens: 96, minGain: 0.01, openPerVisit: true, probeCounts: true };
 
 const request = sessionAbRequest(
   { mount: "gemma4-qat", model: "26b", quant: "i4", expertCache: { slots: 64 } },
   settings,
   RULE,
 );
-
-const MODELS = "6.5.4";
 
 const DISTRIBUTION = {
   directory: "models/karume-gemma4-qat",
@@ -64,7 +62,6 @@ const build = (
   sessionAbGemmaData({
     request: ofRequest,
     distribution: DISTRIBUTION,
-    modelsVersion: MODELS,
     ruleName: RULE,
     arms,
     ...(probes === "none" ? {} : { probes }),
@@ -122,27 +119,24 @@ describe("the Gemma 4 session A/B's data", () => {
       expect(Object.hasOwn(data, "counts")).toBe(false);
     });
 
-    it("refuse probes the request did not ask for, none when it did, and probes of other arms", () => {
+    it("refuse probes the request did not ask for, and none when it did", () => {
       expect(() => build(undefined, FACTS, unprobed, PROBES)).toThrow(
         "The request does not probe the counts, and probes were given",
       );
       expect(() => build(undefined, FACTS, request, "none")).toThrow(
         "The request probes the counts, and no probe was given",
       );
-      expect(() => build(undefined, FACTS, request, PROBES.toReversed())).toThrow(
-        /The probes \(rule, base\) are not the request's arms/,
-      );
     });
   });
 
   describe("what a reader needs to run it again", () => {
-    it("keeps the models version it is given; the entries' is the package's own", () => {
-      expect(build().modelsVersion).toBe(MODELS);
+    it("keeps the version of @karume/models, the package's own", () => {
       const versionOf = (name: string): unknown =>
         JSON.parse(
           readFileSync(new URL(`../../../packages/${name}/package.json`, import.meta.url), "utf8"),
         ).version;
       expect(MODELS_VERSION).toEqual(versionOf("models"));
+      expect(build().modelsVersion).toBe(MODELS_VERSION);
     });
 
     it("names the rule's dispatch keys as the rule arm's probe read them", () => {
@@ -175,8 +169,7 @@ describe("the Gemma 4 session A/B's data", () => {
       expect(Object.hasOwn(build(undefined, noCache, plain), "expertCache")).toBe(false);
     });
 
-    it("refuses arm facts of other arms, or an arm without its resolved cache", () => {
-      expect(() => build(undefined, FACTS.toReversed())).toThrow(/are not the request's arms/);
+    it("refuses an arm without its resolved cache", () => {
       const missing = [FACTS[0], { name: "rule", facts: {} }];
       expect(() => build(undefined, missing)).toThrow(/rule reported no resolved expert cache/);
     });

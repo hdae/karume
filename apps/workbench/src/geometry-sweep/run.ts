@@ -6,11 +6,9 @@
  */
 
 import {
-  type GeometrySweepCaseSummary,
   type GeometrySweepOptions,
   type GeometrySweepProgress,
   type GeometrySweepReport,
-  type GeometrySweepRow,
   type GeometrySweepTimingUnit,
   runGeometrySweep,
 } from "@karume/runtime/tune";
@@ -147,9 +145,10 @@ export type SweepLive = {
   /** From the first sweep's `started` event. */
   readonly unit?: GeometrySweepTimingUnit;
   readonly dp4a?: boolean;
-  /** Every row and every finished case so far, over all calls. */
-  readonly rows: readonly GeometrySweepRow[];
-  readonly cases: readonly GeometrySweepCaseSummary[];
+  /** The cases finished so far, over all calls. */
+  readonly casesDone: number;
+  /** The rows of the case that runs now (each call sweeps one case). */
+  readonly caseRows: number;
   readonly deviceLost?: { readonly reason: string; readonly message: string };
 };
 
@@ -157,15 +156,15 @@ export type SweepLive = {
 export const INITIAL_LIVE: SweepLive = {
   caseIndex: 0,
   phase: { kind: "waiting" },
-  rows: [],
-  cases: [],
+  casesDone: 0,
+  caseRows: 0,
 };
 
 /** The live view after one event. */
 export const foldSweepEvent = (live: SweepLive, event: SweepRunEvent): SweepLive => {
   switch (event.kind) {
     case "case":
-      return { ...live, caseIndex: event.index, phase: { kind: "sweeping" } };
+      return { ...live, caseIndex: event.index, phase: { kind: "sweeping" }, caseRows: 0 };
     case "idle":
       return { ...live, caseIndex: event.index, phase: { kind: "idle", until: event.until } };
     case "sweep": {
@@ -180,9 +179,9 @@ export const foldSweepEvent = (live: SweepLive, event: SweepRunEvent): SweepLive
         case "status":
           return { ...live, phase: { kind: "sweeping", status: progress.message } };
         case "row":
-          return { ...live, rows: [...live.rows, progress.row] };
+          return { ...live, caseRows: live.caseRows + 1 };
         case "case":
-          return { ...live, cases: [...live.cases, progress.summary] };
+          return { ...live, casesDone: live.casesDone + 1 };
         case "deviceLost":
           return {
             ...live,

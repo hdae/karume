@@ -6,17 +6,18 @@
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
-import type { DefaultSampler, FromPretrainedOptions, SamplerSpec } from "@karume/models/gemma";
+import type { DefaultSampler, SamplerSpec } from "@karume/models/gemma";
 
-import { manifestPresets } from "../gemma4/presets.ts";
+import { modelRefusal } from "../gemma4/open.ts";
+import type { GemmaPipelineOptions, GemmaSessionOptions } from "../gemma4/pipeline.ts";
 import {
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
-  isQatModel,
   type ModelKey,
   modelConfig,
 } from "../gemma4/settings.ts";
+import { modelPreset } from "../model-preset.ts";
 
 /**
  * Distinct token ids at which a prompt makes a PLE block whole-resident on the host (ADR 0085): a
@@ -99,17 +100,14 @@ export type DecodeAhead = "1" | "2" | "4" | "8";
  * The pipeline options an arm passes to `fromPretrained` (absent = the default: the PLE on the
  * host, one decode step per batch).
  */
-export type ArmPipelineOptions = Pick<FromPretrainedOptions, "pleResidency" | "decodeAhead">;
+export type ArmPipelineOptions = GemmaPipelineOptions;
 
 /**
  * The Session options an arm passes to `fromPretrained` explicitly. The pipeline resolves each one
  * as explicit > the preset's declaration > the runtime default, so only what the arm changes is
  * passed (absent = the preset alone).
  */
-export type ArmSessionOptions = Pick<
-  FromPretrainedOptions,
-  "integerGemv" | "packedStaticQuantize" | "numerics"
->;
+export type ArmSessionOptions = Omit<GemmaSessionOptions, "fusionRules">;
 
 /**
  * The explicit options of the integer GEMV switch: `integerGemv: true`, plus what it requires —
@@ -192,22 +190,21 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
   const { mount, model } = draft.key;
   const manifest: Manifest | undefined = manifests[mount];
   if (manifest === undefined) return { ok: false, error: `The ${mount} manifest is not loaded.` };
-  if (manifest.models[model] === undefined) {
+  const refusal = modelRefusal(draft.key, manifest);
+  if (refusal?.kind === "unknown") {
     return {
       ok: false,
-      error: `The ${mount} manifest has no model '${model}'; its models are ${Object.keys(manifest.models).join(", ")}.`,
+      error: `The ${mount} manifest has no model '${model}'; its models are ${refusal.models.join(", ")}.`,
     };
   }
-  if (mount === "gemma4-qat-mobile" && !isQatModel(model)) {
+  if (refusal?.kind === "not-mobile") {
     return { ok: false, error: `gemma4QatMobile.Pipeline does not accept the model '${model}'.` };
   }
-  const { presets, defaultQuant } = manifestPresets(manifest, model);
-  const chosen = draft.quant ?? defaultQuant;
-  const preset = presets.find(({ name }) => name === chosen);
-  if (preset === undefined) {
+  const preset = modelPreset(manifest, model, draft.quant);
+  if (!preset.ok) {
     return {
       ok: false,
-      error: `The ${mount} model '${model}' has no preset '${chosen}'; its presets are ${presets.map(({ name }) => name).join(", ")}.`,
+      error: `The ${mount} model '${model}' has no preset '${preset.chosen}'; its presets are ${preset.presets.join(", ")}.`,
     };
   }
   const declaredSampler = modelConfig(manifest, model).sampler;
@@ -228,17 +225,15 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
     ...(decodeAhead >= 2 ? { decodeAhead } : {}),
   };
   const session: ArmSessionOptions =
-    draft.integerGemv === true
-      ? integerGemvSession(manifest.models[model].quants[preset.name].session)
-      : {};
+    draft.integerGemv === true ? integerGemvSession(preset.declaration.session) : {};
   return {
     ok: true,
     arm: {
       mount,
       model,
       quant: preset.name,
-      quantLabel: preset.label,
-      isDefaultQuant: preset.name === defaultQuant,
+      quantLabel: preset.declaration.label ?? preset.name,
+      isDefaultQuant: preset.isDefault,
       tap: draft.tap,
       ...(draft.tap && draft.split === true ? { split: true } : {}),
       ...(Object.keys(session).length === 0 ? {} : { session }),

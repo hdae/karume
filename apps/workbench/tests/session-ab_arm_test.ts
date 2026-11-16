@@ -18,7 +18,7 @@ import {
   type DiagnosticsCallback,
   pipelineArm,
   probeCounts,
-} from "../src/session-ab/run.ts";
+} from "../src/session-ab/gemma-arm.ts";
 
 const ENVIRONMENT = {
   adapter: { vendor: "test", architecture: "", device: "", description: "" },
@@ -112,7 +112,7 @@ type Rig = {
   /** Everything the fake pipeline and the arm's callbacks did, in order. */
   readonly log: string[];
   /** The options each build received. */
-  readonly builds: { readonly fusionRules?: unknown; readonly onRunDiagnostics?: unknown }[];
+  readonly builds: { readonly onRunDiagnostics?: unknown }[];
   /** The log entries made while the runner's clock was open (inside a timed span). */
   readonly timed: string[];
   /** The runner's clock: every read opens or closes the span. */
@@ -148,15 +148,20 @@ type FakeOptions = {
   readonly disposeThrows?: boolean;
 };
 
-/** A fake pipeline build: a sequence whose generation emits the scripted phases and tokens. */
-const fakeBuild = (where: Rig, name: string, fake: FakeOptions) => {
-  return (options: {
-    readonly fusionRules?: SessionOptions["fusionRules"];
-    readonly onRunDiagnostics?: DiagnosticsCallback;
-  }): Promise<ArmPipeline> => {
+/**
+ * A fake pipeline build: a sequence whose generation emits the scripted phases and tokens, the
+ * rule's dispatch key with them when the arm passes `fusionRules` (as the entry's build does).
+ */
+const fakeBuild = (
+  where: Rig,
+  name: string,
+  fake: FakeOptions,
+  fusionRules: SessionOptions["fusionRules"],
+) => {
+  return (options: { readonly onRunDiagnostics?: DiagnosticsCallback }): Promise<ArmPipeline> => {
     where.builds.push(options);
     where.record(`${name}:build`);
-    const rules = options.fusionRules !== undefined;
+    const rules = fusionRules !== undefined;
     const sequence = (): ArmSequence => ({
       generate: (request) => {
         where.record(`${name}:generate`);
@@ -215,7 +220,7 @@ const specsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
     name,
     ...(fusionRules === undefined ? {} : { fusionRules }),
     request,
-    build: fakeBuild(where, name, fake),
+    build: fakeBuild(where, name, fake, fusionRules),
     prompt: () => {
       where.record(`${name}:prompt`);
       return [1, 2, 3];
@@ -247,28 +252,25 @@ const run = (where: Rig, arms: ReturnType<typeof armsOf>, openPerVisit: boolean)
 
 describe("the session A/B's arm on a Gemma 4 pipeline", () => {
   describe("the options each arm builds with", () => {
-    it("passes the rules to the rule arm alone, and never the diagnostics callback", async () => {
+    it("builds every arm with no option: never the diagnostics callback (the rules are the build's own)", async () => {
       for (const openPerVisit of [false, true]) {
         const where = newRig();
         await run(where, armsOf(where, REQUEST, { phases: decodePhases(4) }), openPerVisit);
         expect(where.builds).toHaveLength(openPerVisit ? 2 * 2 * 4 : 2);
         for (const [index, options] of where.builds.entries()) {
-          expect(Object.hasOwn(options, "onRunDiagnostics"), `build ${index}`).toBe(false);
+          expect(options, `build ${index}`).toEqual({});
         }
-        const [base, rule] = where.builds;
-        expect(Object.hasOwn(base, "fusionRules")).toBe(false);
-        expect(rule.fusionRules).toEqual([GELU_MUL_RULE]);
       }
     });
 
-    it("the probe passes the arm's rules and the diagnostics callback", async () => {
+    it("the probe builds with the diagnostics callback alone", async () => {
       const where = newRig();
       await probesOf(where, REQUEST, { phases: decodePhases(4) });
-      const [base, rule] = where.builds;
       expect(where.builds).toHaveLength(2);
-      expect(Object.hasOwn(base, "fusionRules")).toBe(false);
-      expect(rule.fusionRules).toEqual([GELU_MUL_RULE]);
-      for (const options of where.builds) expect(typeof options.onRunDiagnostics).toBe("function");
+      for (const options of where.builds) {
+        expect(Object.keys(options)).toEqual(["onRunDiagnostics"]);
+        expect(typeof options.onRunDiagnostics).toBe("function");
+      }
     });
   });
 

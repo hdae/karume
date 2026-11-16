@@ -1,97 +1,24 @@
 /**
- * The session A/B's arms on a Gemma 4 pipeline and the order the runner visits arms in.
+ * The session A/B's arms on a Gemma 4 pipeline (the `gemma4-session-ab` entry's).
  *
  * An arm (`SessionAbArm` of `@karume/runtime/tune`) here is one Gemma 4 pipeline configuration:
- * open builds the pipeline with the arm's options (the candidate rule for the `rule` arm), a run is
- * one generation of the request's tokens from the fixed prompt with the fixed sampler — its output
- * is the generated token ids, so the A/B's identity is token identity — and close disposes the
- * pipeline. The arms are built without the diagnostics callback, so every run is the production
- * path; the fusion and dispatch counts come from a count probe of each arm before the A/B
- * ({@link probeCounts}: one build with the callback, one generation, one dispose).
- *
- * {@link runPositions} is the runner's visiting order as a list, so an entry can say where a run is
- * (`runSessionAb` reports no progress of its own); `vp test` drives the real runner with fake arms
- * against it.
+ * open builds the pipeline (with the candidate rule for the `rule` arm), a run is one generation of
+ * the request's tokens from the fixed prompt with the fixed sampler — its output is the generated
+ * token ids, so the A/B's identity is token identity — and close disposes the pipeline. The arms
+ * are built without the diagnostics callback, so every run is the production path; the fusion and
+ * dispatch counts come from a count probe of each arm before the A/B ({@link probeCounts}: one build
+ * with the callback, one generation, one dispose).
  */
 
 import type { ExpertCacheReport, Pipeline, RunPhase } from "@karume/models/gemma";
 import type { SessionDiagnostics, SessionOptions } from "@karume/runtime";
-import type {
-  SessionAbAdapter,
-  SessionAbArm,
-  SessionAbEnvironment,
-  SessionAbRun,
-} from "@karume/runtime/tune";
+import type { SessionAbArm, SessionAbRun } from "@karume/runtime/tune";
 
-import type { SessionAbRequest } from "./request.ts";
-
-/**
- * What the runner's record says about where an A/B ran on `adapter`, now. WebGPU does not tell the
- * backend and the runtime's record requires one: it is the host's (`RunContext.backend`), and
- * `unknown` when a browser run declared none.
- */
-export const runnerEnvironment = (
-  adapter: SessionAbAdapter,
-  backend: string | undefined,
-): SessionAbEnvironment => ({
-  adapter,
-  userAgent: navigator.userAgent,
-  backend: backend ?? "unknown",
-  date: new Date().toISOString(),
-});
-
-/** Where one run sits in the runner's order. */
-export type RunPosition = {
-  /** 0 = the untimed warm-up round, 1 to `rounds` the timed rounds. */
-  readonly round: number;
-  /** 1 = the forward pass over the arms, 2 = the reverse pass. */
-  readonly visit: 1 | 2;
-  readonly arm: number;
-  /** 1 or, with `openPerVisit`, 2 (the fresh pipeline's untimed first run comes first). */
-  readonly run: 1 | 2;
-  /** Whether the runner times this run. */
-  readonly timed: boolean;
-};
-
-/**
- * Every run in the runner's order: per round the arms forward then in reverse (A B B A), one run
- * per visit, or two with `openPerVisit` (an untimed one on the fresh pipeline, then the timed one).
- */
-export const runPositions = (
-  arms: number,
-  rounds: number,
-  openPerVisit: boolean,
-): readonly RunPosition[] => {
-  const order = Array.from({ length: arms }, (_, arm) => arm);
-  const runs: (1 | 2)[] = openPerVisit ? [1, 2] : [1];
-  const positions: RunPosition[] = [];
-  for (let round = 0; round <= rounds; round += 1) {
-    for (const [visit, arm] of [
-      ...order.map((arm) => [1, arm] as const),
-      ...order.toReversed().map((arm) => [2, arm] as const),
-    ]) {
-      for (const run of runs) {
-        positions.push({ round, visit, arm, run, timed: round > 0 && run === runs.length });
-      }
-    }
-  }
-  return positions;
-};
+import type { SessionAbRequest } from "./gemma-request.ts";
+import { type ArmStepReporter, ruleKeyPrefix } from "./shared.ts";
 
 /** The request fields an arm reads. */
 export type ArmRequest = Pick<SessionAbRequest, "tokens" | "sampler" | "capacity" | "expertCache">;
-
-/**
- * What one arm did, as a caller shows it: `open` before a pipeline is built, `ran` after a run
- * returned (from the report, outside the timed span), `close` before a pipeline is disposed.
- */
-export type ArmStep = { readonly arm: string; readonly step: "open" | "ran" | "close" };
-
-/**
- * Where an arm's steps go. The arm awaits it before it goes on, so a reporter MAY hand the event
- * loop a turn (a browser paints then) before the runner's next timed run.
- */
-export type ArmStepReporter = (step: ArmStep) => void | Promise<void>;
 
 /**
  * What one count probe did, as a caller shows it: `open` before its pipeline is built, `run` before
@@ -127,16 +54,6 @@ export type DiagnosticsCallback = (diagnostics: CountsDiagnostics, phase: RunPha
  */
 export const countedPhaseOf = (request: Pick<ArmRequest, "expertCache">): "decode" | "verify" =>
   request.expertCache?.depth === undefined ? "decode" : "verify";
-
-/**
- * The prefix of a rule's dispatch keys: an external rule `<namespace>/<rule>` keys every dispatch
- * under `ext:<namespace>:` (ADR 0148 decision 5).
- */
-export const ruleKeyPrefix = (ruleName: string): string => {
-  const slash = ruleName.indexOf("/");
-  if (slash <= 0) throw new Error(`The rule name "${ruleName}" is not <namespace>/<rule>`);
-  return `ext:${ruleName.slice(0, slash)}:`;
-};
 
 /** The expert cache as an arm's pipeline resolved it. */
 export type ResolvedExpertCache = {
@@ -192,19 +109,16 @@ const countsOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]): 
 };
 
 /**
- * What an arm and its count probe are built from. `build` loads the pipeline with the options it
- * is given (the arm's rules, and for the probe alone the diagnostics callback); `prompt` gives the
- * prompt's token ids for a built pipeline. The signal is checked before every build and passed to
- * every generation.
+ * What an arm and its count probe are built from. `build` loads the arm's pipeline (its rules are
+ * the caller's to pass), with the diagnostics callback for the probe alone; `fusionRules` are the
+ * arm's rules, whose dispatch keys the probe reads; `prompt` gives the prompt's token ids for a
+ * built pipeline. The signal is checked before every build and passed to every generation.
  */
 export type ArmSpec<P extends ArmPipeline> = {
   readonly name: string;
   readonly fusionRules?: SessionOptions["fusionRules"];
   readonly request: ArmRequest;
-  readonly build: (options: {
-    readonly fusionRules?: SessionOptions["fusionRules"];
-    readonly onRunDiagnostics?: DiagnosticsCallback;
-  }) => Promise<P>;
+  readonly build: (options: { readonly onRunDiagnostics?: DiagnosticsCallback }) => Promise<P>;
   readonly prompt: (pipeline: P) => readonly number[];
   readonly signal: AbortSignal;
 };
@@ -228,7 +142,7 @@ export type ArmSpec<P extends ArmPipeline> = {
 export const pipelineArm = <P extends ArmPipeline>(
   input: ArmSpec<P> & { readonly onStep: ArmStepReporter },
 ): SessionAbArm & { readonly facts: () => ArmFacts } => {
-  const { name, fusionRules, request, signal, onStep } = input;
+  const { name, request, signal, onStep } = input;
   let pipeline: P | undefined;
   let prompt: readonly number[] = [];
   /** The sequence the next run generates in. */
@@ -264,7 +178,7 @@ export const pipelineArm = <P extends ArmPipeline>(
     open: async () => {
       signal.throwIfAborted();
       await onStep({ arm: name, step: "open" });
-      pipeline = await input.build(fusionRules === undefined ? {} : { fusionRules });
+      pipeline = await input.build({});
       // The same options resolve the same way on every open, so the first open's is the arm's.
       expertCache ??= resolvedExpertCache(
         pipeline.expertCacheReport(),
@@ -313,7 +227,6 @@ export const probeCounts = async <P extends ArmPipeline>(
   signal.throwIfAborted();
   onStep({ arm: name, step: "open" });
   const pipeline = await input.build({
-    ...(fusionRules === undefined ? {} : { fusionRules }),
     onRunDiagnostics: (diagnostics, phase) => {
       if (seen.counts !== undefined || phase.kind !== counted) return;
       seen.counts = countsOf(diagnostics, prefixes);

@@ -9,20 +9,14 @@
 
 import {
   type AssetProgress,
-  type DistributionSource,
-  type HubRepoRef,
-  loadManifest,
+  type LoadedManifest,
   openContainerSource,
   prefetchAssets,
   resolveSelection,
 } from "@karume/hub";
 import { openContainer, type PreparedModel, prepareContainer } from "@karume/runtime";
 
-/** Lower-case hex sha256 of `bytes` (WebCrypto, in a browser and under Node alike). */
-const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-};
+import { sha256Hex } from "../sha256.ts";
 
 /** The prepared component every arm builds its Sessions from, and its container's identity. */
 export type ComponentModel = {
@@ -32,19 +26,19 @@ export type ComponentModel = {
 };
 
 /**
- * Opens `component` of `model` / `quant` (its graph has the same name): its descriptor first (a
- * selection without the component, or a container the runtime cannot prepare, fails before any
- * weight byte is fetched), then the weight parts, with their progress.
+ * Opens `component` of `model` / `quant` (its graph has the same name) from the manifest the entry
+ * loaded: its descriptor first (a selection without the component, or a container the runtime
+ * cannot prepare, fails before any weight byte is fetched), then the weight parts, with their
+ * progress.
  */
 export const openComponentModel = async (
-  ref: HubRepoRef | DistributionSource,
+  loaded: LoadedManifest,
   model: string,
   quant: string,
   component: string,
   signal: AbortSignal,
   onProgress: (progress: AssetProgress) => void,
 ): Promise<ComponentModel> => {
-  const loaded = await loadManifest(ref, { signal });
   const { containers } = resolveSelection(loaded.manifest, {
     model,
     quant,

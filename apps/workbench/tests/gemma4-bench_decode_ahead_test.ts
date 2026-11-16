@@ -106,6 +106,10 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
       tap: true,
       ...(pipeline === undefined ? {} : { pipeline }),
       sampler: { temperature: 0 },
+      distribution: {
+        ref: { repo: "test/gemma4-qat-mobile" },
+        facts: { directory: "qat", manifestSha256: "00", read: "direct" },
+      },
     });
 
     it("records each arm's pipeline options ({} when none)", () => {
@@ -114,9 +118,6 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ pleResidency: "gpu", decodeAhead: 4 })],
-        distributions: {
-          "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00", read: "direct" },
-        },
         visits: [],
         chats: [],
       });

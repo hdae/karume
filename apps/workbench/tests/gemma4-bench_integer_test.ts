@@ -133,6 +133,10 @@ describe("the integer GEMV switch", () => {
       tap: true,
       ...(session === undefined ? {} : { session }),
       sampler: { temperature: 0 },
+      distribution: {
+        ref: { repo: "test/gemma4-qat-mobile" },
+        facts: { directory: "qat", manifestSha256: "00", read: "direct" },
+      },
     });
 
     it("records per arm whether it ran the integer GEMV and the options it passed", () => {
@@ -141,9 +145,6 @@ describe("the integer GEMV switch", () => {
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ integerGemv: true })],
-        distributions: {
-          "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00", read: "direct" },
-        },
         visits: [],
         chats: [],
       });

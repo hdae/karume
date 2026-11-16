@@ -7,7 +7,6 @@
 import type { AttentionBenchRoute, AttentionBenchShapeResult } from "@karume/runtime/tune";
 
 export type BenchTableRow = {
-  readonly key: string;
   readonly shape: string;
   readonly route: "s16" | "online" | "quantization";
   /** Query rows one measured dispatch covered. */
@@ -16,7 +15,6 @@ export type BenchTableRow = {
   readonly split?: string;
   readonly msPerDispatch?: number;
   readonly msPer1000Rows?: number;
-  readonly tops?: number;
   /** The route's (or the quantization's) time for the whole node. */
   readonly nodeMs?: number;
   /** Per-dispatch ms of each stage ("qk 12.30 · stats 1.20 · pv 10.10"). */
@@ -43,7 +41,7 @@ const routeRow = (
   name: "s16" | "online",
   route: AttentionBenchRoute,
 ): BenchTableRow => {
-  const base = { key: `${result.shape.id}:${name}`, shape: result.shape.id, route: name } as const;
+  const base = { shape: result.shape.id, route: name } as const;
   if (!route.eligible) return { ...base, note: `not eligible: ${route.reason}` };
   const unit = name === "s16" ? "block" : "window";
   const failed = route.stages.find((stage) => stage.error !== undefined);
@@ -59,7 +57,6 @@ const routeRow = (
     split: `${route.productionDispatches} ${unit}${route.productionDispatches === 1 ? "" : "s"} × ${formatCount(route.productionRows)} rows`,
     ...(route.msPerDispatch === undefined ? {} : { msPerDispatch: route.msPerDispatch }),
     ...(route.msPer1000Rows === undefined ? {} : { msPer1000Rows: route.msPer1000Rows }),
-    ...(route.tops === undefined ? {} : { tops: route.tops }),
     ...(route.estimatedNodeMs === undefined ? {} : { nodeMs: route.estimatedNodeMs }),
     ...(route.stages.length > 1
       ? {
@@ -86,7 +83,6 @@ export const benchTableRows = (results: readonly AttentionBenchShapeResult[]): B
     return [
       ...rows,
       {
-        key: `${result.shape.id}:quantization`,
         shape: result.shape.id,
         route: "quantization",
         ...(quantization.msPerNode === undefined ? {} : { nodeMs: quantization.msPerNode }),
@@ -100,20 +96,14 @@ export const benchTableRows = (results: readonly AttentionBenchShapeResult[]): B
 
 /**
  * One row of the candidate's table (perf-ledger K-106, the tiled key axis): its ratios to `online`
- * at one shape, the paired per-dispatch times, the producer pair and the identity flag.
+ * at one shape, the rounds that gave a ratio and the identity flag.
  */
 export type CandidateTableRow = {
-  readonly key: string;
   readonly shape: string;
   /** Time tiled ÷ online, the kernel alone (the median of the per-round ratios; below 1 = tiled faster). */
   readonly kernelRatio?: number;
   /** Kernel + producer per node, tiled ÷ today (needs the quantization line). */
   readonly withProducerRatio?: number;
-  /** ms per dispatch of online and of the candidate (the paired minimums). */
-  readonly onlineMs?: number;
-  readonly tiledMs?: number;
-  /** "today 0.512 · tiled 0.640 (×1.250)" — the producer pair of the quantization line. */
-  readonly producer?: string;
   /** Paired rounds that gave a ratio (a round with a clamped pass gives none). */
   readonly rounds?: number;
   /** Both producers on the same Vᵀ, both kernels on their outputs: O identical word for word. */
@@ -131,7 +121,7 @@ export const candidateRows = (results: readonly AttentionBenchShapeResult[]): Ca
   results.flatMap((result): CandidateTableRow[] => {
     const tiled = result.onlineTiled;
     if (tiled === undefined) return [];
-    const base = { key: `${result.shape.id}:onlineTiled`, shape: result.shape.id } as const;
+    const base = { shape: result.shape.id } as const;
     if (!tiled.eligible) return [{ ...base, note: `not run: ${tiled.reason}` }];
     const { kernel, identity } = tiled;
     const pair = result.quantization?.tiledVt;
@@ -150,13 +140,6 @@ export const candidateRows = (results: readonly AttentionBenchShapeResult[]): Ca
         ...(result.tiledVsOnlineWithProducer === undefined
           ? {}
           : { withProducerRatio: result.tiledVsOnlineWithProducer }),
-        ...(kernel.aMsPerDispatch === undefined ? {} : { onlineMs: kernel.aMsPerDispatch }),
-        ...(kernel.bMsPerDispatch === undefined ? {} : { tiledMs: kernel.bMsPerDispatch }),
-        ...(pair === undefined || pair.error !== undefined
-          ? {}
-          : {
-              producer: `today ${formatMs(pair.aMsPerDispatch)} · tiled ${formatMs(pair.bMsPerDispatch)} (${formatRatio(pair.ratio)})`,
-            }),
         rounds: (kernel.rounds ?? []).filter((round) => round.ratio !== undefined).length,
         identical: identity.identical,
         ...(notes.length === 0 ? {} : { note: notes.join(" · ") }),

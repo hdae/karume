@@ -11,7 +11,9 @@
 
 import type { AssetProgress } from "@karume/hub";
 
-import type { ArmStep, ProbeStep, RunPosition } from "./run.ts";
+import { nextTask } from "../next-task.ts";
+import type { ProbeStep } from "./gemma-arm.ts";
+import type { ArmStep, RunPosition } from "./shared.ts";
 
 const MIB = 2 ** 20;
 
@@ -57,12 +59,6 @@ export const probeStepLine = (step: ProbeStep, ended: number, total: number): st
 /** The line of a component's weight fetch, in whole MiB. */
 export const fetchLine = (component: string, progress: AssetProgress): string =>
   `fetching the ${component} component · ${Math.round(progress.loaded / MIB)} / ${Math.round(progress.total / MIB)} MiB`;
-
-/** One turn of the event loop (a macrotask): a browser may render before it ends. */
-export const nextTask = (): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
 
 /**
  * The step reporter of an A/B's arms: on every step it reports {@link armStepLine}, then waits one

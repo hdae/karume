@@ -14,30 +14,22 @@
  */
 
 import { chatPrompt } from "@karume/models/gemma";
-import { acquireGpu } from "@karume/runtime";
 
-import {
-  booleanValue,
-  choiceValue,
-  type DistributionFacts,
-  type Entry,
-  textValue,
-} from "../../entry.ts";
+import { booleanValue, choiceValue, type Entry, textValue } from "../../entry.ts";
 import { buildGemmaPipeline, type GemmaPipeline } from "../../gemma4/pipeline.ts";
-import { GEMMA_MOUNTS, type GemmaMount } from "../../gemma4/settings.ts";
 import { BENCH_PROMPT_IDS, SAMPLER_KINDS, samplerOf } from "../../gemma4-bench/plan.ts";
 import { benchProgressLine } from "../../gemma4-bench/progress.ts";
 import { benchSettingsOf, openBenchArms } from "../../gemma4-bench/request.ts";
 import { decodeBenchResult } from "../../gemma4-bench/result.ts";
 import { type BenchPipeline, type RunArm, settleDecodeBench } from "../../gemma4-bench/run.ts";
 import { createGpuTap } from "../../gemma4-bench/tap.ts";
-import { SOURCE_KINDS } from "../../session-ab/request.ts";
-
-/** Lower-case hex sha256 of `bytes` (WebCrypto, in a browser and under Node alike). */
-const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-};
+import {
+  acquireWithSubgroups,
+  SOURCE_KINDS,
+  sourceParameter,
+  SUBGROUPS_PARAMETER,
+} from "../../local-parameters.ts";
+import { sha256Hex } from "../../sha256.ts";
 
 /** What the bench loop needs of a Gemma 4 pipeline (its own tokenizer renders the prompt). */
 const benchPipelineOf = (pipeline: GemmaPipeline): BenchPipeline => ({
@@ -100,51 +92,27 @@ const entry: Entry = {
       options: BENCH_PROMPT_IDS,
       default: BENCH_PROMPT_IDS,
     },
-    {
-      kind: "boolean",
-      name: "subgroups",
-      label:
-        "Acquire the device with the subgroup features when it has them (off: a device without them)",
-      default: true,
-    },
-    {
-      kind: "choice",
-      name: "source",
-      label: "How a browser reads the distributions",
-      options: SOURCE_KINDS,
-      default: "cached",
-    },
+    SUBGROUPS_PARAMETER,
+    sourceParameter("How a browser reads the distributions"),
   ],
   run: async ({ parameters, gpuOptions, signal, progress, openDistribution }) => {
     const settings = benchSettingsOf(parameters);
-    const opened = await openBenchArms(
+    const openedArms = await openBenchArms(
       textValue(parameters, "arms"),
       choiceValue(parameters, "source", SOURCE_KINDS),
       openDistribution,
       signal,
     );
-    const arms: readonly RunArm[] = opened.arms.map((arm) => ({
+    const arms: readonly RunArm[] = openedArms.map((arm) => ({
       ...arm,
       sampler: samplerOf(settings.sampler, arm.declaredSampler),
     }));
-    const refOf = (mount: GemmaMount) => {
-      const distribution = opened.distributions[mount];
-      if (distribution === undefined) throw new Error(`No distribution opened for '${mount}'`);
-      return distribution.ref;
-    };
     const host: GPU | undefined = gpuOptions.gpu ?? navigator.gpu;
     if (host === undefined) throw new Error("This host has no WebGPU (navigator.gpu)");
     // The tap wraps the host's GPU and the device is acquired through it: it requests
     // timestamp-query itself and hides it from the runtime, so karume's timing mode stays off.
     const tap = createGpuTap(host);
-    // With the subgroup features the device can run the 32-lane kernel forms, as the pages of the
-    // Playground acquire it; without them the arms run on the device a plain `acquireGpu()` gives.
-    // Which one fits can differ: the 26B model with 64 expert slots builds a second pipeline on a
-    // 12 GB GPU only without them (docs/known-issues.md).
-    const gpu = await acquireGpu({
-      gpu: tap.gpu,
-      ...(booleanValue(parameters, "subgroups") ? { subgroups: "available" as const } : {}),
-    });
+    const gpu = await acquireWithSubgroups({ gpu: tap.gpu }, booleanValue(parameters, "subgroups"));
     try {
       const probe = tap.probe(gpu.device);
       if (probe === undefined) throw new Error("The device was not acquired through the GPU tap");
@@ -161,7 +129,7 @@ const entry: Entry = {
           build: async (arm, buildSignal) =>
             benchPipelineOf(
               await buildGemmaPipeline({
-                ref: refOf(arm.mount),
+                ref: arm.distribution.ref,
                 gpu,
                 load: { mount: arm.mount, model: arm.model, quant: arm.quant },
                 signal: buildSignal,
@@ -175,18 +143,7 @@ const entry: Entry = {
         },
         onProgress: (step) => progress(benchProgressLine(step, arms, settings.chats)),
       });
-      const facts: Partial<Record<GemmaMount, DistributionFacts>> = {};
-      for (const mount of GEMMA_MOUNTS) {
-        const distribution = opened.distributions[mount];
-        if (distribution !== undefined) facts[mount] = distribution.facts;
-      }
-      return decodeBenchResult({
-        timestampQuery: probe.timestamps,
-        settings,
-        arms,
-        distributions: facts,
-        outcome,
-      });
+      return decodeBenchResult({ timestampQuery: probe.timestamps, settings, arms, outcome });
     } finally {
       gpu.destroy();
     }

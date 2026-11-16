@@ -22,12 +22,8 @@ import {
   ParameterError,
   type ParameterValues,
 } from "../entry.ts";
-import {
-  GEMMA_MOUNTS,
-  type GemmaManifests,
-  type GemmaMount,
-  isGemmaMount,
-} from "../gemma4/settings.ts";
+import { MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
+import type { GemmaManifests, GemmaMount } from "../gemma4/settings.ts";
 import {
   type ArmDraft,
   BENCH_PROMPT_IDS,
@@ -67,8 +63,6 @@ const AHEAD_DEPTHS: Readonly<Record<"ahead2" | "ahead4" | "ahead8", DecodeAhead>
   ahead8: "8",
 };
 
-const MOUNT_LIST = GEMMA_MOUNTS.join(", ");
-
 /** One arm of the `arms` text: as written (a refusal names it so) and as a draft. */
 export type NamedArm = { readonly text: string; readonly draft: ArmDraft };
 
@@ -84,15 +78,10 @@ const parseArm = (text: string, position: number): NamedArm => {
     throw armError(position, text, `names more than one preset; an arm is ${ARM_FORM}`);
   }
   const [keyText = "", quant] = parts;
-  const slash = keyText.indexOf("/");
-  const mount = slash < 0 ? "" : keyText.slice(0, slash);
-  const model = slash < 0 ? "" : keyText.slice(slash + 1);
-  if (mount === "" || model === "") {
-    throw armError(position, text, `expected ${ARM_FORM} with a mount of ${MOUNT_LIST}`);
-  }
-  if (!isGemmaMount(mount)) {
-    throw armError(position, text, `'${mount}' is not one of the mounts ${MOUNT_LIST}`);
-  }
+  const key = parseModelKey(keyText, {
+    form: `expected ${ARM_FORM} with a mount of ${MOUNT_LIST}`,
+    refuse: (reason) => armError(position, text, reason),
+  });
   if (quant === "") {
     throw armError(
       position,
@@ -148,7 +137,7 @@ const parseArm = (text: string, position: number): NamedArm => {
   return {
     text,
     draft: {
-      key: { mount, model },
+      key,
       ...(quant === undefined ? {} : { quant }),
       tap,
       ...(split ? { split: true } : {}),
@@ -178,38 +167,32 @@ export const parseArmsText = (text: string): readonly NamedArm[] => {
   });
 };
 
-/** The arms a run makes, and the distribution of every mount they read (each opened once). */
-export type OpenedBenchArms = {
-  readonly arms: readonly BenchArm[];
-  readonly distributions: Partial<Readonly<Record<GemmaMount, OpenedDistribution>>>;
-};
+/** An arm with the distribution of its mount, as it was opened (once per mount). */
+export type OpenedBenchArm = BenchArm & { readonly distribution: OpenedDistribution };
 
-/** `mount` opened, or `undefined` when its mirror is missing. */
-const openPresent = async (
-  openDistribution: OpenDistribution,
-  mount: GemmaMount,
-  source: SourceKind,
-): Promise<OpenedDistribution | undefined> => {
-  try {
-    return await openDistribution(mount, source);
-  } catch (error) {
-    // Every Gemma mount has HF-compatible coordinates, so a mount unavailable here has no mirror.
-    if (error instanceof MountUnavailableError && error.mount === mount) return undefined;
-    throw error;
-  }
-};
-
-/** Every arm resolved against the manifests (`resolveArm`), the first refused one named. */
-const resolveArms = (named: readonly NamedArm[], manifests: GemmaManifests): readonly BenchArm[] =>
+/**
+ * Every arm resolved against the manifests (`resolveArm`), the first refused one named, with its
+ * mount's distribution. `resolveArm` refuses an arm whose manifest is not loaded, and a manifest is
+ * loaded only together with its distribution.
+ */
+const resolveArms = (
+  named: readonly NamedArm[],
+  manifests: GemmaManifests,
+  distributions: ReadonlyMap<GemmaMount, OpenedDistribution>,
+): readonly OpenedBenchArm[] =>
   named.map(({ text, draft }, index) => {
     const resolution = resolveArm(draft, manifests);
     if (!resolution.ok) throw armError(index + 1, text, resolution.error);
-    return resolution.arm;
+    const { arm } = resolution;
+    const distribution = distributions.get(arm.mount);
+    if (distribution === undefined) throw new Error(`No distribution opened for '${arm.mount}'`);
+    return { ...arm, distribution };
   });
 
 /**
  * The arms `text` names, each mount they read opened (`source`: how a browser reads it) and its
- * manifest loaded, then every arm resolved against the manifests. A mount whose mirror is missing
+ * manifest loaded, then every arm resolved against the manifests and given its mount's
+ * distribution (the arms of one mount share it). A mount whose mirror is missing
  * is refused, naming the first arm that reads it. Empty text is the default arms: one per mount of
  * the three whose mirror is present, at its default model and preset, the tap on (refused when no
  * mirror is present).
@@ -219,18 +202,18 @@ export const openBenchArms = async (
   source: SourceKind,
   openDistribution: OpenDistribution,
   signal: AbortSignal,
-): Promise<OpenedBenchArms> => {
+): Promise<readonly OpenedBenchArm[]> => {
   const named = parseArmsText(text);
-  const distributions: Partial<Record<GemmaMount, OpenedDistribution>> = {};
+  const distributions = new Map<GemmaMount, OpenedDistribution>();
   const manifests: GemmaManifests = {};
-  const load = async (mount: GemmaMount, opened: OpenedDistribution): Promise<void> => {
-    distributions[mount] = opened;
-    manifests[mount] = (await loadManifest(opened.ref, { signal })).manifest;
-  };
   if (named.length === 0) {
-    for (const mount of GEMMA_MOUNTS) {
-      const opened = await openPresent(openDistribution, mount, source);
-      if (opened !== undefined) await load(mount, opened);
+    for await (const { mount, opened, manifest } of presentMounts(
+      openDistribution,
+      source,
+      signal,
+    )) {
+      distributions.set(mount, opened);
+      manifests[mount] = manifest;
     }
     const drafts = defaultArmDrafts(manifests);
     if (drafts.length === 0) {
@@ -243,11 +226,11 @@ export const openBenchArms = async (
       text: `${draft.key.mount}/${draft.key.model}`,
       draft,
     }));
-    return { arms: resolveArms(defaults, manifests), distributions };
+    return resolveArms(defaults, manifests, distributions);
   }
   for (const [index, { text: armText, draft }] of named.entries()) {
     const { mount } = draft.key;
-    if (distributions[mount] !== undefined) continue;
+    if (distributions.has(mount)) continue;
     let opened: OpenedDistribution;
     try {
       opened = await openDistribution(mount, source);
@@ -257,9 +240,10 @@ export const openBenchArms = async (
       }
       throw error;
     }
-    await load(mount, opened);
+    distributions.set(mount, opened);
+    manifests[mount] = (await loadManifest(opened.ref, { signal })).manifest;
   }
-  return { arms: resolveArms(named, manifests), distributions };
+  return resolveArms(named, manifests, distributions);
 };
 
 /** The workload the parameters ask for; no prompt is refused. */

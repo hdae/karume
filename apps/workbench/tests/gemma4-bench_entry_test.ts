@@ -25,6 +25,15 @@ const parameters = (given: Readonly<Record<string, string>> = {}) =>
 
 const LINEAR = "linear_gemv_parallel:wi4g32:l32";
 
+const FACTS = {
+  gemma4: { directory: "models/karume-gemma4", manifestSha256: hex("1"), read: "directory" },
+  "gemma4-qat": {
+    directory: "models/karume-gemma4-qat",
+    manifestSha256: hex("2"),
+    read: "directory",
+  },
+} as const;
+
 const REGULAR_ARM: RunArm = {
   mount: "gemma4",
   model: "e2b",
@@ -33,6 +42,7 @@ const REGULAR_ARM: RunArm = {
   isDefaultQuant: true,
   tap: true,
   sampler: { temperature: 0 },
+  distribution: { ref: { repo: "test/gemma4" }, facts: FACTS.gemma4 },
 };
 
 const QAT_ARM: RunArm = {
@@ -43,16 +53,8 @@ const QAT_ARM: RunArm = {
   isDefaultQuant: true,
   tap: false,
   sampler: { temperature: 0 },
+  distribution: { ref: { repo: "test/gemma4-qat" }, facts: FACTS["gemma4-qat"] },
 };
-
-const FACTS = {
-  gemma4: { directory: "models/karume-gemma4", manifestSha256: hex("1"), read: "directory" },
-  "gemma4-qat": {
-    directory: "models/karume-gemma4-qat",
-    manifestSha256: hex("2"),
-    read: "directory",
-  },
-} as const;
 
 const SETTINGS: BenchSettings = {
   chats: 2,
@@ -183,14 +185,13 @@ const benchOf = async (
     onProgress: (progress) =>
       options.events?.push(benchProgressLine(progress, arms, settings.chats)),
   });
-  const result = () =>
-    decodeBenchResult({ timestampQuery: true, settings, arms, distributions: FACTS, outcome });
+  const result = () => decodeBenchResult({ timestampQuery: true, settings, arms, outcome });
   return { outcome, result };
 };
 
 describe("the gemma4-bench entry", () => {
   describe("its parameters", () => {
-    it("are the arms, the workload, the device and the source, for a local distribution", () => {
+    it("are the arms, the workload, the device and the source", () => {
       expect(gemmaBench.id).toBe("gemma4-bench");
       expect(gemmaBench.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "arms:text",

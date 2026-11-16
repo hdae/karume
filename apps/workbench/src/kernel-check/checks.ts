@@ -38,51 +38,50 @@ import type { CheckReport, KernelCheckId } from "./verdict.ts";
 export type KernelCheck = {
   readonly id: KernelCheckId;
   readonly title: string;
-  readonly summary: string;
   /** Needs `subgroups` + `subgroup-size-control` + WGSL `subgroup_id` on the device. */
   readonly needsSubgroups: boolean;
   readonly run: (gpu: GpuContext, options: CheckOptions) => Promise<CheckReport>;
 };
 
 export const KERNEL_CHECKS: readonly KernelCheck[] = [
+  // The parallel GEMV's subgroup32 reduction against the plain parallel reduction: u32 identity,
+  // plus the FP64 band (ADR 0101).
   {
     id: "gemv-subgroup32",
     title: "GEMV subgroup32",
-    summary:
-      'The parallel GEMV\'s subgroup32 reduction (REORDER_STRATEGIES.linearGemv: "subgroup32", linear at reorder) against the plain parallel reduction, u32 identity (i2 / i4 / i8, 5 lane counts, M = 1 / 4 / 8), plus the FP64 band (ADR 0101).',
     needsSubgroups: true,
     run: async (gpu, options) => ({
       parts: [await checkGemvSubgroup(gpu, options)],
       expectedCases: GEMV_SUBGROUP_CASES,
     }),
   },
+  // rms_norm's subgroup32 form through real Sessions: within the CPU reference's rms_norm
+  // tolerance, row 0 identical at every M, fused rms_norm + add identical to unfused (ADR 0100).
   {
     id: "rms-subgroup32",
     title: "RMS subgroup32",
-    summary:
-      'REORDER_STRATEGIES.rmsNorm: "subgroup32" (rms_norm at reorder) through real Sessions: the rms_norm tolerance of the CPU reference, row 0 identical at every M, fused rms_norm + add identical to unfused, grid-stride (ADR 0100).',
     needsSubgroups: true,
     run: async (gpu, options) => ({
       parts: await checkRmsSubgroup(gpu, options),
       expectedCases: RMS_SUBGROUP_CASES,
     }),
   },
+  // The prefetch form of the 256-wide rms_norm and of both RMS → add orders against their
+  // runtime-trip v1 WGSL: u32 identity, NaN by payload (perf-ledger K-99).
   {
     id: "rms-norm-prefetch",
     title: "rms_norm: prefetch form vs runtime-trip form",
-    summary:
-      "The prefetch form of the 256-wide rms_norm and of both RMS → add orders against their runtime-trip v1 WGSL, u32 identity with NaN by payload (every multiple of 256 up to 4096 at rows 1 / 4 / 8 / 33, 768 rows at three widths, one workgroup per row and three; adversarial rows) (perf-ledger K-99).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: await checkRmsNormPrefetch(gpu, options),
       expectedCases: RMS_NORM_PREFETCH_CASES,
     }),
   },
+  // The folded ①′, the unrolled ③′ and the fused stats + PV against their v1 WGSL: u32 identity,
+  // plus order-only mutants that must mismatch.
   {
     id: "state-attention-rewrites",
     title: "States attention rewrites (K-55 / K-91)",
-    summary:
-      "The folded ①′ against ①′ (S words) and the unrolled ③′ and fused stats + PV against their v1 WGSL (O words), u32 identity, plus order-only mutants that must mismatch (on one case, and on every case of their shape where their code path runs).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       ...(await checkStateAttentionRewrites(gpu, options)),
@@ -90,88 +89,90 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
       expectedMutants: STATE_ATTENTION_MUTANTS,
     }),
   },
+  // The integer GEMV against its CPU reference, with and without the SRQ epilogue: u32 identity,
+  // plus saturated fixtures.
   {
     id: "gemv-integer",
     title: "Integer GEMV",
-    summary:
-      "The integer GEMV against its CPU reference, u32 identity (i2 / i4 / i8, up to 15 variants per form, M = 1 / 8, with and without the SRQ epilogue), plus saturated fixtures.",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkIntegerGemv(gpu, options)],
       expectedCases: GEMV_INTEGER_CASES,
     }),
   },
+  // The byte-plane GEMV against an FP64 reference (within the GEMM band) and the sequential GEMV
+  // (within twice that band); two runs identical, nothing written past the outputs (ADR 0147
+  // decision 2).
   {
     id: "gemv-planes",
     title: "Byte-plane GEMV",
-    summary:
-      "The byte-plane GEMV (REORDER_STRATEGIES.linearGemvPlanes, linear at reorder) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0147 decision 2, class R).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkPlanesGemv(gpu, options)],
       expectedCases: GEMV_PLANES_CASES,
     }),
   },
+  // The f16 append against host rounding, and every reader of an f16 slot against its f32 kernel
+  // over the slot rounded on the host: u32 identity (ADR 0143).
   {
     id: "state-kv16",
     title: "f16 full state slots",
-    summary:
-      "The f16 append against host rounding (word layout included), and every reader of an f16 slot against its f32 kernel over the same slot rounded on the host, u32 identity (ADR 0143).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: await checkStateKv16(gpu, options),
       expectedCases: STATE_KV16_CASES,
     }),
   },
+  // The f16 store of the attention scores against host rounding: u32 identity (pack2x16float may
+  // round to nearest or toward zero; the record names which).
   {
     id: "score-f16-store",
     title: "f16 attention scores (S)",
-    summary:
-      'The store of attentionScoreStorage: "f16" against host rounding (u32 identity). pack2x16float may round to nearest or toward zero, every value alike; the record names which one this backend does.',
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkScoreF16Store(gpu, options)],
       expectedCases: SCORE_F16_CASES,
     }),
   },
+  // The sliding ①ₜ with GenerationRun.bidirectionalRows against the same kernel keeping every score
+  // and a host mirror of the predicate: u32 identity (ADR 0144).
   {
     id: "state-bidirectional",
     title: "Bidirectional block (Gemma 4 12B images)",
-    summary:
-      "The sliding ①ₜ with GenerationRun.bidirectionalRows against the same kernel keeping every score and a host mirror of the predicate, u32 identity (ADR 0144).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkStateBidirectional(gpu, options)],
       expectedCases: STATE_BIDIRECTIONAL_CASES,
     }),
   },
+  // expert_linear with f16 steps at the 26B shapes, every pick against linear's i4 GEMV on that
+  // expert with the steps widened: u32 identity (ADR 0145).
   {
     id: "expert-linear",
     title: "Expert linear (Gemma 4 26B A4B)",
-    summary:
-      "expert_linear with f16 steps at the 26B shapes (gate_up n 1408 k 2816 with x shared, down n 2816 k 704 per pick; E 8, T 3, 8 picks with repeated ids): every pick against linear's i4 GEMV on that expert with the steps widened, u32 identity (ADR 0145).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkExpertLinear(gpu, options)],
       expectedCases: EXPERT_LINEAR_CASES,
     }),
   },
+  // Each built-in fusion against the same graph run node by node: u32 identity, plus the fusion
+  // counters of both sides (ADR 0147 decision 9); a part the device cannot run reads as not run.
   {
     id: "fusion-twins",
     title: "Fusion rules: fused vs unfused",
-    summary:
-      "Each built-in fusion's output against the same values run node by node (the unfused plan of the same graph), u32 identity with NaN by class or by payload as each case declares, plus the fusion counters of both sides — the expected hits fused, 0 unfused (ADR 0147 decision 9). The linear prologue part needs WGSL packed_4x8_integer_dot_product and the sg32 online-attention part a device whose online attention takes the sg32 form; elsewhere they read as not run.",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: await checkFusionTwins(gpu, options),
       expectedCases: FUSION_TWIN_CASES,
     }),
   },
+  // A measure-first candidate (perf-ledger K-106), not a production route: the tiled quantize_rows
+  // against the host permutation of today's Vᵀ producer bytes, and the online kernel reading the
+  // tiled Vᵀ against today's kernel, every O word identical.
   {
     id: "attention-online-tiled",
     title: "Online attention: tiled Vᵀ key axis (candidate)",
-    summary:
-      "A measure-first candidate (perf-ledger K-106), not a production route: the tiled quantize_rows against the host permutation of today's Vᵀ producer bytes (18 cases: N below a key tile and not a multiple of 4 / 16 / 64, zero and ±max rows, scale bits, nothing written past the rows), and the online kernel reading the tiled Vᵀ against today's kernel, every O word identical (28 cases per reduction form: 7 shapes × both output layouts × dp4a and emulated). The kernel parts need WGSL packed_4x8_integer_dot_product, the sg32 part a device whose online attention takes the sg32 form; elsewhere they read as not run.",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: await checkAttentionOnlineTiled(gpu, options),

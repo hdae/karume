@@ -6,8 +6,8 @@
  * cancelled); one that failed before any chat rethrows. Pure, so `vp test` covers it.
  */
 
-import type { DistributionFacts, EntryResult } from "../entry.ts";
-import type { GemmaMount } from "../gemma4/settings.ts";
+import type { EntryResult } from "../entry.ts";
+import { messageText } from "../record.ts";
 import { buildBenchData, type DecodeBenchData } from "./data.ts";
 import { armLabel, type BenchArm, type BenchSettings, benchPrompt } from "./plan.ts";
 import type { BenchOutcome, BenchStop, RunArm } from "./run.ts";
@@ -48,7 +48,7 @@ const stopText = (stop: BenchStop): string | undefined => {
     case "cancelled":
       return "stopped: cancelled";
     case "failed":
-      return `stopped: ${stop.error instanceof Error ? stop.error.message : String(stop.error)}`;
+      return `stopped: ${messageText(stop.error)}`;
   }
 };
 
@@ -60,8 +60,6 @@ export const decodeBenchResult = (input: {
   readonly timestampQuery: boolean;
   readonly settings: BenchSettings;
   readonly arms: readonly RunArm[];
-  /** The distribution of every mount an arm reads. */
-  readonly distributions: Partial<Readonly<Record<GemmaMount, DistributionFacts>>>;
   readonly outcome: BenchOutcome;
 }): DecodeBenchResult => {
   const { settings, arms, outcome } = input;
@@ -72,18 +70,16 @@ export const decodeBenchResult = (input: {
     complete: stop.kind === "completed",
     settings,
     arms,
-    distributions: input.distributions,
     visits: outcome.visits,
     chats: outcome.chats,
   });
   const stopped = stopText(stop);
-  const split = splitSummaryText(data.summary, arms);
   return {
     ...(stop.kind === "failed" ? { verdict: "incomplete" as const } : {}),
     summary: [
       `${outcome.visits.length} of ${arms.length * settings.rounds} visits, ${outcome.chats.length} chats (cold ones included)${stopped === undefined ? "" : ` · ${stopped}`}`,
       ...data.summary.map((entry) => armPromptLine(entry, arms[entry.arm])),
-      ...(split === "" ? [] : split.split("\n")),
+      ...splitSummaryText(data.summary, arms),
     ],
     data,
   };

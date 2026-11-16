@@ -14,11 +14,11 @@
  */
 
 import { loadManifest } from "@karume/hub";
-import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { acquireGpu } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
 
 import { choiceValue, type Entry, integerValue, numberValue, textValue } from "../../entry.ts";
+import { SOURCE_KINDS, sourceParameter } from "../../local-parameters.ts";
 import {
   COMPONENT_TARGETS,
   componentArmOptions,
@@ -27,11 +27,15 @@ import {
   targetMount,
 } from "../../session-ab/component-target.ts";
 import { openComponentModel } from "../../session-ab/component-model.ts";
-import { MODELS_VERSION, sessionAbMossData, sessionAbVaeData } from "../../session-ab/data.ts";
-import { steppedArm } from "../../session-ab/moss.ts";
+import { sessionAbMossData, sessionAbVaeData } from "../../session-ab/data.ts";
 import { armStepper, fetchLine } from "../../session-ab/progress.ts";
-import { SESSION_AB_DEFAULTS, SESSION_AB_LIMITS, SOURCE_KINDS } from "../../session-ab/request.ts";
-import { runnerEnvironment, runPositions } from "../../session-ab/run.ts";
+import {
+  MIN_GAIN_PARAMETER,
+  ROUNDS_PARAMETER,
+  runnerEnvironment,
+  runPositions,
+  steppedArm,
+} from "../../session-ab/shared.ts";
 import { sessionAbComponentResult } from "../../session-ab/summary.ts";
 
 const entry: Entry = {
@@ -53,29 +57,9 @@ const entry: Entry = {
       label: "Preset (empty: the manifest's default preset of the target's model)",
       default: "",
     },
-    {
-      kind: "integer",
-      name: "rounds",
-      label: "Timed rounds (one untimed warm-up round comes first)",
-      min: SESSION_AB_LIMITS.minRounds,
-      max: SESSION_AB_LIMITS.maxRounds,
-      default: SESSION_AB_DEFAULTS.rounds,
-    },
-    {
-      kind: "number",
-      name: "minGain",
-      label: "Minimum gain (a fraction of the base's time: 0.01 = 1%)",
-      min: SESSION_AB_LIMITS.minGain,
-      max: SESSION_AB_LIMITS.maxGain,
-      default: SESSION_AB_DEFAULTS.minGain,
-    },
-    {
-      kind: "choice",
-      name: "source",
-      label: "How a browser reads the distribution",
-      options: SOURCE_KINDS,
-      default: "cached",
-    },
+    ROUNDS_PARAMETER,
+    MIN_GAIN_PARAMETER,
+    sourceParameter("How a browser reads the distribution"),
   ],
   run: async ({ parameters, gpuOptions, signal, progress, openDistribution, backend }) => {
     const target = choiceValue(parameters, "target", COMPONENT_TARGETS);
@@ -83,8 +67,8 @@ const entry: Entry = {
       targetMount(target),
       choiceValue(parameters, "source", SOURCE_KINDS),
     );
-    const { manifest } = await loadManifest(opened.ref, { signal });
-    const request = componentRequest(target, manifest, textValue(parameters, "preset"), {
+    const loaded = await loadManifest(opened.ref, { signal });
+    const request = componentRequest(target, loaded.manifest, textValue(parameters, "preset"), {
       rounds: integerValue(parameters, "rounds"),
       minGain: numberValue(parameters, "minGain"),
     });
@@ -95,7 +79,7 @@ const entry: Entry = {
       const { component } = request;
       progress(`fetching and opening the ${component} component`);
       const model = await openComponentModel(
-        opened.ref,
+        loaded,
         request.model,
         request.quant,
         component,
@@ -122,13 +106,12 @@ const entry: Entry = {
       const common = {
         distribution: opened.facts,
         container: { component, part0Sha256: model.part0Sha256 },
-        modelsVersion: MODELS_VERSION,
         record,
         judgements,
       };
       return sessionAbComponentResult(
         request.target === "moss-dit-forward"
-          ? sessionAbMossData({ ...common, request, ruleName: EW_CHAIN_RULE_NAME })
+          ? sessionAbMossData({ ...common, request })
           : sessionAbVaeData({ ...common, request }),
       );
     } finally {

@@ -5,7 +5,7 @@ import { ParameterError, parseParameters } from "../src/entry.ts";
 import { benchSettingsOf, openBenchArms, parseArmsText } from "../src/gemma4-bench/request.ts";
 
 import { MOBILE, QAT, REGULAR } from "./helpers/gemma4-bench-manifests.ts";
-import { memoryDistributions } from "./helpers/session-ab-manifests.ts";
+import { hex, memoryDistributions } from "./helpers/session-ab-manifests.ts";
 
 const SIGNAL = new AbortController().signal;
 
@@ -102,7 +102,7 @@ describe("the arms resolved against the distributions", () => {
   describe("by default", () => {
     it("are one arm per mount whose mirror is present, at its default model and preset, tap on, regular Gemma 4 first", async () => {
       const opened: string[] = [];
-      const { arms, distributions } = await openBenchArms(
+      const arms = await openBenchArms(
         "",
         "cached",
         memoryDistributions({ "gemma4-qat-mobile": MOBILE, gemma4: REGULAR }, opened),
@@ -113,8 +113,10 @@ describe("the arms resolved against the distributions", () => {
         { mount: "gemma4", model: "e2b", quant: "bf16", tap: true },
         { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4-fast", tap: true },
       ]);
-      expect(Object.keys(distributions)).toEqual(["gemma4", "gemma4-qat-mobile"]);
-      expect(distributions.gemma4?.facts.directory).toBe("models/karume-gemma4");
+      expect(arms.map(({ distribution }) => distribution.facts.directory)).toEqual([
+        "models/karume-gemma4",
+        "models/karume-gemma4-qat-mobile",
+      ]);
     });
 
     it("are refused when no mirror is present", async () => {
@@ -130,7 +132,7 @@ describe("the arms resolved against the distributions", () => {
   describe("as named", () => {
     it("open each mount once, in the order the arms first name them", async () => {
       const opened: string[] = [];
-      const { arms } = await openBenchArms(
+      const arms = await openBenchArms(
         "gemma4-qat/e2b,gemma4/e4b,gemma4-qat/e4b:tap-off",
         "direct",
         memoryDistributions(
@@ -146,7 +148,7 @@ describe("the arms resolved against the distributions", () => {
     });
 
     it("carry the preset, the label, the declared sampler and the options of their switches", async () => {
-      const { arms } = await openBenchArms(
+      const arms = await openBenchArms(
         "gemma4-qat-mobile/e2b@i4-fast:integer:ple-gpu:ahead8:split",
         "cached",
         memoryDistributions({ "gemma4-qat-mobile": MOBILE }),
@@ -165,6 +167,14 @@ describe("the arms resolved against the distributions", () => {
           session: { integerGemv: true },
           pipeline: { pleResidency: "gpu", decodeAhead: 8 },
           declaredSampler: { temperature: 1, topK: 64, topP: 0.95 },
+          distribution: {
+            ref: expect.anything(),
+            facts: {
+              directory: "models/karume-gemma4-qat-mobile",
+              manifestSha256: hex("f"),
+              read: "directory",
+            },
+          },
         },
       ]);
     });

@@ -14,10 +14,11 @@ import modelsPackage from "../../../../packages/models/package.json" with { type
 import type { DistributionFacts } from "../entry.ts";
 import { entryPointOf, type GemmaEntryPoint } from "../gemma4/settings.ts";
 
+import type { ArmCounts, ArmFacts, ResolvedExpertCache } from "./gemma-arm.ts";
+import type { SessionAbRequest } from "./gemma-request.ts";
 import type { SessionAbMossRequest } from "./moss.ts";
-import type { SessionAbRequest } from "./request.ts";
-import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run.ts";
-import type { SessionAbVaeRequest, SessionAbVaeTarget } from "./vae.ts";
+import { ruleKeyPrefix } from "./shared.ts";
+import type { SessionAbVaeRequest } from "./vae.ts";
 
 /** The version of `@karume/models` the run used (its own package.json). */
 export const MODELS_VERSION: string = modelsPackage.version;
@@ -110,36 +111,32 @@ const checkCounted = (record: SessionAbRecord): void => {
 };
 
 /**
- * The data of one finished Gemma 4 decode A/B. Refuses a record, arm facts or probes whose arms are
- * not the request's (they would describe different runs), probes the request did not ask for or
- * probes missing when it did, and an arm without its resolved expert cache when the request has one.
+ * The data of one finished Gemma 4 decode A/B. Refuses a record whose arms or round count are not
+ * the request's (it would describe different runs), probes the request did not ask for or probes
+ * missing when it did, and an arm without its resolved expert cache when the request has one.
  */
 export const sessionAbGemmaData = (input: {
   readonly request: SessionAbRequest;
   readonly distribution: DistributionFacts;
-  readonly modelsVersion: string;
   readonly ruleName: string;
+  /** What each arm learned, in the request's arms' order (the entry builds its arms from them). */
   readonly arms: readonly SessionAbArmFacts[];
-  /** The count probes in the arms' order; present exactly when the request probes the counts. */
+  /**
+   * The count probes in the request's arms' order; present exactly when the request probes the
+   * counts.
+   */
   readonly probes?: readonly SessionAbArmProbe[];
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
 }): SessionAbGemmaData => {
   const { request, record, ruleName, arms, probes } = input;
   checkRecord(request, record);
-  const requested = namesOf(request.arms);
-  if (namesOf(arms) !== requested) {
-    throw new Error(`The arm facts (${namesOf(arms)}) are not the request's arms (${requested})`);
-  }
   if (request.probeCounts !== (probes !== undefined)) {
     throw new Error(
       request.probeCounts
         ? "The request probes the counts, and no probe was given"
         : "The request does not probe the counts, and probes were given",
     );
-  }
-  if (probes !== undefined && namesOf(probes) !== requested) {
-    throw new Error(`The probes (${namesOf(probes)}) are not the request's arms (${requested})`);
   }
   const ruleArm = request.arms.findIndex(({ fusionRules }) => fusionRules.includes(ruleName));
   if (ruleArm < 0) throw new Error(`No arm of the request passes the rule ${ruleName}`);
@@ -174,7 +171,7 @@ export const sessionAbGemmaData = (input: {
             dispatches: counts.dispatches,
           })),
         }),
-    modelsVersion: input.modelsVersion,
+    modelsVersion: MODELS_VERSION,
     record,
     judgements: input.judgements,
   };
@@ -187,87 +184,23 @@ export type SessionAbContainer = {
   readonly part0Sha256: string;
 };
 
-/** The `data` of a MOSS-Image DiT forward A/B. */
-export type SessionAbMossData = {
-  readonly target: "moss-dit-forward";
-  readonly request: SessionAbMossRequest;
-  readonly distribution: DistributionFacts;
-  readonly container: SessionAbContainer;
-  /**
-   * The rule the `rule` arm passed (the MOSS-Image pipeline's own, from `@karume/models`); its
-   * dispatch keys all start with the prefix.
-   */
-  readonly rule: {
-    readonly name: string;
-    readonly package: "@karume/models";
-    readonly keyPrefix: string;
-  };
-  readonly modelsVersion: string;
-  /**
-   * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
-   * a `sessionArm` reports its fusion counts and dispatches, and the runner refused a run whose
-   * counts were not its arm's first run's.
-   */
-  readonly record: SessionAbRecord;
-  /** `judgeSessionAb(record, { minGain: request.minGain })`, one per compared arm. */
-  readonly judgements: readonly SessionAbJudgement[];
-};
-
 /**
- * The data of one finished A/B on the MOSS-Image DiT target. Refuses a record whose arms or round
- * count are not the request's (it would describe different runs), a request without an arm that
- * passes the rule, and a record whose arms carry no counts (every arm of this target reports them).
+ * A rule an arm of a Session target passed (its pipeline's own, from `@karume/models`); its
+ * dispatch keys all start with the prefix.
  */
-export const sessionAbMossData = (input: {
-  readonly request: SessionAbMossRequest;
-  readonly distribution: DistributionFacts;
-  readonly container: SessionAbContainer;
-  readonly modelsVersion: string;
-  readonly ruleName: string;
-  readonly record: SessionAbRecord;
-  readonly judgements: readonly SessionAbJudgement[];
-}): SessionAbMossData => {
-  const { request, record, ruleName } = input;
-  checkRecord(request, record);
-  if (!request.arms.some(({ fusionRules }) => fusionRules.includes(ruleName))) {
-    throw new Error(`No arm of the request passes the rule ${ruleName}`);
-  }
-  checkCounted(record);
-  return {
-    target: "moss-dit-forward",
-    request,
-    distribution: input.distribution,
-    container: input.container,
-    rule: {
-      name: ruleName,
-      package: "@karume/models",
-      keyPrefix: ruleKeyPrefix(ruleName),
-    },
-    modelsVersion: input.modelsVersion,
-    record,
-    judgements: input.judgements,
-  };
-};
-
-/**
- * A rule an arm of a VAE target passed (the Wan and anima pipelines' own, from `@karume/models`);
- * its dispatch keys all start with the prefix.
- */
-export type SessionAbVaeRule = {
+export type SessionAbComponentRule = {
   readonly name: string;
   readonly package: "@karume/models";
   readonly keyPrefix: string;
 };
 
-/** The `data` of a VAE forward A/B. */
-export type SessionAbVaeData = {
-  readonly target: SessionAbVaeTarget;
-  readonly request: SessionAbVaeRequest;
+/** What the `data` of a Session target holds besides the rules its arms passed. */
+type ComponentBody<Request extends SessionAbMossRequest | SessionAbVaeRequest> = {
+  readonly target: Request["target"];
+  readonly request: Request;
   readonly distribution: DistributionFacts;
   /** The container every arm built its Sessions from. */
   readonly container: SessionAbContainer;
-  /** The rules the arms passed, in the arms' order (each named once). */
-  readonly rules: readonly SessionAbVaeRule[];
   readonly modelsVersion: string;
   /**
    * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
@@ -279,36 +212,64 @@ export type SessionAbVaeData = {
   readonly judgements: readonly SessionAbJudgement[];
 };
 
-/**
- * The data of one finished A/B on a VAE target. Refuses a record whose arms or round count are not
- * the request's (it would describe different runs), a request whose arms pass no rule, and a
- * record whose arms carry no counts (every arm of these targets reports them).
- */
-export const sessionAbVaeData = (input: {
-  readonly request: SessionAbVaeRequest;
+/** The `data` of a MOSS-Image DiT forward A/B. */
+export type SessionAbMossData = ComponentBody<SessionAbMossRequest> & {
+  /** The rule the `rule` arm passed (the MOSS-Image pipeline's own). */
+  readonly rule: SessionAbComponentRule;
+};
+
+/** The `data` of a VAE forward A/B. */
+export type SessionAbVaeData = ComponentBody<SessionAbVaeRequest> & {
+  /** The rules the arms passed, in the arms' order (each named once; the Wan and anima pipelines' own). */
+  readonly rules: readonly SessionAbComponentRule[];
+};
+
+/** What a Session target's data is built from. */
+type ComponentInput<Request> = {
+  readonly request: Request;
   readonly distribution: DistributionFacts;
   readonly container: SessionAbContainer;
-  readonly modelsVersion: string;
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
-}): SessionAbVaeData => {
+};
+
+/**
+ * The data of one finished A/B on a Session target, with `rulesOf` the rules' part of its shape
+ * (the rules the request's arms pass, each named once, in the arms' order). Refuses a record whose
+ * arms or round count are not the request's (it would describe different runs), a request whose
+ * arms pass no rule, and a record whose arms carry no counts (every arm of these targets reports
+ * them).
+ */
+const componentData = <Request extends SessionAbMossRequest | SessionAbVaeRequest, Rules>(
+  input: ComponentInput<Request>,
+  rulesOf: (rules: readonly SessionAbComponentRule[]) => Rules,
+): ComponentBody<Request> & Rules => {
   const { request, record } = input;
   checkRecord(request, record);
   const names = [...new Set(request.arms.flatMap(({ fusionRules }) => fusionRules))];
   if (names.length === 0) throw new Error("No arm of the request passes a rule");
   checkCounted(record);
+  const rules = names.map((name): SessionAbComponentRule => ({
+    name,
+    package: "@karume/models",
+    keyPrefix: ruleKeyPrefix(name),
+  }));
   return {
     target: request.target,
     request,
     distribution: input.distribution,
     container: input.container,
-    rules: names.map((name) => ({
-      name,
-      package: "@karume/models",
-      keyPrefix: ruleKeyPrefix(name),
-    })),
-    modelsVersion: input.modelsVersion,
+    ...rulesOf(rules),
+    modelsVersion: MODELS_VERSION,
     record,
     judgements: input.judgements,
   };
 };
+
+/** The data of one finished A/B on the MOSS-Image DiT target ({@link componentData}). */
+export const sessionAbMossData = (input: ComponentInput<SessionAbMossRequest>): SessionAbMossData =>
+  componentData(input, ([rule]) => ({ rule }));
+
+/** The data of one finished A/B on a VAE target ({@link componentData}). */
+export const sessionAbVaeData = (input: ComponentInput<SessionAbVaeRequest>): SessionAbVaeData =>
+  componentData(input, (rules) => ({ rules }));

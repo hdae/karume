@@ -250,14 +250,14 @@ export const shareText = (value: number | undefined, total: number | undefined):
     : `${((value / total) * 100).toFixed(1)}%`;
 
 /**
- * The split breakdowns of the summary as plain text (the entry's summary ends with it): per arm ×
+ * The split breakdowns of the summary as plain lines (the entry's summary ends with them): per arm ×
  * prompt a header, the families, then the keys — GPU ms per token, share of the total, dispatches
- * per token.
+ * per token — with an empty line between two breakdowns.
  */
 export const splitSummaryText = (
   summary: readonly ArmPromptSummary[],
   arms: readonly Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split">[],
-): string => {
+): readonly string[] => {
   const lines: string[] = [];
   for (const entry of summary) {
     const { split } = entry;
@@ -275,5 +275,5 @@ export const splitSummaryText = (
       ...split.keys.map((key) => row(key.gpuMs, key.dispatches, `${key.family}  ${key.key}`)),
     );
   }
-  return lines.join("\n");
+  return lines;
 };

@@ -12,7 +12,10 @@
 
 import type { ChatMessage, ChatOptions, ChatStream, SamplerSpec } from "@karume/models/gemma";
 
+import type { OpenedDistribution } from "../entry.ts";
 import { type StopRecord, stopRecordOf } from "../gemma4/stop-record.ts";
+import { nextTask } from "../next-task.ts";
+import { seconds } from "../record.ts";
 import { type ChatMeasurement, type ChatMarks, measureChat, type TokenMark } from "./measure.ts";
 import {
   type BenchArm,
@@ -48,8 +51,11 @@ export type BenchProbe = {
   readonly reset: () => void;
 };
 
-/** An arm with the sampler its chats are sent with. */
-export type RunArm = BenchArm & { readonly sampler: SamplerSpec };
+/** An arm with the sampler its chats are sent with and its mount's distribution (`openBenchArms`). */
+export type RunArm = BenchArm & {
+  readonly sampler: SamplerSpec;
+  readonly distribution: OpenedDistribution;
+};
 
 export type VisitRecord = Visit & { readonly loadSeconds: number };
 
@@ -92,8 +98,6 @@ export type BenchDependencies = {
    */
   readonly pause?: () => Promise<void>;
 };
-
-const nextMacrotask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 const idBytes = (ids: readonly number[]): Uint8Array<ArrayBuffer> => {
   const words = Uint32Array.from(ids);
@@ -205,14 +209,14 @@ export type DecodeBenchInput = {
  * when a later step fails or is cancelled); the promise resolves when every visit is done and
  * rejects with the first failure or the signal's reason.
  */
-export const runDecodeBench = async (
+const runDecodeBench = async (
   input: DecodeBenchInput & {
     readonly onVisit: (visit: VisitRecord) => void;
     readonly onChat: (chat: ChatRecord) => void;
   },
 ): Promise<void> => {
   const { arms, settings, signal, dependencies, onProgress, onVisit, onChat } = input;
-  const pause = dependencies.pause ?? nextMacrotask;
+  const pause = dependencies.pause ?? nextTask;
   const visits = visitOrder(arms.length, settings.rounds);
   for (const visit of visits) {
     signal.throwIfAborted();
@@ -229,10 +233,7 @@ export const runDecodeBench = async (
       },
       async (pipeline) => {
         signal.throwIfAborted();
-        onVisit({
-          ...visit,
-          loadSeconds: Number(((dependencies.now() - loadStarted) / 1000).toFixed(3)),
-        });
+        onVisit({ ...visit, loadSeconds: seconds(dependencies.now() - loadStarted) });
         for (const prompt of settings.prompts) {
           for (let chat = 0; chat < settings.chats; chat += 1) {
             onProgress({ kind: "chat", visit, visits: visits.length, prompt, chat });

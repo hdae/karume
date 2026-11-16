@@ -202,12 +202,11 @@ describe("the split summary", () => {
     });
   });
 
-  it("writes the breakdown as text: per split arm and prompt, families then keys with their shares", () => {
+  it("writes the breakdown as lines: per split arm and prompt, families then keys with their shares", () => {
     const entries = summarizeRuns([run(0, chats[0]), run(0, chats[2])], 1, ["few-ids"]);
-    const text = splitSummaryText(entries, [
+    const lines = splitSummaryText(entries, [
       { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4", tap: true, split: true },
     ]);
-    const lines = text.split("\n");
     expect(lines[0]).toBe(
       "arm 1 mobile QAT e2b i4 (split) · Story request · 2 warm chats · GPU 4.150 ms/token (split)",
     );
@@ -219,7 +218,7 @@ describe("the split summary", () => {
   });
 
   it("writes nothing when no arm ran split", () => {
-    expect(splitSummaryText(summarizeRuns([run(0)], 1, ["few-ids"]), [])).toBe("");
+    expect(splitSummaryText(summarizeRuns([run(0)], 1, ["few-ids"]), [])).toEqual([]);
   });
 });
 

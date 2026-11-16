@@ -6,6 +6,8 @@
  * `lastRunAt` is left out). Pure, so `vp test` covers it.
  */
 
+import { seconds as secondsOf } from "../record.ts";
+
 /** Times of one chat, from `performance.now()`. */
 export type TurnMarks = {
   /** When `chat` was called. */
@@ -32,8 +34,6 @@ export type TurnTiming = {
   readonly decodeSeconds?: number;
   readonly decodeTokensPerSecond?: number;
 };
-
-const secondsOf = (milliseconds: number): number => Number((milliseconds / 1000).toFixed(3));
 
 /** `count / seconds` at 0.1 precision; `undefined` when it cannot be measured (no time, no tokens). */
 const rate = (count: number, seconds: number | undefined): number | undefined => {

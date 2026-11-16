@@ -1,7 +1,7 @@
 /**
  * The session A/B's two VAE targets, their pure parts: the work of one forward (the seeded
- * feeds), the VAE Session's options as each pipeline derives them from the preset, the request, the
- * arms' options and which counter an arm's row reads. A run is one forward of one VAE graph — the
+ * feeds), the VAE Session's options as each pipeline derives them from the preset, the request and
+ * the arms' options. A run is one forward of one VAE graph — the
  * Wan2.2 `vae_decoder_next` chunk graph (tile 16: the latent frame and its 32 caches in, four frames
  * and the 32 updated caches out) or the anima `vae_decoder` tile graph (latents `[1, 16, 64, 64]` →
  * a 512² tile; a 1024² image decodes 9 of them) — on fixed feeds. The arms are `sessionArm`s of
@@ -12,12 +12,14 @@
  * `sessionArm` reports them for every run.
  */
 
-import type { Manifest, SessionSpec } from "@karume/hub";
+import type { SessionSpec } from "@karume/hub";
 import type { MountName } from "@karume/local-distributions/mounts";
 import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionOptions, Tensor } from "@karume/runtime";
 
-import type { SessionAbSettings } from "./request.ts";
+import type { FoundPreset } from "../model-preset.ts";
+import { type GraphInput, seededUniform } from "./feeds.ts";
+import { type RequestArm, type RoundsAndGain, twoArms } from "./shared.ts";
 
 /** The two targets: the graph a run forwards once, and the seed of its feeds. */
 export const VAE_AB_TARGETS = {
@@ -25,33 +27,15 @@ export const VAE_AB_TARGETS = {
   "anima-vae-decode": { component: "vae_decoder", seed: 0x5eed },
 } as const;
 
-/** A graph input as a VAE graph declares it (every shape static). */
-export type VaeInput = {
-  readonly name: string;
-  readonly dtype: string;
-  readonly shape: readonly (number | string)[];
-};
-
-/** mulberry32: the same seed gives the same feeds on every machine and runtime. */
-export const seededUniform = (seed: number): (() => number) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
-
 /**
- * Fixed feeds of one VAE forward: every input uniform in [−1, 1) from the seeded generator, input by
- * input in the graph's order (the latent and, on a Wan chunk graph, every cache stand in for a
- * tile's — the times and the identity do not depend on them being real). Refuses an input that is
- * not f32 or has a symbolic dimension, so a changed graph does not run on feeds made for another.
+ * Fixed feeds of one VAE forward (every shape of a VAE graph is static): every input uniform in
+ * [−1, 1) from the seeded generator, input by input in the graph's order (the latent and, on a Wan
+ * chunk graph, every cache stand in for a tile's — the times and the identity do not depend on them
+ * being real). Refuses an input that is not f32 or has a symbolic dimension, so a changed graph does
+ * not run on feeds made for another.
  */
 export const vaeFeeds = (
-  graphInputs: readonly VaeInput[],
+  graphInputs: readonly GraphInput[],
   seed: number,
 ): Readonly<Record<string, Tensor>> => {
   const next = seededUniform(seed);
@@ -81,9 +65,6 @@ export const VAE_AB_MOUNTS = {
   "wan22-vae-next": "wan22",
   "anima-vae-decode": "anima",
 } as const satisfies Readonly<Record<SessionAbVaeTarget, MountName>>;
-
-export const isVaeTarget = (target: string): target is SessionAbVaeTarget =>
-  Object.hasOwn(VAE_AB_TARGETS, target);
 
 /** The rule an arm names (`models/vae_rms_silu`, the one the Wan and anima pipelines pass). */
 const vaeRuleNamed = (name: string) => {
@@ -119,30 +100,27 @@ export type SessionAbVaeModel = {
   readonly storage: string;
 };
 
-/** The manifest's `defaultModel` at `quant`: its declared knobs and the component's storage. */
+/**
+ * `model` at `preset` (the one `presetOf` found): its declared knobs and the target component's
+ * storage. Refuses a preset without the component.
+ */
 export const vaeAbModel = (
-  manifest: Manifest,
   target: SessionAbVaeTarget,
-  quant: string,
+  model: string,
+  preset: FoundPreset,
 ): SessionAbVaeModel => {
-  const model = manifest.defaultModel;
   const { component } = VAE_AB_TARGETS[target];
-  const entry = Object.hasOwn(manifest.models, model) ? manifest.models[model] : undefined;
-  const preset =
-    entry !== undefined && Object.hasOwn(entry.quants, quant) ? entry.quants[quant] : undefined;
-  if (preset === undefined) {
-    throw new Error(`The manifest has no preset '${quant}' of model '${model}'`);
-  }
-  const storage = Object.hasOwn(preset.weights, component) ? preset.weights[component] : undefined;
+  const { weights, session } = preset.declaration;
+  const storage = Object.hasOwn(weights, component) ? weights[component] : undefined;
   if (storage === undefined) {
-    throw new Error(`Preset '${quant}' of model '${model}' has no '${component}'`);
+    throw new Error(`Preset '${preset.name}' of model '${model}' has no '${component}'`);
   }
-  return { model, quant, session: { ...preset.session }, storage };
+  return { model, quant: preset.name, session: { ...session }, storage };
 };
 
 /** What one run asked for on a VAE target, as the record keeps it. */
 export type SessionAbVaeRequest = SessionAbVaeModel &
-  Pick<SessionAbSettings, "rounds" | "minGain"> & {
+  RoundsAndGain & {
     readonly target: SessionAbVaeTarget;
     readonly mount: (typeof VAE_AB_MOUNTS)[SessionAbVaeTarget];
     readonly component: string;
@@ -152,7 +130,7 @@ export type SessionAbVaeRequest = SessionAbVaeModel &
     /** What every arm's Session gets from the preset ({@link vaeSessionOptions}). */
     readonly sessionOptions: VaeSessionOptions;
     /** The arms in order: the first is the base. */
-    readonly arms: readonly { readonly name: string; readonly fusionRules: readonly string[] }[];
+    readonly arms: readonly RequestArm[];
   };
 
 /**
@@ -164,7 +142,7 @@ export type SessionAbVaeRequest = SessionAbVaeModel &
 export const sessionAbVaeRequest = (
   target: SessionAbVaeTarget,
   model: SessionAbVaeModel,
-  settings: Pick<SessionAbSettings, "rounds" | "minGain">,
+  settings: RoundsAndGain,
 ): SessionAbVaeRequest => ({
   target,
   mount: VAE_AB_MOUNTS[target],
@@ -175,10 +153,7 @@ export const sessionAbVaeRequest = (
   openPerVisit: true,
   seed: VAE_AB_TARGETS[target].seed,
   sessionOptions: vaeSessionOptions(target, model.session),
-  arms: [
-    { name: "base", fusionRules: [] },
-    { name: "rule", fusionRules: [VAE_RMS_SILU_RULE_NAME] },
-  ],
+  arms: twoArms(VAE_RMS_SILU_RULE_NAME),
 });
 
 /** Each arm's Session options: the request's, plus the rules the arm names. */
@@ -195,15 +170,3 @@ export const vaeArmOptions = (
             fusionRules: fusionRules.map(vaeRuleNamed),
           },
   }));
-
-/**
- * The counter an arm's row shows as its hits: the rule the arm adds, or for an arm that adds none
- * (the base) the first rule of the request, which reads 0 there.
- */
-export const vaeRowRule = (request: SessionAbVaeRequest, arm: string): string => {
-  const rules = request.arms.flatMap(({ fusionRules }) => fusionRules);
-  const own = request.arms.find(({ name }) => name === arm)?.fusionRules[0];
-  const rule = own ?? rules[0];
-  if (rule === undefined) throw new Error("The request's arms add no rule");
-  return rule;
-};

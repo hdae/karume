@@ -89,7 +89,6 @@ const vaeData = (record: SessionAbRecord) => {
     request,
     distribution: DISTRIBUTION,
     container: { component: "vae_decoder_next", part0Sha256: hex("c") },
-    modelsVersion: "6.5.4",
     record,
     judgements: judgeSessionAb(record, { minGain: request.minGain }),
   });
@@ -97,7 +96,7 @@ const vaeData = (record: SessionAbRecord) => {
 
 describe("the session-ab entry", () => {
   describe("its parameters", () => {
-    it("are the target, the preset, the rounds, the minimum gain and the source, for a local distribution", () => {
+    it("are the target, the preset, the rounds, the minimum gain and the source", () => {
       expect(sessionAb.id).toBe("session-ab");
       expect(sessionAb.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "target:choice",
@@ -309,8 +308,6 @@ describe("the session-ab entry", () => {
           request,
           distribution: { ...DISTRIBUTION, directory: "models/karume-moss-image" },
           container: { component: "dit", part0Sha256: hex("c") },
-          modelsVersion: "6.5.4",
-          ruleName: EW_CHAIN_RULE_NAME,
           record: mossRecord,
           judgements: judgeSessionAb(mossRecord, { minGain: 0.01 }),
         }),

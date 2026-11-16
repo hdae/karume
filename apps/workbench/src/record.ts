@@ -107,6 +107,10 @@ export const errorText = (error: unknown): string => {
   }
 };
 
+/** What a thrown value says in one line of a summary: an Error's message, otherwise its text. */
+export const messageText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 /** `2026-11-16T09-30-12`: a UTC timestamp that is safe in file names on every OS. */
 export const utcStamp = (at: Date): string => at.toISOString().slice(0, 19).replaceAll(":", "-");
 

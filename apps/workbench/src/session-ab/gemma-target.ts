@@ -6,7 +6,7 @@
  */
 
 import { loadManifest, type Manifest } from "@karume/hub";
-import { MountUnavailableError, type SourceKind } from "@karume/local-distributions/browser";
+import type { SourceKind } from "@karume/local-distributions/browser";
 
 import {
   booleanValue,
@@ -18,63 +18,41 @@ import {
   type ParameterValues,
   textValue,
 } from "../entry.ts";
+import { modelRefusal, MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
 import {
-  GEMMA_MOUNTS,
   hasExpertCache,
-  isGemmaMount,
-  isQatModel,
   type ModelKey,
   parseExpertCacheSlots,
   parseExpertHostTier,
 } from "../gemma4/settings.ts";
-import {
-  presetOf,
-  type SessionAbModel,
-  type SessionAbRequest,
-  sessionAbRequest,
-} from "./request.ts";
-
-const MOUNT_LIST = GEMMA_MOUNTS.join(", ");
+import { type SessionAbModel, type SessionAbRequest, sessionAbRequest } from "./gemma-request.ts";
+import { presetOf } from "./shared.ts";
 
 /**
  * The model's text form → its key, or `undefined` for the empty default. Refuses text that is not
  * `<mount>/<model>` and a mount that is not one of the three.
  */
-export const parseModelText = (text: string): ModelKey | undefined => {
-  if (text === "") return undefined;
-  const slash = text.indexOf("/");
-  const mount = slash < 0 ? "" : text.slice(0, slash);
-  const model = slash < 0 ? "" : text.slice(slash + 1);
-  if (mount === "" || model === "") {
-    throw new ParameterError(
-      "model",
-      `expected <mount>/<model> with a mount of ${MOUNT_LIST} (empty: the default), got "${text}"`,
-    );
-  }
-  if (!isGemmaMount(mount)) {
-    throw new ParameterError("model", `'${mount}' is not one of the mounts ${MOUNT_LIST}`);
-  }
-  return { mount, model };
-};
+export const parseModelText = (text: string): ModelKey | undefined =>
+  text === ""
+    ? undefined
+    : parseModelKey(text, {
+        form: `expected <mount>/<model> with a mount of ${MOUNT_LIST} (empty: the default), got "${text}"`,
+        refuse: (reason) => new ParameterError("model", reason),
+      });
 
 /**
  * Refuses a model the manifest does not have (naming the models it has), and a model of the mobile
  * QAT mount its entry point does not accept (naming the ones it does).
  */
-export const checkModel = (key: ModelKey, manifest: Manifest): void => {
-  const models = Object.keys(manifest.models);
-  if (!models.includes(key.model)) {
-    throw new ParameterError(
-      "model",
-      `${key.mount} has no model '${key.model}'; its models are ${models.join(", ")}`,
-    );
-  }
-  if (key.mount === "gemma4-qat-mobile" && !isQatModel(key.model)) {
-    throw new ParameterError(
-      "model",
-      `gemma4QatMobile.Pipeline does not accept '${key.model}'; the models of ${key.mount} it accepts are ${models.filter(isQatModel).join(", ")}`,
-    );
-  }
+const checkModel = (key: ModelKey, manifest: Manifest): void => {
+  const refusal = modelRefusal(key, manifest);
+  if (refusal === undefined) return;
+  throw new ParameterError(
+    "model",
+    refusal.kind === "unknown"
+      ? `${key.mount} has no model '${key.model}'; its models are ${refusal.models.join(", ")}`
+      : `gemma4QatMobile.Pipeline does not accept '${key.model}'; the models of ${key.mount} it accepts are ${refusal.accepted.join(", ")}`,
+  );
 };
 
 /** The model a run loads, the distribution it is read from and its manifest. */
@@ -82,21 +60,6 @@ export type OpenedGemmaModel = {
   readonly key: ModelKey;
   readonly opened: OpenedDistribution;
   readonly manifest: Manifest;
-};
-
-/** `mount` opened, or `undefined` when its mirror is missing. */
-const openPresent = async (
-  openDistribution: OpenDistribution,
-  mount: ModelKey["mount"],
-  source: SourceKind,
-): Promise<OpenedDistribution | undefined> => {
-  try {
-    return await openDistribution(mount, source);
-  } catch (error) {
-    // Every Gemma mount has HF-compatible coordinates, so a mount unavailable here has no mirror.
-    if (error instanceof MountUnavailableError && error.mount === mount) return undefined;
-    throw error;
-  }
 };
 
 /**
@@ -116,10 +79,7 @@ export const openGemmaModel = async (
     checkModel(chosen, manifest);
     return { key: chosen, opened, manifest };
   }
-  for (const mount of GEMMA_MOUNTS) {
-    const opened = await openPresent(openDistribution, mount, source);
-    if (opened === undefined) continue;
-    const { manifest } = await loadManifest(opened.ref, { signal });
+  for await (const { mount, opened, manifest } of presentMounts(openDistribution, source, signal)) {
     const key = { mount, model: manifest.defaultModel };
     checkModel(key, manifest);
     return { key, opened, manifest };
@@ -183,7 +143,7 @@ export const gemmaRequest = (
     {
       mount: key.mount,
       model: key.model,
-      quant: presetOf(manifest, key.model, textValue(parameters, "preset")),
+      quant: presetOf(manifest, key.model, textValue(parameters, "preset")).name,
       ...(booleanValue(parameters, "f16Kv") ? { fullStateStorage: "f16" as const } : {}),
       ...(expertCache === undefined ? {} : { expertCache }),
     },

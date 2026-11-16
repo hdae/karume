@@ -302,8 +302,8 @@ describe("foldSweepEvent (the live view)", () => {
       { kind: "idle", until: 5000 },
     ]);
     const last = states.at(-1);
-    expect(last).toMatchObject({ caseIndex: 1, unit: "ns", dp4a: true, rows: [measured] });
-    expect(last?.cases).toEqual([{ caseId: "a", elapsedMs: 1 }]);
+    // One row and one finished case of case a (the idle wait does not reset them).
+    expect(last).toMatchObject({ caseIndex: 1, unit: "ns", dp4a: true, caseRows: 1, casesDone: 1 });
   });
 
   it("keeps a device loss", () => {

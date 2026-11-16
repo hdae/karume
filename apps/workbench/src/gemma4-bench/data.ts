@@ -73,12 +73,10 @@ export const buildBenchData = (input: {
   readonly complete: boolean;
   readonly settings: BenchSettings;
   readonly arms: readonly RunArm[];
-  /** The distribution of every mount an arm reads. */
-  readonly distributions: Partial<Readonly<Record<GemmaMount, DistributionFacts>>>;
   readonly visits: readonly VisitRecord[];
   readonly chats: readonly ChatRecord[];
 }): DecodeBenchData => {
-  const { settings, arms, distributions } = input;
+  const { settings, arms } = input;
   return {
     timestampQuery: input.timestampQuery,
     complete: input.complete,
@@ -96,24 +94,20 @@ export const buildBenchData = (input: {
         };
       }),
     },
-    arms: arms.map((arm, index) => {
-      const distribution = distributions[arm.mount];
-      if (distribution === undefined) throw new Error(`No distribution facts for '${arm.mount}'`);
-      return {
-        index: index + 1,
-        mount: arm.mount,
-        distribution,
-        pipeline: entryPointOf(arm.mount),
-        model: arm.model,
-        preset: { quant: arm.quant, label: arm.quantLabel, isDefault: arm.isDefaultQuant },
-        tap: arm.tap,
-        split: arm.split === true,
-        integerGemv: arm.session?.integerGemv === true,
-        sessionOptions: arm.session ?? {},
-        pipelineOptions: arm.pipeline ?? {},
-        sampler: arm.sampler,
-      };
-    }),
+    arms: arms.map((arm, index) => ({
+      index: index + 1,
+      mount: arm.mount,
+      distribution: arm.distribution.facts,
+      pipeline: entryPointOf(arm.mount),
+      model: arm.model,
+      preset: { quant: arm.quant, label: arm.quantLabel, isDefault: arm.isDefaultQuant },
+      tap: arm.tap,
+      split: arm.split === true,
+      integerGemv: arm.session?.integerGemv === true,
+      sessionOptions: arm.session ?? {},
+      pipelineOptions: arm.pipeline ?? {},
+      sampler: arm.sampler,
+    })),
     visits: input.visits,
     chats: input.chats,
     summary: summarizeRuns(input.chats, arms.length, settings.prompts),

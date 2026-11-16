@@ -9,15 +9,15 @@ import type { MountName } from "@karume/local-distributions/mounts";
 import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import type { SessionOptions, Tensor } from "@karume/runtime";
 
+import type { GraphInput } from "./feeds.ts";
 import {
-  type DitInput,
   MOSS_MOUNT,
   mossAbModel,
   mossDitFeeds,
   type SessionAbMossRequest,
   sessionAbMossRequest,
 } from "./moss.ts";
-import { presetOf, type SessionAbSettings } from "./request.ts";
+import { presetOf, type RoundsAndGain } from "./shared.ts";
 import {
   type SessionAbVaeRequest,
   sessionAbVaeRequest,
@@ -51,12 +51,13 @@ export const componentRequest = (
   target: ComponentTarget,
   manifest: Manifest,
   preset: string,
-  settings: Pick<SessionAbSettings, "rounds" | "minGain">,
+  settings: RoundsAndGain,
 ): ComponentRequest => {
-  const quant = presetOf(manifest, manifest.defaultModel, preset);
+  const model = manifest.defaultModel;
+  const found = presetOf(manifest, model, preset);
   return target === "moss-dit-forward"
-    ? sessionAbMossRequest(mossAbModel(manifest, quant), settings, EW_CHAIN_RULE_NAME)
-    : sessionAbVaeRequest(target, vaeAbModel(manifest, target, quant), settings);
+    ? sessionAbMossRequest(mossAbModel(model, found), settings, EW_CHAIN_RULE_NAME)
+    : sessionAbVaeRequest(target, vaeAbModel(target, model, found), settings);
 };
 
 /**
@@ -77,7 +78,7 @@ export const componentArmOptions = (
 /** The fixed feeds of one forward of the request's graph (`inputs` as the graph declares them). */
 export const componentFeeds = (
   request: ComponentRequest,
-  inputs: readonly DitInput[],
+  inputs: readonly GraphInput[],
 ): Readonly<Record<string, Tensor>> =>
   request.target === "moss-dit-forward"
     ? mossDitFeeds(inputs, request.imageTokens, request.textTokens, request.seed)

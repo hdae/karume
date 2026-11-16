@@ -8,7 +8,7 @@ import { ParameterError, parseParameters } from "../src/entry.ts";
 import { FITTED_EXPERT_SLOTS, type ModelKey } from "../src/gemma4/settings.ts";
 import { type SessionAbArmProbe, sessionAbGemmaData } from "../src/session-ab/data.ts";
 import { gemmaRequest, openGemmaModel, parseModelText } from "../src/session-ab/gemma-target.ts";
-import { SESSION_AB_PROMPT } from "../src/session-ab/request.ts";
+import { SESSION_AB_PROMPT } from "../src/session-ab/gemma-request.ts";
 import { sessionAbGemmaResult } from "../src/session-ab/summary.ts";
 
 import {
@@ -36,7 +36,7 @@ const requestOf = (given: Readonly<Record<string, string>>, key: ModelKey = QAT_
 
 describe("the gemma4-session-ab entry", () => {
   describe("its parameters", () => {
-    it("are the page's inputs of the Gemma 4 target and whether the device takes the subgroup features, for a local distribution", () => {
+    it("are the model, the preset, the settings, the load options, whether the device takes the subgroup features, the expert cache and the source", () => {
       expect(gemmaSessionAb.id).toBe("gemma4-session-ab");
       expect(gemmaSessionAb.parameters.map(({ name, kind }) => `${name}:${kind}`)).toEqual([
         "model:text",
@@ -55,7 +55,7 @@ describe("the gemma4-session-ab entry", () => {
       ]);
     });
 
-    it("default to the page's form: the default model and preset, 96 tokens, 4 rounds, 1%, open per visit, probed, subgroups when the device has them, no cache, cached", () => {
+    it("default to the default model and preset, 96 tokens, 4 rounds, 1%, open per visit, probed, subgroups when the device has them, no cache, cached", () => {
       expect(parameters()).toEqual({
         model: "",
         preset: "",
@@ -314,7 +314,6 @@ describe("the gemma4-session-ab entry", () => {
       const data = sessionAbGemmaData({
         request,
         distribution: DISTRIBUTION,
-        modelsVersion: "6.5.4",
         ruleName: GELU_MUL_RULE_NAME,
         arms: request.arms.map(({ name }) => ({ name, facts })),
         ...(probes === "none" ? {} : { probes }),

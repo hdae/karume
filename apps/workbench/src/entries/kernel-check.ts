@@ -8,7 +8,7 @@
 import { type CheckProgress, subgroup32Available } from "@karume/kernel-checks";
 import { acquireGpu, type GpuContext } from "@karume/runtime";
 
-import type { Entry } from "../entry.ts";
+import { choicesValue, type Entry } from "../entry.ts";
 import { KERNEL_CHECKS, type KernelCheck } from "../kernel-check/checks.ts";
 import { kernelCheckResult } from "../kernel-check/summary.ts";
 import {
@@ -43,8 +43,7 @@ const entry: Entry = {
     },
   ],
   run: async ({ parameters, gpuOptions, signal, progress }) => {
-    const selected = parameters["checks"];
-    if (typeof selected !== "object") throw new Error("checks is not a list of check ids");
+    const selected = choicesValue(parameters, "checks", KERNEL_CHECK_IDS);
     // The adapter's features say which subgroup feature is missing; the device's alone cannot.
     const adapter = await (gpuOptions.gpu ?? navigator.gpu).requestAdapter();
     if (adapter === null) throw new Error("WebGPU returned no adapter");

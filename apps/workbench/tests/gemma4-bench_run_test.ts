@@ -6,10 +6,8 @@ import {
   type BenchDependencies,
   type BenchPipeline,
   type BenchProbe,
-  type ChatRecord,
   type RunArm,
-  runDecodeBench,
-  type VisitRecord,
+  settleDecodeBench,
 } from "../src/gemma4-bench/run.ts";
 
 const arm = (model: string, tap = true): RunArm => ({
@@ -20,6 +18,10 @@ const arm = (model: string, tap = true): RunArm => ({
   isDefaultQuant: true,
   tap,
   sampler: { temperature: 0 },
+  distribution: {
+    ref: { repo: `test/${model}` },
+    facts: { directory: `models/${model}`, manifestSha256: "00", read: "directory" },
+  },
 });
 
 const SETTINGS: BenchSettings = {
@@ -159,28 +161,20 @@ const runBench = async (input: {
 }) => {
   const world = newWorld();
   const probe = fakeProbe();
-  const visits: VisitRecord[] = [];
-  const chats: ChatRecord[] = [];
-  const outcome = runDecodeBench({
+  const { visits, chats, stop } = await settleDecodeBench({
     arms: input.arms,
     settings: input.settings ?? SETTINGS,
     signal: input.signal ?? new AbortController().signal,
     dependencies: fakeDependencies(world, probe, input.failChatAt),
     onProgress: () => {},
-    onVisit: (visit) => visits.push(visit),
-    onChat: (chat) => chats.push(chat),
   });
-  const settled = await outcome.then(
-    () => ({ ok: true as const }),
-    (error: unknown) => ({ ok: false as const, error }),
-  );
-  return { world, probe, visits, chats, settled };
+  return { world, probe, visits, chats, stop };
 };
 
 describe("the bench loop", () => {
   it("visits the arms in ABBA order, building each pipeline only after the previous one is released", async () => {
-    const { world, settled } = await runBench({ arms: [arm("e2b"), arm("qat-e2b")] });
-    expect(settled.ok).toBe(true);
+    const { world, stop } = await runBench({ arms: [arm("e2b"), arm("qat-e2b")] });
+    expect(stop).toEqual({ kind: "completed" });
     expect(world.log).toEqual([
       "build e2b",
       "dispose e2b",
@@ -254,9 +248,9 @@ describe("the bench loop", () => {
   });
 
   describe("when a chat fails", () => {
-    it("releases the pipeline, keeps what finished, and rejects with the chat's error", async () => {
-      const { world, chats, settled } = await runBench({ arms: [arm("e2b")], failChatAt: 1 });
-      expect(settled.ok ? undefined : settled.error).toEqual(new Error("chat failed"));
+    it("releases the pipeline, keeps what finished, and stops failed with the chat's error", async () => {
+      const { world, chats, stop } = await runBench({ arms: [arm("e2b")], failChatAt: 1 });
+      expect(stop).toEqual({ kind: "failed", error: new Error("chat failed") });
       expect(world.log).toEqual(["build e2b", "dispose e2b"]);
       expect(chats).toHaveLength(1);
     });
@@ -266,11 +260,11 @@ describe("the bench loop", () => {
     it("stops before building the next visit", async () => {
       const controller = new AbortController();
       controller.abort(new Error("Cancelled by the user"));
-      const { world, settled } = await runBench({
+      const { world, stop } = await runBench({
         arms: [arm("e2b")],
         signal: controller.signal,
       });
-      expect(settled.ok ? undefined : settled.error).toEqual(new Error("Cancelled by the user"));
+      expect(stop).toEqual({ kind: "cancelled" });
       expect(world.log).toEqual([]);
     });
   });

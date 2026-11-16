@@ -5,7 +5,12 @@
  * it.
  */
 
-import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
+import type {
+  SessionAbArmRecord,
+  SessionAbJudgement,
+  SessionAbRecord,
+  SessionAbVerdict,
+} from "@karume/runtime/tune";
 
 import type { EntryResult, Verdict } from "../entry.ts";
 
@@ -15,18 +20,53 @@ import type {
   SessionAbMossData,
   SessionAbVaeData,
 } from "./data.ts";
-import { countedPhaseOf } from "./run.ts";
-import { vaeRowRule } from "./vae.ts";
-import { identityText, judgementLine, recordedCounts } from "./view.ts";
+import { countedPhaseOf } from "./gemma-arm.ts";
 
 /** `fail` when any arm's outputs differ from the base's first run in any run, else `pass`. */
 export const identityVerdict = (record: SessionAbRecord): Verdict =>
   record.arms.every((arm) => arm.identity.worst.failures === 0) ? "pass" : "fail";
 
+/** "identical (N runs)", or how many words of which run differ from the base's first, and where first. */
+const identityText = (arm: SessionAbArmRecord): string => {
+  const { runs, worst } = arm.identity;
+  if (worst.failures === 0) return `identical (${runs} runs)`;
+  const where = `round ${worst.round}, visit ${worst.visit}, run ${worst.run}`;
+  const first =
+    worst.first === undefined
+      ? ""
+      : `; first at ${worst.first.output}[${worst.first.index}] (${worst.first.cause}): expected ${worst.first.expected}, got ${worst.first.actual}`;
+  return `${worst.failures} of ${worst.words} words differ (${where}${first})`;
+};
+
 const identityLine = (record: SessionAbRecord): string =>
   `Identity against the base's first run: ${record.arms
     .map((arm) => `${arm.name} ${identityText(arm)}`)
     .join("; ")}`;
+
+/** The word a verdict is shown with. */
+const VERDICT_LABELS: Readonly<Record<SessionAbVerdict, string>> = {
+  adopt: "Adopt",
+  reject: "Reject",
+  inconclusive: "Inconclusive",
+};
+
+const signedMs = (value: number): string =>
+  `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(3)} ms`;
+
+const gainText = (judgement: SessionAbJudgement): string => `${(judgement.gain * 100).toFixed(2)}%`;
+
+const intervalLabel = (judgement: SessionAbJudgement): string =>
+  `Interval of the median difference (${(judgement.intervalCoverage * 100).toFixed(1)}% coverage)`;
+
+const intervalText = (judgement: SessionAbJudgement): string =>
+  `${signedMs(judgement.deltaLowMs)} to ${signedMs(judgement.deltaHighMs)}`;
+
+/**
+ * One compared arm's judgement in one line: the verdict, the gain and the interval of the median
+ * difference.
+ */
+const judgementLine = (judgement: SessionAbJudgement): string =>
+  `${judgement.arm} against ${judgement.base}: ${VERDICT_LABELS[judgement.verdict]} · gain ${gainText(judgement)} · ${intervalLabel(judgement).toLowerCase()} ${intervalText(judgement)}`;
 
 const signed = (value: number): string => `${value >= 0 ? "+" : "−"}${Math.abs(value)}`;
 
@@ -56,6 +96,15 @@ const countsLine = (
   return `${heading}: ${[...hits, dispatches].join("; ")}${differences.length === 0 ? "" : ` (${differences.join(", ")})`}`;
 };
 
+/**
+ * An arm's counts as the runner's record keeps them (a target whose arms report their counts to
+ * the runner, the `sessionArm`s of the Session targets); `undefined` when the arm reported none.
+ */
+export const recordedCounts = (arm: SessionAbArmRecord): SessionAbArmCounts | undefined =>
+  arm.fusions === undefined || arm.dispatches === undefined
+    ? undefined
+    : { arm: arm.name, fusions: arm.fusions, dispatches: arm.dispatches };
+
 /** The runner record's counts per arm; the data builders refused a record without them. */
 const runnerCounts = (arms: readonly SessionAbArmRecord[]): readonly SessionAbArmCounts[] =>
   arms.map((arm) => {
@@ -69,9 +118,7 @@ export const sessionAbComponentResult = (
   data: SessionAbMossData | SessionAbVaeData,
 ): EntryResult => {
   const rules =
-    data.target === "moss-dit-forward"
-      ? [data.rule.name]
-      : [...new Set(data.record.arms.map((arm) => vaeRowRule(data.request, arm.name)))];
+    data.target === "moss-dit-forward" ? [data.rule.name] : data.rules.map(({ name }) => name);
   return {
     verdict: identityVerdict(data.record),
     summary: [

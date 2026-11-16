@@ -14,27 +14,28 @@
 
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import { chatPrompt } from "@karume/models/gemma";
-import { acquireGpu, type SessionOptions } from "@karume/runtime";
+import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb } from "@karume/runtime/tune";
 
 import { booleanValue, choiceValue, type Entry, textValue } from "../../entry.ts";
 import { buildGemmaPipeline, type GemmaPipeline } from "../../gemma4/pipeline.ts";
 import { EXPERT_SPECULATION_DEPTH } from "../../gemma4/settings.ts";
 import {
-  MODELS_VERSION,
-  type SessionAbArmProbe,
-  sessionAbGemmaData,
-} from "../../session-ab/data.ts";
+  acquireWithSubgroups,
+  SOURCE_KINDS,
+  sourceParameter,
+  SUBGROUPS_PARAMETER,
+} from "../../local-parameters.ts";
+import { type SessionAbArmProbe, sessionAbGemmaData } from "../../session-ab/data.ts";
+import { type ArmSpec, pipelineArm, probeCounts } from "../../session-ab/gemma-arm.ts";
 import { gemmaRequest, openGemmaModel, parseModelText } from "../../session-ab/gemma-target.ts";
 import { armStepper, probeStepLine } from "../../session-ab/progress.ts";
-import { SESSION_AB_DEFAULTS, SESSION_AB_LIMITS, SOURCE_KINDS } from "../../session-ab/request.ts";
 import {
-  type ArmSpec,
-  pipelineArm,
-  probeCounts,
+  MIN_GAIN_PARAMETER,
+  ROUNDS_PARAMETER,
   runnerEnvironment,
   runPositions,
-} from "../../session-ab/run.ts";
+} from "../../session-ab/shared.ts";
 import { sessionAbGemmaResult } from "../../session-ab/summary.ts";
 
 const entry: Entry = {
@@ -56,42 +57,30 @@ const entry: Entry = {
       label: "Preset (empty: the manifest's default preset of the model)",
       default: "",
     },
+    // At least 2: the first token comes from the prefill, so a run of one token has no decode run
+    // for the probe to count. At most what SESSION_AB_CAPACITY holds next to the prompt.
     {
       kind: "integer",
       name: "tokens",
       label: "Tokens per run (the first comes from the prefill)",
-      min: SESSION_AB_LIMITS.minTokens,
-      max: SESSION_AB_LIMITS.maxTokens,
-      default: SESSION_AB_DEFAULTS.tokens,
+      min: 2,
+      max: 512,
+      default: 96,
     },
-    {
-      kind: "integer",
-      name: "rounds",
-      label: "Timed rounds (one untimed warm-up round comes first)",
-      min: SESSION_AB_LIMITS.minRounds,
-      max: SESSION_AB_LIMITS.maxRounds,
-      default: SESSION_AB_DEFAULTS.rounds,
-    },
-    {
-      kind: "number",
-      name: "minGain",
-      label: "Minimum gain (a fraction of the base's time: 0.01 = 1%)",
-      min: SESSION_AB_LIMITS.minGain,
-      max: SESSION_AB_LIMITS.maxGain,
-      default: SESSION_AB_DEFAULTS.minGain,
-    },
+    ROUNDS_PARAMETER,
+    MIN_GAIN_PARAMETER,
     {
       kind: "boolean",
       name: "openPerVisit",
       label:
         "Open and close each arm's pipeline per visit (off: both stay loaded; two pipelines of a large model do not fit together)",
-      default: SESSION_AB_DEFAULTS.openPerVisit,
+      default: true,
     },
     {
       kind: "boolean",
       name: "probeCounts",
       label: "Probe the counts first (one extra load and untimed run per arm)",
-      default: SESSION_AB_DEFAULTS.probeCounts,
+      default: true,
     },
     {
       kind: "boolean",
@@ -99,13 +88,7 @@ const entry: Entry = {
       label: "f16 KV (full layers)",
       default: false,
     },
-    {
-      kind: "boolean",
-      name: "subgroups",
-      label:
-        "Acquire the device with the subgroup features when it has them (off: a device without them)",
-      default: true,
-    },
+    SUBGROUPS_PARAMETER,
     {
       kind: "text",
       name: "expertCacheSlots",
@@ -128,13 +111,7 @@ const entry: Entry = {
       max: EXPERT_SPECULATION_DEPTH.max,
       default: 0,
     },
-    {
-      kind: "choice",
-      name: "source",
-      label: "How a browser reads the distribution",
-      options: SOURCE_KINDS,
-      default: "cached",
-    },
+    sourceParameter("How a browser reads the distribution"),
   ],
   run: async ({ parameters, gpuOptions, signal, progress, openDistribution, backend }) => {
     const { key, opened, manifest } = await openGemmaModel(
@@ -144,14 +121,7 @@ const entry: Entry = {
       signal,
     );
     const request = gemmaRequest(parameters, key, manifest, GELU_MUL_RULE_NAME);
-    // With the subgroup features the device can run the 32-lane kernel forms, as the pages of the
-    // Playground acquire it; without them the arms run on the device a plain `acquireGpu()` gives.
-    // Which one fits can differ: the 26B model with 64 expert slots builds a second pipeline on a
-    // 12 GB GPU only without them (docs/known-issues.md).
-    const gpu = await acquireGpu({
-      ...gpuOptions,
-      ...(booleanValue(parameters, "subgroups") ? { subgroups: "available" as const } : {}),
-    });
+    const gpu = await acquireWithSubgroups(gpuOptions, booleanValue(parameters, "subgroups"));
     try {
       const specOf = (
         name: string,
@@ -168,16 +138,17 @@ const entry: Entry = {
             gpu,
             load: request,
             signal,
-            ...(options.fusionRules === undefined
-              ? {}
-              : { sessionOptions: { fusionRules: options.fusionRules } }),
+            ...(fusionRules === undefined ? {} : { sessionOptions: { fusionRules } }),
             ...(options.onRunDiagnostics === undefined
               ? {}
               : { onRunDiagnostics: options.onRunDiagnostics }),
           }),
         signal,
       });
-      const specs = [specOf("base", undefined), specOf("rule", [GELU_MUL_RULE])];
+      // The request's arms name the rule: an arm that names one passes candidate/gelu_mul.
+      const specs = request.arms.map(({ name, fusionRules }) =>
+        specOf(name, fusionRules.length === 0 ? undefined : [GELU_MUL_RULE]),
+      );
       // The count probes come first, one arm at a time, all untimed; the arms are never built with
       // the diagnostics callback.
       const probes: SessionAbArmProbe[] = [];
@@ -208,7 +179,6 @@ const entry: Entry = {
         sessionAbGemmaData({
           request,
           distribution: opened.facts,
-          modelsVersion: MODELS_VERSION,
           ruleName: GELU_MUL_RULE_NAME,
           arms: arms.map((arm) => ({ name: arm.name, facts: arm.facts() })),
           ...(request.probeCounts ? { probes } : {}),
