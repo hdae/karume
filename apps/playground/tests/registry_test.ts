@@ -1,7 +1,7 @@
+import { MOUNTS } from "@karume/local-distributions/mounts";
 import { readdir } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 
-import { MOUNTS } from "../src/mounts.ts";
 import { MODEL_PAGES, PAGE_GROUPS, pageAt, pagesByGroup } from "../src/models/registry.ts";
 
 /** The file routes under `src/routes/` other than the root layout and the index, as paths. */

@@ -5,6 +5,7 @@
  */
 
 import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
+import { distributionSource, type PipelineSource } from "@karume/local-distributions/browser";
 import { type Prompt, frameToRgba } from "@karume/models/wan";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -31,7 +32,6 @@ import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { distributionSource, type PipelineSource } from "@/lib/distributions";
 import { downloadBlob, fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { type CacheInventory, queryCacheInventory } from "@/lib/hub-cache";
@@ -222,7 +222,7 @@ export const Wan22Page = () => {
     }
     const controller = new AbortController();
     const load = async (): Promise<ManifestState> => {
-      const loaded = await loadManifest(distributionSource("wan22"), {
+      const loaded = await loadManifest(distributionSource("wan22", document.baseURI), {
         signal: controller.signal,
       });
       const response = await fetch("models/wan22/karume.json", { signal: controller.signal });

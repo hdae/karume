@@ -1,12 +1,11 @@
 import type { HubRepoRef } from "@karume/hub";
-import { useCallback, useMemo, useState } from "react";
-
 import {
   type DistributionStatus,
   hfRepoRef,
   type PipelineSource,
   type SourceKind,
-} from "@/lib/distributions";
+} from "@karume/local-distributions/browser";
+import { useCallback, useMemo, useState } from "react";
 
 export type PipelineSourceChoice = {
   /** The source to build from (stable until the choice, the mount or the cache generation changes). */

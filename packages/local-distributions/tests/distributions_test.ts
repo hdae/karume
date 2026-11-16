@@ -8,7 +8,7 @@ import {
   type DistributionRequest,
   type DistributionResponse,
   handleDistributionRequest,
-} from "../vite-plugin-distributions.ts";
+} from "../plugin.ts";
 
 const BYTES = Uint8Array.from({ length: 64 }, (_, index) => index);
 

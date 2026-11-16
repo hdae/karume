@@ -4,10 +4,10 @@
  * taken by the page (WebCrypto is async) and handed in.
  */
 
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import type { SessionDiagnostics } from "@karume/runtime";
 
 import type { RecordEnvironment } from "@/lib/environment";
-import type { PipelineSource } from "@/lib/distributions";
 import {
   type ComponentRecord,
   foldComponentDiagnostics,

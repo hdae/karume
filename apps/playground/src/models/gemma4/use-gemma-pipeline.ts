@@ -11,13 +11,13 @@
  * destroyed only after them.
  */
 
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { type FromPretrainedOptions, Pipeline, type RunPhase } from "@karume/models/gemma";
 import * as gemma4QatMobile from "@karume/models/gemma4-qat-mobile";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import { entryPointOf, type ExpertCacheSlots, type GemmaMount, isQatModel } from "./settings";
 
@@ -96,7 +96,7 @@ export const buildGemmaPipeline = async (input: {
 }): Promise<GemmaPipeline> => {
   const { gpu, request, signal, onRunDiagnostics, onProgress, sessionOptions, pipelineOptions } =
     input;
-  const ref = pretrainedRef(request.source, request.mount);
+  const ref = pretrainedRef(request.source, request.mount, document.baseURI);
   const common = {
     ...sessionOptions,
     ...pipelineOptions,

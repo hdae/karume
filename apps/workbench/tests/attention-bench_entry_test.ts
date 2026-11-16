@@ -106,6 +106,7 @@ describe("the attention-bench entry", () => {
       gpuOptions: {},
       signal: new AbortController().signal,
       progress: () => undefined,
+      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
     });
     await expect(run).rejects.toThrow(ParameterError);
   });

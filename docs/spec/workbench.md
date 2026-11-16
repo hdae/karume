@@ -11,21 +11,40 @@ The workbench is private (not published) and is not part of the lanes: its tests
 
 ## An entry
 
-- One file `apps/workbench/src/entries/<id>.ts` is one entry. Its default export declares an `id` (kebab-case, equal
+- One file `apps/workbench/src/entries/<id>.ts` is one entry (`src/entries/local/<id>.ts` for an entry that reads a
+  local distribution). Its default export declares an `id` (kebab-case, equal
   to the file name), a `title`, a `description`, its `parameters` and `run`. Nothing else lists the entries: the
   registry collects the files, and an id that is not its file name is an error at start.
 - An entry holds no UI code. The browser shell and the Node command render and drive every entry the same way, and the
   same module runs in both.
-- Parameters are declared, of four kinds: `boolean`, `integer` (with a minimum and a maximum), `choice` (one of a
-  list) and `choices` (a subset of a list, written as a comma-separated list). Values arrive as strings — a URL query,
+- Parameters are declared, of six kinds: `boolean`, `integer` and `number` (each with a minimum and a maximum; a
+  number is finite), `text` (any string — the entry gives it its meaning when it runs), `choice` (one of a list) and
+  `choices` (a subset of a list, written as a comma-separated list). Values arrive as strings — a URL query,
   `--name=value` on the command line, the form — and one function turns them into typed values. A missing name takes
   its default; a name the entry does not declare and a value that does not fit are errors that name the parameter.
 - `run` receives the typed parameters, the GPU options of the host (`{}` in a browser, Dawn's `GPU` under Node), an
-  abort signal and a function that reports one status line. An entry acquires and releases its own GPU context.
+  abort signal, a function that reports one status line and a function that opens a local distribution. An entry
+  acquires and releases its own GPU context.
 - `run` resolves to an optional `verdict`, a `summary` (the lines a person reads first) and `data` (the entry's own
   record body). A check concludes `pass` or `fail`; `incomplete` says the run did not cover what was asked (a check
   the device cannot run, a sweep that a device loss or an error stopped). An entry that only measures and finished
   has no verdict.
+
+### Local distributions
+
+- An entry that reads a model distribution declares it (`readsLocalDistribution`) and lives under
+  `src/entries/local/`. The dev server and the Node command list it; a production build neither lists nor bundles it,
+  because a production build serves no distribution.
+- Such an entry opens a mount of the shared mount table (`@karume/local-distributions`) through the function the host
+  gives it, naming how a browser should read it: `cached` (the dev server's HF-compatible `/hf/` route into the hub's
+  CacheStorage, so a second run does not move the weights again) or `direct` (plain requests to `/models/<mount>/`).
+  Under Node the mirror's directory is read whichever is named. A repository the manifest references is read from the
+  mount that holds it.
+- What it gets back is the reference the hub and a family's `fromPretrained` take, and the facts a record carries:
+  the mount's directory, the sha256 of its manifest and how it was read (`cached`, `direct` or `directory`).
+- A mount whose mirror is missing, and a mount without an HF-compatible route asked for `cached`, are errors that
+  name the mount.
+- The cache of `cached` belongs to the page's origin: the workbench does not see what the Playground cached.
 
 ### The entries
 
@@ -75,7 +94,8 @@ Every run leaves one record, format `karume-workbench/1`:
 
 ## The dev server
 
-`vp dev` in `apps/workbench` listens on `127.0.0.1:8791` only.
+`vp dev` in `apps/workbench` listens on `127.0.0.1:8791` only. Besides the two endpoints below it serves the local
+distributions as the Playground's dev server does (`/models/index.json`, `/models/<mount>/…` and `/hf/…`, read only).
 
 | Request | Answer |
 | --- | --- |
@@ -84,7 +104,7 @@ Every run leaves one record, format `karume-workbench/1`:
 
 - Nothing the client sends becomes part of a path except through the two rules above (the kebab-case entry id and the
   adapter directory).
-- The preview server and a production build have neither endpoint.
+- The preview server and a production build have neither endpoint. The preview server serves the distributions.
 - Every response of the dev and preview servers carries `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated.
 
@@ -115,5 +135,5 @@ Progress goes to stderr; the outcome, the summary and the record's path go to st
 ## What it does not do
 
 - It collects nobody else's results: a record stays where it was written.
-- It reads no model distribution. An entry that needs one is not built yet.
+- It downloads no model: an entry reads a local mirror or nothing.
 - It keeps no history and compares no two records.

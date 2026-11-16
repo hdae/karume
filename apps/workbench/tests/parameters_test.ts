@@ -5,10 +5,12 @@ import {
   choicesValue,
   choiceValue,
   integerValue,
+  numberValue,
   type Parameter,
   ParameterError,
   parameterText,
   parseParameters,
+  textValue,
 } from "../src/entry.ts";
 
 const DECLARED: readonly Parameter[] = [
@@ -111,5 +113,79 @@ describe("the typed accessors", () => {
     expect(() => choicesValue(values, "storage", STORAGES)).toThrow("Parameter storage:");
     expect(() => integerValue(values, "missing")).toThrow(ParameterError);
     expect(() => choiceValue(values, "storage", ["f16"])).toThrow("Parameter storage:");
+  });
+});
+
+describe("the text and number kinds", () => {
+  const MORE: readonly Parameter[] = [
+    { kind: "text", name: "prompt", label: "Prompt", default: "a red fox" },
+    { kind: "number", name: "scale", label: "Scale", min: -1, max: 10, default: 4.5 },
+  ];
+  const refusal = (given: Record<string, string>): ParameterError => {
+    try {
+      parseParameters(MORE, given);
+    } catch (error) {
+      if (error instanceof ParameterError) return error;
+      throw error;
+    }
+    throw new Error("expected a ParameterError");
+  };
+
+  it("give each its default when nothing is given", () => {
+    expect(parseParameters(MORE, {})).toEqual({ prompt: "a red fox", scale: 4.5 });
+  });
+
+  it("read any string as a text, the empty one, commas and spaces included", () => {
+    for (const text of ["", "a, b", "  spaced  ", "NaN"]) {
+      expect(parseParameters(MORE, { prompt: text })["prompt"]).toBe(text);
+    }
+  });
+
+  it("read a finite number within its bounds in any form Number reads", () => {
+    for (const [text, value] of [
+      ["0.25", 0.25],
+      ["-1", -1],
+      ["10", 10],
+      ["1e1", 10],
+      [".5", 0.5],
+    ] as const) {
+      expect(parseParameters(MORE, { scale: text })["scale"]).toBe(value);
+    }
+  });
+
+  it("refuse an empty or padded number, NaN, an infinity, trailing characters and a value off the bounds", () => {
+    for (const text of [
+      "",
+      " ",
+      " 1",
+      "1 ",
+      "NaN",
+      "Infinity",
+      "-Infinity",
+      "1e400",
+      "2x",
+      "10.5",
+    ]) {
+      const error = refusal({ scale: text });
+      expect(error.parameter).toBe("scale");
+      expect(error.message).toContain("scale");
+    }
+  });
+
+  it("write each value as the text parseParameters reads back", () => {
+    const values = parseParameters(MORE, { prompt: "x,y", scale: "0.1" });
+    const texts = Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [name, parameterText(value)]),
+    );
+    expect(texts).toEqual({ prompt: "x,y", scale: "0.1" });
+    expect(parseParameters(MORE, texts)).toEqual(values);
+  });
+
+  it("read with their accessors, which throw on a value of another kind", () => {
+    const values = parseParameters(MORE, { scale: "-0.5" });
+    expect(textValue(values, "prompt")).toBe("a red fox");
+    expect(numberValue(values, "scale")).toBe(-0.5);
+    expect(() => textValue(values, "scale")).toThrow("Parameter scale:");
+    expect(() => numberValue(values, "prompt")).toThrow("Parameter prompt:");
   });
 });

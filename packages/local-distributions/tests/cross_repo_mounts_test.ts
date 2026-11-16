@@ -1,8 +1,8 @@
 import { type Manifest, parseManifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
-import { crossRepoMounts, type RepoHolders } from "../src/lib/distributions.ts";
-import { MOUNTS } from "../src/mounts.ts";
+import { crossRepoMounts, type RepoHolders } from "../browser.ts";
+import { MOUNTS } from "../mounts.ts";
 
 const hex = (character: string): string => character.repeat(64);
 const V4 = "hdae/karume-irodori-v4-small";
@@ -198,7 +198,7 @@ describe("the mounts other distributions reference", () => {
   // karume-irodori-v4-large its codec pair from karume-irodori-v4-small, each at the revision its
   // manifest pins — not the revision these mounts are served at. Without the opt-in
   // the serving table throws, and /models/index.json builds it, so every page would fail
-  // (vite-plugin-distributions.ts).
+  // (plugin.ts).
   it.each(["anima", "irodori-v4", "irodori-v4.1"] as const)(
     "%s aliases the referenced revisions",
     (name) => {

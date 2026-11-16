@@ -1,8 +1,8 @@
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import { createHash } from "node:crypto";
 import { frameToRgba } from "@karume/models/wan";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { PipelineSource } from "../src/lib/distributions.ts";
 import {
   attentionPipelines,
   buildCostOf,

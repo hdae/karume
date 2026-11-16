@@ -9,7 +9,7 @@ import {
   type DistributionResponse,
   handleDistributionRequest,
   hfServingTable,
-} from "../vite-plugin-distributions.ts";
+} from "../plugin.ts";
 
 const MAIN_REPO = "owner/karume-dist-main";
 const CROSS_REPO = "owner/karume-dist-b";

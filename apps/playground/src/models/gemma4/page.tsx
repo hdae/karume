@@ -7,6 +7,7 @@
  * tools; a tool call the model makes is run in the browser and the turn continues with its result.
  */
 
+import { type DistributionStatus, mountStatus } from "@karume/local-distributions/browser";
 import {
   ChatSession,
   type ChatReply,
@@ -50,7 +51,6 @@ import { useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
-import { type DistributionStatus, mountStatus } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";

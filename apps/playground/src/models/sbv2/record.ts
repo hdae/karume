@@ -5,9 +5,9 @@
  * WAV the regression test hashes).
  */
 
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import type { RunComponent, Utterance } from "@karume/models/sbv2";
 
-import type { PipelineSource } from "@/lib/distributions";
 import type { RecordEnvironment } from "@/lib/environment";
 import {
   type ComponentRecord,

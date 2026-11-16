@@ -4,7 +4,7 @@
  * the checkout before the run and saves the record after it.
  */
 
-import type { Entry, GpuOptions, ParameterValues } from "./entry.ts";
+import type { Entry, GpuOptions, OpenDistribution, ParameterValues } from "./entry.ts";
 import {
   buildRecord,
   type Checkout,
@@ -19,14 +19,15 @@ export const executeEntry = async (options: {
   readonly gpuOptions: GpuOptions;
   readonly signal: AbortSignal;
   readonly progress: (text: string) => void;
+  readonly openDistribution: OpenDistribution;
   readonly environment: RecordEnvironment;
   readonly checkout: Checkout;
 }): Promise<WorkbenchRecord> => {
-  const { entry, parameters, gpuOptions, signal, progress } = options;
+  const { entry, parameters, gpuOptions, signal, progress, openDistribution } = options;
   const started = performance.now();
   let settlement: Settlement;
   try {
-    const result = await entry.run({ parameters, gpuOptions, signal, progress });
+    const result = await entry.run({ parameters, gpuOptions, signal, progress, openDistribution });
     settlement = { kind: "resolved", result, aborted: signal.aborted };
   } catch (error) {
     settlement = { kind: "rejected", error, aborted: signal.aborted };

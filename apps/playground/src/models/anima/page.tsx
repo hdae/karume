@@ -6,6 +6,11 @@
  */
 
 import {
+  crossRepoMounts,
+  type DistributionStatus,
+  type RepoHolders,
+} from "@karume/local-distributions/browser";
+import {
   SAMPLER_TYPES,
   SOURCES,
   type RunComponent,
@@ -39,7 +44,6 @@ import { useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import { crossRepoMounts, type DistributionStatus, type RepoHolders } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import type { RgbaPixels } from "@/lib/image";

@@ -308,6 +308,9 @@ importers:
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
+      '@karume/local-distributions':
+        specifier: workspace:*
+        version: link:../../packages/local-distributions
       '@karume/models':
         specifier: workspace:*
         version: link:../../packages/models
@@ -375,9 +378,15 @@ importers:
 
   apps/workbench:
     dependencies:
+      '@karume/hub':
+        specifier: workspace:*
+        version: link:../../packages/hub
       '@karume/kernel-checks':
         specifier: workspace:*
         version: link:../../packages/kernel-checks
+      '@karume/local-distributions':
+        specifier: workspace:*
+        version: link:../../packages/local-distributions
       '@karume/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
@@ -436,6 +445,19 @@ importers:
         version: link:../test-support
 
   packages/kernel-checks: {}
+
+  packages/local-distributions:
+    dependencies:
+      '@karume/hub':
+        specifier: workspace:*
+        version: link:../hub
+      '@karume/models':
+        specifier: workspace:*
+        version: link:../models
+    devDependencies:
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.2.0(@types/node@24.19.1)(@vitest/ui@5.0.4)(jiti@2.7.0)(typescript@7.0.2)
 
   packages/models:
     dependencies:

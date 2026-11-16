@@ -4,8 +4,9 @@
  * - Dev server only: `POST /workbench/results` writes a record under `outputs/workbench/`
  *   ({@link handleRecordPost}) and `GET /workbench/checkout` answers the checkout at request time.
  *   Neither exists in preview or in a production build, which offers a download only.
- * - Dev and preview servers: every response carries COOP / COEP, so the page is cross-origin
- *   isolated (full-precision timers).
+ * - Cross-origin isolation (COOP / COEP on every dev and preview response) is the distributions
+ *   plugin's, which `vite.config.ts` installs ahead of this one so that these endpoints' answers
+ *   carry it too.
  * - Production build: the checkout is baked in as the `__WORKBENCH_CHECKOUT__` constant, read when
  *   the config loads.
  */
@@ -17,18 +18,7 @@ import type { Connect, Plugin } from "vite-plus";
 import { readCheckout } from "./src/checkout.ts";
 import { handleRecordPost, MAX_RECORD_BYTES, type RecordPostResponse } from "./src/results.ts";
 
-/** Headers on every dev and preview response (cross-origin isolation of the page). */
-export const ISOLATION_HEADERS: Readonly<Record<string, string>> = {
-  "Cross-Origin-Opener-Policy": "same-origin",
-  "Cross-Origin-Embedder-Policy": "require-corp",
-};
-
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-
-const isolation: Connect.NextHandleFunction = (_request, response, next) => {
-  for (const [name, value] of Object.entries(ISOLATION_HEADERS)) response.setHeader(name, value);
-  next();
-};
 
 const headersOf = (request: IncomingMessage): Record<string, string | undefined> => {
   const headers: Record<string, string | undefined> = {};
@@ -102,10 +92,6 @@ export const resultsPlugin = (): Plugin => ({
     };
   },
   configureServer(server) {
-    server.middlewares.use(isolation);
     server.middlewares.use(workbenchEndpoints);
-  },
-  configurePreviewServer(server) {
-    server.middlewares.use(isolation);
   },
 });

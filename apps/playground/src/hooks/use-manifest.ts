@@ -1,9 +1,9 @@
 import { MANIFEST_FILENAME, type Manifest, parseManifest } from "@karume/hub";
+import type { DistributionStatus } from "@karume/local-distributions/browser";
+import type { MountName } from "@karume/local-distributions/mounts";
 import { useEffect, useState } from "react";
 
-import type { DistributionStatus } from "@/lib/distributions";
 import { sha256Hex } from "@/lib/record";
-import type { MountName } from "@/mounts";
 
 export type ManifestState =
   | { readonly kind: "loading" }

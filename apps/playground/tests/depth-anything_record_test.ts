@@ -1,6 +1,6 @@
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { PipelineSource } from "../src/lib/distributions.ts";
 import type { RecordEnvironment } from "../src/lib/environment.ts";
 import type { ComponentRecord, TimingTally } from "../src/lib/record.ts";
 import {

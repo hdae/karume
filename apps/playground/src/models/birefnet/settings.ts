@@ -11,8 +11,7 @@ import {
   resolveSelection,
   selectionRefs,
 } from "@karume/hub";
-
-import type { MountName } from "@/mounts";
+import type { MountName } from "@karume/local-distributions/mounts";
 
 /** A checkpoint is a mount (and the key of `birefnet.SOURCES`): each is its own distribution. */
 export type CheckpointId = Extract<MountName, "birefnet-hr" | "lucida">;

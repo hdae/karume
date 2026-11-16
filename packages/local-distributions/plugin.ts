@@ -1,5 +1,6 @@
 /**
- * Dev-server plugin that serves local Karume distributions read-only under `/models/<name>/`.
+ * `@karume/local-distributions/plugin` (Node only) — the dev-server plugin that serves local Karume
+ * distributions read-only under `/models/<name>/`.
  *
  * The page reads a distribution through `localDirectory` of `@karume/hub` over `fetch` (whole files
  * and `Range` reads), so the server only has to hand out bytes: no listing, no writes, nothing
@@ -469,6 +470,28 @@ const handleHfRequest = async (
 };
 
 /**
+ * What `/models/index.json` answers for `mounts`, as they are on disk now. The Node side of the
+ * package reads the same facts through this function.
+ */
+export const distributionIndex = async (
+  mounts: readonly DistributionMount[],
+): Promise<DistributionIndex> => {
+  const { repos } = await hfServingTable(mounts);
+  const index: Record<string, DistributionIndex[string]> = {};
+  for (const mount of mounts) {
+    const served = mount.hfRepo === undefined ? undefined : repos.get(mount.hfRepo);
+    index[mount.name] = {
+      directory: mount.label,
+      available: (await realRoot(mount)) !== undefined,
+      ...(mount.hfRepo === undefined || served === undefined
+        ? {}
+        : { hf: { repo: mount.hfRepo, revision: served.revision } }),
+    };
+  }
+  return index;
+};
+
+/**
  * The whole request policy. `/models/index.json` lists the mounts; `/models/<name>/<path>` serves a
  * file of that mount (GET / HEAD, with `Range`); `/hf/…` is the HF-compatible route
  * ({@link handleHfRequest}); everything else passes to Vite with the isolation headers.
@@ -486,19 +509,7 @@ export const handleDistributionRequest = async (
   if (hf) return await handleHfRequest(path, request, mounts);
 
   if (path === INDEX_PATH) {
-    const { repos } = await hfServingTable(mounts);
-    const index: Record<string, DistributionIndex[string]> = {};
-    for (const mount of mounts) {
-      const served = mount.hfRepo === undefined ? undefined : repos.get(mount.hfRepo);
-      index[mount.name] = {
-        directory: mount.label,
-        available: (await realRoot(mount)) !== undefined,
-        ...(mount.hfRepo === undefined || served === undefined
-          ? {}
-          : { hf: { repo: mount.hfRepo, revision: served.revision } }),
-      };
-    }
-    const text = JSON.stringify(index);
+    const text = JSON.stringify(await distributionIndex(mounts));
     return respond(
       200,
       { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -553,6 +564,24 @@ export type DistributionsPluginOptions = {
   >;
 };
 
+/** The mounts of `distributions`, their directories resolved against `repositoryRoot`. */
+export const distributionMounts = (
+  repositoryRoot: string,
+  distributions: DistributionsPluginOptions["distributions"],
+): readonly DistributionMount[] =>
+  Object.entries(distributions).map(([name, entry]) => {
+    const directory = typeof entry === "string" ? entry : entry.directory;
+    return {
+      name,
+      root: resolve(repositoryRoot, directory),
+      label: relative(repositoryRoot, resolve(repositoryRoot, directory)),
+      ...(typeof entry === "string" ? {} : { hfRepo: entry.hfRepo }),
+      ...(typeof entry === "string" || entry.aliasReferencedRevisions !== true
+        ? {}
+        : { aliasReferencedRevisions: true }),
+    };
+  });
+
 /** Serves {@link DistributionsPluginOptions.distributions} on the dev and preview servers. */
 export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin => {
   let mounts: readonly DistributionMount[] = [];
@@ -596,19 +625,7 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
     log: (message: string) => void,
     info: (message: string) => void,
   ): Promise<void> => {
-    const repoRoot = await findRepoRoot(appRoot);
-    mounts = Object.entries(options.distributions).map(([name, entry]) => {
-      const directory = typeof entry === "string" ? entry : entry.directory;
-      return {
-        name,
-        root: resolve(repoRoot, directory),
-        label: relative(repoRoot, resolve(repoRoot, directory)),
-        ...(typeof entry === "string" ? {} : { hfRepo: entry.hfRepo }),
-        ...(typeof entry === "string" || entry.aliasReferencedRevisions !== true
-          ? {}
-          : { aliasReferencedRevisions: true }),
-      };
-    });
+    mounts = distributionMounts(await findRepoRoot(appRoot), options.distributions);
     for (const mount of mounts) {
       if ((await realRoot(mount)) === undefined) {
         log(

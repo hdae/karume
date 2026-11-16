@@ -4,6 +4,7 @@
  * fails when a route has no entry or an entry has no route).
  */
 
+import type { MountName } from "@karume/local-distributions/mounts";
 import type { FileRoutesByPath } from "@tanstack/react-router";
 import {
   ArrowUpFromLineIcon,
@@ -21,8 +22,6 @@ import {
   VideoIcon,
 } from "lucide-react";
 
-import type { MountName } from "@/mounts";
-
 /** The sidebar groups, in display order. */
 export const PAGE_GROUPS = ["Video", "Image", "Vision", "Audio", "Text", "Benchmarks"] as const;
 export type PageGroup = (typeof PAGE_GROUPS)[number];
@@ -36,7 +35,7 @@ export type ModelPage = {
   readonly summary: string;
   readonly group: PageGroup;
   readonly icon: LucideIcon;
-  /** The `/models/<name>/` mounts the page reads (`src/mounts.ts`); empty for a kernel page. */
+  /** The `/models/<name>/` mounts the page reads (`@karume/local-distributions/mounts`); empty for a kernel page. */
   readonly mounts: readonly MountName[];
 };
 

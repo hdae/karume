@@ -1,8 +1,9 @@
 /**
- * The distributions the dev server mounts: `/models/<name>/` → a directory under `models/` (relative
- * to the repository root — docs/assets-layout.md). One table for both sides: `vite.config.ts` hands
- * it to `distributionsPlugin`, and the page registry names its mounts with {@link MountName} (a type
- * import, so the browser bundle never loads this module).
+ * The distributions the dev servers of the playground and the workbench mount: `/models/<name>/` → a
+ * directory under `models/` (relative to the repository root — docs/assets-layout.md). One table for
+ * every side: each app's `vite.config.ts` hands it to `distributionsPlugin`, the Node side opens its
+ * directories, and pages name their mounts with {@link MountName} (a type import, so a browser bundle
+ * never loads this module).
  *
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
  * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
@@ -20,7 +21,7 @@ import * as sbv2 from "@karume/models/sbv2";
 import * as siglip2 from "@karume/models/siglip2";
 import * as wan from "@karume/models/wan";
 
-import type { DistributionsPluginOptions } from "../vite-plugin-distributions.ts";
+import type { DistributionsPluginOptions } from "./plugin.ts";
 
 export const MOUNTS = {
   wan22: { directory: "models/karume-wan2.2", hfRepo: wan.SOURCES["wan2.2"].repo },
@@ -28,7 +29,7 @@ export const MOUNTS = {
   umt5: "models/karume-umt5-xxl",
   // karume-anima-extra takes its text encoder and VAE from karume-anima at the revision its manifest
   // declares, while this mount is served at its own revision: the opt-in lets the declared revision
-  // alias this directory for exactly the files the reference names (vite-plugin-distributions.ts).
+  // alias this directory for exactly the files the reference names (plugin.ts).
   anima: {
     directory: "models/karume-anima",
     hfRepo: anima.SOURCES["anima"].repo,

@@ -1,4 +1,5 @@
 import { type Manifest, parseManifest } from "@karume/hub";
+import { crossRepoMounts } from "@karume/local-distributions/browser";
 import { ModelInputError } from "@karume/models/anima";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -15,7 +16,6 @@ import {
   usesNegativePrompt,
   type AnimaForm,
 } from "../src/models/anima/settings.ts";
-import { crossRepoMounts } from "../src/lib/distributions.ts";
 
 const hex = (character: string): string => character.repeat(64);
 const OFFICIAL = "hdae/karume-anima";

@@ -3,7 +3,8 @@
  * covers it.
  */
 
-import type { PipelineSource } from "@/lib/distributions";
+import type { PipelineSource } from "@karume/local-distributions/browser";
+
 import type { RecordEnvironment } from "@/lib/environment";
 import {
   type ComponentRecord,

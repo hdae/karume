@@ -4,13 +4,13 @@
  * and reads the small assets), so building eagerly costs little and gives the page the prompt list.
  */
 
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import type { GpuContext } from "@karume/runtime";
 import { type Prompt, type RunComponent, Ti2vPipeline } from "@karume/models/wan";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import type { TextEncoderPath } from "./settings";
 
@@ -92,6 +92,7 @@ export const useWanPipeline = (input: {
       const ref = pretrainedRef(
         source,
         "wan22",
+        document.baseURI,
         needsUmt5 && textEncoderRepo !== undefined ? { [textEncoderRepo]: "umt5" } : {},
       );
       return await Ti2vPipeline.fromPretrained(ref, {

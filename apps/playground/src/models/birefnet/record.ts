@@ -5,9 +5,9 @@
  */
 
 import type { Manifest } from "@karume/hub";
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import type { SessionDiagnostics } from "@karume/runtime";
 
-import type { PipelineSource } from "@/lib/distributions";
 import type { RecordEnvironment } from "@/lib/environment";
 import {
   type ComponentRecord,

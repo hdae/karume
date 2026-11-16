@@ -14,6 +14,7 @@ import { executeEntry } from "./execute.ts";
 import { errorText, recordText, type WorkbenchRecord } from "./record.ts";
 import { currentCheckout } from "./shell/checkout.ts";
 import { element } from "./shell/dom.ts";
+import { browserDistributions } from "./shell/distributions.ts";
 import { parameterForm } from "./shell/form.ts";
 import { downloadRecord, type SaveResult, saveRecord } from "./shell/save.ts";
 
@@ -177,6 +178,7 @@ const start = (): void => {
             progress: (text) => {
               status.textContent = text;
             },
+            openDistribution: browserDistributions(document.baseURI),
             environment,
             checkout,
           });

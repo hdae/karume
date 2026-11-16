@@ -13,7 +13,9 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@karume/hub": "workspace:*",
     "@karume/kernel-checks": "workspace:*",
+    "@karume/local-distributions": "workspace:*",
     "@karume/runtime": "workspace:*"
   },
   "devDependencies": {

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { dawnFlags, installDawn } from "@karume/test-support/dawn";
 import { createServer, isRunnableDevEnvironment } from "vite-plus";
 
+import { nodeDistributions } from "./node-distributions.ts";
 import { readCheckout } from "./src/checkout.ts";
 import { type Entry, ParameterError, parseParameters } from "./src/entry.ts";
 import { dawnBackend, readEnvironment } from "./src/environment.ts";
@@ -92,6 +93,7 @@ const runEntry = async (entry: Entry, given: Readonly<Record<string, string>>): 
     gpuOptions: { gpu },
     signal: controller.signal,
     progress: (text) => process.stderr.write(`${text}\n`),
+    openDistribution: nodeDistributions(REPOSITORY_ROOT),
     environment,
     checkout,
   });

@@ -1,6 +1,7 @@
+import type { SourceKind } from "@karume/local-distributions/browser";
+
 import { Field } from "@/components/field";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { SourceKind } from "@/lib/distributions";
 
 /**
  * The Source field: **Cached** (the hub's cache over `/hf/`) or **Direct** (plain fetch from

@@ -1,6 +1,6 @@
+import type { DistributionStatus } from "@karume/local-distributions/browser";
 import { useState } from "react";
 
-import type { DistributionStatus } from "@/lib/distributions";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 
 import type { CheckpointId } from "./settings";

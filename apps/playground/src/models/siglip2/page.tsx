@@ -9,6 +9,11 @@
  * source, model and preset.
  */
 
+import {
+  mountStatus,
+  type PipelineSource,
+  pretrainedRef,
+} from "@karume/local-distributions/browser";
 import { Pipeline } from "@karume/models/siglip2";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useRef, useState } from "react";
@@ -42,7 +47,6 @@ import { useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { mountStatus, type PipelineSource, pretrainedRef } from "@/lib/distributions";
 import { downloadBlob, fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import type { LoadedImage } from "@/lib/image";
@@ -222,20 +226,23 @@ export const Siglip2Page = () => {
         // The signal reaches the fetches only: the Session build that follows (weight upload) takes
         // none (buildStatus marks it not cancellable); leaving the page during it disposes the
         // finished pipeline below.
-        const built = await Pipeline.fromPretrained(pretrainedRef(runSource, "siglip2"), {
-          gpu: runGpu,
-          model,
-          quant,
-          signal,
-          onRunDiagnostics: (diagnostics) => {
-            counters.latest = {
-              submitCount: diagnostics.submit.submitCount,
-              dispatchCount: diagnostics.submit.dispatchCount,
-            };
-            diagnosticsSinkRef.current?.(diagnostics);
+        const built = await Pipeline.fromPretrained(
+          pretrainedRef(runSource, "siglip2", document.baseURI),
+          {
+            gpu: runGpu,
+            model,
+            quant,
+            signal,
+            onRunDiagnostics: (diagnostics) => {
+              counters.latest = {
+                submitCount: diagnostics.submit.submitCount,
+                dispatchCount: diagnostics.submit.dispatchCount,
+              };
+              diagnosticsSinkRef.current?.(diagnostics);
+            },
+            onProgress: (progress) => report(buildStatus(progress)),
           },
-          onProgress: (progress) => report(buildStatus(progress)),
-        });
+        );
         buildMs = performance.now() - buildStart;
         if (signal.aborted) {
           // Cancelled during the fetch, or the page was left while the Session was being built.

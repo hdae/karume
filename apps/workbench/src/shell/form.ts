@@ -40,6 +40,26 @@ const field = (parameter: Parameter, value: ParameterValue): Field => {
         read: () => input.value,
       };
     }
+    case "number": {
+      const input = element("input", {
+        type: "number",
+        step: "any",
+        min: String(parameter.min),
+        max: String(parameter.max),
+        value: parameterText(value),
+      });
+      return {
+        element: element("label", {}, [`${parameter.label} `, input]),
+        read: () => input.value,
+      };
+    }
+    case "text": {
+      const input = element("input", { type: "text", value: parameterText(value) });
+      return {
+        element: element("label", {}, [`${parameter.label} `, input]),
+        read: () => input.value,
+      };
+    }
     case "choice": {
       const select = element(
         "select",

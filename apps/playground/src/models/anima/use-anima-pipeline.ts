@@ -14,12 +14,12 @@
  */
 
 import type { AssetProgress } from "@karume/hub";
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { Pipeline, type ResidencyAction, type RunComponent } from "@karume/models/anima";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import { residentAfter } from "./record";
 import type { AnimaMount } from "./settings";
@@ -169,7 +169,7 @@ export const useAnimaPipeline = (
       await release();
       const started = performance.now();
       const pipeline = await Pipeline.fromPretrained(
-        pretrainedRef(spec.source, spec.mount, crossRepo),
+        pretrainedRef(spec.source, spec.mount, document.baseURI, crossRepo),
         {
           gpu: spec.gpu,
           model: spec.model,

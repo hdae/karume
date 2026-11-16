@@ -1,0 +1,21 @@
+{
+  "name": "@karume/local-distributions",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The local model distributions under models/ as the playground and the workbench read them: the dev-server plugin, the mount table, the page side and the Node side.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./plugin": "./plugin.ts",
+    "./mounts": "./mounts.ts",
+    "./browser": "./browser.ts",
+    "./node": "./node.ts"
+  },
+  "dependencies": {
+    "@karume/hub": "workspace:*",
+    "@karume/models": "workspace:*"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}

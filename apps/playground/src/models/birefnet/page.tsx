@@ -11,6 +11,7 @@
  * limits are too small for the intermediates is told before any weight is read.
  */
 
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { type AlphaMatte, Pipeline } from "@karume/models/birefnet";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -39,7 +40,6 @@ import { useGpu } from "@/hooks/use-gpu";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import type { LoadedImage, RgbaPixels } from "@/lib/image";
@@ -211,7 +211,7 @@ export const BirefnetPage = () => {
     if (build === undefined) return undefined;
     const controller = new AbortController();
     estimateMatte(
-      pretrainedRef(build.source, build.checkpoint),
+      pretrainedRef(build.source, build.checkpoint, document.baseURI),
       { model: build.model, quant: build.quant },
       build.gpu.limits,
       controller.signal,
@@ -255,7 +255,7 @@ export const BirefnetPage = () => {
         report({ stage: "loading", note: "reading the manifest" });
         const loadStart = performance.now();
         const pipeline = await Pipeline.fromPretrained(
-          pretrainedRef(target.source, target.checkpoint),
+          pretrainedRef(target.source, target.checkpoint, document.baseURI),
           {
             gpu: target.gpu,
             model: target.model,

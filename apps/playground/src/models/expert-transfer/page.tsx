@@ -8,6 +8,7 @@
  * each costs.
  */
 
+import { type HfCoordinates, hfRepoRef } from "@karume/local-distributions/browser";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { useMemo, useState } from "react";
 
@@ -31,7 +32,6 @@ import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
 import { useRunTask } from "@/hooks/use-run-task";
 import { fileStamp } from "@/lib/download";
-import { type HfCoordinates, hfRepoRef } from "@/lib/distributions";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 
 import { type CacheReadResult, openCached26b, runCacheRead } from "./cache-read";

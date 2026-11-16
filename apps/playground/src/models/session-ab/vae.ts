@@ -19,10 +19,9 @@
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
+import type { MountName } from "@karume/local-distributions/mounts";
 import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionOptions, Tensor } from "@karume/runtime";
-
-import type { MountName } from "@/mounts";
 
 import type { SessionAbSettings } from "./request";
 

@@ -8,9 +8,8 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
+import type { PipelineSource } from "@karume/local-distributions/browser";
 import type { SessionBuildStats, SessionDiagnostics } from "@karume/runtime";
-
-import type { PipelineSource } from "@/lib/distributions";
 
 /** The number of NaN / ±Infinity elements. */
 export const countNonFinite = (data: Float32Array): number => {

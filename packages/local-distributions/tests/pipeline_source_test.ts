@@ -1,8 +1,10 @@
 import { fetchAssets, isDistributionSource, loadManifest } from "@karume/hub";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { pretrainedRef } from "../src/lib/distributions.ts";
+import { pretrainedRef } from "../browser.ts";
 
+/** The page's base URL (`document.baseURI` in a browser). */
+const BASE = "http://127.0.0.1/";
 const REF = { repo: "owner/karume-x", revision: "a".repeat(40), hubUrl: "http://127.0.0.1/hf" };
 
 const hex = (character: string): string => character.repeat(64);
@@ -56,7 +58,9 @@ afterEach(() => {
 
 describe("pretrainedRef", () => {
   it("hands the cached route's ref to fromPretrained as is", () => {
-    expect(pretrainedRef({ kind: "cached", ref: REF, cacheGeneration: 0 }, "anima")).toBe(REF);
+    expect(pretrainedRef({ kind: "cached", ref: REF, cacheGeneration: 0 }, "anima", BASE)).toBe(
+      REF,
+    );
   });
 
   it("reads the direct route from the mount, and a cross-repo reference from the mapped mount", async () => {
@@ -70,7 +74,7 @@ describe("pretrainedRef", () => {
           : new Response(new Uint8Array(4), { status: 200 }),
       );
     });
-    const ref = pretrainedRef({ kind: "direct" }, "anima-extra", {
+    const ref = pretrainedRef({ kind: "direct" }, "anima-extra", BASE, {
       "hdae/karume-anima": "anima",
     });
     expect(isDistributionSource(ref)).toBe(true);
@@ -78,6 +82,9 @@ describe("pretrainedRef", () => {
     const vae = loaded.manifest.models["a"]?.assets["vae"];
     if (vae === undefined) throw new Error("the fixture has no asset 'vae'");
     await fetchAssets(loaded, { vae });
-    expect(requested).toEqual(["models/anima-extra/karume.json", "models/anima/vae/model.krm"]);
+    expect(requested).toEqual([
+      `${BASE}models/anima-extra/karume.json`,
+      `${BASE}models/anima/vae/model.krm`,
+    ]);
   });
 });

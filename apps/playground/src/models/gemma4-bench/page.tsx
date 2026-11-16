@@ -12,6 +12,13 @@
  * builds its arm's pipeline and releases it before the next.
  */
 
+import {
+  type DistributionStatus,
+  hfRepoRef,
+  mountStatus,
+  type PipelineSource,
+  type SourceKind,
+} from "@karume/local-distributions/browser";
 import { chatPrompt } from "@karume/models/gemma";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { memo, useMemo, useState } from "react";
@@ -43,13 +50,6 @@ import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import {
-  type DistributionStatus,
-  hfRepoRef,
-  mountStatus,
-  type PipelineSource,
-  type SourceKind,
-} from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";

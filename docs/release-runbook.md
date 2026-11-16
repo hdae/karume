@@ -124,7 +124,7 @@ Gemma Terms of Use instead of the MIT texts, and it references only v4-small (th
    `packages/test-support/src/test-assets.pin.json` in the same commit as the tests that read them
    (`tools/test-assets/README.md`).
 5. **Pins**: update `irodori.SOURCES["irodori-v4-large"]` (§3). The Playground mount of the model (`irodori-v4-large` in
-   `apps/playground/src/mounts.ts`) reads its repository name from that entry, as the other Irodori mounts read theirs.
+   `packages/local-distributions/mounts.ts`) reads its repository name from that entry, as the other Irodori mounts read theirs.
 
 If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —

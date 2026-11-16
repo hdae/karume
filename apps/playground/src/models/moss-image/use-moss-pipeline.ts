@@ -13,12 +13,12 @@
  */
 
 import type { AssetProgress } from "@karume/hub";
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { Pipeline } from "@karume/models/moss";
 import type { GpuContext } from "@karume/runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import { MOSS_MOUNT } from "./settings";
 
@@ -139,13 +139,16 @@ export const useMossPipeline = (
       // A failed dispose of the old pipeline is shown, and does not block opening the new one.
       await release();
       const started = performance.now();
-      const pipeline = await Pipeline.fromPretrained(pretrainedRef(spec.source, MOSS_MOUNT), {
-        gpu: spec.gpu,
-        model: spec.model,
-        quant: spec.quant,
-        signal,
-        onProgress,
-      });
+      const pipeline = await Pipeline.fromPretrained(
+        pretrainedRef(spec.source, MOSS_MOUNT, document.baseURI),
+        {
+          gpu: spec.gpu,
+          model: spec.model,
+          quant: spec.quant,
+          signal,
+          onProgress,
+        },
+      );
       // A cancel (or leaving the page) that lands as opening finishes: drop the pipeline rather
       // than keep one nobody will release.
       if (signal.aborted) {

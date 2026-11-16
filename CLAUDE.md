@@ -48,6 +48,8 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)
 - `packages/kernel-checks/` (private) — the kernel identity checks (subgroup GEMV / RMS, the state-attention rewrites) shared by
   the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
+- `packages/local-distributions/` (private) — the local mirrors under `models/` as the two apps read them: the dev-server
+  plugin, the mount table, the page side and the Node side
 - `apps/workbench/` (private) — the browser app and Node command that run checks and measurements on a GPU: one file is
   one entry, one JSON record per run under `outputs/workbench/` ([docs/spec/workbench.md](docs/spec/workbench.md)).
   `apps/playground/` (private) — the model pages

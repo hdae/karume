@@ -106,11 +106,21 @@ data         the entry's own record body
 
 Add one file `src/entries/<id>.ts` (kebab-case) whose default export is an `Entry`
 (`src/entry.ts`): `id` (the file name), `title`, a one- or two-sentence `description`, the declared
-`parameters` (`boolean`, `integer` with min / max, `choice`, `choices`) and `run`. `run` gets the
+`parameters` (`boolean`, `integer` and `number` with min / max, `text`, `choice`, `choices`) and `run`. `run` gets the
 typed parameters, `gpuOptions` to spread into `acquireGpu` (it acquires and destroys its own GPU
 context), an `AbortSignal` and `progress(text)`, and resolves to `{ verdict?, summary, data }`. An
 entry holds no UI code and no Node API: the shell and `run.ts` render and drive every entry the same
 way. The registry (`src/entries.ts`) picks the file up; nothing else lists entries.
+
+An entry that reads a local distribution (a mirror under `models/`) is a file
+`src/entries/local/<id>.ts` that declares `readsLocalDistribution: true` and opens the mount with
+`openDistribution(mount, source)` from its run context: a reference for `loadManifest` or a family's
+`fromPretrained`, and the facts its record carries (`directory`, `manifestSha256`, `read`). In a
+browser `source` picks the cached route (`/hf/`, the hub's CacheStorage) or the direct one
+(`/models/<mount>/`); under Node the mirror's directory is read. The dev server serves the same
+`/models/` and `/hf/` routes as the playground, from the shared mount table of
+[`@karume/local-distributions`](../../packages/local-distributions/README.md). A production build
+leaves these entries out.
 
 ## Develop
 

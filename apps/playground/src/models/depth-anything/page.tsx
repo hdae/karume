@@ -4,6 +4,7 @@
  * the sha256 of the raw f32 depth, Session diagnostics, GPU time per kernel when "GPU timing" is on).
  */
 
+import { mountStatus } from "@karume/local-distributions/browser";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { useMemo, useRef, useState } from "react";
 
@@ -31,7 +32,6 @@ import { useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { mountStatus } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import type { LoadedImage } from "@/lib/image";

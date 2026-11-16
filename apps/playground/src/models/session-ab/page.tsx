@@ -27,6 +27,11 @@
  */
 
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
+import {
+  type DistributionStatus,
+  mountStatus,
+  pretrainedRef,
+} from "@karume/local-distributions/browser";
 import { chatPrompt } from "@karume/models/gemma";
 import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
@@ -63,7 +68,6 @@ import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import { type DistributionStatus, mountStatus, pretrainedRef } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";
@@ -515,7 +519,7 @@ export const SessionAbPage = () => {
     void task.start(async ({ signal, report, holdTicker }) => {
       report({ stage: "fetching and opening the dit component" });
       const model = await openComponentModel(
-        pretrainedRef(source, MOSS_MOUNT),
+        pretrainedRef(source, MOSS_MOUNT, document.baseURI),
         request.model,
         request.quant,
         request.component,
@@ -641,7 +645,7 @@ export const SessionAbPage = () => {
     void task.start(async ({ signal, report, holdTicker }) => {
       report({ stage: `fetching and opening the ${request.component} component` });
       const model = await openComponentModel(
-        pretrainedRef(source, request.mount),
+        pretrainedRef(source, request.mount, document.baseURI),
         request.model,
         request.quant,
         request.component,

@@ -1,11 +1,10 @@
 import { fileURLToPath } from "node:url";
+import { MOUNTS } from "@karume/local-distributions/mounts";
+import { distributionsPlugin } from "@karume/local-distributions/plugin";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite-plus";
-
-import { MOUNTS } from "./src/mounts.ts";
-import { distributionsPlugin } from "./vite-plugin-distributions.ts";
 
 export default defineConfig({
   plugins: [
@@ -19,8 +18,8 @@ export default defineConfig({
     }),
     react(),
     tailwindcss(),
-    // The mount table (src/mounts.ts): `/models/<name>/` → a directory under `models/`, and the public
-    // repo name a mount is also served under on the HF-compatible route.
+    // The mount table (@karume/local-distributions/mounts): `/models/<name>/` → a directory under
+    // `models/`, and the public repo name a mount is also served under on the HF-compatible route.
     distributionsPlugin({ distributions: MOUNTS }),
   ],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },

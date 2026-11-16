@@ -9,6 +9,9 @@
  * SPEC: docs/spec/workbench.md#an-entry
  */
 
+import type { DistributionSource, HubRepoRef } from "@karume/hub";
+import type { SourceKind } from "@karume/local-distributions/browser";
+import type { MountName } from "@karume/local-distributions/mounts";
 import type { AcquireGpuOptions } from "@karume/runtime";
 
 /** What a check-like entry concludes. Absent for an entry that only measures. */
@@ -45,7 +48,27 @@ export type ChoicesParameter = ParameterBase & {
   readonly default: readonly string[];
 };
 
-export type Parameter = BooleanParameter | IntegerParameter | ChoiceParameter | ChoicesParameter;
+/** Any string; the entry gives it its meaning at run and throws {@link ParameterError} naming it. */
+export type TextParameter = ParameterBase & {
+  readonly kind: "text";
+  readonly default: string;
+};
+
+/** A finite real number from `min` to `max`. */
+export type NumberParameter = ParameterBase & {
+  readonly kind: "number";
+  readonly min: number;
+  readonly max: number;
+  readonly default: number;
+};
+
+export type Parameter =
+  | BooleanParameter
+  | IntegerParameter
+  | NumberParameter
+  | TextParameter
+  | ChoiceParameter
+  | ChoicesParameter;
 
 export type ParameterValue = boolean | number | string | readonly string[];
 
@@ -53,6 +76,40 @@ export type ParameterValues = Readonly<Record<string, ParameterValue>>;
 
 /** The part of the runtime's `acquireGpu` options the host decides: `{}` in a browser, Dawn's GPU under Node. */
 export type GpuOptions = Pick<AcquireGpuOptions, "gpu">;
+
+/**
+ * How a run read a distribution: `cached` (the hub's CacheStorage over the dev server's `/hf/`
+ * route), `direct` (plain fetch from the dev server's `/models/<mount>/`) or `directory` (the
+ * mirror's directory, under Node).
+ */
+export type DistributionRead = SourceKind | "directory";
+
+/** What a record carries about a distribution a run read. */
+export type DistributionFacts = {
+  /** The mount's directory relative to the repository root (`models/karume-moss-image`). */
+  readonly directory: string;
+  /** The sha256 of the mount's `karume.json` as it was read. */
+  readonly manifestSha256: string;
+  readonly read: DistributionRead;
+};
+
+export type OpenedDistribution = {
+  /** What `loadManifest` and a family's `fromPretrained` take. */
+  readonly ref: HubRepoRef | DistributionSource;
+  readonly facts: DistributionFacts;
+};
+
+/**
+ * Opens a local distribution: `source` is how a browser reads it (`cached` or `direct`); under
+ * Node the mirror's directory is read whatever it says. A referenced repository is read from the
+ * mount that holds it. Throws `MountUnavailableError` (`@karume/local-distributions/browser`), which
+ * names the mount, when its mirror is missing or, for `cached`, when the mount has no HF-compatible
+ * coordinates.
+ */
+export type OpenDistribution = (
+  mount: MountName,
+  source: SourceKind,
+) => Promise<OpenedDistribution>;
 
 export type RunContext = {
   readonly parameters: ParameterValues;
@@ -65,6 +122,8 @@ export type RunContext = {
   readonly signal: AbortSignal;
   /** Reports one status line (the latest replaces the previous one). */
   readonly progress: (text: string) => void;
+  /** For an entry that reads a local distribution ({@link Entry.readsLocalDistribution}). */
+  readonly openDistribution: OpenDistribution;
 };
 
 export type EntryResult = {
@@ -85,6 +144,11 @@ export type Entry = {
   /** One or two sentences. */
   readonly description: string;
   readonly parameters: readonly Parameter[];
+  /**
+   * Marks an entry that reads a local distribution (`openDistribution`). It lives in
+   * `src/entries/local/`, and a production build, which serves no distribution, leaves it out.
+   */
+  readonly readsLocalDistribution?: true;
   readonly run: (context: RunContext) => Promise<EntryResult>;
 };
 
@@ -116,6 +180,25 @@ const parseValue = (parameter: Parameter, text: string): ParameterValue => {
       }
       return value;
     }
+    case "number": {
+      const value = Number(text);
+      // `Number` reads "" and surrounding whitespace as a number; the text form refuses them.
+      if (
+        text === "" ||
+        text.trim() !== text ||
+        !Number.isFinite(value) ||
+        value < parameter.min ||
+        value > parameter.max
+      ) {
+        throw new ParameterError(
+          parameter.name,
+          `expected a finite number from ${parameter.min} to ${parameter.max}, got "${text}"`,
+        );
+      }
+      return value;
+    }
+    case "text":
+      return text;
     case "choice": {
       if (parameter.options.includes(text)) return text;
       throw new ParameterError(
@@ -182,6 +265,18 @@ export const booleanValue = (values: ParameterValues, name: string): boolean => 
 export const integerValue = (values: ParameterValues, name: string): number => {
   const value = values[name];
   if (typeof value !== "number") throw new ParameterError(name, "is not an integer");
+  return value;
+};
+
+export const numberValue = (values: ParameterValues, name: string): number => {
+  const value = values[name];
+  if (typeof value !== "number") throw new ParameterError(name, "is not a number");
+  return value;
+};
+
+export const textValue = (values: ParameterValues, name: string): string => {
+  const value = values[name];
+  if (typeof value !== "string") throw new ParameterError(name, "is not a text");
   return value;
 };
 

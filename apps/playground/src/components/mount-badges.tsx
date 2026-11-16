@@ -1,6 +1,7 @@
+import type { MountName } from "@karume/local-distributions/mounts";
+
 import { Badge } from "@/components/ui/badge";
 import type { DistributionIndexState } from "@/hooks/use-distribution-index";
-import type { MountName } from "@/mounts";
 
 /**
  * One badge per mount: its directory, marked "(missing)" when the dev server has no `karume.json`

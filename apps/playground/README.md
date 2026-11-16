@@ -63,7 +63,7 @@ The dev server listens on **http://127.0.0.1:8790** (loopback only). It serves:
 
 ### The mounts
 
-The mount table is `src/mounts.ts` (`vite.config.ts` hands it to `distributionsPlugin`; the page
+The mount table is `mounts.ts` of [`@karume/local-distributions`](../../packages/local-distributions/README.md) (`vite.config.ts` hands it to `distributionsPlugin`; the page
 registry names mounts with its `MountName` type). The directories are relative to the repository
 root. The HF-compatible repo is the public name from the family's `SOURCES` table (imported as a namespace, `anima.SOURCES`).
 
@@ -1371,7 +1371,7 @@ a route file has no entry or an entry has no route file.
 
 ### Adding a model page
 
-1. Add the mount to `src/mounts.ts` (`<name>: "models/<dir>"`, or
+1. Add the mount to `packages/local-distributions/mounts.ts` (`<name>: "models/<dir>"`, or
    `{ directory, hfRepo: <family>.SOURCES[...].repo }` with `import * as <family> from "@karume/models/<subpath>"` to serve it on the HF-compatible route too).
 2. Add `src/routes/<page>.tsx` (`createFileRoute("/<page>")({ component })`) and put the page's code
    under `src/models/<page>/` (`page.tsx` exports `<Pascal>Page`). Run `pnpm --filter
@@ -1383,15 +1383,15 @@ The kit a page builds on:
 
 | Piece | Where | What it does |
 | --- | --- | --- |
-| `useDistributionIndex`, `mountStatus` | `src/hooks/use-distribution-index.ts`, `src/lib/distributions.ts` | Which mounts exist (`/models/index.json`) and one mount's status. |
+| `useDistributionIndex`, `mountStatus` | `src/hooks/use-distribution-index.ts`, `@karume/local-distributions/browser` | Which mounts exist (`/models/index.json`) and one mount's status. |
 | `MountBadges` | `src/components/mount-badges.tsx` | A badge per mount: its directory, "(missing)" when absent. |
 | `useManifest` | `src/hooks/use-manifest.ts` | The mount's manifest over `/models/` and the sha256 of its `karume.json` (`loading` / `missing` / `ready` / `error`). |
 | `manifestPresets`, `presetChoices`, `modelChoices` | `src/lib/presets.ts` | A model's presets (quants with label and description) and its `defaultQuant`; select choices with "(default)". |
 | `PresetSelect` | `src/components/preset-select.tsx` | The Preset field: the presets, the default marked, the description as the hint. |
 | `usePipelineSource` | `src/hooks/use-pipeline-source.ts` | The cached / direct choice for a mount: a stable `PipelineSource`, the cached route's `HubRepoRef`, `cacheCleared()` after clearing the hub's cache. |
 | `SourcePicker` | `src/components/source-picker.tsx` | The Source field (Cached / Direct, Cached disabled without an HF-compatible route). |
-| `pretrainedRef` | `src/lib/distributions.ts` | The first argument of `fromPretrained` for a `PipelineSource`: the `HubRepoRef`, or the mount over plain fetch with `crossRepo` mapped to other mounts. |
-| `distributionSource`, `hfRepoRef` | `src/lib/distributions.ts` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
+| `pretrainedRef` | `@karume/local-distributions/browser` | The first argument of `fromPretrained` for a `PipelineSource`: the `HubRepoRef`, or the mount over plain fetch with `crossRepo` mapped to other mounts. |
+| `distributionSource`, `hfRepoRef` | `@karume/local-distributions/browser` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
 | `queryCacheInventory` | `src/lib/hub-cache.ts` | What the hub's cache holds of a distribution, over every preset. |
 | `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss (`reacquire`) or an options change (GPU timing). `track(work)` holds the device until `work` settles: the destroy waits one macrotask after the release and then for every tracked promise, and the next acquisition — of any page, through the app-wide queue the root layout provides (`GpuQueueContext`) — waits for that destroy (flush before destroy). A device released while still acquiring holds no work: it is destroyed when it arrives, and the next acquisition does not wait for it. A page MUST pass every pipeline / Session disposal and every build or run on the device through `track`, started no later than the effects of the commit that releases the device. `lease` names one acquisition (a new one on every options or attempt change, also back to earlier options); `state` shows a device only for the lease it was acquired for, so in the render that changes the lease it is already `acquiring` and effects keyed on the device dispose in the same commit. |
 | `useTimestampQuery` | `src/hooks/use-timestamp-query.ts` | Whether the adapter lists `timestamp-query`. |

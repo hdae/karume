@@ -6,9 +6,8 @@
  */
 
 import type { Manifest } from "@karume/hub";
+import type { MountName } from "@karume/local-distributions/mounts";
 import type { GenerateRequest } from "@karume/models/moss";
-
-import type { MountName } from "@/mounts";
 
 /** The one mount the page reads (`models/karume-moss-image`, on the cached or the direct route). */
 export const MOSS_MOUNT = "moss-image" satisfies MountName;

@@ -13,6 +13,7 @@
  */
 
 import type { AssetProgress } from "@karume/hub";
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { Pipeline } from "@karume/models/depth-anything";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import {
@@ -25,7 +26,6 @@ import {
 } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 import { perRunSubmitCounts } from "@/lib/record";
 
 import { createPipelineSlot, type Obtained, type SlotEntry } from "./pipeline-slot";
@@ -113,18 +113,21 @@ export const useDepthPipeline = (input: {
         (buildSignal) => {
           // One per Session: the Session counts submits over its whole life.
           const perRun = perRunSubmitCounts();
-          return Pipeline.fromPretrained(pretrainedRef(key.source, "depth-anything"), {
-            gpu: key.gpu,
-            model: key.model,
-            quant: key.quant,
-            signal: buildSignal,
-            onProgress,
-            onRunDiagnostics: (report) => {
-              // MUST: count every report, sink or not (`?.()` would skip evaluating the argument).
-              const run = perRun(report);
-              diagnostics.current?.(run);
+          return Pipeline.fromPretrained(
+            pretrainedRef(key.source, "depth-anything", document.baseURI),
+            {
+              gpu: key.gpu,
+              model: key.model,
+              quant: key.quant,
+              signal: buildSignal,
+              onProgress,
+              onRunDiagnostics: (report) => {
+                // MUST: count every report, sink or not (`?.()` would skip evaluating the argument).
+                const run = perRun(report);
+                diagnostics.current?.(run);
+              },
             },
-          });
+          );
         },
         signal,
       );

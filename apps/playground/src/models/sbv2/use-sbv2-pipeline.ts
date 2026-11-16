@@ -8,12 +8,12 @@
  * again.
  */
 
+import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { type RunComponent, Pipeline } from "@karume/models/sbv2";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 export type Sbv2PipelineState =
   | { readonly kind: "idle" }
@@ -68,7 +68,7 @@ export const useSbv2Pipeline = (input: {
     const started = performance.now();
     setState({ kind: "loading", detail: `opening ${model} / ${quant} (${source.kind} source)` });
 
-    const build = Pipeline.fromPretrained(pretrainedRef(source, "sbv2"), {
+    const build = Pipeline.fromPretrained(pretrainedRef(source, "sbv2", document.baseURI), {
       gpu,
       model,
       quant,

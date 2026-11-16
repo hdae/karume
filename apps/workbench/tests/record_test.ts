@@ -144,6 +144,7 @@ describe("executeEntry", () => {
       gpuOptions: {},
       signal: controller.signal,
       progress: () => {},
+      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
       environment: ENVIRONMENT,
       checkout: CHECKOUT,
     });

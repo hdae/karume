@@ -1,6 +1,8 @@
 /**
- * Reading the distributions the dev server mounts under `/models/<name>/`
- * (`vite-plugin-distributions.ts`). URLs are relative, so the page works behind any base path.
+ * `@karume/local-distributions/browser` — reading the distributions a dev server mounts under
+ * `/models/<name>/` (`plugin.ts`) from a page. Web APIs only. Every URL is resolved against the
+ * `base` the page passes (its `document.baseURI`), so the page works behind any base path and
+ * nothing here reads the page's location.
  *
  * Two ways to read one: {@link distributionSource} (`localDirectory` over plain `fetch`, nothing
  * cached) and {@link hfRepoRef} (the HF-compatible route `/hf/`, read by the hub's HF source into
@@ -10,13 +12,14 @@
 
 import {
   type DistributionSource,
+  type FileRef,
   type HubRepoRef,
   localDirectory,
   type Manifest,
   resolveSelection,
 } from "@karume/hub";
 
-import type { MountName } from "@/mounts";
+import type { MountName } from "./mounts.ts";
 
 /** The HF-compatible coordinates of a mount (the revision follows its `karume.json`). */
 export type HfCoordinates = { readonly repo: string; readonly revision: string };
@@ -49,8 +52,14 @@ const isStatus = (value: unknown): value is DistributionStatus =>
   (!("hf" in value) || isHfCoordinates(value.hf));
 
 /** Fetches `/models/index.json` (which mounts exist and whether their directory is there). */
-export const fetchDistributionIndex = async (signal?: AbortSignal): Promise<DistributionIndex> => {
-  const response = await fetch("models/index.json", signal === undefined ? {} : { signal });
+export const fetchDistributionIndex = async (
+  base: string,
+  signal?: AbortSignal,
+): Promise<DistributionIndex> => {
+  const response = await fetch(
+    new URL("models/index.json", base).href,
+    signal === undefined ? {} : { signal },
+  );
   if (!response.ok) throw new Error(`models/index.json: HTTP ${response.status}`);
   const body: unknown = await response.json();
   if (typeof body !== "object" || body === null) {
@@ -74,17 +83,21 @@ const withSignal = (signal: AbortSignal | undefined): RequestInit =>
  */
 export const distributionSource = (
   name: string,
+  base: string,
   crossRepo: Readonly<Record<string, DistributionSource>> = {},
 ): DistributionSource =>
   localDirectory(
     {
       readFile: async (path, { signal }) => {
-        const response = await fetch(`models/${name}/${path}`, withSignal(signal));
+        const response = await fetch(
+          new URL(`models/${name}/${path}`, base).href,
+          withSignal(signal),
+        );
         if (!response.ok) throw new Error(`models/${name}/${path}: HTTP ${response.status}`);
         return new Uint8Array(await response.arrayBuffer());
       },
       readFileRange: async (path, offset, length, { signal }) => {
-        const response = await fetch(`models/${name}/${path}`, {
+        const response = await fetch(new URL(`models/${name}/${path}`, base).href, {
           ...withSignal(signal),
           headers: { Range: `bytes=${offset}-${offset + length - 1}` },
         });
@@ -127,8 +140,8 @@ export type SourceKind = "cached" | "direct";
 /**
  * The source a pipeline is built from: `cached` = the HF-compatible route through the hub's
  * CacheStorage (later runs read the weights from the browser's disk); `direct` = `localDirectory`
- * over plain `fetch`, nothing cached. MUST be stable (memoized — {@link usePipelineSource} does it):
- * a page that rebuilds its pipeline when the source changes would rebuild on every render.
+ * over plain `fetch`, nothing cached. MUST be stable (memoized — the playground's `usePipelineSource`
+ * does it): a page that rebuilds its pipeline when the source changes would rebuild on every render.
  */
 export type PipelineSource =
   | { readonly kind: "direct" }
@@ -142,20 +155,23 @@ export type PipelineSource =
 /**
  * The first argument of a family's `fromPretrained` for `source`: the `HubRepoRef` of the cached
  * route as is (it reaches cross-repo references on the same route), or the mount `name` over plain
- * fetch with `crossRepo` mapping each referenced repo to the mount that holds it (the direct route
- * has no revision to follow — `{ "hdae/karume-anima": "anima" }` for the Anima fine-tunes).
+ * fetch below `base` with `crossRepo` mapping each referenced repo to the mount that holds it (the
+ * direct route has no revision to follow — `{ "hdae/karume-anima": "anima" }` for the Anima
+ * fine-tunes).
  */
 export const pretrainedRef = (
   source: PipelineSource,
   name: MountName,
+  base: string,
   crossRepo: Readonly<Record<string, MountName>> = {},
 ): HubRepoRef | DistributionSource =>
   source.kind === "cached"
     ? source.ref
     : distributionSource(
         name,
+        base,
         Object.fromEntries(
-          Object.entries(crossRepo).map(([repo, mount]) => [repo, distributionSource(mount)]),
+          Object.entries(crossRepo).map(([repo, mount]) => [repo, distributionSource(mount, base)]),
         ),
       );
 
@@ -196,3 +212,57 @@ export const crossRepoMounts = <M extends MountName>(
   }
   return map;
 };
+
+/** The last path element (`hdae/karume-umt5-xxl` → `karume-umt5-xxl`). */
+const lastElement = (path: string): string => path.split(/[/\\]/).at(-1) ?? path;
+
+/**
+ * The mount of `index` that holds `repo`, by the rule the `/hf/` route serves a cross-repo reference
+ * with (`plugin.ts`): the mount served under that repository's name, else the mount whose directory
+ * is named after the repository's last element (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`).
+ */
+const holderOf = (repo: string, index: DistributionIndex): string | undefined => {
+  const mounts = Object.entries(index);
+  return (mounts.find(([, status]) => status.hf?.repo === repo) ??
+    mounts.find(([, status]) => lastElement(status.directory) === lastElement(repo)))?.[0];
+};
+
+/**
+ * The `crossRepo` map of the direct route for a whole distribution: every repository `manifest`
+ * references across repositories (any model, container or asset), mapped to the mount of `index`
+ * that holds it ({@link holderOf}). The Node side maps a mirror's references through this same
+ * function. A repository no mount holds is left out: the hub fails loudly, naming it, when a read
+ * needs it, so a selection that does not read it still opens.
+ */
+export const crossRepoHolders = (
+  manifest: Manifest,
+  index: DistributionIndex,
+): Readonly<Record<string, string>> => {
+  const refs: readonly FileRef[] = Object.values(manifest.models).flatMap((model) => [
+    ...Object.values(model.weights).flatMap((dtypes) =>
+      Object.values(dtypes).flatMap(({ container }) => container.parts),
+    ),
+    ...Object.values(model.assets),
+  ]);
+  const holders: Record<string, string> = {};
+  for (const { repo } of refs) {
+    if (repo === undefined || Object.hasOwn(holders, repo)) continue;
+    const holder = holderOf(repo, index);
+    if (holder !== undefined) holders[repo] = holder;
+  }
+  return holders;
+};
+
+/**
+ * A mount that cannot be read the way it was asked for: its mirror is missing, or it has no
+ * HF-compatible coordinates for the cached route.
+ */
+export class MountUnavailableError extends Error {
+  readonly mount: string;
+
+  constructor(mount: string, reason: string) {
+    super(`Distribution mount ${mount}: ${reason}`);
+    this.name = "MountUnavailableError";
+    this.mount = mount;
+  }
+}

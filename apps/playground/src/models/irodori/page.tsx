@@ -5,6 +5,13 @@
  * factor, Session diagnostics, the sha256 of the f32 samples).
  */
 
+import {
+  crossRepoMounts,
+  mountStatus,
+  type PipelineSource,
+  pretrainedRef,
+  type RepoHolders,
+} from "@karume/local-distributions/browser";
 import { SOURCES, type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -36,13 +43,6 @@ import { useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import {
-  crossRepoMounts,
-  mountStatus,
-  type PipelineSource,
-  pretrainedRef,
-  type RepoHolders,
-} from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets, type Preset } from "@/lib/presets";
@@ -229,7 +229,10 @@ export const IrodoriPage = () => {
     }
     const controller = new AbortController();
     setSplitTableState({ kind: "reading" });
-    readSplitTable(pretrainedRef(source, mount, REPO_HOLDERS), controller.signal).then(
+    readSplitTable(
+      pretrainedRef(source, mount, document.baseURI, REPO_HOLDERS),
+      controller.signal,
+    ).then(
       (table) => {
         if (!controller.signal.aborted) setSplitTableState({ kind: "ready", table });
       },
@@ -442,20 +445,23 @@ export const IrodoriPage = () => {
               );
             }
           }
-          return Pipeline.fromPretrained(pretrainedRef(key.source, key.mount, crossRepo), {
-            gpu: key.gpu,
-            model: key.model,
-            quant: key.quant,
-            ...(key.linearCompute === "preset" ? {} : { linearCompute: key.linearCompute }),
-            signal,
-            onRunDiagnostics: (component, diagnostics) =>
-              diagnosticsRef.current?.(component, diagnostics),
-            onProgress: (progress) =>
-              report({
-                stage: "building the pipeline",
-                note: `reading ${progress.path} (${mib(progress.loaded)} / ${mib(progress.total)} MiB)`,
-              }),
-          });
+          return Pipeline.fromPretrained(
+            pretrainedRef(key.source, key.mount, document.baseURI, crossRepo),
+            {
+              gpu: key.gpu,
+              model: key.model,
+              quant: key.quant,
+              ...(key.linearCompute === "preset" ? {} : { linearCompute: key.linearCompute }),
+              signal,
+              onRunDiagnostics: (component, diagnostics) =>
+                diagnosticsRef.current?.(component, diagnostics),
+              onProgress: (progress) =>
+                report({
+                  stage: "building the pipeline",
+                  note: `reading ${progress.path} (${mib(progress.loaded)} / ${mib(progress.total)} MiB)`,
+                }),
+            },
+          );
         },
       });
       const { pipeline } = acquired;

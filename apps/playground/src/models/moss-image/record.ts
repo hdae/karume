@@ -7,7 +7,8 @@
  * and of `generate` as a whole.
  */
 
-import type { PipelineSource } from "@/lib/distributions";
+import type { PipelineSource } from "@karume/local-distributions/browser";
+
 import type { RecordEnvironment } from "@/lib/environment";
 import { seconds, type SourceRecord, sourceRecord } from "@/lib/record";
 
