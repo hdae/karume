@@ -340,7 +340,7 @@ const scaleResources = (
 
 /**
  * f32 linear (f16-stored weights unless the case names another storage — the `k88` cases) — the
- * GEMM path of src/runtime/recipe-builders/linear.ts:342-369.
+ * GEMM path of src/runtime/linear-program.ts (`linearGemmProgram`).
  */
 const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
   const { m, n, k, groupSize } = sweepCase;
@@ -461,7 +461,7 @@ const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
 
 /**
  * i8a8 linear (i8 per-channel weights) — the ② GEMM of
- * src/runtime/recipe-builders/linear.ts:494-587.
+ * src/runtime/linear-program.ts (`linearI8a8Program`).
  */
 const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): CasePlan => {
   const { m, n, k } = sweepCase;

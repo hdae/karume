@@ -96,7 +96,7 @@ import {
   linearI8a8UsesVecFill,
   linearI8a8Wgsl,
 } from "../src/kernels/linear-i8a8.ts";
-import { linearI8a8Geometry } from "../src/runtime/recipe-builders/linear.ts";
+import { linearI8a8Geometry } from "../src/runtime/linear-program.ts";
 import { conv3dI8a8Key, conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   attentionPvI8a8Key,

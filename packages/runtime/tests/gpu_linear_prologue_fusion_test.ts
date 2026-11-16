@@ -1,5 +1,5 @@
 // gelu_tanh and the erf gelu folded into the step ① of the a8 linear that reads them (perf-ledger
-// F-4 — the linear prologue of src/runtime/fusion.ts, executed by `buildLinearI8a8`): bit parity
+// F-4 — the linear prologue of src/runtime/fusion.ts, built by `linearI8a8Program`): bit parity
 // with the unfused pair on the same backend, the counter, and the dispatch reduction, for both
 // integer dot forms.
 //

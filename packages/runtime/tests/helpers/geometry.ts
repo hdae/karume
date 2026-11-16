@@ -13,7 +13,7 @@ export const deviceGeometryProfile = (gpu: GpuContext): GeometryProfile =>
 /**
  * The geometry the table's `i8a8.linear` rules give an i8 linear of `rows` rows: the first rule
  * whose `maxRows` is at least `rows` (ADR 0115 addendum decision 14). Looked up here, not with the
- * runtime's selector (`i8a8LinearGeometry`) or the recipe builder's `linearI8a8Geometry`, so an
+ * runtime's selector (`i8a8LinearGeometry`) or the linear program's `linearI8a8Geometry`, so an
  * expected key built from it catches a wrong rule choice in either.
  */
 export const expectedI8a8LinearGeometry = (

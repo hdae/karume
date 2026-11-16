@@ -152,8 +152,8 @@ const STRICT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
  *   linear nodes (confirmed by reading the IR of full-24layer: 192 linears, every weight in i8
  *   storage, k ∈ {1024, 4096}, all a8-eligible, k % 4 == 0).
  * - `quantizeRows` 192 = the same count. An a8 linear lowers to the pair "`quantize_rows`, which
- *   quantises the activations to per-token i8 → the integer dot-product GEMM" (`buildLinearI8a8` of
- *   `recipe-builders/linear.ts`). Even linears that share an input do not share the quantisation.
+ *   quantises the activations to per-token i8 → the integer dot-product GEMM" (`linearI8a8Program` of
+ *   `linear-program.ts`). Even linears that share an input do not share the quantisation.
  *   NOTE: since the erf gelu joined the linear prologue (perf-ledger F-4, 2026-10-25), 24 of the
  *   192 are its prologue form (`quantize_rows:…:gelu:reg4` — the 24 intermediate → output linears,
  *   K 4096, whose input is the gelu), which the `quantize_rows:` prefix counts as well: the total

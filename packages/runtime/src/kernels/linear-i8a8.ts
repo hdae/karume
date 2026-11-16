@@ -166,7 +166,7 @@ export const LINEAR_W4A8_MAX_GROUP = 2113664;
  * `xq` (four i8 packed per word, `k / 4` words per row) and the per-token scale `xs` (one f32 per
  * row), for `m` rows of reduction length `k` (`k % 4 == 0` on this path — `linearTakesI8a8`).
  *
- * MUST: execution (`buildLinearI8a8` in recipe-builders/linear.ts) and the estimate (estimate.ts)
+ * MUST: execution (`linearI8a8Program` in runtime/linear-program.ts) and the estimate (estimate.ts)
  * take them from this one function (rewriting the formula on one side would let the estimate keep
  * claiming a different number against an implementation where only one side was fixed).
  */

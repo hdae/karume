@@ -29,7 +29,7 @@
  * `select` for the same reason.
  * MUST: the caller guarantees `dim % 4 == 0` (the i8 payload packs 4 per flat index, and this is
  * exactly the condition for a row to start on a word boundary — eligibility is decided in
- * src/runtime/recipe-builders/linear.ts and src/runtime/attention-route.ts). Here every one of the
+ * src/runtime/linear-route.ts and src/runtime/attention-route.ts). Here every one of the
  * `dim / 4` words is written on the assumption that there is no remainder (full-write). The one
  * exception is the padded form ({@link quantizeRowsPaddedWgsl} — the online attention's Vᵀ at
  * `N % 4 != 0`), which owns exactly the row lengths that are not multiples of 4.

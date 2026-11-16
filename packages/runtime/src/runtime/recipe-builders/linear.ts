@@ -1,13 +1,18 @@
 /**
- * Per-op-family derivation — the matrix-product family (matmul, bmm, linear with its GEMV / i8a8
- * variants, embedding, expert_linear).
+ * Per-op-family derivation — the matrix-product family (matmul, bmm, linear, embedding,
+ * expert_linear).
+ *
+ * linear is built from data: the selection names its strategy (src/runtime/linear-strategies.ts),
+ * the strategy's dispatch program says its kernels, uniforms, bindings, grids and temporaries
+ * without a device (src/runtime/linear-program.ts), and `emitLinearProgram` here turns the program
+ * into the step's dispatches. The other ops of the family build their single dispatch directly.
  *
  * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
  * state, params writes, the weights' storage form and scale bindings) are reached only through
  * {@link RecipeBuildFace}.
  */
 
-import type { BindingSource, StepRecipeBuilder, TempSource } from "../recipe.ts";
+import type { BindingRecipe, BindingSource, StepRecipeBuilder, TempSource } from "../recipe.ts";
 import {
   EMBEDDING_SCALE_BINDING,
   EMBEDDING_WORKGROUP_SIZE,
@@ -25,75 +30,15 @@ import {
 } from "../../kernels/expert-linear.ts";
 import { ExecutionError, type NodePlan } from "../plan.ts";
 import { gemmUsesVec4 } from "../../kernels/gemm.ts";
-import {
-  LINEAR_ACT_SCALE_BINDING,
-  LINEAR_I8A8_MAX_K,
-  linearI8a8Key,
-  linearI8a8Params,
-  linearI8a8TempBytes,
-  linearI8a8UsesVec4,
-  linearI8a8UsesVecFill,
-  linearI8a8Wgsl,
-} from "../../kernels/linear-i8a8.ts";
-import {
-  linearGemvKey,
-  linearGemvParallelKey,
-  linearGemvParallelPackedKey,
-  linearGemvParallelPackedParams,
-  linearGemvParallelPackedWgsl,
-  linearGemvParallelStagedKey,
-  linearGemvParallelStagedWgsl,
-  linearGemvParallelWgsl,
-  linearGemvParams,
-  linearGemvRowsKey,
-  linearGemvRowsWgsl,
-  linearGemvSubgroupKey,
-  linearGemvSubgroupWgsl,
-  linearGemvWgsl,
-} from "../../kernels/linear-gemv.ts";
-import {
-  integerGemvKey,
-  integerGemvParams,
-  type IntegerGemvVariant,
-  integerGemvWgsl,
-  integerGemvWorkgroups,
-} from "../../kernels/linear-gemv-integer.ts";
-import {
-  planesGemvKey,
-  planesGemvParams,
-  type PlanesGemvVariant,
-  planesGemvWgsl,
-  planesGemvWorkgroups,
-} from "../../kernels/linear-gemv-planes.ts";
-import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
 import type { LinearPrologue, PackedActivations } from "../fusion.ts";
-import { type LinearProgram, linearSplitKProgram, type ProgramOperand } from "../linear-program.ts";
-import { type LinearGemvChoice, selectLinearStrategy } from "../linear-strategies.ts";
-import type { WeightStorage } from "../../kernels/weight-storage.ts";
+import { type LinearProgram, linearProgramFor, type ProgramOperand } from "../linear-program.ts";
+import { selectLinearStrategy } from "../linear-strategies.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
-import {
-  defaultI8a8Geometry,
-  type I8a8Geometry,
-  i8a8TileM,
-  i8a8TileN,
-} from "../../kernels/i8a8-geometry.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
-import {
-  gemmRowsGeometry,
-  type GeometryProfile,
-  i8a8LinearGeometry,
-} from "../../kernels/geometry-profile.ts";
+import { gemmRowsGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../../kernels/matmul.ts";
 import { numel } from "../../ops.ts";
-import {
-  quantizeRowsGeometry,
-  quantizeRowsKey,
-  quantizeRowsParams,
-  quantizeRowsPrologueKey,
-  quantizeRowsPrologueWgsl,
-  quantizeRowsWgsl,
-} from "../../kernels/quantize-rows.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
@@ -193,7 +138,8 @@ export const buildBmm = async (
  * transposing copy).
  *
  * Which kernel computes it is decided in one place, {@link selectLinearStrategy}
- * (src/runtime/linear-strategies.ts) — this function only builds what that returns.
+ * (src/runtime/linear-strategies.ts); its dispatches are the strategy's program
+ * ({@link linearProgramFor} in src/runtime/linear-program.ts) — this function only emits that.
  * MUST: the same "one workgroup = one tile" as matmul, so exceeding the limit fails loudly.
  */
 export const buildLinear = async (
@@ -211,110 +157,43 @@ export const buildLinear = async (
   const k = weight[1];
   const m = numel(x.slice(0, -1));
   const weightStorage = face.weightStorage(step);
+  const groupSize = weightStorage === "i4" ? face.weightGroupSize(step) : undefined;
   const choice = selectLinearStrategy({
     plan: step,
     weightStorage,
-    groupSize: weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
+    groupSize,
     knobs: face.state,
     packed,
     prologue,
   });
-  switch (choice.id) {
-    case "integer-gemv":
-      await buildLinearIntegerGemv(
-        face,
-        step,
-        binds,
-        outs,
-        builder,
-        choice.variant,
-        m,
-        n,
-        k,
-        packedScaleOf(packed, choice.id),
-      );
-      return;
-    case "i8a8":
-      await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage, prologue);
-      return;
-    case "planes-gemv":
-      await buildLinearPlanesGemv(face, step, binds, outs, builder, choice.variant, m, n, k);
-      return;
-    case "gemm-splitk":
-      await emitLinearProgram(
-        face,
-        binds,
-        outs,
-        builder,
-        linearSplitKProgram(
-          `linear split-K [${x.join(",")}] × [${weight.join(",")}]`,
-          m,
-          n,
-          k,
-          choice.slices,
-        ),
-      );
-      return;
-    case "gemm-f32":
-    case "gemm-f16": {
-      const { v4, compute, groupSize } = choice;
-      // MUST: the tile geometry is the bucket of the flattened row count m (the adapter's profile —
-      // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to key, WGSL and
-      // dispatch.
-      const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
-      const key = linearKey(weightStorage, v4, compute, m, groupSize, geometry);
-      const { pipeline, layout, roles } = await face.state.cache.get(
-        key,
-        linearWgsl(weightStorage, v4, compute, m, groupSize, geometry),
-      );
-      const params = face.writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
-      const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-      const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
-      builder.dispatch({
-        key,
-        pipeline,
-        layout,
-        roles,
-        params,
-        bindings: [
-          ...binds.map((source, index) => ({ binding: index + 1, source })),
-          { binding: 4, source: outs[0] },
-          ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-        ],
-        workgroups: [
-          tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-          tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-          1,
-        ],
-      });
-      return;
-    }
-    default:
-      await buildLinearGemv(
-        face,
-        step,
-        binds,
-        outs,
-        builder,
-        choice,
-        m,
-        n,
-        k,
-        choice.id === "gemv-parallel-packed" ? packedScaleOf(packed, choice.id) : undefined,
-      );
-  }
+  const program = linearProgramFor(choice, {
+    x,
+    weight,
+    m,
+    n,
+    k,
+    weightStorage,
+    groupSize,
+    packedScale: packed?.scale,
+    prologue,
+    geometryProfile: face.state.geometryProfile,
+    linearI8a8Dot: face.state.linearI8a8Dot,
+  });
+  await emitLinearProgram(face, step, binds, outs, builder, program);
 };
 
 /**
  * Turns a strategy's {@link LinearProgram} into the step's dispatches: the temporaries are allocated
  * before the first dispatch and released after the last, each dispatch's pipeline comes from the
- * Session's cache under its key, and its grid is checked against the device limit.
+ * Session's cache under its key, the weight's scale is bound where its storage has one, and each grid
+ * is checked against the device limit.
  *
  * MUST: a temporary larger than the device's storage binding limit fails here — binding it would be a
  * validation error at the first run, with nothing naming the linear.
  */
 const emitLinearProgram = async (
   face: RecipeBuildFace,
+  step: NodePlan,
   binds: readonly BindingSource[],
   outs: readonly BindingSource[],
   builder: StepRecipeBuilder,
@@ -331,14 +210,14 @@ const emitLinearProgram = async (
     }
     return builder.allocTemp(byteLength);
   });
-  const sourceOf = (operand: ProgramOperand): BindingSource => {
+  const sourceOf = (operand: Exclude<ProgramOperand, "weightScale">): BindingSource => {
     if (operand === "x") return binds[0];
     if (operand === "weight") return binds[1];
     if (operand === "bias") return binds[2];
     if (operand === "out") return outs[0];
     return temps[operand.temp];
   };
-  for (const { key, wgsl, params, operands, grid } of program.dispatches) {
+  for (const { key, wgsl, params, bindings, grid } of program.dispatches) {
     const { pipeline, layout, roles } = await face.state.cache.get(key, wgsl());
     builder.dispatch({
       key,
@@ -346,10 +225,13 @@ const emitLinearProgram = async (
       layout,
       roles,
       params: face.writeParams(params, PARAMS_UNIFORM_USAGE),
-      bindings: operands.map((operand, index) => ({
-        binding: index + 1,
-        source: sourceOf(operand),
-      })),
+      // The weight's scale is bound only where its storage has a scale buffer (none for f32 / f16 /
+      // bf16 — `weightScaleBindings` returns no entry), the condition the WGSL declares it on.
+      bindings: bindings.flatMap(({ binding, operand }): readonly BindingRecipe[] =>
+        operand === "weightScale"
+          ? face.weightScaleBindings(step, binding)
+          : [{ binding, source: sourceOf(operand) }],
+      ),
       workgroups:
         grid.kind === "tiled"
           ? [
@@ -362,385 +244,6 @@ const emitLinearProgram = async (
   }
   // MUST: return the temporaries at the node boundary (the arena's invariant), last allocated first.
   for (const temp of temps.toReversed()) builder.releaseTemp(temp);
-};
-
-/**
- * The producer SRQ's scale of a strategy that reads packed activations. The selection takes such a
- * strategy only for a linear the pairing was declared for, so a missing pairing is a broken plan.
- */
-const packedScaleOf = (packed: PackedActivations | undefined, strategy: string): number => {
-  if (packed === undefined) {
-    throw new ExecutionError(
-      `linear: the strategy ${strategy} was chosen without a packed pairing`,
-    );
-  }
-  return packed.scale;
-};
-
-/**
- * linear's **GEMV family** (1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × i2 / i4 / i8 weights, and M=1 ×
- * f16 / f32 weights — ADR 0082 (f16 / f32 in addenda 6 and 7); i2 is ADR 0097).
- *
- * Bindings, uniform and output storage are the same as the default path; only "which thread owns
- * which output" changes (one thread = one output column (× row block for M ≥ 2), no shared tile
- * and no barrier). The exception is the parallel GEMV that linear at the level `reorder` resolves
- * to (`linearGemvReduce: parallel` — ADR 0098), which splits K for the eligible shapes.
- * The K reduction order per output element stays sequential in ascending k, so it is
- * **bit-identical** (the numeric contract of src/kernels/linear-gemv.ts).
- * Which member runs (the M = 1 column form, the row-block form whose row count is part of the key,
- * the parallel forms) was decided by `selectLinearStrategy`; this function turns that choice into
- * the key, the WGSL, the uniform and the dispatch.
- * MUST: `groupSize` is set only for i4 (i8 has no groups — the kernel checks the pairing).
- * MUST: one thread, one output (column × row block), so the dispatch is
- * `[ceil(n / cols), ceil(m / rows), 1]`.
- * It is not grid-stride, so exceeding the limit fails loudly (the same discipline as the default
- * path).
- */
-const buildLinearGemv = async (
-  face: RecipeBuildFace,
-  step: NodePlan,
-  binds: readonly BindingSource[],
-  outs: readonly BindingSource[],
-  builder: StepRecipeBuilder,
-  /** The member of the family {@link selectLinearStrategy} chose, with its lanes and row form. */
-  choice: LinearGemvChoice,
-  m: number,
-  n: number,
-  k: number,
-  /** The producer SRQ's scale (only for the packed form — ADR 0105). */
-  packedScale: number | undefined,
-): Promise<void> => {
-  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-  const [x, weight] = step.inputShapes;
-  const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
-  const { storage, groupSize, lanes, variant, rowsVariant } = choice;
-  const subgroup = choice.id === "gemv-parallel-subgroup32";
-  const staged = choice.id === "gemv-parallel-staged";
-  const rows = rowsVariant?.rows ?? 1;
-  const key =
-    lanes !== undefined
-      ? subgroup
-        ? linearGemvSubgroupKey(storage, groupSize, lanes)
-        : packedScale !== undefined
-          ? linearGemvParallelPackedKey(storage, groupSize, lanes)
-          : staged
-            ? linearGemvParallelStagedKey(storage, groupSize, lanes)
-            : linearGemvParallelKey(storage, groupSize, lanes)
-      : rowsVariant === undefined
-        ? linearGemvKey(storage, groupSize, variant)
-        : linearGemvRowsKey(storage, groupSize, rowsVariant);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    lanes !== undefined
-      ? subgroup
-        ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
-        : packedScale !== undefined
-          ? linearGemvParallelPackedWgsl(storage, groupSize, lanes)
-          : staged
-            ? linearGemvParallelStagedWgsl(storage, groupSize, lanes)
-            : linearGemvParallelWgsl(storage, groupSize, lanes)
-      : rowsVariant === undefined
-        ? linearGemvWgsl(storage, groupSize, variant)
-        : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
-  );
-  // The uniform is the same three words as the default path (no separate binding layout). The
-  // divisibility check lives in one place on the family side. Only the packed variant appends one
-  // word, the activation scale, to Dims.
-  const params = face.writeParams(
-    packedScale === undefined
-      ? linearGemvParams(storage, m, n, k, groupSize)
-      : linearGemvParallelPackedParams(storage, m, n, k, packedScale, groupSize),
-    PARAMS_UNIFORM_USAGE,
-  );
-  builder.dispatch({
-    key,
-    pipeline,
-    layout,
-    roles,
-    params,
-    bindings: [
-      ...binds.map((source, index) => ({ binding: index + 1, source })),
-      { binding: 4, source: outs[0] },
-      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-    ],
-    workgroups: [
-      tiledWorkgroups(n, lanes === undefined ? variant.cols : 128 / lanes, limit, where),
-      tiledWorkgroups(m, rows, limit, where),
-      1,
-    ],
-  });
-};
-
-/**
- * linear's **integer GEMV** (`SessionOptions.integerGemv` — src/kernels/linear-gemv-integer.ts): an
- * integer GEMV linear whose activation arrives as packed int8 codes. The output stays f32 (the
- * linear→SRQ fusion builds the SRQ-epilogue form in its own rule).
- *
- * The bindings keep the linear's numbering, as the parallel GEMV's do (1 x = the packed codes / 2 w =
- * the weight units / 3 bias / 4 out / 5 the weight scales, per channel and for i4 per group); a
- * linear always binds its bias (arity 3).
- * The activation scale is the producer SRQ's, carried by the pairing (`packed.scale`).
- * MUST: called only past `buildLinear`'s guard (the activation is packed and the variant came from
- * `linearIntegerGemvVariant`). The grid is `(workgroups(n), m)`, one workgroup per tile, so
- * exceeding the limit fails loudly.
- */
-const buildLinearIntegerGemv = async (
-  face: RecipeBuildFace,
-  step: NodePlan,
-  binds: readonly BindingSource[],
-  outs: readonly BindingSource[],
-  builder: StepRecipeBuilder,
-  variant: IntegerGemvVariant,
-  m: number,
-  n: number,
-  k: number,
-  xScale: number,
-): Promise<void> => {
-  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-  const [x, weight] = step.inputShapes;
-  const where = `linear gemv integer [${x.join(",")}] × [${weight.join(",")}]`;
-  const key = integerGemvKey(variant, false);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    integerGemvWgsl(variant, false),
-  );
-  const params = face.writeParams(
-    integerGemvParams(variant, m, n, k, xScale),
-    PARAMS_UNIFORM_USAGE,
-  );
-  builder.dispatch({
-    key,
-    pipeline,
-    layout,
-    roles,
-    params,
-    bindings: [
-      ...binds.map((source, index) => ({ binding: index + 1, source })),
-      { binding: 4, source: outs[0] },
-      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-    ],
-    workgroups: [
-      tiledWorkgroups(integerGemvWorkgroups(n, variant), 1, limit, where),
-      tiledWorkgroups(m, 1, limit, where),
-      1,
-    ],
-  });
-};
-
-/**
- * linear's **byte-plane GEMV** (`REORDER_STRATEGIES.linearGemvPlanes` —
- * src/kernels/linear-gemv-planes.ts): an i2 linear of a measured shape whose activation arrives as
- * f32.
- *
- * The bindings keep the linear's numbering (1 x / 2 w = the i2 words / 3 bias / 4 out / 5 the
- * per-channel weight scale); a linear always binds its bias (arity 3).
- * MUST: called only past `buildLinear`'s guard (the activation is f32 and the variant came from
- * `linearPlanesGemvVariant`). The grid is `(workgroups(n), m)`, one workgroup per tile, so
- * exceeding the limit fails loudly.
- */
-const buildLinearPlanesGemv = async (
-  face: RecipeBuildFace,
-  step: NodePlan,
-  binds: readonly BindingSource[],
-  outs: readonly BindingSource[],
-  builder: StepRecipeBuilder,
-  variant: PlanesGemvVariant,
-  m: number,
-  n: number,
-  k: number,
-): Promise<void> => {
-  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-  const [x, weight] = step.inputShapes;
-  const where = `linear gemv planes [${x.join(",")}] × [${weight.join(",")}]`;
-  const key = planesGemvKey(variant);
-  const { pipeline, layout, roles } = await face.state.cache.get(key, planesGemvWgsl(variant));
-  const params = face.writeParams(planesGemvParams(m, n, k), PARAMS_UNIFORM_USAGE);
-  builder.dispatch({
-    key,
-    pipeline,
-    layout,
-    roles,
-    params,
-    bindings: [
-      ...binds.map((source, index) => ({ binding: index + 1, source })),
-      { binding: 4, source: outs[0] },
-      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-    ],
-    workgroups: [
-      tiledWorkgroups(planesGemvWorkgroups(n, variant), 1, limit, where),
-      tiledWorkgroups(m, 1, limit, where),
-      1,
-    ],
-  });
-};
-
-/**
- * The kernel of the i8a8 path's step ①: the plain per-token quantization (one row = one workgroup,
- * or the small-row geometry), or — when the fusion pass folded a producer into this linear — the
- * prologue form, which keeps one row per workgroup in registers (perf-ledger F-4).
- */
-const quantizeStep = (
-  k: number,
-  prologue: LinearPrologue | undefined,
-): { readonly key: string; readonly wgsl: string; readonly rowsPerGroup: number } => {
-  if (prologue !== undefined) {
-    return {
-      key: quantizeRowsPrologueKey(prologue.op, k),
-      wgsl: quantizeRowsPrologueWgsl(prologue.op, k),
-      rowsPerGroup: 1,
-    };
-  }
-  const geometry = quantizeRowsGeometry(k);
-  return {
-    key: quantizeRowsKey(geometry),
-    wgsl: quantizeRowsWgsl(geometry),
-    rowsPerGroup: geometry.rowsPerGroup,
-  };
-};
-
-/**
- * The geometry of the i8a8 path's GEMM (②) for a linear of `m` rows: the profile's `i8a8.linear`
- * rule for `m` (`i8a8LinearGeometry`), or — for i4 resident weights whose group length is not a
- * multiple of that rule's K tile — the default geometry `defaultI8a8Geometry("linear")`, whose K
- * tile 16 divides every i4 group length (a power of two of at least 16). The w4a8 kernel refuses a
- * K tile that crosses a group boundary (`assertI8a8GroupGeometry`), and a profile field applies to
- * i8 and i4 weights alike, so a K64 rule would otherwise make w4a8 at group 32 unbuildable (ADR 0115
- * addendum decision 14).
- *
- * MUST: called once per linear, and the one value it returns feeds the key, the WGSL, the dispatch
- * grid and `linearI8a8UsesVecFill` — a second lookup could disagree with the first and build a grid
- * that does not match the WGSL.
- */
-export const linearI8a8Geometry = (
-  profile: GeometryProfile,
-  m: number,
-  weightStorage: WeightStorage,
-  groupSize: number | undefined,
-): I8a8Geometry => {
-  const selected = i8a8LinearGeometry(profile, m);
-  return weightStorage === "i4" && groupSize !== undefined && groupSize % selected.tileK !== 0
-    ? defaultI8a8Geometry("linear")
-    : selected;
-};
-
-/**
- * linear's **w8a8 / w4a8 variant** (opt-in — {@link SessionOptions.linearCompute}).
- * **One node = two dispatches** (the same "one node in several dispatches" treatment as fused
- * attention):
- *
- * ① `quantize_rows` (activations to per-token i8, grid-stride over rows) → ② the integer
- * dot-product GEMM (one workgroup = one output tile, so exceeding the limit fails loudly). ① is the
- * same whatever the weights' storage form. With a {@link LinearPrologue} (the producer folded by the
- * fusion pass — perf-ledger F-4), ① quantizes `op(x)` of the re-pointed input instead (same bindings
- * and params, and the same values as "elementwise op → quantize_rows").
- *
- * MUST: the temporary buffers (`xq` / `xs`) are declared → released at the end of the node. That
- * closes the plan's reference counting, and even on a failure path `arena.destroy()` collects the
- * whole region.
- * MUST: the i32 overflow guard fails loudly. Letting it pass would garble values, sign included,
- * through i32 wrap-around.
- * The guard's axis depends on the storage form — for i8 it is **k** (the whole reduction is one
- * i32), for i4 **the group length** (flushing is per group, so only one group's worth sits in an
- * i32).
- */
-const buildLinearI8a8 = async (
-  face: RecipeBuildFace,
-  step: NodePlan,
-  binds: readonly BindingSource[],
-  outs: readonly BindingSource[],
-  builder: StepRecipeBuilder,
-  m: number,
-  n: number,
-  k: number,
-  weightStorage: WeightStorage,
-  prologue: LinearPrologue | undefined,
-): Promise<void> => {
-  const [x, weight] = step.inputShapes;
-  const where = `linear i8a8 [${x.join(",")}] × [${weight.join(",")}]`;
-  // For i4 the group length affects both the key and the WGSL (the baked-in shift) (ADR 0069).
-  const groupSize = weightStorage === "i4" ? face.weightGroupSize(step) : undefined;
-  if (groupSize === undefined && k > LINEAR_I8A8_MAX_K) {
-    throw new ExecutionError(
-      `${where}: k=${k} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K} of the i8a8 path` +
-        " (set linearCompute to 'f32', or take this linear off i8 residency)",
-    );
-  }
-  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
-
-  // The quantized activations `xq` (four i8 packed per word) and the per-token scale `xs`.
-  // Temporary regions closed inside the node (the bytes from the function the estimate shares).
-  const bytes = linearI8a8TempBytes(m, k);
-  const xq = builder.allocTemp(bytes.xq);
-  const xs = builder.allocTemp(bytes.xs);
-
-  // ① Per-token quantization of the activations (grid-stride over rows). With a prologue the same
-  // quantization of `op(x)`, `x` being the folded producer's input (`binds[0]`); the bindings and
-  // params are the plain form's.
-  const quantize = quantizeStep(k, prologue);
-  const {
-    pipeline: quantizePipeline,
-    layout: quantizeLayout,
-    roles: quantizeRoles,
-  } = await face.state.cache.get(quantize.key, quantize.wgsl);
-  builder.dispatch({
-    key: quantize.key,
-    pipeline: quantizePipeline,
-    layout: quantizeLayout,
-    roles: quantizeRoles,
-    params: face.writeParams(quantizeRowsParams(m, k), PARAMS_UNIFORM_USAGE),
-    bindings: [
-      { binding: 1, source: binds[0] },
-      { binding: 2, source: xq },
-      { binding: 3, source: xs },
-    ],
-    workgroups: [gridStrideWorkgroups(m, quantize.rowsPerGroup, limit), 1, 1],
-  });
-
-  // ② The integer dot-product GEMM. The tile geometry is the adapter's profile's `i8a8.linear` rule
-  // for m (src/kernels/geometry-profile.ts), with the w4a8 group fallback — taken once and passed
-  // unchanged to key, WGSL, dispatch and the fill form; it is part of the key, so "same key →
-  // byte-identical WGSL" holds.
-  const v4 = linearI8a8UsesVec4(n);
-  const geometry = linearI8a8Geometry(face.state.geometryProfile, m, weightStorage, groupSize);
-  const dp4a = face.state.linearI8a8Dot === "dp4a";
-  // MUST: look up both key and wgsl with **the actual resident form** (`weightStorage`). Fixing it
-  // to i8 would hand out i4's group scales as per-channel scales, a silent wrong value (the numeric
-  // contracts differ — ADR 0076).
-  // The fill form of the vec4 skeleton (a geometry without the skeleton: always the word fill).
-  const vecFill = linearI8a8UsesVecFill(geometry, weightStorage, k);
-  const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize, vecFill);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    linearI8a8Wgsl(v4, dp4a, geometry, weightStorage, groupSize, vecFill),
-  );
-  builder.dispatch({
-    key,
-    pipeline,
-    layout,
-    roles,
-    params: face.writeParams(linearI8a8Params(m, n, k, groupSize), PARAMS_UNIFORM_USAGE),
-    bindings: [
-      { binding: 1, source: xq },
-      { binding: 2, source: binds[1] },
-      { binding: 3, source: binds[2] },
-      { binding: 4, source: outs[0] },
-      // Only **whether** it is bound depends on the resident form (i8 / i4) — the buffer itself is
-      // looked up by initializer name, so it is the same for i8 / i4. The **interpretation** of the
-      // scale (per-channel or group) is decided by the discriminator of `linearI8a8Wgsl` /
-      // `linearI8a8Key` above, which is the real guard against silent wrong values.
-      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
-      { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
-    ],
-    workgroups: [
-      tiledWorkgroups(n, i8a8TileN(geometry), limit, where),
-      tiledWorkgroups(m, i8a8TileM(geometry), limit, where),
-      1,
-    ],
-  });
-
-  // MUST: return the temporary buffers at the node boundary (the arena's invariant).
-  builder.releaseTemp(xs);
-  builder.releaseTemp(xq);
 };
 
 /**

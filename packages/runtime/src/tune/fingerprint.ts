@@ -192,7 +192,7 @@ type ProfileSlot = { readonly field: string; readonly candidate: GeometryCandida
 /**
  * The geometry the table applies to a case (the same selection functions as the Session path —
  * `gemmRowsGeometry(profile, m)` and `i8a8LinearGeometry(profile, m)` in
- * src/runtime/recipe-builders/linear.ts, `conv2dProfileGeometry` and `i8a8.conv3d` in conv.ts, the
+ * src/runtime/linear-program.ts, `conv2dProfileGeometry` and `i8a8.conv3d` in conv.ts, the
  * fields in attention.ts). bmm's M is the row count of one matrix (as in buildBmm). The i8a8 linear
  * cases are i8, so the builder's w4a8 group fallback never applies to them.
  */

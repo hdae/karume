@@ -124,8 +124,9 @@ maintainer's ruling of 2026-11-06).
        (`packages/runtime/src/runtime/state-attention-strategies.ts`, with their levels). The fused attention was not
        reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies` are already the single
        decisions its consumers call; its levels are recorded when item 4 selects by them.
-     - The other linear strategies are still built by device-bound functions; they move to dispatch programs one at a
-       time. The linear→static_quantize rule keeps its own conditions.
+     - Every strategy of `linear` is a dispatch program (`packages/runtime/src/runtime/linear-program.ts`); the
+       linear→static_quantize rule keeps its own conditions and its own builder. The memory estimate and the
+       verification cache do not read programs yet.
      - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`
        (so no browser check); slower than the reference kernel at K = 1536. A fast form would reuse the GEMM skeleton.
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.

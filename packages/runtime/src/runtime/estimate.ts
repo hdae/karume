@@ -1635,7 +1635,7 @@ const nodeStepProgram = (
     dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
   } else if (linearTakesI8a8Route(node, knobs)) {
     // The i8a8 linear's two node temporaries over its two dispatches, with the lifetimes
-    // `buildLinearI8a8` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize reads
+    // `linearI8a8Program` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize reads
     // the input (a folded producer's input with a prologue — the re-pointed plan) and writes `xq`
     // and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the output; both are
     // released after ②.

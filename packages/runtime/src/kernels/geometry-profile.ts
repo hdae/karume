@@ -859,7 +859,7 @@ export const gemmRowsGeometry = (profile: GeometryProfile, rows: number): GemmGe
  * decision 14), by the same rule order as {@link gemmRowsGeometry}.
  *
  * MUST: one call per linear, and its return value (after the w4a8 fallback of
- * src/runtime/recipe-builders/linear.ts) feeds the key, the WGSL, the dispatch and
+ * src/runtime/linear-program.ts) feeds the key, the WGSL, the dispatch and
  * `linearI8a8UsesVecFill` alike — the sweep's case plan and the fingerprint select by the case's M
  * through this same function.
  */

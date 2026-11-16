@@ -957,7 +957,8 @@ const segmentOf = <Slot extends ProfileSlot, G extends Geometry>(
 
 /**
  * A row's field. For linear / matmul / bmm, the gemmRows bucket of the shape's M (the three
- * production paths look up the same gemmRows table by M — src/runtime/recipe-builders/linear.ts,
+ * production paths look up the same gemmRows table by M — src/runtime/linear-program.ts and
+ * src/runtime/recipe-builders/linear.ts,
  * gemmRowsGeometry in geometry-profile.ts); for the i8a8 linear, the i8a8.linear bucket of its M
  * (`i8a8LinearGeometry`); for attention, the shape's stage; for conv2d, **the tileM of the case's
  * default row** (the side chosen by the production m-tile selection `conv2dIgemmMTile` — the

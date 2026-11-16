@@ -1,6 +1,6 @@
 /**
  * gelu_tanh and the erf gelu folded into the step ① of the a8 linear that reads them (perf-ledger
- * F-4 — the linear prologue of the runtime's src/runtime/fusion.ts, executed by `buildLinearI8a8`)
+ * F-4 — the linear prologue of the runtime's src/runtime/fusion.ts, built by `linearI8a8Program`)
  * against the unfused pair on the same backend, for both integer dot forms: u32 identity with NaN by
  * class, linearPrologue at 1 and 0, 2 dispatches against 3.
  *

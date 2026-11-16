@@ -208,7 +208,7 @@ describe("shape table", () => {
           break;
         case "i8a8-linear":
           // the i8a8 eligibility test (k % 4 == 0) and the i32 reduction check (the predicates of
-          // recipe-builders/linear.ts)
+          // linear-route.ts and linear-program.ts)
           assertEquals(sweepCase.k % 4, 0, sweepCase.id);
           assert(sweepCase.k <= LINEAR_I8A8_MAX_K, sweepCase.id);
           assertEquals(sweepCase.n % 4, 0, sweepCase.id);
