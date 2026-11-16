@@ -66,6 +66,9 @@ if (current === undefined && host.__karumeDawnGpu !== undefined) {
     enumerable: true,
   });
 }
+// The GPU this worker was given, kept for the record below: a test may swap or delete
+// `navigator.gpu`, and the environment a file ran in is the one set up here.
+const workerGpu: GPU | undefined = navigator.gpu;
 
 // A setup file is evaluated once per test file: the classes are wrapped once per worker, the buckets
 // start empty for every file, and each test gets its own bucket. The classes are the globals installed
@@ -88,7 +91,7 @@ afterAll(async () => {
     testPath,
     kernels: kernelsOfFile(),
     inputs: inputsOfFile(),
-    adapter: await adapterFactsOf(navigator.gpu),
+    adapter: await adapterFactsOf(workerGpu),
   };
   const path = pendingPathOf(testPath);
   mkdirSync(dirname(path), { recursive: true });
