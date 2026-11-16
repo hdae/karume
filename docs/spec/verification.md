@@ -21,14 +21,21 @@ An entry (`packages/runtime/tests/corpus/entries.ts`) is:
 - **A seed** for the weights and the inputs.
 - **A plan**: the symbol that is the rows of a step, the values of the other input symbols, the states-only symbol that
   sizes the state slots with its value per run, and the runs — each a list of steps given by their rows.
+- **Settings**: the Session settings the entry is checked under, each with a name and its kind. A setting of kind
+  *level* is a level alone (`exact`, `reorder`); a setting of kind *approximation* names an approximation. Every
+  entry has `exact`.
 
 Widths are the real model's: the kernels a level selects are listed for real shapes, so a narrower graph would select
-none of them. What an entry cuts is depth. It keeps one layer of each kind, together with the layers those read values
-or state slots from, and the layer that computes the graph's outputs.
+none of them. What an entry cuts is depth. It keeps layers that together dispatch every kernel key the full graph
+dispatches under the entry's settings, the layers those read values or state slots from, and the layer that computes
+the graph's outputs.
 
-| Entry | Graph | Kept layers | Runs |
+| Entry | Graph | Kept layers | Settings |
 | --- | --- | --- | --- |
-| `gemma4-qat-e2b-cut4` | Gemma 4 QAT E2B, `model`, weights `int4-sym-g` group 32 | 13, 14, 15, 34 of 35 | prefill of 8 rows, then 4 steps of 1 row; prefill of 64 rows, then 4 steps of 1 row |
+| `gemma4-qat-e2b-cut4` | Gemma 4 QAT E2B, `model`; weights `int4-sym-g` group 32 | 13, 14, 15, 34 of 35 | `exact`, `reorder` |
+| `gemma4-qat-mobile-e2b-cut3` | Gemma 4 QAT E2B of the mobile line, `model`; weights `int4-sym-g` (groups 512, 2048, 4096), `int2-off`, `int8-sym` and f32; a `static_quantize` around every linear | 13, 14, 34 of 35 | `exact`, `reorder`, `packed` (`reorder` with `packedStaticQuantize`), `integer` (`packed` with `integerGemv`) |
+
+Both entries have two runs: a prefill of 8 rows, then 4 steps of 1 row; a prefill of 64 rows, then 4 steps of 1 row.
 
 ### Generated weights
 
@@ -39,7 +46,7 @@ or state slots from, and the layer that computes the graph's outputs.
 
 | Role | Read by | Values |
 | --- | --- | --- |
-| linear weight | `linear` slot 1 (also when `embedding` slot 0 reads the same table) | standard deviation 1/sqrt(fan-in); in `int4-sym-g`, levels uniform in [-7, 7] and every group scale 1/(sqrt(fan-in) · sqrt(56/3)) |
+| linear weight | `linear` slot 1 (also when `embedding` slot 0 reads the same table) | levels drawn uniformly, every scale 1/(sqrt(fan-in) · d), d the standard deviation of the levels: `int4-sym-g` levels [-7, 7]; `int2-off` all four codes, levels [-2, 1]; `int8-sym` levels [-127, 127]; f32 U(-1, 1) |
 | norm weight | `rms_norm` slot 1 | 1 + U(-0.1, 0.1) |
 | operand | `mul` slot 1 | U(-1, 1) |
 
@@ -60,17 +67,22 @@ or state slots from, and the layer that computes the graph's outputs.
 
 ### What is checked
 
-Per entry and per run, with six Sessions opened one after another on the same generated weights:
+Per entry and per run, with Sessions opened one after another on the same generated weights:
 
-| Check | Compared | Stored value |
-| --- | --- | --- |
-| Fusion identity | `exact` against `exact` with every fusion rule disabled: every output word of every step, as u32. The fused side's rule counters are above 0 at every step and the plain side's are 0. | none |
-| Determinism | Two Sessions of the same settings, at `exact` and at `reorder`: every output word, as u32. | none |
-| The comparison can fail | A Session whose weights differ by one quantization level in one element gives other output words. | none |
-| `reorder` selects something | At least one step dispatches another set of kernel keys at `reorder` than at `exact`. | none |
-| Outputs are finite and vary | No NaN or infinity; not every value equal. | none |
-| Output rows | Per level, the sha256 of every step's output words (kept as a safetensors artifact). | a row per environment |
-| Census rows | Per level, the sha256 of a text listing every step's kernel keys with their dispatch counts and the fusion counters that are not 0. | a row per environment |
+| Check | Under | Compared | Stored value |
+| --- | --- | --- | --- |
+| Fusion identity | every setting of kind *level* | The setting against the same setting with every fusion rule disabled: every output word of every step, as u32. The fused side's rule counters are above 0 at every step and the plain side's are 0. | none |
+| Determinism | every setting | Two Sessions of the setting: every output word, as u32. | none |
+| The comparison can fail | `exact` | A Session whose weights differ by one quantization level in one element gives other output words. | none |
+| Every setting exercises something | every pair of settings | No two settings dispatch the same sets of kernel keys at every step. | none |
+| Outputs are finite and vary | every setting | No NaN or infinity; not every value equal. | none |
+| Output rows | every setting | The sha256 of every step's output words (kept as a safetensors artifact). | a row per environment |
+| Census rows | every setting | The sha256 of a text listing every step's kernel keys with their dispatch counts and the fusion counters that are not 0. | a row per environment |
+
+- A setting of kind *approximation* is not compared with another plan: the packed activations and the integer GEMV
+  are forms of the linear→static_quantize fusion and do not run with the rule disabled.
+- The element that moves one level is named by the entry. In the mobile entry it is in the tied table: a level of a
+  layer weight there moves its linear's output by less than the quantization step that follows.
 
 - The rows are the sha256 rows of the reference mechanism (`packages/runtime/tests/fixtures/references/corpus.json`):
   one row per environment key, a missing row is an explicit skip and fails the reference guard, and a row is never
@@ -78,9 +90,11 @@ Per entry and per run, with six Sessions opened one after another on the same ge
 
 ### What is not checked
 
-- **The distance between `exact` and `reorder`.** It is written to the results per step (largest absolute and relative
+- **The distance of a setting from `exact`.** It is written to the results per step (largest absolute and relative
   difference) and never asserted. One quantization level in one weight moves the outputs less than a change of
-  summation order does, so no tolerance at the graph outputs separates a defect from a reordering.
+  summation order does, so no tolerance at the graph outputs separates a defect from a reordering. Where a
+  `static_quantize` follows, a change of summation order either leaves a step's outputs bit-identical or moves them
+  far (a rounding flips).
 - **The op band of a `reorder` strategy on the corpus's activations.** A strategy's band is checked by its own kernel
   check, on its own inputs.
 - **That a fixture still equals the model it was cut from.** No test reads a distribution mirror.

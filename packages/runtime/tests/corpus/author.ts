@@ -7,10 +7,10 @@
  *
  * It cuts the mirror's declaration to the entry's layers, keeps the const blocks the cut still
  * reads, and takes the stored encoding of every model-side weight left. Before writing, it runs the
- * full graph and the cut graph on generated weights, at `exact` and at `reorder`, on every run of
- * the entry's plan, and refuses to write unless every step dispatched the same set of kernel keys
- * in both (the cut must exercise what the whole model does). The same mirror and entry give the
- * same bytes.
+ * full graph and the cut graph on generated weights, under every Session setting of the entry, on
+ * every run of the entry's plan, and refuses to write unless every step dispatched the same set of
+ * kernel keys in both (the cut must exercise what the whole model does). The same mirror and entry
+ * give the same bytes.
  */
 
 import { mkdir, writeFile, writeTextFile } from "@karume/test-support/fs";
@@ -34,12 +34,6 @@ import { generateWeights, type StoredEncoding } from "./weights.ts";
 const FIXTURE_LIMIT_BYTES = 2 * 1024 * 1024;
 
 const REPOSITORY = new URL("../../../../", import.meta.url);
-
-const LEVELS: readonly { readonly level: "exact" | "reorder"; readonly options: SessionOptions }[] =
-  [
-    { level: "exact", options: { numerics: { level: "exact" } } },
-    { level: "reorder", options: { numerics: { level: "reorder" } } },
-  ];
 
 /** The stored encoding of every model-side weight of a distribution's graph. */
 const storageOf = (bound: BoundGraph): Map<string, StoredEncoding> => {
@@ -191,7 +185,7 @@ const main = async (): Promise<void> => {
       weights: cutWeights,
     });
     const differences: string[] = [];
-    for (const { level, options } of LEVELS) {
+    for (const { name: setting, options } of entry.settings) {
       const fullRuns = await driveAll(
         gpu,
         fullSupply,
@@ -217,11 +211,11 @@ const main = async (): Promise<void> => {
           const onlyCut = [...cutKeys].filter((key) => !fullKeys.has(key));
           const onlyFull = [...fullKeys].filter((key) => !cutKeys.has(key));
           console.log(
-            `${level} ${run.name} step ${index}: ${cutKeys.size} kernel keys in the cut, ${fullKeys.size} in the full graph`,
+            `${setting} ${run.name} step ${index}: ${cutKeys.size} kernel keys in the cut, ${fullKeys.size} in the full graph`,
           );
           if (onlyCut.length > 0 || onlyFull.length > 0) {
             differences.push(
-              `${level} ${run.name} step ${index}: only in the cut [${onlyCut.join(", ")}]; only in the full graph [${onlyFull.join(", ")}]`,
+              `${setting} ${run.name} step ${index}: only in the cut [${onlyCut.join(", ")}]; only in the full graph [${onlyFull.join(", ")}]`,
             );
           }
         });

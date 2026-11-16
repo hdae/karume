@@ -5,9 +5,12 @@
  * The value rule keeps a real graph's activations in their working range (uniform random weights
  * saturate the logits at the softcap):
  *
- * - a linear weight has standard deviation 1/sqrt(fanIn). In `int4-sym-g` that is q uniform in
- *   [-7, 7] (stored u = q + 8) with every group's scale 1/(sqrt(rowLength) · sqrt(56/3)) —
- *   sqrt(56/3) ≈ 4.32 is the standard deviation of q;
+ * - a linear weight has standard deviation 1/sqrt(fanIn): its levels are drawn uniformly and every
+ *   scale is 1/(sqrt(fanIn) · d), d the standard deviation of the drawn levels. In `int4-sym-g`, q
+ *   uniform in [-7, 7] (stored u = q + 8), d = sqrt(56/3) ≈ 4.32, one scale per group; in
+ *   `int2-off`, all four codes u = q + 2 for q in [-2, 1], d = sqrt(5/4), one scale per row; in
+ *   `int8-sym`, q uniform in [-127, 127] (stored as a signed byte), d = sqrt((255² − 1)/12), one
+ *   scale per row; in `f32`, U(-1, 1) times 1/(sqrt(fanIn) · sqrt(1/3));
  * - a norm weight is near 1 (1 + U(-0.1, 0.1));
  * - an elementwise operand (a layer scalar, an embedding scale) is U(-1, 1).
  *
@@ -173,13 +176,17 @@ const nibblePairTable = (): Uint8Array<ArrayBuffer> => {
 /** The standard deviation of q uniform over the 15 levels [-7, 7]: sqrt((15² − 1) / 12). */
 const INT4_LEVEL_DEVIATION = Math.sqrt(56 / 3);
 
-const generateInt4Linear = (
-  name: string,
-  stream: RandomStream,
-  shape: readonly number[],
-  encoding: StoredEncoding,
-  fanIn: number,
-): GeneratedTensor => {
+/** The standard deviation of q uniform over the 4 levels [-2, 1]: sqrt((4² − 1) / 12). */
+const INT2_LEVEL_DEVIATION = Math.sqrt(5 / 4);
+
+/** The standard deviation of q uniform over the 255 levels [-127, 127]: sqrt((255² − 1) / 12). */
+const INT8_LEVEL_DEVIATION = Math.sqrt((255 * 255 - 1) / 12);
+
+/** The standard deviation of U(-1, 1): sqrt(1/3). */
+const UNIT_DEVIATION = Math.sqrt(1 / 3);
+
+/** The group size of a quantized linear weight, which must be stored with rows on axis 0. */
+const rowGroupSize = (name: string, encoding: StoredEncoding): number => {
   if (encoding.groupSize === undefined) {
     throw new CorpusWeightError(
       `initializer '${name}': codec '${encoding.codec}' needs a groupSize`,
@@ -190,6 +197,29 @@ const generateInt4Linear = (
       `initializer '${name}': codec '${encoding.codec}' with rowAxis ${encoding.rowAxis} has no generation rule (rows on axis 0 only)`,
     );
   }
+  return encoding.groupSize;
+};
+
+/** Every scale step equal to `step`, in the scale shape of (shape, rows on axis 0, groupSize). */
+const constantScale = (
+  shape: readonly number[],
+  groupSize: number,
+  step: number,
+): Uint8Array<ArrayBuffer> => {
+  const [rows, groups] = groupScaleShape(shape, 0, groupSize);
+  const scale = new Float32Array(rows * groups);
+  scale.fill(step);
+  return new Uint8Array(scale.buffer);
+};
+
+const generateInt4Linear = (
+  name: string,
+  stream: RandomStream,
+  shape: readonly number[],
+  encoding: StoredEncoding,
+  fanIn: number,
+): GeneratedTensor => {
+  const groupSize = rowGroupSize(name, encoding);
   const bytes = new Uint8Array(
     payloadBytes(encoding.codec, numelOf(shape), `initializer '${name}'`),
   );
@@ -207,10 +237,92 @@ const generateInt4Linear = (
       bytes[at + 1] = table[word >>> 16];
     }
   }
-  const [rows, groups] = groupScaleShape(shape, 0, encoding.groupSize);
-  const scale = new Float32Array(rows * groups);
-  scale.fill(1 / (Math.sqrt(fanIn) * INT4_LEVEL_DEVIATION));
-  return { encoding, bytes, scale: new Uint8Array(scale.buffer) };
+  return {
+    encoding,
+    bytes,
+    scale: constantScale(shape, groupSize, 1 / (Math.sqrt(fanIn) * INT4_LEVEL_DEVIATION)),
+  };
+};
+
+/**
+ * `int2-off`: every 2-bit code u = q + 2 is equally likely, so the payload is the stream's words
+ * themselves, written low byte first (the same bytes on every machine). A per-channel codec: one
+ * scale per row.
+ */
+const generateInt2Linear = (
+  name: string,
+  stream: RandomStream,
+  shape: readonly number[],
+  encoding: StoredEncoding,
+  fanIn: number,
+): GeneratedTensor => {
+  const groupSize = rowGroupSize(name, encoding);
+  const bytes = new Uint8Array(
+    payloadBytes(encoding.codec, numelOf(shape), `initializer '${name}'`),
+  );
+  // The packing (16 elements in 4 bytes) makes the payload a multiple of 4.
+  const scratch = new Uint32Array(CHUNK_WORDS);
+  const words = bytes.byteLength / 4;
+  for (let start = 0; start < words; start += scratch.length) {
+    const length = Math.min(scratch.length, words - start);
+    fillWords(stream, scratch, length);
+    for (let i = 0; i < length; i += 1) {
+      const word = scratch[i];
+      const at = (start + i) * 4;
+      bytes[at] = word & 0xff;
+      bytes[at + 1] = (word >>> 8) & 0xff;
+      bytes[at + 2] = (word >>> 16) & 0xff;
+      bytes[at + 3] = word >>> 24;
+    }
+  }
+  return {
+    encoding,
+    bytes,
+    scale: constantScale(shape, groupSize, 1 / (Math.sqrt(fanIn) * INT2_LEVEL_DEVIATION)),
+  };
+};
+
+/**
+ * A random byte b → the stored byte of q = −127 + ⌊255 b / 256⌋ (two's complement), so q covers
+ * [-127, 127] and never -128 (one level takes 2 of the 256 byte values, the others 1).
+ */
+const int8LevelTable = (): Uint8Array<ArrayBuffer> => {
+  const table = new Uint8Array(256);
+  for (let bits = 0; bits < table.length; bits += 1)
+    table[bits] = (-127 + ((bits * 255) >> 8)) & 0xff;
+  return table;
+};
+
+/** `int8-sym`: one byte per element, four per random word (low byte first). One scale per row. */
+const generateInt8Linear = (
+  name: string,
+  stream: RandomStream,
+  shape: readonly number[],
+  encoding: StoredEncoding,
+  fanIn: number,
+): GeneratedTensor => {
+  const groupSize = rowGroupSize(name, encoding);
+  const count = payloadBytes(encoding.codec, numelOf(shape), `initializer '${name}'`);
+  const bytes = new Uint8Array(count);
+  const table = int8LevelTable();
+  const scratch = new Uint32Array(CHUNK_WORDS);
+  const words = Math.ceil(count / 4);
+  for (let start = 0; start < words; start += scratch.length) {
+    const length = Math.min(scratch.length, words - start);
+    fillWords(stream, scratch, length);
+    for (let i = 0; i < length; i += 1) {
+      const word = scratch[i];
+      const at = (start + i) * 4;
+      for (let lane = 0; lane < 4 && at + lane < count; lane += 1) {
+        bytes[at + lane] = table[(word >>> (lane * 8)) & 0xff];
+      }
+    }
+  }
+  return {
+    encoding,
+    bytes,
+    scale: constantScale(shape, groupSize, 1 / (Math.sqrt(fanIn) * INT8_LEVEL_DEVIATION)),
+  };
 };
 
 /** One initializer to generate. */
@@ -232,11 +344,21 @@ export const generateTensor = (spec: TensorSpec, seed: number): GeneratedTensor 
   if (encoding.codec === "f32" && role.kind === "operand") {
     return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit) };
   }
+  if (encoding.codec === "f32" && role.kind === "linear") {
+    const step = 1 / (Math.sqrt(role.fanIn) * UNIT_DEVIATION);
+    return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit * step) };
+  }
   if (encoding.codec === "int4-sym-g" && role.kind === "linear") {
     return generateInt4Linear(name, stream, shape, encoding, role.fanIn);
   }
+  if (encoding.codec === "int2-off" && role.kind === "linear") {
+    return generateInt2Linear(name, stream, shape, encoding, role.fanIn);
+  }
+  if (encoding.codec === "int8-sym" && role.kind === "linear") {
+    return generateInt8Linear(name, stream, shape, encoding, role.fanIn);
+  }
   throw new CorpusWeightError(
-    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights and operands and int4-sym-g linear weights`,
+    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights and operands, and linear weights in f32, int4-sym-g, int2-off and int8-sym`,
   );
 };
 
@@ -286,20 +408,29 @@ export const generateWeights = (
   return generated;
 };
 
+/** The codecs {@link perturbOneLevel} can move a level in. */
+export const PERTURBABLE_CODECS: readonly CodecName[] = ["int4-sym-g", "int2-off"];
+
 /**
  * The same tensor with element 0 moved by one quantization level (u → u + 1, or u − 1 at the top
  * level): the smallest change a stored weight can make, for checking that the corpus's comparisons
  * can fail.
  */
 export const perturbOneLevel = (name: string, tensor: GeneratedTensor): GeneratedTensor => {
-  if (tensor.encoding.codec !== "int4-sym-g") {
-    throw new CorpusWeightError(
-      `initializer '${name}': perturbing one level is defined for int4-sym-g, not '${tensor.encoding.codec}'`,
-    );
-  }
   const bytes = tensor.bytes.slice();
-  // Element 0 is the low nibble of byte 0 (the i4 pack order).
-  const level = bytes[0] & 0x0f;
-  bytes[0] = (bytes[0] & 0xf0) | (level < 15 ? level + 1 : level - 1);
-  return { ...tensor, bytes };
+  if (tensor.encoding.codec === "int4-sym-g") {
+    // Element 0 is the low nibble of byte 0 (the i4 pack order).
+    const level = bytes[0] & 0x0f;
+    bytes[0] = (bytes[0] & 0xf0) | (level < 15 ? level + 1 : level - 1);
+    return { ...tensor, bytes };
+  }
+  if (tensor.encoding.codec === "int2-off") {
+    // Element 0 is the low 2 bits of byte 0 (the i2 pack order).
+    const level = bytes[0] & 0x03;
+    bytes[0] = (bytes[0] & 0xfc) | (level < 3 ? level + 1 : level - 1);
+    return { ...tensor, bytes };
+  }
+  throw new CorpusWeightError(
+    `initializer '${name}': perturbing one level is defined for ${PERTURBABLE_CODECS.join(" and ")}, not '${tensor.encoding.codec}'`,
+  );
 };

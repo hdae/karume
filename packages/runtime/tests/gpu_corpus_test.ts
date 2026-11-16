@@ -2,24 +2,26 @@
 // layers — tests/corpus/entries.ts) runs on weights generated from its seed, through a driver that
 // knows only the declaration. No real weights, no models or hub code, no read of models/.
 //
-// Per entry and per run of its plan:
+// Each entry lists the Session settings it is checked under (entries.ts); a setting made of a level
+// alone promises the bits of its unfused plan, one that names an approximation promises nothing
+// against another plan. Per entry and per run of its plan:
 //
-// 1. fusion identity — `exact` and `exact` with every fusion rule disabled give the same output
-//    words at every step, and the comparison is not vacuous (the fused side's rule counters are
-//    above 0 at every step, the plain side's are 0);
-// 2. determinism — two Sessions of the same settings give the same words, at `exact` and at
-//    `reorder`;
-// 3. the comparison can fail — weights one quantization level apart in one element give other
-//    words;
-// 4. the entry exercises `reorder` — at least one step dispatches another kernel key set than at
-//    `exact`;
-// 5. outputs are finite and vary;
-// 6. sha256 rows per environment (ADR 0106 — helpers/reference.ts): per level, one row for the
+// 1. fusion identity, for every setting made of a level alone — the setting and the same setting
+//    with every fusion rule disabled give the same output words at every step, and the comparison
+//    is not vacuous (the fused side's rule counters are above 0 at every step, the plain side's
+//    are 0);
+// 2. determinism, for every setting — two Sessions give the same words;
+// 3. the comparison can fail — at `exact`, weights one quantization level apart in one element
+//    give other words;
+// 4. every setting exercises something — no two settings dispatch the same kernel key sets at every
+//    step;
+// 5. outputs are finite and vary, for every setting;
+// 6. sha256 rows per environment (ADR 0106 — helpers/reference.ts): per setting, one row for the
 //    output words of every step and one for the census (kernel keys with their dispatch counts and
 //    the fusion counters, per step), the artifacts kept the way that mechanism keeps them;
-// 7. the distance between `exact` and `reorder` per step goes to the results as information. It is
-//    never asserted: an end-to-end tolerance cannot tell a defect from a reordering, and the sha256
-//    rows are never replaced by one.
+// 7. the distance of every other setting from `exact` per step goes to the results as information.
+//    It is never asserted: an end-to-end tolerance cannot tell a defect from a reordering, and the
+//    sha256 rows are never replaced by one.
 //
 // The weights are generated once per entry; Sessions are opened one after another and disposed.
 //
@@ -35,7 +37,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { FUSION_RULES } from "../src/runtime/fusion.ts";
 import { type CorpusRun, driveRun, type StepOutput, type StepResult } from "./corpus/driver.ts";
-import { CORPUS_ENTRIES, type CorpusEntry } from "./corpus/entries.ts";
+import { CORPUS_ENTRIES, type CorpusEntry, type CorpusSetting } from "./corpus/entries.ts";
 import { openCorpusFixture } from "./corpus/fixture.ts";
 import { constSideOf, corpusSupply } from "./corpus/supply.ts";
 import { generateWeights, perturbOneLevel } from "./corpus/weights.ts";
@@ -57,30 +59,64 @@ const references = openReferences(new URL("./fixtures/references/corpus.json", i
 /** Artifacts and outcomes (`outputs/verify/<environment key>/<date>_corpus/` — safe to delete). */
 const results = openResults("corpus");
 
-type Level = "exact" | "reorder";
+/** The setting the perturbed weights run under and the distances are taken from. */
+const EXACT = "exact";
 
-type Side = "exact" | "exactAgain" | "exactUnfused" | "reorder" | "reorderAgain" | "exactPerturbed";
-
-/** The Sessions every run is driven through, in the order they are opened. */
-const SIDES: readonly {
-  readonly side: Side;
+/** One Session every run is driven through: a setting, on the base or the perturbed weights. */
+type Side = {
+  /** The setting's name, `<name>/again`, `<name>/unfused` or `exact/perturbed`. */
+  readonly id: string;
   readonly weights: "base" | "perturbed";
   readonly options: SessionOptions;
-}[] = [
-  { side: "exact", weights: "base", options: { numerics: { level: "exact" } } },
-  { side: "exactAgain", weights: "base", options: { numerics: { level: "exact" } } },
-  {
-    side: "exactUnfused",
-    weights: "base",
-    options: { numerics: { level: "exact" }, [DISABLED_FUSION_RULES]: "all" },
-  },
-  { side: "reorder", weights: "base", options: { numerics: { level: "reorder" } } },
-  { side: "reorderAgain", weights: "base", options: { numerics: { level: "reorder" } } },
-  { side: "exactPerturbed", weights: "perturbed", options: { numerics: { level: "exact" } } },
-];
+};
 
-/** Every side's steps, per run name. */
-type EntryOutcome = ReadonlyMap<Side, ReadonlyMap<string, readonly StepResult[]>>;
+const againOf = (setting: CorpusSetting): string => `${setting.name}/again`;
+const unfusedOf = (setting: CorpusSetting): string => `${setting.name}/unfused`;
+const PERTURBED = `${EXACT}/perturbed`;
+
+/** The entry's `exact` setting (every entry has one). */
+const exactOf = (entry: CorpusEntry): CorpusSetting => {
+  const exact = entry.settings.find((setting) => setting.name === EXACT);
+  if (exact === undefined) {
+    throw new Error(
+      `entry ${entry.name} has no setting named '${EXACT}': the perturbed weights and the distances are taken at exact, so add it`,
+    );
+  }
+  return exact;
+};
+
+/**
+ * The Sessions every run of `entry` is driven through, in the order they are opened: per setting,
+ * two Sessions, and a third with every fusion rule disabled when the setting is a level alone; then
+ * the perturbed weights at `exact`.
+ */
+const sidesOf = (entry: CorpusEntry): readonly Side[] => {
+  const names = entry.settings.map((setting) => setting.name);
+  if (new Set(names).size !== names.length) {
+    throw new Error(
+      `entry ${entry.name} repeats a setting name in [${names.join(", ")}]: give each setting its own name`,
+    );
+  }
+  return [
+    ...entry.settings.flatMap((setting): Side[] => [
+      { id: setting.name, weights: "base", options: setting.options },
+      { id: againOf(setting), weights: "base", options: setting.options },
+      ...(setting.kind === "level"
+        ? [
+            {
+              id: unfusedOf(setting),
+              weights: "base",
+              options: { ...setting.options, [DISABLED_FUSION_RULES]: "all" },
+            } satisfies Side,
+          ]
+        : []),
+    ]),
+    { id: PERTURBED, weights: "perturbed", options: exactOf(entry).options },
+  ];
+};
+
+/** Every side's steps (by side id), per run name. */
+type EntryOutcome = ReadonlyMap<string, ReadonlyMap<string, readonly StepResult[]>>;
 
 const RULE_NAMES = FUSION_RULES.map((rule) => rule.name);
 
@@ -155,13 +191,13 @@ const censusText = (steps: readonly StepResult[]): string =>
     .join("\n")
     .concat("\n");
 
-/** max |exact − reorder| and the largest relative difference, per output of one step. */
-const distanceOf = (exact: StepResult, reorder: StepResult): string =>
+/** max |exact − other| and the largest relative difference, per output of one step. */
+const distanceOf = (exact: StepResult, other: StepResult): string =>
   exact.outputs
     .flatMap((output, at) => (output.dtype === "f32" ? [{ output, at }] : []))
     .map(({ output, at }) => {
       const a = f32Of(output);
-      const b = f32Of(reorder.outputs[at]);
+      const b = f32Of(other.outputs[at]);
       let scale = 0;
       for (const value of a) scale = Math.max(scale, Math.abs(value));
       // Relative to max(|exact|, 1e-3 · max |exact|): elements near 0 do not dominate.
@@ -180,9 +216,13 @@ const distanceOf = (exact: StepResult, reorder: StepResult): string =>
 const rowId = (
   entry: CorpusEntry,
   run: CorpusRun,
-  level: Level,
+  setting: CorpusSetting,
   kind: "outputs" | "census",
-): string => `${entry.name}/${run.name}/${level}/${kind}`;
+): string => `${entry.name}/${run.name}/${setting.name}/${kind}`;
+
+/** The set of kernel keys one step dispatched, as canonical text. */
+const keySetOf = (step: StepResult): string =>
+  [...new Set(step.pipelines.map((row) => row.key))].sort().join("\n");
 
 /** Settles one sha256 row, recording the outcome before a mismatch fails. */
 const settleRow = async (
@@ -207,10 +247,12 @@ const settleRow = async (
 const CASE_IDS: string[] = [];
 
 for (const entry of CORPUS_ENTRIES) {
+  const sides = sidesOf(entry);
+  const exact = exactOf(entry);
   describe.skipIf(!GPU_AVAILABLE)(`corpus entry ${entry.name} (real GPU)`, () => {
     let gpu: GpuContext | undefined;
     let outcome: EntryOutcome | undefined;
-    const outcomeOf = (side: Side, run: CorpusRun): readonly StepResult[] => {
+    const outcomeOf = (side: string, run: CorpusRun): readonly StepResult[] => {
       const steps = outcome?.get(side)?.get(run.name);
       if (steps === undefined) throw new Error(`no steps of side ${side} for run ${run.name}`);
       return steps;
@@ -243,9 +285,9 @@ for (const entry of CORPUS_ENTRIES) {
           weights: perturbed,
         }),
       };
-      const sides = new Map<Side, Map<string, readonly StepResult[]>>();
+      const driven = new Map<string, Map<string, readonly StepResult[]>>();
       const construction: string[] = [];
-      for (const { side, weights: which, options } of SIDES) {
+      for (const { id, weights: which, options } of sides) {
         start = performance.now();
         const session = await createSessionFromContainer(
           gpu,
@@ -253,18 +295,18 @@ for (const entry of CORPUS_ENTRIES) {
           entry.graph,
           options,
         );
-        construction.push(`${side} ${(performance.now() - start).toFixed(0)} ms`);
+        construction.push(`${id} ${(performance.now() - start).toFixed(0)} ms`);
         try {
           const runs = new Map<string, readonly StepResult[]>();
           for (const run of entry.plan.runs) {
             runs.set(run.name, await driveRun(session, declaration, entry.plan, run, entry.seed));
           }
-          sides.set(side, runs);
+          driven.set(id, runs);
         } finally {
           await session.dispose();
         }
       }
-      outcome = sides;
+      outcome = driven;
       const note =
         `fixture ${fixture.graphBytes} bytes; generated ${weights.size} weights in ${generationMs.toFixed(0)} ms; ` +
         `Session construction: ${construction.join(", ")}`;
@@ -278,58 +320,58 @@ for (const entry of CORPUS_ENTRIES) {
 
     for (const run of entry.plan.runs) {
       describe(`run ${run.name} (steps ${run.steps.join(", ")})`, () => {
-        it("fusion identity: exact with every fusion rule disabled gives the same words at every step", () => {
-          const fused = outcomeOf("exact", run);
-          const plain = outcomeOf("exactUnfused", run);
-          assertEquals(firstDifference(fused, plain), undefined);
-          for (const [index, step] of fused.entries()) {
-            const fired = ruleCounters(step).reduce((total, [, count]) => total + count, 0);
-            assert(fired > 0, `step ${index}: no fusion rule fired on the fused side`);
-            const plainFired = ruleCounters(plain[index]).filter(([, count]) => count !== 0);
-            assertEquals(plainFired, [], `step ${index}: a rule fired on the unfused side`);
-          }
-        });
+        for (const setting of entry.settings) {
+          if (setting.kind !== "level") continue;
+          it(`fusion identity: ${setting.name} with every fusion rule disabled gives the same words at every step`, () => {
+            const fused = outcomeOf(setting.name, run);
+            const plain = outcomeOf(unfusedOf(setting), run);
+            assertEquals(firstDifference(fused, plain), undefined);
+            for (const [index, step] of fused.entries()) {
+              const fired = ruleCounters(step).reduce((total, [, count]) => total + count, 0);
+              assert(fired > 0, `step ${index}: no fusion rule fired on the fused side`);
+              const plainFired = ruleCounters(plain[index]).filter(([, count]) => count !== 0);
+              assertEquals(plainFired, [], `step ${index}: a rule fired on the unfused side`);
+            }
+          });
+        }
 
-        it("determinism: two Sessions at exact give the same words", () => {
-          assertEquals(
-            firstDifference(outcomeOf("exact", run), outcomeOf("exactAgain", run)),
-            undefined,
-          );
-        });
-
-        it("determinism: two Sessions at reorder give the same words", () => {
-          assertEquals(
-            firstDifference(outcomeOf("reorder", run), outcomeOf("reorderAgain", run)),
-            undefined,
-          );
-        });
+        for (const setting of entry.settings) {
+          it(`determinism: two Sessions at ${setting.name} give the same words`, () => {
+            assertEquals(
+              firstDifference(outcomeOf(setting.name, run), outcomeOf(againOf(setting), run)),
+              undefined,
+            );
+          });
+        }
 
         it("the comparison can fail: one weight one quantization level away gives other words", () => {
           assert(
-            firstDifference(outcomeOf("exact", run), outcomeOf("exactPerturbed", run)) !==
-              undefined,
+            firstDifference(outcomeOf(exact.name, run), outcomeOf(PERTURBED, run)) !== undefined,
             `moving '${entry.perturbed}' element 0 by one level changed no output word`,
           );
         });
 
-        it("reorder selects something: some step dispatches another kernel key set than exact", () => {
-          const keys = (step: StepResult): string =>
-            [...new Set(step.pipelines.map((row) => row.key))].sort().join("\n");
-          const exact = outcomeOf("exact", run);
-          const reorder = outcomeOf("reorder", run);
-          assert(
-            exact.some((step, index) => keys(step) !== keys(reorder[index])),
-            "every step dispatched the same kernel keys at exact and at reorder",
-          );
+        it("every setting exercises something: no two settings dispatch the same kernel key sets at every step", () => {
+          const alike: string[] = [];
+          entry.settings.forEach((a, at) => {
+            for (const b of entry.settings.slice(at + 1)) {
+              const stepsA = outcomeOf(a.name, run);
+              const stepsB = outcomeOf(b.name, run);
+              if (stepsA.every((step, index) => keySetOf(step) === keySetOf(stepsB[index]))) {
+                alike.push(`${a.name} and ${b.name}`);
+              }
+            }
+          });
+          assertEquals(alike, [], "these settings dispatched the same kernel keys at every step");
         });
 
-        it("outputs are finite and vary at both levels", () => {
-          for (const side of ["exact", "reorder"] as const) {
-            for (const [index, step] of outcomeOf(side, run).entries()) {
+        it("outputs are finite and vary under every setting", () => {
+          for (const setting of entry.settings) {
+            for (const [index, step] of outcomeOf(setting.name, run).entries()) {
               for (const output of step.outputs) {
                 if (output.dtype !== "f32") continue;
                 const values = f32Of(output);
-                const where = `${side} step ${index} output ${output.name}`;
+                const where = `${setting.name} step ${index} output ${output.name}`;
                 assert(values.every(Number.isFinite), `${where}: a value is NaN or infinite`);
                 assert(
                   values.some((value) => value !== values[0]),
@@ -340,45 +382,50 @@ for (const entry of CORPUS_ENTRIES) {
           }
         });
 
-        for (const level of ["exact", "reorder"] as const) {
-          const outputsId = rowId(entry, run, level, "outputs");
-          const censusId = rowId(entry, run, level, "census");
+        for (const setting of entry.settings) {
+          const outputsId = rowId(entry, run, setting, "outputs");
+          const censusId = rowId(entry, run, setting, "census");
           CASE_IDS.push(outputsId, censusId);
-          const stem = `${entry.name}.${run.name}.${level}`;
+          const stem = `${entry.name}.${run.name}.${setting.name}`;
           it.skipIf(references.lacksReference(outputsId))(
-            `${level}: the output words of every step equal this machine's sha256 row`,
+            `${setting.name}: the output words of every step equal this machine's sha256 row`,
             () =>
               settleRow(
                 outputsId,
                 `${stem}.outputs.safetensors`,
-                outputsArtifact(outcomeOf(level, run)),
+                outputsArtifact(outcomeOf(setting.name, run)),
               ),
           );
           it.skipIf(references.lacksReference(censusId))(
-            `${level}: the census of every step equals this machine's sha256 row`,
+            `${setting.name}: the census of every step equals this machine's sha256 row`,
             () =>
               settleRow(
                 censusId,
                 `${stem}.census.txt`,
-                new TextEncoder().encode(censusText(outcomeOf(level, run))),
+                new TextEncoder().encode(censusText(outcomeOf(setting.name, run))),
               ),
           );
         }
 
-        it("the distance between exact and reorder is recorded, not asserted", async () => {
-          const exact = outcomeOf("exact", run);
-          const reorder = outcomeOf("reorder", run);
-          const note = exact
-            .map((step, index) => `step ${index}: ${distanceOf(step, reorder[index])}`)
-            .join("; ");
-          console.log(`[corpus] ${entry.name} ${run.name} exact against reorder: ${note}`);
-          await results.record({
-            id: `${entry.name}/${run.name}/exact-against-reorder`,
-            status: "pass",
-            elapsedMs: 0,
-            note,
+        for (const setting of entry.settings) {
+          if (setting.name === exact.name) continue;
+          it(`the distance between exact and ${setting.name} is recorded, not asserted`, async () => {
+            const reference = outcomeOf(exact.name, run);
+            const other = outcomeOf(setting.name, run);
+            const note = reference
+              .map((step, index) => `step ${index}: ${distanceOf(step, other[index])}`)
+              .join("; ");
+            console.log(
+              `[corpus] ${entry.name} ${run.name} exact against ${setting.name}: ${note}`,
+            );
+            await results.record({
+              id: `${entry.name}/${run.name}/exact-against-${setting.name}`,
+              status: "pass",
+              elapsedMs: 0,
+              note,
+            });
           });
-        });
+        }
       });
     }
   });
