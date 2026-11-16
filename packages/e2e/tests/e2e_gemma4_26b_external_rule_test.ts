@@ -8,8 +8,8 @@
  * linear → gelu_tanh → up linear → mul), and the routed experts', adjacent (gelu_tanh of one half of the gate/up `expert_linear` → mul with the
  * other half): 30 + 30 = 60 per plan, the count the 2026-11-10 prototype reached through a load hook
  * (perf-ledger K-105). Every other counter stays the plan's without the rule, and the rule disabled
- * by name gives that plan back. Token identity on the real weights is not checked here: the opt-in
- * session A/B (`e2e_gemma4_session_ab_test.ts`) runs 26B under the expert cache with the rule passed
+ * by name gives that plan back. Token identity on the real weights is not checked here: the
+ * session A/B (the workbench entry `gemma4-session-ab`) runs 26B under the expert cache with the rule passed
  * through the gemma pipeline's experimental `fusionRules`; the rule's values are checked against the
  * unfused plan on the GPU in `e2e_external_fusion_rule_test.ts`.
  *

@@ -30,7 +30,7 @@ Adopted so far, both on 2026-11-12 (ADR 0148 addenda of 2026-11-12):
 
 | Rule | Export | What it folds | Contract | Checked by |
 | --- | --- | --- | --- | --- |
-| `candidate/gelu_mul` | `GELU_MUL_RULE`, `GELU_MUL_RULE_NAME` (`src/gelu-mul.ts`) | `gelu_tanh(gate)` then the `mul` that reads it, adjacent or with one independent `linear` between them (Gemma 4 26B A4B's routed experts and dense MLP), in one dispatch | E | `packages/e2e/tests/e2e_external_fusion_rule_test.ts` (fused vs unfused on the GPU), `e2e_gemma4_26b_external_rule_test.ts` (planned on 26B's graph), `e2e_gemma4_session_ab_test.ts` (the session A/B on 26B, opt-in: token identity and hits) |
+| `candidate/gelu_mul` | `GELU_MUL_RULE`, `GELU_MUL_RULE_NAME` (`src/gelu-mul.ts`) | `gelu_tanh(gate)` then the `mul` that reads it, adjacent or with one independent `linear` between them (Gemma 4 26B A4B's routed experts and dense MLP), in one dispatch | E | `packages/e2e/tests/e2e_external_fusion_rule_test.ts` (fused vs unfused on the GPU), `e2e_gemma4_26b_external_rule_test.ts` (planned on 26B's graph); the workbench entry `gemma4-session-ab` (the session A/B: token identity and hits) |
 
 Who imports it (every importer; keep this list complete when one is added):
 
@@ -41,8 +41,8 @@ Who imports it (every importer; keep this list complete when one is added):
 - `packages/models/tests/moss_fusion_rules_test.ts`, `wan_ti2v_pipeline_test.ts` and `anima_pipeline_test.ts` — the
   MOSS-Image, Wan and anima pipelines' `fusionRules` reach their DiT and VAE Sessions (and estimates) after the
   family's own rule where there is one, and not the text encoders'.
-- `packages/e2e/tests/e2e_external_fusion_rule_test.ts`, `e2e_gemma4_26b_external_rule_test.ts` and
-  `e2e_gemma4_session_ab_test.ts` — the e2e tests in the table above.
+- `packages/e2e/tests/e2e_external_fusion_rule_test.ts` and `e2e_gemma4_26b_external_rule_test.ts` — the e2e tests in
+  the table above.
 - `apps/workbench/src/entries/local/gemma4-session-ab.ts` — the workbench entry `gemma4-session-ab` (its rule arm
   passes `candidate/gelu_mul`), `apps/workbench/tests/session-ab_arm_test.ts`, the test of its arms, and
   `apps/workbench/tests/gemma4-session-ab_entry_test.ts`, the test of its request and result.

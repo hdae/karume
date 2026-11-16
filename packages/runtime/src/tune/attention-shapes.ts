@@ -77,8 +77,8 @@ const MOSS_IMAGE_FRIDGE_NOTE_TOKENS = 63;
  * 4,159 (N % 4 = 3 — the padded form where the profile chooses none), 24 heads of D = 128 (the
  * `dit` graph's 42 attention nodes are all `[1, 24, S, 128]` with the half scale of D = 128 — the
  * distribution's graph declaration; `assertMossImageSize` / `mossImageTokens` of
- * packages/models/src/moss give the image tokens, the session A/B of e2e_moss_session_ab_test.ts the
- * text tokens). `dit_skip22`'s negative branch (S = 4,106 there) is the same kind of shape and is
+ * packages/models/src/moss give the image tokens, the workbench's session A/B on the MOSS-Image
+ * DiT the text tokens). `dit_skip22`'s negative branch (S = 4,106 there) is the same kind of shape and is
  * not measured separately.
  */
 export const MOSS_IMAGE_ATTENTION_SHAPE: AttentionBenchShape = {
