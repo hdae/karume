@@ -10,8 +10,8 @@
  *
  * The presets are not held in a fixed table; **every quant preset** is enumerated from the
  * mirror's manifest (`mirrorSeats`). The row class is derived from the preset's `session` too: a
- * preset with an empty `session` (`i4`) gives a reference-path row, one with a non-empty `session`
- * (those that bundle knobs, such as `i4-gemvpar` / `i4-fast`) a practical-preset row. When the
+ * preset with an empty `session` (`bf16`) gives a reference-path row, one with a non-empty `session`
+ * (a declared numeric requirement or a named approximation) a practical-preset row. When the
  * distribution gains a preset, it gains a row.
  *
  * The asset is the mirror `models/karume-gemma4/` (untracked by git). A machine without it, or
