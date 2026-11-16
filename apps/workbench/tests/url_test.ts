@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { type Entry, parseParameters } from "../src/entry.ts";
-import { givenOfQuery, queryOf } from "../src/shell/url.ts";
+import { batchQueryOf, givenOfQuery, queryOf, selectionOfQuery } from "../src/shell/url.ts";
 
 const ENTRY: Entry = {
   id: "probe",
@@ -80,5 +80,35 @@ describe("the page's URL", () => {
       rounds: "2",
     });
     expect(givenOfQuery(new URLSearchParams("entry=probe"))).toEqual({});
+  });
+});
+
+describe("the page's URL of a batch", () => {
+  it("names the batch and, when one is declared, the backend, and nothing else", () => {
+    expect(batchQueryOf("synthetic-quick", "").toString()).toBe("batch=synthetic-quick");
+    expect(batchQueryOf("synthetic-quick", "d3d12").toString()).toBe(
+      "batch=synthetic-quick&backend=d3d12",
+    );
+  });
+
+  it("selects the batch it names, as an entry query selects its entry", () => {
+    expect(selectionOfQuery(batchQueryOf("synthetic-quick", "metal"))).toEqual({
+      kind: "batch",
+      id: "synthetic-quick",
+    });
+    const values = parseParameters(ENTRY.parameters, {});
+    expect(selectionOfQuery(queryOf(ENTRY, values, "metal"))).toEqual({
+      kind: "entry",
+      id: "probe",
+    });
+    expect(selectionOfQuery(new URLSearchParams("backend=metal"))).toEqual({ kind: "none" });
+  });
+
+  it("reads an entry and a batch in one query as both, which the shell shows as an error", () => {
+    expect(selectionOfQuery(new URLSearchParams("entry=probe&batch=synthetic-quick"))).toEqual({
+      kind: "both",
+      entry: "probe",
+      batch: "synthetic-quick",
+    });
   });
 });

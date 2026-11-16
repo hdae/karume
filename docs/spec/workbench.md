@@ -66,6 +66,7 @@ Every run leaves one record, format `karume-workbench/1`:
 | --- | --- |
 | `format` | `karume-workbench/1` |
 | `entry` | `id` and the typed `parameters` the run used |
+| `batch` | Only in the record of a run that was a step of a [batch](#batches): the batch's `id`, `startedAt` (when the batch run started, ISO 8601 — the same in every record of that batch run), `step` (the step's 1-based number in the file) and `steps` (the number of steps in the file). The record of a single run has no such key |
 | `recordedAt`, `seconds` | When the run ended (ISO 8601) and the wall time of `run` |
 | `outcome` | `done`; `error` (`run` threw: `error` holds the stack or message); `cancelled` (the signal was aborted before `run` settled — what the entry returned by then is kept) |
 | `environment` | `host` (`browser` or `node`), `userAgent`, `crossOriginIsolated` (browser only), `backend` (optional), `adapter` (vendor, architecture, device, description), the adapter's `features` (sorted), every numeric adapter `limits` value and `wgslLanguageFeatures` (sorted) |
@@ -98,42 +99,56 @@ Every run leaves one record, format `karume-workbench/1`:
 
 ## The dev server
 
-`vp dev` in `apps/workbench` listens on `127.0.0.1:8791` only. Besides the two endpoints below it serves the local
+`vp dev` in `apps/workbench` listens on `127.0.0.1:8791` only. Besides the endpoints below it serves the local
 distributions as the Playground's dev server does (`/models/index.json`, `/models/<mount>/…` and `/hf/…`, read only).
 
 | Request | Answer |
 | --- | --- |
 | `POST /workbench/results` | Writes the body as a record and answers `201` with `{ "path": … }` (repository-relative). `405` for another method; `415` unless `Content-Type` is `application/json`; `403` unless the `Origin` header is the server's own origin; `413` for a body over 64 MiB (not read past the limit); `422` unless the body is JSON with the format above, a kebab-case `entry.id`, an `environment.host` of `browser` or `node` and an `environment.adapter` object. The bytes written are the body, unchanged. |
 | `GET /workbench/checkout` | The checkout at the moment of the request. `405` for another method. |
+| `GET /workbench/batches` | The untracked batches, read at the moment of the request: `{ "batches": [{ "id": …, "text": … }] }` for every `*.json` file directly in `inputs/workbench/batches/` (the id is the file name without `.json`), in file-name order; a missing directory is an empty list. A file over 1 MiB (not read past the cap) or not UTF-8 is listed with `"problem"` in place of `"text"`. `Cache-Control: no-store`. `405` for another method. |
 
 - Nothing the client sends becomes part of a path except through the two rules above (the kebab-case entry id and the
-  adapter directory).
-- The preview server and a production build have neither endpoint. The preview server serves the distributions.
+  adapter directory); the request for the batches names no path.
+- The preview server and a production build have none of these endpoints. The preview server serves the distributions.
 - Every response of the dev and preview servers carries `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated.
 
 ## The shell
 
-- A list of the entries; the selected entry's parameter form, generated from its declaration; an optional backend
-  field; Run and Cancel; one status line.
+- A list of the entries, then the list of the [batches](#batches) in a colour of their own (a tinted background and a
+  coloured left border); an untracked batch carries the mark `local`, a batch with problems the mark `has problems`.
+- The selected entry's panel: its parameter form, generated from its declaration; an optional backend field; Run and
+  Cancel; one status line.
 - After a run: the verdict (or the outcome of a run that did not finish), the summary, where the record was saved, the
   buttons "Download record" and "Copy record", and the record's text (its first 200,000 characters).
-- The selected entry, the parameter values and the declared backend are in the URL. Nothing runs without a click on
-  Run. One run at a time.
+- The selected batch's panel: its title, description and source (tracked or untracked). A batch with problems shows
+  them, and no Run. Otherwise a table of the steps — a checkbox (all checked at first; not in the URL), the step's
+  number, the entry id, the parameters the file writes (`name=value`; not the defaults), a link that opens the step in
+  the entry's form (`?entry=<id>&<name>=<value>…` from the step's typed values, the declared backend carried over) and
+  the step's state — then the backend field, Run and Cancel, and one status line.
+- While a batch runs, the status line is the running step's progress prefixed with its number and the file's step
+  count (`step 3 of 9 · …`) and its row is marked. A finished step's row shows the outcome and the verdict, the seconds,
+  the first summary line (the first line of the error for `error`) and where the record was saved or why not; the
+  result view of a single run (above) opens under the row. At the end the status line sums the run up as the Node
+  command's last line does, after the reason when a failure around a step's run stopped the batch.
+- The selected entry and its parameter values, or the selected batch (`?batch=<id>`), and the declared backend are in
+  the URL; an entry and a batch in one URL is an error the panel shows. Selecting from the menu writes the URL. Nothing
+  runs without a click on Run. One run — of an entry or of a batch — at a time; the menu is off while it runs.
 - Without WebGPU or without an adapter the page says so in place of Run.
 
 ## The Node command
 
 `node apps/workbench/run.ts <entry id> [--name=value …]` runs an entry on Dawn and writes its record through the same
-path rule; `--list` prints the entries. The command's body and the entries load through one module runner, so both
-sides hold the same instance of every shared module. It uses the GPU, so it runs under the GPU lock
-(`flock /tmp/karume-gpu.lock …`).
+path rule; `node apps/workbench/run.ts --batch=<path>` runs a batch ([under Node](#under-node)); `--list` prints the
+entries. The command's body and the entries load through one module runner, so both sides hold the same instance of
+every shared module. It uses the GPU, so it runs under the GPU lock (`flock /tmp/karume-gpu.lock …`).
 
 | Exit code | When |
 | --- | --- |
-| 0 | The run is done and its verdict is `pass`, `incomplete` or none (`--list` is 0 too) |
-| 1 | The verdict is `fail`, `run` threw, the run was cancelled (SIGINT), or the command failed around the run (no adapter, a record that cannot be written) |
-| 2 | The command line names no entry, an unknown entry, an argument that is not `--name=value`, or a parameter the entry does not declare or whose value does not fit its declaration |
+| 0 | The run is done and its verdict is `pass`, `incomplete` or none (`--list` is 0 too); for a batch, every step's run is so |
+| 1 | The verdict is `fail`, `run` threw, the run was cancelled (SIGINT), or the command failed around the run (no adapter, a record that cannot be written); for a batch, a step ended as `error` or `cancelled`, concluded `fail`, failed around its run, or did not run |
+| 2 | The command line names no entry, an unknown entry, an argument that is not `--name=value`, or a parameter the entry does not declare or whose value does not fit its declaration; `--batch` together with an entry id, a `--name=value` or a second `--batch`, a path whose file name is not `<id>.json`, a file that cannot be read, or a batch with problems |
 
 - A value that fits its declaration but that the entry refuses when it runs (the `arms` text of `gemma4-bench`, for
   example) is not a command-line error: `run` throws, the record's outcome is `error`, the record is written, and the
@@ -141,8 +156,84 @@ sides hold the same instance of every shared module. It uses the GPU, so it runs
 
 Progress goes to stderr; the outcome, the summary and the record's path go to stdout.
 
+## Batches
+
+A batch is a JSON file that lists steps — an entry id and parameter values each — which the shell and the Node command
+run in order on one click or one command.
+
+### The batch file
+
+```json
+{
+  "format": "karume-workbench-batch/1",
+  "title": "Session A/B on three targets",
+  "description": "optional, one paragraph",
+  "steps": [
+    { "id": "session-ab" },
+    { "id": "session-ab", "parameters": { "source": "direct" } },
+    { "id": "gemma4-bench", "parameters": { "arms": "gemma4-qat/e2b:split", "chats": 2, "prompts": ["few-ids"] } }
+  ]
+}
+```
+
+- `format` (required, exactly `karume-workbench-batch/1`), `title` (required, a string that is not blank),
+  `description` (optional string), `steps` (required, at least one).
+- A step is `{ id, parameters? }` — the shape of a record's `entry`, so the `entry` of a saved record is a step. `id`
+  names a registered entry; `parameters` maps parameter names to a JSON boolean, number, string or list of strings.
+- A parameter a step does not write takes the entry's default. A value is read in its string form (a list joined with
+  commas) by the parser of the URL and the command line, so `3` and `"3"` are the same for an `integer` parameter.
+- A key the format does not name, at the top or in a step, is a problem. A batch is a list: no expressions, conditions,
+  loops, repeat counts, pauses, steps that expand into several, or expected results. It carries no backend: that is
+  the shell's field and `backend=` in the URL, and Dawn's flags under Node.
+- A batch's id is its file name without `.json`, kebab-case as an entry id is.
+- Validation is whole and comes before anything runs: the JSON, the shape, and every step's entry and values. Every
+  problem is reported, and a problem of a step names the step by its 1-based number
+  (`step 3 (session-ab): Parameter rounds: …`). A batch with a problem runs nothing.
+
+### Where batches come from
+
+| Source | Where | How it reaches the page |
+| --- | --- | --- |
+| Tracked | `apps/workbench/batches/<id>.json` | Bundled, in the dev server and in a production build |
+| Untracked | `inputs/workbench/batches/<id>.json` under the repository root (outside git) | `GET /workbench/batches` of the dev server, asked once when the page starts |
+| Node | any path | `node apps/workbench/run.ts --batch=<path>` |
+
+- The dev server lists every batch, one with problems with its problems: a step naming an entry the registry does not
+  hold, a file name that is not kebab-case, and an untracked batch with a tracked batch's id (which is not runnable).
+- A production build asks for no untracked batch and lists only the tracked batches whose every step names an entry it
+  holds: it holds no entry that reads a local distribution, and so no batch that needs one.
+- The page has no file picker and no paste box: the menu is the way in.
+- `synthetic-quick` is the tracked quick look at the three synthetic entries: `kernel-check` with its defaults,
+  `geometry-sweep` at the `quick` set with one round and no idle time, `attention-bench` with its defaults. It is not
+  the evidence run.
+
+### A batch run
+
+- The checked steps run in file order, each as one ordinary run: the environment and the checkout are read when the
+  step starts, and its record is saved where and how a single run's record is, with the `batch` field
+  ([the record](#the-record)). No record is made for the batch as a whole.
+- A step that ends as `error` or with verdict `fail` does not stop the batch: the next checked step runs.
+- Cancel (SIGINT under Node) cancels the running step — its record is `cancelled` and saved — and the remaining steps do
+  not run.
+- A step whose run fails around the entry — the environment or the checkout cannot be read, or (under Node) its record
+  cannot be written — stops the batch with the reason: that failure is the host's, not the step's.
+
+### Under Node
+
+- `node apps/workbench/run.ts --batch=<path>` reads the file (a relative path against the current directory) and runs
+  every step. `--batch` with an entry id or a `--name=value`, a file name that is not `<id>.json`, a file that cannot be
+  read and a batch with problems are usage errors (exit 2): every problem goes to stderr and nothing runs.
+- Each step prints what a single run prints, its first line prefixed with its position (`[3/9] session-ab: done,
+  verdict pass (6.2 s)`); its progress goes to stderr prefixed the same way. A failure around a step's run goes to stderr
+  with the same prefix.
+- The last line sums the run up, counting what happened and what did not run: `batch <id>: 9 steps — 7 done (1 with
+  verdict fail), 1 error, 1 did not run`.
+- The first SIGINT cancels the running step, and the rest do not run. The exit codes are in
+  [the Node command](#the-node-command).
+
 ## What it does not do
 
 - It collects nobody else's results: a record stays where it was written.
 - It downloads no model: an entry reads a local mirror or nothing.
 - It keeps no history and compares no two records.
+- A batch decides nothing from a result: it is a list of runs, and it leaves no record of its own.

@@ -1,8 +1,9 @@
 /**
- * Runs one workbench entry under Node + Dawn, as the browser shell does, and writes its record
- * where the dev server would:
+ * Runs one workbench entry, or the steps of a batch file, under Node + Dawn, as the browser shell
+ * does, and writes each record where the dev server would:
  *
  *     flock /tmp/karume-gpu.lock node apps/workbench/run.ts kernel-check [--name=value …]
+ *     flock /tmp/karume-gpu.lock node apps/workbench/run.ts --batch=apps/workbench/batches/<id>.json
  *     node apps/workbench/run.ts --list
  *
  * The entry modules are the browser's own. Their imports use Vite features (`import.meta.glob` in

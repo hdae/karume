@@ -7,49 +7,18 @@
  */
 
 import { type Entry, parseParameters, type ParameterValues } from "../entry.ts";
-import { readEnvironment } from "../environment.ts";
-import { type RunHost, runEntry } from "../execute.ts";
-import { errorText, type WorkbenchRecord } from "../record.ts";
-import { currentCheckout } from "./checkout.ts";
-import { browserDistributions } from "./distributions.ts";
+import { runEntry } from "../execute.ts";
+import { errorText } from "../record.ts";
+import { browserHost } from "./browser-host.ts";
 import { element } from "./dom.ts";
 import { parameterForm } from "./form.ts";
-import { resultView } from "./result-view.ts";
+import { endedText, resultView } from "./result-view.ts";
 import type { RunLock } from "./run-lock.ts";
-import { type SaveResult, saveRecord } from "./save.ts";
 import { queryOf } from "./url.ts";
 
 const writeUrl = (entry: Entry, values: ParameterValues, backend: string): void => {
   history.replaceState(null, "", `?${queryOf(entry, values, backend).toString()}`);
 };
-
-/** The status line once a run has made its record. */
-const endedText = (record: WorkbenchRecord): string =>
-  record.outcome === "error"
-    ? `Failed after ${record.seconds} s: ${record.error?.split("\n", 1)[0] ?? ""}`
-    : `${record.outcome === "done" ? "Finished" : "Cancelled"} after ${record.seconds} s`;
-
-/**
- * The browser's host for one run. `declared` is the backend field's value when Run was clicked;
- * `status` is the panel's status line, which says how the run ended before the record is posted.
- */
-const browserHost = (declared: string, status: HTMLElement): RunHost<SaveResult> => ({
-  readEnvironment: () =>
-    readEnvironment(navigator.gpu, {
-      host: "browser",
-      userAgent: navigator.userAgent,
-      crossOriginIsolated,
-      ...(declared === "" ? {} : { backend: { name: declared, source: "declared" } }),
-    }),
-  readCheckout: currentCheckout,
-  gpuOptions: {},
-  openDistribution: browserDistributions(document.baseURI),
-  // A record the dev server does not take is "not saved" with a reason; the page carries on.
-  save: (record, text) => {
-    status.textContent = endedText(record);
-    return saveRecord(text);
-  },
-});
 
 export const entryPanel = (options: {
   readonly entry: Entry;
@@ -107,7 +76,9 @@ export const entryPanel = (options: {
     lock.take({ run, cancel });
     result.replaceChildren();
     status.textContent = "Starting…";
-    const host = browserHost(backend.value.trim(), status);
+    const host = browserHost(backend.value.trim(), (record) => {
+      status.textContent = endedText(record);
+    });
     void (async () => {
       try {
         const { record, text, saved } = await runEntry(host, {

@@ -49,10 +49,28 @@ export type Checkout = {
 
 export type Outcome = "done" | "error" | "cancelled";
 
+/**
+ * The batch a run was a step of. Absent from the record of a single run.
+ *
+ * SPEC: docs/spec/workbench.md#batches
+ */
+export type RecordBatch = {
+  /** The batch's id: its file name without `.json`. */
+  readonly id: string;
+  /** When the batch run started (ISO 8601): the same in every record of that batch run. */
+  readonly startedAt: string;
+  /** The step's 1-based number in the file. */
+  readonly step: number;
+  /** The number of steps in the file. */
+  readonly steps: number;
+};
+
 export type WorkbenchRecord = {
   readonly format: typeof RECORD_FORMAT;
   /** The typed parameter values the run used. */
   readonly entry: { readonly id: string; readonly parameters: ParameterValues };
+  /** Present only for a run that was a step of a batch. */
+  readonly batch?: RecordBatch;
   /** When the run ended (ISO 8601). */
   readonly recordedAt: string;
   /** Wall time of the entry's `run`. */
@@ -94,10 +112,12 @@ export const utcStamp = (at: Date): string => at.toISOString().slice(0, 19).repl
 
 /**
  * The record of a run. A run that settled after its signal was aborted is `cancelled` (with the
- * result it returned, if any); one that threw otherwise is `error`, without a result.
+ * result it returned, if any); one that threw otherwise is `error`, without a result. `batch`, when
+ * given, sits right after `entry`; without it the record has no such key.
  */
 export const buildRecord = (facts: {
   readonly entry: { readonly id: string; readonly parameters: ParameterValues };
+  readonly batch?: RecordBatch;
   readonly endedAt: Date;
   readonly milliseconds: number;
   readonly environment: RecordEnvironment;
@@ -114,6 +134,7 @@ export const buildRecord = (facts: {
   return {
     format: RECORD_FORMAT,
     entry: facts.entry,
+    ...(facts.batch === undefined ? {} : { batch: facts.batch }),
     recordedAt: facts.endedAt.toISOString(),
     seconds: seconds(facts.milliseconds),
     outcome,

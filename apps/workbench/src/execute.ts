@@ -9,6 +9,7 @@ import type { Entry, GpuOptions, OpenDistribution, ParameterValues, RunContext }
 import {
   buildRecord,
   type Checkout,
+  type RecordBatch,
   type RecordEnvironment,
   recordText,
   type Settlement,
@@ -23,6 +24,8 @@ export const executeEntry = async (options: {
   readonly context: HostContext;
   readonly environment: RecordEnvironment;
   readonly checkout: Checkout;
+  /** The batch this run is a step of; absent for a single run. */
+  readonly batch?: RecordBatch;
 }): Promise<WorkbenchRecord> => {
   const { entry, context, environment } = options;
   const started = performance.now();
@@ -37,6 +40,7 @@ export const executeEntry = async (options: {
   const milliseconds = performance.now() - started;
   return buildRecord({
     entry: { id: entry.id, parameters: context.parameters },
+    ...(options.batch === undefined ? {} : { batch: options.batch }),
     endedAt: new Date(),
     milliseconds,
     environment,
@@ -74,6 +78,8 @@ export const runEntry = async <Saved>(
     readonly parameters: ParameterValues;
     readonly signal: AbortSignal;
     readonly progress: (text: string) => void;
+    /** The batch this run is a step of; absent for a single run. */
+    readonly batch?: RecordBatch;
   },
 ): Promise<SingleRun<Saved>> => {
   const [environment, checkout] = await Promise.all([host.readEnvironment(), host.readCheckout()]);
@@ -88,6 +94,7 @@ export const runEntry = async <Saved>(
     },
     environment,
     checkout,
+    ...(run.batch === undefined ? {} : { batch: run.batch }),
   });
   const text = recordText(record);
   return { record, text, saved: await host.save(record, text) };

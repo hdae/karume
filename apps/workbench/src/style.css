@@ -2,6 +2,8 @@
   color-scheme: light dark;
   font-family: system-ui, sans-serif;
   line-height: 1.45;
+  /* What marks a batch (the menu item, the running step), readable in both schemes. */
+  --batch-accent: light-dark(#0f766e, #2dd4bf);
 }
 body {
   margin: 0 auto;
@@ -38,6 +40,50 @@ body {
 .entries span {
   font-size: 0.85em;
   opacity: 0.8;
+}
+.batches button {
+  border-left: 0.35rem solid var(--batch-accent);
+  background: color-mix(in srgb, var(--batch-accent) 14%, Canvas);
+}
+.batches .marks {
+  display: flex;
+  gap: 0.35rem;
+  opacity: 1;
+}
+.mark {
+  padding: 0 0.35rem;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+}
+.mark.problems,
+.steps .fail,
+.steps .error {
+  color: light-dark(#b91c1c, #f87171);
+}
+.steps {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75rem 0;
+}
+.steps th,
+.steps td {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+}
+.steps tr.running {
+  background: color-mix(in srgb, var(--batch-accent) 18%, Canvas);
+}
+.steps .pass {
+  color: light-dark(#15803d, #4ade80);
+}
+.steps .defaults {
+  opacity: 0.7;
+  font-style: italic;
+}
+.steps .step-result > td {
+  padding-left: 1.5rem;
 }
 .parameters fieldset label,
 .parameters > label,

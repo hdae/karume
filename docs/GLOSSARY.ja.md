@@ -189,6 +189,7 @@
 | cross-implementation audit △ | 他実装との突き合わせ | 取り込み時に他実装とモデルコードを比べて記録する | — | ADR 0147 決定 4 |
 | deviation record △ | 上流との相違の記録 | 上流のバグを写さなかった箇所と、それぞれのチェック | — | ADR 0147 決定 4 |
 | workbench | workbench（訳さない） | チェックと計測を GPU 上で実行し、1 回の実行につき JSON の記録を 1 つ残す private のブラウザアプリ（`apps/workbench`）。ADR 0152 が harness と呼ぶもの | ハーネス | spec/workbench.md |
+| batch (workbench) | バッチ | workbench のエントリの実行（エントリの id とパラメータの値）を順に並べた JSON ファイル。シェルと Node のコマンドが 1 回の操作で順に実行し、ステップごとに `batch` 欄つきの通常の記録を 1 つ残す。追跡するものは `apps/workbench/batches/`・追跡しないものは `inputs/workbench/batches/`。条件・繰り返し・期待値は持たない | — | spec/workbench.md#batches |
 | per-GPU evidence record △ | GPU ごとの証拠の記録 | workbench の kernel-check エントリの記録を vendor / architecture / backend / browser ごとに残す | — | ADR 0147 決定 9 |
 
 ## op の語彙

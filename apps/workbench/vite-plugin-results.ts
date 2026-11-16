@@ -2,8 +2,10 @@
  * The workbench's server side.
  *
  * - Dev server only: `POST /workbench/results` writes a record under `outputs/workbench/`
- *   ({@link handleRecordPost}) and `GET /workbench/checkout` answers the checkout at request time.
- *   Neither exists in preview or in a production build, which offers a download only.
+ *   ({@link handleRecordPost}), `GET /workbench/checkout` answers the checkout at request time and
+ *   `GET /workbench/batches` the untracked batches under `inputs/workbench/batches/`
+ *   ({@link handleBatchesGet}). None exists in preview or in a production build, which offers a
+ *   download only and lists the tracked batches alone.
  * - Cross-origin isolation (COOP / COEP on every dev and preview response) is the distributions
  *   plugin's, which `vite.config.ts` installs ahead of this one so that these endpoints' answers
  *   carry it too.
@@ -15,6 +17,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type { Connect, Plugin } from "vite-plus";
 
+import { handleBatchesGet, MAX_BATCH_BYTES } from "./src/batch-files.ts";
 import { readCheckout } from "./src/checkout.ts";
 import { handleRecordPost, MAX_RECORD_BYTES, type RecordPostResponse } from "./src/results.ts";
 
@@ -69,6 +72,16 @@ const answerWorkbench = async (
         body: `${JSON.stringify(await readCheckout(REPOSITORY_ROOT))}\n`,
       });
     }
+    return true;
+  }
+  if (path === "/workbench/batches") {
+    send(
+      response,
+      await handleBatchesGet(
+        { method: request.method ?? "GET" },
+        { repositoryRoot: REPOSITORY_ROOT, maxBytes: MAX_BATCH_BYTES },
+      ),
+    );
     return true;
   }
   return false;

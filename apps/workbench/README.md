@@ -2,8 +2,8 @@
 
 A bare browser app for measurements and checks on a real GPU. One file is one **entry**; the page
 lists the entries, shows the selected entry's parameters, runs it on a click on **Run**, and keeps the
-result as a JSON **record**. The same entry modules also run under Node + Dawn (`run.ts`). The app is
-private (not published).
+result as a JSON **record**. A [batch](#batches) runs several entries in a row. The same entry modules
+also run under Node + Dawn (`run.ts`). The app is private (not published).
 
 | Entry | What it does |
 | --- | --- |
@@ -114,6 +114,48 @@ per batch, tap off, over two rounds:
 flock /tmp/karume-gpu.lock node apps/workbench/run.ts gemma4-bench --arms=gemma4-qat/e2b@i4-fast:split,gemma4-qat/e2b@i4-fast:ple-gpu:ahead4:tap-off --rounds=2
 ```
 
+## Batches
+
+A **batch** is a JSON file of steps — an entry id and the parameter values that differ from the
+defaults — run in order on one click (or one command). Write it as `<id>.json` (kebab-case) in one of
+two directories:
+
+- `apps/workbench/batches/` — tracked; the dev server and a production build list it (a production
+  build only when every step names an entry it holds, so not one that reads a local distribution);
+- `inputs/workbench/batches/` under the repository root — untracked (`inputs/` is outside git); only
+  the dev server lists it, marked `local`, read when the page starts.
+
+```json
+{
+  "format": "karume-workbench-batch/1",
+  "title": "Kernel checks, then a quick sweep",
+  "description": "Optional, one paragraph.",
+  "steps": [
+    { "id": "kernel-check" },
+    { "id": "geometry-sweep", "parameters": { "candidateSet": "quick", "rounds": 1, "idleSeconds": 0 } }
+  ]
+}
+```
+
+A step is the `entry` object of a saved record, so a record's `entry` pastes in as a step. Values
+are read as the URL reads them (`3` and `"3"` alike, a list is comma-joined); nothing else is allowed
+in the file — no repeats, conditions or expected results, and no backend (the backend stays the
+page's field). The whole file is checked before anything runs: a batch with problems is listed with
+every problem, each naming its step (`step 2 (geometry-sweep): Parameter rounds: …`), and has no Run.
+
+In the page, the batches follow the entries in the menu in their own colour (`?batch=<id>` selects
+one). Uncheck the steps to leave out, press **Run**: a failed or erroring step does not stop the
+batch, Cancel stops the running step (its record is kept) and the rest. Each step leaves an ordinary
+record with a `batch` field. Under Node:
+
+```sh
+flock /tmp/karume-gpu.lock node apps/workbench/run.ts --batch=apps/workbench/batches/synthetic-quick.json
+```
+
+`synthetic-quick` runs the three synthetic entries as a quick look (the sweep at `quick`, one round,
+no idle time) — not the evidence run. The rules are in
+[the spec](../../docs/spec/workbench.md#batches).
+
 ## Records
 
 A run leaves one JSON record under `outputs/workbench/` (outside git), in a directory per host and
@@ -145,7 +187,7 @@ leaves these entries out.
 ## Develop
 
 ```sh
-pnpm --filter @karume/workbench test        # vp test: parameters, registry, record, write-back, the entries' pure helpers (no GPU)
+pnpm --filter @karume/workbench test        # vp test: parameters, registry, record, write-back, batches, the entries' pure helpers (no GPU)
 pnpm --filter @karume/workbench typecheck
 pnpm --filter @karume/workbench build
 ```

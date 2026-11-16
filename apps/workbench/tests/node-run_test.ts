@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { type CommandEnding, exitCodeOf, parseCommandLine, UsageError } from "../node-run.ts";
+import type { StepState } from "../src/batch-run.ts";
 import { type Entry, type EntryResult, ParameterError } from "../src/entry.ts";
 import { buildRecord, type Settlement } from "../src/record.ts";
 
@@ -113,5 +114,96 @@ describe("exitCodeOf", () => {
     ["a failure around the run", { kind: "threw", error: new Error("no adapter") }, 1],
   ])("%s exits %i", (_case, ending, code) => {
     expect(exitCodeOf(ending)).toBe(code);
+  });
+});
+
+describe("parseCommandLine with --batch", () => {
+  it("runs the batch file the path names, its id the file name without .json", () => {
+    expect(
+      parseCommandLine(["--batch=apps/workbench/batches/synthetic-quick.json"], ENTRIES),
+    ).toEqual({
+      kind: "batch",
+      path: "apps/workbench/batches/synthetic-quick.json",
+      id: "synthetic-quick",
+    });
+    expect(parseCommandLine(["--batch=../a.json"], ENTRIES)).toEqual({
+      kind: "batch",
+      path: "../a.json",
+      id: "a",
+    });
+  });
+
+  it("leaves --list as it is", () => {
+    expect(parseCommandLine(["--batch=a.json", "--list"], ENTRIES)).toEqual({ kind: "list" });
+  });
+
+  it.each([
+    [["probe", "--batch=a.json"], "runs a batch file alone"],
+    [["--batch=a.json", "probe"], "runs a batch file alone"],
+    [["--batch=a.json", "--rounds=4"], "runs a batch file alone"],
+    [["--batch=a.json", "--batch=b.json"], "runs a batch file alone"],
+    [["--batch"], "Name the batch file"],
+    [["--batch="], "Name the batch file"],
+    [["--batch=batches/quick.txt"], "batches/quick.txt: a batch file is named <id>.json"],
+  ])("refuses %j as a usage error", (args, message) => {
+    const error = thrown(args);
+    expect(error).toBeInstanceOf(UsageError);
+    expect(error).toHaveProperty("message", expect.stringContaining(message));
+    expect(exitCodeOf({ kind: "threw", error })).toBe(2);
+  });
+});
+
+const ranState = (settlement: Settlement): StepState<unknown> => {
+  const ending = recorded(settlement);
+  if (ending.kind !== "recorded") throw new Error("expected a record");
+  return { kind: "ran", run: { record: ending.record, text: "", saved: "path" } };
+};
+
+const PASSED = ranState({
+  kind: "resolved",
+  result: { ...RESULT, verdict: "pass" },
+  aborted: false,
+});
+
+describe("exitCodeOf a batch", () => {
+  it.each<[string, readonly StepState<unknown>[], number]>([
+    [
+      "every step done, verdict pass, incomplete or none",
+      [
+        PASSED,
+        ranState({
+          kind: "resolved",
+          result: { ...RESULT, verdict: "incomplete" },
+          aborted: false,
+        }),
+        ranState({ kind: "resolved", result: RESULT, aborted: false }),
+      ],
+      0,
+    ],
+    [
+      "a step with verdict fail",
+      [
+        PASSED,
+        ranState({ kind: "resolved", result: { ...RESULT, verdict: "fail" }, aborted: false }),
+      ],
+      1,
+    ],
+    [
+      "a step that threw",
+      [ranState({ kind: "rejected", error: new Error("boom"), aborted: false }), PASSED],
+      1,
+    ],
+    [
+      "a cancelled step and the steps after it",
+      [PASSED, ranState({ kind: "rejected", error: "x", aborted: true }), { kind: "not-run" }],
+      1,
+    ],
+    [
+      "a step that failed around its run",
+      [PASSED, { kind: "host-failed", error: new Error("disk full") }, { kind: "not-run" }],
+      1,
+    ],
+  ])("%s exits %i", (_case, steps, code) => {
+    expect(exitCodeOf({ kind: "batch", steps })).toBe(code);
   });
 });

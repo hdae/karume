@@ -114,6 +114,44 @@ describe("buildRecord", () => {
   });
 });
 
+describe("buildRecord of a batch step", () => {
+  const BATCH = { id: "synthetic-quick", startedAt: "2026-11-16T09:00:00.000Z", step: 2, steps: 3 };
+
+  it("has no batch key for a single run", () => {
+    const single = record({ kind: "resolved", result: RESULT, aborted: false });
+    expect(Object.keys(single)).not.toContain("batch");
+    expect(recordText(single)).not.toContain('"batch"');
+  });
+
+  it("carries the batch field right after entry, the rest as a single run has it", () => {
+    const facts = {
+      entry: { id: "kernel-check", parameters: { checks: ["gemv-integer"] } },
+      endedAt: new Date("2026-11-16T09:30:12.345Z"),
+      milliseconds: 1234.5678,
+      environment: ENVIRONMENT,
+      checkout: CHECKOUT,
+      settlement: { kind: "resolved", result: RESULT, aborted: false },
+    } as const;
+    const step = buildRecord({ ...facts, batch: BATCH });
+    expect(step.batch).toEqual(BATCH);
+    expect(Object.keys(step)).toEqual([
+      "format",
+      "entry",
+      "batch",
+      "recordedAt",
+      "seconds",
+      "outcome",
+      "environment",
+      "checkout",
+      "verdict",
+      "summary",
+      "data",
+    ]);
+    const { batch: _batch, ...rest } = step;
+    expect(rest).toEqual(buildRecord(facts));
+  });
+});
+
 describe("recordText", () => {
   it("is the record as JSON with one-space indentation and a final newline, and parses back to it", () => {
     const done = record({ kind: "resolved", result: RESULT, aborted: false });

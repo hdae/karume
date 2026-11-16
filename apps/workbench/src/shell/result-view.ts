@@ -12,6 +12,12 @@ import { downloadRecord, type SaveResult } from "./save.ts";
 /** The record text shown in the page; the download and the copy are always whole. */
 const SHOWN_CHARACTERS = 200_000;
 
+/** The status line once a run has made its record. */
+export const endedText = (record: WorkbenchRecord): string =>
+  record.outcome === "error"
+    ? `Failed after ${record.seconds} s: ${record.error?.split("\n", 1)[0] ?? ""}`
+    : `${record.outcome === "done" ? "Finished" : "Cancelled"} after ${record.seconds} s`;
+
 export const resultView = (
   record: WorkbenchRecord,
   text: string,
