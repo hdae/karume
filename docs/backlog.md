@@ -134,7 +134,13 @@ maintainer's ruling of 2026-11-06).
      and the Gemma 4 pipeline options, composed per field between a preset and an explicit value; the seven options that
      named a reduction form or a fusion left the public surface (breaking); the three bit-identical fusions always
      apply; the Gemma 4 QAT presets declare `numerics`; the spec is [spec/numerics.md](spec/numerics.md).)* Left from it:
-     - The runtime's regression corpus.
+     - The runtime's regression corpus: the mechanism and its first entry have landed (Gemma 4 QAT E2B cut to four
+       layers — [spec/verification.md](spec/verification.md#the-regression-corpus)). Left: the entries for the mobile
+       QAT line (packed activations, linear→static_quantize, the integer GEMV), a graph without state slots, the int8
+       activation paths, conv / VAE, an i32-input text encoder, and the 26B MoE graph (388 MiB per layer). Checking a
+       `reorder` strategy inside its op band on the corpus's activations (replaying one op on values taken from an
+       `exact` run) is not built; it is built when a defect shows that the kernel checks' own inputs miss something
+       (the maintainer's ruling of 2026-11-16).
      - The derived applicability check that replaces the `FamilySessionPolicy` tables (ADR 0147 follow-ups, code item 4).
      - No per-adapter table: the subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder`
        strategies with no end-to-end gain measured on any adapter, so no Session selects them; they run through the

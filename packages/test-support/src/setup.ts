@@ -22,6 +22,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, afterEach, beforeEach, expect } from "vite-plus/test";
 import { create, globals } from "webgpu";
+import { dawnFlags } from "./dawn.ts";
 import { beginInputRecordFile, inputsOfFile, installInputRecord } from "./input-record.ts";
 import {
   beginKernelRecordFile,
@@ -45,11 +46,8 @@ if (host.__karumeDawnGpu === undefined && process.env.KARUME_NO_DAWN !== "1") {
   // Dawn quantises timestamps to 65,536 ns by default, which turns short dispatches into 0 ns;
   // the suite measures per-dispatch GPU time, so the quantisation is disabled unless the caller
   // provides its own toggles.
-  const flags = (process.env.KARUME_DAWN_FLAGS ?? "disable-dawn-features=timestamp_quantization")
-    .split(/\s+/)
-    .filter((flag) => flag !== "");
   try {
-    host.__karumeDawnGpu = create(flags);
+    host.__karumeDawnGpu = create(dawnFlags());
   } catch (error) {
     // A machine without a usable WebGPU backend (e.g. a CI runner without Vulkan) behaves like a
     // browser without WebGPU: `navigator.gpu` stays undefined, GPU cases are skipped, and the
