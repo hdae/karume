@@ -139,7 +139,7 @@ describe("the word identity criteria", () => {
 });
 
 describe("the expected case counts each check exports", () => {
-  // The node GPU tests and the playground hold a run to these counts; a changed grid changes them
+  // The node GPU tests and the workbench hold a run to these counts; a changed grid changes them
   // here as well, on purpose
   it("are the counts of the grids the checks were measured at", () => {
     assertEquals(GEMV_SUBGROUP_CASES, { "gemv-subgroup32": 180 });

@@ -8,7 +8,7 @@
 // rounding barrier of the workgroup u32 staging works on real backends can only be seen here.
 //
 // The twin cases of both forms live in @karume/kernel-checks (checkAdalnTwins), which the
-// playground's /kernel-check page runs on the browser's backend too; the census, the fallback
+// workbench's kernel-check entry runs on the browser's backend too; the census, the fallback
 // counterexamples and the grid-stride run on a capped device stay here.
 
 import { test } from "vite-plus/test";

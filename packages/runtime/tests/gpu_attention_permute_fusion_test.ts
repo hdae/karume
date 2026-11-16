@@ -17,7 +17,7 @@
 //
 // The route table, the graphs and the twin cases of the routes any device takes and of the online
 // sg32 routes live in @karume/kernel-checks (checkAttentionPermuteTwins,
-// checkAttentionPermuteSg32Twins), which the playground's /kernel-check page runs on the browser's
+// checkAttentionPermuteSg32Twins), which the workbench's kernel-check entry runs on the browser's
 // backend too. The online wg routes need a device acquired without subgroups and keep their twin
 // here; the census, the non-constant output and the a8 × "f32" comparison of every route stay here.
 

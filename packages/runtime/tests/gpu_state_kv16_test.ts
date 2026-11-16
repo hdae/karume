@@ -1,5 +1,5 @@
 // f16 storage of a full state slot (ADR 0143), on a real GPU. The cases, the host rounding and the
-// mutants live in @karume/kernel-checks, one implementation with the playground's /kernel-check page
+// mutants live in @karume/kernel-checks, one implementation with the workbench's kernel-check entry
 // (the same check on a browser's backend); this file asserts the counts it returns.
 
 import { describe, it } from "vite-plus/test";

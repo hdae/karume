@@ -7,8 +7,8 @@
 // bit difference of finite values. Whether the workgroup u32 staging works as a rounding barrier on
 // a real backend is visible only here.
 //
-// The twin cases live in @karume/kernel-checks (checkGatedResidualTwins), which the playground's
-// /kernel-check page runs on the browser's backend too; the census and the grid-stride run on a
+// The twin cases live in @karume/kernel-checks (checkGatedResidualTwins), which the workbench's
+// kernel-check entry runs on the browser's backend too; the census and the grid-stride run on a
 // capped device stay here.
 
 import { test } from "vite-plus/test";

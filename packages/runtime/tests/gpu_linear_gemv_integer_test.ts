@@ -2,7 +2,7 @@
  * The integer GEMV (`SessionOptions.integerGemv`) on a real GPU:
  *
  * 1. The kernel against its CPU mirror: the shared check of `@karume/kernel-checks` (the same cases
- *    the playground's kernel-check page runs), every output word equal.
+ *    the workbench's kernel-check entry runs), every output word equal.
  * 2. Through a Session: `static_quantize → linear (i2) → static_quantize` at a measured decode shape
  *    (M = 1). With the option on, the integer key runs (with the SRQ epilogue when the linear→SRQ
  *    fusion takes the window, plain otherwise) and the output words equal `referenceIntegerGemv`;

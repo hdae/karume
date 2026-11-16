@@ -1,6 +1,6 @@
 /**
- * The kernel identity checks shared by the runtime's node GPU tests and the playground's
- * `/kernel-check` page (one implementation, so the page runs exactly the cases the tests run).
+ * The kernel identity checks shared by the runtime's node GPU tests and the workbench's
+ * `kernel-check` entry (one implementation, so the entry runs exactly the cases the tests run).
  * Private: the checks drive runtime internals and are not part of any published surface.
  */
 

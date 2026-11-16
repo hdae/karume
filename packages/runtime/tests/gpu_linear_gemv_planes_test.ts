@@ -1,7 +1,7 @@
 /**
  * The byte-plane GEMV (`REORDER_STRATEGIES.linearGemvPlanes` with linear at `reorder`) on a real GPU:
  *
- * 1. The class-R check of `@karume/kernel-checks` (the cases the playground's kernel-check page
+ * 1. The class-R check of `@karume/kernel-checks` (the cases the workbench's kernel-check entry
  *    runs): the f64 band, the A/B band against the sequential GEMV and the structural checks.
  * 2. Point 4 of ADR 0110 §3 — the check is not vacuous: two mutants of the WGSL turn its f64 band
  *    red (the decode off by a constant, on every case; two planes' activations swapped, on every

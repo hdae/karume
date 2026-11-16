@@ -8,8 +8,8 @@
 // the values and the physical kernels stay the production pair, only the exact match stops
 // matching.
 //
-// The twin cases live in @karume/kernel-checks (checkLinearPrologueTwins), which the playground's
-// /kernel-check page runs on the browser's backend too; the census of both sides stays here.
+// The twin cases live in @karume/kernel-checks (checkLinearPrologueTwins), which the workbench's
+// kernel-check entry runs on the browser's backend too; the census of both sides stays here.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";

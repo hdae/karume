@@ -1,7 +1,7 @@
 // Bit identity of the prefetch form of the 256-wide rms_norm and of the RMS → add fusion (v2,
 // perf-ledger K-99) with v1's runtime-trip output loop on the GPU. The cases, the inputs and the
 // fault-injection record live in @karume/kernel-checks (checkRmsNormPrefetch), which the
-// playground's /kernel-check page runs on the browser's backend too.
+// workbench's kernel-check entry runs on the browser's backend too.
 import { assertEquals } from "@std/assert";
 import { checkRmsNormPrefetch, RMS_NORM_PREFETCH_CASES } from "@karume/kernel-checks";
 import { describe, it } from "vite-plus/test";

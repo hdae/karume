@@ -1,5 +1,5 @@
 // The twin cases of the linear→SRQ Session fusion live in @karume/kernel-checks
-// (checkLinearStaticQuantizeTwins), which the playground's /kernel-check page runs on the browser's
+// (checkLinearStaticQuantizeTwins), which the workbench's kernel-check entry runs on the browser's
 // backend too; the row identity across M, the borrowed scale's lifetimes and the Session with the
 // rule left out stay here.
 

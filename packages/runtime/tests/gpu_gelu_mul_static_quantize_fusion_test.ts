@@ -6,7 +6,7 @@
  * barriers execute.
  *
  * The twin cases live in @karume/kernel-checks (checkGeluMulStaticQuantizeTwins), which the
- * playground's /kernel-check page runs on the browser's backend too; the check that the data reaches
+ * workbench's kernel-check entry runs on the browser's backend too; the check that the data reaches
  * the boundaries and the rounding-barrier dispatch stay here.
  */
 

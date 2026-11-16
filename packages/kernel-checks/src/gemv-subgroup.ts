@@ -150,7 +150,7 @@ const caseCount = (): number =>
 
 /**
  * Runs the check on a device with the subgroup features (`subgroup32Available`). The same check runs
- * in the node GPU test and on the playground's `/kernel-check` page.
+ * in the node GPU test and on the workbench's `kernel-check` entry.
  */
 export const checkGemvSubgroup = async (
   gpu: GpuContext,

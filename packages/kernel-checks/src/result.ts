@@ -2,7 +2,7 @@
  * The structured result every kernel check returns, and the word comparisons behind it. A check
  * does not assert: it runs every case, counts the words that fail each criterion and keeps the
  * first (or, for a tolerance band, the worst) failing word, so the node GPU tests assert on the
- * counts and the playground page shows them.
+ * counts and the workbench entry reports them.
  *
  * A failure of the harness itself (a WebGPU error, a lost device, a mutation anchor that no longer
  * matches the generated WGSL) is not a result: it throws, so a broken harness never reads as a

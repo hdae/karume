@@ -13,7 +13,7 @@
 // to run on each backend. Order-only mutants (a reassociated product, two terms swapped) must
 // mismatch on the same harness, or a zero-mismatch result proves nothing.
 // The cases, inputs, mutants and the word comparison live in @karume/kernel-checks, one
-// implementation with the playground's /kernel-check page (the same check on a browser's backend:
+// implementation with the workbench's kernel-check entry (the same check on a browser's backend:
 // D3D12, Metal); this file asserts the counts it returns.
 // NOTE: F = 8 matched on Dawn / Vulkan / RTX 3080 Ti and on Chrome / D3D12 / RTX 5070 Ti; F = 4
 // matched on Vulkan and differed on D3D12 (2026-10-27 — perf-ledger K-95), so on D3D12 this test

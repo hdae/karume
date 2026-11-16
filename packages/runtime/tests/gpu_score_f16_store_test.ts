@@ -1,5 +1,5 @@
 // The rounding of the f16 attention scores on a real GPU. The cases and the host rounding live in
-// @karume/kernel-checks, one implementation with the playground's /kernel-check page (the same check
+// @karume/kernel-checks, one implementation with the workbench's kernel-check entry (the same check
 // on a browser's backend); this file asserts the counts it returns.
 
 import { describe, it } from "vite-plus/test";

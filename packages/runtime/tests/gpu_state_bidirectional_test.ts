@@ -1,5 +1,5 @@
 // The bidirectional block of `GenerationRun.bidirectionalRows` (ADR 0144 decision 3): the kernel's
-// words (the check in @karume/kernel-checks, shared with /kernel-check), and the run through a real
+// words (the check in @karume/kernel-checks, shared with the workbench's kernel-check entry), and the run through a real
 // Session against the CPU reference, with the plans it selects and the runs it refuses.
 
 import { describe, it } from "vite-plus/test";

@@ -5,8 +5,8 @@
 // alone by the rope rule) on the same backend. The outputs are compared as u32 words, with the
 // counters, the dispatch counts and the census. No adapter = explicit SKIP.
 //
-// The twin cases live in @karume/kernel-checks (checkRmsNormRopeTwins), which the playground's
-// /kernel-check page runs on the browser's backend too; the shapes, the rope counters, the census
+// The twin cases live in @karume/kernel-checks (checkRmsNormRopeTwins), which the workbench's
+// kernel-check entry runs on the browser's backend too; the shapes, the rope counters, the census
 // and the grid-stride run on a capped device stay here.
 
 import { test } from "vite-plus/test";

@@ -25,7 +25,7 @@
  * the same path twice always agrees). Every run also confirms that the output is not constant.
  *
  * The parity cases of ① and ③ live in @karume/kernel-checks (checkRowBlockAttentionTwins), which
- * the playground's /kernel-check page runs on the browser's backend too; the peaks, the block
+ * the workbench's kernel-check entry runs on the browser's backend too; the peaks, the block
  * counts, the output shapes, the non-constant outputs and ② stay here.
  */
 

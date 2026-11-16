@@ -6,8 +6,8 @@
 // - CPU: the keys (the existing ones unmoved), the row words and Vᵀ bytes by hand, the producer's
 //   refusals, the host permutation that is the oracle of the GPU parts, and the production producer
 //   building the form at any N.
-// - GPU: the identity check of @karume/kernel-checks (one implementation with the playground's
-//   /kernel-check page): the tiled producer against the host permutation of today's producer's bytes,
+// - GPU: the identity check of @karume/kernel-checks (one implementation with the workbench's
+//   kernel-check entry): the tiled producer against the host permutation of today's producer's bytes,
 //   and the kernel reading the tiled Vᵀ against today's kernel, Uint32 identity of O on the shapes of
 //   the four-point check (gpu_attention_online_i8a8_test.ts), both reduction forms, both output
 //   layouts, dp4a and the emulated dot. Then the fault injections: a wrong word index in the producer

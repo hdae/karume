@@ -1,5 +1,5 @@
 // The twin cases of the RMS→add fusion live in @karume/kernel-checks (checkRmsNormAddTwins), which
-// the playground's /kernel-check page runs on the browser's backend too; the row identity across
+// the workbench's kernel-check entry runs on the browser's backend too; the row identity across
 // row counts and the forced grid-stride dispatch stay here.
 
 import { assertEquals } from "@std/assert";

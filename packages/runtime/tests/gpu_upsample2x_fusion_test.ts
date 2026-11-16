@@ -2,8 +2,8 @@
 // src/runtime/fusion.ts). Pins that replacing the exporter's sequence of two expands with a private
 // 1-pass copy still duplicates every bit unchanged.
 //
-// The twin case lives in @karume/kernel-checks (checkUpsample2xTwins), which the playground's
-// /kernel-check page runs on the browser's backend too; the comparisons with the host-built
+// The twin case lives in @karume/kernel-checks (checkUpsample2xTwins), which the workbench's
+// kernel-check entry runs on the browser's backend too; the comparisons with the host-built
 // expectation, the census and the fallback cases stay here.
 
 import { test } from "vite-plus/test";

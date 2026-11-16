@@ -2,8 +2,8 @@
 // Only the two adjacent nodes the exporter emits are folded into one dispatch; any shape the
 // matcher does not catch falls back to the plain sequence.
 //
-// The twin cases live in @karume/kernel-checks (checkSiluTwins), which the playground's
-// /kernel-check page runs on the browser's backend too; the census and the fallback cases stay here.
+// The twin cases live in @karume/kernel-checks (checkSiluTwins), which the workbench's
+// kernel-check entry runs on the browser's backend too; the census and the fallback cases stay here.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";

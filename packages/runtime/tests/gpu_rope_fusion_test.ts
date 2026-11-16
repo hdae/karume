@@ -2,7 +2,7 @@
 // parity with the existing primitive sequence and the dispatch reduction directly.
 //
 // The twin cases of every form live in @karume/kernel-checks (checkRopeTwins), which the
-// playground's /kernel-check page runs on the browser's backend too; the census, the output shapes,
+// workbench's kernel-check entry runs on the browser's backend too; the census, the output shapes,
 // the fallback cases and the grid-stride runs on a capped device stay here.
 
 import { test } from "vite-plus/test";
