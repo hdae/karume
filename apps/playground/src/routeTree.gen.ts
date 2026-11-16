@@ -13,7 +13,6 @@ import { Route as IndexRouteImport } from "./routes/index";
 import { Route as AnimaRouteImport } from "./routes/anima";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
-import { Route as ExpertTransferRouteImport } from "./routes/expert-transfer";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
 import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
@@ -41,11 +40,6 @@ const BirefnetRoute = BirefnetRouteImport.update({
 const DepthAnythingRoute = DepthAnythingRouteImport.update({
   id: "/depth-anything",
   path: "/depth-anything",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const ExpertTransferRoute = ExpertTransferRouteImport.update({
-  id: "/expert-transfer",
-  path: "/expert-transfer",
   getParentRoute: () => rootRouteImport,
 } as any);
 const Gemma4Route = Gemma4RouteImport.update({
@@ -94,7 +88,6 @@ export interface FileRoutesByFullPath {
   "/anima": typeof AnimaRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
-  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
@@ -109,7 +102,6 @@ export interface FileRoutesByTo {
   "/anima": typeof AnimaRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
-  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
@@ -125,7 +117,6 @@ export interface FileRoutesById {
   "/anima": typeof AnimaRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
-  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
@@ -142,7 +133,6 @@ export interface FileRouteTypes {
     | "/anima"
     | "/birefnet"
     | "/depth-anything"
-    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/irodori"
@@ -157,7 +147,6 @@ export interface FileRouteTypes {
     | "/anima"
     | "/birefnet"
     | "/depth-anything"
-    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/irodori"
@@ -172,7 +161,6 @@ export interface FileRouteTypes {
     | "/anima"
     | "/birefnet"
     | "/depth-anything"
-    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/irodori"
@@ -188,7 +176,6 @@ export interface RootRouteChildren {
   AnimaRoute: typeof AnimaRoute;
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
-  ExpertTransferRoute: typeof ExpertTransferRoute;
   Gemma4Route: typeof Gemma4Route;
   Gemma4BenchRoute: typeof Gemma4BenchRoute;
   IrodoriRoute: typeof IrodoriRoute;
@@ -227,13 +214,6 @@ declare module "@tanstack/react-router" {
       path: "/depth-anything";
       fullPath: "/depth-anything";
       preLoaderRoute: typeof DepthAnythingRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/expert-transfer": {
-      id: "/expert-transfer";
-      path: "/expert-transfer";
-      fullPath: "/expert-transfer";
-      preLoaderRoute: typeof ExpertTransferRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/gemma4": {
@@ -300,7 +280,6 @@ const rootRouteChildren: RootRouteChildren = {
   AnimaRoute: AnimaRoute,
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
-  ExpertTransferRoute: ExpertTransferRoute,
   Gemma4Route: Gemma4Route,
   Gemma4BenchRoute: Gemma4BenchRoute,
   IrodoriRoute: IrodoriRoute,

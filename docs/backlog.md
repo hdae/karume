@@ -175,9 +175,15 @@ maintainer's ruling of 2026-11-06).
        registered table as base plus new workbench records; [spec/geometry-profiles.md](spec/geometry-profiles.md).)*
        Left from it: `apple-metal-3` cites only records of the old sweep format, so it is regenerated from a new sweep
        on M2 (its header and the two NVIDIA tables' headers are replaced when each table is regenerated).
-     - The entries that read a local distribution (the Gemma 4 decode bench, the Session A/B, the cached-expert reads of
-       the expert transfer): local only and left out of a public build; then their Playground pages go (the maintainer's
-       ruling of 2026-11-16).
+     - *(Landed 2026-11-16: what an entry needs to read a local distribution — the private package
+       `@karume/local-distributions` shared with the Playground, the same routes on the workbench's dev server,
+       `openDistribution` for both hosts, entries under `src/entries/local/` left out of a production build, the
+       parameter kinds `text` and `number`. The Playground's expert transfer page was removed without an entry: its
+       measurements are in [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md), no open item waits
+       for another, and its cached-read part would measure something else under the workbench's origin.)*
+     - The entries that read a local distribution: the Session A/B (the three component targets and the Gemma 4 decode
+       target) and the Gemma 4 decode bench; then their Playground pages go, with the opt-in e2e copies of the Session
+       A/B code (the maintainer's rulings of 2026-11-16).
      - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
        hosted is the maintainer's decision.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).

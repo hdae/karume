@@ -17,7 +17,6 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
-| Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | done (Chrome / D3D12 on the RTX 5070 Ti: the Gemma 4 target on 2026-11-11, perf-ledger K-105; the MOSS-Image and VAE targets on 2026-11-12, F-13 and V-10; not run on Metal) |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
