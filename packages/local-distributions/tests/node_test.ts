@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,8 +5,7 @@ import { fetchAssets, loadManifest, parseManifest } from "@karume/hub";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { MountUnavailableError } from "../browser.ts";
-import { MOUNTS } from "../mounts.ts";
-import { localDistributionIndex, openMountDirectory } from "../node.ts";
+import { openMountDirectory } from "../node.ts";
 
 const hex = (character: string): string => character.repeat(64);
 const VAE = Uint8Array.from({ length: 4 }, (_, index) => index + 1);
@@ -51,9 +49,6 @@ const EXTRA = manifestText({ repo: "hdae/karume-anima", revision: ANIMA_REVISION
 /** The `anima` mount lists the VAE as its own file, so the `/hf/` route may alias the revision. */
 const ANIMA = manifestText({});
 
-const revisionOf = (text: string): string =>
-  createHash("sha256").update(text).digest("hex").slice(0, 40);
-
 /** A repository root of its own, with two mirrors at the mount table's directories. */
 let root = "";
 
@@ -72,31 +67,9 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe("localDistributionIndex", () => {
-  it("answers what /models/index.json answers: every mount, its directory, whether it is there, its /hf/ coordinates", async () => {
-    expect(parseManifest(EXTRA).defaultModel).toBe("a");
-    const index = await localDistributionIndex(root);
-    expect(Object.keys(index)).toEqual(Object.keys(MOUNTS));
-    expect(index["anima-extra"]).toEqual({
-      directory: "models/karume-anima-extra",
-      available: true,
-      hf: { repo: "hdae/karume-anima-extra", revision: revisionOf(EXTRA) },
-    });
-    expect(index["anima"]).toEqual({
-      directory: "models/karume-anima",
-      available: true,
-      hf: { repo: "hdae/karume-anima", revision: revisionOf(ANIMA) },
-    });
-    expect(index["moss-image"]).toEqual({
-      directory: "models/karume-moss-image",
-      available: false,
-    });
-    expect(index["umt5"]).toEqual({ directory: "models/karume-umt5-xxl", available: false });
-  });
-});
-
 describe("openMountDirectory", () => {
   it("opens the mount's directory with its manifest's bytes and directory", async () => {
+    expect(parseManifest(EXTRA).defaultModel).toBe("a");
     const opened = await openMountDirectory(root, "anima-extra");
     expect(opened.directory).toBe("models/karume-anima-extra");
     expect(new TextDecoder().decode(opened.manifestBytes)).toBe(EXTRA);
@@ -114,5 +87,22 @@ describe("openMountDirectory", () => {
     const open = openMountDirectory(root, "moss-image");
     await expect(open).rejects.toThrow(MountUnavailableError);
     await expect(open).rejects.toThrow(/moss-image.*models\/karume-moss-image/);
+  });
+
+  it("opens a mount while the mirror of a mount it does not reference has a manifest that does not parse", async () => {
+    const broken = await mkdtemp(join(tmpdir(), "local-distributions-node-broken-"));
+    try {
+      const extra = join(broken, "models", "karume-anima-extra");
+      const sbv2 = join(broken, "models", "karume-sbv2-jvnv");
+      await mkdir(extra, { recursive: true });
+      await mkdir(sbv2, { recursive: true });
+      await writeFile(join(extra, "karume.json"), EXTRA);
+      await writeFile(join(sbv2, "karume.json"), "{}");
+      expect(() => parseManifest("{}")).toThrow();
+      const opened = await openMountDirectory(broken, "anima-extra");
+      expect(new TextDecoder().decode(opened.manifestBytes)).toBe(EXTRA);
+    } finally {
+      await rm(broken, { recursive: true, force: true });
+    }
   });
 });

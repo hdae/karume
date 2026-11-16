@@ -1,24 +1,23 @@
 /**
- * `@karume/local-distributions/node` — the mounts of the mount table read straight from their
- * directories under Node: the facts a page gets from `/models/index.json`
- * ({@link localDistributionIndex}) and a mount opened as a hub source with `nodeDirectory`
- * ({@link openMountDirectory}). Cross-repo references are mapped to the mounts that hold them by
- * `crossRepoHolders`, the function the direct route of a browser maps them with, so both read the
- * same repositories from the same mounts.
+ * `@karume/local-distributions/node` — a mount of the mount table opened as a hub source with
+ * `nodeDirectory`, straight from its directory under Node ({@link openMountDirectory}). Cross-repo
+ * references are mapped to the mounts that hold them by `crossRepoHolders`, the function the direct
+ * route of a browser maps them with (`openMountRoute`), so both read the same repositories from the
+ * same mounts.
+ *
+ * It reads the mount table and the opened mount's own mirror only: the HF-compatible route's
+ * revisions (`hfServingTable`, which reads every mirror's manifest) are the dev server's, and a Node
+ * run serves no `/hf/` route, so a broken mirror of another mount does not stop it.
  */
 
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { type DistributionSource, MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 
-import { crossRepoHolders, type DistributionIndex, MountUnavailableError } from "./browser.ts";
+import { crossRepoHolders, MountUnavailableError } from "./browser.ts";
 import { MOUNTS, type MountName } from "./mounts.ts";
-import { distributionIndex, distributionMounts } from "./plugin.ts";
-
-/** What `/models/index.json` answers, read from the directories under `repositoryRoot` now. */
-export const localDistributionIndex = (repositoryRoot: string): Promise<DistributionIndex> =>
-  distributionIndex(distributionMounts(repositoryRoot, MOUNTS));
+import { type DistributionMount, distributionMounts, realRoot } from "./plugin.ts";
 
 /** A mount opened by {@link openMountDirectory}. */
 export type OpenedMountDirectory = {
@@ -32,30 +31,44 @@ export type OpenedMountDirectory = {
 
 /**
  * Opens mount `name` from its directory under `repositoryRoot` (the mount table's directory). Each
- * repository its manifest references is read from the directory of the mount that holds it.
- * Throws {@link MountUnavailableError} when the mirror is missing.
+ * repository its manifest references is read from the directory of the mount that holds it: the
+ * mount served under that repository's name on `/hf/` (the table's `hfRepo`), else the mount whose
+ * directory is named after it. Throws {@link MountUnavailableError} when the mirror is missing (the
+ * dev server's rule: no `karume.json` in the directory).
  */
 export const openMountDirectory = async (
   repositoryRoot: string,
   name: MountName,
 ): Promise<OpenedMountDirectory> => {
-  const index = await localDistributionIndex(repositoryRoot);
-  const status = index[name];
-  if (!status.available) {
-    throw new MountUnavailableError(name, `its mirror ${status.directory} has no karume.json`);
+  const mounts = distributionMounts(repositoryRoot, MOUNTS);
+  const byName: Readonly<Record<string, DistributionMount>> = Object.fromEntries(
+    mounts.map((mount) => [mount.name, mount]),
+  );
+  const mount = byName[name];
+  if ((await realRoot(mount)) === undefined) {
+    throw new MountUnavailableError(name, `its mirror ${mount.label} has no karume.json`);
   }
-  const directoryOf = (mount: string): string => resolve(repositoryRoot, index[mount].directory);
-  const manifestBytes = new Uint8Array(await readFile(join(directoryOf(name), MANIFEST_FILENAME)));
+  const manifestBytes = new Uint8Array(await readFile(join(mount.root, MANIFEST_FILENAME)));
   const manifest = parseManifest(new TextDecoder().decode(manifestBytes));
+  // What `crossRepoHolders` reads of each mount, from the table: its directory and its `/hf/` repo.
+  const holders = Object.fromEntries(
+    mounts.map((entry) => [
+      entry.name,
+      {
+        directory: entry.label,
+        ...(entry.hfRepo === undefined ? {} : { hf: { repo: entry.hfRepo } }),
+      },
+    ]),
+  );
   const crossRepo = Object.fromEntries(
-    Object.entries(crossRepoHolders(manifest, index)).map(([repo, mount]) => [
+    Object.entries(crossRepoHolders(manifest, holders)).map(([repo, holder]) => [
       repo,
-      nodeDirectory(directoryOf(mount)),
+      nodeDirectory(byName[holder].root),
     ]),
   );
   return {
-    source: nodeDirectory(directoryOf(name), { crossRepo }),
-    directory: status.directory,
+    source: nodeDirectory(mount.root, { crossRepo }),
+    directory: mount.label,
     manifestBytes,
   };
 };

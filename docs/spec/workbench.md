@@ -39,8 +39,9 @@ The workbench is private (not published) and is not part of the lanes: its tests
 - Such an entry opens a mount of the shared mount table (`@karume/local-distributions`) through the function the host
   gives it, naming how a browser should read it: `cached` (the dev server's HF-compatible `/hf/` route into the hub's
   CacheStorage, so a second run does not move the weights again) or `direct` (plain requests to `/models/<mount>/`).
-  Under Node the mirror's directory is read whichever is named. A repository the manifest references is read from the
-  mount that holds it.
+  Under Node the mirror's directory is read whichever is named, and no other mount's mirror is read but those of the
+  repositories the manifest references, so a broken mirror of an unrelated mount does not stop the run. A repository
+  the manifest references is read from the mount that holds it.
 - What it gets back is the reference the hub and a family's `fromPretrained` take, and the facts a record carries:
   the mount's directory, the sha256 of its manifest and how it was read (`cached`, `direct` or `directory`).
 - A mount whose mirror is missing, and a mount without an HF-compatible route asked for `cached`, are errors that
@@ -94,6 +95,9 @@ Every run leaves one record, format `karume-workbench/1`:
   replaced.
 - A browser run under the dev server posts its record, and the dev server writes it; the page says where. A machine
   that reaches the dev server through an SSH tunnel therefore leaves its records on the development machine.
+- A record the dev server does not take — it cannot be reached, it answers anything but `201` with a path, or its
+  answer cannot be read — is not saved: the run's outcome stands, the page says why the record was not saved and offers
+  the download, and a batch goes on with its next step.
 - A production build writes nothing: the page offers the download and says the record is not saved.
 - A cancelled run and a failed run leave a record like any other.
 
@@ -120,8 +124,9 @@ distributions as the Playground's dev server does (`/models/index.json`, `/model
   coloured left border); an untracked batch carries the mark `local`, a batch with problems the mark `has problems`.
 - The selected entry's panel: its parameter form, generated from its declaration; an optional backend field; Run and
   Cancel; one status line.
-- After a run: the verdict (or the outcome of a run that did not finish), the summary, where the record was saved, the
-  buttons "Download record" and "Copy record", and the record's text (its first 200,000 characters).
+- After a run: the verdict (or the outcome of a run that did not finish), the summary, where the record was saved (or
+  why it was not), the buttons "Download record" and "Copy record", and the record's text (its first 200,000
+  characters).
 - The selected batch's panel: its title, description and source (tracked or untracked). A batch with problems shows
   them, and no Run. Otherwise a table of the steps — a checkbox (all checked at first; not in the URL), the step's
   number, the entry id, the parameters the file writes (`name=value`; not the defaults), a link that opens the step in

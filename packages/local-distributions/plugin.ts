@@ -160,8 +160,11 @@ const isMissing = (error: unknown): boolean =>
   "code" in error &&
   (error.code === "ENOENT" || error.code === "ENOTDIR");
 
-/** Absolute real path of the mount, or `undefined` when it has no `karume.json`. */
-const realRoot = async (mount: DistributionMount): Promise<string | undefined> => {
+/**
+ * Absolute real path of the mount, or `undefined` when it has no `karume.json` — what makes a mount
+ * available, for the dev server and for the Node side (`openMountDirectory`) alike.
+ */
+export const realRoot = async (mount: DistributionMount): Promise<string | undefined> => {
   try {
     const root = await realpath(mount.root);
     await access(join(root, "karume.json"));
@@ -469,11 +472,8 @@ const handleHfRequest = async (
   return await serveFile(served.root, segments, request, "no-store");
 };
 
-/**
- * What `/models/index.json` answers for `mounts`, as they are on disk now. The Node side of the
- * package reads the same facts through this function.
- */
-export const distributionIndex = async (
+/** What `/models/index.json` answers for `mounts`, as they are on disk now. */
+const distributionIndex = async (
   mounts: readonly DistributionMount[],
 ): Promise<DistributionIndex> => {
   const { repos } = await hfServingTable(mounts);

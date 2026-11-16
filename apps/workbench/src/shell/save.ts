@@ -2,6 +2,12 @@
  * Where a browser run's record goes: under the dev server it is POSTed to `/workbench/results`,
  * which writes it under `outputs/workbench/`; a production build saves nothing (the page offers the
  * download). The download is the same text either way.
+ *
+ * The save never rejects: it runs after the run has ended, so every way it can fail — the dev server
+ * cannot be reached, answers anything but `201` with a path, or its answer cannot be read — is a
+ * `not-saved` with the reason, which the page shows with the run's result and the download.
+ *
+ * SPEC: docs/spec/workbench.md#where-records-go
  */
 
 import { utcStamp, type WorkbenchRecord } from "../record.ts";
@@ -24,17 +30,24 @@ export const saveRecord = async (text: string): Promise<SaveResult> => {
   } catch (error) {
     return { kind: "not-saved", reason: `the dev server could not be reached (${String(error)})` };
   }
-  if (response.status !== 201) {
-    const reason = (await response.text()).trim();
-    return { kind: "not-saved", reason: `the dev server answered ${response.status}: ${reason}` };
+  try {
+    if (response.status !== 201) {
+      const reason = (await response.text()).trim();
+      return { kind: "not-saved", reason: `the dev server answered ${response.status}: ${reason}` };
+    }
+    const body: unknown = await response.json();
+    return typeof body === "object" &&
+      body !== null &&
+      "path" in body &&
+      typeof body.path === "string"
+      ? { kind: "saved", path: body.path }
+      : { kind: "not-saved", reason: "the dev server answered no path" };
+  } catch (error) {
+    return {
+      kind: "not-saved",
+      reason: `the dev server answered ${response.status}, but its answer could not be read (${String(error)})`,
+    };
   }
-  const body: unknown = await response.json();
-  return typeof body === "object" &&
-    body !== null &&
-    "path" in body &&
-    typeof body.path === "string"
-    ? { kind: "saved", path: body.path }
-    : { kind: "not-saved", reason: "the dev server answered no path" };
 };
 
 /** Hands the record text to the browser as `<entry id>_<UTC stamp>.json`. */

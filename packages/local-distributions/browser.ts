@@ -7,7 +7,9 @@
  * Two ways to read one: {@link distributionSource} (`localDirectory` over plain `fetch`, nothing
  * cached) and {@link hfRepoRef} (the HF-compatible route `/hf/`, read by the hub's HF source into
  * its CacheStorage). A page picks one with a {@link PipelineSource} and hands {@link pretrainedRef}
- * to the family's `fromPretrained`.
+ * to the family's `fromPretrained`; {@link openMountRoute} opens a mount on the route a
+ * {@link SourceKind} names, with its manifest's bytes (the browser twin of the Node side's
+ * `openMountDirectory`).
  */
 
 import {
@@ -15,7 +17,9 @@ import {
   type FileRef,
   type HubRepoRef,
   localDirectory,
+  MANIFEST_FILENAME,
   type Manifest,
+  parseManifest,
   resolveSelection,
 } from "@karume/hub";
 
@@ -157,13 +161,14 @@ export type PipelineSource =
  * route as is (it reaches cross-repo references on the same route), or the mount `name` over plain
  * fetch below `base` with `crossRepo` mapping each referenced repo to the mount that holds it (the
  * direct route has no revision to follow — `{ "hdae/karume-anima": "anima" }` for the Anima
- * fine-tunes).
+ * fine-tunes; a mount is named as `/models/index.json` keys it, which is how
+ * {@link crossRepoHolders} names it).
  */
 export const pretrainedRef = (
   source: PipelineSource,
   name: MountName,
   base: string,
-  crossRepo: Readonly<Record<string, MountName>> = {},
+  crossRepo: Readonly<Record<string, string>> = {},
 ): HubRepoRef | DistributionSource =>
   source.kind === "cached"
     ? source.ref
@@ -217,11 +222,19 @@ export const crossRepoMounts = <M extends MountName>(
 const lastElement = (path: string): string => path.split(/[/\\]/).at(-1) ?? path;
 
 /**
+ * What {@link crossRepoHolders} reads of each mount: its directory and the repository it is served
+ * under on `/hf/`. A {@link DistributionIndex} is one; the Node side builds it from the mount table.
+ */
+type HolderIndex = Readonly<
+  Record<string, { readonly directory: string; readonly hf?: Pick<HfCoordinates, "repo"> }>
+>;
+
+/**
  * The mount of `index` that holds `repo`, by the rule the `/hf/` route serves a cross-repo reference
  * with (`plugin.ts`): the mount served under that repository's name, else the mount whose directory
  * is named after the repository's last element (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`).
  */
-const holderOf = (repo: string, index: DistributionIndex): string | undefined => {
+const holderOf = (repo: string, index: HolderIndex): string | undefined => {
   const mounts = Object.entries(index);
   return (mounts.find(([, status]) => status.hf?.repo === repo) ??
     mounts.find(([, status]) => lastElement(status.directory) === lastElement(repo)))?.[0];
@@ -236,7 +249,7 @@ const holderOf = (repo: string, index: DistributionIndex): string | undefined =>
  */
 export const crossRepoHolders = (
   manifest: Manifest,
-  index: DistributionIndex,
+  index: HolderIndex,
 ): Readonly<Record<string, string>> => {
   const refs: readonly FileRef[] = Object.values(manifest.models).flatMap((model) => [
     ...Object.values(model.weights).flatMap((dtypes) =>
@@ -266,3 +279,52 @@ export class MountUnavailableError extends Error {
     this.mount = mount;
   }
 }
+
+/** A mount opened by {@link openMountRoute}. */
+export type OpenedMountRoute = {
+  /** What `loadManifest` and a family's `fromPretrained` take ({@link pretrainedRef}). */
+  readonly ref: HubRepoRef | DistributionSource;
+  /** The mount's directory relative to the repository root, as `/models/index.json` names it. */
+  readonly directory: string;
+  /** The bytes of its `karume.json`, read from `/models/<name>/` when it was opened. */
+  readonly manifestBytes: Uint8Array<ArrayBuffer>;
+};
+
+/**
+ * Opens mount `name` of the dev server below `base` the way `source` names: `cached` = the
+ * `HubRepoRef` of the HF-compatible route, `direct` = plain fetch from `/models/<name>/` with each
+ * repository the manifest references read from the mount that holds it ({@link crossRepoHolders} —
+ * the mapping the Node side's `openMountDirectory` uses too). The manifest's bytes are read from
+ * `/models/<name>/` either way. Throws {@link MountUnavailableError} when the mirror is missing or,
+ * for `cached`, when the dev server serves the mount on no HF-compatible route.
+ */
+export const openMountRoute = async (
+  base: string,
+  name: MountName,
+  source: SourceKind,
+): Promise<OpenedMountRoute> => {
+  const index = await fetchDistributionIndex(base);
+  const status = index[name];
+  if (!status.available) {
+    throw new MountUnavailableError(name, `its mirror ${status.directory} has no karume.json`);
+  }
+  const path = `models/${name}/${MANIFEST_FILENAME}`;
+  const response = await fetch(new URL(path, base).href);
+  if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+  const manifestBytes = new Uint8Array(await response.arrayBuffer());
+  if (source === "cached") {
+    if (status.hf === undefined) {
+      throw new MountUnavailableError(
+        name,
+        "the dev server serves it on no HF-compatible route (/hf/), so it cannot be read cached; read it direct",
+      );
+    }
+    return { ref: hfRepoRef(status.hf, base), directory: status.directory, manifestBytes };
+  }
+  const manifest = parseManifest(new TextDecoder().decode(manifestBytes));
+  return {
+    ref: pretrainedRef({ kind: "direct" }, name, base, crossRepoHolders(manifest, index)),
+    directory: status.directory,
+    manifestBytes,
+  };
+};

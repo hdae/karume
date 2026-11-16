@@ -4,10 +4,10 @@
  * server, and the directory is the distribution itself.
  */
 
-import { createHash } from "node:crypto";
 import { openMountDirectory } from "@karume/local-distributions/node";
 
 import type { OpenDistribution } from "./src/entry.ts";
+import { sha256Hex } from "./src/sha256.ts";
 
 export const nodeDistributions =
   (repositoryRoot: string): OpenDistribution =>
@@ -17,7 +17,7 @@ export const nodeDistributions =
       ref: opened.source,
       facts: {
         directory: opened.directory,
-        manifestSha256: createHash("sha256").update(opened.manifestBytes).digest("hex"),
+        manifestSha256: await sha256Hex(opened.manifestBytes),
         read: "directory",
       },
     };
