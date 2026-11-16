@@ -229,7 +229,9 @@ export type RepositoryLinkReport = LinkReport & {
 
 /** The check over every tracked Markdown file and every tracked `*.ts` / `*.py` file under `root`. */
 export const checkRepository = (root: string): RepositoryLinkReport => {
-  const tracked = trackedFiles(root);
+  // The check reads the working tree: a tracked file deleted there (a deletion not staged yet) has no
+  // text to check, and a link that still points at it is reported as a missing file.
+  const tracked = trackedFiles(root).filter((file) => existsSync(join(root, file)));
   const markdown = tracked.filter((file) => file.endsWith(".md"));
   const sources = tracked.filter((file) => file.endsWith(".ts") || file.endsWith(".py"));
   return {

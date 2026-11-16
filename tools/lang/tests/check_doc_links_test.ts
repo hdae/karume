@@ -3,11 +3,13 @@
  * rest is reported with its reason.
  */
 
+import { execFileSync } from "node:child_process";
 import { assertEquals } from "@std/assert";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import {
   checkLinks,
+  checkRepository,
   decidedPointers,
   headingSlugs,
   linkTargets,
@@ -100,6 +102,32 @@ describe("checkLinks", () => {
     );
     // 5 Markdown links checked (web skipped by scheme, asset skipped) + 3 pointers.
     assertEquals(report.checked, 9);
+  });
+});
+
+describe("checkRepository on a tracked file deleted in the working tree", () => {
+  let root = "";
+
+  beforeAll(async () => {
+    root = await makeTempDir();
+    await writeTextFile(`${root}/a.md`, "# A\n[gone](b.md)\n");
+    await writeTextFile(`${root}/b.md`, "# B\n");
+    execFileSync("git", ["-C", root, "init", "--quiet"]);
+    execFileSync("git", ["-C", root, "add", "a.md", "b.md"]);
+    await remove(`${root}/b.md`);
+  });
+
+  afterAll(async () => {
+    await remove(root, { recursive: true });
+  });
+
+  it("checks the files that are there and reports the link to the deleted one", () => {
+    const report = checkRepository(root);
+    assertEquals(report.markdownFiles, 1);
+    assertEquals(
+      report.broken.map((b) => `${b.file}:${b.line} ${b.reason} ${b.target}`),
+      ["a.md:2 missing file b.md"],
+    );
   });
 });
 
