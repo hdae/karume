@@ -311,4 +311,4 @@ Open questions of 2026-11-09: ordering against built-in rules, whether to limit 
 | `docs/perf-ledger.md` / `docs/release-runbook.md` | Performance candidates and kill criteria / release checklist |
 | `docs/limitations.md` | Cross-device identity limits; subgroup checks not automatic |
 | `docs/glossary.md` / `CLAUDE.md` | Term definitions / cross-cutting invariants and verification commands |
-| `packages/kernel-checks/README.md`, `apps/playground/README.md` | Shared kernel identity checks; the kernel-check and sweep pages |
+| `packages/kernel-checks/README.md`, `apps/workbench/README.md`, `docs/spec/workbench.md` | Shared kernel identity checks; the workbench's kernel-check, sweep and bench entries |

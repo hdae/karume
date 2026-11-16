@@ -8,8 +8,7 @@ import {
   formatCount,
   formatMs,
   formatRatio,
-  shapeLabel,
-} from "../src/models/attention-bench/rows.ts";
+} from "../src/attention-bench/rows.ts";
 
 const SHAPE = {
   id: "wan22-self-121f",
@@ -119,7 +118,6 @@ describe("attention bench table rows", () => {
   });
 
   test("labels and numbers", () => {
-    assertEquals(shapeLabel(SHAPE), "wan22-self-121f (24 × 27,280 → 27,280, D 128)");
     assertEquals(formatCount(27280), "27,280");
     assertEquals(
       [formatMs(12.345), formatMs(0.01234), formatMs(undefined)],

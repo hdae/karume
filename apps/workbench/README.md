@@ -7,6 +7,8 @@ private (not published).
 
 | Entry | What it does |
 | --- | --- |
+| `attention-bench` | The two a8 attention routes — S stored in f16 over three dispatches (s16), and the online int8 kernel — timed per kernel at Wan2.2 TI2V-5B's shapes with the kernels, row blocks and variants production would use on this host (`runAttentionRouteBench` of `@karume/runtime/tune`), apart from a generation. Parameters: `shapes` (default: all three), `rowsPerDispatch` (default 0: the first row block production would dispatch; a number is capped at each shape's query count), `rounds` (5; the min is kept), `quantization` (also time the shared quantization dispatches; default on), `onlineTiled` (also time the tiled key-axis candidate of perf-ledger K-106 against the online kernel in the same rounds, with its producer and an identity check; default off). Times are GPU timestamps when the adapter lists `timestamp-query`, else the wall clock: compare ratios then, not absolute values. The record's `data` is the runtime's `karume-attention-bench/2` report. |
+| `geometry-sweep` | The GEMM tile geometries measured on this host's GPU with `runGeometrySweep` of `@karume/runtime/tune`, one call per case with idle time before every case but the first (cooling: heat moves the default geometry's re-measurement, which the derivation checks), merged into one `karume-geometry-sweep/3` record. The record's `data` is that record, one input of `deriveGeometryProfile` as it is. Parameters: `candidateSet` (`quick`, `quick+` — the default —, `full`, or the evaluation set `k88`, which sweeps a case table of its own and from whose record no table is derived; `quick+` is `quick%2B` in a URL), `ops` (default: every op family), `cases` (default none: every case of the chosen op families in the chosen set; a case the chosen set does not have is an error, a case of an op family not chosen is not swept), `rounds` (5), `idleSeconds` (90). A cancel or a lost device keeps the cases that finished. `deriveGeometryProfile` rejects a record whose fingerprints (`caseSets`, `defaultKernels`, `candidateKernels`) differ from the deriving code's, so run it from the checkout that will derive the table and leave `packages/runtime` alone until then (the dev server reloads edited modules); keep the tab in front and nothing else on the GPU. Without `timestamp-query` the sweep times by the wall clock, and the derivation rejects such a record. |
 | `kernel-check` | The kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on this host's backend (D3D12 in Chrome on Windows, Metal on macOS, Dawn under Node). Parameter `checks`: the checks to run (default: all twelve, the release check). The verdict rules are in `src/kernel-check/verdict.ts`, the checks in [the package README](../../packages/kernel-checks/README.md). |
 
 ## Run in a browser
@@ -48,6 +50,34 @@ to stderr; the outcome, the summary and the record's path go to stdout. Exit cod
 done and its verdict is pass, incomplete or none; 1 for fail, error or cancelled (Ctrl-C cancels); 2
 for a command line that names no entry or a parameter that does not fit.
 
+## Example setups
+
+The geometry sweep's two standing setups are plain parameter values.
+
+**V-15** — every conv3d w8a8 case with every i8a8 geometry of the `full` set, 5 rounds, 90 s idle:
+the record from which the derivation chooses `i8a8.conv3d`.
+
+```text
+http://127.0.0.1:8791/?entry=geometry-sweep&candidateSet=full&ops=i8a8-conv3d&rounds=5&idleSeconds=90
+```
+
+```sh
+flock /tmp/karume-gpu.lock node apps/workbench/run.ts geometry-sweep --candidateSet=full --ops=i8a8-conv3d --rounds=5 --idleSeconds=90
+```
+
+**K-88** — every case of the `k88` table (linear, matmul, conv2d), 5 rounds, 90 s idle: per case
+this adapter's table geometry against the same geometry with its fastest skeleton form, with the
+conv2d counter decode and with both, and the census-weighted sums per unit. No table is derived from
+this record.
+
+```text
+http://127.0.0.1:8791/?entry=geometry-sweep&candidateSet=k88&ops=linear,matmul,conv2d&rounds=5&idleSeconds=90
+```
+
+```sh
+flock /tmp/karume-gpu.lock node apps/workbench/run.ts geometry-sweep --candidateSet=k88 --ops=linear,matmul,conv2d --rounds=5 --idleSeconds=90
+```
+
 ## Records
 
 A record lands at `outputs/workbench/<host>-<adapter name>/<entry id>_<UTC stamp>.json` (outside git):
@@ -85,7 +115,7 @@ way. The registry (`src/entries.ts`) picks the file up; nothing else lists entri
 ## Develop
 
 ```sh
-pnpm --filter @karume/workbench test        # vp test: parameters, registry, record, write-back, the kernel-check entry (no GPU)
+pnpm --filter @karume/workbench test        # vp test: parameters, registry, record, write-back, the entries' pure helpers (no GPU)
 pnpm --filter @karume/workbench typecheck
 pnpm --filter @karume/workbench build
 ```

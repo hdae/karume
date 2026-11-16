@@ -9,7 +9,6 @@ import {
   type GpuState,
   leaseFor,
   leaseState,
-  runOnGpuQueue,
 } from "../src/hooks/use-gpu.ts";
 
 type FakeGpu = { readonly id: number; readonly destroy: () => void };
@@ -281,114 +280,6 @@ describe("createGpuLifecycle (useGpu's device order)", () => {
       await flushTasks();
       lostHandlers.get(1)?.(lostInfo("destroyed", "Device was destroyed."));
       expect(states.map(({ kind }) => kind)).toEqual(["ready"]);
-    });
-  });
-});
-
-describe("runOnGpuQueue (a task with a device of its own, such as runGeometrySweep)", () => {
-  /** A task that logs its start and end and settles when told to. */
-  const queuedTask = (name: string) => {
-    const done = deferred();
-    return {
-      done,
-      task: async (): Promise<string> => {
-        events.push(`${name} start`);
-        await done.promise;
-        events.push(`${name} end`);
-        return name;
-      },
-    };
-  };
-
-  describe("when the previous page's device is still waiting for its work", () => {
-    it("starts the task only after that device is destroyed", async () => {
-      const queue = createGpuQueue();
-      const leaving = createGpuLifecycle(queue);
-      const { release } = await openReady(leaving);
-      const run = deferred();
-      void leaving.track(run.promise);
-      release();
-
-      const sweep = queuedTask("sweep");
-      const result = runOnGpuQueue(queue, sweep.task);
-      await flushTasks();
-      expect(events).toEqual(["acquire 1"]);
-
-      run.resolve();
-      await flushTasks();
-      expect(events).toEqual(["acquire 1", "destroy 1", "sweep start"]);
-      sweep.done.resolve();
-      expect(await result).toBe("sweep");
-    });
-  });
-
-  describe("while the task runs", () => {
-    it("holds the next page's acquisition until the task has settled", async () => {
-      const queue = createGpuQueue();
-      const sweep = queuedTask("sweep");
-      void runOnGpuQueue(queue, sweep.task);
-      // The next page mounts in a later commit and opens its device in its effect.
-      const next: GpuState[] = [];
-      createGpuLifecycle(queue).open({}, (state) => next.push(state));
-      await flushTasks();
-      expect(events).toEqual(["sweep start"]);
-      expect(next).toEqual([]);
-
-      sweep.done.resolve();
-      await flushTasks();
-      expect(events).toEqual(["sweep start", "sweep end", "acquire 1"]);
-      expect(next.map(({ kind }) => kind)).toEqual(["ready"]);
-    });
-
-    it("holds a second task (the page entered again and run again) until the first has settled", async () => {
-      const queue = createGpuQueue();
-      const first = queuedTask("first");
-      const second = queuedTask("second");
-      void runOnGpuQueue(queue, first.task);
-      void runOnGpuQueue(queue, second.task);
-      await flushTasks();
-      expect(events).toEqual(["first start"]);
-
-      first.done.resolve();
-      await flushTasks();
-      expect(events).toEqual(["first start", "first end", "second start"]);
-    });
-  });
-
-  describe("when a useGpu device is released while the task runs (the two writers of the queue)", () => {
-    it("holds the next acquisition until both the task and that device are gone", async () => {
-      const queue = createGpuQueue();
-      const { release } = await openReady(createGpuLifecycle(queue));
-      const sweep = queuedTask("sweep");
-      void runOnGpuQueue(queue, sweep.task);
-      release();
-      const next: GpuState[] = [];
-      createGpuLifecycle(queue).open({}, (state) => next.push(state));
-      await flushTasks();
-      expect(events).toEqual(["acquire 1", "sweep start", "destroy 1"]);
-      expect(next).toEqual([]);
-
-      sweep.done.resolve();
-      await flushTasks();
-      expect(events).toEqual(["acquire 1", "sweep start", "destroy 1", "sweep end", "acquire 2"]);
-      expect(next.map(({ kind }) => kind)).toEqual(["ready"]);
-    });
-  });
-
-  describe("when the task rejects", () => {
-    it("passes the rejection on and still lets the next acquisition through", async () => {
-      const queue = createGpuQueue();
-      const failing = runOnGpuQueue(queue, () => Promise.reject(new Error("no adapter")));
-      const outcome = failing.then(
-        () => "resolved",
-        (error: unknown) => (error instanceof Error ? error.message : "other"),
-      );
-      const next: GpuState[] = [];
-      createGpuLifecycle(queue).open({}, (state) => next.push(state));
-      await flushTasks();
-      expect(await outcome).toBe("no adapter");
-      expect(events).toEqual(["acquire 1"]);
-      expect(next.map(({ kind }) => kind)).toEqual(["ready"]);
     });
   });
 });

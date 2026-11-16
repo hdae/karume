@@ -11,8 +11,8 @@ import {
   INITIAL_LIVE,
   runSweepPlan,
   type SweepRunEvent,
-} from "../src/models/geometry-sweep/run.ts";
-import type { SweepPlan } from "../src/models/geometry-sweep/settings.ts";
+} from "../src/geometry-sweep/run.ts";
+import type { SweepPlan } from "../src/geometry-sweep/settings.ts";
 import { type PerCaseOptions, perCase, row } from "./helpers/geometry-sweep-report.ts";
 
 const PLAN: SweepPlan = {
@@ -83,6 +83,21 @@ describe("runSweepPlan", () => {
         rounds: 5,
         signal,
       });
+    });
+
+    it("passes the host's GPU to every call", async () => {
+      const run = harness(async (options) => reportFor(options));
+      // Never asked for an adapter: the fake sweep only records what it was given.
+      const gpu: GPU = {
+        __brand: "GPU",
+        requestAdapter: () => Promise.resolve(null),
+        getPreferredCanvasFormat: () => "bgra8unorm",
+        wgslLanguageFeatures: Object.assign(new Set<string>(), {
+          __brand: "WGSLLanguageFeatures" as const,
+        }),
+      };
+      await runSweepPlan(PLAN, { ...run.deps(new AbortController().signal), gpu });
+      expect(run.calls.map((call) => call.gpu)).toEqual([gpu, gpu, gpu]);
     });
 
     it("reports the idle's end and each case's start", async () => {
@@ -178,10 +193,10 @@ describe("runSweepPlan", () => {
     });
   });
 
-  describe("when the signal was aborted before the run started (the page left while it waited for the GPU queue)", () => {
+  describe("when the signal was aborted before the run started", () => {
     it("acquires nothing", async () => {
       const controller = new AbortController();
-      controller.abort(new Error("The page was left during the sweep"));
+      controller.abort(new Error("Cancelled by the user"));
       const run = harness(async (options) => reportFor(options));
       const outcome = await runSweepPlan(PLAN, run.deps(controller.signal));
       expect(run.log).toEqual([]);

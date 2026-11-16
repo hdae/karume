@@ -6,7 +6,7 @@ import {
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import { k88Summary, k88TableGeometry } from "../src/models/geometry-sweep/k88.ts";
+import { k88Summary, k88TableGeometry } from "../src/geometry-sweep/k88.ts";
 
 /** The default geometry of the linear cases' bucket and of conv2d's 64-row class. */
 const LINEAR_DEFAULT: GemmGeometry = { regM: 8, regN: 8, wgX: 16, wgY: 16 };
@@ -196,7 +196,7 @@ describe("k88Summary", () => {
   });
 });
 
-describe("the case-set ids the page shows (the chosen set's, per op family)", () => {
+describe("the case-set ids a record of the chosen set carries (per op family)", () => {
   it("differ per evaluation set and are the sweep's own for the table-deriving sets", () => {
     const sweep = sweepCaseSetIds();
     const k88 = sweepCaseSetIds("k88");

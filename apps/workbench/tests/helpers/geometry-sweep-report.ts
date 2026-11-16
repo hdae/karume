@@ -1,7 +1,7 @@
 /**
- * Complete sweep records for the geometry sweep page's tests: rows of the conv3d default and one
+ * Complete sweep records for the geometry sweep entry's tests: rows of the conv3d default and one
  * candidate, and what one `runGeometrySweep({ cases: [caseId] })` returns. Complete, so a field the
- * page's code starts to read is never silently missing from a fake.
+ * entry's code starts to read is never silently missing from a fake.
  */
 
 import {

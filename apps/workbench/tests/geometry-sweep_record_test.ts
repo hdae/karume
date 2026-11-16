@@ -1,14 +1,7 @@
 import { deriveGeometryProfile, type GeometrySweepReport } from "@karume/runtime/tune";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
-import { downloadJson } from "../src/lib/download.ts";
-import {
-  caseSummaryRows,
-  deriveTarget,
-  mergeSweepReports,
-  sweepFileName,
-  sweepRecordText,
-} from "../src/models/geometry-sweep/record.ts";
+import { caseSummaryRows, mergeSweepReports } from "../src/geometry-sweep/record.ts";
 import {
   ADAPTER,
   CANDIDATE_GEOMETRY,
@@ -164,89 +157,6 @@ describe("mergeSweepReports", () => {
 
     it("throws for no record at all", () => {
       expect(() => mergeSweepReports([], PLAN)).toThrow(/No per-case record/);
-    });
-  });
-});
-
-describe("sweepRecordText", () => {
-  it("is the record's JSON, which reads back to the same record", () => {
-    const report = perCase(CASE_A);
-    const text = sweepRecordText(report);
-    expect(text.endsWith("\n")).toBe(true);
-    expect(JSON.parse(text)).toEqual(report);
-  });
-
-  it("is the very text the page's Download record button saves (downloadJson), so the sha256 names the file", async () => {
-    const report = perCase(CASE_A);
-    const blobs: Blob[] = [];
-    vi.stubGlobal("document", { createElement: () => ({ click: () => undefined }) });
-    vi.spyOn(URL, "createObjectURL").mockImplementation((object) => {
-      if (object instanceof Blob) blobs.push(object);
-      return "blob:test";
-    });
-    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    try {
-      downloadJson(report, "record.json");
-      // downloadBlob revokes the URL on the next task.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    } finally {
-      vi.unstubAllGlobals();
-      vi.restoreAllMocks();
-    }
-    expect(blobs).toHaveLength(1);
-    expect(await blobs[0]?.text()).toBe(sweepRecordText(report));
-  });
-});
-
-describe("sweepFileName", () => {
-  it("names the adapter's description, the candidate set and the record's UTC end", () => {
-    expect(sweepFileName(perCase(CASE_A, { date: "2026-10-28T10:05:09.123Z" }))).toBe(
-      "geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T10-05-09.json",
-    );
-  });
-
-  it("falls back to vendor, architecture and device when the description is empty", () => {
-    const report = perCase(CASE_A, { adapter: { ...ADAPTER, description: "" } });
-    expect(sweepFileName(report)).toMatch(/^geometry-sweep_nvidia-blackwell-0x2c05_full_/);
-  });
-
-  it("spells quick+ apart from quick", () => {
-    const report = perCase(CASE_A);
-    const quickPlus = {
-      ...report,
-      settings: { ...report.settings, candidateSet: "quick+" as const },
-    };
-    expect(sweepFileName(quickPlus)).toMatch(/_quick-plus_/);
-  });
-
-  it("names an adapter that reports nothing as unknown", () => {
-    const report = perCase(CASE_A, {
-      adapter: { vendor: "", architecture: "", device: "", description: "" },
-    });
-    expect(sweepFileName(report)).toMatch(/^geometry-sweep_unknown-adapter_/);
-  });
-});
-
-describe("deriveTarget", () => {
-  it("names the table <vendor>-<architecture> and matches both, like the built-in tables", () => {
-    expect(deriveTarget(ADAPTER)).toEqual({
-      id: "nvidia-blackwell",
-      vendor: "nvidia",
-      architecture: "blackwell",
-    });
-  });
-
-  it("matches the vendor alone when the architecture is empty", () => {
-    expect(deriveTarget({ ...ADAPTER, architecture: "" })).toEqual({
-      id: "nvidia",
-      vendor: "nvidia",
-    });
-  });
-
-  it("makes an injection-only table when the vendor is empty", () => {
-    expect(deriveTarget({ ...ADAPTER, vendor: "", architecture: "" })).toEqual({
-      id: "in-app",
-      optIn: true,
     });
   });
 });

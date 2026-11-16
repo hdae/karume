@@ -11,13 +11,11 @@
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as AnimaRouteImport } from "./routes/anima";
-import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
 import { Route as ExpertTransferRouteImport } from "./routes/expert-transfer";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
 import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
-import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
 import { Route as MossImageRouteImport } from "./routes/moss-image";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
@@ -33,11 +31,6 @@ const IndexRoute = IndexRouteImport.update({
 const AnimaRoute = AnimaRouteImport.update({
   id: "/anima",
   path: "/anima",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const AttentionBenchRoute = AttentionBenchRouteImport.update({
-  id: "/attention-bench",
-  path: "/attention-bench",
   getParentRoute: () => rootRouteImport,
 } as any);
 const BirefnetRoute = BirefnetRouteImport.update({
@@ -63,11 +56,6 @@ const Gemma4Route = Gemma4RouteImport.update({
 const Gemma4BenchRoute = Gemma4BenchRouteImport.update({
   id: "/gemma4-bench",
   path: "/gemma4-bench",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const GeometrySweepRoute = GeometrySweepRouteImport.update({
-  id: "/geometry-sweep",
-  path: "/geometry-sweep",
   getParentRoute: () => rootRouteImport,
 } as any);
 const IrodoriRoute = IrodoriRouteImport.update({
@@ -104,13 +92,11 @@ const Wan22Route = Wan22RouteImport.update({
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/anima": typeof AnimaRoute;
-  "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
-  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -121,13 +107,11 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/anima": typeof AnimaRoute;
-  "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
-  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -139,13 +123,11 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/anima": typeof AnimaRoute;
-  "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
-  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -158,13 +140,11 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/anima"
-    | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
     | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
-    | "/geometry-sweep"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -175,13 +155,11 @@ export interface FileRouteTypes {
   to:
     | "/"
     | "/anima"
-    | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
     | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
-    | "/geometry-sweep"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -192,13 +170,11 @@ export interface FileRouteTypes {
     | "__root__"
     | "/"
     | "/anima"
-    | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
     | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
-    | "/geometry-sweep"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -210,13 +186,11 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   AnimaRoute: typeof AnimaRoute;
-  AttentionBenchRoute: typeof AttentionBenchRoute;
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
   ExpertTransferRoute: typeof ExpertTransferRoute;
   Gemma4Route: typeof Gemma4Route;
   Gemma4BenchRoute: typeof Gemma4BenchRoute;
-  GeometrySweepRoute: typeof GeometrySweepRoute;
   IrodoriRoute: typeof IrodoriRoute;
   MossImageRoute: typeof MossImageRoute;
   Sbv2Route: typeof Sbv2Route;
@@ -239,13 +213,6 @@ declare module "@tanstack/react-router" {
       path: "/anima";
       fullPath: "/anima";
       preLoaderRoute: typeof AnimaRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/attention-bench": {
-      id: "/attention-bench";
-      path: "/attention-bench";
-      fullPath: "/attention-bench";
-      preLoaderRoute: typeof AttentionBenchRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/birefnet": {
@@ -281,13 +248,6 @@ declare module "@tanstack/react-router" {
       path: "/gemma4-bench";
       fullPath: "/gemma4-bench";
       preLoaderRoute: typeof Gemma4BenchRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/geometry-sweep": {
-      id: "/geometry-sweep";
-      path: "/geometry-sweep";
-      fullPath: "/geometry-sweep";
-      preLoaderRoute: typeof GeometrySweepRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/irodori": {
@@ -338,13 +298,11 @@ declare module "@tanstack/react-router" {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AnimaRoute: AnimaRoute,
-  AttentionBenchRoute: AttentionBenchRoute,
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
   ExpertTransferRoute: ExpertTransferRoute,
   Gemma4Route: Gemma4Route,
   Gemma4BenchRoute: Gemma4BenchRoute,
-  GeometrySweepRoute: GeometrySweepRoute,
   IrodoriRoute: IrodoriRoute,
   MossImageRoute: MossImageRoute,
   Sbv2Route: Sbv2Route,

@@ -17,16 +17,14 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
-| Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
-| Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
 | Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | done (Chrome / D3D12 on the RTX 5070 Ti: the Gemma 4 target on 2026-11-11, perf-ledger K-105; the MOSS-Image and VAE targets on 2026-11-12, F-13 and V-10; not run on Metal) |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
 diagnostics, plus the output's sha256 where there is one) for comparing runs across presets, sources
-and machines. The benchmark pages read no distribution; the geometry sweep page acquires no GPU of
-its own (`runGeometrySweep` does) and saves the runtime's sweep record as it is.
+and machines. The attention route bench and the geometry sweep, which read no distribution, run in
+[the workbench](../workbench/README.md).
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
 `@karume/runtime` (and its `/tune` subpath), `@karume/hub` and the family subpaths of
@@ -1053,61 +1051,6 @@ JSON.
 - After a device loss, **Acquire the GPU again** rebuilds the pipeline for the same Load and starts
   an empty chat.
 
-## The attention route bench page
-
-This page times the two attention routes on their own, apart from a generation, with the kernels,
-keys, binding order, row blocks and variants production would use on this device
-(`runAttentionRouteBench` of `@karume/runtime/tune`):
-
-- **s16** — the a8 route with S stored in f16: ①QK, ② row statistics and ③PV, each timed on its own
-  and summed;
-- **online** — the online int8 kernel (`attention_online`, ADR 0132), one dispatch;
-- **quantization** (optional) — the four dispatches both routes share (q and k per token, the
-  permute to Vᵀ and its quantization), once per node and outside the route totals;
-- **the candidate** (opt-in, perf-ledger K-106) — not a production route: the online kernel reading
-  Vᵀ in its own key order (the tiled key axis), timed against **online** in the same rounds, with
-  its producer and an identity check.
-
-The page probes the adapter first and acquires its GPU with `subgroups: "available"` and, when the
-adapter lists `timestamp-query`, `gpuTiming: true`. Without timestamp-query it says so and the
-times are wall-clock (per pass, divided by the repetitions — they include the submit overhead).
-Chrome without developer flags rounds timestamps to 100 µs; the bench stacks repetitions until one
-pass is about 80 ms, so that rounding stays below 0.2%.
-
-| Control | What it does |
-| --- | --- |
-| Shapes | Wan2.2 TI2V-5B (24 heads, D = 128): self-attention at 33 frames (N = 7,920), self-attention at 121 frames (N = 27,280), cross-attention over the 512 text tokens at 121 frames (M = 27,280). |
-| Rows per dispatch | Empty (default) = the first row block production would dispatch: for s16 the first block of the even split under the device's `maxStorageBufferBindingSize`, for online the first window of its work budget. A number overrides both (capped at the shape's query count; the online kernel rounds up to whole 64-row workgroups). |
-| Rounds | Measurement rounds per dispatch (default 5); the min is kept. |
-| Quantization | Also time the shared quantization dispatches (default on). |
-| Candidate (tiled) | Also time the tiled key axis candidate (default off): at each shape the online kernel and the candidate on the same window in the same rounds, each round running A B B A (online, tiled, tiled, online — a drift within the round cancels); with the quantization line, today's Vᵀ producer and the tiled one the same way; and the identity check (both producers on the same f32 Vᵀ, both kernels on their outputs, every O word and scale word compared). |
-| Run / Cancel | Run the bench; Cancel stops before the next dispatch (the record keeps the finished shapes). |
-
-The result table has one row per shape and route: rows per dispatch, the production split, ms per
-dispatch, ms per 1,000 query rows, integer TOPS (`4 · heads · rows · N · D` operations per dispatch),
-the node estimate (ms per row × the node's query rows, quantization excluded), the **online / s16**
-ratio of the per-row times (below 1 = online faster), the s16 stages and the variant (the online
-reduction form `sg32` / `wg` with its workgroup storage bytes, or the s16 row window). A route
-production would not run on this device or shape shows the reason instead. The status card shows the
-device facts: geometry profile, the dp4a variant (and the canary's verdict), the subgroup features
-and the linear lane mapping, and the limits.
-
-With the candidate, a second table has one row per shape: **tiled ÷ online** for the kernel alone
-(the median of the per-round time ratios; below 1 = the candidate faster) and for kernel + producer
-per node (each side's node estimate plus its Vᵀ producer, from the paired minimums — needs the
-quantization line), the paired ms per dispatch of both kernels, the producer pair, the rounds that
-gave a ratio, and **identical** / **differs** (with the first differing O word). The adoption line is
-a kernel gain of ×1.05 on the RTX 5070 Ti, a ratio of at most ×0.952.
-
-**Download record (JSON)** saves `attention-bench_<UTC timestamp>.json` (`format:
-"karume-playground-attention-bench/2"`): the adapter, the device facts (as on the Wan2.2 page), the
-settings (with `onlineTiled`), and under `bench` the runtime's record (`karume-attention-bench/2`)
-with every stage's key, workgroups, reps, raw rounds and wall-clock rounds, and with the candidate
-every paired round (both passes of each arm and the round's ratio) and the identity block. **Copy
-record** copies the same JSON.
-
-Absolute times compare only on one machine; across machines, compare the ratios.
-
 ## The Gemma 4 decode bench page
 
 A decode A/B of regular Gemma 4 and its q4_0 QAT line (`gemma.Pipeline`, mounts `gemma4` and
@@ -1237,154 +1180,6 @@ Caveats:
   tables are memoized); the page's own updates land between chats.
 - A tap-off arm still runs on the device with `timestamp-query` enabled (unused).
 - Absolute times compare only on one machine.
-
-## The geometry sweep page
-
-This page measures the GEMM tile geometries on the browser's GPU and writes the record a geometry
-profile is derived from. It is the successor of the sweep tab of the removed `tools/gpu-lab`. It
-calls `runGeometrySweep` of `@karume/runtime/tune` **once per case**, idles between cases (cooling:
-one case takes minutes, and heat moves the default geometry's re-measurement, which the derivation
-checks), and merges the per-case records into **one sweep record** (`karume-geometry-sweep/3`, the
-format `deriveGeometryProfile` reads, with no playground envelope). Its first job is perf-ledger
-V-15: the conv3d-only sweep on the RTX 5070 Ti, from which the derivation chooses `i8a8.conv3d` of
-the `nvidia-blackwell` table. Its second is perf-ledger K-85: a `full` sweep of the `i8a8-linear`
-family alone, the vec4 skeleton and the K64 tiles included ([The i8a8 linear run](#the-i8a8-linear-run)).
-Its third is perf-ledger K-88: the evaluation set `k88` of the f32 GEMM skeleton forms and the conv2d
-counter decode ([The K-88 preset](#the-k-88-preset)).
-
-**Serve the page from the checkout that will derive the table.** The record carries `caseSets` and
-`defaultKernels` (one value per op family of its cases) and `candidateKernels`, the fingerprints of
-the case set and of the kernels of the runtime the page was built from, and `deriveGeometryProfile`
-rejects a record whose values differ from the deriving code. Do not edit `packages/runtime` of the
-serving checkout until the record has been derived: the dev server reloads edited modules.
-
-**The GPU.** `runGeometrySweep` acquires a dedicated device per call and destroys it before it
-returns, so the page has no `useGpu`. The run joins the app's device queue with `runOnGpuQueue`
-instead:
-
-- it starts only after the previous page's device is destroyed ("waiting for the previous page's GPU
-  device" in the status);
-- the next acquisition of any page waits until the run has settled;
-- leaving the page aborts the run at its next cancel point (below), and the queue stays held until
-  the run has settled.
-
-| Control | What it does |
-| --- | --- |
-| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; **K-88 (GEMM forms / conv2d decode)** with every case of the `k88` table, the `k88` set, 5 rounds and 90 s idle. While the form equals a preset, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
-| Op families | Which families are shown and swept (the runtime's `geometrySweepCases(<candidate set>)`, grouped by op — the `k88` set has a case table of its own). With one family left ticked, the run sweeps that family alone. |
-| Cases | Every case of the chosen families, with **all** / **none** per family. A ticked case of a family that is not chosen is not swept. |
-| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from; for `i8a8-linear` a grid of its own with the vec4 skeleton and K tile 64), `k88` (the evaluation of perf-ledger K-88; no table is derived). Changing to a set that sweeps another case table switches the table and ticks every case of it. |
-| Rounds | Measurement rounds per geometry (default 5); the min is kept. |
-| Idle between cases (s) | Cooling before every case but the first (default 90; 0 = none). |
-| Run / Cancel | Run sweeps the cases in the table's order. Cancel takes effect at once during the idle wait, before the next case starts, and inside a case once the current geometry is measured (`runGeometrySweep` keeps the rows measured so far, with `aborted: true`). While a case still acquires its device, Cancel waits for the device; that case measured nothing, and its record is dropped. A Cancel after the last case has measured everything leaves the run completed. |
-
-The status card shows the adapter as the browser reports it (read without creating a device), whether
-it lists `timestamp-query` (without it the sweep falls back to the wall clock, and the derivation
-rejects a wall-clock record), cross-origin isolation, the case set ids per op family the chosen candidate set's records carry
-(`sweepCaseSetIds(<candidate set>)` — an evaluation set's own) and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
-seconds, the cases done, and the current case with its row count and the sweep's status line (the
-geometry measured now), or the seconds left of the idle wait. A device loss stops the run after
-that case.
-
-The **Cases** table has one row per case, filled live: the default geometry's time per dispatch, the
-drift (the default re-measured at the end of the case ÷ the first; outside 0.9–1.1 the derivation
-drops the case's ratios), the fastest candidate whose output matched the default bit for bit, the
-failed rows, the rows whose output differed from the default (never adopted), and the case's
-seconds.
-
-### The record
-
-When the run ends with at least one case (also after Cancel, a device loss or an error), the page
-merges the per-case records into one record in the shape one call over the planned cases writes
-(`gpuTiming.quantized` aside, below):
-
-| Field | What |
-| --- | --- |
-| `rows`, `cases` | every case's rows and summary, in run order |
-| `startedAt`, `date` | the first case's start, the last case's end |
-| `settings.cases` | every planned case (also the ones a cancel left out) |
-| `candidateKernels` | recomputed over the merged rows with `sweepCandidateKernelsId` (each per-case record fingerprints only its own rows) |
-| `caseSets`, `defaultKernels` | the union of the per-case records' (each holds the op family of its own case); two records that give one family different values fail the merge |
-| `aborted` | Cancel stopped a case midway or the run between cases (a run stopped by a device loss or an error has fewer cases than planned and `aborted: false`) |
-| `gpuTiming.quantized` | true when any case's rounds looked quantized: the larger rounding bound, never the smaller. One call judges all the rows together (true only when every round looks quantized); the runtime does not export that judgement, and taking the larger bound only drops more observations from the ratio data |
-| `deviceLost` | the first loss, or `null` |
-| everything else | the per-case records' own values, which must agree (format, browser, adapter, dp4a, timing, the other settings) — the merge fails loudly otherwise |
-
-The result card shows the file name, the sha256 of the bytes saved and a summary, then runs
-`deriveGeometryProfile` on those very bytes and shows its verdicts and the derived table
-(`geometryProfileJson`). The table is named `<vendor>-<architecture>` and matches the adapter's
-vendor and architecture (an adapter without a vendor gets an injection-only table). It is derived
-from this record alone, with no base table (the page has no `base` input): the op families this
-record has no case of come out at the default with no provenance entry, so only the fields this record
-has cases for (for V-15, `i8a8.conv3d`) say what a derivation with the adapter's table as `base` will
-choose — that derivation carries the other families over from the table. A record the derivation
-rejects shows the reason instead.
-
-### The i8a8 linear run
-
-Perf-ledger K-85 asks for one record of the `i8a8-linear` family alone with the `full` set (ADR 0115
-addendum decision 14). There is no preset for it: choose `full` under **Candidate set** and untick
-every **Op families** checkbox but `i8a8-linear`. The run then sweeps that family's 13 cases of the
-sweep's own table, one call per case, and merges them into one record:
-
-- the six anima DiT shapes (M 1,024 / 4,096);
-- the five Wan2.2 TI2V-5B DiT shapes at 33 frames (M 7,920 / 512 / 1);
-- the Irodori v4-small guard at M 185, and the same shape at M 256 (the upper end of the bucket
-  ≤ 256).
-
-Under `full` the family has a grid of its own: the 48 geometries the other i8a8 families use, then the
-vec4 skeleton grid (regM 8 / 12 / 16, regN 4 / 8, the existing workgroup shapes, K tile 16 / 32 / 64,
-each without and with the skeleton), within 16,384 B of workgroup storage — 230 geometries, 103 of
-them with the skeleton and 62 with K tile 64. Every one is checked for bit identity with the default
-as in the other sets.
-
-The result card derives the table from this record alone, so only the three `i8a8.linear` buckets
-(≤ 256 / 257〜512 / > 512) say what a derivation with the adapter's table as `base` will choose; the
-other families come out at the default.
-
-### The K-88 preset
-
-The `k88` set measures the two optional geometry fields of perf-ledger K-88 on a case table of its
-own: `form` (`"tb-un"`: a thread's column quads a workgroup row apart and the K loop unrolled;
-`"tas-tb-un"`: also the A tile k-major) in the vec4 f32-compute kernels of linear / matmul / conv2d,
-and `decode: "counter"` (an incremental im2col decode) in conv2d's vec4 kernel. The cases are copied
-from the distributions' graphs, each with its node count in a unit: the gemma4 E2B prefill gate /
-up, down and q linears at the 768-row chunk (int4 g32 — 140 of the chunk's 277 linears), the
-umT5-XXL feed-forward wi (int8, 512 tokens), the siglip2 so400m fc1 (f32), a small-M linear and the
-square 4,096³ linear and matmul (no model, not summed), the three heaviest conv2d of a Wan2.2 VAE
-decoder next chunk and first chunk (int8, the chunk's frames in the batch) and the anima VAE c192 /
-c384 conv2d (f16). Per case the candidates are the geometry the default profile and every
-registered table give it, each without the fields, with each form and, for conv2d, with the decode
-alone and with each form; every one is checked for bit identity with the default as in the other
-sets. A case takes 5–20 s on an RTX 3080 Ti.
-
-No table is derived from a `k88` record (`deriveGeometryProfile` refuses it). The result card shows
-the **K-88 summary** instead. Per unit (one gemma4 E2B prefill chunk, one Wan2.2 VAE next chunk, one
-first chunk, one umT5 forward, one siglip2 forward, one anima VAE decode), the census-weighted sum
-(each case's node count × its time per dispatch) of this adapter's table geometry and of its best
-form, its decode and its best decode + form, with each sum's ratio to the table's. Per case, this
-adapter's table geometry (the embedded table a Session on this adapter selects — the record's
-`geometryProfile`; its `gemmRows` rule of the case's M or its conv2d field of the case's class) and
-the same geometry's best form ÷ table, decode ÷ table and both ÷ table (each the table's time ÷ the
-variant's: above ×1 the variant is faster), whether every candidate of the case matched the default
-bit for bit, and the mismatching and failed rows. A candidate whose output differed never counts.
-The record downloads as for any set.
-
-**Download record (JSON)** saves `geometry-sweep_<adapter>_<candidate set>_<UTC timestamp>.json`
-(the adapter's description, or its vendor, architecture and device when the description is empty;
-`quick+` is spelled `quick-plus`; the timestamp is the record's `date`). **Copy record** copies the
-same JSON.
-
-### Caveats
-
-- A tab in the background is throttled: keep it in front, with nothing else on the GPU.
-- The per-case records are kept only in the page's memory; a crashed tab loses them.
-- `runGeometrySweep` consults no signal while it acquires its device. If the browser's adapter or
-  device request never settles, the case never starts: Cancel and leaving the page do not end it,
-  and since the run holds the app's GPU queue, no other page acquires a device either. Reload the
-  tab to recover.
-- The verdicts on the page are a preview. The table the repository registers comes from the
-  derivation on the dev machine over every record of the adapter.
 
 ## The session A/B page
 
@@ -1549,7 +1344,7 @@ seed and the two arms with the rules they passed), `distribution`, `source`, `co
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, the geometry sweep's merge and run order, every page's pure helpers (settings, records, progress, pipeline slots)
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, every page's pure helpers (settings, records, progress, pipeline slots)
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
@@ -1599,7 +1394,6 @@ The kit a page builds on:
 | `distributionSource`, `hfRepoRef` | `src/lib/distributions.ts` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
 | `queryCacheInventory` | `src/lib/hub-cache.ts` | What the hub's cache holds of a distribution, over every preset. |
 | `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss (`reacquire`) or an options change (GPU timing). `track(work)` holds the device until `work` settles: the destroy waits one macrotask after the release and then for every tracked promise, and the next acquisition — of any page, through the app-wide queue the root layout provides (`GpuQueueContext`) — waits for that destroy (flush before destroy). A device released while still acquiring holds no work: it is destroyed when it arrives, and the next acquisition does not wait for it. A page MUST pass every pipeline / Session disposal and every build or run on the device through `track`, started no later than the effects of the commit that releases the device. `lease` names one acquisition (a new one on every options or attempt change, also back to earlier options); `state` shows a device only for the lease it was acquired for, so in the render that changes the lease it is already `acquiring` and effects keyed on the device dispose in the same commit. |
-| `runOnGpuQueue`, `useGpuQueue` | `src/hooks/use-gpu.ts` | Work that acquires and destroys a device of its own (`runGeometrySweep`) as the app's GPU user: it starts after the queue's last released device is destroyed, and the next acquisition waits until it has settled. The queue is taken in the call itself (call it from the event handler). It MUST NOT be called while a `useGpu` device is live (the task would start beside it), so only a page without `useGpu` calls it. |
 | `useTimestampQuery` | `src/hooks/use-timestamp-query.ts` | Whether the adapter lists `timestamp-query`. |
 | `useRunTask` | `src/hooks/use-run-task.ts` | One cancellable run: state (`idle` / `running` with stage and counter / `done` / `cancelled` / `error`), the elapsed-time ticker, Cancel, and an abort when the GPU lease ends (the page is left or the GPU is acquired again). Takes the page GPU's `{ track, lease }`, so every run holds the device until it settles. A report with `cancellable: false` and its required `cancelNote` marks a stage that takes no signal. |
 | `RunStatusCard`, `RunStatus`, `GpuAlerts` | `src/components/run-status-card.tsx` | The Status card: GPU, cross-origin isolation, the page's rows and controls, the GPU's failure states, and the run (elapsed, stage, progress bar, Cancel — disabled with the stage's `cancelNote` while it is not cancellable — error in full). |

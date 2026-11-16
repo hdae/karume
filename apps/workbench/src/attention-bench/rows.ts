@@ -1,14 +1,10 @@
 /**
- * The table the attention bench page shows: one row per (shape, route), plus one for the shared
+ * The rows of the attention bench entry's summary: one per (shape, route), plus one for the shared
  * quantization when it was timed. Pure functions over the runtime's bench record, so `vp test`
  * covers them without a GPU.
  */
 
-import type {
-  AttentionBenchRoute,
-  AttentionBenchShape,
-  AttentionBenchShapeResult,
-} from "@karume/runtime/tune";
+import type { AttentionBenchRoute, AttentionBenchShapeResult } from "@karume/runtime/tune";
 
 export type BenchTableRow = {
   readonly key: string;
@@ -41,10 +37,6 @@ export const formatCount = (value: number): string => integer.format(value);
 /** Milliseconds: 2 decimals from 1 ms up, 3 significant digits below. */
 export const formatMs = (value: number | undefined): string =>
   value === undefined ? "—" : value >= 1 ? value.toFixed(2) : value.toPrecision(3);
-
-/** A shape's label: "wan22-self-121f (24 × 27,280 → 27,280, D 128)". */
-export const shapeLabel = (shape: AttentionBenchShape): string =>
-  `${shape.id} (${shape.heads} × ${formatCount(shape.queries)} → ${formatCount(shape.keys)}, D ${shape.depth})`;
 
 const routeRow = (
   result: AttentionBenchShapeResult,

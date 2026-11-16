@@ -1,5 +1,5 @@
 /**
- * The geometry sweep page's run: one `runGeometrySweep` call per planned case with idle time
+ * The geometry sweep entry's run: one `runGeometrySweep` call per planned case with idle time
  * between them (cooling — a case takes minutes, and heat moves the default's re-measurement), and
  * the live view folded from its events. The sweep and the idle wait are injected, so the order,
  * the cancel points and the fold are tested without a GPU.
@@ -15,7 +15,7 @@ import {
   runGeometrySweep,
 } from "@karume/runtime/tune";
 
-import type { SweepPlan } from "./settings";
+import type { SweepPlan } from "./settings.ts";
 
 /** What the run reports while it goes. */
 export type SweepRunEvent =
@@ -40,6 +40,8 @@ export type SweepRunOutcome = {
 };
 
 export type SweepRunDeps = {
+  /** The WebGPU implementation every call acquires its device from (default `navigator.gpu`). */
+  readonly gpu?: GPU;
   readonly signal: AbortSignal;
   readonly onEvent: (event: SweepRunEvent) => void;
   /** Default `runGeometrySweep`. */
@@ -73,13 +75,12 @@ export const idle = (ms: number, signal: AbortSignal): Promise<void> =>
  * the records so far come back with the reason the run ended.
  *
  * Cancel points: before a case starts (checked before its sweep acquires a device, so a run whose
- * signal was aborted while it waited for the app's GPU queue acquires nothing), during the idle
- * wait (at once), and inside a case where `runGeometrySweep` takes its signal (once the current
- * geometry is measured — that record is kept, with `aborted: true`). `runGeometrySweep` checks no
- * signal while it acquires its device: a cancel then waits for the device, and the record it
- * returns without a row is dropped (it measured nothing). An adapter or device request that never
- * settles therefore holds the run — and with it the app's GPU queue (`runOnGpuQueue`) — for good:
- * neither a cancel nor leaving the page ends it, and only reloading the tab recovers. A cancel that
+ * signal was aborted before it started acquires nothing), during the idle wait (at once), and
+ * inside a case where `runGeometrySweep` takes its signal (once the current geometry is measured —
+ * that record is kept, with `aborted: true`). `runGeometrySweep` checks no signal while it
+ * acquires its device: a cancel then waits for the device, and the record it returns without a row
+ * is dropped (it measured nothing). An adapter or device request that never settles therefore holds
+ * the run for good: a cancel does not end it, only reloading the page or ending the process. A cancel that
  * lands after the last case has measured everything changes nothing: the run is completed. A device
  * loss ends the run after the case's record; the next case would acquire a new device, but the loss
  * means the machine's state changed mid-sweep.
@@ -107,6 +108,7 @@ export const runSweepPlan = async (
       if (signal.aborted) return { reports, stop: { kind: "cancelled" } };
       onEvent({ kind: "case", index, caseId });
       const report = await sweep({
+        gpu: deps.gpu,
         candidateSet: plan.candidateSet,
         ops: plan.ops,
         cases: [caseId],
@@ -151,7 +153,7 @@ export type SweepLive = {
   readonly deviceLost?: { readonly reason: string; readonly message: string };
 };
 
-/** Before the first case: waiting for the app's GPU queue (the previous page's device). */
+/** Before the first case starts. */
 export const INITIAL_LIVE: SweepLive = {
   caseIndex: 0,
   phase: { kind: "waiting" },

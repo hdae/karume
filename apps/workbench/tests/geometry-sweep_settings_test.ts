@@ -1,0 +1,152 @@
+import { type GeometrySweepCase, geometrySweepCases } from "@karume/runtime/tune";
+import { describe, expect, it } from "vite-plus/test";
+
+import geometrySweep from "../src/entries/geometry-sweep.ts";
+import { ParameterError, parseParameters } from "../src/entry.ts";
+import {
+  CANDIDATE_SETS,
+  planSweep,
+  SWEEP_CASE_IDS,
+  SWEEP_OPS,
+  type SweepSelection,
+  sweepSelection,
+} from "../src/geometry-sweep/settings.ts";
+
+const CASES: readonly GeometrySweepCase[] = [
+  { id: "linear-a", op: "linear" },
+  { id: "conv3d-a", op: "i8a8-conv3d" },
+  { id: "linear-b", op: "linear" },
+  { id: "conv3d-b", op: "i8a8-conv3d" },
+  { id: "bmm-a", op: "bmm" },
+];
+
+/** The entry's selection for the given parameter strings (the defaults for the rest). */
+const selectionOf = (given: Readonly<Record<string, string>> = {}): SweepSelection =>
+  sweepSelection(parseParameters(geometrySweep.parameters, given));
+
+const DEFAULTS = selectionOf();
+
+describe("the defaults", () => {
+  it("sweep every case of the table in its order, with the runtime's candidate set", () => {
+    const plan = planSweep(DEFAULTS, CASES);
+    expect(plan.caseIds).toEqual(["linear-a", "conv3d-a", "linear-b", "conv3d-b", "bmm-a"]);
+    expect(plan.ops).toEqual(["linear", "i8a8-conv3d", "bmm"]);
+    expect(plan.candidateSet).toBe("quick+");
+  });
+
+  it("are quick+, every op family of the sweep's own table, no case chosen, 5 rounds and 90 s idle", () => {
+    expect(DEFAULTS).toEqual({
+      candidateSet: "quick+",
+      ops: [...new Set(geometrySweepCases().map(({ op }) => op))],
+      cases: [],
+      rounds: 5,
+      idleSeconds: 90,
+    });
+  });
+});
+
+describe("the parameters", () => {
+  it("offer every op family and every case id of the sweep's table and of the k88 table, in table order", () => {
+    const tables = [...geometrySweepCases(), ...geometrySweepCases("k88")];
+    expect(SWEEP_OPS).toEqual([...new Set(tables.map(({ op }) => op))]);
+    expect(SWEEP_CASE_IDS).toEqual(tables.map(({ id }) => id));
+  });
+
+  it.each([
+    [{ rounds: "0" }, "rounds"],
+    [{ rounds: "2.5" }, "rounds"],
+    [{ rounds: "" }, "rounds"],
+    [{ idleSeconds: "-1" }, "idleSeconds"],
+    [{ idleSeconds: " " }, "idleSeconds"],
+  ])("refuse %o, naming the parameter", (given, parameter) => {
+    expect(() => selectionOf(given)).toThrow(ParameterError);
+    expect(() => selectionOf(given)).toThrow(`Parameter ${parameter}:`);
+  });
+});
+
+describe("planSweep", () => {
+  describe("when an op family is not chosen", () => {
+    it("leaves its cases out, and its op out of the call's ops", () => {
+      const plan = planSweep({ ...DEFAULTS, ops: ["linear", "bmm"] }, CASES);
+      expect(plan.caseIds).toEqual(["linear-a", "linear-b", "bmm-a"]);
+      expect(plan.ops).toEqual(["linear", "bmm"]);
+    });
+
+    it("does not sweep a chosen case of it", () => {
+      const plan = planSweep(
+        { ...DEFAULTS, ops: ["linear"], cases: ["linear-b", "conv3d-a"] },
+        CASES,
+      );
+      expect(plan.caseIds).toEqual(["linear-b"]);
+    });
+  });
+
+  describe("when an op is chosen but none of its cases is", () => {
+    it("does not name that op in the call's ops", () => {
+      expect(planSweep({ ...DEFAULTS, cases: ["conv3d-b"] }, CASES)).toMatchObject({
+        caseIds: ["conv3d-b"],
+        ops: ["i8a8-conv3d"],
+      });
+    });
+  });
+
+  describe("when a chosen case is not a case of the chosen set", () => {
+    it("throws, naming it", () => {
+      expect(() =>
+        planSweep({ ...DEFAULTS, cases: ["linear-a", "k88-x", "k88-y"] }, CASES),
+      ).toThrow(new ParameterError("cases", "k88-x, k88-y are not cases of the quick+ set"));
+    });
+
+    it("throws for a case of the sweep's table under k88, and for a k88 case under quick+", () => {
+      const [k88Case] = geometrySweepCases("k88");
+      const [sweepCase] = geometrySweepCases();
+      if (k88Case === undefined || sweepCase === undefined) throw new Error("an empty case table");
+      expect(() =>
+        planSweep(
+          selectionOf({ candidateSet: "k88", cases: sweepCase.id }),
+          geometrySweepCases("k88"),
+        ),
+      ).toThrow(`${sweepCase.id} is not a case of the k88 set`);
+      expect(() =>
+        planSweep(selectionOf({ cases: k88Case.id }), geometrySweepCases("quick+")),
+      ).toThrow(`${k88Case.id} is not a case of the quick+ set`);
+    });
+  });
+
+  describe("when nothing is left to sweep", () => {
+    it("refuses with the reason", () => {
+      expect(() => planSweep({ ...DEFAULTS, ops: [] }, CASES)).toThrow("Choose at least one case");
+    });
+  });
+
+  it("accepts no idle at all", () => {
+    expect(planSweep(selectionOf({ idleSeconds: "0" }), CASES).idleSeconds).toBe(0);
+  });
+});
+
+describe("a full run of the i8a8-linear family alone (ADR 0115 addendum decision 14)", () => {
+  it("with only the i8a8-linear op family under full, plans the family's 13 cases of the sweep's own table in its order (one call per case, merged into one record)", () => {
+    const runtimeCases = geometrySweepCases();
+    const plan = planSweep(
+      selectionOf({ candidateSet: "full", ops: "i8a8-linear" }),
+      geometrySweepCases("full"),
+    );
+    expect(plan.ops).toEqual(["i8a8-linear"]);
+    expect(plan.candidateSet).toBe("full");
+    expect(plan.caseIds).toEqual(
+      runtimeCases.filter(({ op }) => op === "i8a8-linear").map(({ id }) => id),
+    );
+    expect(plan.caseIds.length).toBe(13);
+    // The entry offers the sets the runtime has (the evaluation set k85 is retired)
+    expect([...CANDIDATE_SETS]).toEqual(["quick", "quick+", "full", "k88"]);
+  });
+});
+
+describe("the evaluation set k88", () => {
+  it("with the default ops and no case chosen, plans every case of its own table", () => {
+    const k88Cases = geometrySweepCases("k88");
+    const plan = planSweep(selectionOf({ candidateSet: "k88" }), k88Cases);
+    expect(plan.caseIds).toEqual(k88Cases.map(({ id }) => id));
+    expect(plan.ops).toEqual(["linear", "matmul", "conv2d"]);
+  });
+});

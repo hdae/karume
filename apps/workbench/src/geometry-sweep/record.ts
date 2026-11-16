@@ -1,21 +1,16 @@
 /**
- * The geometry sweep page's record: the per-case records of `runGeometrySweep` (one call per case,
+ * The geometry sweep entry's record: the per-case records of `runGeometrySweep` (one call per case,
  * idle time between them) merged into one sweep record that `deriveGeometryProfile` reads as it is
- * (`karume-geometry-sweep/3` — no playground envelope), its text and file name, the table target
- * the page derives with, and the per-case summary the page shows. Pure.
+ * (`karume-geometry-sweep/3` — no envelope of its own), and the per-case summary. Pure.
  */
 
 import {
   type GeometryProfileFamilyIds,
-  type GeometryProfileTarget,
-  type GeometrySweepAdapter,
   type GeometrySweepCaseSummary,
   type GeometrySweepReport,
   type GeometrySweepRow,
   sweepCandidateKernelsId,
 } from "@karume/runtime/tune";
-
-import { fileStamp } from "@/lib/download";
 
 /**
  * The fields every per-case record of one sweep shares (anything else is a different sweep). The
@@ -143,52 +138,6 @@ export const mergeSweepReports = (
   };
 };
 
-/** The bytes the page downloads, copies and hashes (one text, so the sha256 names the file). */
-export const sweepRecordText = (report: GeometrySweepReport): string =>
-  `${JSON.stringify(report, null, 2)}\n`;
-
-/** Lower-case words joined by `-`, safe in file names (`NVIDIA GeForce RTX 5070 Ti` → `nvidia-geforce-rtx-5070-ti`). */
-const slug = (text: string): string =>
-  text
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "");
-
-/**
- * The adapter in a file name: its description, else vendor, architecture and device (Chrome without
- * developer flags may report an empty description).
- */
-const adapterSlug = (adapter: GeometrySweepAdapter): string => {
-  const described = slug(adapter.description);
-  if (described !== "") return described;
-  const fields = slug([adapter.vendor, adapter.architecture, adapter.device].join(" "));
-  return fields === "" ? "unknown-adapter" : fields;
-};
-
-/**
- * `geometry-sweep_<adapter>_<candidate set>_<UTC timestamp of the record's date>.json`. The candidate
- * set is in the name so a quick dry run is never mistaken for the full record.
- */
-export const sweepFileName = (report: GeometrySweepReport): string =>
-  `geometry-sweep_${adapterSlug(report.adapter)}_${report.settings.candidateSet.replace("+", "-plus")}_${fileStamp(new Date(report.date))}.json`;
-
-/**
- * The table the page derives from its own record (to show the verdicts before the file is sent):
- * `<vendor>-<architecture>` matching the adapter's vendor and architecture, the id form of the
- * built-in tables (`nvidia-blackwell`). An adapter without a vendor gets an injection-only table.
- */
-export const deriveTarget = (
-  adapter: GeometrySweepAdapter,
-): { readonly id: string } & GeometryProfileTarget => {
-  if (adapter.vendor === "") return { id: "in-app", optIn: true };
-  if (adapter.architecture === "") return { id: adapter.vendor, vendor: adapter.vendor };
-  return {
-    id: `${adapter.vendor}-${adapter.architecture}`,
-    vendor: adapter.vendor,
-    architecture: adapter.architecture,
-  };
-};
-
 /** One case of the summary table. */
 export type CaseSummaryRow = {
   readonly caseId: string;
@@ -209,7 +158,7 @@ export type CaseSummaryRow = {
   readonly seconds?: number;
 };
 
-/** Per case, in the order the rows came: what the page's table shows (live, and for a record). */
+/** Per case, in the order the rows came: one line of the entry's summary each. */
 export const caseSummaryRows = (
   rows: readonly GeometrySweepRow[],
   cases: readonly GeometrySweepCaseSummary[],

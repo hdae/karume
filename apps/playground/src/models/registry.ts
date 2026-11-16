@@ -10,7 +10,6 @@ import {
   AudioLinesIcon,
   BoxesIcon,
   GaugeIcon,
-  Grid3x3Icon,
   ImageIcon,
   type LucideIcon,
   MessageSquareTextIcon,
@@ -19,7 +18,6 @@ import {
   ScissorsIcon,
   ScaleIcon,
   SparklesIcon,
-  TimerIcon,
   VideoIcon,
 } from "lucide-react";
 
@@ -122,15 +120,6 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
   },
   {
-    path: "/attention-bench",
-    title: "Attention route bench",
-    summary:
-      "Per-kernel GPU time of the two a8 attention routes (S in f16 over three dispatches, and the online kernel) at Wan2.2's shapes. Needs no distribution.",
-    group: "Benchmarks",
-    icon: TimerIcon,
-    mounts: [],
-  },
-  {
     path: "/gemma4-bench",
     title: "Gemma 4 decode bench",
     summary:
@@ -147,15 +136,6 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Benchmarks",
     icon: ArrowUpFromLineIcon,
     mounts: ["gemma4-qat"],
-  },
-  {
-    path: "/geometry-sweep",
-    title: "Geometry sweep",
-    summary:
-      "Sweeps the GEMM tile geometries case by case on this GPU (runGeometrySweep), merges one record for deriveGeometryProfile and shows the derived table. Needs no distribution.",
-    group: "Benchmarks",
-    icon: Grid3x3Icon,
-    mounts: [],
   },
   {
     path: "/session-ab",

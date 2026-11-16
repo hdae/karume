@@ -23,9 +23,9 @@
  * inside a round), so each case's drift (the default geometry re-measured at its end ÷ at its
  * start) is part of the summary.
  *
- * NOTE: this summary and the K-88 summary of the playground's `/geometry-sweep` page
- * (apps/playground/src/models/geometry-sweep/k88.ts) are computed separately from the same record
- * fields; the e2e tests cannot import the playground.
+ * NOTE: this summary and the K-88 summary of the workbench's `geometry-sweep` entry
+ * (apps/workbench/src/geometry-sweep/k88.ts) are computed separately from the same record fields;
+ * the e2e tests cannot import the workbench.
  *
  * MUST: never run it while other work uses the GPU (the times would measure the contention); run it
  * under `flock /tmp/karume-gpu.lock`. Without the variable or without an adapter, the case SKIPs with

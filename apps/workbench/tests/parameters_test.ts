@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { type Parameter, ParameterError, parameterText, parseParameters } from "../src/entry.ts";
+import {
+  booleanValue,
+  choicesValue,
+  choiceValue,
+  integerValue,
+  type Parameter,
+  ParameterError,
+  parameterText,
+  parseParameters,
+} from "../src/entry.ts";
 
 const DECLARED: readonly Parameter[] = [
   { kind: "boolean", name: "warm", label: "Warm up", default: false },
@@ -82,5 +91,25 @@ describe("parameterText", () => {
     );
     expect(texts).toEqual({ warm: "true", rounds: "7", storage: "f16", checks: "b,c" });
     expect(parseParameters(DECLARED, texts)).toEqual(values);
+  });
+});
+
+describe("the typed accessors", () => {
+  const values = parseParameters(DECLARED, { warm: "true", checks: "c,a" });
+  const STORAGES = ["f16", "f32"] as const;
+
+  it("read each parsed value as its declared kind", () => {
+    expect(booleanValue(values, "warm")).toBe(true);
+    expect(integerValue(values, "rounds")).toBe(3);
+    expect(choiceValue(values, "storage", STORAGES)).toBe("f32");
+    expect(choicesValue(values, "checks", ["a", "b", "c"])).toEqual(["a", "c"]);
+  });
+
+  it("throw a ParameterError naming a value of another kind, an undeclared name or a value off the options", () => {
+    expect(() => booleanValue(values, "rounds")).toThrow("Parameter rounds:");
+    expect(() => integerValue(values, "warm")).toThrow("Parameter warm:");
+    expect(() => choicesValue(values, "storage", STORAGES)).toThrow("Parameter storage:");
+    expect(() => integerValue(values, "missing")).toThrow(ParameterError);
+    expect(() => choiceValue(values, "storage", ["f16"])).toThrow("Parameter storage:");
   });
 });

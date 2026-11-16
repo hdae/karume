@@ -159,6 +159,50 @@ export const parseParameters = (
   );
 };
 
+const optionOf = <T extends string>(name: string, value: unknown, options: readonly T[]): T => {
+  const option = options.find((candidate) => candidate === value);
+  if (option === undefined) {
+    throw new ParameterError(name, `expected one of ${options.join(", ")}, got ${String(value)}`);
+  }
+  return option;
+};
+
+/*
+ * The accessors below narrow a value of {@link parseParameters}' result to its declared kind, so an
+ * entry reads typed values without casts. A value of another kind means the entry read a name it
+ * did not declare, or declared it as another kind: they throw {@link ParameterError}.
+ */
+
+export const booleanValue = (values: ParameterValues, name: string): boolean => {
+  const value = values[name];
+  if (typeof value !== "boolean") throw new ParameterError(name, "is not a boolean");
+  return value;
+};
+
+export const integerValue = (values: ParameterValues, name: string): number => {
+  const value = values[name];
+  if (typeof value !== "number") throw new ParameterError(name, "is not an integer");
+  return value;
+};
+
+/** The value of a `choice` parameter as one of `options` (their literal type). */
+export const choiceValue = <T extends string>(
+  values: ParameterValues,
+  name: string,
+  options: readonly T[],
+): T => optionOf(name, values[name], options);
+
+/** The value of a `choices` parameter as a list of `options` (their literal type). */
+export const choicesValue = <T extends string>(
+  values: ParameterValues,
+  name: string,
+  options: readonly T[],
+): readonly T[] => {
+  const value = values[name];
+  if (typeof value !== "object") throw new ParameterError(name, "is not a list");
+  return value.map((item) => optionOf(name, item, options));
+};
+
 /** A value as the string {@link parseParameters} reads back (the URL and the form). */
 export const parameterText = (value: ParameterValue): string =>
   typeof value === "object" ? value.join(",") : String(value);

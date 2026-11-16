@@ -169,11 +169,10 @@ maintainer's ruling of 2026-11-06).
      - What the key does not see (the spec lists it); a file whose every case is skipped runs each time.
   6. **The workbench** (ADR 0152 calls it the harness). *(Landed 2026-11-16: the app `apps/workbench` — entries as files
      without UI code, the record `karume-workbench/1`, the dev server's write-back under `outputs/workbench/`, the Node
-     command — and its first entry, `kernel-check`, which left the Playground;
+     command — and the entries `kernel-check`, `geometry-sweep` and `attention-bench`, whose pages left the Playground;
      [spec/workbench.md](spec/workbench.md).)* Left, in this order:
-     - The entries for the geometry sweep and the attention bench (both run on synthetic tensors through
-       `@karume/runtime/tune`), a tracked generator from sweep records to the per-adapter geometry profiles (today
-       untracked scripts write those files), and the removal of those two Playground pages.
+     - A tracked generator from sweep and bench records to the per-adapter geometry profiles (today untracked scripts
+       under `outputs/diag/` write those files; the Playground page's preview of a derived table went with the page).
      - The entries that read a local distribution (the Gemma 4 decode bench, the Session A/B, the cached-expert reads of
        the expert transfer): local only and left out of a public build; then their Playground pages go (the maintainer's
        ruling of 2026-11-16).
@@ -317,7 +316,7 @@ maintainer's ruling of 2026-11-06).
   Rest of E1 (BiRefNet's f16 series — ADR [0113](decisions/0113-birefnet-weight-series.md)) = derivation of the Lucida f16 2048² synthetic tolerance (`LUCIDA_F16_2048_SYNTHETIC_TOLERANCE` in `packages/e2e/tests/e2e_birefnet_test.ts` is still a placeholder taken from the f32 series; the RTX 3080 Ti can run it) and phase 2 (the i8 plan + i8 series).
 - **Remainder of geometry profiles (K-71 — ADR [0115](decisions/0115-geometry-profiles.md) / [0116](decisions/0116-geometry-profile-row-buckets.md) / [0117](decisions/0117-app-geometry-tuning.md)) (filed 2026-09-27 to 10-03)**:
   The finished records (registration of `nvidia-blackwell`, the 7 row-count buckets, integration into applications (ADR 0117, all 7 stages ✅), the Codex review follow-up, 4 small items) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-  ② Regenerating `apple-metal-3` from the sweeps of one Chrome version (the table mixes Chrome 153 and 154) happens the next time a sweep is taken on M2, on the playground's `/geometry-sweep` page (ruling 2026-10-02)
+  ② Regenerating `apple-metal-3` from the sweeps of one Chrome version (the table mixes Chrome 153 and 154) happens the next time a sweep is taken on M2, with the workbench's `geometry-sweep` entry (ruling 2026-10-02)
   ③ The Pixel 10a (Mali-G715) table is not registered; the re-run on the new version has not been done (research K-70 §15)
   ④ The `i8a8-linear` family of `apple-metal-3` (perf-ledger K-85, ADR [0115](decisions/0115-geometry-profiles.md) addendum decision 14): its buckets ≤ 256 and 257〜512 run the default geometry until a `full` sweep of that family alone is taken on an M2 (about 20,000 s; on hold) and derived with the table as `base`. A table for Apple adapters whose `description` Chrome leaves empty is decided after that sweep (an Apple M5 record of the family is kept as a record only). `nvidia-blackwell` and `nvidia-ampere` are registered (2026-11-13)
 - **Remainder of the container-format wave (ADR [0108](decisions/0108-container-format.md)) = stages 4 to 6** (upstream intake of the anima transformer f16 / LoRA runtime A/B / new bit widths, Range fetching and so on —

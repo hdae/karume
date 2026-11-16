@@ -22,14 +22,18 @@ The workbench is private (not published) and is not part of the lanes: its tests
   its default; a name the entry does not declare and a value that does not fit are errors that name the parameter.
 - `run` receives the typed parameters, the GPU options of the host (`{}` in a browser, Dawn's `GPU` under Node), an
   abort signal and a function that reports one status line. An entry acquires and releases its own GPU context.
-- `run` resolves to an optional `verdict` (`pass`, `fail` or `incomplete`), a `summary` (a few lines a person reads
-  first) and `data` (the entry's own record body).
+- `run` resolves to an optional `verdict`, a `summary` (the lines a person reads first) and `data` (the entry's own
+  record body). A check concludes `pass` or `fail`; `incomplete` says the run did not cover what was asked (a check
+  the device cannot run, a sweep that a device loss or an error stopped). An entry that only measures and finished
+  has no verdict.
 
 ### The entries
 
 | Entry | What it runs | Inputs |
 | --- | --- | --- |
 | `kernel-check` | The twelve kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on the host's backend. Parameter `checks`: which of the twelve (default: all). `pass` needs every check run and passed; a check the device cannot run is not available, never a pass. | Synthetic (built in memory); no distribution |
+| `geometry-sweep` | `runGeometrySweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-geometry-sweep/3` record (`data`) — what `deriveGeometryProfile` reads. Parameters: `candidateSet` (`quick`, `quick+`, `full`, or the evaluation set `k88`), `ops`, `cases` (none: every case of the chosen op families in the chosen set; a case that is not in the chosen set is an error), `rounds`, `idleSeconds`. A cancelled run, a lost device and a sweep that threw keep the cases that finished. | Synthetic; no distribution |
+| `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
 
 ## The record
 
