@@ -23,8 +23,9 @@ The workbench is private (not published) and is not part of the lanes: its tests
   `--name=value` on the command line, the form — and one function turns them into typed values. A missing name takes
   its default; a name the entry does not declare and a value that does not fit are errors that name the parameter.
 - `run` receives the typed parameters, the GPU options of the host (`{}` in a browser, Dawn's `GPU` under Node), an
-  abort signal, a function that reports one status line and a function that opens a local distribution. An entry
-  acquires and releases its own GPU context.
+  abort signal, a function that reports one status line, a function that opens a local distribution and the
+  backend's name as the host knows it (what the record's `environment.backend` holds, absent when a browser run
+  declared none). An entry acquires and releases its own GPU context.
 - `run` resolves to an optional `verdict`, a `summary` (the lines a person reads first) and `data` (the entry's own
   record body). A check concludes `pass` or `fail`; `incomplete` says the run did not cover what was asked (a check
   the device cannot run, a sweep that a device loss or an error stopped). An entry that only measures and finished
@@ -53,6 +54,8 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | `kernel-check` | The twelve kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on the host's backend. Parameter `checks`: which of the twelve (default: all). `pass` needs every check run and passed; a check the device cannot run is not available, never a pass. | Synthetic (built in memory); no distribution |
 | `geometry-sweep` | `runGeometrySweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-geometry-sweep/3` record (`data`) — what `deriveGeometryProfile` reads. Parameters: `candidateSet` (`quick`, `quick+`, `full`, or the evaluation set `k88`), `ops`, `cases` (none: every case of the chosen op families in the chosen set; a case that is not in the chosen set is an error), `rounds`, `idleSeconds`. A cancelled run, a lost device and a sweep that threw keep the cases that finished. | Synthetic; no distribution |
 | `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
+| `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
+| `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
 
 ## The record
 
@@ -121,7 +124,8 @@ distributions as the Playground's dev server does (`/models/index.json`, `/model
 ## The Node command
 
 `node apps/workbench/run.ts <entry id> [--name=value …]` runs an entry on Dawn and writes its record through the same
-path rule; `--list` prints the entries. It uses the GPU, so it runs under the GPU lock
+path rule; `--list` prints the entries. The command's body and the entries load through one module runner, so both
+sides hold the same instance of every shared module. It uses the GPU, so it runs under the GPU lock
 (`flock /tmp/karume-gpu.lock …`).
 
 | Exit code | When |

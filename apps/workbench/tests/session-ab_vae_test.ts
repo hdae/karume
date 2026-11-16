@@ -1,16 +1,10 @@
-import { readFileSync } from "node:fs";
-
 import { parseManifest } from "@karume/hub";
 import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
-import {
-  buildSessionAbVaePageRecord,
-  SESSION_AB_VAE_PAGE_FORMAT,
-} from "../src/models/session-ab/record.ts";
-import { INITIAL_SESSION_AB_FORM, parseSessionAbForm } from "../src/models/session-ab/request.ts";
+import { sessionAbVaeData } from "../src/session-ab/data.ts";
+import { SESSION_AB_DEFAULTS, type SessionAbSettings } from "../src/session-ab/request.ts";
 import {
   isVaeTarget,
   sessionAbVaeRequest,
@@ -21,8 +15,8 @@ import {
   type VaeInput,
   vaeRowRule,
   vaeSessionOptions,
-} from "../src/models/session-ab/vae.ts";
-import { recordedCounts } from "../src/models/session-ab/view.ts";
+} from "../src/session-ab/vae.ts";
+import { recordedCounts } from "../src/session-ab/view.ts";
 
 import { abRecord, steady } from "./helpers/session-ab-records.ts";
 
@@ -39,11 +33,10 @@ const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number
   ...new Uint32Array(data.buffer, data.byteOffset, data.length),
 ];
 
-const settings = (form = {}) => {
-  const parsed = parseSessionAbForm({ ...INITIAL_SESSION_AB_FORM, backend: "d3d12", ...form });
-  if (!parsed.ok) throw new Error(parsed.errors.join(" "));
-  return parsed.value;
-};
+const settings = (patch: Partial<SessionAbSettings> = {}): SessionAbSettings => ({
+  ...SESSION_AB_DEFAULTS,
+  ...patch,
+});
 
 const hex = (character: string): string => character.repeat(64);
 
@@ -106,24 +99,6 @@ const WAN_MANIFEST = parseManifest(
 
 const CONV8 = vaeAbModel(WAN_MANIFEST, "wan22-vae-next", "i8-a8-attn8-online-conv8");
 
-const ENVIRONMENT: RecordEnvironment = {
-  recordedAt: "2026-11-11T12:00:00.000Z",
-  userAgent: "Mozilla/5.0 Chrome/150.0.0.0",
-  crossOriginIsolated: true,
-  adapter: { vendor: "nvidia", architecture: "blackwell", device: "", description: "" },
-  device: {
-    features: [],
-    wgslLanguageFeatures: [],
-    subgroupLanesLinear: false,
-    gpuTimingEnabled: false,
-    limits: {
-      maxComputeWorkgroupStorageSize: 32768,
-      maxStorageBufferBindingSize: 2 ** 31,
-      maxBufferSize: 2 ** 31,
-    },
-  },
-};
-
 /** A two-arm runner record whose arms carry the counts a `sessionArm` reports. */
 const countedRecord = (): SessionAbRecord => {
   const record = abRecord({ base: steady(584), rule: steady(564) });
@@ -140,22 +115,20 @@ const countedRecord = (): SessionAbRecord => {
   };
 };
 
-const pageRecordOf = (
+const dataOf = (
   record: SessionAbRecord,
-  request = sessionAbVaeRequest("wan22-vae-next", CONV8, settings({ rounds: "3" })),
+  request = sessionAbVaeRequest("wan22-vae-next", CONV8, settings({ rounds: 3 })),
 ) =>
-  buildSessionAbVaePageRecord({
-    environment: ENVIRONMENT,
-    versions: { runtime: "9.8.7", models: "6.5.4" },
+  sessionAbVaeData({
     request,
-    distribution: { directory: "models/karume-wan2.2", manifestSha256: hex("f") },
-    source: { kind: "direct" },
+    distribution: { directory: "models/karume-wan2.2", manifestSha256: hex("f"), read: "direct" },
     container: { component: "vae_decoder_next", part0Sha256: hex("c") },
+    modelsVersion: "6.5.4",
     record,
     judgements: [],
   });
 
-describe("the session A/B page's VAE targets", () => {
+describe("the session A/B's VAE targets", () => {
   it("are the two VAE targets and nothing else", () => {
     expect(Object.keys(VAE_AB_TARGETS)).toEqual(["wan22-vae-next", "anima-vae-decode"]);
     expect(["wan22-vae-next", "anima-vae-decode"].every(isVaeTarget)).toBe(true);
@@ -259,7 +232,6 @@ describe("the session A/B page's VAE targets", () => {
         rounds: 4,
         minGain: 0.01,
         openPerVisit: true,
-        backend: "d3d12",
         seed: 0x5eed,
         sessionOptions: { convCompute: "a8" },
         arms: [
@@ -295,54 +267,34 @@ describe("the session A/B page's VAE targets", () => {
   });
 
   describe("the record", () => {
-    it("is an envelope of its own around the runtime's record, with the container and the rule", () => {
+    it("holds the target, the container and the rule around the runtime's record", () => {
       const record = countedRecord();
-      const page = pageRecordOf(record);
-      expect(page.format).toBe(SESSION_AB_VAE_PAGE_FORMAT);
-      expect([page.page, page.target]).toEqual(["session-ab", "wan22-vae-next"]);
-      expect(page.container).toEqual({ component: "vae_decoder_next", part0Sha256: hex("c") });
-      expect(page.rules).toEqual([
+      const data = dataOf(record);
+      expect(data.target).toBe("wan22-vae-next");
+      expect(data.container).toEqual({ component: "vae_decoder_next", part0Sha256: hex("c") });
+      expect(data.rules).toEqual([
         { name: RULE, package: "@karume/models", keyPrefix: "ext:models:" },
       ]);
-      expect(page.record).toBe(record);
-      expect(JSON.parse(JSON.stringify(page))).toEqual(page);
+      expect(data.record).toBe(record);
+      expect(JSON.parse(JSON.stringify(data))).toEqual(data);
       expect(
-        page.record.arms.map(
-          (arm) => recordedCounts(arm)?.fusions[vaeRowRule(page.request, arm.name)] ?? 0,
+        data.record.arms.map(
+          (arm) => recordedCounts(arm)?.fusions[vaeRowRule(data.request, arm.name)] ?? 0,
         ),
       ).toEqual([0, 30]);
     });
 
     it("refuses a runtime record of other arms or rounds, or whose arms reported no counts", () => {
       const record = countedRecord();
-      expect(() => pageRecordOf({ ...record, rounds: 4 })).toThrow("is not the request's");
-      expect(() => pageRecordOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
+      expect(() => dataOf({ ...record, rounds: 4 })).toThrow("is not the request's");
+      expect(() => dataOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
         "is not the request's",
       );
       const [base, rule] = record.arms;
       const uncounted = { name: rule.name, timesMs: rule.timesMs, identity: rule.identity };
-      expect(() => pageRecordOf({ ...record, arms: [base, uncounted] })).toThrow(
+      expect(() => dataOf({ ...record, arms: [base, uncounted] })).toThrow(
         "arm(s) rule reported no counts",
       );
-    });
-  });
-
-  describe("its feeds' twin in the opt-in Node A/B", () => {
-    /** The text between the twin markers, `export` aside. */
-    const twinOf = (path: string): string => {
-      const text = readFileSync(new URL(path, import.meta.url), "utf8");
-      const begin = text.indexOf("// ---- The VAE feeds: twin begin");
-      const endMarker = "// ---- The VAE feeds: twin end ----";
-      const end = text.indexOf(endMarker);
-      expect(begin, path).toBeGreaterThanOrEqual(0);
-      expect(end, path).toBeGreaterThan(begin);
-      return text.slice(begin, end + endMarker.length).replace(/^export /gm, "");
-    };
-
-    it("is the same text as the page's (a change to one is made to the other)", () => {
-      const page = twinOf("../src/models/session-ab/vae.ts");
-      expect(page).toContain("const vaeFeeds = (");
-      expect(twinOf("../../../packages/e2e/tests/e2e_vae_session_ab_test.ts")).toBe(page);
     });
   });
 });

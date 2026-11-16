@@ -1,5 +1,5 @@
 /**
- * The session A/B page's arms and the order the runner visits them in.
+ * The session A/B's arms on a Gemma 4 pipeline and the order the runner visits arms in.
  *
  * An arm (`SessionAbArm` of `@karume/runtime/tune`) here is one Gemma 4 pipeline configuration:
  * open builds the pipeline with the arm's options (the candidate rule for the `rule` arm), a run is
@@ -9,22 +9,36 @@
  * path; the fusion and dispatch counts come from a count probe of each arm before the A/B
  * ({@link probeCounts}: one build with the callback, one generation, one dispose).
  *
- * NOTE: the arm builder ({@link pipelineArm} and what it uses, between the twin markers) has a twin
- * in packages/e2e/tests/e2e_gemma4_session_ab_test.ts (the opt-in Node A/B). No module both may
- * import fits the gates and this change's scope (the e2e tests cannot import the playground,
- * `@karume/candidate-rules` holds rules only), so the two copies are kept textually parallel: a
- * change to one MUST be made to the other (tests/session-ab_arm_test.ts compares them).
- *
- * {@link runPositions} is the runner's visiting order as a list, so the page can say where a run is
+ * {@link runPositions} is the runner's visiting order as a list, so an entry can say where a run is
  * (`runSessionAb` reports no progress of its own); `vp test` drives the real runner with fake arms
  * against it.
  */
 
 import type { ExpertCacheReport, Pipeline, RunPhase } from "@karume/models/gemma";
 import type { SessionDiagnostics, SessionOptions } from "@karume/runtime";
-import type { SessionAbArm, SessionAbRun } from "@karume/runtime/tune";
+import type {
+  SessionAbAdapter,
+  SessionAbArm,
+  SessionAbEnvironment,
+  SessionAbRun,
+} from "@karume/runtime/tune";
 
-import type { SessionAbRequest } from "./request";
+import type { SessionAbRequest } from "./request.ts";
+
+/**
+ * What the runner's record says about where an A/B ran on `adapter`, now. WebGPU does not tell the
+ * backend and the runtime's record requires one: it is the host's (`RunContext.backend`), and
+ * `unknown` when a browser run declared none.
+ */
+export const runnerEnvironment = (
+  adapter: SessionAbAdapter,
+  backend: string | undefined,
+): SessionAbEnvironment => ({
+  adapter,
+  userAgent: navigator.userAgent,
+  backend: backend ?? "unknown",
+  date: new Date().toISOString(),
+});
 
 /** Where one run sits in the runner's order. */
 export type RunPosition = {
@@ -67,13 +81,17 @@ export const runPositions = (
 /** The request fields an arm reads. */
 export type ArmRequest = Pick<SessionAbRequest, "tokens" | "sampler" | "capacity" | "expertCache">;
 
-// ---- The arm builder: twin begin (the same text in e2e_gemma4_session_ab_test.ts, `export` aside) ----
-
 /**
  * What one arm did, as a caller shows it: `open` before a pipeline is built, `ran` after a run
  * returned (from the report, outside the timed span), `close` before a pipeline is disposed.
  */
 export type ArmStep = { readonly arm: string; readonly step: "open" | "ran" | "close" };
+
+/**
+ * Where an arm's steps go. The arm awaits it before it goes on, so a reporter MAY hand the event
+ * loop a turn (a browser paints then) before the runner's next timed run.
+ */
+export type ArmStepReporter = (step: ArmStep) => void | Promise<void>;
 
 /**
  * What one count probe did, as a caller shows it: `open` before its pipeline is built, `run` before
@@ -208,7 +226,7 @@ export type ArmSpec<P extends ArmPipeline> = {
  * 0095, addendum of 2026-11-11), so the next visit's build does not land on top of it.
  */
 export const pipelineArm = <P extends ArmPipeline>(
-  input: ArmSpec<P> & { readonly onStep: (step: ArmStep) => void },
+  input: ArmSpec<P> & { readonly onStep: ArmStepReporter },
 ): SessionAbArm & { readonly facts: () => ArmFacts } => {
   const { name, fusionRules, request, signal, onStep } = input;
   let pipeline: P | undefined;
@@ -245,7 +263,7 @@ export const pipelineArm = <P extends ArmPipeline>(
     name,
     open: async () => {
       signal.throwIfAborted();
-      onStep({ arm: name, step: "open" });
+      await onStep({ arm: name, step: "open" });
       pipeline = await input.build(fusionRules === undefined ? {} : { fusionRules });
       // The same options resolve the same way on every open, so the first open's is the arm's.
       expertCache ??= resolvedExpertCache(
@@ -257,7 +275,7 @@ export const pipelineArm = <P extends ArmPipeline>(
     },
     run,
     report: async () => {
-      onStep({ arm: name, step: "ran" });
+      await onStep({ arm: name, step: "ran" });
       const finished = used;
       used = undefined;
       await finished?.dispose();
@@ -265,7 +283,7 @@ export const pipelineArm = <P extends ArmPipeline>(
       return {};
     },
     close: async () => {
-      onStep({ arm: name, step: "close" });
+      await onStep({ arm: name, step: "close" });
       const closing = pipeline;
       pipeline = undefined;
       next = undefined;
@@ -322,5 +340,3 @@ export const probeCounts = async <P extends ArmPipeline>(
   }
   return seen.counts;
 };
-
-// ---- The arm builder: twin end ----

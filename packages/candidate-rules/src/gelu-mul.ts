@@ -121,7 +121,7 @@ const match = (nodes: readonly NodePlan[], index: number): GeluMulMatch | undefi
   };
 };
 
-export const GELU_MUL_RULE = defineRule<GeluMulMatch, typeof GELU_MUL_RULE_NAME>({
+export const GELU_MUL_RULE = /* @__PURE__ */ defineRule<GeluMulMatch, typeof GELU_MUL_RULE_NAME>({
   name: GELU_MUL_RULE_NAME,
   heads: ["gelu_tanh"],
   contract: "E",

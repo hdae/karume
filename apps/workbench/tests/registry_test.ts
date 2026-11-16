@@ -16,11 +16,16 @@ const localEntry = (id: string): Entry => ({ ...fakeEntry(id), readsLocalDistrib
 const idsOf = (entries: readonly Entry[]): readonly string[] => entries.map(({ id }) => id);
 
 describe("the registry", () => {
-  it("holds one entry per file of src/entries/, each id equal to its file name", async () => {
-    const files = (await readdir(new URL("../src/entries/", import.meta.url)))
-      .filter((file) => file.endsWith(".ts"))
-      .map((file) => file.slice(0, -".ts".length))
-      .sort();
+  it("holds one entry per file of src/entries/ and src/entries/local/, each id equal to its file name", async () => {
+    const namesIn = async (directory: string): Promise<readonly string[]> =>
+      (await readdir(new URL(directory, import.meta.url)))
+        .filter((file) => file.endsWith(".ts"))
+        .map((file) => file.slice(0, -".ts".length));
+    const files = [
+      ...(await namesIn("../src/entries/")),
+      ...(await namesIn("../src/entries/local/")),
+    ].sort();
+    expect(files).toContain("session-ab");
     expect(registeredEntries().map(({ id }) => id)).toEqual(files);
   });
 

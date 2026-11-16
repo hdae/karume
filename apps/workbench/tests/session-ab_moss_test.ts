@@ -1,11 +1,8 @@
-import { readFileSync } from "node:fs";
-
 import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { parseManifest } from "@karume/hub";
 import { runSessionAb, type SessionAbArm, type SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
 import {
   type DitInput,
   MOSS_DIT_WORK,
@@ -13,14 +10,11 @@ import {
   mossDitFeeds,
   sessionAbMossRequest,
   steppedArm,
-} from "../src/models/session-ab/moss.ts";
-import {
-  buildSessionAbMossPageRecord,
-  SESSION_AB_MOSS_PAGE_FORMAT,
-} from "../src/models/session-ab/record.ts";
-import { INITIAL_SESSION_AB_FORM, parseSessionAbForm } from "../src/models/session-ab/request.ts";
-import type { ArmStep } from "../src/models/session-ab/run.ts";
-import { recordedCounts } from "../src/models/session-ab/view.ts";
+} from "../src/session-ab/moss.ts";
+import { sessionAbMossData } from "../src/session-ab/data.ts";
+import { SESSION_AB_DEFAULTS, type SessionAbSettings } from "../src/session-ab/request.ts";
+import type { ArmStep } from "../src/session-ab/run.ts";
+import { recordedCounts } from "../src/session-ab/view.ts";
 
 import { abRecord, steady } from "./helpers/session-ab-records.ts";
 
@@ -41,11 +35,10 @@ const wordsOf = (data: Float32Array | Int32Array | Uint32Array): readonly number
   ...new Uint32Array(data.buffer, data.byteOffset, data.length),
 ];
 
-const settings = (form = {}) => {
-  const parsed = parseSessionAbForm({ ...INITIAL_SESSION_AB_FORM, backend: "d3d12", ...form });
-  if (!parsed.ok) throw new Error(parsed.errors.join(" "));
-  return parsed.value;
-};
+const settings = (patch: Partial<SessionAbSettings> = {}): SessionAbSettings => ({
+  ...SESSION_AB_DEFAULTS,
+  ...patch,
+});
 
 const hex = (character: string): string => character.repeat(64);
 
@@ -95,24 +88,6 @@ const manifest = parseManifest(
 
 const MODEL = mossAbModel(manifest, "f32+dit8-a8-attn8-online");
 
-const ENVIRONMENT: RecordEnvironment = {
-  recordedAt: "2026-11-11T12:00:00.000Z",
-  userAgent: "Mozilla/5.0 Chrome/150.0.0.0",
-  crossOriginIsolated: true,
-  adapter: { vendor: "nvidia", architecture: "blackwell", device: "", description: "" },
-  device: {
-    features: [],
-    wgslLanguageFeatures: [],
-    subgroupLanesLinear: false,
-    gpuTimingEnabled: false,
-    limits: {
-      maxComputeWorkgroupStorageSize: 32768,
-      maxStorageBufferBindingSize: 2 ** 31,
-      maxBufferSize: 2 ** 31,
-    },
-  },
-};
-
 /** A runner record whose arms carry the counts a `sessionArm` reports. */
 const countedRecord = (): SessionAbRecord => {
   const record = abRecord({ base: steady(1792), rule: steady(1620) });
@@ -126,23 +101,25 @@ const countedRecord = (): SessionAbRecord => {
   };
 };
 
-const pageRecordOf = (
+const dataOf = (
   record: SessionAbRecord,
-  request = sessionAbMossRequest(MODEL, settings({ rounds: "3" }), EW_CHAIN_RULE_NAME),
+  request = sessionAbMossRequest(MODEL, settings({ rounds: 3 }), EW_CHAIN_RULE_NAME),
 ) =>
-  buildSessionAbMossPageRecord({
-    environment: ENVIRONMENT,
-    versions: { runtime: "9.8.7", models: "6.5.4" },
+  sessionAbMossData({
     request,
-    distribution: { directory: "models/karume-moss-image", manifestSha256: hex("f") },
-    source: { kind: "direct" },
+    distribution: {
+      directory: "models/karume-moss-image",
+      manifestSha256: hex("f"),
+      read: "direct",
+    },
     container: { component: "dit", part0Sha256: hex("c") },
+    modelsVersion: "6.5.4",
     ruleName: EW_CHAIN_RULE_NAME,
     record,
     judgements: [],
   });
 
-describe("the session A/B page's MOSS-Image DiT target", () => {
+describe("the session A/B's MOSS-Image DiT target", () => {
   describe("the feeds", () => {
     const feeds = mossDitFeeds(DIT_INPUTS, IMAGE, TEXT, MOSS_DIT_WORK.seed);
 
@@ -208,7 +185,6 @@ describe("the session A/B page's MOSS-Image DiT target", () => {
         rounds: 4,
         minGain: 0.01,
         openPerVisit: true,
-        backend: "d3d12",
         imageTokens: 4096,
         textTokens: 63,
         seed: MOSS_DIT_WORK.seed,
@@ -313,29 +289,27 @@ describe("the session A/B page's MOSS-Image DiT target", () => {
   });
 
   describe("the record", () => {
-    it("is an envelope of its own around the runtime's record, with the container and the rule's key prefix", () => {
+    it("holds the target, the container and the rule's key prefix around the runtime's record", () => {
       const record = countedRecord();
-      const page = pageRecordOf(record);
-      expect(page.format).toBe(SESSION_AB_MOSS_PAGE_FORMAT);
-      expect(page.format).not.toBe("karume-playground-session-ab/2");
-      expect([page.page, page.target]).toEqual(["session-ab", "moss-dit-forward"]);
-      expect(page.container).toEqual({ component: "dit", part0Sha256: hex("c") });
-      expect(page.rule).toEqual({
+      const data = dataOf(record);
+      expect(data.target).toBe("moss-dit-forward");
+      expect(data.container).toEqual({ component: "dit", part0Sha256: hex("c") });
+      expect(data.rule).toEqual({
         name: EW_CHAIN_RULE_NAME,
         package: "@karume/models",
         keyPrefix: "ext:models:",
       });
-      expect(page.record).toBe(record);
-      expect(JSON.parse(JSON.stringify(page))).toEqual(page);
+      expect(data.record).toBe(record);
+      expect(JSON.parse(JSON.stringify(data))).toEqual(data);
     });
 
     it("refuses a runtime record of other arms or rounds, or whose arms reported no counts", () => {
       const record = countedRecord();
-      expect(() => pageRecordOf({ ...record, rounds: 4 })).toThrow("is not the request's");
-      expect(() => pageRecordOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
+      expect(() => dataOf({ ...record, rounds: 4 })).toThrow("is not the request's");
+      expect(() => dataOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
         "is not the request's",
       );
-      expect(() => pageRecordOf(abRecord({ base: steady(10), rule: steady(9) }))).toThrow(
+      expect(() => dataOf(abRecord({ base: steady(10), rule: steady(9) }))).toThrow(
         "reported no counts",
       );
     });
@@ -346,25 +320,6 @@ describe("the session A/B page's MOSS-Image DiT target", () => {
       expect(recordedCounts(rule)?.fusions[EW_CHAIN_RULE_NAME]).toBe(292);
       const [uncounted] = abRecord({ base: steady(10), rule: steady(9) }).arms;
       expect(recordedCounts(uncounted)).toBeUndefined();
-    });
-  });
-
-  describe("its feeds' twin in the opt-in Node A/B", () => {
-    /** The text between the twin markers, `export` aside. */
-    const twinOf = (path: string): string => {
-      const text = readFileSync(new URL(path, import.meta.url), "utf8");
-      const begin = text.indexOf("// ---- The MOSS DiT feeds: twin begin");
-      const endMarker = "// ---- The MOSS DiT feeds: twin end ----";
-      const end = text.indexOf(endMarker);
-      expect(begin, path).toBeGreaterThanOrEqual(0);
-      expect(end, path).toBeGreaterThan(begin);
-      return text.slice(begin, end + endMarker.length).replace(/^export /gm, "");
-    };
-
-    it("is the same text as the page's (a change to one is made to the other)", () => {
-      const page = twinOf("../src/models/session-ab/moss.ts");
-      expect(page).toContain("const mossDitFeeds = (");
-      expect(twinOf("../../../packages/e2e/tests/e2e_moss_session_ab_test.ts")).toBe(page);
     });
   });
 });

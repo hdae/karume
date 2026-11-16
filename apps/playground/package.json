@@ -16,7 +16,6 @@
     "@base-ui/react": "catalog:",
     "@fontsource-variable/geist": "catalog:",
     "@hdae/yomi": "catalog:",
-    "@karume/candidate-rules": "workspace:*",
     "@karume/hub": "workspace:*",
     "@karume/local-distributions": "workspace:*",
     "@karume/models": "workspace:*",

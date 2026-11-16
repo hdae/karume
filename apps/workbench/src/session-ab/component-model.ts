@@ -1,6 +1,6 @@
 /**
- * The model of the session A/B page's Session targets (the MOSS-Image DiT, the Wan2.2 and anima
- * VAEs): one component of one preset, fetched and opened through the hub on the route a pipeline's
+ * The model of the session A/B's Session targets (the MOSS-Image DiT, the Wan2.2 and anima VAEs):
+ * one component of one preset, fetched and opened through the hub on the route a pipeline's
  * `fromPretrained` takes for its components (manifest → selection → part 0 → `openContainer` →
  * `prepareContainer`, then the weight parts into the hub's cache before a Session reads them), so
  * every arm builds its Sessions from one prepared model. Opening builds no Session and holds no GPU
@@ -18,7 +18,11 @@ import {
 } from "@karume/hub";
 import { openContainer, type PreparedModel, prepareContainer } from "@karume/runtime";
 
-import { sha256Hex } from "@/lib/record";
+/** Lower-case hex sha256 of `bytes` (WebCrypto, in a browser and under Node alike). */
+const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 /** The prepared component every arm builds its Sessions from, and its container's identity. */
 export type ComponentModel = {

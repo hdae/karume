@@ -1,7 +1,7 @@
 import { runSessionAb, type SessionAbArm } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import { runPositions } from "../src/models/session-ab/run.ts";
+import { runPositions } from "../src/session-ab/run.ts";
 
 const ENVIRONMENT = {
   adapter: { vendor: "test", architecture: "", device: "", description: "" },
@@ -46,7 +46,7 @@ const observedRuns = async (
   return runs;
 };
 
-describe("the runner's visiting order as the page lists it", () => {
+describe("the runner's visiting order as an entry lists it", () => {
   for (const openPerVisit of [true, false]) {
     it(`matches runSessionAb run for run (openPerVisit: ${openPerVisit})`, async () => {
       for (const [arms, rounds] of [

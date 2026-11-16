@@ -181,9 +181,9 @@ maintainer's ruling of 2026-11-06).
        parameter kinds `text` and `number`. The Playground's expert transfer page was removed without an entry: its
        measurements are in [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md), no open item waits
        for another, and its cached-read part would measure something else under the workbench's origin.)*
-     - The entries that read a local distribution: the Session A/B (the three component targets and the Gemma 4 decode
-       target) and the Gemma 4 decode bench; then their Playground pages go, with the opt-in e2e copies of the Session
-       A/B code (the maintainer's rulings of 2026-11-16).
+     - *(Landed 2026-11-16: the Session A/B as the entries `session-ab` (the MOSS-Image DiT, the Wan2.2 VAE next chunk,
+       the anima VAE tile) and `gemma4-session-ab`; its Playground page and the opt-in e2e copies of its code went.)*
+     - The Gemma 4 decode bench as an entry; then its Playground page goes (the maintainer's ruling of 2026-11-16).
      - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
        hosted is the maintainer's decision.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
@@ -284,8 +284,8 @@ maintainer's ruling of 2026-11-06).
   built. The session A/B is built too (P3): `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`
   with `wordIdentity`, the gemma pipeline's experimental `fusionRules` (gemma only, as an experiment — maintainer
   2026-11-11; the details are decided later), the private `packages/candidate-rules` (the candidate `candidate/gelu_mul`),
-  the Playground's `/session-ab` page and an opt-in Node run on 26B (`KARUME_SESSION_AB=<dir>`,
-  `e2e_gemma4_session_ab_test.ts`). The page ran in Chrome / D3D12 on the RTX 5070 Ti on every target (the Gemma 4
+  the workbench's `session-ab` and `gemma4-session-ab` entries (until 2026-11-16 the Playground's `/session-ab` page and
+  three opt-in e2e copies of its code). The page ran in Chrome / D3D12 on the RTX 5070 Ti on every target (the Gemma 4
   target on 2026-11-11, the MOSS-Image and VAE targets on 2026-11-12 — [perf-ledger](perf-ledger.md) K-105, F-13, V-10),
   and the experimental `fusionRules` option reached the MOSS-Image, Wan and anima pipelines. Left: a run on Metal; a
   public way to switch a built-in rule off for a measurement (today only the test-only `DISABLED_FUSION_RULES`).

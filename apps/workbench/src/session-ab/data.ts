@@ -1,43 +1,26 @@
 /**
- * The session A/B page's saved record: the runtime's `karume-session-ab/1` record as it is, inside
- * the page's envelope with the request it ran, the distribution it read, the counts of the probe
- * before the A/B (the runner's record carries none), what a reader needs to run it again (the
- * package versions, the rule's dispatch keys, the expert cache as resolved) and the judgements. Pure, so `vp test` covers it; a stored envelope's `record` can be judged again
- * with `judgeSessionAb`.
+ * The session A/B entries' `data`: the runtime's `karume-session-ab/1` record as it is, with the
+ * request it ran, the distribution it read, the counts of the probe before the A/B (on the Gemma
+ * decode, whose runner record carries none), what a reader needs to run it again (the
+ * `@karume/models` version, the rule's dispatch keys or key prefix, the expert cache as resolved)
+ * and the judgements. The workbench record around it holds the environment, the checkout (the
+ * runtime's version) and the backend when it is known. Pure, so `vp test` covers it; a stored
+ * `record` can be judged again with `judgeSessionAb`.
  */
 
 import type { SessionAbJudgement, SessionAbRecord } from "@karume/runtime/tune";
 
-import type { RecordEnvironment } from "@/lib/environment";
-import type { SourceRecord } from "@/lib/record";
-import { entryPointOf, type GemmaEntryPoint } from "@/models/gemma4/settings";
+import modelsPackage from "../../../../packages/models/package.json" with { type: "json" };
+import type { DistributionFacts } from "../entry.ts";
+import { entryPointOf, type GemmaEntryPoint } from "../gemma4/settings.ts";
 
-import modelsPackage from "../../../../../packages/models/package.json" with { type: "json" };
-import runtimePackage from "../../../../../packages/runtime/package.json" with { type: "json" };
+import type { SessionAbMossRequest } from "./moss.ts";
+import type { SessionAbRequest } from "./request.ts";
+import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run.ts";
+import type { SessionAbVaeRequest, SessionAbVaeTarget } from "./vae.ts";
 
-import type { SessionAbMossRequest } from "./moss";
-import type { SessionAbRequest } from "./request";
-import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run";
-import type { SessionAbVaeRequest, SessionAbVaeTarget } from "./vae";
-
-/** The version of the envelope; bump it when a field changes meaning or goes away. */
-export const SESSION_AB_PAGE_FORMAT = "karume-playground-session-ab/2";
-
-/** The versions of the workspace packages a build of the page runs. */
-export type SessionAbVersions = { readonly runtime: string; readonly models: string };
-
-/** The versions this build of the page was built with (the packages' own package.json). */
-export const PACKAGE_VERSIONS: SessionAbVersions = {
-  runtime: runtimePackage.version,
-  models: modelsPackage.version,
-};
-
-/** The distribution every arm read. */
-export type SessionAbDistribution = {
-  readonly directory: string;
-  /** sha256 of the mount's `karume.json`. */
-  readonly manifestSha256: string;
-};
+/** The version of `@karume/models` the run used (its own package.json). */
+export const MODELS_VERSION: string = modelsPackage.version;
 
 /** The rule the `rule` arm passed, and the dispatch keys it ran under. */
 export type SessionAbRuleRecord = {
@@ -72,15 +55,12 @@ export type SessionAbArmCounts = {
   readonly dispatches: number;
 };
 
-export type SessionAbPageRecord = RecordEnvironment & {
-  readonly format: typeof SESSION_AB_PAGE_FORMAT;
-  readonly page: "session-ab";
-  /** The `@karume/runtime` and `@karume/models` versions the page was built with. */
-  readonly versions: SessionAbVersions;
+/** The `data` of a Gemma 4 decode A/B. */
+export type SessionAbGemmaData = {
   readonly request: SessionAbRequest;
   readonly pipeline: GemmaEntryPoint;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
+  /** The distribution every arm and probe read, as `openDistribution` returned it. */
+  readonly distribution: DistributionFacts;
   readonly rule: SessionAbRuleRecord;
   /**
    * The expert cache as each arm's pipeline resolved it, in the arms' order: slots per routed layer
@@ -95,6 +75,7 @@ export type SessionAbPageRecord = RecordEnvironment & {
    * carries no counts: the arms it timed were built without the diagnostics callback.
    */
   readonly counts?: readonly SessionAbArmCounts[];
+  readonly modelsVersion: string;
   /** The runtime's record (`karume-session-ab/1`), unchanged. */
   readonly record: SessionAbRecord;
   /** `judgeSessionAb(record, { minGain: request.minGain })`, one per compared arm. */
@@ -104,25 +85,11 @@ export type SessionAbPageRecord = RecordEnvironment & {
 const namesOf = (arms: readonly { readonly name: string }[]): string =>
   arms.map(({ name }) => name).join(", ");
 
-/**
- * The envelope of one finished A/B. Refuses a record, arm facts or probes whose arms are not the
- * request's (they would describe different runs), probes the request did not ask for or probes
- * missing when it did, and an arm without its resolved expert cache when the request has one.
- */
-export const buildSessionAbPageRecord = (input: {
-  readonly environment: RecordEnvironment;
-  readonly versions: SessionAbVersions;
-  readonly request: SessionAbRequest;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
-  readonly ruleName: string;
-  readonly arms: readonly SessionAbArmFacts[];
-  /** The count probes in the arms' order; present exactly when the request probes the counts. */
-  readonly probes?: readonly SessionAbArmProbe[];
-  readonly record: SessionAbRecord;
-  readonly judgements: readonly SessionAbJudgement[];
-}): SessionAbPageRecord => {
-  const { request, record, ruleName, arms, probes } = input;
+/** Refuses a runner record whose arms or round count are not the request's. */
+const checkRecord = (
+  request: { readonly arms: readonly { readonly name: string }[]; readonly rounds: number },
+  record: SessionAbRecord,
+): void => {
   const requested = namesOf(request.arms);
   const recorded = namesOf(record.arms);
   if (requested !== recorded || record.rounds !== request.rounds) {
@@ -130,6 +97,37 @@ export const buildSessionAbPageRecord = (input: {
       `The A/B record (${recorded}; ${record.rounds} rounds) is not the request's (${requested}; ${request.rounds} rounds)`,
     );
   }
+};
+
+/** Refuses a runner record with an arm that reported no counts. */
+const checkCounted = (record: SessionAbRecord): void => {
+  const uncounted = record.arms.filter(
+    (arm) => arm.fusions === undefined || arm.dispatches === undefined,
+  );
+  if (uncounted.length > 0) {
+    throw new Error(`The A/B record's arm(s) ${namesOf(uncounted)} reported no counts`);
+  }
+};
+
+/**
+ * The data of one finished Gemma 4 decode A/B. Refuses a record, arm facts or probes whose arms are
+ * not the request's (they would describe different runs), probes the request did not ask for or
+ * probes missing when it did, and an arm without its resolved expert cache when the request has one.
+ */
+export const sessionAbGemmaData = (input: {
+  readonly request: SessionAbRequest;
+  readonly distribution: DistributionFacts;
+  readonly modelsVersion: string;
+  readonly ruleName: string;
+  readonly arms: readonly SessionAbArmFacts[];
+  /** The count probes in the arms' order; present exactly when the request probes the counts. */
+  readonly probes?: readonly SessionAbArmProbe[];
+  readonly record: SessionAbRecord;
+  readonly judgements: readonly SessionAbJudgement[];
+}): SessionAbGemmaData => {
+  const { request, record, ruleName, arms, probes } = input;
+  checkRecord(request, record);
+  const requested = namesOf(request.arms);
   if (namesOf(arms) !== requested) {
     throw new Error(`The arm facts (${namesOf(arms)}) are not the request's arms (${requested})`);
   }
@@ -156,14 +154,9 @@ export const buildSessionAbPageRecord = (input: {
           return { arm: name, ...facts.expertCache };
         });
   return {
-    format: SESSION_AB_PAGE_FORMAT,
-    page: "session-ab",
-    ...input.environment,
-    versions: input.versions,
     request,
     pipeline: entryPointOf(request.mount),
     distribution: input.distribution,
-    source: input.source,
     rule: {
       name: ruleName,
       package: "@karume/candidate-rules",
@@ -181,34 +174,25 @@ export const buildSessionAbPageRecord = (input: {
             dispatches: counts.dispatches,
           })),
         }),
+    modelsVersion: input.modelsVersion,
     record,
     judgements: input.judgements,
   };
 };
 
-/**
- * The version of the MOSS-Image DiT target's envelope, a record of its own (the Gemma target's
- * `karume-playground-session-ab/2` is unchanged); bump it when a field changes meaning or goes away.
- */
-export const SESSION_AB_MOSS_PAGE_FORMAT = "karume-playground-session-ab-moss/1";
-
-/** The container both arms built their Sessions from. */
-export type SessionAbMossContainer = {
+/** The container every arm built its Sessions from. */
+export type SessionAbContainer = {
   readonly component: string;
   /** sha256 of its part 0 (the two documents, which name every block's sha256). */
   readonly part0Sha256: string;
 };
 
-export type SessionAbMossPageRecord = RecordEnvironment & {
-  readonly format: typeof SESSION_AB_MOSS_PAGE_FORMAT;
-  readonly page: "session-ab";
+/** The `data` of a MOSS-Image DiT forward A/B. */
+export type SessionAbMossData = {
   readonly target: "moss-dit-forward";
-  /** The `@karume/runtime` and `@karume/models` versions the page was built with. */
-  readonly versions: SessionAbVersions;
   readonly request: SessionAbMossRequest;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
-  readonly container: SessionAbMossContainer;
+  readonly distribution: DistributionFacts;
+  readonly container: SessionAbContainer;
   /**
    * The rule the `rule` arm passed (the MOSS-Image pipeline's own, from `@karume/models`); its
    * dispatch keys all start with the prefix.
@@ -218,6 +202,7 @@ export type SessionAbMossPageRecord = RecordEnvironment & {
     readonly package: "@karume/models";
     readonly keyPrefix: string;
   };
+  readonly modelsVersion: string;
   /**
    * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
    * a `sessionArm` reports its fusion counts and dispatches, and the runner refused a run whose
@@ -229,64 +214,40 @@ export type SessionAbMossPageRecord = RecordEnvironment & {
 };
 
 /**
- * The envelope of one finished A/B on the MOSS-Image DiT target. Refuses a record whose arms or
- * round count are not the request's (it would describe different runs), a request without an arm
- * that passes the rule, and a record whose arms carry no counts (every arm of this target reports
- * them).
+ * The data of one finished A/B on the MOSS-Image DiT target. Refuses a record whose arms or round
+ * count are not the request's (it would describe different runs), a request without an arm that
+ * passes the rule, and a record whose arms carry no counts (every arm of this target reports them).
  */
-export const buildSessionAbMossPageRecord = (input: {
-  readonly environment: RecordEnvironment;
-  readonly versions: SessionAbVersions;
+export const sessionAbMossData = (input: {
   readonly request: SessionAbMossRequest;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
-  readonly container: SessionAbMossContainer;
+  readonly distribution: DistributionFacts;
+  readonly container: SessionAbContainer;
+  readonly modelsVersion: string;
   readonly ruleName: string;
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
-}): SessionAbMossPageRecord => {
+}): SessionAbMossData => {
   const { request, record, ruleName } = input;
-  const requested = namesOf(request.arms);
-  const recorded = namesOf(record.arms);
-  if (requested !== recorded || record.rounds !== request.rounds) {
-    throw new Error(
-      `The A/B record (${recorded}; ${record.rounds} rounds) is not the request's (${requested}; ${request.rounds} rounds)`,
-    );
-  }
+  checkRecord(request, record);
   if (!request.arms.some(({ fusionRules }) => fusionRules.includes(ruleName))) {
     throw new Error(`No arm of the request passes the rule ${ruleName}`);
   }
-  const uncounted = record.arms.filter(
-    (arm) => arm.fusions === undefined || arm.dispatches === undefined,
-  );
-  if (uncounted.length > 0) {
-    throw new Error(`The A/B record's arm(s) ${namesOf(uncounted)} reported no counts`);
-  }
+  checkCounted(record);
   return {
-    format: SESSION_AB_MOSS_PAGE_FORMAT,
-    page: "session-ab",
     target: "moss-dit-forward",
-    ...input.environment,
-    versions: input.versions,
     request,
     distribution: input.distribution,
-    source: input.source,
     container: input.container,
     rule: {
       name: ruleName,
       package: "@karume/models",
       keyPrefix: ruleKeyPrefix(ruleName),
     },
+    modelsVersion: input.modelsVersion,
     record,
     judgements: input.judgements,
   };
 };
-
-/**
- * The version of the VAE targets' envelope, a record of its own (the Gemma and MOSS-Image targets'
- * formats are unchanged); bump it when a field changes meaning or goes away.
- */
-export const SESSION_AB_VAE_PAGE_FORMAT = "karume-playground-session-ab-vae/1";
 
 /**
  * A rule an arm of a VAE target passed (the Wan and anima pipelines' own, from `@karume/models`);
@@ -298,19 +259,16 @@ export type SessionAbVaeRule = {
   readonly keyPrefix: string;
 };
 
-export type SessionAbVaePageRecord = RecordEnvironment & {
-  readonly format: typeof SESSION_AB_VAE_PAGE_FORMAT;
-  readonly page: "session-ab";
+/** The `data` of a VAE forward A/B. */
+export type SessionAbVaeData = {
   readonly target: SessionAbVaeTarget;
-  /** The `@karume/runtime` and `@karume/models` versions the page was built with. */
-  readonly versions: SessionAbVersions;
   readonly request: SessionAbVaeRequest;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
+  readonly distribution: DistributionFacts;
   /** The container every arm built its Sessions from. */
-  readonly container: SessionAbMossContainer;
+  readonly container: SessionAbContainer;
   /** The rules the arms passed, in the arms' order (each named once). */
   readonly rules: readonly SessionAbVaeRule[];
+  readonly modelsVersion: string;
   /**
    * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
    * a `sessionArm` reports its fusion counts and dispatches, and the runner refused a run whose
@@ -322,51 +280,34 @@ export type SessionAbVaePageRecord = RecordEnvironment & {
 };
 
 /**
- * The envelope of one finished A/B on a VAE target. Refuses a record whose arms or round count are
- * not the request's (it would describe different runs), a request whose arms pass no rule, and a
+ * The data of one finished A/B on a VAE target. Refuses a record whose arms or round count are not
+ * the request's (it would describe different runs), a request whose arms pass no rule, and a
  * record whose arms carry no counts (every arm of these targets reports them).
  */
-export const buildSessionAbVaePageRecord = (input: {
-  readonly environment: RecordEnvironment;
-  readonly versions: SessionAbVersions;
+export const sessionAbVaeData = (input: {
   readonly request: SessionAbVaeRequest;
-  readonly distribution: SessionAbDistribution;
-  readonly source: SourceRecord;
-  readonly container: SessionAbMossContainer;
+  readonly distribution: DistributionFacts;
+  readonly container: SessionAbContainer;
+  readonly modelsVersion: string;
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
-}): SessionAbVaePageRecord => {
+}): SessionAbVaeData => {
   const { request, record } = input;
-  const requested = namesOf(request.arms);
-  const recorded = namesOf(record.arms);
-  if (requested !== recorded || record.rounds !== request.rounds) {
-    throw new Error(
-      `The A/B record (${recorded}; ${record.rounds} rounds) is not the request's (${requested}; ${request.rounds} rounds)`,
-    );
-  }
+  checkRecord(request, record);
   const names = [...new Set(request.arms.flatMap(({ fusionRules }) => fusionRules))];
   if (names.length === 0) throw new Error("No arm of the request passes a rule");
-  const uncounted = record.arms.filter(
-    (arm) => arm.fusions === undefined || arm.dispatches === undefined,
-  );
-  if (uncounted.length > 0) {
-    throw new Error(`The A/B record's arm(s) ${namesOf(uncounted)} reported no counts`);
-  }
+  checkCounted(record);
   return {
-    format: SESSION_AB_VAE_PAGE_FORMAT,
-    page: "session-ab",
     target: request.target,
-    ...input.environment,
-    versions: input.versions,
     request,
     distribution: input.distribution,
-    source: input.source,
     container: input.container,
     rules: names.map((name) => ({
       name,
       package: "@karume/models",
       keyPrefix: ruleKeyPrefix(name),
     })),
+    modelsVersion: input.modelsVersion,
     record,
     judgements: input.judgements,
   };

@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import type {
   ExpertCacheReport,
@@ -20,7 +18,7 @@ import {
   type DiagnosticsCallback,
   pipelineArm,
   probeCounts,
-} from "../src/models/session-ab/run.ts";
+} from "../src/session-ab/run.ts";
 
 const ENVIRONMENT = {
   adapter: { vendor: "test", architecture: "", device: "", description: "" },
@@ -205,13 +203,13 @@ const REQUEST: ArmRequest = {
   capacity: 1024,
 };
 
-/** The page's two arms: `base` without rules, `rule` with the candidate rule. */
+/** The entry's two arms: `base` without rules, `rule` with the candidate rule. */
 const ARMS: readonly {
   readonly name: string;
   readonly fusionRules?: SessionOptions["fusionRules"];
 }[] = [{ name: "base" }, { name: "rule", fusionRules: [GELU_MUL_RULE] }];
 
-/** What an arm and its probe are built from, for each of the page's two arms. */
+/** What an arm and its probe are built from, for each of the entry's two arms. */
 const specsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
   ARMS.map(({ name, fusionRules }) => ({
     name,
@@ -230,7 +228,7 @@ const armsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
     pipelineArm({ ...spec, onStep: ({ step }) => where.record(`${spec.name}:step:${step}`) }),
   );
 
-/** The probes of both arms, one after the other, as the page runs them. */
+/** The probes of both arms, one after the other, as the entry runs them. */
 const probesOf = async (where: Rig, request: ArmRequest, fake: FakeOptions) => {
   const counts: ArmCounts[] = [];
   for (const spec of specsOf(where, request, fake)) {
@@ -247,7 +245,7 @@ const probesOf = async (where: Rig, request: ArmRequest, fake: FakeOptions) => {
 const run = (where: Rig, arms: ReturnType<typeof armsOf>, openPerVisit: boolean) =>
   runSessionAb({ arms, rounds: 3, openPerVisit, environment: ENVIRONMENT, clock: where.clock });
 
-describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
+describe("the session A/B's arm on a Gemma 4 pipeline", () => {
   describe("the options each arm builds with", () => {
     it("passes the rules to the rule arm alone, and never the diagnostics callback", async () => {
       for (const openPerVisit of [false, true]) {
@@ -413,25 +411,6 @@ describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
       await base.open();
       await expect(base.close()).rejects.toThrow("the dispose failed");
       expect(where.log.slice(-2)).toEqual(["base:step:close", "base:dispose"]);
-    });
-  });
-
-  describe("its twin in the opt-in Node A/B", () => {
-    /** The text between the twin markers, `export` aside. */
-    const twinOf = (path: string): string => {
-      const text = readFileSync(new URL(path, import.meta.url), "utf8");
-      const begin = text.indexOf("// ---- The arm builder: twin begin");
-      const endMarker = "// ---- The arm builder: twin end ----";
-      const end = text.indexOf(endMarker);
-      expect(begin, path).toBeGreaterThanOrEqual(0);
-      expect(end, path).toBeGreaterThan(begin);
-      return text.slice(begin, end + endMarker.length).replace(/^export /gm, "");
-    };
-
-    it("is the same text as the page's (a change to one is made to the other)", () => {
-      const page = twinOf("../src/models/session-ab/run.ts");
-      expect(page).toContain("const pipelineArm = <P extends ArmPipeline>");
-      expect(twinOf("../../../packages/e2e/tests/e2e_gemma4_session_ab_test.ts")).toBe(page);
     });
   });
 });

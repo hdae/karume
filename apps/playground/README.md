@@ -17,13 +17,12 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
-| Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | done (Chrome / D3D12 on the RTX 5070 Ti: the Gemma 4 target on 2026-11-11, perf-ledger K-105; the MOSS-Image and VAE targets on 2026-11-12, F-13 and V-10; not run on Metal) |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
 diagnostics, plus the output's sha256 where there is one) for comparing runs across presets, sources
-and machines. The attention route bench and the geometry sweep, which read no distribution, run in
-[the workbench](../workbench/README.md).
+and machines. The attention route bench and the geometry sweep, which read no distribution, and the
+session A/B run in [the workbench](../workbench/README.md).
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
 `@karume/runtime` (and its `/tune` subpath), `@karume/hub` and the family subpaths of
@@ -34,13 +33,7 @@ analyser whose `sbv2.Utterance` the Style-Bert-VITS2 page hands to `sbv2.Pipelin
 the SBV2 WAV regression test uses).
 
 Nothing here imports runtime internals: the kernel checks, which drive them through
-`@karume/kernel-checks`, run in [the workbench](../workbench/README.md). One exception to the public
-surfaces: the session A/B page imports `@karume/candidate-rules`, a private workspace package
-(never published): candidate fusion rules written against
-`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline to measure them
-([the session A/B page](#the-session-ab-page)); its MOSS-Image DiT and VAE targets pass the adopted
-rules `models/ew_chain` of `@karume/models/moss` and `models/vae_rms_silu` of `@karume/models/wan`
-instead.
+`@karume/kernel-checks`, run in [the workbench](../workbench/README.md).
 
 ## Run
 
@@ -220,8 +213,8 @@ last run (`attention_online` for the online route, `attention_qk` / `attention_s
 
 **Fusion rule.** The pipeline passes its rule `models/vae_rms_silu` (`@karume/models/wan`,
 u32-identical to the unfused plan) by default to the VAE decoder chunk graphs, so the page has no
-switch for it. The session A/B page's Wan2.2 VAE target compares a chunk forward with and without
-it.
+switch for it. The workbench entry `session-ab` (target `wan22-vae-next`) compares a chunk forward
+with and without it.
 
 ### The record (`format: "karume-playground-wan22/3"`)
 
@@ -326,7 +319,8 @@ covers) and a summary of the record.
 
 **Fusion rule.** The pipeline passes its rule `models/vae_rms_silu` (`@karume/models/anima`,
 u32-identical to the unfused plan) by default to the VAE decoder, so the page has no switch for it.
-The session A/B page's anima VAE target compares a tile forward with and without it.
+The workbench entry `session-ab` (target `anima-vae-decode`) compares a tile forward with and
+without it.
 
 ### The record (`format: "karume-playground-anima/2"`)
 
@@ -415,8 +409,8 @@ same RGBA bytes the sha256 covers) and a summary of the record.
 
 **Fusion rule.** The pipeline passes its own rule `models/ew_chain` (`@karume/models/moss`,
 u32-identical to the unfused plan) by default to `dit_text`, the DiT pair and the VAE decoder, so
-the page has no switch for it. The session A/B page's MOSS-Image target compares a DiT forward with
-and without it.
+the page has no switch for it. The workbench entry `session-ab` (target `moss-dit-forward`)
+compares a DiT forward with and without it.
 
 ### The record (`format: "karume-playground-moss-image/2"`)
 
@@ -1179,166 +1173,6 @@ Caveats:
   tables are memoized); the page's own updates land between chats.
 - A tap-off arm still runs on the device with `timestamp-query` enabled (unused).
 - Absolute times compare only on one machine.
-
-## The session A/B page
-
-The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) on a real
-Gemma 4 decode, one MOSS-Image DiT forward or one Wan2.2 / anima VAE forward (the **Target** select;
-the sections below up to the MOSS-Image one describe the Gemma 4 target), with and without a
-fusion rule: how a fusion is accepted or dropped on a
-backend the node lanes do not reach (D3D12 in Chrome on Windows, Metal on macOS). Speed fusions are
-adopted on the measured end-to-end time of untimed runs, not on per-dispatch GPU time
-([ADR 0117](../../docs/decisions/0117-app-geometry-tuning.md), addendum of 2026-11-11).
-
-**The pipeline.** The model and the preset are chosen as on the chat page (any model of the three
-mounts), with the load options the chat page offers that the A/B needs: f16 KV and, for Gemma 4 26B
-A4B, the expert cache (slots, host tier, self-speculation depth — 64 slots with the host tier `all`
-runs 26B on a 16 GB GPU). Both arms and the count probes load it with `buildGemmaPipeline` from one
-source, chosen as on the chat page: the cached route by default (the hub's cache, so the loads after
-the first read the browser's CacheStorage) or the direct route (`/models/`, fetched anew on every
-load). With the defaults an A/B loads the pipeline 22 times — two probes, and two arms twice per
-round over the warm-up round and four timed rounds — so the route matters; the record keeps it.
-
-**The arms.** `base` passes no rule; `rule` passes the candidate rule `candidate/gelu_mul` of
-`@karume/candidate-rules` through the gemma pipeline's experimental `fusionRules` (the target
-Session gets it). An arm's open builds the pipeline, encodes the prompt and creates the first run's
-sequence; close disposes the pipeline (with the sequences it handed out). A **timed run** is one
-greedy generation (temperature 0, seed 0) of the chosen token count from one fixed prompt, in a
-fresh sequence of capacity 1024; it returns the generated token ids, which the runner compares with
-the base's first run, so identity is token identity. The sequence of every later run is created by
-the report of the run before it, which also disposes that run's sequence, outside the timed span.
-The arms are always built **without** `onRunDiagnostics`: the callback is a build-time option of
-the gemma pipeline, and its presence alone moves every generation of that pipeline onto another
-decode path (no on-GPU greedy output without the expert cache, no run-ahead, a diagnostics read per
-run). So every run of the A/B, timed or not, is the production path, and the arms report no counts
-to the runner: the runtime's record carries none.
-
-**The count probe.** With **Probe the counts first (one extra load and run per arm)** on (the
-default), the page probes each arm in turn before the A/B: it builds the arm's pipeline once with
-`onRunDiagnostics`, runs one untimed generation of the same prompt and token count, takes the
-fusion counts, the planned dispatches (`lastRunPipelines`) and the rule's dispatch keys of one run
-of that generation, and disposes the pipeline. The counted run is the first decode run, or, with a
-self-speculation depth set, the first verify run (a self-speculating decode has no decode run: each
-cycle is one verify of its drafts plus one row, `depth + 1` rows, fewer near the token limit), so
-with a depth the counts are those of that multi-row verify plan. The probe's tokens are compared
-with nothing; it exists for the counts only. The status card shows the probe's progress (which
-arm, building, generating or closing). Off, the page and its record have no counts.
-
-| Field | Default | Accepted |
-| --- | --- | --- |
-| Rounds | 4 | an integer ≥ 3 (one untimed warm-up round comes first) |
-| Tokens per run | 96 | 2 to 512 (the first token comes from the prefill, so one token has no decode run) |
-| Minimum gain | 0.01 (1% of the base's time) | a number ≥ 0 |
-| Open and close per visit | on | on: every visit builds its pipeline, runs it once untimed and once timed, and disposes it (two pipelines of a large model do not fit together); off: both pipelines stay loaded |
-| Probe the counts first (one extra load and run per arm) | on | on: the count probe above runs before the A/B; off: no counts |
-| Backend | none (must be chosen) | `d3d12` / `metal` / `vulkan` / `other` — WebGPU does not expose it, so the record states what is chosen |
-
-The runner visits the arms forward and in reverse in every round (base, rule, rule, base); the
-status card shows the run in progress (round, visit, arm, timed or not) and how many runs have
-ended. A visit's close awaits the pipeline's dispose, which resolves once the device has the
-memory back, so the next visit's build does not land on top of the disposed pipeline.
-
-When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
-which run differ and where first), the rule's hits and the dispatches from the arm's count probe
-(not from the timed runs; a dash without the probe) and every timed round's two visits; then the judgement of the rule arm: **Adopt**, **Reject** or **Inconclusive**, its reason in
-words and its numbers (median paired difference, base median, gain, noise floor, the interval of
-the median difference with its coverage, the paired differences per round). Identity is required: tokens that differ reject
-the rule whatever the times. A verdict speaks for that device, backend and work only, and
-inconclusive does not mean the difference is zero.
-
-### The record (`format: "karume-playground-session-ab/2"`)
-
-**Download record (JSON)** saves `session-ab_<UTC timestamp>.json` once the A/B has ended:
-`recordEnvironment`, `versions` (the `@karume/runtime` and `@karume/models` versions the page was
-built with), the `request` (model, preset, load options, rounds, tokens, minimum gain, open per
-visit, `probeCounts`, backend, the prompt, the sampler, the capacity and the two arms with the
-rules they passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256),
-`source`, `rule` (name, package and `dispatchKeys`, the rule's dispatch keys in the counted run of
-the rule arm's probe; `keyPrefix`, the prefix every key of the rule carries, instead when the counts
-were not probed), `expertCache` (with the cache: per arm the slots per routed layer, the host tier's
-bytes and the depth, as the pipeline resolved them), `counts` (with the probe: per arm the fusion
-counts and the planned dispatches of the probe's counted run), the runtime's `record`
-(`karume-session-ab/1`) unchanged, which carries no counts (its arms were built without the
-callback), and the `judgements`. A stored `record` can be judged again with `judgeSessionAb`, with another minimum
-gain too. A failed or cancelled A/B leaves no record (the runner returns one only at the end).
-**Copy record** copies the same JSON.
-
-Caveats:
-
-- Never run it while other work uses the same GPU: the times would measure the contention.
-- Nothing the page does runs inside a timed span but the generation, on the production path (the
-  diagnostics callback is only ever given to the probe's pipelines): the status is rendered at once
-  on every step an arm reports outside the spans, and the status card's ticker (the elapsed seconds) is held while a timed run is
-  in flight, so it stands still then.
-- Building a pipeline per visit is not timed, but it heats the GPU between visits like any load;
-  the A B B A order spreads that over both arms.
-
-### The MOSS-Image DiT target
-
-**The model.** The `dit` component (the DiT's positive branch) of the chosen preset of the
-`moss-image` mount (the manifest's `defaultModel`), from the cached or the direct route as on the
-MOSS-Image page: the manifest, the selection, part 0 (`openContainer`, `prepareContainer` — a
-container the runtime cannot prepare fails before any weight byte is fetched), then the weight parts
-into the hub's cache, once per press of Run. Both arms build their Sessions from that one prepared
-model with the knobs the preset declares (`session` of the manifest; the practical preset's are
-`linearCompute: "a8"`, `attentionCompute: "a8"`, `attentionScoreStorage: "none"`).
-
-**The arms.** `sessionArm`s of `@karume/runtime/tune`: `base` with the preset's knobs, `rule` with
-the same plus `models/ew_chain` of `@karume/models/moss` (the rule the MOSS-Image pipeline passes by
-default) through `SessionOptions.fusionRules`. **Open and close per visit
-is always on** for this target (two DiT Sessions never live together; the switch is locked). A
-**timed run** is one forward at the sequence of a 1024 × 1024 request — 4,096 image tokens and 63
-text tokens, S = 4,159 — on fixed feeds: every f32 input uniform in [−1, 1) from a seeded generator
-(mulberry32, seed `0x5eed`), `is_image` 1 for the image tokens; the same feeds as the opt-in Node
-A/B `packages/e2e/tests/e2e_moss_session_ab_test.ts` (a twin the playground's tests compare). Its
-output words are what the runner compares (u32, NaN by class). Every run of a `sessionArm` reports
-its fusion counts and dispatches to the runner outside the timed span, so the hits and dispatches
-come from the runner's record and there is no count probe (the Tokens and Probe fields do not
-apply). A cancel takes effect at the next visit's open: a Session run takes no signal.
-
-**The record** (`format: "karume-playground-session-ab-moss/1"`, a format of its own beside the
-Gemma 4 target's): `session-ab-moss_<UTC timestamp>.json` with `recordEnvironment`, `versions`,
-the `request` (`target: "moss-dit-forward"`, the mount, model, preset and its knobs, the component,
-the rounds, minimum gain, backend, the token counts and seed of the feeds, and the two arms with
-the rules they passed), `distribution`, `source`, `container` (the component and the sha256 of its
-part 0), `rule` (name, package — `@karume/models` — and `keyPrefix`), the runtime's `record` unchanged — its arms carry
-the counts — and the `judgements`.
-
-### The VAE targets
-
-**Wan2.2 VAE next chunk** and **anima VAE decode** measure the rule `models/vae_rms_silu` of
-`@karume/models` (the VAE's channel RMS norm and the SiLU after it in one dispatch, 32 pixels per
-workgroup), which the Wan and anima pipelines pass by default to their VAE decoder Sessions.
-
-**The model.** The `vae_decoder_next` chunk graph of the `wan22` mount (tile 16) or the
-`vae_decoder` tile graph of the `anima` mount, at the chosen preset of the manifest's
-`defaultModel`, fetched and opened once per press of Run as the MOSS-Image target does. Every arm's
-Session gets the options the pipeline gives its VAE there besides the rule: on Wan2.2 the preset's
-conv knob alone (`convCompute: "a8"` on the default `i8-a8-attn8-online-conv8`), on anima none (the
-VAE stage takes none of the quant's session).
-
-**The arms.** `sessionArm`s: `base` with those options (the plan without the rule), `rule` with the
-same plus the rule (the plan the pipeline runs); the runner visits base, rule, rule, base per round,
-and **Open and close per visit is always on**. A **timed run** is one forward on fixed feeds — every input uniform in
-[−1, 1) from the seeded generator (mulberry32, seed `0x5eed`), input by input in the graph's order:
-on Wan2.2 the latent frame `[48, 1, 16, 16]` and every one of its 32 caches, on anima the latents
-`[1, 16, 64, 64]` of one 512² tile (a 1024² image decodes 9 such tiles) — the same feeds as the
-opt-in Node A/B `packages/e2e/tests/e2e_vae_session_ab_test.ts` (a twin the playground's tests
-compare). Every output is read back and compared (u32, NaN by class): on the Wan2.2 chunk graph
-that is the four frames and the 32 updated caches, so the timed span moves about 0.9 GiB over the
-bus per run, the same in every arm. The hits column shows the rule's counter (0 in the base); the
-counts come from the runner's record, and the Tokens and Probe fields do not
-apply. The targets run on every backend, Metal included, where the rule has not been run: the
-pipelines pass it there too, and a difference from the base is recorded, not refused
-([known issues](../../docs/known-issues.md)).
-
-**The record** (`format: "karume-playground-session-ab-vae/1"`):
-`session-ab-vae-<target>_<UTC timestamp>.json` with `recordEnvironment`, `versions`, the
-`request` (`target`, the mount, model, preset, its declared `session`, the component's
-`storage`, the `sessionOptions` every arm got, the component, rounds, minimum gain, backend, the
-seed and the two arms with the rules they passed), `distribution`, `source`, `container`,
-`rules` (name, package — `@karume/models` — and `keyPrefix` of each), the runtime's `record` unchanged and the
-`judgements`.
 
 ## Develop
 

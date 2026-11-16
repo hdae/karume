@@ -1,30 +1,24 @@
 /**
- * The session A/B page's MOSS-Image DiT target, its pure parts: the work of one forward (the
- * sequence of a 1024 × 1024 request and the seeded feeds), the request and the arms' step reports.
- * A run is one forward of the `dit` component (the positive branch) on the fixed feeds, the arms are
+ * The session A/B's MOSS-Image DiT target, its pure parts: the work of one forward (the sequence of
+ * a 1024 × 1024 request and the seeded feeds), the request and the arms' step reports. A run is one
+ * forward of the `dit` component (the positive branch) on the fixed feeds, the arms are
  * `sessionArm`s of `@karume/runtime/tune` over the one prepared model — `base` with the preset's
  * knobs, `rule` with the same plus the rule `models/ew_chain` — and the output is the DiT's output
  * rows, so the A/B's identity is u32 identity of the output words (NaN by class). The counts (the
  * rule's hits, the dispatches) are the runner's: a `sessionArm` reports every run's fusion counts and dispatches
  * outside the timed span, so this target needs no count probe.
- *
- * NOTE: the feeds (between the twin markers) have a twin in
- * packages/e2e/tests/e2e_moss_session_ab_test.ts (the opt-in Node A/B). No module both may import
- * fits the gates (the e2e tests cannot import the playground, `@karume/candidate-rules` holds rules
- * only), so the two copies are kept textually parallel: a change to one MUST be made to the other
- * (tests/session-ab_moss_test.ts compares them).
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
+import type { MountName } from "@karume/local-distributions/mounts";
 import type { Tensor } from "@karume/runtime";
 import type { SessionAbArm } from "@karume/runtime/tune";
 
-import { MOSS_MOUNT } from "@/models/moss-image/settings";
+import type { SessionAbSettings } from "./request.ts";
+import type { ArmStepReporter } from "./run.ts";
 
-import type { SessionAbSettings } from "./request";
-import type { ArmStep } from "./run";
-
-// ---- The MOSS DiT feeds: twin begin (the same text in e2e_moss_session_ab_test.ts and the playground's session-ab/moss.ts, `export` aside) ----
+/** The mount the target reads its distribution from. */
+export const MOSS_MOUNT = "moss-image" satisfies MountName;
 
 /**
  * The work of one forward: the sequence of a 1024 × 1024 request — 4,096 image tokens (64 × 64
@@ -95,8 +89,6 @@ export const mossDitFeeds = (
   return feeds;
 };
 
-// ---- The MOSS DiT feeds: twin end ----
-
 /** The component the target runs (its graph has the same name). */
 export const MOSS_AB_COMPONENT = "dit";
 
@@ -120,9 +112,9 @@ export const mossAbModel = (manifest: Manifest, quant: string): SessionAbMossMod
   return { model, quant, session: { ...preset.session } };
 };
 
-/** What one press of Run asked for on this target, as the record keeps it. */
+/** What one run asked for on this target, as the record keeps it. */
 export type SessionAbMossRequest = SessionAbMossModel &
-  Pick<SessionAbSettings, "rounds" | "minGain" | "backend"> & {
+  Pick<SessionAbSettings, "rounds" | "minGain"> & {
     readonly target: "moss-dit-forward";
     readonly mount: typeof MOSS_MOUNT;
     readonly component: typeof MOSS_AB_COMPONENT;
@@ -138,11 +130,11 @@ export type SessionAbMossRequest = SessionAbMossModel &
 /**
  * The request of a run on this target: the model, the settings this target reads (the token count
  * and the count probe are the Gemma target's, and every visit opens and closes its arm's Session
- * whatever the form says) and the fixed work, with the arms named.
+ * whatever the settings say) and the fixed work, with the arms named.
  */
 export const sessionAbMossRequest = (
   model: SessionAbMossModel,
-  settings: SessionAbSettings,
+  settings: Pick<SessionAbSettings, "rounds" | "minGain">,
   ruleName: string,
 ): SessionAbMossRequest => ({
   target: "moss-dit-forward",
@@ -152,7 +144,6 @@ export const sessionAbMossRequest = (
   rounds: settings.rounds,
   minGain: settings.minGain,
   openPerVisit: true,
-  backend: settings.backend,
   ...MOSS_DIT_WORK,
   arms: [
     { name: "base", fusionRules: [] },
@@ -161,25 +152,25 @@ export const sessionAbMossRequest = (
 });
 
 /**
- * `arm` with its steps reported, as the Gemma target's arms report theirs: `onStep` is called
- * with `open` before the arm opens, `ran` after its report has read a run's counts and `close`
- * before it closes — never inside `run`, so a status render never lands in a timed span. The arm's
- * runs and counts pass through unchanged.
+ * `arm` with its steps reported, as the Gemma target's arms report theirs: `onStep` is called (and
+ * awaited) with `open` before the arm opens, `ran` after its report has read a run's counts and
+ * `close` before it closes — never inside `run`, so a status update never lands in a timed span.
+ * The arm's runs and counts pass through unchanged.
  */
-export const steppedArm = (arm: SessionAbArm, onStep: (step: ArmStep) => void): SessionAbArm => ({
+export const steppedArm = (arm: SessionAbArm, onStep: ArmStepReporter): SessionAbArm => ({
   name: arm.name,
   open: async () => {
-    onStep({ arm: arm.name, step: "open" });
+    await onStep({ arm: arm.name, step: "open" });
     await arm.open();
   },
   run: arm.run,
   report: async () => {
     const counts = (await arm.report?.()) ?? {};
-    onStep({ arm: arm.name, step: "ran" });
+    await onStep({ arm: arm.name, step: "ran" });
     return counts;
   },
   close: async () => {
-    onStep({ arm: arm.name, step: "close" });
+    await onStep({ arm: arm.name, step: "close" });
     await arm.close();
   },
 });

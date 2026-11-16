@@ -18,7 +18,6 @@ import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
 import { Route as MossImageRouteImport } from "./routes/moss-image";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
-import { Route as SessionAbRouteImport } from "./routes/session-ab";
 import { Route as Siglip2RouteImport } from "./routes/siglip2";
 import { Route as Wan22RouteImport } from "./routes/wan22";
 
@@ -67,11 +66,6 @@ const Sbv2Route = Sbv2RouteImport.update({
   path: "/sbv2",
   getParentRoute: () => rootRouteImport,
 } as any);
-const SessionAbRoute = SessionAbRouteImport.update({
-  id: "/session-ab",
-  path: "/session-ab",
-  getParentRoute: () => rootRouteImport,
-} as any);
 const Siglip2Route = Siglip2RouteImport.update({
   id: "/siglip2",
   path: "/siglip2",
@@ -93,7 +87,6 @@ export interface FileRoutesByFullPath {
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
-  "/session-ab": typeof SessionAbRoute;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
@@ -107,7 +100,6 @@ export interface FileRoutesByTo {
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
-  "/session-ab": typeof SessionAbRoute;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
@@ -122,7 +114,6 @@ export interface FileRoutesById {
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
-  "/session-ab": typeof SessionAbRoute;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
@@ -138,7 +129,6 @@ export interface FileRouteTypes {
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
-    | "/session-ab"
     | "/siglip2"
     | "/wan22";
   fileRoutesByTo: FileRoutesByTo;
@@ -152,7 +142,6 @@ export interface FileRouteTypes {
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
-    | "/session-ab"
     | "/siglip2"
     | "/wan22";
   id:
@@ -166,7 +155,6 @@ export interface FileRouteTypes {
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
-    | "/session-ab"
     | "/siglip2"
     | "/wan22";
   fileRoutesById: FileRoutesById;
@@ -181,7 +169,6 @@ export interface RootRouteChildren {
   IrodoriRoute: typeof IrodoriRoute;
   MossImageRoute: typeof MossImageRoute;
   Sbv2Route: typeof Sbv2Route;
-  SessionAbRoute: typeof SessionAbRoute;
   Siglip2Route: typeof Siglip2Route;
   Wan22Route: typeof Wan22Route;
 }
@@ -251,13 +238,6 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof Sbv2RouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/session-ab": {
-      id: "/session-ab";
-      path: "/session-ab";
-      fullPath: "/session-ab";
-      preLoaderRoute: typeof SessionAbRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
     "/siglip2": {
       id: "/siglip2";
       path: "/siglip2";
@@ -285,7 +265,6 @@ const rootRouteChildren: RootRouteChildren = {
   IrodoriRoute: IrodoriRoute,
   MossImageRoute: MossImageRoute,
   Sbv2Route: Sbv2Route,
-  SessionAbRoute: SessionAbRoute,
   Siglip2Route: Siglip2Route,
   Wan22Route: Wan22Route,
 };

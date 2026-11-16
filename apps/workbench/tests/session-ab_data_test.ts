@@ -1,46 +1,19 @@
 import { judgeSessionAb } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
 import { readFileSync } from "node:fs";
 
 import {
-  buildSessionAbPageRecord,
-  PACKAGE_VERSIONS,
+  MODELS_VERSION,
   type SessionAbArmFacts,
   type SessionAbArmProbe,
-} from "../src/models/session-ab/record.ts";
-import {
-  INITIAL_SESSION_AB_FORM,
-  parseSessionAbForm,
-  sessionAbRequest,
-} from "../src/models/session-ab/request.ts";
+  sessionAbGemmaData,
+} from "../src/session-ab/data.ts";
+import { SESSION_AB_DEFAULTS, sessionAbRequest } from "../src/session-ab/request.ts";
 
 import { abRecord, RULE, steady } from "./helpers/session-ab-records.ts";
 
-const ENVIRONMENT: RecordEnvironment = {
-  recordedAt: "2026-11-11T12:00:00.000Z",
-  userAgent: "Mozilla/5.0 Chrome/150.0.0.0",
-  crossOriginIsolated: true,
-  adapter: { vendor: "nvidia", architecture: "blackwell", device: "", description: "" },
-  device: {
-    features: [],
-    wgslLanguageFeatures: [],
-    subgroupLanesLinear: false,
-    gpuTimingEnabled: false,
-    limits: {
-      maxComputeWorkgroupStorageSize: 32768,
-      maxStorageBufferBindingSize: 2 ** 31,
-      maxBufferSize: 2 ** 31,
-    },
-  },
-};
-
-const settings = (() => {
-  const parsed = parseSessionAbForm({ ...INITIAL_SESSION_AB_FORM, rounds: "3", backend: "d3d12" });
-  if (!parsed.ok) throw new Error(parsed.errors.join(" "));
-  return parsed.value;
-})();
+const settings = { ...SESSION_AB_DEFAULTS, rounds: 3 };
 
 const request = sessionAbRequest(
   { mount: "gemma4-qat", model: "26b", quant: "i4", expertCache: { slots: 64 } },
@@ -48,7 +21,13 @@ const request = sessionAbRequest(
   RULE,
 );
 
-const VERSIONS = { runtime: "9.8.7", models: "6.5.4" };
+const MODELS = "6.5.4";
+
+const DISTRIBUTION = {
+  directory: "models/karume-gemma4-qat",
+  manifestSha256: "ab".repeat(32),
+  read: "directory",
+} as const;
 
 /** What the two arms learned: the cache as resolved (two layers here). */
 const FACTS: readonly SessionAbArmFacts[] = [
@@ -79,15 +58,13 @@ const build = (
   record = abRecord({ base: steady(100), rule: steady(90) }),
   arms: readonly SessionAbArmFacts[] = FACTS,
   ofRequest = request,
-  /** "none" = the page ran no probe. */
+  /** "none" = the entry ran no probe. */
   probes: readonly SessionAbArmProbe[] | "none" = PROBES,
 ) =>
-  buildSessionAbPageRecord({
-    environment: ENVIRONMENT,
-    versions: VERSIONS,
+  sessionAbGemmaData({
     request: ofRequest,
-    distribution: { directory: "models/karume-gemma4-qat", manifestSha256: "ab".repeat(32) },
-    source: { kind: "direct" },
+    distribution: DISTRIBUTION,
+    modelsVersion: MODELS,
     ruleName: RULE,
     arms,
     ...(probes === "none" ? {} : { probes }),
@@ -95,31 +72,24 @@ const build = (
     judgements: judgeSessionAb(record, { minGain: ofRequest.minGain }),
   });
 
-describe("the session A/B page's record", () => {
-  it("is the page's envelope around the runtime's record, kept as it is", () => {
+describe("the Gemma 4 session A/B's data", () => {
+  it("holds the request, the entry point, the distribution and the rule around the runtime's record, kept as it is", () => {
     const record = abRecord({ base: steady(100), rule: steady(90) });
-    const envelope = build(record);
-    expect(envelope).toMatchObject({
-      format: "karume-playground-session-ab/2",
-      page: "session-ab",
-      recordedAt: ENVIRONMENT.recordedAt,
-      adapter: ENVIRONMENT.adapter,
+    const data = build(record);
+    expect(data).toMatchObject({
       request,
       pipeline: "gemma.Pipeline",
-      distribution: { directory: "models/karume-gemma4-qat" },
-      source: { kind: "direct" },
+      distribution: DISTRIBUTION,
       rule: { name: RULE, package: "@karume/candidate-rules" },
     });
-    expect(envelope.record).toBe(record);
-    expect(envelope.judgements.map(({ arm, verdict }) => [arm, verdict])).toEqual([
-      ["rule", "adopt"],
-    ]);
+    expect(data.record).toBe(record);
+    expect(data.judgements.map(({ arm, verdict }) => [arm, verdict])).toEqual([["rule", "adopt"]]);
   });
 
   it("survives JSON: the stored record is judged again to the same judgements", () => {
-    const envelope = build();
-    const stored: typeof envelope = JSON.parse(JSON.stringify(envelope));
-    expect(stored).toEqual(envelope);
+    const data = build();
+    const stored: typeof data = JSON.parse(JSON.stringify(data));
+    expect(stored).toEqual(data);
     const { record, judgements } = stored;
     expect(judgeSessionAb(record, { minGain: request.minGain })).toEqual(judgements);
   });
@@ -137,19 +107,19 @@ describe("the session A/B page's record", () => {
 
   describe("the counts of the probes", () => {
     it("are kept per arm in the arms' order, next to the runtime's record without counts", () => {
-      const envelope = build();
-      expect(envelope.counts).toEqual([
+      const data = build();
+      expect(data.counts).toEqual([
         { arm: "base", fusions: { rmsNormAdd: 30 }, dispatches: 1294 },
         { arm: "rule", fusions: { rmsNormAdd: 30, [RULE]: 60 }, dispatches: 1234 },
       ]);
-      for (const arm of envelope.record.arms) {
+      for (const arm of data.record.arms) {
         expect(Object.hasOwn(arm, "fusions") || Object.hasOwn(arm, "dispatches")).toBe(false);
       }
     });
 
     it("are absent when the request does not probe them", () => {
-      const envelope = build(undefined, FACTS, unprobed, "none");
-      expect(Object.hasOwn(envelope, "counts")).toBe(false);
+      const data = build(undefined, FACTS, unprobed, "none");
+      expect(Object.hasOwn(data, "counts")).toBe(false);
     });
 
     it("refuse probes the request did not ask for, none when it did, and probes of other arms", () => {
@@ -166,16 +136,13 @@ describe("the session A/B page's record", () => {
   });
 
   describe("what a reader needs to run it again", () => {
-    it("keeps the versions it is given; the page's are the two packages' own", () => {
-      expect(build().versions).toEqual(VERSIONS);
+    it("keeps the models version it is given; the entries' is the package's own", () => {
+      expect(build().modelsVersion).toBe(MODELS);
       const versionOf = (name: string): unknown =>
         JSON.parse(
           readFileSync(new URL(`../../../packages/${name}/package.json`, import.meta.url), "utf8"),
         ).version;
-      expect(PACKAGE_VERSIONS).toEqual({
-        runtime: versionOf("runtime"),
-        models: versionOf("models"),
-      });
+      expect(MODELS_VERSION).toEqual(versionOf("models"));
     });
 
     it("names the rule's dispatch keys as the rule arm's probe read them", () => {

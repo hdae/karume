@@ -164,6 +164,36 @@ describe("executeEntry", () => {
     expect(done.seconds).toBeGreaterThanOrEqual(0);
   });
 
+  it("hands the entry the backend the record names, and none when the record has none", async () => {
+    const seen: (string | undefined)[] = [];
+    const entry = entryOf(async ({ backend }) => {
+      seen.push(backend);
+      return RESULT;
+    });
+    await executeEntry({
+      entry,
+      parameters: {},
+      gpuOptions: {},
+      signal: new AbortController().signal,
+      progress: () => {},
+      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      environment: { ...ENVIRONMENT, backend: { name: "d3d12", source: "declared" } },
+      checkout: CHECKOUT,
+    });
+    const { backend: _dropped, ...withoutBackend } = ENVIRONMENT;
+    await executeEntry({
+      entry,
+      parameters: {},
+      gpuOptions: {},
+      signal: new AbortController().signal,
+      progress: () => {},
+      openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      environment: withoutBackend,
+      checkout: CHECKOUT,
+    });
+    expect(seen).toEqual(["d3d12", undefined]);
+  });
+
   it("records a throw as error and a run cancelled midway as cancelled", async () => {
     expect((await execute(entryOf(() => Promise.reject(new Error("boom"))))).outcome).toBe("error");
     const controller = new AbortController();

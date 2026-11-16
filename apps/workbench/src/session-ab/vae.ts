@@ -1,5 +1,5 @@
 /**
- * The session A/B page's two VAE targets, their pure parts: the work of one forward (the seeded
+ * The session A/B's two VAE targets, their pure parts: the work of one forward (the seeded
  * feeds), the VAE Session's options as each pipeline derives them from the preset, the request, the
  * arms' options and which counter an arm's row reads. A run is one forward of one VAE graph — the
  * Wan2.2 `vae_decoder_next` chunk graph (tile 16: the latent frame and its 32 caches in, four frames
@@ -10,12 +10,6 @@
  * the pipeline runs) — and every output is read back, so the A/B's identity is u32 identity of every
  * output word (NaN by class). The counts (the rule's hits, the dispatches) are the runner's: a
  * `sessionArm` reports them for every run.
- *
- * NOTE: the feeds (between the twin markers) have a twin in
- * packages/e2e/tests/e2e_vae_session_ab_test.ts (the opt-in Node A/B). No module both may import
- * fits the gates (the e2e tests cannot import the playground, `@karume/candidate-rules` holds rules
- * only), so the two copies are kept textually parallel: a change to one MUST be made to the other
- * (tests/session-ab_vae_test.ts compares them).
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
@@ -23,9 +17,7 @@ import type { MountName } from "@karume/local-distributions/mounts";
 import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionOptions, Tensor } from "@karume/runtime";
 
-import type { SessionAbSettings } from "./request";
-
-// ---- The VAE feeds: twin begin (the same text in e2e_vae_session_ab_test.ts and the playground's session-ab/vae.ts, `export` aside) ----
+import type { SessionAbSettings } from "./request.ts";
 
 /** The two targets: the graph a run forwards once, and the seed of its feeds. */
 export const VAE_AB_TARGETS = {
@@ -82,8 +74,6 @@ export const vaeFeeds = (
   return feeds;
 };
 
-// ---- The VAE feeds: twin end ----
-
 export type SessionAbVaeTarget = keyof typeof VAE_AB_TARGETS;
 
 /** The mount each target reads its distribution from. */
@@ -109,7 +99,7 @@ export type VaeSessionOptions = Pick<SessionOptions, "convCompute">;
  * besides the fusion rule it adds (the `rule` arm adds it here): Wan's VAE takes the conv knob
  * alone (`wanVaeSessionOptions` of packages/models/src/wan/tile-decode.ts — ADR 0133 decision 6)
  * and anima's VAE stage none of it (`withStage` of packages/models/src/anima/pipeline.ts). A copy of
- * that rule: neither function is on the public surface the playground reads.
+ * that rule: neither function is on the public surface the workbench reads.
  */
 export const vaeSessionOptions = (
   target: SessionAbVaeTarget,
@@ -150,9 +140,9 @@ export const vaeAbModel = (
   return { model, quant, session: { ...preset.session }, storage };
 };
 
-/** What one press of Run asked for on a VAE target, as the record keeps it. */
+/** What one run asked for on a VAE target, as the record keeps it. */
 export type SessionAbVaeRequest = SessionAbVaeModel &
-  Pick<SessionAbSettings, "rounds" | "minGain" | "backend"> & {
+  Pick<SessionAbSettings, "rounds" | "minGain"> & {
     readonly target: SessionAbVaeTarget;
     readonly mount: (typeof VAE_AB_MOUNTS)[SessionAbVaeTarget];
     readonly component: string;
@@ -168,12 +158,13 @@ export type SessionAbVaeRequest = SessionAbVaeModel &
 /**
  * The request of a run on a VAE target: the model, the settings this target reads (the token count
  * and the count probe are the Gemma target's, and every visit opens and closes its arm's Session
- * whatever the form says), the options the pipeline gives the VAE besides its rule, and the two arms.
+ * whatever the settings say), the options the pipeline gives the VAE besides its rule, and the two
+ * arms.
  */
 export const sessionAbVaeRequest = (
   target: SessionAbVaeTarget,
   model: SessionAbVaeModel,
-  settings: SessionAbSettings,
+  settings: Pick<SessionAbSettings, "rounds" | "minGain">,
 ): SessionAbVaeRequest => ({
   target,
   mount: VAE_AB_MOUNTS[target],
@@ -182,7 +173,6 @@ export const sessionAbVaeRequest = (
   rounds: settings.rounds,
   minGain: settings.minGain,
   openPerVisit: true,
-  backend: settings.backend,
   seed: VAE_AB_TARGETS[target].seed,
   sessionOptions: vaeSessionOptions(target, model.session),
   arms: [

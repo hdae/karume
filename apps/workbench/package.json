@@ -13,9 +13,11 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@karume/candidate-rules": "workspace:*",
     "@karume/hub": "workspace:*",
     "@karume/kernel-checks": "workspace:*",
     "@karume/local-distributions": "workspace:*",
+    "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*"
   },
   "devDependencies": {

@@ -210,8 +210,8 @@ on the M2 — ADR [0105](decisions/0105-packed-static-quantize-activations.md) a
   differ from the unfused plan by the rounding of a contracted multiply-add, so Wan's frames and anima's images on Metal
   may not be the unfused plan's words.
 - **Ruling (2026-11-12)**: the rule runs on Metal too, and a difference there is recorded rather than gated, as for the
-  Chrome-on-Metal kernel rewrites just above; no option turns it off. A measurement would be the playground's `/session-ab`
-  VAE targets in Chrome on a Mac, or the opt-in Node A/B `packages/e2e/tests/e2e_vae_session_ab_test.ts` there: both
+  Chrome-on-Metal kernel rewrites just above; no option turns it off. A measurement would be the workbench's `session-ab`
+  entry on its VAE targets in Chrome on a Mac, or the same entry under Node there: both
   compare every output word of a forward with and without the rule.
 
 ## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
@@ -437,6 +437,23 @@ counted (ADR [0093](decisions/0093-transient-liveness-packing.md) addendum 2026-
 - Fix candidates: `EstimateOptions.convCompute`, counting the pair under the same eligibility as execution
   (`conv3dI8a8Eligible`, `packages/runtime/src/kernels/conv3d-i8a8.ts:114`) from a bytes function shared with
   `buildConv3dI8a8`, as linear i8a8 does.
+
+## Gemma 4 26B with the expert cache: a second pipeline on a device acquired with the subgroup features runs out of memory on a 12 GB GPU (filed 2026-11-16; cause not investigated)
+
+On the RTX 3080 Ti (12 GB; Node + Dawn / Vulkan), with the device acquired by `acquireGpu({ subgroups: "available" })`,
+building `gemma4-qat` / `26b` at `i4` with `expertCache: { slots: 64, hostBytes: all }`, disposing that pipeline (its
+dispose awaited) and building it again on the same device fails in the second build: `GpuOutOfMemoryError: expert pool
+allocation` (`VK_ERROR_OUT_OF_DEVICE_MEMORY`). On a device acquired by a plain `acquireGpu()` the same sequence passes —
+repeated over the 18 builds of a session A/B.
+
+- **Reproduce**: `flock /tmp/karume-gpu.lock node apps/workbench/run.ts gemma4-session-ab --model=gemma4-qat/26b
+  --preset=i4 --expertCacheSlots=64 --hostTier=all` fails within half a minute (the base probe builds and runs, the rule
+  probe's build fails); with `--subgroups=false` it passes.
+- **Blast radius**: an application that builds this model twice on one device with the subgroup features on a GPU of
+  this size (the Playground's chat page acquires its device that way; a pipeline that acquires its own device takes the
+  features its manifest asks for). One build passes. Not seen on the RTX 5070 Ti (16 GB).
+- **Not known**: whether the first pipeline's memory is not back when its dispose resolves, or the second build needs
+  more than the first; what the subgroup features change in this model's plan or allocations.
 
 ## `/gemma4-bench` split mode fails intermittently (filed 2026-11-03; playground bench split mode only)
 

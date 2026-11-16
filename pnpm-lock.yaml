@@ -302,9 +302,6 @@ importers:
       '@hdae/yomi':
         specifier: 'catalog:'
         version: '@jsr/hdae__yomi@0.4.2'
-      '@karume/candidate-rules':
-        specifier: workspace:*
-        version: link:../../packages/candidate-rules
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
@@ -378,6 +375,9 @@ importers:
 
   apps/workbench:
     dependencies:
+      '@karume/candidate-rules':
+        specifier: workspace:*
+        version: link:../../packages/candidate-rules
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
@@ -387,6 +387,9 @@ importers:
       '@karume/local-distributions':
         specifier: workspace:*
         version: link:../../packages/local-distributions
+      '@karume/models':
+        specifier: workspace:*
+        version: link:../../packages/models
       '@karume/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime

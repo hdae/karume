@@ -1,6 +1,6 @@
 /**
- * Hand-written `karume-session-ab/1` records for the session A/B page's tests: two arms, `base` and
- * `rule`, with the times and identity each case needs, and no counts (the page's arms report none
+ * Hand-written `karume-session-ab/1` records for the session A/B tests: two arms, `base` and
+ * `rule`, with the times and identity each case needs, and no counts (the Gemma arms report none
  * to the runner: the counts come from the probe). Plain data, as a stored record is.
  */
 

@@ -43,5 +43,6 @@ Who imports it (every importer; keep this list complete when one is added):
   family's own rule where there is one, and not the text encoders'.
 - `packages/e2e/tests/e2e_external_fusion_rule_test.ts`, `e2e_gemma4_26b_external_rule_test.ts` and
   `e2e_gemma4_session_ab_test.ts` — the e2e tests in the table above.
-- `apps/playground/src/models/session-ab/page.tsx` — the playground's `/session-ab` page (its Gemma 4 target passes
-  `candidate/gelu_mul`), and `apps/playground/tests/session-ab_arm_test.ts`, the test of its arms.
+- `apps/workbench/src/entries/local/gemma4-session-ab.ts` — the workbench entry `gemma4-session-ab` (its rule arm
+  passes `candidate/gelu_mul`), `apps/workbench/tests/session-ab_arm_test.ts`, the test of its arms, and
+  `apps/workbench/tests/gemma4-session-ab_entry_test.ts`, the test of its request and result.

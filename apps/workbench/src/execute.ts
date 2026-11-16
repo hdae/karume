@@ -27,7 +27,15 @@ export const executeEntry = async (options: {
   const started = performance.now();
   let settlement: Settlement;
   try {
-    const result = await entry.run({ parameters, gpuOptions, signal, progress, openDistribution });
+    const backend = options.environment.backend?.name;
+    const result = await entry.run({
+      parameters,
+      gpuOptions,
+      signal,
+      progress,
+      openDistribution,
+      ...(backend === undefined ? {} : { backend }),
+    });
     settlement = { kind: "resolved", result, aborted: signal.aborted };
   } catch (error) {
     settlement = { kind: "rejected", error, aborted: signal.aborted };

@@ -124,6 +124,11 @@ export type RunContext = {
   readonly progress: (text: string) => void;
   /** For an entry that reads a local distribution ({@link Entry.readsLocalDistribution}). */
   readonly openDistribution: OpenDistribution;
+  /**
+   * The backend's name as the host knows it — what the record's `environment.backend` holds — for
+   * an entry whose own record names the backend. Absent when a browser run declared none.
+   */
+  readonly backend?: string;
 };
 
 export type EntryResult = {
