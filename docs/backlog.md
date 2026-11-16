@@ -194,7 +194,8 @@ maintainer's ruling of 2026-11-06).
   7. **Weights from outside the exporter.** The safetensors reader and name maps, quantization at load with the block
      sha256 test, LoRA merged before quantization (Anima, then Wan2.2); example apps per model on request. GGUF is
      deferred ([research 2026-11-16](research/2026-11-16-gguf-and-quantized-kernel-generation.md): what its types
-     need from storage and kernels).
+     need from storage and kernels); the ledger's symmetric-only rule (no zero point) is re-evaluated when a format
+     that needs a minimum is taken up (the maintainer, 2026-11-16).
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.
