@@ -86,6 +86,24 @@
     "irodori-v4-small-dit-cut2/s48-s513/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "aa0b29af4218e70b6be07856d32e66bd781cc270f1f89ed13189332024e614a7"
     },
+    "moss-image-sft-vae-decoder-post/h9-w15/exact/census": {
+      "node-nvidia-geforce-rtx-3080-ti": "35138b8c8f8bd9d093e0c3edd39018e9c967aa81cf8e95471b44b234c9153153"
+    },
+    "moss-image-sft-vae-decoder-post/h9-w15/exact/outputs": {
+      "node-nvidia-geforce-rtx-3080-ti": "3074ec87f593a63ed1980b9bf8df4258da4ebcd377cd4f0e6bb42a9bba862612"
+    },
+    "sbv2-jvnv-text-encoder-cut2/t16-t129/a8/census": {
+      "node-nvidia-geforce-rtx-3080-ti": "48306d7e07c17e84c967e2565410e4963cb343bd1a1f33979736486faadecef0"
+    },
+    "sbv2-jvnv-text-encoder-cut2/t16-t129/a8/outputs": {
+      "node-nvidia-geforce-rtx-3080-ti": "cecb7dfb9cb514f1ddeb5c16c3513a3e5af696cfafed027e9031945cd04ab976"
+    },
+    "sbv2-jvnv-text-encoder-cut2/t16-t129/exact/census": {
+      "node-nvidia-geforce-rtx-3080-ti": "38693b5d8ae2a32d8baa7343969794785bfefca7cd407de42b9086cbcea2e236"
+    },
+    "sbv2-jvnv-text-encoder-cut2/t16-t129/exact/outputs": {
+      "node-nvidia-geforce-rtx-3080-ti": "5ce11a27072805928398c9e19ca238cdba6c660d6b42c48c98bea4a31cd6b4dd"
+    },
     "wan2.2-ti2v-5b-transformer-cut2/s16-s513/a8-attn8-online/census": {
       "node-nvidia-geforce-rtx-3080-ti": "b9c651c9e1e4a978686e68d4afd6f52b09519910471eaf45e508e40ae7b0cc23"
     },
@@ -103,6 +121,18 @@
     },
     "wan2.2-ti2v-5b-transformer-cut2/s16-s513/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "8ffee64a894acbbf9e170ed03e2bde3e1521dd43c7b207b979b47700ad0eb08a"
+    },
+    "wan2.2-ti2v-5b-vae-decoder-first/static/conv8/census": {
+      "node-nvidia-geforce-rtx-3080-ti": "7106c4d6ecc4c3e7e16bd101713fc22a20e795a2b6186991bd9edd5c80989c30"
+    },
+    "wan2.2-ti2v-5b-vae-decoder-first/static/conv8/outputs": {
+      "node-nvidia-geforce-rtx-3080-ti": "886f9f52112bfed4a67446b726e9aa6dbf09b89e3a8e4c59ddac6a74db54314c"
+    },
+    "wan2.2-ti2v-5b-vae-decoder-first/static/exact/census": {
+      "node-nvidia-geforce-rtx-3080-ti": "f9131aa5c2f1a9f1f15ad4228f00d1189fafceee9e7f144fe289a784a7ff7a44"
+    },
+    "wan2.2-ti2v-5b-vae-decoder-first/static/exact/outputs": {
+      "node-nvidia-geforce-rtx-3080-ti": "94c146b7d81f365e5272a3e5d176433503015f59d2172b2d1014f0c725b8ffa8"
     }
   }
 }

@@ -9,8 +9,9 @@
  * reads, and takes the stored encoding of every model-side weight left. Before writing, it runs the
  * full graph and the cut graph on generated weights, under every Session setting of the entry, on
  * every run of the entry's plan, and refuses to write unless every step dispatched the same set of
- * kernel keys in both (the cut must exercise what the whole model does). The same mirror and entry
- * give the same bytes.
+ * kernel keys in both (the cut must exercise what the whole model does). An entry without a cut
+ * takes the whole graph: its fixture is the mirror's declaration and const region as they are,
+ * with nothing to compare. The same mirror and entry give the same bytes.
  */
 
 import { mkdir, writeFile, writeTextFile } from "@karume/test-support/fs";
@@ -123,15 +124,21 @@ const main = async (): Promise<void> => {
     : undefined;
   if (full === undefined)
     throw new Error(`${entry.source.mirror} has no graph '${entry.source.graph}'`);
-  const { declaration: cut, report } = cutLayers(
-    full.declaration,
-    entry.source.layers,
-    entry.source.segment,
-  );
-  console.log(
-    `cut to layers [${report.kept.join(", ")}]: ${report.nodes} nodes, ${report.initializers} initializers, ` +
-      `${report.states.length} state slots; rewired ${report.rewired.map(([from, to]) => `${from} → ${to}`).join(", ")}`,
-  );
+  const layers = entry.source.cut;
+  let cut = full.declaration;
+  if (layers === undefined) {
+    console.log(
+      `the whole graph: ${cut.nodes.length} nodes, ${Object.keys(cut.initializers).length} initializers, ` +
+        `${Object.keys(cut.states).length} state slots`,
+    );
+  } else {
+    const { declaration, report } = cutLayers(full.declaration, layers.layers, layers.segment);
+    cut = declaration;
+    console.log(
+      `cut to layers [${report.kept.join(", ")}]: ${report.nodes} nodes, ${report.initializers} initializers, ` +
+        `${report.states.length} state slots; rewired ${report.rewired.map(([from, to]) => `${from} → ${to}`).join(", ")}`,
+    );
+  }
   const fullStorage = storageOf(full);
   const cutStorage = new Map(
     [...fullStorage].filter(([initializer]) => Object.hasOwn(cut.initializers, initializer)),
@@ -160,6 +167,28 @@ const main = async (): Promise<void> => {
     );
   }
 
+  // The fixture of a whole graph is the graph itself: there is nothing to compare it with.
+  if (layers === undefined) console.log("the whole graph: no kernel-key comparison to make");
+  else await compareKernelKeys(entry, mirror, full, fullStorage, bytes, cutStorage);
+  const urls = fixtureUrls(entry);
+  await mkdir(new URL(".", urls.graph), { recursive: true });
+  await writeFile(urls.graph, bytes);
+  await writeTextFile(urls.storage, serializeStorageTable(entry.graph, cutStorage));
+  console.log(`wrote ${urls.graph.pathname} and ${urls.storage.pathname}`);
+};
+
+/**
+ * Runs the full graph and the cut on generated weights under every setting and run of the entry,
+ * and throws unless every step dispatched the same set of kernel keys in both.
+ */
+const compareKernelKeys = async (
+  entry: CorpusEntry,
+  mirror: OpenedContainer,
+  full: BoundGraph,
+  fullStorage: ReadonlyMap<string, StoredEncoding>,
+  bytes: Uint8Array<ArrayBuffer>,
+  cutStorage: ReadonlyMap<string, StoredEncoding>,
+): Promise<void> => {
   installDawn();
   const gpu = await acquireGpu();
   try {
@@ -233,11 +262,6 @@ const main = async (): Promise<void> => {
   } finally {
     gpu.destroy();
   }
-  const urls = fixtureUrls(entry);
-  await mkdir(new URL(".", urls.graph), { recursive: true });
-  await writeFile(urls.graph, bytes);
-  await writeTextFile(urls.storage, serializeStorageTable(entry.graph, cutStorage));
-  console.log(`wrote ${urls.graph.pathname} and ${urls.storage.pathname}`);
 };
 
 if (import.meta.main) await main();

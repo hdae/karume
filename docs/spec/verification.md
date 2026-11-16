@@ -7,8 +7,8 @@ What is built now. Reasons are in ADR [0152](../decisions/0152-maintained-specs-
 ## The regression corpus
 
 The corpus runs the graphs of real models inside the runtime's own tests (`packages/runtime/tests/gpu_corpus_test.ts`,
-core lane, real GPU). An entry is a real model's graph cut to a few layers, run on weights generated from a seed by a
-driver that knows only the declaration. It reads no real weights, no distribution mirror, and imports neither
+core lane, real GPU). An entry is a real model's graph — cut to a few layers, or whole when it is small — run on
+weights generated from a seed by a driver that knows only the declaration. It reads no real weights, no distribution mirror, and imports neither
 `packages/models` nor `packages/hub`.
 
 ### An entry
@@ -20,9 +20,10 @@ An entry (`packages/runtime/tests/corpus/entries.ts`) is:
   the distribution stores each model-side weight in, which a graph container does not carry).
 - **A seed** for the weights and the inputs.
 - **A plan**: the symbol that is the rows of a step, the values of the other input symbols, the states-only symbol that
-  sizes the state slots with its value per run, and the runs — each a list of steps given by their rows. On a graph
-  with state slots the steps of a run follow one another (a prefill, then appended steps); on a graph without, they
-  are independent runs of the graph at those rows.
+  sizes the state slots with its value per run, and the runs — each a list of steps given by their rows. A plan
+  without a row symbol gives each step the value of every input symbol by name (several symbols, or none on a graph
+  whose shapes are all static). On a graph with state slots the steps of a run follow one another (a prefill, then
+  appended steps); on a graph without, they are independent runs of the graph.
 - **Settings**: the Session settings the entry is checked under, each with a name and its kind. A setting of kind
   *level* is a level alone (`exact`, `reorder`); a setting of kind *approximation* names an approximation. Every
   entry has `exact`.
@@ -30,7 +31,7 @@ An entry (`packages/runtime/tests/corpus/entries.ts`) is:
 Widths are the real model's: the kernels a level selects are listed for real shapes, so a narrower graph would select
 none of them. What an entry cuts is depth. It keeps layers that together dispatch every kernel key the full graph
 dispatches under the entry's settings, the layers those read values or state slots from, and the layer that computes
-the graph's outputs.
+the graph's outputs. A graph whose layers are not a numbered chain is taken whole.
 
 | Entry | Graph | Kept layers | Settings |
 | --- | --- | --- | --- |
@@ -38,13 +39,17 @@ the graph's outputs.
 | `gemma4-qat-mobile-e2b-cut3` | Gemma 4 QAT E2B of the mobile line, `model`; weights `int4-sym-g` (groups 512, 2048, 4096), `int2-off`, `int8-sym` and f32; a `static_quantize` around every linear | 13, 14, 34 of 35 | `exact`, `reorder`, `packed` (`reorder` with `packedStaticQuantize`), `integer` (`packed` with `integerGemv`) |
 | `irodori-v4-small-dit-cut2` | Irodori v4-small, `dit`; no state slots; weights `int8-sym`; attention built from `bmm` and `safe_softmax` | blocks 0, 11 of 12 | `exact`, `a8` (`linearCompute: "a8"`) |
 | `wan2.2-ti2v-5b-transformer-cut2` | Wan2.2 TI2V-5B, `transformer`; no state slots; weights `int8-sym`; the `attention` op | blocks 28, 29 of 30 | `exact`, `a8-attn8-s16` (`linearCompute` and `attentionCompute` `"a8"`, `attentionScoreStorage: "f16"`), `a8-attn8-online` (the same with `attentionScoreStorage: "none"`) |
+| `wan2.2-ti2v-5b-vae-decoder-first` | Wan2.2 TI2V-5B, `vae_decoder_first`; every shape static; `conv3d` and `conv2d` with `int8-sym` weights | whole graph | `exact`, `conv8` (`convCompute: "a8"`) |
+| `moss-image-sft-vae-decoder-post` | MOSS-Image, `vae_decoder_post`; symbols `h` and `w`; `conv2d` and `group_norm`, f32 weights | whole graph | `exact` |
+| `sbv2-jvnv-text-encoder-cut2` | Style-Bert-VITS2 JVNV, `text_encoder` (a DeBERTa); i32 inputs; `int8-sym` weights; attention built from `bmm`, `masked_fill` and `softmax` | 0, 21 of 22 | `exact`, `a8` (`linearCompute: "a8"`) |
 
 - The two Gemma entries have two runs: a prefill of 8 rows, then 4 steps of 1 row; a prefill of 64 rows, then 4 steps
   of 1 row.
-- The two entries without state slots have one run of two steps: 48 and 513 rows (Irodori), 16 and 513 rows (Wan2.2).
-  The rows are chosen so that the two steps dispatch the largest set of kernel keys two values can reach; kernel keys
-  that only other row counts select are not run. `reorder` dispatches the kernels of `exact` on these two graphs and
-  is not a setting of theirs.
+- The other entries have one run of independent steps: 48 and 513 rows (Irodori), 16 and 513 rows (Wan2.2 DiT), 16 and
+  129 rows (the text encoder), `h` 9 and `w` 15 (the MOSS-Image decoder), one step with nothing to bind (the Wan2.2
+  decoder). The values are chosen so that the steps dispatch the largest set of kernel keys that many values can
+  reach; kernel keys that only other values select are not run. `reorder` dispatches the kernels of `exact` on these
+  five graphs and is not a setting of theirs.
 
 ### Generated weights
 
@@ -56,10 +61,13 @@ the graph's outputs.
 | Role | Read by | Values |
 | --- | --- | --- |
 | linear weight | `linear` slot 1 (also when `embedding` slot 0 reads the same table) | levels drawn uniformly, every scale 1/(sqrt(fan-in) · d), d the standard deviation of the levels: `int4-sym-g` levels [-7, 7]; `int2-off` all four codes, levels [-2, 1]; `int8-sym` levels [-127, 127]; f32 U(-1, 1) |
-| norm weight | `rms_norm` slot 1, `layer_norm` slot 1 | 1 + U(-0.1, 0.1) |
+| norm weight | slot 1 of `rms_norm`, `layer_norm`, `group_norm` | 1 + U(-0.1, 0.1) |
 | operand | `mul` slot 1 | U(-1, 1) |
-| bias | `linear` slot 2, `layer_norm` slot 2 | U(-0.1, 0.1) |
+| convolution weight | `conv1d` / `conv2d` / `conv3d` slot 1 | the linear rule with fan-in the product of the dimensions after the first |
+| embedding table | `embedding` slot 0, when no `linear` reads the table | the linear rule with fan-in 1 |
+| bias | slot 2 of `linear`, `conv1d` / `conv2d` / `conv3d`, `layer_norm`, `group_norm` | U(-0.1, 0.1) |
 | additive operand | `add` slot 0 or 1 | U(-0.1, 0.1) |
+| normalised table | `layer_norm` slot 0 | U(-1, 1) |
 
 - An initializer read by anything else, by consumers that ask for different rules, or stored in a codec without a rule
   fails with its name and what reads it. There is no fallback rule.
@@ -69,9 +77,12 @@ the graph's outputs.
 
 ### The driver
 
-- The inputs of a step are drawn from what reads them (`packages/runtime/tests/corpus/driver.ts`): an i32 input read
-  as an `embedding` index is drawn below the table's row count; an f32 input is U(-1, 1); a bool input is all ones.
-  Any other i32 input fails with its name.
+- The inputs of a step are drawn from what reads them (`packages/runtime/tests/corpus/driver.ts`): an f32 input is
+  U(-1, 1); a bool input is all ones; an i32 input is an index or a mask.
+  - An index: every reader, through `reshape` / `expand` / `permute`, is `embedding` slot 1 or `gather` slot 1. It is
+    drawn below the shortest axis it indexes (the table's rows; the last axis of the gathered value).
+  - A mask: every path of its integer values ends in a `cast`, at least one of them to bool. It is all ones.
+  - Any other i32 input fails with its name.
 - Dimension expressions are evaluated with the runtime's dimension grammar.
 - A graph with state slots runs each run through one generation context: the first step is the prefill, later steps
   append. A graph without state slots runs each step directly.
@@ -92,6 +103,11 @@ Per entry and per run, with Sessions opened one after another on the same genera
 
 - A setting of kind *approximation* is not compared with another plan: the packed activations and the integer GEMV
   are forms of the linear→static_quantize fusion and do not run with the rule disabled.
+- An entry whose graph no fusion rule matches under a level says so (the text encoder). Its check is then that no rule
+  fires; a rule that starts to match fails it.
+- An entry whose outputs are very large keeps the sha256 of each output's words as the artifact of its output rows
+  instead of the words (the Wan2.2 decoder, 458 MB of outputs per Session).
+- In f32 weights the one level is one unit in the last place.
 - The element that moves one level is named by the entry. In the mobile entry it is in the tied table: a level of a
   layer weight there moves its linear's output by less than the quantization step that follows.
 
@@ -122,6 +138,6 @@ Per entry and per run, with Sessions opened one after another on the same genera
   a block). The cut rewires the residual value across each removed range and removes what nothing reads any more,
   graph inputs included. It fails when the boundary is not a single residual value, when a kept layer reads a value or
   a state slot of a removed layer, or when a graph output is computed in a removed layer.
-- The tool refuses to write unless the cut dispatches the same set of kernel keys as the full graph, step by step, at
-  both levels, on generated weights.
+- The tool refuses to write unless the cut dispatches the same set of kernel keys as the full graph, step by step,
+  under every setting of the entry, on generated weights. An entry that takes the whole graph has no such comparison.
 - The entry's rows for a machine are created with `KARUME_REFERENCE=write vp test packages/runtime/tests/gpu_corpus_test.ts`.

@@ -111,6 +111,35 @@ const F32_ADDITIVE: TensorSpec = {
   encoding: { codec: "f32" },
 };
 
+/** A conv3d weight [out, in, kt, kh, kw]: the linear rule with fan-in 2 · 1 · 3 · 3. */
+const INT8_CONVOLUTION: TensorSpec = {
+  name: "pin.conv.weight",
+  shape: [4, 2, 1, 3, 3],
+  role: { kind: "convolution", fanIn: 18 },
+  encoding: { codec: "int8-sym", groupSize: 18 },
+};
+/** A conv2d weight [out, in, kh, kw]. */
+const F32_CONVOLUTION: TensorSpec = {
+  name: "pin.conv.weight",
+  shape: [4, 2, 3, 3],
+  role: { kind: "convolution", fanIn: 18 },
+  encoding: { codec: "f32" },
+};
+/** An embedding table no linear reads: standard deviation 1. */
+const INT8_EMBEDDING: TensorSpec = {
+  name: "pin.embedding.weight",
+  shape: [8, 6],
+  role: { kind: "embedding" },
+  encoding: { codec: "int8-sym", groupSize: 6 },
+};
+/** A table that is normalised (the data input of a layer norm). */
+const F32_NORMALIZED: TensorSpec = {
+  name: "pin.rel_embeddings.weight",
+  shape: [4, 8],
+  role: { kind: "normalized" },
+  encoding: { codec: "f32" },
+};
+
 const f32Values = (bytes: Uint8Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
   new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 
@@ -180,6 +209,87 @@ const blockDeclaration = (): IrDeclaration =>
       },
       { op: "linear", ins: ["l", "w", "wb"], outs: ["h"], attrs: {} },
       { op: "add", ins: ["table", "h"], outs: ["y"], attrs: {} },
+    ],
+  } satisfies DeclarationJson);
+
+/**
+ * `conv1d`, `conv2d` → `group_norm`, `conv3d`, each with weight and bias, and a table normalised by
+ * `layer_norm` (a relative-position table).
+ */
+const convolutionDeclaration = (): IrDeclaration =>
+  parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["conv1d", "conv2d", "conv3d", "group_norm", "layer_norm"] },
+    symbols: [],
+    inputs: [
+      { name: "x1", dtype: "f32", shape: [1, 2, 8] },
+      { name: "x2", dtype: "f32", shape: [1, 2, 8, 8] },
+      { name: "x3", dtype: "f32", shape: [1, 2, 2, 8, 8] },
+    ],
+    outputs: ["y1", "g", "y3", "r"],
+    initializers: {
+      "c1.weight": {},
+      "c1.bias": {},
+      "c2.weight": {},
+      "c2.bias": {},
+      "c3.weight": {},
+      "c3.bias": {},
+      "gn.weight": {},
+      "gn.bias": {},
+      rel: {},
+      "ln.weight": {},
+      "ln.bias": {},
+    },
+    values: {
+      "c1.weight": { dtype: "f32", shape: [4, 2, 3] },
+      "c1.bias": { dtype: "f32", shape: [4] },
+      "c2.weight": { dtype: "f32", shape: [4, 2, 3, 3] },
+      "c2.bias": { dtype: "f32", shape: [4] },
+      "c3.weight": { dtype: "f32", shape: [4, 2, 1, 3, 3] },
+      "c3.bias": { dtype: "f32", shape: [4] },
+      "gn.weight": { dtype: "f32", shape: [4] },
+      "gn.bias": { dtype: "f32", shape: [4] },
+      rel: { dtype: "f32", shape: [6, 4] },
+      "ln.weight": { dtype: "f32", shape: [4] },
+      "ln.bias": { dtype: "f32", shape: [4] },
+      y1: { dtype: "f32", shape: [1, 4, 6] },
+      y2: { dtype: "f32", shape: [1, 4, 6, 6] },
+      g: { dtype: "f32", shape: [1, 4, 6, 6] },
+      y3: { dtype: "f32", shape: [1, 4, 2, 6, 6] },
+      r: { dtype: "f32", shape: [6, 4] },
+    },
+    nodes: [
+      {
+        op: "conv1d",
+        ins: ["x1", "c1.weight", "c1.bias"],
+        outs: ["y1"],
+        attrs: { dilation: 1, groups: 1, padding: 0, stride: 1 },
+      },
+      {
+        op: "conv2d",
+        ins: ["x2", "c2.weight", "c2.bias"],
+        outs: ["y2"],
+        attrs: { dilation: [1, 1], groups: 1, padding: [0, 0], stride: [1, 1] },
+      },
+      {
+        op: "group_norm",
+        ins: ["y2", "gn.weight", "gn.bias"],
+        outs: ["g"],
+        attrs: { eps: 1e-6, num_groups: 2 },
+      },
+      {
+        op: "conv3d",
+        ins: ["x3", "c3.weight", "c3.bias"],
+        outs: ["y3"],
+        attrs: { dilation: [1, 1, 1], groups: 1, padding: [0, 0, 0], stride: [1, 1, 1] },
+      },
+      {
+        op: "layer_norm",
+        ins: ["rel", "ln.weight", "ln.bias"],
+        outs: ["r"],
+        attrs: { eps: 1e-7, normalized_shape: [4] },
+      },
     ],
   } satisfies DeclarationJson);
 
@@ -283,6 +393,34 @@ describe("the generator's bytes are pinned per codec and role", () => {
       "a27e04cc10f8d84e12048e9d9c4567bf5c18db07bc218f91f7548a72f7329a18",
     );
   });
+
+  it("an int8-sym convolution weight [4, 2, 1, 3, 3]", async () => {
+    assertEquals(
+      await digest(generateTensor(INT8_CONVOLUTION, SEED)),
+      "e56ab7c27edcf6158fc347acba75a3ca62a1a346e8b71f5536ee1c2ec060dbb2",
+    );
+  });
+
+  it("an f32 convolution weight [4, 2, 3, 3]", async () => {
+    assertEquals(
+      await digest(generateTensor(F32_CONVOLUTION, SEED)),
+      "681b988b31b70c6202cc3e0738fa23e273549ebcb4e869bfeae861856d9c85dc",
+    );
+  });
+
+  it("an int8-sym embedding table [8, 6] no linear reads", async () => {
+    assertEquals(
+      await digest(generateTensor(INT8_EMBEDDING, SEED)),
+      "f2b480143c5f2157bf86e8cc21c302fcb091b68e3a7a7048ba5593665ca55322",
+    );
+  });
+
+  it("an f32 table that is normalised [4, 8]", async () => {
+    assertEquals(
+      await digest(generateTensor(F32_NORMALIZED, SEED)),
+      "ba66973e177c0610548c7a85dff45fa910e3854b281b9744101a414094208b77",
+    );
+  });
 });
 
 describe("the generator's values", () => {
@@ -344,6 +482,32 @@ describe("the generator's values", () => {
     }
   });
 
+  it("a convolution weight has the bytes of the linear weight [out, fan-in] of the same name", () => {
+    for (const spec of [INT8_CONVOLUTION, F32_CONVOLUTION]) {
+      const convolution = generateTensor(spec, SEED);
+      const linear = generateTensor(
+        { ...spec, shape: [4, 18], role: { kind: "linear", fanIn: 18 } },
+        SEED,
+      );
+      assertEquals(convolution.bytes, linear.bytes);
+      assertEquals(convolution.scale, linear.scale);
+    }
+  });
+
+  it("an embedding table stores q in [-127, 127] and every row scale 1/sqrt((255² − 1)/12) (fan-in 1)", () => {
+    const tensor = generateTensor({ ...INT8_EMBEDDING, shape: [64, 6] }, SEED);
+    assert(new Int8Array(tensor.bytes.buffer).every((q) => q !== -128));
+    assertEquals(tensor.scale?.byteLength, 64 * 4);
+    const expected = Math.fround(1 / Math.sqrt((255 * 255 - 1) / 12));
+    assert(f32Values(tensor.scale ?? new Uint8Array(0)).every((value) => value === expected));
+  });
+
+  it("a table that is normalised lies in [-1, 1)", () => {
+    const values = f32Values(generateTensor({ ...F32_NORMALIZED, shape: [4096] }, SEED).bytes);
+    assert(values.every((v) => v >= -1 && v < 1));
+    assert(values.some((v) => v < -0.9) && values.some((v) => v > 0.9));
+  });
+
   it("the bytes follow the seed and the initializer's name", async () => {
     const base = await digest(generateTensor(F32_NORM, SEED));
     assertEquals(await digest(generateTensor(F32_NORM, SEED)), base);
@@ -384,11 +548,29 @@ describe("the generator's values", () => {
     assertEquals(level(perturbOneLevel(INT8_LINEAR.name, top).bytes), 126);
   });
 
+  it("moving one level of an f32 weight moves element 0 one unit in the last place, away from zero", () => {
+    const tensor = generateTensor(F32_LINEAR, SEED);
+    const moved = perturbOneLevel(F32_LINEAR.name, tensor);
+    const before = f32Values(tensor.bytes);
+    const after = f32Values(moved.bytes);
+    assertEquals(new Uint32Array(after.buffer)[0] - new Uint32Array(before.buffer)[0], 1);
+    assert(Math.abs(after[0]) > Math.abs(before[0]));
+    assertEquals(after.subarray(1), before.subarray(1));
+    // At the largest finite magnitude it moves down, never to an infinity.
+    const largest = {
+      ...tensor,
+      bytes: new Uint8Array(Float32Array.of(-3.4028234663852886e38).buffer),
+    };
+    const down = f32Values(perturbOneLevel(F32_LINEAR.name, largest).bytes)[0];
+    assert(Number.isFinite(down) && down > -3.4028234663852886e38);
+  });
+
   it("moving one level of a codec without the rule throws", () => {
+    const tensor: GeneratedTensor = { encoding: { codec: "f16" }, bytes: new Uint8Array(8) };
     assertThrows(
-      () => perturbOneLevel(F32_LINEAR.name, generateTensor(F32_LINEAR, SEED)),
+      () => perturbOneLevel("pin.half.weight", tensor),
       CorpusWeightError,
-      "perturbing one level is defined for int4-sym-g, int2-off, int8-sym, not 'f32'",
+      "perturbing one level is defined for int4-sym-g, int2-off, int8-sym, f32, not 'f16'",
     );
   });
 });
@@ -434,16 +616,40 @@ describe("an initializer's role comes from its consumers", () => {
     );
   });
 
-  it("an embedding table no linear reads has no rule", () => {
+  it("an embedding table no linear reads is an embedding table", () => {
     const document = toyDocument();
     document.nodes.pop();
     document.outputs = ["y"];
     delete document.values.logits;
-    assertThrows(
-      () => initializerRole(parseIrDeclarationValue(document), "table"),
-      CorpusWeightError,
-      "initializer 'table' is read only as an embedding table",
-    );
+    assertEquals(initializerRole(parseIrDeclarationValue(document), "table"), {
+      kind: "embedding",
+    });
+  });
+
+  it("conv1d, conv2d and conv3d slot 1 are convolution weights whose fan-in is every dimension after the first", () => {
+    assertEquals(initializerRole(convolutionDeclaration(), "c1.weight"), {
+      kind: "convolution",
+      fanIn: 2 * 3,
+    });
+    assertEquals(initializerRole(convolutionDeclaration(), "c2.weight"), {
+      kind: "convolution",
+      fanIn: 2 * 3 * 3,
+    });
+    assertEquals(initializerRole(convolutionDeclaration(), "c3.weight"), {
+      kind: "convolution",
+      fanIn: 2 * 1 * 3 * 3,
+    });
+  });
+
+  it("convolution and group_norm slot 2 are biases; group_norm slot 1 is a norm weight", () => {
+    for (const name of ["c1.bias", "c2.bias", "c3.bias", "gn.bias"]) {
+      assertEquals(initializerRole(convolutionDeclaration(), name), { kind: "bias" });
+    }
+    assertEquals(initializerRole(convolutionDeclaration(), "gn.weight"), { kind: "norm" });
+  });
+
+  it("an initializer read as the data input of layer_norm is a table that is normalised", () => {
+    assertEquals(initializerRole(convolutionDeclaration(), "rel"), { kind: "normalized" });
   });
 });
 

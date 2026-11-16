@@ -1,6 +1,7 @@
 // The runtime's regression corpus on a real GPU: each entry's graph (a real model cut to a few
-// layers — tests/corpus/entries.ts) runs on weights generated from its seed, through a driver that
-// knows only the declaration. No real weights, no models or hub code, no read of models/.
+// layers, or whole — tests/corpus/entries.ts) runs on weights generated from its seed, through a
+// driver that knows only the declaration. No real weights, no models or hub code, no read of
+// models/.
 //
 // Each entry lists the Session settings it is checked under (entries.ts); a setting made of a level
 // alone promises the bits of its unfused plan, one that names an approximation promises nothing
@@ -9,7 +10,7 @@
 // 1. fusion identity, for every setting made of a level alone — the setting and the same setting
 //    with every fusion rule disabled give the same output words at every step, and the comparison
 //    is not vacuous (the fused side's rule counters are above 0 at every step, the plain side's
-//    are 0);
+//    are 0). An entry whose graph no rule matches says so, and the check is that none fires;
 // 2. determinism, for every setting — two Sessions give the same words;
 // 3. the comparison can fail — at `exact`, weights one quantization level apart in one element
 //    give other words;
@@ -18,7 +19,8 @@
 // 5. outputs are finite and vary, for every setting;
 // 6. sha256 rows per environment (ADR 0106 — helpers/reference.ts): per setting, one row for the
 //    output words of every step and one for the census (kernel keys with their dispatch counts and
-//    the fusion counters, per step), the artifacts kept the way that mechanism keeps them;
+//    the fusion counters, per step), the artifacts kept the way that mechanism keeps them (an
+//    entry with very large outputs keeps the sha256 of each output instead of its words);
 // 7. the distance of every other setting from `exact` per step goes to the results as information.
 //    It is never asserted: an end-to-end tolerance cannot tell a defect from a reordering, and the
 //    sha256 rows are never replaced by one.
@@ -36,7 +38,13 @@ import {
   type SessionOptions,
 } from "../src/runtime/executor.ts";
 import { FUSION_RULES } from "../src/runtime/fusion.ts";
-import { type CorpusRun, driveRun, type StepOutput, type StepResult } from "./corpus/driver.ts";
+import {
+  type CorpusRun,
+  describeStep,
+  driveRun,
+  type StepOutput,
+  type StepResult,
+} from "./corpus/driver.ts";
 import { CORPUS_ENTRIES, type CorpusEntry, type CorpusSetting } from "./corpus/entries.ts";
 import { openCorpusFixture } from "./corpus/fixture.ts";
 import { constSideOf, corpusSupply } from "./corpus/supply.ts";
@@ -50,6 +58,7 @@ import {
   type ReferenceSettlement,
   registerReferenceGate,
   settleReference,
+  sha256Hex,
 } from "./helpers/reference.ts";
 import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { buildSafetensors } from "./helpers/safetensors.ts";
@@ -87,8 +96,8 @@ const exactOf = (entry: CorpusEntry): CorpusSetting => {
 
 /**
  * The Sessions every run of `entry` is driven through, in the order they are opened: per setting,
- * two Sessions, and a third with every fusion rule disabled when the setting is a level alone; then
- * the perturbed weights at `exact`.
+ * two Sessions, and a third with every fusion rule disabled when the setting is a level alone (and
+ * the entry does not say that no rule matches its graph); then the perturbed weights at `exact`.
  */
 const sidesOf = (entry: CorpusEntry): readonly Side[] => {
   const names = entry.settings.map((setting) => setting.name);
@@ -101,7 +110,7 @@ const sidesOf = (entry: CorpusEntry): readonly Side[] => {
     ...entry.settings.flatMap((setting): Side[] => [
       { id: setting.name, weights: "base", options: setting.options },
       { id: againOf(setting), weights: "base", options: setting.options },
-      ...(setting.kind === "level"
+      ...(setting.kind === "level" && entry.fusion !== "none"
         ? [
             {
               id: unfusedOf(setting),
@@ -186,7 +195,8 @@ const censusText = (steps: readonly StepResult[]): string =>
         .filter(([, count]) => count !== undefined && count !== 0)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([name, count]) => `  fusion ${name} ${String(count)}`);
-      return [`step ${index} rows ${step.rows}`, ...kernels, ...fusions].join("\n");
+      const label = describeStep(step.step);
+      return [`step ${index}${label === "" ? "" : ` ${label}`}`, ...kernels, ...fusions].join("\n");
     })
     .join("\n")
     .concat("\n");
@@ -212,6 +222,25 @@ const distanceOf = (exact: StepResult, other: StepResult): string =>
       return `${output.name} maxAbs ${maxAbs.toExponential(2)} maxRel ${maxRel.toExponential(2)}`;
     })
     .join(", ");
+
+/**
+ * The artifact of a run's outputs for an entry whose outputs are too large to keep per run: one
+ * line per output with the sha256 of its words, in step and declaration order.
+ */
+const outputsDigests = async (steps: readonly StepResult[]): Promise<Uint8Array<ArrayBuffer>> => {
+  const lines: string[] = [];
+  for (const [index, step] of steps.entries()) {
+    for (const output of step.outputs) {
+      const digest = await sha256Hex(
+        new Uint8Array(output.words.buffer, output.words.byteOffset, output.words.byteLength),
+      );
+      lines.push(
+        `step ${index} ${output.name} ${output.dtype} [${output.shape.join(",")}] ${digest}`,
+      );
+    }
+  }
+  return new TextEncoder().encode(`${lines.join("\n")}\n`);
+};
 
 const rowId = (
   entry: CorpusEntry,
@@ -316,12 +345,31 @@ for (const entry of CORPUS_ENTRIES) {
 
     afterAll(() => {
       gpu?.destroy();
+      // Every side's output words stay here until the entry's cases are done (hundreds of MiB for
+      // a whole graph that returns its caches): release them before the next entry runs.
+      outcome = undefined;
     });
 
     for (const run of entry.plan.runs) {
-      describe(`run ${run.name} (steps ${run.steps.join(", ")})`, () => {
+      const steps = run.steps.map((step) =>
+        typeof step === "number" ? String(step) : `{${describeStep(step)}}`,
+      );
+      describe(`run ${run.name} (steps ${steps.join(", ")})`, () => {
         for (const setting of entry.settings) {
           if (setting.kind !== "level") continue;
+          if (entry.fusion === "none") {
+            it(`no fusion rule fires at ${setting.name} (the entry says none matches its graph)`, () => {
+              for (const [index, step] of outcomeOf(setting.name, run).entries()) {
+                const fired = ruleCounters(step).filter(([, count]) => count !== 0);
+                assertEquals(
+                  fired,
+                  [],
+                  `step ${index}: a rule fired — drop the entry's fusion: "none" so that the unfused plan is compared`,
+                );
+              }
+            });
+            continue;
+          }
           it(`fusion identity: ${setting.name} with every fusion rule disabled gives the same words at every step`, () => {
             const fused = outcomeOf(setting.name, run);
             const plain = outcomeOf(unfusedOf(setting), run);
@@ -389,12 +437,18 @@ for (const entry of CORPUS_ENTRIES) {
           const stem = `${entry.name}.${run.name}.${setting.name}`;
           it.skipIf(references.lacksReference(outputsId))(
             `${setting.name}: the output words of every step equal this machine's sha256 row`,
-            () =>
-              settleRow(
-                outputsId,
-                `${stem}.outputs.safetensors`,
-                outputsArtifact(outcomeOf(setting.name, run)),
-              ),
+            async () =>
+              entry.outputsArtifact === "digests"
+                ? settleRow(
+                    outputsId,
+                    `${stem}.outputs.txt`,
+                    await outputsDigests(outcomeOf(setting.name, run)),
+                  )
+                : settleRow(
+                    outputsId,
+                    `${stem}.outputs.safetensors`,
+                    outputsArtifact(outcomeOf(setting.name, run)),
+                  ),
           );
           it.skipIf(references.lacksReference(censusId))(
             `${setting.name}: the census of every step equals this machine's sha256 row`,

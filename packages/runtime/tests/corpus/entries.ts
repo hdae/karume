@@ -1,6 +1,6 @@
 /**
- * The regression corpus's entries: the graph of a real model, cut to a few layers, run on generated
- * weights by a driver that knows only the declaration.
+ * The regression corpus's entries: the graph of a real model, cut to a few layers or whole, run on
+ * generated weights by a driver that knows only the declaration.
  *
  * An entry's fixture is a graph container (`<name>.krg` — the declaration and its const region)
  * and the storage table (`<name>.storage.json` — the codec the distribution stores each model-side
@@ -52,15 +52,33 @@ export type CorpusEntry = {
   readonly plan: CorpusPlan;
   /** The Session settings the entry is checked under. */
   readonly settings: readonly CorpusSetting[];
-  /** A quantized weight whose element 0 moves one level, to show the comparisons can fail. */
+  /**
+   * `"none"` when no fusion rule matches the graph under the entry's level settings: there is no
+   * unfused plan to compare with, so the check is that no rule fires (a rule that starts to match
+   * fails it, and the entry then drops this field to get the comparison). Absent otherwise.
+   */
+  readonly fusion?: "none";
+  /**
+   * `"digests"` when the outputs are too large to keep per run: the outputs row's artifact then
+   * lists the sha256 of each output's words instead of holding the words (a mismatch shows which
+   * outputs differ, not the bytes). Absent otherwise.
+   */
+  readonly outputsArtifact?: "digests";
+  /**
+   * A stored weight whose element 0 moves one level (one unit in the last place in f32), to show
+   * the comparisons can fail.
+   */
   readonly perturbed: string;
-  /** Where `author.ts` cuts the entry from (relative to the repository root; read-only). */
+  /** Where `author.ts` takes the entry from (relative to the repository root; read-only). */
   readonly source: {
     readonly mirror: string;
     readonly graph: string;
-    /** The module path segment the layers are numbered by (`<segment>.<n>.` in initializer names). */
-    readonly segment: string;
-    readonly layers: readonly number[];
+    /** The layers the fixture keeps; absent when the entry takes the whole graph. */
+    readonly cut?: {
+      /** The module path segment the layers are numbered by (`<segment>.<n>.` in initializer names). */
+      readonly segment: string;
+      readonly layers: readonly number[];
+    };
   };
 };
 
@@ -96,8 +114,7 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-gemma4-qat/e2b/model/model.i4.krm",
       graph: "model",
-      segment: "layers",
-      layers: [13, 14, 15, 34],
+      cut: { segment: "layers", layers: [13, 14, 15, 34] },
     },
   },
   {
@@ -141,8 +158,7 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-gemma4-qat-mobile/e2b/model/model.i4.krm",
       graph: "model",
-      segment: "layers",
-      layers: [13, 14, 34],
+      cut: { segment: "layers", layers: [13, 14, 34] },
     },
   },
   {
@@ -178,8 +194,7 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-irodori-v4-small/v4-small/dit/model.i8.krm",
       graph: "dit",
-      segment: "blocks",
-      layers: [0, 11],
+      cut: { segment: "blocks", layers: [0, 11] },
     },
   },
   {
@@ -233,8 +248,97 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-wan2.2/ti2v-5b/transformer/model.i8.krm",
       graph: "transformer",
-      segment: "blocks",
-      layers: [28, 29],
+      cut: { segment: "blocks", layers: [28, 29] },
+    },
+  },
+  {
+    // Wan2.2 TI2V-5B, `vae_decoder_first`, the whole graph: every shape static, no state slots,
+    // int8-sym conv3d / conv2d weights, the latent and about thirty causal-conv caches in, the
+    // frames and the next caches out. Its preset's VAE Session takes conv3d with int8 activations
+    // (`convCompute: "a8"`); `reorder` dispatches the same kernels as `exact` here.
+    name: "wan2.2-ti2v-5b-vae-decoder-first",
+    // Its outputs are 458 MB per Session (the decoder returns every cache).
+    outputsArtifact: "digests",
+    graph: "vae_decoder_first",
+    seed: 1,
+    plan: {
+      bindings: {},
+      // One step, nothing to bind.
+      runs: [{ name: "static", steps: [{}] }],
+    },
+    settings: [
+      EXACT,
+      {
+        name: "conv8",
+        kind: "approximation",
+        options: { numerics: { level: "exact" }, convCompute: "a8" },
+      },
+    ],
+    // The output convolution: element 0 reaches every pixel of output channel 0.
+    perturbed: "decoder.conv_out.weight",
+    source: {
+      mirror: "models/karume-wan2.2/ti2v-5b/vae_decoder_first/model.i8.krm",
+      graph: "vae_decoder_first",
+    },
+  },
+  {
+    // MOSS-Image, `vae_decoder_post`, the whole graph: f32 conv2d and group_norm weights, no state
+    // slots, the spatial size bound by two symbols (`hidden` [1,384,h,w] → [1,3,8h,8w]). No preset
+    // gives it session settings; `reorder` dispatches the same kernels as `exact` here.
+    name: "moss-image-sft-vae-decoder-post",
+    graph: "vae_decoder_post",
+    seed: 1,
+    plan: {
+      bindings: {},
+      runs: [
+        // One step: a width that is not a multiple of 4 dispatches every kernel key any (h, w)
+        // selects (the convolutions without v4 beside those with it); h ≠ w, so the two symbols
+        // cannot stand in for each other.
+        { name: "h9-w15", steps: [{ h: 9, w: 15 }] },
+      ],
+    },
+    settings: [EXACT],
+    // The output convolution (f32: one unit in the last place): element 0 reaches every pixel of
+    // output channel 0.
+    perturbed: "decoder.conv_out.weight",
+    source: {
+      mirror: "models/karume-moss-image/sft/vae_decoder_post/model.f32.krm",
+      graph: "vae_decoder_post",
+    },
+  },
+  {
+    // Style-Bert-VITS2 JVNV, `text_encoder` (a DeBERTa): i32 inputs — token ids, a mask and two
+    // relative-position index tables read by gather — int8-sym linear weights, attention built
+    // from bmm, masked_fill and softmax with three summed scores. Layers 0 and 21 of 22 (21
+    // computes the output). No fusion rule matches it at a level alone; under int8 linear
+    // activations the linear prologue fuses.
+    name: "sbv2-jvnv-text-encoder-cut2",
+    graph: "text_encoder",
+    seed: 1,
+    plan: {
+      rowSymbol: "T",
+      bindings: {},
+      runs: [
+        // One run of two independent steps. 16 rows: conv1d with v4, bmm in 16×16 tiles, the GEMVs
+        // of the linears. 129 rows: conv1d without v4, bmm in 64×64 tiles, the 64×64 GEMM, the
+        // other i8a8 tile.
+        { name: "t16-t129", steps: [16, 129] },
+      ],
+    },
+    settings: [
+      EXACT,
+      {
+        name: "a8",
+        kind: "approximation",
+        options: { numerics: { level: "exact" }, linearCompute: "a8" },
+      },
+    ],
+    fusion: "none",
+    perturbed: "model.encoder.layer.21.output.dense.weight",
+    source: {
+      mirror: "models/karume-sbv2-jvnv/shared/text_encoder/model.i8.krm",
+      graph: "text_encoder",
+      cut: { segment: "layer", layers: [0, 21] },
     },
   },
 ];

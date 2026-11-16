@@ -11,10 +11,14 @@
  *   `int2-off`, all four codes u = q + 2 for q in [-2, 1], d = sqrt(5/4), one scale per row; in
  *   `int8-sym`, q uniform in [-127, 127] (stored as a signed byte), d = sqrt((255² − 1)/12), one
  *   scale per row; in `f32`, U(-1, 1) times 1/(sqrt(fanIn) · sqrt(1/3));
+ * - a convolution weight takes the linear rule with fanIn the product of its dimensions after the
+ *   first (input channels per group × kernel extent);
+ * - an embedding table no linear reads takes the linear rule with fanIn 1 (standard deviation 1);
  * - a norm weight is near 1 (1 + U(-0.1, 0.1));
  * - an elementwise operand (a layer scalar, an embedding scale) is U(-1, 1);
- * - a bias (of a linear or a layer norm) is U(-0.1, 0.1);
- * - an additive operand (a modulation table added to an activation) is U(-0.1, 0.1).
+ * - a bias (of a linear, a convolution, a layer norm or a group norm) is U(-0.1, 0.1);
+ * - an additive operand (a modulation table added to an activation) is U(-0.1, 0.1);
+ * - a table that is normalised (the data input of a layer norm) is U(-1, 1).
  *
  * The role comes from the consuming op and input slot ({@link initializerRole}). Only the roles and
  * codecs a corpus entry needs are implemented; anything else throws with the initializer's name and
@@ -54,10 +58,13 @@ export type GeneratedTensor = {
 /** What an initializer is to the graph, as far as its value rule is concerned. */
 export type WeightRole =
   | { readonly kind: "linear"; readonly fanIn: number }
+  | { readonly kind: "convolution"; readonly fanIn: number }
+  | { readonly kind: "embedding" }
   | { readonly kind: "norm" }
   | { readonly kind: "operand" }
   | { readonly kind: "bias" }
-  | { readonly kind: "additive" };
+  | { readonly kind: "additive" }
+  | { readonly kind: "normalized" };
 
 /** An initializer the corpus has no generation rule for. */
 export class CorpusWeightError extends Error {
@@ -68,18 +75,25 @@ export class CorpusWeightError extends Error {
  * Consumer (`op#slot`) → what that slot makes of the initializer. A consumer outside this table has
  * no rule: add one only together with the value rule it needs.
  */
-const CONSUMER_KINDS: Readonly<
-  Record<string, "linear" | "embedding" | "norm" | "operand" | "bias" | "additive">
-> = {
+const CONSUMER_KINDS: Readonly<Record<string, WeightRole["kind"]>> = {
   "linear#1": "linear",
   "embedding#0": "embedding",
+  "conv1d#1": "convolution",
+  "conv2d#1": "convolution",
+  "conv3d#1": "convolution",
   "rms_norm#1": "norm",
   "layer_norm#1": "norm",
+  "group_norm#1": "norm",
   "mul#1": "operand",
   "linear#2": "bias",
   "layer_norm#2": "bias",
+  "conv1d#2": "bias",
+  "conv2d#2": "bias",
+  "conv3d#2": "bias",
+  "group_norm#2": "bias",
   "add#0": "additive",
   "add#1": "additive",
+  "layer_norm#0": "normalized",
 };
 
 /** Elements of a shape. */
@@ -101,8 +115,9 @@ const consumersOf = (declaration: IrDeclaration, name: string): string[] => {
  * The role of initializer `name`, from what consumes it.
  *
  * A table read both by `embedding` (slot 0) and by `linear` (slot 1) is a tied embedding: it is
- * stored and quantized for the linear, so it takes the linear's rule. Any other mix of roles, a
- * consumer outside the table, or no consumer at all throws.
+ * stored and quantized for the linear, so it takes the linear's rule; a table only `embedding`
+ * reads is an embedding table. Any other mix of roles, a consumer outside the table, or no consumer
+ * at all throws.
  */
 export const initializerRole = (declaration: IrDeclaration, name: string): WeightRole => {
   const value = Object.hasOwn(declaration.values, name) ? declaration.values[name] : undefined;
@@ -139,15 +154,27 @@ export const initializerRole = (declaration: IrDeclaration, name: string): Weigh
     }
     return { kind: "linear", fanIn: shape[1] };
   }
+  if (kinds.size === 1 && kinds.has("convolution")) {
+    if (shape.length < 3) {
+      throw new CorpusWeightError(
+        `initializer '${name}' is a convolution weight of rank ${shape.length} ([${shape.join(",")}]): the rule needs [out, in per group, ...kernel]`,
+      );
+    }
+    return { kind: "convolution", fanIn: numelOf(shape.slice(1)) };
+  }
+  if (kinds.size === 1 && kinds.has("embedding")) {
+    if (shape.length !== 2) {
+      throw new CorpusWeightError(
+        `initializer '${name}' is an embedding table of rank ${shape.length} ([${shape.join(",")}]): the rule needs [rows, width]`,
+      );
+    }
+    return { kind: "embedding" };
+  }
   if (kinds.size === 1 && kinds.has("norm")) return { kind: "norm" };
   if (kinds.size === 1 && kinds.has("operand")) return { kind: "operand" };
   if (kinds.size === 1 && kinds.has("bias")) return { kind: "bias" };
   if (kinds.size === 1 && kinds.has("additive")) return { kind: "additive" };
-  if (kinds.size === 1 && kinds.has("embedding")) {
-    throw new CorpusWeightError(
-      `initializer '${name}' is read only as an embedding table: no generation rule for a table that no linear reads (add one to the corpus generator)`,
-    );
-  }
+  if (kinds.size === 1 && kinds.has("normalized")) return { kind: "normalized" };
   throw new CorpusWeightError(
     `initializer '${name}' is read by [${consumers.join(", ")}]: these consumers ask for different value rules, so its role cannot be told`,
   );
@@ -360,22 +387,36 @@ export const generateTensor = (spec: TensorSpec, seed: number): GeneratedTensor 
   if (encoding.codec === "f32" && (role.kind === "bias" || role.kind === "additive")) {
     return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => 0.1 * unit) };
   }
-  if (encoding.codec === "f32" && role.kind === "linear") {
-    const step = 1 / (Math.sqrt(role.fanIn) * UNIT_DEVIATION);
+  if (encoding.codec === "f32" && role.kind === "normalized") {
+    return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit) };
+  }
+  const fanIn = linearRuleFanIn(role);
+  if (encoding.codec === "f32" && fanIn !== undefined) {
+    const step = 1 / (Math.sqrt(fanIn) * UNIT_DEVIATION);
     return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit * step) };
   }
-  if (encoding.codec === "int4-sym-g" && role.kind === "linear") {
-    return generateInt4Linear(name, stream, shape, encoding, role.fanIn);
+  if (encoding.codec === "int4-sym-g" && fanIn !== undefined) {
+    return generateInt4Linear(name, stream, shape, encoding, fanIn);
   }
-  if (encoding.codec === "int2-off" && role.kind === "linear") {
-    return generateInt2Linear(name, stream, shape, encoding, role.fanIn);
+  if (encoding.codec === "int2-off" && fanIn !== undefined) {
+    return generateInt2Linear(name, stream, shape, encoding, fanIn);
   }
-  if (encoding.codec === "int8-sym" && role.kind === "linear") {
-    return generateInt8Linear(name, stream, shape, encoding, role.fanIn);
+  if (encoding.codec === "int8-sym" && fanIn !== undefined) {
+    return generateInt8Linear(name, stream, shape, encoding, fanIn);
   }
   throw new CorpusWeightError(
-    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights, operands, biases and additive operands, and linear weights in f32, int4-sym-g, int2-off and int8-sym`,
+    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights, operands, biases, additive operands and normalised tables, and linear weights, convolution weights and embedding tables in f32, int4-sym-g, int2-off and int8-sym`,
   );
+};
+
+/**
+ * The fan-in of a role that takes the linear rule: a linear or convolution weight's own, 1 for an
+ * embedding table (standard deviation 1). `undefined` for the other roles.
+ */
+const linearRuleFanIn = (role: WeightRole): number | undefined => {
+  if (role.kind === "linear" || role.kind === "convolution") return role.fanIn;
+  if (role.kind === "embedding") return 1;
+  return undefined;
 };
 
 /**
@@ -425,12 +466,17 @@ export const generateWeights = (
 };
 
 /** The codecs {@link perturbOneLevel} can move a level in. */
-export const PERTURBABLE_CODECS: readonly CodecName[] = ["int4-sym-g", "int2-off", "int8-sym"];
+export const PERTURBABLE_CODECS: readonly CodecName[] = [
+  "int4-sym-g",
+  "int2-off",
+  "int8-sym",
+  "f32",
+];
 
 /**
  * The same tensor with element 0 moved by one quantization level (u → u + 1, or u − 1 at the top
- * level): the smallest change a stored weight can make, for checking that the corpus's comparisons
- * can fail.
+ * level; in `f32`, one unit in the last place, away from zero): the smallest change a stored weight
+ * can make, for checking that the corpus's comparisons can fail.
  */
 export const perturbOneLevel = (name: string, tensor: GeneratedTensor): GeneratedTensor => {
   const bytes = tensor.bytes.slice();
@@ -450,6 +496,15 @@ export const perturbOneLevel = (name: string, tensor: GeneratedTensor): Generate
     // Element 0 is byte 0, a signed level in [-127, 127].
     const level = (bytes[0] << 24) >> 24;
     bytes[0] = (level < 127 ? level + 1 : level - 1) & 0xff;
+    return { ...tensor, bytes };
+  }
+  if (tensor.encoding.codec === "f32") {
+    // Element 0 is the first word; its bit pattern + 1 is the next value away from zero (− 1 at the
+    // largest finite magnitude, which + 1 would turn into an infinity).
+    const words = new Uint32Array(bytes.buffer, 0, 1);
+    const values = new Float32Array(bytes.buffer, 0, 1);
+    words[0] += 1;
+    if (!Number.isFinite(values[0])) words[0] -= 2;
     return { ...tensor, bytes };
   }
   throw new CorpusWeightError(
