@@ -1,0 +1,20 @@
+{
+  "name": "@karume/gemma4-app-support",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Gemma 4 helpers the playground's chat page and the workbench's Gemma entries share: the mounts and their entry points, the expert cache's text forms, the stop record and the turn timing.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./settings": "./settings.ts",
+    "./stop-record": "./stop-record.ts",
+    "./turn-timing": "./turn-timing.ts"
+  },
+  "dependencies": {
+    "@karume/hub": "workspace:*",
+    "@karume/models": "workspace:*"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}

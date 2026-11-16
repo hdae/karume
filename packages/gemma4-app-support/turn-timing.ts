@@ -1,49 +1,60 @@
 /**
- * The statistics of one Gemma 4 chat from its `performance.now()` marks. Copied from the
- * Playground's chat page (`apps/playground/src/models/gemma4/turns.ts`, `turnTiming`), which keeps
- * its own: the workbench and the Playground share no module. The workbench builds no pipeline with
- * `onRunDiagnostics`, so the decode window always ends at the stream's end (the chat page's
- * `lastRunAt` is left out). Pure, so `vp test` covers it.
+ * `@karume/gemma4-app-support/turn-timing` — the statistics of one Gemma 4 generation (a turn of the
+ * playground's chat page, a chat of the workbench's decode bench) from its `performance.now()`
+ * marks. Pure, so `vp test` covers it.
+ *
+ * The one difference between the two: only a pipeline built with `onRunDiagnostics` reports when its
+ * last decode run ended (the chat page's diagnostics; the workbench builds none). With that mark
+ * (`lastRunAt`) the decode window ends there; without it, at the stream's end.
  */
 
-import { seconds as secondsOf } from "../record.ts";
-
-/** Times of one chat, from `performance.now()`. */
+/** Times of one generation, from `performance.now()`. */
 export type TurnMarks = {
-  /** When `chat` was called. */
+  /** When it was sent (`send` of a `ChatSession`, `chat` of the pipeline). */
   readonly sentAt: number;
   /** When each prefill chunk was committed (`onPrefill`), in order. */
   readonly prefillAt: readonly number[];
   /** When the first generated token arrived (`onToken`; none when the first draw was a stop token). */
   readonly firstTokenAt?: number;
+  /**
+   * When the last decode / draft / verify run reported (`onRunDiagnostics` — in the synchronous
+   * section right after the run's outputs were read, so it includes the run that drew the stop token).
+   * Only when the pipeline was built with diagnostics; without them the decode ends at `endAt`.
+   */
+  readonly lastRunAt?: number;
   /** When the text stream ended. */
   readonly endAt: number;
 };
 
-/** The statistics of one chat (seconds at millisecond precision, rates at 0.1 tokens/s). */
+/** The statistics of one generation (seconds at millisecond precision, rates at 0.1 tokens/s). */
 export type TurnTiming = {
   readonly totalSeconds: number;
-  /** From `chat` to the last committed prefill chunk (includes the sequence allocation). */
+  /**
+   * From the send to the last committed prefill chunk (includes the session's overflow handling, if
+   * any, and the sequence allocation).
+   */
   readonly prefillSeconds?: number;
   readonly prefillTokensPerSecond?: number;
-  /** Time to first token: from `chat` to the first generated token. */
+  /** Time to first token: from the send to the first generated token. */
   readonly ttftSeconds?: number;
   /** Tokens drawn after the first one (the first is sampled from the prefill's logits). */
   readonly decodeTokens: number;
-  /** From the first token to the stream's end. */
+  /** From the first token to the last decode run (with `lastRunAt`) or the stream's end (without). */
   readonly decodeSeconds?: number;
   readonly decodeTokensPerSecond?: number;
 };
 
+const secondsOf = (milliseconds: number): number => Number((milliseconds / 1000).toFixed(3));
+
 /** `count / seconds` at 0.1 precision; `undefined` when it cannot be measured (no time, no tokens). */
-const rate = (count: number, seconds: number | undefined): number | undefined => {
+export const rate = (count: number, seconds: number | undefined): number | undefined => {
   if (seconds === undefined || !(seconds > 0) || !(count > 0)) return undefined;
   return Number((count / seconds).toFixed(1));
 };
 
 /**
- * The statistics of one chat. `tokens` is the stop's `tokens` (the generated count, a stop token
- * counted as one); `promptTokens` is the prompt passed to the sequence (`undefined` when the chat
+ * The statistics of one generation. `tokens` is the stop's `tokens` (the generated count, a stop
+ * token counted as one); `promptTokens` is the prompt passed to the sequence (`undefined` when it
  * failed before generating).
  */
 export const turnTiming = (
@@ -57,7 +68,7 @@ export const turnTiming = (
   const decodeSeconds =
     marks.firstTokenAt === undefined || decodeTokens === 0
       ? undefined
-      : secondsOf(marks.endAt - marks.firstTokenAt);
+      : secondsOf((marks.lastRunAt ?? marks.endAt) - marks.firstTokenAt);
   const prefillTokensPerSecond =
     counts.promptTokens === undefined ? undefined : rate(counts.promptTokens, prefillSeconds);
   const decodeTokensPerSecond = rate(decodeTokens, decodeSeconds);

@@ -13,7 +13,7 @@
  * is also broken down per key ({@link KeyPerToken}).
  */
 
-import { type TurnTiming, turnTiming } from "../gemma4/turn-timing.ts";
+import { type TurnTiming, turnTiming } from "@karume/gemma4-app-support/turn-timing";
 
 /** What the tap had recorded when a token arrived. */
 export type TokenMark = {

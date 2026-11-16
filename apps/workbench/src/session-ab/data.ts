@@ -8,11 +8,11 @@
  * `record` can be judged again with `judgeSessionAb`.
  */
 
+import { entryPointOf, type GemmaEntryPoint } from "@karume/gemma4-app-support/settings";
 import type { SessionAbJudgement, SessionAbRecord } from "@karume/runtime/tune";
 
 import modelsPackage from "../../../../packages/models/package.json" with { type: "json" };
 import type { DistributionFacts } from "../entry.ts";
-import { entryPointOf, type GemmaEntryPoint } from "../gemma4/settings.ts";
 
 import type { ArmCounts, ArmFacts, ResolvedExpertCache } from "./gemma-arm.ts";
 import type { SessionAbRequest } from "./gemma-request.ts";

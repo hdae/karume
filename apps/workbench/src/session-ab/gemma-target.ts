@@ -5,6 +5,12 @@
  * settings. Every value that does not fit is a `ParameterError` that says what exists.
  */
 
+import {
+  hasExpertCache,
+  type ModelKey,
+  parseExpertCacheSlots,
+  parseExpertHostTier,
+} from "@karume/gemma4-app-support/settings";
 import { loadManifest, type Manifest } from "@karume/hub";
 import type { SourceKind } from "@karume/local-distributions/browser";
 
@@ -19,12 +25,6 @@ import {
   textValue,
 } from "../entry.ts";
 import { modelRefusal, MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
-import {
-  hasExpertCache,
-  type ModelKey,
-  parseExpertCacheSlots,
-  parseExpertHostTier,
-} from "../gemma4/settings.ts";
 import { type SessionAbModel, type SessionAbRequest, sessionAbRequest } from "./gemma-request.ts";
 import { presetOf } from "./shared.ts";
 

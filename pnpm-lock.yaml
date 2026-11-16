@@ -302,6 +302,9 @@ importers:
       '@hdae/yomi':
         specifier: 'catalog:'
         version: '@jsr/hdae__yomi@0.4.2'
+      '@karume/gemma4-app-support':
+        specifier: workspace:*
+        version: link:../../packages/gemma4-app-support
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
@@ -378,6 +381,9 @@ importers:
       '@karume/candidate-rules':
         specifier: workspace:*
         version: link:../../packages/candidate-rules
+      '@karume/gemma4-app-support':
+        specifier: workspace:*
+        version: link:../../packages/gemma4-app-support
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
@@ -436,6 +442,19 @@ importers:
       '@karume/test-support':
         specifier: workspace:*
         version: link:../test-support
+
+  packages/gemma4-app-support:
+    dependencies:
+      '@karume/hub':
+        specifier: workspace:*
+        version: link:../hub
+      '@karume/models':
+        specifier: workspace:*
+        version: link:../models
+    devDependencies:
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.2.0(@types/node@24.19.1)(@vitest/ui@5.0.4)(jiti@2.7.0)(typescript@7.0.2)
 
   packages/hub:
     dependencies:

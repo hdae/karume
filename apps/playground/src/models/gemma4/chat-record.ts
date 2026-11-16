@@ -6,26 +6,20 @@
  * environment is passed in), so `vp test` covers it.
  */
 
-import type {
-  ChatJsonObject,
-  ChatStop,
-  ExpertCacheReport,
-  GenerationDecodeAhead,
-  GenerationSpeculation,
-  SamplerSpec,
-} from "@karume/models/gemma";
-
-import type { RecordEnvironment } from "@/lib/environment";
-import type { ComponentRecord, SourceRecord } from "@/lib/record";
-
 import {
-  type ChatSettings,
   entryPointOf,
   type ExpertCacheSlots,
   type GemmaEntryPoint,
   type GemmaMount,
-} from "./settings";
-import type { TurnTiming } from "./turns";
+} from "@karume/gemma4-app-support/settings";
+import type { StopRecord } from "@karume/gemma4-app-support/stop-record";
+import type { TurnTiming } from "@karume/gemma4-app-support/turn-timing";
+import type { ChatJsonObject, ExpertCacheReport, SamplerSpec } from "@karume/models/gemma";
+
+import type { RecordEnvironment } from "@/lib/environment";
+import type { ComponentRecord, SourceRecord } from "@/lib/record";
+
+import type { ChatSettings } from "./settings";
 
 /**
  * The version of the saved record; bump it when a field changes meaning or goes away.
@@ -38,32 +32,6 @@ import type { TurnTiming } from "./turns";
  * stop with the reason `capacity`.
  */
 export const RECORD_FORMAT = "karume-playground-gemma4/4";
-
-/** How a turn stopped (the stop of the turn's stream, flattened for JSON). */
-export type StopRecord = {
-  readonly reason: ChatStop["reason"];
-  /** Generated tokens, a stop token counted as one. */
-  readonly tokens: number;
-  /** The stop token (`eos` / `stop-token`). */
-  readonly token?: number;
-  readonly stopString?: string;
-  /** Present only on turns of a pipeline with the MTP drafter. */
-  readonly speculation?: GenerationSpeculation;
-  /**
-   * Present only on turns of a pipeline built with `decodeAhead` ≥ 2: the depth, the batches the
-   * turn ran (0 = it decoded one step per batch) and the steps they computed.
-   */
-  readonly decodeAhead?: GenerationDecodeAhead;
-};
-
-export const stopRecordOf = (stop: ChatStop): StopRecord => ({
-  reason: stop.reason,
-  tokens: stop.tokens,
-  ...("token" in stop ? { token: stop.token } : {}),
-  ...(stop.reason === "stop-string" ? { stopString: stop.stopString } : {}),
-  ...(stop.speculation === undefined ? {} : { speculation: stop.speculation }),
-  ...(stop.decodeAhead === undefined ? {} : { decodeAhead: stop.decodeAhead }),
-});
 
 /** Runs reported by `onRunDiagnostics` during the turn, by phase (only with diagnostics). */
 export type RunCounts = {

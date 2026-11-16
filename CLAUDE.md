@@ -50,6 +50,9 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
 - `packages/local-distributions/` (private) — the local mirrors under `models/` as the two apps read them: the dev-server
   plugin, the mount table, the page side and the Node side
+- `packages/gemma4-app-support/` (private) — the Gemma 4 helpers the playground's chat page and the workbench's Gemma
+  entries share: the mounts and their entry points, the expert cache's text forms, the stop record and the turn timing;
+  only those two apps import it
 - `apps/workbench/` (private) — the browser app and Node command that run checks and measurements on a GPU: one file is
   one entry, one JSON record per run under `outputs/workbench/` ([docs/spec/workbench.md](docs/spec/workbench.md)).
   `apps/playground/` (private) — the model pages

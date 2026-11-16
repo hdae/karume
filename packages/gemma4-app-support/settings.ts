@@ -1,18 +1,17 @@
 /**
- * The Gemma 4 lookups and text forms the workbench's Gemma entries use: the three mounts and the
- * entry point each is built with, a model's declared `pipelineConfig`, which model takes the exact
- * expert cache, and the text forms of the cache's slots and host tier with their parsing. Copied
- * from the Playground's chat page settings (`apps/playground/src/models/gemma4/settings.ts`), which
- * keeps its own: the workbench and the Playground share no module. Pure, so `vp test` covers it.
+ * `@karume/gemma4-app-support/settings` — the Gemma 4 lookups and text forms the playground's chat
+ * page and the workbench's Gemma entries share: the three mounts and the entry point each is built
+ * with, a model's declared `pipelineConfig`, which model takes the exact expert cache, and the text
+ * forms of the cache's slots and host tier with their parsing. Pure, so `vp test` covers it.
  */
 
 import type { Manifest } from "@karume/hub";
 import { type PipelineConfig, parsePipelineConfig } from "@karume/models/gemma";
 
 /**
- * The mounts the Gemma entries read, each built with its family's entry point ({@link entryPointOf}):
- * regular Gemma 4 (`karume-gemma4`), the q4_0 QAT line (`karume-gemma4-qat` — a `gemma4/1`
- * distribution with MTP drafters) and the mobile QAT distribution (`karume-gemma4-qat-mobile`).
+ * The Gemma 4 mounts, each built with its family's entry point ({@link entryPointOf}): regular
+ * Gemma 4 (`karume-gemma4`), the q4_0 QAT line (`karume-gemma4-qat` — a `gemma4/1` distribution with
+ * MTP drafters) and the mobile QAT distribution (`karume-gemma4-qat-mobile`).
  */
 export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat", "gemma4-qat-mobile"] as const;
 export type GemmaMount = (typeof GEMMA_MOUNTS)[number];
@@ -38,7 +37,7 @@ export type ModelKey = { readonly mount: GemmaMount; readonly model: string };
 export type QatModel = "e2b" | "e4b";
 export const isQatModel = (model: string): model is QatModel => model === "e2b" || model === "e4b";
 
-/** The manifests that have loaded, by mount (a mount whose mirror is missing is absent). */
+/** The manifests that have loaded, by mount (a mount whose mirror is missing or failed is absent). */
 export type GemmaManifests = Partial<Record<GemmaMount, Manifest>>;
 
 /** The model's static wiring as the distribution declares it (`pipelineConfig`, validated). */
@@ -50,7 +49,7 @@ export const modelConfig = (manifest: Manifest, model: string): PipelineConfig =
 
 /**
  * Whether the model is a mixture of experts, i.e. whether the exact expert cache (`expertCache` of
- * `Pipeline.fromPretrained`) applies. Decided by the model key: neither the manifest nor
+ * `Pipeline.fromPretrained` — ADR 0146) applies. Decided by the model key: neither the manifest nor
  * `pipelineConfig` declares the routing (only the graph inside the container has `expert_linear`,
  * and reading it means opening the container), and the one such model the mounts hold is Gemma 4
  * 26B A4B of the q4_0 QAT line. The pipeline still refuses a graph without `expert_linear`, so a
@@ -79,8 +78,9 @@ export const EXPERT_CACHE_FITTED = "fitted";
  * 26B's per-layer slots fitted at a mean of 64, layer 0 first: the allocation of
  * docs/research/2026-11-08-gemma4-26b-moe-cache.md §4.2, fitted on CPU traces by a local search that
  * keeps the mean at 64 — the same total VRAM as 64 slots in every layer, moved to the early layers
- * so a run's first miss comes later. Marked pure so a production build, which leaves out the entries
- * that read a distribution, drops it with them.
+ * so a run's first miss comes later. Marked pure, so a bundle that imports this module without
+ * using it (a workbench production build, which leaves out the entries that read a distribution)
+ * drops it.
  */
 export const FITTED_EXPERT_SLOTS: readonly number[] = /* @__PURE__ */ Object.freeze([
   96, 108, 84, 88, 84, 68, 72, 72, 68, 60, 52, 56, 64, 64, 60, 68, 52, 56, 64, 56, 48, 40, 44, 48,
@@ -168,8 +168,8 @@ export const parseExpertHostTier = (text: string): Parsed<number | undefined> =>
 };
 
 /**
- * The range of the self-speculation depth (`expertCache.depth`). The bound that depends on the slots
- * (`depth + 1 ≤ ⌊slots / 8⌋` on 26B, with the fewest layer's slots for a list) is the pipeline's to
- * check: a depth it refuses fails at the build with its own message.
+ * The range of the self-speculation depth (`expertCache.depth` — ADR 0146 decision 8). The bound
+ * that depends on the slots (`depth + 1 ≤ ⌊slots / 8⌋` on 26B, with the fewest layer's slots for a
+ * list) is the pipeline's to check: a depth it refuses fails at the build with its own message.
  */
 export const EXPERT_SPECULATION_DEPTH = { min: 1, max: 4 } as const;

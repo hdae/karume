@@ -1,7 +1,3 @@
-// Cases copied from the Playground's tests of its Gemma 4 chat page settings
-// (apps/playground/tests/gemma4_settings_test.ts and gemma4_expert_cache_test.ts), for the lookups
-// and text forms the workbench copied (src/gemma4/settings.ts).
-
 import { parseManifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -17,11 +13,55 @@ import {
   modelConfig,
   parseExpertCacheSlots,
   parseExpertHostTier,
-} from "../src/gemma4/settings.ts";
-
-import { REGULAR } from "./helpers/gemma4-bench-manifests.ts";
+} from "../settings.ts";
 
 const GIB = 2 ** 30;
+
+const hex = (character: string): string => character.repeat(64);
+
+/** A `karume/5` manifest shaped like a Gemma 4 distribution: the one model `e2b`. */
+const MANIFEST = parseManifest(
+  JSON.stringify({
+    format: "karume/5",
+    generator: "test",
+    defaultModel: "e2b",
+    models: {
+      e2b: {
+        pipeline: "gemma4/1",
+        assets: {},
+        weights: {
+          model: {
+            i4: {
+              container: {
+                descriptor: {
+                  graph: { length: 8, sha256: hex("d") },
+                  model: { length: 8, sha256: hex("e") },
+                },
+                parts: [
+                  { path: "e2b/model.krm-00001", size: 40, sha256: hex("a") },
+                  { path: "e2b/model.krm-00002", size: 8, sha256: hex("b") },
+                ],
+              },
+            },
+          },
+        },
+        quants: { i4: { weights: { model: "i4" }, session: {} } },
+        defaultQuant: "i4",
+        pipelineConfig: {
+          chunkLength: 768,
+          maxChunkLength: 768,
+          maxPosition: 131072,
+          capacity: 4096,
+          rope: {
+            sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+            full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+          },
+          sampler: { temperature: 1, topK: 64, topP: 0.95 },
+        },
+      },
+    },
+  }),
+);
 
 describe("model keys", () => {
   it("accepts only the models gemma4QatMobile.Pipeline takes", () => {
@@ -36,6 +76,18 @@ describe("entryPointOf", () => {
     expect(entryPointOf("gemma4")).toBe("gemma.Pipeline");
     expect(entryPointOf("gemma4-qat")).toBe("gemma.Pipeline");
     expect(entryPointOf("gemma4-qat-mobile")).toBe("gemma4QatMobile.Pipeline");
+  });
+});
+
+describe("modelConfig", () => {
+  it("reads the validated pipelineConfig of the model", () => {
+    const config = modelConfig(MANIFEST, "e2b");
+    expect(config.capacity).toBe(4096);
+    expect(config.sampler).toEqual({ temperature: 1, topK: 64, topP: 0.95 });
+  });
+
+  it("fails loudly for a model the manifest does not have", () => {
+    expect(() => modelConfig(MANIFEST, "e4b")).toThrow(/no model 'e4b'/);
   });
 });
 
@@ -116,7 +168,7 @@ describe("FITTED_EXPERT_SLOTS", () => {
     expect(FITTED_EXPERT_SLOTS.reduce((sum, count) => sum + count, 0)).toBe(30 * 64);
   });
 
-  it("keeps every layer in the range the page accepts", () => {
+  it("keeps every layer in the range the slots' text form accepts", () => {
     for (const count of FITTED_EXPERT_SLOTS) {
       expect(parseExpertCacheSlots(String(count))).toEqual({ ok: true, value: count });
     }
@@ -161,19 +213,5 @@ describe("parseExpertHostTier", () => {
 
   it("refuses a budget beyond a safe integer of bytes", () => {
     expect(parseExpertHostTier("9000000").ok).toBe(false);
-  });
-});
-
-describe("modelConfig", () => {
-  const regular = parseManifest(REGULAR);
-
-  it("reads the validated pipelineConfig of the model", () => {
-    const config = modelConfig(regular, "e2b");
-    expect(config.capacity).toBe(4096);
-    expect(config.sampler).toEqual({ temperature: 1, topK: 64, topP: 0.95 });
-  });
-
-  it("fails loudly for a model the manifest does not have", () => {
-    expect(() => modelConfig(regular, "12b")).toThrow(/no model '12b'/);
   });
 });

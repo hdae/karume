@@ -16,6 +16,7 @@
     "@base-ui/react": "catalog:",
     "@fontsource-variable/geist": "catalog:",
     "@hdae/yomi": "catalog:",
+    "@karume/gemma4-app-support": "workspace:*",
     "@karume/hub": "workspace:*",
     "@karume/local-distributions": "workspace:*",
     "@karume/models": "workspace:*",

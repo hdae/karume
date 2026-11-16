@@ -4,17 +4,17 @@
  * refusals (the session A/B names the `model` parameter, the decode bench names the arm).
  */
 
-import { loadManifest, type Manifest } from "@karume/hub";
-import { MountUnavailableError, type SourceKind } from "@karume/local-distributions/browser";
-
-import type { OpenDistribution, OpenedDistribution } from "../entry.ts";
 import {
   GEMMA_MOUNTS,
   type GemmaMount,
   isGemmaMount,
   isQatModel,
   type ModelKey,
-} from "./settings.ts";
+} from "@karume/gemma4-app-support/settings";
+import { loadManifest, type Manifest } from "@karume/hub";
+import { MountUnavailableError, type SourceKind } from "@karume/local-distributions/browser";
+
+import type { OpenDistribution, OpenedDistribution } from "../entry.ts";
 
 /** The three mounts as a refusal lists them. */
 export const MOUNT_LIST = GEMMA_MOUNTS.join(", ");

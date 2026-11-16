@@ -7,6 +7,22 @@
  * tools; a tool call the model makes is run in the browser and the turn continues with its result.
  */
 
+import {
+  EXPERT_CACHE_FITTED,
+  EXPERT_CACHE_SLOTS,
+  EXPERT_HOST_TIER_ALL,
+  EXPERT_SPECULATION_DEPTH,
+  GEMMA_MOUNTS,
+  type GemmaManifests,
+  type GemmaMount,
+  hasExpertCache,
+  type ModelKey,
+  modelConfig,
+  parseExpertCacheSlots,
+  parseExpertHostTier,
+} from "@karume/gemma4-app-support/settings";
+import { stopRecordOf } from "@karume/gemma4-app-support/stop-record";
+import { turnTiming } from "@karume/gemma4-app-support/turn-timing";
 import { type DistributionStatus, mountStatus } from "@karume/local-distributions/browser";
 import {
   ChatSession,
@@ -62,7 +78,6 @@ import {
   type GemmaRecord,
   NO_RUNS,
   type RunCounts,
-  stopRecordOf,
   type ToolResultRecord,
   type TurnRecord,
 } from "./chat-record";
@@ -83,28 +98,16 @@ import {
   type ChatForm,
   type ChatSettings,
   effectiveModelKey,
-  EXPERT_CACHE_FITTED,
-  EXPERT_CACHE_SLOTS,
-  EXPERT_HOST_TIER_ALL,
-  EXPERT_SPECULATION_DEPTH,
-  GEMMA_MOUNTS,
-  type GemmaManifests,
-  type GemmaMount,
   gemmaModelChoices,
   chatSpeculative,
   hasDrafter,
-  hasExpertCache,
   hasVision,
   INITIAL_CHAT_FORM,
   MOUNT_LABELS,
-  type ModelKey,
-  modelConfig,
   modelKeyValue,
   OVERFLOW_CHOICES,
   overflowPolicy,
   parseChatForm,
-  parseExpertCacheSlots,
-  parseExpertHostTier,
   parseExpertSpeculationDepth,
   parseModelKey,
   parseTurnForm,
@@ -123,7 +126,6 @@ import {
   notKeptNotice,
   type SentTurn,
   type TranscriptEntry,
-  turnTiming,
 } from "./turns";
 import {
   type DiagnosticsSink,

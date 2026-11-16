@@ -4,9 +4,10 @@
  * give. Pure, so `vp test` covers it.
  */
 
+import { type ExpertCacheSlots, FITTED_EXPERT_SLOTS } from "@karume/gemma4-app-support/settings";
 import type { ExpertCacheReport } from "@karume/models/gemma";
 
-import { type ExpertCacheSlots, FITTED_EXPERT_SLOTS, sameExpertSlots } from "./settings";
+import { sameExpertSlots } from "./settings";
 
 const MIB = 2 ** 20;
 const GIB = 2 ** 30;

@@ -1,5 +1,6 @@
 /**
- * The chat page's transcript and per-turn statistics. Pure, so `vp test` covers it.
+ * The chat page's transcript and the texts of its per-turn statistics (the statistics themselves are
+ * `turnTiming` of `@karume/gemma4-app-support/turn-timing`). Pure, so `vp test` covers it.
  *
  * The transcript is derived from the session's history (`session.turns`), not mirrored: after every
  * turn the in-context entries are rebuilt from that history, so the bubbles always show exactly what
@@ -8,6 +9,7 @@
  * (shown dimmed).
  */
 
+import type { TurnTiming } from "@karume/gemma4-app-support/turn-timing";
 import type { ChatJsonObject, ChatMessage, ChatStop, Rgb8Image } from "@karume/models/gemma";
 
 /** One tool call of an assistant entry: the function and its arguments as JSON text. */
@@ -227,80 +229,6 @@ export const deriveTranscript = (input: {
     .slice(0, Math.min(inContext.length, Math.max(0, offset)))
     .map((entry) => ({ ...entry, inContext: false }));
   return { entries: [...archived, ...left, ...context], kept };
-};
-
-/** Times of one turn, from `performance.now()`. */
-export type TurnMarks = {
-  /** When `send` was called. */
-  readonly sentAt: number;
-  /** When each prefill chunk was committed (`onPrefill`), in order. */
-  readonly prefillAt: readonly number[];
-  /** When the first generated token arrived (`onToken`; none when the first draw was a stop token). */
-  readonly firstTokenAt?: number;
-  /**
-   * When the last decode / draft / verify run reported (`onRunDiagnostics` — in the synchronous
-   * section right after the run's outputs were read, so it includes the run that drew the stop token).
-   * Only when the pipeline was loaded with diagnostics; without them the decode ends at `endAt`.
-   */
-  readonly lastRunAt?: number;
-  /** When the text stream ended. */
-  readonly endAt: number;
-};
-
-/** The statistics of one turn (seconds at millisecond precision, rates at 0.1 tokens/s). */
-export type TurnTiming = {
-  readonly totalSeconds: number;
-  /** From `send` to the last committed prefill chunk (includes overflow handling and the sequence allocation). */
-  readonly prefillSeconds?: number;
-  readonly prefillTokensPerSecond?: number;
-  /** Time to first token: from `send` to the first generated token. */
-  readonly ttftSeconds?: number;
-  /** Tokens drawn after the first one (the first is sampled from the prefill's logits). */
-  readonly decodeTokens: number;
-  /** From the first token to the last decode run (with diagnostics) or the stream's end (without). */
-  readonly decodeSeconds?: number;
-  readonly decodeTokensPerSecond?: number;
-};
-
-const secondsOf = (milliseconds: number): number => Number((milliseconds / 1000).toFixed(3));
-
-/** `count / seconds` at 0.1 precision; `undefined` when it cannot be measured (no time, no tokens). */
-export const rate = (count: number, seconds: number | undefined): number | undefined => {
-  if (seconds === undefined || !(seconds > 0) || !(count > 0)) return undefined;
-  return Number((count / seconds).toFixed(1));
-};
-
-/**
- * The statistics of one turn. `tokens` is the stop's `tokens` (the generated count, a stop token
- * counted as one); `promptTokens` is the prompt the session passed to the sequence (`undefined` when
- * the turn failed before generating).
- */
-export const turnTiming = (
-  marks: TurnMarks,
-  counts: { readonly promptTokens?: number; readonly tokens: number },
-): TurnTiming => {
-  const prefillEnd = marks.prefillAt.at(-1) ?? marks.firstTokenAt;
-  const prefillSeconds =
-    prefillEnd === undefined ? undefined : secondsOf(prefillEnd - marks.sentAt);
-  const decodeTokens = Math.max(0, counts.tokens - 1);
-  const decodeSeconds =
-    marks.firstTokenAt === undefined || decodeTokens === 0
-      ? undefined
-      : secondsOf((marks.lastRunAt ?? marks.endAt) - marks.firstTokenAt);
-  const prefillTokensPerSecond =
-    counts.promptTokens === undefined ? undefined : rate(counts.promptTokens, prefillSeconds);
-  const decodeTokensPerSecond = rate(decodeTokens, decodeSeconds);
-  return {
-    totalSeconds: secondsOf(marks.endAt - marks.sentAt),
-    ...(prefillSeconds === undefined ? {} : { prefillSeconds }),
-    ...(prefillTokensPerSecond === undefined ? {} : { prefillTokensPerSecond }),
-    ...(marks.firstTokenAt === undefined
-      ? {}
-      : { ttftSeconds: secondsOf(marks.firstTokenAt - marks.sentAt) }),
-    decodeTokens,
-    ...(decodeSeconds === undefined ? {} : { decodeSeconds }),
-    ...(decodeTokensPerSecond === undefined ? {} : { decodeTokensPerSecond }),
-  };
 };
 
 /** How a turn stopped, as the stop record keeps it (the reason, and the matched stop string). */

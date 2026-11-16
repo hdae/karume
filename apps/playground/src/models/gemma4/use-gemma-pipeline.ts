@@ -11,6 +11,12 @@
  * destroyed only after them.
  */
 
+import {
+  entryPointOf,
+  type ExpertCacheSlots,
+  type GemmaMount,
+  isQatModel,
+} from "@karume/gemma4-app-support/settings";
 import { type PipelineSource, pretrainedRef } from "@karume/local-distributions/browser";
 import { type FromPretrainedOptions, Pipeline, type RunPhase } from "@karume/models/gemma";
 import * as gemma4QatMobile from "@karume/models/gemma4-qat-mobile";
@@ -18,8 +24,6 @@ import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-
-import { entryPointOf, type ExpertCacheSlots, type GemmaMount, isQatModel } from "./settings";
 
 /** What **Load** asks for (a new object per press, so pressing again rebuilds). */
 export type LoadRequest = {

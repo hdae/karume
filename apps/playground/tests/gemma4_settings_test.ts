@@ -6,13 +6,10 @@ import {
   type ChatForm,
   defaultModelKey,
   effectiveModelKey,
-  entryPointOf,
   gemmaModelChoices,
   chatSpeculative,
   hasDrafter,
   INITIAL_CHAT_FORM,
-  isQatModel,
-  modelConfig,
   overflowPolicy,
   parseChatForm,
   parseModelKey,
@@ -104,12 +101,6 @@ describe("model keys", () => {
     expect(parseModelKey("gemma4/")).toBeUndefined();
     expect(parseModelKey("gemma4")).toBeUndefined();
   });
-
-  it("accepts only the models gemma4QatMobile.Pipeline takes", () => {
-    expect(isQatModel("e2b")).toBe(true);
-    expect(isQatModel("e4b")).toBe(true);
-    expect(isQatModel("12b")).toBe(false);
-  });
 });
 
 describe("gemmaModelChoices", () => {
@@ -192,26 +183,6 @@ describe("hasDrafter", () => {
     for (const model of ["e2b", "e4b", "12b"]) {
       expect(hasDrafter(line, { mount: "gemma4-qat", model })).toBe(true);
     }
-  });
-});
-
-describe("entryPointOf", () => {
-  it("builds only the mobile QAT mount with the mobile entry point", () => {
-    expect(entryPointOf("gemma4")).toBe("gemma.Pipeline");
-    expect(entryPointOf("gemma4-qat")).toBe("gemma.Pipeline");
-    expect(entryPointOf("gemma4-qat-mobile")).toBe("gemma4QatMobile.Pipeline");
-  });
-});
-
-describe("modelConfig", () => {
-  it("reads the validated pipelineConfig of the model", () => {
-    const config = modelConfig(regular, "e2b");
-    expect(config.capacity).toBe(4096);
-    expect(config.sampler).toEqual({ temperature: 1, topK: 64, topP: 0.95 });
-  });
-
-  it("fails loudly for a model the manifest does not have", () => {
-    expect(() => modelConfig(regular, "e4b")).toThrow(/no model 'e4b'/);
   });
 });
 

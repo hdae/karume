@@ -13,13 +13,13 @@
  */
 
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
+import { EXPERT_SPECULATION_DEPTH } from "@karume/gemma4-app-support/settings";
 import { chatPrompt } from "@karume/models/gemma";
 import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb } from "@karume/runtime/tune";
 
 import { booleanValue, choiceValue, type Entry, textValue } from "../../entry.ts";
 import { buildGemmaPipeline, type GemmaPipeline } from "../../gemma4/pipeline.ts";
-import { EXPERT_SPECULATION_DEPTH } from "../../gemma4/settings.ts";
 import {
   acquireWithSubgroups,
   SOURCE_KINDS,

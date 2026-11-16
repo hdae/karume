@@ -5,10 +5,14 @@
  * the rest (the entry, its parameters and the environment). Pure, so `vp test` covers it.
  */
 
+import {
+  entryPointOf,
+  type GemmaEntryPoint,
+  type GemmaMount,
+} from "@karume/gemma4-app-support/settings";
 import type { SamplerSpec } from "@karume/models/gemma";
 
 import type { DistributionFacts } from "../entry.ts";
-import { entryPointOf, type GemmaEntryPoint, type GemmaMount } from "../gemma4/settings.ts";
 import {
   type ArmPipelineOptions,
   type ArmSessionOptions,

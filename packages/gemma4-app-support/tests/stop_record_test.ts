@@ -1,10 +1,7 @@
-// Cases copied from the Playground's tests of its Gemma 4 chat record (apps/playground/tests/
-// gemma4_record_test.ts), for the function the workbench copied (src/gemma4/stop-record.ts).
-
 import type { ChatStop } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
-import { stopRecordOf } from "../src/gemma4/stop-record.ts";
+import { stopRecordOf } from "../stop-record.ts";
 
 describe("stopRecordOf", () => {
   it("keeps the stop token of an EOS / stop-token stop", () => {
@@ -46,7 +43,7 @@ describe("stopRecordOf", () => {
     });
   });
 
-  it("keeps the decode run-ahead counters of a run-ahead turn, and has none otherwise", () => {
+  it("keeps the decode run-ahead counters of a run-ahead generation, and has none otherwise", () => {
     const decodeAhead = { depth: 4, batches: 3, steps: 11 };
     expect(stopRecordOf({ reason: "eos", token: 106, tokens: 10, decodeAhead })).toEqual({
       reason: "eos",

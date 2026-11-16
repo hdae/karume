@@ -10,10 +10,10 @@
  * `onRunDiagnostics` keeps its on-GPU greedy selection, which is the decode path measured.
  */
 
+import { type StopRecord, stopRecordOf } from "@karume/gemma4-app-support/stop-record";
 import type { ChatMessage, ChatOptions, ChatStream, SamplerSpec } from "@karume/models/gemma";
 
 import type { OpenedDistribution } from "../entry.ts";
-import { type StopRecord, stopRecordOf } from "../gemma4/stop-record.ts";
 import { nextTask } from "../next-task.ts";
 import { seconds } from "../record.ts";
 import { type ChatMeasurement, type ChatMarks, measureChat, type TokenMark } from "./measure.ts";

@@ -1,13 +1,25 @@
-// Cases copied from the Playground's tests of its Gemma 4 chat page turns (apps/playground/tests/
-// gemma4_turns_test.ts), for the function the workbench copied (src/gemma4/turn-timing.ts). The
-// copy has no `lastRunAt`, so the first case ends its decode at the stream's end.
-
 import { describe, expect, it } from "vite-plus/test";
 
-import { turnTiming } from "../src/gemma4/turn-timing.ts";
+import { rate, turnTiming } from "../turn-timing.ts";
 
 describe("turnTiming", () => {
-  it("splits a turn into prefill, time to first token and decode", () => {
+  it("splits a turn into prefill, time to first token and decode, the decode ending at the last run", () => {
+    const timing = turnTiming(
+      { sentAt: 1000, prefillAt: [1100, 1200], firstTokenAt: 1250, lastRunAt: 2250, endAt: 2300 },
+      { promptTokens: 1000, tokens: 51 },
+    );
+    expect(timing).toEqual({
+      totalSeconds: 1.3,
+      prefillSeconds: 0.2,
+      prefillTokensPerSecond: 5000,
+      ttftSeconds: 0.25,
+      decodeTokens: 50,
+      decodeSeconds: 1,
+      decodeTokensPerSecond: 50,
+    });
+  });
+
+  it("splits a generation without a run mark (no diagnostics), the decode ending at the stream's end", () => {
     const timing = turnTiming(
       { sentAt: 1000, prefillAt: [1100, 1200], firstTokenAt: 1250, endAt: 2250 },
       { promptTokens: 1000, tokens: 51 },
@@ -23,7 +35,7 @@ describe("turnTiming", () => {
     });
   });
 
-  it("times the decode from the first token to the stream's end", () => {
+  it("falls back to the stream's end when no decode run reported", () => {
     const timing = turnTiming(
       { sentAt: 0, prefillAt: [100], firstTokenAt: 100, endAt: 600 },
       { promptTokens: 10, tokens: 11 },
@@ -48,5 +60,14 @@ describe("turnTiming", () => {
   it("measures no prefill rate when the turn failed before generating", () => {
     const timing = turnTiming({ sentAt: 0, prefillAt: [], endAt: 5 }, { tokens: 0 });
     expect(timing).toEqual({ totalSeconds: 0.005, decodeTokens: 0 });
+  });
+});
+
+describe("rate", () => {
+  it("is undefined for no time or no tokens rather than 0 or Infinity", () => {
+    expect(rate(10, 0)).toBeUndefined();
+    expect(rate(0, 1)).toBeUndefined();
+    expect(rate(10, undefined)).toBeUndefined();
+    expect(rate(10, 4)).toBe(2.5);
   });
 });

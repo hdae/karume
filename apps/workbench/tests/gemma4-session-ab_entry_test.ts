@@ -1,11 +1,11 @@
 import { MountUnavailableError } from "@karume/local-distributions/browser";
 import { GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
+import { FITTED_EXPERT_SLOTS, type ModelKey } from "@karume/gemma4-app-support/settings";
 import { judgeSessionAb, type SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import gemmaSessionAb from "../src/entries/local/gemma4-session-ab.ts";
 import { ParameterError, parseParameters } from "../src/entry.ts";
-import { FITTED_EXPERT_SLOTS, type ModelKey } from "../src/gemma4/settings.ts";
 import { type SessionAbArmProbe, sessionAbGemmaData } from "../src/session-ab/data.ts";
 import { gemmaRequest, openGemmaModel, parseModelText } from "../src/session-ab/gemma-target.ts";
 import { SESSION_AB_PROMPT } from "../src/session-ab/gemma-request.ts";

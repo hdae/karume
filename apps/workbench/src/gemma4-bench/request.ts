@@ -10,6 +10,7 @@
  * escaping in a URL query (unlike `+`, which a query reads as a space).
  */
 
+import type { GemmaManifests, GemmaMount } from "@karume/gemma4-app-support/settings";
 import { loadManifest } from "@karume/hub";
 import { MountUnavailableError, type SourceKind } from "@karume/local-distributions/browser";
 
@@ -23,7 +24,6 @@ import {
   type ParameterValues,
 } from "../entry.ts";
 import { MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
-import type { GemmaManifests, GemmaMount } from "../gemma4/settings.ts";
 import {
   type ArmDraft,
   BENCH_PROMPT_IDS,

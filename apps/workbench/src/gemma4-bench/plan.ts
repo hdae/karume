@@ -5,18 +5,18 @@
  * tokens, rounds, sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
  */
 
-import type { Manifest, SessionSpec } from "@karume/hub";
-import type { DefaultSampler, SamplerSpec } from "@karume/models/gemma";
-
-import { modelRefusal } from "../gemma4/open.ts";
-import type { GemmaPipelineOptions, GemmaSessionOptions } from "../gemma4/pipeline.ts";
 import {
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
   type ModelKey,
   modelConfig,
-} from "../gemma4/settings.ts";
+} from "@karume/gemma4-app-support/settings";
+import type { Manifest, SessionSpec } from "@karume/hub";
+import type { DefaultSampler, SamplerSpec } from "@karume/models/gemma";
+
+import { modelRefusal } from "../gemma4/open.ts";
+import type { GemmaPipelineOptions, GemmaSessionOptions } from "../gemma4/pipeline.ts";
 import { modelPreset } from "../model-preset.ts";
 
 /**
