@@ -12,7 +12,9 @@
  *   `int8-sym`, q uniform in [-127, 127] (stored as a signed byte), d = sqrt((255² − 1)/12), one
  *   scale per row; in `f32`, U(-1, 1) times 1/(sqrt(fanIn) · sqrt(1/3));
  * - a norm weight is near 1 (1 + U(-0.1, 0.1));
- * - an elementwise operand (a layer scalar, an embedding scale) is U(-1, 1).
+ * - an elementwise operand (a layer scalar, an embedding scale) is U(-1, 1);
+ * - a bias (of a linear or a layer norm) is U(-0.1, 0.1);
+ * - an additive operand (a modulation table added to an activation) is U(-0.1, 0.1).
  *
  * The role comes from the consuming op and input slot ({@link initializerRole}). Only the roles and
  * codecs a corpus entry needs are implemented; anything else throws with the initializer's name and
@@ -53,7 +55,9 @@ export type GeneratedTensor = {
 export type WeightRole =
   | { readonly kind: "linear"; readonly fanIn: number }
   | { readonly kind: "norm" }
-  | { readonly kind: "operand" };
+  | { readonly kind: "operand" }
+  | { readonly kind: "bias" }
+  | { readonly kind: "additive" };
 
 /** An initializer the corpus has no generation rule for. */
 export class CorpusWeightError extends Error {
@@ -64,11 +68,18 @@ export class CorpusWeightError extends Error {
  * Consumer (`op#slot`) → what that slot makes of the initializer. A consumer outside this table has
  * no rule: add one only together with the value rule it needs.
  */
-const CONSUMER_KINDS: Readonly<Record<string, "linear" | "embedding" | "norm" | "operand">> = {
+const CONSUMER_KINDS: Readonly<
+  Record<string, "linear" | "embedding" | "norm" | "operand" | "bias" | "additive">
+> = {
   "linear#1": "linear",
   "embedding#0": "embedding",
   "rms_norm#1": "norm",
+  "layer_norm#1": "norm",
   "mul#1": "operand",
+  "linear#2": "bias",
+  "layer_norm#2": "bias",
+  "add#0": "additive",
+  "add#1": "additive",
 };
 
 /** Elements of a shape. */
@@ -130,6 +141,8 @@ export const initializerRole = (declaration: IrDeclaration, name: string): Weigh
   }
   if (kinds.size === 1 && kinds.has("norm")) return { kind: "norm" };
   if (kinds.size === 1 && kinds.has("operand")) return { kind: "operand" };
+  if (kinds.size === 1 && kinds.has("bias")) return { kind: "bias" };
+  if (kinds.size === 1 && kinds.has("additive")) return { kind: "additive" };
   if (kinds.size === 1 && kinds.has("embedding")) {
     throw new CorpusWeightError(
       `initializer '${name}' is read only as an embedding table: no generation rule for a table that no linear reads (add one to the corpus generator)`,
@@ -344,6 +357,9 @@ export const generateTensor = (spec: TensorSpec, seed: number): GeneratedTensor 
   if (encoding.codec === "f32" && role.kind === "operand") {
     return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit) };
   }
+  if (encoding.codec === "f32" && (role.kind === "bias" || role.kind === "additive")) {
+    return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => 0.1 * unit) };
+  }
   if (encoding.codec === "f32" && role.kind === "linear") {
     const step = 1 / (Math.sqrt(role.fanIn) * UNIT_DEVIATION);
     return { encoding, bytes: generateF32(stream, numelOf(shape), (unit) => unit * step) };
@@ -358,7 +374,7 @@ export const generateTensor = (spec: TensorSpec, seed: number): GeneratedTensor 
     return generateInt8Linear(name, stream, shape, encoding, role.fanIn);
   }
   throw new CorpusWeightError(
-    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights and operands, and linear weights in f32, int4-sym-g, int2-off and int8-sym`,
+    `initializer '${name}': no generation rule for a ${role.kind} weight stored in codec '${encoding.codec}' (layout ${entry.layout}); the corpus generates f32 norm weights, operands, biases and additive operands, and linear weights in f32, int4-sym-g, int2-off and int8-sym`,
   );
 };
 
@@ -409,7 +425,7 @@ export const generateWeights = (
 };
 
 /** The codecs {@link perturbOneLevel} can move a level in. */
-export const PERTURBABLE_CODECS: readonly CodecName[] = ["int4-sym-g", "int2-off"];
+export const PERTURBABLE_CODECS: readonly CodecName[] = ["int4-sym-g", "int2-off", "int8-sym"];
 
 /**
  * The same tensor with element 0 moved by one quantization level (u → u + 1, or u − 1 at the top
@@ -430,7 +446,13 @@ export const perturbOneLevel = (name: string, tensor: GeneratedTensor): Generate
     bytes[0] = (bytes[0] & 0xfc) | (level < 3 ? level + 1 : level - 1);
     return { ...tensor, bytes };
   }
+  if (tensor.encoding.codec === "int8-sym") {
+    // Element 0 is byte 0, a signed level in [-127, 127].
+    const level = (bytes[0] << 24) >> 24;
+    bytes[0] = (level < 127 ? level + 1 : level - 1) & 0xff;
+    return { ...tensor, bytes };
+  }
   throw new CorpusWeightError(
-    `initializer '${name}': perturbing one level is defined for ${PERTURBABLE_CODECS.join(" and ")}, not '${tensor.encoding.codec}'`,
+    `initializer '${name}': perturbing one level is defined for ${PERTURBABLE_CODECS.join(", ")}, not '${tensor.encoding.codec}'`,
   );
 };

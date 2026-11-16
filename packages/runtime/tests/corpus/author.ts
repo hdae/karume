@@ -123,7 +123,11 @@ const main = async (): Promise<void> => {
     : undefined;
   if (full === undefined)
     throw new Error(`${entry.source.mirror} has no graph '${entry.source.graph}'`);
-  const { declaration: cut, report } = cutLayers(full.declaration, entry.source.layers);
+  const { declaration: cut, report } = cutLayers(
+    full.declaration,
+    entry.source.layers,
+    entry.source.segment,
+  );
   console.log(
     `cut to layers [${report.kept.join(", ")}]: ${report.nodes} nodes, ${report.initializers} initializers, ` +
       `${report.states.length} state slots; rewired ${report.rewired.map(([from, to]) => `${from} → ${to}`).join(", ")}`,

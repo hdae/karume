@@ -98,6 +98,19 @@ const F32_OPERAND: TensorSpec = {
   encoding: { codec: "f32" },
 };
 
+const F32_BIAS: TensorSpec = {
+  name: "pin.linear.bias",
+  shape: [8],
+  role: { kind: "bias" },
+  encoding: { codec: "f32" },
+};
+const F32_ADDITIVE: TensorSpec = {
+  name: "pin.scale_shift_table",
+  shape: [1, 2, 4],
+  role: { kind: "additive" },
+  encoding: { codec: "f32" },
+};
+
 const f32Values = (bytes: Uint8Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
   new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 
@@ -137,6 +150,38 @@ const toyDocument = (): DeclarationJson => ({
 });
 
 const toy = (): IrDeclaration => parseIrDeclarationValue(toyDocument());
+
+/** `e` → `layer_norm(e, lnw, lnb)` → `linear(·, w, wb)` → `add(table, ·)` (a block without states). */
+const blockDeclaration = (): IrDeclaration =>
+  parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["add", "layer_norm", "linear"] },
+    symbols: ["T"],
+    inputs: [{ name: "e", dtype: "f32", shape: [1, "T", 16] }],
+    outputs: ["y"],
+    initializers: { lnw: {}, lnb: {}, w: {}, wb: {}, table: {} },
+    values: {
+      lnw: { dtype: "f32", shape: [16] },
+      lnb: { dtype: "f32", shape: [16] },
+      w: { dtype: "f32", shape: [16, 16] },
+      wb: { dtype: "f32", shape: [16] },
+      table: { dtype: "f32", shape: [1, 1, 16] },
+      l: { dtype: "f32", shape: [1, "T", 16] },
+      h: { dtype: "f32", shape: [1, "T", 16] },
+      y: { dtype: "f32", shape: [1, "T", 16] },
+    },
+    nodes: [
+      {
+        op: "layer_norm",
+        ins: ["e", "lnw", "lnb"],
+        outs: ["l"],
+        attrs: { eps: 1e-6, normalized_shape: [16] },
+      },
+      { op: "linear", ins: ["l", "w", "wb"], outs: ["h"], attrs: {} },
+      { op: "add", ins: ["table", "h"], outs: ["y"], attrs: {} },
+    ],
+  } satisfies DeclarationJson);
 
 /** The toy with one extra node reading `initializer` at `op` slot `slot`. */
 const toyWithReader = (initializer: string, op: string, slot: number): IrDeclaration => {
@@ -224,6 +269,20 @@ describe("the generator's bytes are pinned per codec and role", () => {
       "7722c980e3782d77b0547683b24d03d5934e346a852ac6224f553cbac216e9f9",
     );
   });
+
+  it("an f32 bias [8]", async () => {
+    assertEquals(
+      await digest(generateTensor(F32_BIAS, SEED)),
+      "eb42ea5855074bdfaca52e6dc965e55981ca850ff591c1bf51b6f59285d9effe",
+    );
+  });
+
+  it("an f32 additive operand [1, 2, 4]", async () => {
+    assertEquals(
+      await digest(generateTensor(F32_ADDITIVE, SEED)),
+      "a27e04cc10f8d84e12048e9d9c4567bf5c18db07bc218f91f7548a72f7329a18",
+    );
+  });
 });
 
 describe("the generator's values", () => {
@@ -277,6 +336,14 @@ describe("the generator's values", () => {
     assert(f32Values(generateTensor(F32_OPERAND, SEED).bytes).every((v) => v >= -1 && v < 1));
   });
 
+  it("a bias and an additive operand lie in [-0.1, 0.1)", () => {
+    for (const spec of [F32_BIAS, F32_ADDITIVE]) {
+      const values = f32Values(generateTensor({ ...spec, shape: [4096] }, SEED).bytes);
+      assert(values.every((v) => v >= -0.1 && v < 0.1));
+      assert(values.some((v) => v < -0.09) && values.some((v) => v > 0.09));
+    }
+  });
+
   it("the bytes follow the seed and the initializer's name", async () => {
     const base = await digest(generateTensor(F32_NORM, SEED));
     assertEquals(await digest(generateTensor(F32_NORM, SEED)), base);
@@ -305,11 +372,23 @@ describe("the generator's values", () => {
     assertEquals(moved.scale, tensor.scale);
   });
 
+  it("moving one level of an int8-sym weight changes element 0 by one level and nothing else", () => {
+    const tensor = generateTensor(INT8_LINEAR, SEED);
+    const moved = perturbOneLevel(INT8_LINEAR.name, tensor);
+    const level = (bytes: Uint8Array<ArrayBuffer>): number => (bytes[0] << 24) >> 24;
+    assertEquals(Math.abs(level(moved.bytes) - level(tensor.bytes)), 1);
+    assertEquals(moved.bytes.subarray(1), tensor.bytes.subarray(1));
+    assertEquals(moved.scale, tensor.scale);
+    // At the top level it moves down, never to -128.
+    const top = { ...tensor, bytes: Uint8Array.of(127, 0, 0, 0) };
+    assertEquals(level(perturbOneLevel(INT8_LINEAR.name, top).bytes), 126);
+  });
+
   it("moving one level of a codec without the rule throws", () => {
     assertThrows(
-      () => perturbOneLevel(INT8_LINEAR.name, generateTensor(INT8_LINEAR, SEED)),
+      () => perturbOneLevel(F32_LINEAR.name, generateTensor(F32_LINEAR, SEED)),
       CorpusWeightError,
-      "perturbing one level is defined for int4-sym-g and int2-off, not 'int8-sym'",
+      "perturbing one level is defined for int4-sym-g, int2-off, int8-sym, not 'f32'",
     );
   });
 });
@@ -326,6 +405,17 @@ describe("an initializer's role comes from its consumers", () => {
   it("rms_norm slot 1 is a norm weight, mul slot 1 an operand", () => {
     assertEquals(initializerRole(toy(), "norm"), { kind: "norm" });
     assertEquals(initializerRole(toy(), "scalar"), { kind: "operand" });
+  });
+
+  it("layer_norm slot 1 is a norm weight; linear and layer_norm slot 2 are biases", () => {
+    assertEquals(initializerRole(blockDeclaration(), "lnw"), { kind: "norm" });
+    assertEquals(initializerRole(blockDeclaration(), "lnb"), { kind: "bias" });
+    assertEquals(initializerRole(blockDeclaration(), "wb"), { kind: "bias" });
+  });
+
+  it("add (either slot) is an additive operand", () => {
+    assertEquals(initializerRole(blockDeclaration(), "table"), { kind: "additive" });
+    assertEquals(initializerRole(toy(), "bias"), { kind: "additive" });
   });
 
   it("a consumer without a rule throws with the initializer and what reads it", () => {

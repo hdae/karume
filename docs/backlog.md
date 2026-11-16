@@ -134,11 +134,11 @@ maintainer's ruling of 2026-11-06).
      and the Gemma 4 pipeline options, composed per field between a preset and an explicit value; the seven options that
      named a reduction form or a fusion left the public surface (breaking); the three bit-identical fusions always
      apply; the Gemma 4 QAT presets declare `numerics`; the spec is [spec/numerics.md](spec/numerics.md).)* Left from it:
-     - The runtime's regression corpus: the mechanism and two entries have landed (Gemma 4 QAT E2B cut to four layers;
-       its mobile line cut to three, with the packed activations and the integer GEMV —
-       [spec/verification.md](spec/verification.md#the-regression-corpus)). Left: the entries for a graph without state
-       slots, the int8 activation paths, conv / VAE, an i32-input text encoder, and the 26B MoE graph (388 MiB per
-       layer). Checking a
+     - The runtime's regression corpus: the mechanism and four entries have landed (Gemma 4 QAT E2B; its mobile line
+       with the packed activations and the integer GEMV; the Irodori v4-small DiT with int8 linear activations; the
+       Wan2.2 DiT with int8 linear and attention — [spec/verification.md](spec/verification.md#the-regression-corpus)).
+       Left: the entries for conv / VAE, an i32-input text encoder, the f16 compute paths and the 26B MoE graph
+       (388 MiB per layer). Checking a
        `reorder` strategy inside its op band on the corpus's activations (replaying one op on values taken from an
        `exact` run) is not built; it is built when a defect shows that the kernel checks' own inputs miss something
        (the maintainer's ruling of 2026-11-16).

@@ -1,0 +1,288 @@
+{
+  "schema": 1,
+  "graph": "dit",
+  "initializers": {
+    "blocks.0.attention.gate.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention.k_norm.weight": {
+      "codec": "f32"
+    },
+    "blocks.0.attention.q_norm.weight": {
+      "codec": "f32"
+    },
+    "blocks.0.attention.wk.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention.wo.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention.wq.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention.wv.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.gate_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.gate_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.attention_adaln.gate_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.scale_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.scale_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.attention_adaln.scale_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.shift_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.attention_adaln.shift_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.attention_adaln.shift_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp.w1.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp.w2.weight": {
+      "codec": "int8-sym",
+      "groupSize": 3680,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp.w3.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.gate_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.gate_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.mlp_adaln.gate_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.scale_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.scale_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.mlp_adaln.scale_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.shift_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.0.mlp_adaln.shift_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.0.mlp_adaln.shift_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.attention.gate.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention.k_norm.weight": {
+      "codec": "f32"
+    },
+    "blocks.11.attention.q_norm.weight": {
+      "codec": "f32"
+    },
+    "blocks.11.attention.wk.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention.wo.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention.wq.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention.wv.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.gate_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.gate_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.attention_adaln.gate_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.scale_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.scale_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.attention_adaln.scale_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.shift_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.attention_adaln.shift_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.attention_adaln.shift_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp.w1.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp.w2.weight": {
+      "codec": "int8-sym",
+      "groupSize": 3680,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp.w3.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.gate_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.gate_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.mlp_adaln.gate_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.scale_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.scale_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.mlp_adaln.scale_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.shift_down.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "blocks.11.mlp_adaln.shift_up.bias": {
+      "codec": "f32"
+    },
+    "blocks.11.mlp_adaln.shift_up.weight": {
+      "codec": "int8-sym",
+      "groupSize": 192,
+      "rowAxis": 0
+    },
+    "cond_module.0.weight": {
+      "codec": "int8-sym",
+      "groupSize": 512,
+      "rowAxis": 0
+    },
+    "cond_module.2.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "cond_module.4.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    },
+    "in_proj.bias": {
+      "codec": "f32"
+    },
+    "in_proj.weight": {
+      "codec": "int8-sym",
+      "groupSize": 32,
+      "rowAxis": 0
+    },
+    "out_norm.weight": {
+      "codec": "f32"
+    },
+    "out_proj.bias": {
+      "codec": "f32"
+    },
+    "out_proj.weight": {
+      "codec": "int8-sym",
+      "groupSize": 1280,
+      "rowAxis": 0
+    }
+  }
+}

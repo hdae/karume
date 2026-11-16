@@ -30,9 +30,16 @@ export type CorpusSetting = {
   readonly options: SessionOptions;
 };
 
-/** The two levels alone. Every entry has `exact`: the perturbed weights and the distances use it. */
+/** Every entry has `exact`: the perturbed weights and the distances use it. */
+const EXACT: CorpusSetting = {
+  name: "exact",
+  kind: "level",
+  options: { numerics: { level: "exact" } },
+};
+
+/** The two levels alone. */
 const LEVEL_SETTINGS: readonly CorpusSetting[] = [
-  { name: "exact", kind: "level", options: { numerics: { level: "exact" } } },
+  EXACT,
   { name: "reorder", kind: "level", options: { numerics: { level: "reorder" } } },
 ];
 
@@ -51,6 +58,8 @@ export type CorpusEntry = {
   readonly source: {
     readonly mirror: string;
     readonly graph: string;
+    /** The module path segment the layers are numbered by (`<segment>.<n>.` in initializer names). */
+    readonly segment: string;
     readonly layers: readonly number[];
   };
 };
@@ -87,6 +96,7 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-gemma4-qat/e2b/model/model.i4.krm",
       graph: "model",
+      segment: "layers",
       layers: [13, 14, 15, 34],
     },
   },
@@ -131,7 +141,100 @@ export const CORPUS_ENTRIES: readonly CorpusEntry[] = [
     source: {
       mirror: "models/karume-gemma4-qat-mobile/e2b/model/model.i4.krm",
       graph: "model",
+      segment: "layers",
       layers: [13, 14, 34],
+    },
+  },
+  {
+    // Irodori v4-small, `dit`: no state slots, int8-sym linear weights, attention built from bmm and
+    // safe_softmax. Blocks 0 and 11 of 12: in block 0 one of the two ropes is not fused (it
+    // dispatches a neg the other blocks do not), 11 computes the output, and block 0 hands its
+    // residual to block 11. Its presets are `i8` (exact) and `i8-a8`; `reorder` dispatches the
+    // same kernels as `exact` here (no strategy fits its linears, and it has no attention op).
+    name: "irodori-v4-small-dit-cut2",
+    graph: "dit",
+    seed: 1,
+    plan: {
+      rowSymbol: "S",
+      bindings: {},
+      runs: [
+        // One run of two independent steps (the graph has no state slots). 48 rows: the GEMVs of
+        // the linears (M ≤ 64) and the bmm without v4 (48 + 1519 keys is not a multiple of 4).
+        // 513 rows: the 128×128 GEMM of exact, the 128×64 i8a8 tile of a8 (M > 512) and the bmm
+        // with v4.
+        { name: "s48-s513", steps: [48, 513] },
+      ],
+    },
+    settings: [
+      EXACT,
+      {
+        name: "a8",
+        kind: "approximation",
+        options: { numerics: { level: "exact" }, linearCompute: "a8" },
+      },
+    ],
+    // The output projection: element 0 reaches every row of output column 0.
+    perturbed: "out_proj.weight",
+    source: {
+      mirror: "models/karume-irodori-v4-small/v4-small/dit/model.i8.krm",
+      graph: "dit",
+      segment: "blocks",
+      layers: [0, 11],
+    },
+  },
+  {
+    // Wan2.2 TI2V-5B, `transformer`: no state slots, int8-sym linear weights, self- and
+    // cross-attention through the `attention` op. Blocks 28 and 29 of 30 (29 computes the output).
+    // Its presets add int8 attention with the scores stored in f16 or not stored at all (the
+    // online kernel); `reorder` dispatches the same kernels as `exact` here.
+    name: "wan2.2-ti2v-5b-transformer-cut2",
+    graph: "transformer",
+    seed: 1,
+    plan: {
+      rowSymbol: "S",
+      bindings: {},
+      runs: [
+        // One run of two independent steps (the graph has no state slots). 16 rows: the GEMVs of
+        // the linears and the attention kernels with v4 (S a multiple of 4, so the scores are
+        // stored in f16). 513 rows: the 128×128 GEMM of exact, the 128×64 i8a8 tile (M > 512),
+        // attention without v4 (scores in f32) and the online kernel with padded keys.
+        // One run, not two: on a device whose workgroup storage cannot hold the online kernel, the
+        // online setting falls back to stored f32 scores, which is what the f16 setting runs at
+        // 513 rows too — the two settings then differ only at 16 rows, and "no two settings
+        // dispatch the same kernels" is judged over a run.
+        { name: "s16-s513", steps: [16, 513] },
+      ],
+    },
+    settings: [
+      EXACT,
+      {
+        name: "a8-attn8-s16",
+        kind: "approximation",
+        options: {
+          numerics: { level: "exact" },
+          linearCompute: "a8",
+          attentionCompute: "a8",
+          attentionScoreStorage: "f16",
+        },
+      },
+      {
+        name: "a8-attn8-online",
+        kind: "approximation",
+        options: {
+          numerics: { level: "exact" },
+          linearCompute: "a8",
+          attentionCompute: "a8",
+          attentionScoreStorage: "none",
+        },
+      },
+    ],
+    // The output projection: element 0 reaches every row of output column 0.
+    perturbed: "proj_out.weight",
+    source: {
+      mirror: "models/karume-wan2.2/ti2v-5b/transformer/model.i8.krm",
+      graph: "transformer",
+      segment: "blocks",
+      layers: [28, 29],
     },
   },
 ];
