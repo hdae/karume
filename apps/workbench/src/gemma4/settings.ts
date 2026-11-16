@@ -1,10 +1,13 @@
 /**
  * The Gemma 4 lookups and text forms the workbench's Gemma entries use: the three mounts and the
- * entry point each is built with, which model takes the exact expert cache, and the text forms of
- * the cache's slots and host tier with their parsing. Copied from the Playground's chat page
- * settings (`apps/playground/src/models/gemma4/settings.ts`), which keeps its own: the workbench and
- * the Playground share no module. Pure, so `vp test` covers it.
+ * entry point each is built with, a model's declared `pipelineConfig`, which model takes the exact
+ * expert cache, and the text forms of the cache's slots and host tier with their parsing. Copied
+ * from the Playground's chat page settings (`apps/playground/src/models/gemma4/settings.ts`), which
+ * keeps its own: the workbench and the Playground share no module. Pure, so `vp test` covers it.
  */
+
+import type { Manifest } from "@karume/hub";
+import { type PipelineConfig, parsePipelineConfig } from "@karume/models/gemma";
 
 /**
  * The mounts the Gemma entries read, each built with its family's entry point ({@link entryPointOf}):
@@ -34,6 +37,16 @@ export type ModelKey = { readonly mount: GemmaMount; readonly model: string };
 /** The models `gemma4QatMobile.Pipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
 export type QatModel = "e2b" | "e4b";
 export const isQatModel = (model: string): model is QatModel => model === "e2b" || model === "e4b";
+
+/** The manifests that have loaded, by mount (a mount whose mirror is missing is absent). */
+export type GemmaManifests = Partial<Record<GemmaMount, Manifest>>;
+
+/** The model's static wiring as the distribution declares it (`pipelineConfig`, validated). */
+export const modelConfig = (manifest: Manifest, model: string): PipelineConfig => {
+  const entry = manifest.models[model];
+  if (entry === undefined) throw new Error(`The manifest has no model '${model}'`);
+  return parsePipelineConfig(entry.pipelineConfig);
+};
 
 /**
  * Whether the model is a mixture of experts, i.e. whether the exact expert cache (`expertCache` of

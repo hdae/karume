@@ -74,32 +74,18 @@ const MIB = 2 ** 20;
 /**
  * Builds the pipeline a request names: `gemma.Pipeline` for the `gemma4` and `gemma4-qat` mounts,
  * `gemma4QatMobile.Pipeline` for `gemma4-qat-mobile` (no MTP drafter, models `e2b` / `e4b` only — refused
- * here, before any read). The one build path of the chat page and the decode bench, so both load a
- * model the same way. Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
- * `sessionOptions` are passed to `fromPretrained` as explicit Session options (the pipeline resolves
- * them as explicit > the preset's declaration > the runtime default; the decode bench's integer
- * GEMV switch); the chat page passes none.
- * `pipelineOptions` are passed to `fromPretrained` as they are (the decode bench's PLE placement and
- * run-ahead depth); the chat page passes none.
+ * here, before any read). Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
  */
-export const buildGemmaPipeline = async (input: {
+const buildGemmaPipeline = async (input: {
   readonly gpu: GpuContext;
   readonly request: Omit<LoadRequest, "diagnostics">;
   readonly signal: AbortSignal;
   readonly onRunDiagnostics?: DiagnosticsSink;
   readonly onProgress?: FromPretrainedOptions["onProgress"];
-  readonly sessionOptions?: Pick<
-    FromPretrainedOptions,
-    "integerGemv" | "packedStaticQuantize" | "numerics"
-  >;
-  readonly pipelineOptions?: Pick<FromPretrainedOptions, "pleResidency" | "decodeAhead">;
 }): Promise<GemmaPipeline> => {
-  const { gpu, request, signal, onRunDiagnostics, onProgress, sessionOptions, pipelineOptions } =
-    input;
+  const { gpu, request, signal, onRunDiagnostics, onProgress } = input;
   const ref = pretrainedRef(request.source, request.mount, document.baseURI);
   const common = {
-    ...sessionOptions,
-    ...pipelineOptions,
     gpu,
     quant: request.quant,
     ...(request.fullStateStorage === undefined

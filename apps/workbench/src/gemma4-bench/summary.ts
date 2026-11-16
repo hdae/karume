@@ -8,11 +8,20 @@
  * op family and pipeline key ({@link SplitSummary}).
  */
 
-import type { Spread } from "@/lib/record";
+import { familyOfKey, OP_FAMILY_LABELS, type OpFamily } from "./family.ts";
+import { type ChatMeasurement, type KeyPerToken, median, round4 } from "./measure.ts";
+import { armLabel, type BenchArm, type BenchPromptId, benchPrompt } from "./plan.ts";
 
-import { familyOfKey, OP_FAMILY_LABELS, type OpFamily } from "./family";
-import { type ChatMeasurement, type KeyPerToken, median, round4 } from "./measure";
-import { armLabel, type BenchArm, type BenchPromptId, benchPrompt } from "./plan";
+/**
+ * min / median / max of a non-empty list (the median of an even count is the mean of the middle
+ * two). Copied from the Playground's record helpers (`apps/playground/src/lib/record.ts`).
+ */
+export type Spread = {
+  readonly count: number;
+  readonly min: number;
+  readonly median: number;
+  readonly max: number;
+};
 
 /** What the summary reads of one chat. */
 export type SummaryInput = {
@@ -241,8 +250,9 @@ export const shareText = (value: number | undefined, total: number | undefined):
     : `${((value / total) * 100).toFixed(1)}%`;
 
 /**
- * The split breakdowns of the summary as plain text (the page's `#split-summary`): per arm × prompt
- * a header, the families, then the keys — GPU ms per token, share of the total, dispatches per token.
+ * The split breakdowns of the summary as plain text (the entry's summary ends with it): per arm ×
+ * prompt a header, the families, then the keys — GPU ms per token, share of the total, dispatches
+ * per token.
  */
 export const splitSummaryText = (
   summary: readonly ArmPromptSummary[],

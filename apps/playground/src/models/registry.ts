@@ -9,7 +9,6 @@ import type { FileRoutesByPath } from "@tanstack/react-router";
 import {
   AudioLinesIcon,
   BoxesIcon,
-  GaugeIcon,
   ImageIcon,
   type LucideIcon,
   MessageSquareTextIcon,
@@ -21,7 +20,7 @@ import {
 } from "lucide-react";
 
 /** The sidebar groups, in display order. */
-export const PAGE_GROUPS = ["Video", "Image", "Vision", "Audio", "Text", "Benchmarks"] as const;
+export const PAGE_GROUPS = ["Video", "Image", "Vision", "Audio", "Text"] as const;
 export type PageGroup = (typeof PAGE_GROUPS)[number];
 
 /** Every file route except the index (the route tree is generated from `src/routes/`). */
@@ -114,15 +113,6 @@ export const MODEL_PAGES: readonly ModelPage[] = [
       "A chat with Gemma 4 (E2B / E4B), its q4_0 QAT line (E2B / E4B / 12B, MTP drafters) or the fixed mobile QAT (E2B / E4B), streaming tokens on the GPU.",
     group: "Text",
     icon: MessageSquareTextIcon,
-    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
-  },
-  {
-    path: "/gemma4-bench",
-    title: "Gemma 4 decode bench",
-    summary:
-      "Decode A/B of regular Gemma 4, its q4_0 QAT line and the mobile QAT distribution (model × preset, GPU tap on or off) in interleaved rounds: decode tokens/s, TTFT, prefill, and GPU busy time, dispatches, passes and submits per token.",
-    group: "Benchmarks",
-    icon: GaugeIcon,
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
   },
 ];

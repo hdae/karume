@@ -1,15 +1,14 @@
 /**
- * What the decode bench runs: the prompt set, the arms (a model of one of the two Gemma 4
+ * What the decode bench runs: the prompt set, the arms (a model of one of the three Gemma 4
  * distributions × a preset × the tap on, on and split per dispatch, or off × the integer GEMV on or
- * off × the PLE on the host or the GPU × the decode run-ahead depth), the workload form (chats,
- * new tokens, rounds, sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
+ * off × the PLE on the host or the GPU × the decode run-ahead depth), the workload (chats, new
+ * tokens, rounds, sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
  */
 
 import type { Manifest, SessionSpec } from "@karume/hub";
 import type { DefaultSampler, FromPretrainedOptions, SamplerSpec } from "@karume/models/gemma";
 
-import type { Choice } from "@/components/choice-select";
-import { manifestPresets } from "@/lib/presets";
+import { manifestPresets } from "../gemma4/presets.ts";
 import {
   GEMMA_MOUNTS,
   type GemmaManifests,
@@ -17,7 +16,7 @@ import {
   isQatModel,
   type ModelKey,
   modelConfig,
-} from "@/models/gemma4/settings";
+} from "../gemma4/settings.ts";
 
 /**
  * Distinct token ids at which a prompt makes a PLE block whole-resident on the host (ADR 0085): a
@@ -40,7 +39,8 @@ export type BenchPrompt = {
  * The fixed prompts, in the order a visit runs them (the one below the threshold first, so it runs
  * on a pipeline no larger prompt has touched yet). Both ask for more than 128 tokens of text, so a
  * greedy run normally reaches the token limit. With the chat template the Gemma 4 tokenizer renders
- * them to 21 tokens (17 distinct) and 60 tokens (48 distinct); the page counts them again at run time.
+ * them to 21 tokens (17 distinct) and 60 tokens (48 distinct); the bench counts them again at run
+ * time.
  */
 export const BENCH_PROMPTS: readonly BenchPrompt[] = [
   {
@@ -57,6 +57,14 @@ export const BENCH_PROMPTS: readonly BenchPrompt[] = [
   },
 ];
 
+/**
+ * The prompt ids in the set's order. Marked pure so a production build, which leaves out the
+ * entries that read a distribution, drops it with them.
+ */
+export const BENCH_PROMPT_IDS: readonly BenchPromptId[] = /* @__PURE__ */ BENCH_PROMPTS.map(
+  ({ id }) => id,
+);
+
 export const benchPrompt = (id: BenchPromptId): BenchPrompt => {
   const prompt = BENCH_PROMPTS.find((candidate) => candidate.id === id);
   if (prompt === undefined) throw new Error(`No bench prompt '${id}'`);
@@ -69,9 +77,8 @@ export const meetsDistinctIdCondition = (prompt: BenchPrompt, distinctIds: numbe
     ? distinctIds < PLE_DISTINCT_ID_THRESHOLD
     : distinctIds >= PLE_DISTINCT_ID_THRESHOLD;
 
-/** One arm as the form holds it (`quant` absent = the model's default preset). */
+/** One arm as the `arms` parameter names it (`quant` absent = the model's default preset). */
 export type ArmDraft = {
-  readonly id: number;
   readonly key: ModelKey;
   readonly quant?: string;
   readonly tap: boolean;
@@ -87,13 +94,6 @@ export type ArmDraft = {
 
 /** The run-ahead depths the bench offers (1 = off — one step per batch). */
 export type DecodeAhead = "1" | "2" | "4" | "8";
-
-export const DECODE_AHEAD_CHOICES: readonly Choice<DecodeAhead>[] = [
-  { value: "1", label: "1 (off)" },
-  { value: "2", label: "2" },
-  { value: "4", label: "4" },
-  { value: "8", label: "8" },
-];
 
 /**
  * The pipeline options an arm passes to `fromPretrained` (absent = the default: the PLE on the
@@ -167,14 +167,15 @@ export const armLabel = (
   }`;
 
 /**
- * The arms the page starts with: the default model of each loaded distribution at its default
- * preset, tap on (regular Gemma 4 first, so it is arm 1, the one the others are compared with).
+ * The arms of an empty `arms` parameter: the default model of each loaded distribution at its
+ * default preset, tap on (regular Gemma 4 first, so it is arm 1, the one the others are compared
+ * with).
  */
 export const defaultArmDrafts = (manifests: GemmaManifests): readonly ArmDraft[] =>
-  GEMMA_MOUNTS.flatMap((mount, index) => {
+  GEMMA_MOUNTS.flatMap((mount) => {
     const manifest = manifests[mount];
     if (manifest === undefined) return [];
-    return [{ id: index, key: { mount, model: manifest.defaultModel }, tap: true }];
+    return [{ key: { mount, model: manifest.defaultModel }, tap: true }];
   });
 
 export type ArmResolution =
@@ -182,26 +183,32 @@ export type ArmResolution =
   | { readonly ok: false; readonly error: string };
 
 /**
- * A draft → its arm, or why it cannot run (a missing manifest or model, a QAT model the entry point
- * refuses, or a run-ahead depth without the PLE on the GPU — the pipeline refuses that pair too, but
- * only after the arm was started).
+ * A draft → its arm, or why it cannot run (a missing manifest, a model or a preset the manifest does
+ * not have — named with the ones it has —, a QAT model the entry point refuses, or a run-ahead depth
+ * without the PLE on the GPU — the pipeline refuses that pair too, but only after the arm was
+ * started).
  */
 export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResolution => {
   const { mount, model } = draft.key;
   const manifest: Manifest | undefined = manifests[mount];
   if (manifest === undefined) return { ok: false, error: `The ${mount} manifest is not loaded.` };
   if (manifest.models[model] === undefined) {
-    return { ok: false, error: `The ${mount} manifest has no model '${model}'.` };
+    return {
+      ok: false,
+      error: `The ${mount} manifest has no model '${model}'; its models are ${Object.keys(manifest.models).join(", ")}.`,
+    };
   }
   if (mount === "gemma4-qat-mobile" && !isQatModel(model)) {
     return { ok: false, error: `gemma4QatMobile.Pipeline does not accept the model '${model}'.` };
   }
   const { presets, defaultQuant } = manifestPresets(manifest, model);
-  const preset =
-    presets.find(({ name }) => name === draft.quant) ??
-    presets.find(({ name }) => name === defaultQuant);
+  const chosen = draft.quant ?? defaultQuant;
+  const preset = presets.find(({ name }) => name === chosen);
   if (preset === undefined) {
-    return { ok: false, error: `The ${mount} model '${model}' has no preset '${defaultQuant}'.` };
+    return {
+      ok: false,
+      error: `The ${mount} model '${model}' has no preset '${chosen}'; its presets are ${presets.map(({ name }) => name).join(", ")}.`,
+    };
   }
   const declaredSampler = modelConfig(manifest, model).sampler;
   const decodeAhead = Number(draft.decodeAhead ?? "1");
@@ -241,13 +248,12 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
   };
 };
 
-/** Which sampler every chat of every arm is sent with. */
-export type SamplerKind = "greedy" | "distribution";
-
-export const SAMPLER_CHOICES: readonly Choice<SamplerKind>[] = [
-  { value: "greedy", label: "Greedy (temperature 0, the same tokens in every round)" },
-  { value: "distribution", label: "The distribution's sampler, seed 0" },
-];
+/**
+ * Which sampler every chat of every arm is sent with: greedy (temperature 0, the same tokens in
+ * every round) or the distribution's sampler with seed 0.
+ */
+export const SAMPLER_KINDS = ["greedy", "distribution"] as const;
+export type SamplerKind = (typeof SAMPLER_KINDS)[number];
 
 /**
  * The sampler a chat is sent with: greedy, or the distribution's declared sampler with seed 0
@@ -258,23 +264,6 @@ export const samplerOf = (kind: SamplerKind, declared: DefaultSampler | undefine
     ? { temperature: 0 }
     : { temperature: declared.temperature, topK: declared.topK, topP: declared.topP, seed: 0 };
 
-/** The workload form, as typed. */
-export type BenchForm = {
-  readonly chats: string;
-  readonly newTokens: string;
-  readonly rounds: string;
-  readonly sampler: SamplerKind;
-  readonly prompts: readonly BenchPromptId[];
-};
-
-export const INITIAL_BENCH_FORM: BenchForm = {
-  chats: "3",
-  newTokens: "128",
-  rounds: "4",
-  sampler: "greedy",
-  prompts: BENCH_PROMPTS.map(({ id }) => id),
-};
-
 export type BenchSettings = {
   /** Chats per prompt per visit; chat 0 is the cold one and is left out of the summary. */
   readonly chats: number;
@@ -284,41 +273,6 @@ export type BenchSettings = {
   readonly sampler: SamplerKind;
   /** In {@link BENCH_PROMPTS} order. */
   readonly prompts: readonly BenchPromptId[];
-};
-
-export type Parsed<Value> =
-  | { readonly ok: true; readonly value: Value }
-  | { readonly ok: false; readonly errors: readonly string[] };
-
-const integerOf = (text: string): number | undefined => {
-  const trimmed = text.trim();
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  const value = Number(trimmed);
-  return Number.isSafeInteger(value) ? value : undefined;
-};
-
-/**
- * The form → the settings, or every problem at once. Two chats at least (chat 0 is discarded), two
- * new tokens at least (one decode token), one round, one prompt.
- */
-export const parseBenchForm = (form: BenchForm): Parsed<BenchSettings> => {
-  const errors: string[] = [];
-  const chats = integerOf(form.chats);
-  if (chats === undefined || chats < 2) {
-    errors.push("Chats must be an integer ≥ 2 (chat 0 is the cold one and is left out).");
-  }
-  const newTokens = integerOf(form.newTokens);
-  if (newTokens === undefined || newTokens < 2) {
-    errors.push("New tokens must be an integer ≥ 2 (the first token comes from the prefill).");
-  }
-  const rounds = integerOf(form.rounds);
-  if (rounds === undefined || rounds < 1) errors.push("Rounds must be an integer ≥ 1.");
-  const prompts = BENCH_PROMPTS.map(({ id }) => id).filter((id) => form.prompts.includes(id));
-  if (prompts.length === 0) errors.push("Choose at least one prompt.");
-  if (errors.length > 0 || chats === undefined || newTokens === undefined || rounds === undefined) {
-    return { ok: false, errors };
-  }
-  return { ok: true, value: { chats, newTokens, rounds, sampler: form.sampler, prompts } };
 };
 
 /** One visit of an arm: its pipeline is built, runs every chat of the visit, and is released. */

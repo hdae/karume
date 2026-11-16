@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { ChatMeasurement } from "../src/models/gemma4-bench/measure.ts";
-import type { BenchPromptId } from "../src/models/gemma4-bench/plan.ts";
-import { spreadOf, type SummaryInput, summarizeRuns } from "../src/models/gemma4-bench/summary.ts";
+import type { ChatMeasurement } from "../src/gemma4-bench/measure.ts";
+import type { BenchPromptId } from "../src/gemma4-bench/plan.ts";
+import { spreadOf, type SummaryInput, summarizeRuns } from "../src/gemma4-bench/summary.ts";
 
 const measurement = (decodeMsPerToken: number, gpuBusyMs?: number): ChatMeasurement => ({
   timing: { totalSeconds: 1, decodeTokens: 127 },

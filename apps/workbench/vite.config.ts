@@ -4,7 +4,7 @@ import { defineConfig } from "vite-plus";
 
 import { resultsPlugin } from "./vite-plugin-results.ts";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     // `/models/` and `/hf/` from the mount table the playground also serves, and COOP / COEP on
     // every dev and preview response (first, so the results plugin's answers carry them too).
@@ -17,5 +17,18 @@ export default defineConfig({
   // listens on 8790.
   server: { host: "127.0.0.1", port: 8791, strictPort: true },
   preview: { host: "127.0.0.1", port: 8791, strictPort: true },
-  test: { include: ["tests/**/*_test.ts"] },
-});
+  // A production build serves no distribution: the registry's module of local entries resolves to
+  // an empty one, so those entries are outside the build's module graph.
+  resolve: {
+    alias:
+      command === "build"
+        ? [{ find: "./local-entries.ts", replacement: "./no-local-entries.ts" }]
+        : [],
+  },
+  test: {
+    include: ["tests/**/*_test.ts"],
+    // The registry lists entries with `import.meta.glob`, whose expansion depends on which files
+    // exist; a cached transform of it would outlive an added or removed entry file.
+    fsModuleCache: false,
+  },
+}));

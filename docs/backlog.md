@@ -183,7 +183,8 @@ maintainer's ruling of 2026-11-06).
        for another, and its cached-read part would measure something else under the workbench's origin.)*
      - *(Landed 2026-11-16: the Session A/B as the entries `session-ab` (the MOSS-Image DiT, the Wan2.2 VAE next chunk,
        the anima VAE tile) and `gemma4-session-ab`; its Playground page and the opt-in e2e copies of its code went.)*
-     - The Gemma 4 decode bench as an entry; then its Playground page goes (the maintainer's ruling of 2026-11-16).
+     - *(Landed 2026-11-16: the Gemma 4 decode bench as the entry `gemma4-bench`; its page went. The Playground now
+       holds model pages only.)*
      - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
        hosted is the maintainer's decision.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).

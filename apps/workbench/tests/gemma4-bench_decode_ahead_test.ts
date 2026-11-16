@@ -1,10 +1,9 @@
 import type { Manifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
-import { type ArmDraft, armLabel, resolveArm } from "../src/models/gemma4-bench/plan.ts";
-import { buildBenchRecord } from "../src/models/gemma4-bench/record.ts";
-import type { RunArm } from "../src/models/gemma4-bench/run.ts";
+import { buildBenchData } from "../src/gemma4-bench/data.ts";
+import { type ArmDraft, armLabel, resolveArm } from "../src/gemma4-bench/plan.ts";
+import type { RunArm } from "../src/gemma4-bench/run.ts";
 
 /** A QAT manifest with one preset (`i4`, the default). */
 const manifest = {
@@ -35,7 +34,6 @@ const manifestWith12b = {
 } as unknown as Manifest;
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
-  id: 0,
   key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
@@ -71,7 +69,6 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
 
     it("runs ahead on 12B, which has no PLE, and refuses to place one", () => {
       const twelve = (extra: Partial<ArmDraft>): ArmDraft => ({
-        id: 0,
         key: { mount: "gemma4-qat", model: "12b" },
         tap: false,
         ...extra,
@@ -99,24 +96,7 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
     });
   });
 
-  describe("the record", () => {
-    const ENVIRONMENT: RecordEnvironment = {
-      recordedAt: "2026-11-03T10:00:00.000Z",
-      userAgent: "test",
-      crossOriginIsolated: true,
-      adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "" },
-      device: {
-        features: [],
-        wgslLanguageFeatures: [],
-        subgroupLanesLinear: false,
-        gpuTimingEnabled: false,
-        limits: {
-          maxComputeWorkgroupStorageSize: 32768,
-          maxStorageBufferBindingSize: 4294967292,
-          maxBufferSize: 4294967292,
-        },
-      },
-    };
+  describe("the data", () => {
     const armOf = (pipeline?: RunArm["pipeline"]): RunArm => ({
       mount: "gemma4-qat-mobile",
       model: "e2b",
@@ -129,27 +109,21 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
     });
 
     it("records each arm's pipeline options ({} when none)", () => {
-      const record = buildBenchRecord({
-        environment: ENVIRONMENT,
+      const data = buildBenchData({
         timestampQuery: true,
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ pleResidency: "gpu", decodeAhead: 4 })],
-        distributions: { "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00" } },
-        sources: {
-          gemma4: { kind: "direct" },
-          "gemma4-qat": { kind: "direct" },
-          "gemma4-qat-mobile": { kind: "direct" },
+        distributions: {
+          "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00", read: "direct" },
         },
         visits: [],
         chats: [],
       });
-      expect(record.arms.map(({ pipelineOptions }) => pipelineOptions)).toEqual([
+      expect(data.arms.map(({ pipelineOptions }) => pipelineOptions)).toEqual([
         {},
         { pleResidency: "gpu", decodeAhead: 4 },
       ]);
-      // Version 2: mount `gemma4-qat` is the q4_0 QAT line since the mobile line's rename.
-      expect(record.format).toBe("karume-playground-gemma4-bench/2");
     });
   });
 });

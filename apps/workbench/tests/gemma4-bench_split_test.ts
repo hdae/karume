@@ -8,14 +8,14 @@ import {
   type PassTime,
   type TokenMark,
   UNLABELED_KEY,
-} from "../src/models/gemma4-bench/measure.ts";
-import { armLabel, resolveArm } from "../src/models/gemma4-bench/plan.ts";
+} from "../src/gemma4-bench/measure.ts";
+import { armLabel, resolveArm } from "../src/gemma4-bench/plan.ts";
 import {
   splitSummaryText,
   summarizeRuns,
   summarizeSplit,
   type SummaryInput,
-} from "../src/models/gemma4-bench/summary.ts";
+} from "../src/gemma4-bench/summary.ts";
 
 const LINEAR = "linear_gemv_parallel:wi4g32:l32";
 const NORM = "rms_norm:v1:f32:lastdim:wg256";
@@ -244,7 +244,7 @@ describe("a split arm", () => {
       },
     },
   } as unknown as Manifest;
-  const draft = { id: 0, key: { mount: "gemma4-qat-mobile" as const, model: "e2b" }, split: true };
+  const draft = { key: { mount: "gemma4-qat-mobile" as const, model: "e2b" }, split: true };
 
   it("is labelled as split", () => {
     expect(

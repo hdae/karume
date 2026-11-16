@@ -6,13 +6,11 @@ import {
   armLabel,
   BENCH_PROMPTS,
   defaultArmDrafts,
-  INITIAL_BENCH_FORM,
   meetsDistinctIdCondition,
-  parseBenchForm,
   resolveArm,
   samplerOf,
   visitOrder,
-} from "../src/models/gemma4-bench/plan.ts";
+} from "../src/gemma4-bench/plan.ts";
 
 const pipelineConfig = {
   capacity: 4096,
@@ -44,7 +42,6 @@ const manifest = (defaultModel: string, models: readonly string[]): Manifest =>
   }) as unknown as Manifest;
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
-  id: 0,
   key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
@@ -75,12 +72,11 @@ describe("the arms", () => {
         { mount: "gemma4", model: "e2b", tap: true },
         { mount: "gemma4-qat-mobile", model: "e2b", tap: true },
       ]);
-      expect(new Set(drafts.map(({ id }) => id)).size).toBe(2);
     });
 
     it("leaves out a distribution whose manifest is not loaded", () => {
       expect(defaultArmDrafts({ "gemma4-qat-mobile": manifest("e4b", ["e4b"]) })).toEqual([
-        { id: 2, key: { mount: "gemma4-qat-mobile", model: "e4b" }, tap: true },
+        { key: { mount: "gemma4-qat-mobile", model: "e4b" }, tap: true },
       ]);
     });
   });
@@ -103,10 +99,11 @@ describe("the arms", () => {
       });
     });
 
-    it("falls back to the default preset when the chosen one is not the model's", () => {
-      expect(resolveArm(draft({ quant: "bf16" }), manifests)).toMatchObject({
-        ok: true,
-        arm: { quant: "i4-fast" },
+    it("refuses a preset the model does not have, naming its presets", () => {
+      expect(resolveArm(draft({ quant: "bf16" }), manifests)).toEqual({
+        ok: false,
+        error:
+          "The gemma4-qat-mobile model 'e2b' has no preset 'bf16'; its presets are i4, i4-fast.",
       });
     });
 
@@ -131,6 +128,15 @@ describe("the arms", () => {
         resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }), manifests).ok,
       ).toBe(false);
     });
+
+    it("names the models the manifest has when it refuses one", () => {
+      expect(
+        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }), manifests),
+      ).toEqual({
+        ok: false,
+        error: "The gemma4-qat-mobile manifest has no model 'e9b'; its models are e2b, e4b, e12b.",
+      });
+    });
   });
 
   it("labels an arm by distribution, model and preset, marking a tap-off control", () => {
@@ -146,8 +152,8 @@ describe("the arms", () => {
 describe("the sampler", () => {
   const declared = { temperature: 1, topK: 64, topP: 0.95 };
 
-  it("is greedy by default", () => {
-    expect(INITIAL_BENCH_FORM.sampler).toBe("greedy");
+  // The default (greedy) is the entry's `sampler` parameter: gemma4-bench_entry_test.ts.
+  it("is greedy at temperature 0", () => {
     expect(samplerOf("greedy", declared)).toEqual({ temperature: 0 });
   });
 
@@ -157,43 +163,6 @@ describe("the sampler", () => {
 
   it("stays greedy when the distribution declares none", () => {
     expect(samplerOf("distribution", undefined)).toEqual({ temperature: 0 });
-  });
-});
-
-describe("the workload form", () => {
-  it("defaults to 3 chats of 128 new tokens over 4 rounds, both prompts", () => {
-    expect(parseBenchForm(INITIAL_BENCH_FORM)).toEqual({
-      ok: true,
-      value: {
-        chats: 3,
-        newTokens: 128,
-        rounds: 4,
-        sampler: "greedy",
-        prompts: ["few-ids", "many-ids"],
-      },
-    });
-  });
-
-  it("keeps the prompts in the set's order whatever order they were ticked in", () => {
-    const parsed = parseBenchForm({ ...INITIAL_BENCH_FORM, prompts: ["many-ids", "few-ids"] });
-    expect(parsed.ok && parsed.value.prompts).toEqual(["few-ids", "many-ids"]);
-  });
-
-  it("needs a warm chat, a decode token, a round and a prompt — and reports every problem", () => {
-    const parsed = parseBenchForm({
-      chats: "1",
-      newTokens: "1",
-      rounds: "0",
-      sampler: "greedy",
-      prompts: [],
-    });
-    expect(parsed.ok).toBe(false);
-    expect(parsed.ok ? [] : parsed.errors).toHaveLength(4);
-  });
-
-  it("refuses text that is not a non-negative integer", () => {
-    expect(parseBenchForm({ ...INITIAL_BENCH_FORM, chats: "2.5" }).ok).toBe(false);
-    expect(parseBenchForm({ ...INITIAL_BENCH_FORM, rounds: "-1" }).ok).toBe(false);
   });
 });
 

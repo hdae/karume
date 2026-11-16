@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { familyOfKey, type OpFamily } from "../src/models/gemma4-bench/family.ts";
+import { familyOfKey, type OpFamily } from "../src/gemma4-bench/family.ts";
 
 /**
  * Keys as the runtime's builders print them (packages/runtime/src/kernels and codegen, at the

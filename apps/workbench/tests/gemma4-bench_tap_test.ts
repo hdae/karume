@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { createGpuTap } from "../src/models/gemma4-bench/tap.ts";
+import { createGpuTap } from "../src/gemma4-bench/tap.ts";
 
 /**
  * A fake WebGPU that runs every command at encode time: a timestamped pass writes `begin` / `end`

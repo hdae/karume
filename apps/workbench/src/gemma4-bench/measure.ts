@@ -4,7 +4,7 @@
  *
  * The decode window runs from the first generated token (`onToken`) to the end of the text stream,
  * over `tokens − 1` decode tokens — the first token is sampled from the prefill's logits, and a stop
- * token counts as one (the chat page's `turnTiming`, whose figures the record also keeps). The tap's
+ * token counts as one (`turnTiming`, whose figures the record also keeps). The tap's
  * decode window starts at the passes and submits recorded when the first token arrived and runs to
  * the end of the chat, so it includes the run that drew a stop token, as the wall-clock window does.
  * An encode that runs ahead of its token moves at most one step across a boundary.
@@ -13,7 +13,7 @@
  * is also broken down per key ({@link KeyPerToken}).
  */
 
-import { type TurnTiming, turnTiming } from "@/models/gemma4/turns";
+import { type TurnTiming, turnTiming } from "../gemma4/turn-timing.ts";
 
 /** What the tap had recorded when a token arrived. */
 export type TokenMark = {
@@ -102,7 +102,7 @@ export type TapFigures = {
 };
 
 export type ChatMeasurement = {
-  /** The chat page's statistics (seconds at ms precision, rates at 0.1 tokens/s). */
+  /** `turnTiming`'s statistics (seconds at ms precision, rates at 0.1 tokens/s). */
   readonly timing: TurnTiming;
   readonly decodeTokens: number;
   /** Unrounded figures, which the summary aggregates (absent when not measurable). */

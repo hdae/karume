@@ -6,7 +6,7 @@
  * Why not karume's own timing mode: a device acquired with `gpuTiming: true` encodes one dispatch
  * per pass (ADR 0021), which adds about 4 µs per dispatch and changes what is measured — QAT runs
  * about 210 more dispatches per token than regular Gemma 4, so the mode would bias the very A/B
- * this page exists for. The tap requests `timestamp-query` itself (when the adapter lists it) and
+ * this bench exists for. The tap requests `timestamp-query` itself (when the adapter lists it) and
  * hides it from `device.features`, so the runtime sees a device without timing
  * (`gpuTimingEnabled` false) and keeps its plain 1-chunk-1-pass encode; the tap then adds
  * `timestampWrites` to each compute pass and resolves the pairs before the command encoder finishes.
@@ -17,8 +17,8 @@
  * cache key) it ran with. The extra pass boundaries cost GPU time of their own, so absolute times
  * are inflated; the shares per kernel are what it is for.
  *
- * Each device gets its own probe ({@link GpuTap.probe}, keyed by the device): the page's GPU can be
- * acquired again (after a device loss) while an older acquisition is still settling.
+ * Each device gets its own probe ({@link GpuTap.probe}, keyed by the device): a GPU acquired through
+ * the tap again (after a device loss) gets a new one while an older acquisition is still settling.
  *
  * A disabled probe passes everything straight through (one flag check per command encoder and per
  * submit), so a tap-off arm measures the wall clock of the same device without the tap's per-pass
@@ -400,7 +400,7 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
 };
 
 /**
- * Wraps `inner` (the browser's `navigator.gpu`). Nothing is touched until `acquireGpu` requests an
+ * Wraps `inner` (the host's GPU: `navigator.gpu` in a browser, Dawn's under Node). Nothing is touched until `acquireGpu` requests an
  * adapter and a device through the wrapper; `inner` itself is never modified.
  */
 export const createGpuTap = (inner: GPU): GpuTap => {

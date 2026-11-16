@@ -12,9 +12,8 @@
 
 import type { ChatMessage, ChatOptions, ChatStream, SamplerSpec } from "@karume/models/gemma";
 
-import { type StopRecord, stopRecordOf } from "@/models/gemma4/chat-record";
-
-import { type ChatMeasurement, type ChatMarks, measureChat, type TokenMark } from "./measure";
+import { type StopRecord, stopRecordOf } from "../gemma4/stop-record.ts";
+import { type ChatMeasurement, type ChatMarks, measureChat, type TokenMark } from "./measure.ts";
 import {
   type BenchArm,
   type BenchPromptId,
@@ -23,7 +22,7 @@ import {
   meetsDistinctIdCondition,
   type Visit,
   visitOrder,
-} from "./plan";
+} from "./plan.ts";
 
 /** What the loop needs of a pipeline. */
 export type BenchPipeline = {
@@ -87,7 +86,10 @@ export type BenchDependencies = {
   readonly probe: BenchProbe;
   readonly now: () => number;
   readonly sha256: (bytes: Uint8Array<ArrayBuffer>) => Promise<string>;
-  /** Lets the page render between chats, outside the measured windows (one macrotask by default). */
+  /**
+   * Lets the host show the progress line between chats, outside the measured windows (one
+   * macrotask by default).
+   */
   readonly pause?: () => Promise<void>;
 };
 
@@ -189,20 +191,26 @@ const withPipeline = async (
   if (failure !== undefined) throw failure.error;
 };
 
-/**
- * Runs the whole bench. `onVisit` and `onChat` get each finished visit and chat as it lands (the
- * page shows them and keeps them when a later step fails or is cancelled); the promise resolves when
- * every visit is done and rejects with the first failure or the signal's reason.
- */
-export const runDecodeBench = async (input: {
+/** What a bench run is given. */
+export type DecodeBenchInput = {
   readonly arms: readonly RunArm[];
   readonly settings: BenchSettings;
   readonly signal: AbortSignal;
   readonly dependencies: BenchDependencies;
   readonly onProgress: (progress: BenchProgress) => void;
-  readonly onVisit: (visit: VisitRecord) => void;
-  readonly onChat: (chat: ChatRecord) => void;
-}): Promise<void> => {
+};
+
+/**
+ * Runs the whole bench. `onVisit` and `onChat` get each finished visit and chat as it lands (kept
+ * when a later step fails or is cancelled); the promise resolves when every visit is done and
+ * rejects with the first failure or the signal's reason.
+ */
+export const runDecodeBench = async (
+  input: DecodeBenchInput & {
+    readonly onVisit: (visit: VisitRecord) => void;
+    readonly onChat: (chat: ChatRecord) => void;
+  },
+): Promise<void> => {
   const { arms, settings, signal, dependencies, onProgress, onVisit, onChat } = input;
   const pause = dependencies.pause ?? nextMacrotask;
   const visits = visitOrder(arms.length, settings.rounds);
@@ -244,5 +252,41 @@ export const runDecodeBench = async (input: {
         }
       },
     );
+  }
+};
+
+/**
+ * How a bench run ended: every visit done, the signal aborted (whatever the bench rejected with
+ * then), or the first failure.
+ */
+export type BenchStop =
+  | { readonly kind: "completed" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "failed"; readonly error: unknown };
+
+/** What a bench run left: the visits and chats that finished, and how it ended. */
+export type BenchOutcome = {
+  readonly visits: readonly VisitRecord[];
+  readonly chats: readonly ChatRecord[];
+  readonly stop: BenchStop;
+};
+
+/** Runs the whole bench ({@link runDecodeBench}) and resolves with what finished, however it ended. */
+export const settleDecodeBench = async (input: DecodeBenchInput): Promise<BenchOutcome> => {
+  const visits: VisitRecord[] = [];
+  const chats: ChatRecord[] = [];
+  try {
+    await runDecodeBench({
+      ...input,
+      onVisit: (visit) => visits.push(visit),
+      onChat: (chat) => chats.push(chat),
+    });
+    return { visits, chats, stop: { kind: "completed" } };
+  } catch (error) {
+    return {
+      visits,
+      chats,
+      stop: input.signal.aborted ? { kind: "cancelled" } : { kind: "failed", error },
+    };
   }
 };

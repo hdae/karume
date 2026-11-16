@@ -455,15 +455,16 @@ repeated over the 18 builds of a session A/B.
 - **Not known**: whether the first pipeline's memory is not back when its dispose resolves, or the second build needs
   more than the first; what the subgroup features change in this model's plan or allocations.
 
-## `/gemma4-bench` split mode fails intermittently (filed 2026-11-03; playground bench split mode only)
+## The decode bench's split mode fails intermittently (filed 2026-11-03; the `gemma4-bench` entry's split arms only)
 
-On the maintainer's M2 (Chrome 158), `/gemma4-bench` arms with "Split dispatches" on failed — once with "Integer GEMV"
+On the maintainer's M2 (Chrome 158), arms of the decode bench (then the Playground's `/gemma4-bench` page, now the
+workbench's `gemma4-bench` entry) with the split on failed — once with "Integer GEMV"
 on, once on a plain QAT arm — with `setBindGroup: The provided value cannot be converted to a sequence`, raised in the bench's GPU tap
-(`apps/playground/src/models/gemma4-bench/tap.ts`). It was not reproduced in isolation and has not been investigated;
+(`apps/workbench/src/gemma4-bench/tap.ts`). It was not reproduced in isolation and has not been investigated;
 the same plain arm and a byte-plane arm ran with the split in later runs
 ([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §12).
 
-- Impact: the playground bench's split mode only (a run can fail before its per-key attribution is complete).
+- Impact: the decode bench's split mode only (a run can fail before its per-key attribution is complete).
 
 ## The bidirectional block of a generation run: four edge cases outside the shipped path (filed 2026-11-08; recorded only)
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { createGpuTap, TIMED_PASS_SLOTS } from "../src/models/gemma4-bench/tap.ts";
+import { createGpuTap, TIMED_PASS_SLOTS } from "../src/gemma4-bench/tap.ts";
 
 /** What a real (fake) compute pass received, in order. */
 type Call = readonly unknown[];

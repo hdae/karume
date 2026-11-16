@@ -1,15 +1,14 @@
 import type { Manifest, SessionSpec } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { RecordEnvironment } from "../src/lib/environment.ts";
+import { buildBenchData } from "../src/gemma4-bench/data.ts";
 import {
   type ArmDraft,
   armLabel,
   integerGemvSession,
   resolveArm,
-} from "../src/models/gemma4-bench/plan.ts";
-import { buildBenchRecord } from "../src/models/gemma4-bench/record.ts";
-import type { RunArm } from "../src/models/gemma4-bench/run.ts";
+} from "../src/gemma4-bench/plan.ts";
+import type { RunArm } from "../src/gemma4-bench/run.ts";
 
 /** The QAT `i4-fast` declaration (the packed activations and what they need). */
 const FAST: SessionSpec = {
@@ -43,7 +42,6 @@ const manifest = {
 } as unknown as Manifest;
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
-  id: 0,
   key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
@@ -125,24 +123,7 @@ describe("the integer GEMV switch", () => {
     });
   });
 
-  describe("the record", () => {
-    const ENVIRONMENT: RecordEnvironment = {
-      recordedAt: "2026-11-03T10:00:00.000Z",
-      userAgent: "test",
-      crossOriginIsolated: true,
-      adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "" },
-      device: {
-        features: [],
-        wgslLanguageFeatures: [],
-        subgroupLanesLinear: false,
-        gpuTimingEnabled: false,
-        limits: {
-          maxComputeWorkgroupStorageSize: 32768,
-          maxStorageBufferBindingSize: 2147483644,
-          maxBufferSize: 2147483644,
-        },
-      },
-    };
+  describe("the data", () => {
     const armOf = (session?: RunArm["session"]): RunArm => ({
       mount: "gemma4-qat-mobile",
       model: "e2b",
@@ -155,23 +136,19 @@ describe("the integer GEMV switch", () => {
     });
 
     it("records per arm whether it ran the integer GEMV and the options it passed", () => {
-      const record = buildBenchRecord({
-        environment: ENVIRONMENT,
+      const data = buildBenchData({
         timestampQuery: true,
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ integerGemv: true })],
-        distributions: { "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00" } },
-        sources: {
-          gemma4: { kind: "direct" },
-          "gemma4-qat": { kind: "direct" },
-          "gemma4-qat-mobile": { kind: "direct" },
+        distributions: {
+          "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00", read: "direct" },
         },
         visits: [],
         chats: [],
       });
       expect(
-        record.arms.map(({ integerGemv, sessionOptions }) => ({ integerGemv, sessionOptions })),
+        data.arms.map(({ integerGemv, sessionOptions }) => ({ integerGemv, sessionOptions })),
       ).toEqual([
         { integerGemv: false, sessionOptions: {} },
         { integerGemv: true, sessionOptions: { integerGemv: true } },

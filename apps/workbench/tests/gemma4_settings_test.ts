@@ -2,6 +2,7 @@
 // (apps/playground/tests/gemma4_settings_test.ts and gemma4_expert_cache_test.ts), for the lookups
 // and text forms the workbench copied (src/gemma4/settings.ts).
 
+import { parseManifest } from "@karume/hub";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -13,9 +14,12 @@ import {
   FITTED_EXPERT_SLOTS,
   hasExpertCache,
   isQatModel,
+  modelConfig,
   parseExpertCacheSlots,
   parseExpertHostTier,
 } from "../src/gemma4/settings.ts";
+
+import { REGULAR } from "./helpers/gemma4-bench-manifests.ts";
 
 const GIB = 2 ** 30;
 
@@ -157,5 +161,19 @@ describe("parseExpertHostTier", () => {
 
   it("refuses a budget beyond a safe integer of bytes", () => {
     expect(parseExpertHostTier("9000000").ok).toBe(false);
+  });
+});
+
+describe("modelConfig", () => {
+  const regular = parseManifest(REGULAR);
+
+  it("reads the validated pipelineConfig of the model", () => {
+    const config = modelConfig(regular, "e2b");
+    expect(config.capacity).toBe(4096);
+    expect(config.sampler).toEqual({ temperature: 1, topK: 64, topP: 0.95 });
+  });
+
+  it("fails loudly for a model the manifest does not have", () => {
+    expect(() => modelConfig(regular, "12b")).toThrow(/no model '12b'/);
   });
 });

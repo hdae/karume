@@ -5,16 +5,9 @@
  */
 
 import { type Entry, ENTRY_ID } from "./entry.ts";
+import { LOCAL_MODULES } from "./local-entries.ts";
 
 const MODULES = import.meta.glob<Entry>("./entries/*.ts", { eager: true, import: "default" });
-
-/**
- * The entries that read a local distribution. `import.meta.env.PROD` is a constant in a production
- * build, so the glob sits in a dead branch there and the bundler leaves these modules out.
- */
-const LOCAL_MODULES: Readonly<Record<string, Entry>> = import.meta.env.PROD
-  ? {}
-  : import.meta.glob<Entry>("./entries/local/*.ts", { eager: true, import: "default" });
 
 /** Where the registry's glob finds the entries that read a local distribution. */
 const LOCAL_DIRECTORY = "./entries/local/";

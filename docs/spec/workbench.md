@@ -34,8 +34,9 @@ The workbench is private (not published) and is not part of the lanes: its tests
 ### Local distributions
 
 - An entry that reads a model distribution declares it (`readsLocalDistribution`) and lives under
-  `src/entries/local/`. The dev server and the Node command list it; a production build neither lists nor bundles it,
-  because a production build serves no distribution.
+  `src/entries/local/`. The dev server and the Node command list it; a production build neither lists nor bundles it
+  (the registry's module of local entries resolves to an empty one in a build), because a production build serves no
+  distribution.
 - Such an entry opens a mount of the shared mount table (`@karume/local-distributions`) through the function the host
   gives it, naming how a browser should read it: `cached` (the dev server's HF-compatible `/hf/` route into the hub's
   CacheStorage, so a second run does not move the weights again) or `direct` (plain requests to `/models/<mount>/`).
@@ -56,6 +57,7 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
+| `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch or off × the integer GEMV × the PLE on the GPU × the decode run-ahead depth — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token. Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
 
 ## The record
 

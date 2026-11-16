@@ -14,7 +14,6 @@ import { Route as AnimaRouteImport } from "./routes/anima";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
-import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
 import { Route as MossImageRouteImport } from "./routes/moss-image";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
@@ -44,11 +43,6 @@ const DepthAnythingRoute = DepthAnythingRouteImport.update({
 const Gemma4Route = Gemma4RouteImport.update({
   id: "/gemma4",
   path: "/gemma4",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const Gemma4BenchRoute = Gemma4BenchRouteImport.update({
-  id: "/gemma4-bench",
-  path: "/gemma4-bench",
   getParentRoute: () => rootRouteImport,
 } as any);
 const IrodoriRoute = IrodoriRouteImport.update({
@@ -83,7 +77,6 @@ export interface FileRoutesByFullPath {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
-  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -96,7 +89,6 @@ export interface FileRoutesByTo {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
-  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -110,7 +102,6 @@ export interface FileRoutesById {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
-  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/irodori": typeof IrodoriRoute;
   "/moss-image": typeof MossImageRoute;
   "/sbv2": typeof Sbv2Route;
@@ -125,7 +116,6 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
-    | "/gemma4-bench"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -138,7 +128,6 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
-    | "/gemma4-bench"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -151,7 +140,6 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
-    | "/gemma4-bench"
     | "/irodori"
     | "/moss-image"
     | "/sbv2"
@@ -165,7 +153,6 @@ export interface RootRouteChildren {
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
   Gemma4Route: typeof Gemma4Route;
-  Gemma4BenchRoute: typeof Gemma4BenchRoute;
   IrodoriRoute: typeof IrodoriRoute;
   MossImageRoute: typeof MossImageRoute;
   Sbv2Route: typeof Sbv2Route;
@@ -208,13 +195,6 @@ declare module "@tanstack/react-router" {
       path: "/gemma4";
       fullPath: "/gemma4";
       preLoaderRoute: typeof Gemma4RouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/gemma4-bench": {
-      id: "/gemma4-bench";
-      path: "/gemma4-bench";
-      fullPath: "/gemma4-bench";
-      preLoaderRoute: typeof Gemma4BenchRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/irodori": {
@@ -261,7 +241,6 @@ const rootRouteChildren: RootRouteChildren = {
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
   Gemma4Route: Gemma4Route,
-  Gemma4BenchRoute: Gemma4BenchRoute,
   IrodoriRoute: IrodoriRoute,
   MossImageRoute: MossImageRoute,
   Sbv2Route: Sbv2Route,

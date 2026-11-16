@@ -1,7 +1,7 @@
 import type { ChatOptions, ChatStop, ChatStream } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { BenchSettings } from "../src/models/gemma4-bench/plan.ts";
+import type { BenchSettings } from "../src/gemma4-bench/plan.ts";
 import {
   type BenchDependencies,
   type BenchPipeline,
@@ -10,7 +10,7 @@ import {
   type RunArm,
   runDecodeBench,
   type VisitRecord,
-} from "../src/models/gemma4-bench/run.ts";
+} from "../src/gemma4-bench/run.ts";
 
 const arm = (model: string, tap = true): RunArm => ({
   mount: model.startsWith("qat-") ? "gemma4-qat-mobile" : "gemma4",

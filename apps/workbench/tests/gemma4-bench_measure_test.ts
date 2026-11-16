@@ -6,7 +6,7 @@ import {
   measureChat,
   type PassTime,
   type TokenMark,
-} from "../src/models/gemma4-bench/measure.ts";
+} from "../src/gemma4-bench/measure.ts";
 
 /** A pass of `ms` GPU time starting at `atMs` (timestamps in ns, as the tap reads them). */
 const pass = (atMs: number, ms: number, dispatches = 10): PassTime => ({
