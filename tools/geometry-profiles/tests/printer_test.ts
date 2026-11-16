@@ -1,0 +1,47 @@
+/**
+ * The printer through the repository's formatter reproduces every registered table from its
+ * `import type` line on: the generator writes the same bytes as the tables in the repository for
+ * an unchanged profile (the header comments above that line are older than the tool and are
+ * replaced when a table is regenerated). No GPU and no records.
+ */
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { assertEquals, assertThrows } from "@std/assert";
+import { BUILTIN_GEOMETRY_PROFILES } from "@karume/runtime";
+import { describe, it } from "vite-plus/test";
+import { formatTypeScript, REPOSITORY_ROOT } from "../format.ts";
+import { constantName, literal, PrinterError, profileModule } from "../literal.ts";
+
+const PROFILES = "packages/runtime/src/kernels/geometry-profiles";
+
+describe("the printer through the formatter", () => {
+  for (const profile of BUILTIN_GEOMETRY_PROFILES) {
+    it(`reproduces ${profile.id}.ts from its import line on`, () => {
+      const path = `${PROFILES}/${profile.id}.ts`;
+      const file = readFileSync(join(REPOSITORY_ROOT, path), "utf8");
+      const body = file.slice(file.indexOf("import type {"));
+      const printed = formatTypeScript(profileModule(profile), path);
+      assertEquals(printed, body);
+      assertEquals(
+        body.includes(`export const ${constantName(profile.id)}: GeometryProfile`),
+        true,
+      );
+    });
+  }
+});
+
+describe("literal", () => {
+  it("spells Infinity as Number.POSITIVE_INFINITY and quotes only keys that are not identifiers", () => {
+    assertEquals(
+      literal({ maxRows: Number.POSITIVE_INFINITY, "i8a8-linear": ["a"], ok: true }),
+      '{ maxRows: Number.POSITIVE_INFINITY, "i8a8-linear": ["a"], ok: true }',
+    );
+  });
+
+  it("refuses values a profile cannot hold", () => {
+    assertThrows(() => literal({ a: undefined }), PrinterError);
+    assertThrows(() => literal(Number.NaN), PrinterError);
+    assertThrows(() => literal(null), PrinterError);
+  });
+});

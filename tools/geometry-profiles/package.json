@@ -1,0 +1,19 @@
+{
+  "name": "@karume/geometry-profiles",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Generator of the runtime's embedded geometry profile tables from workbench sweep records.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.ts",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@karume/runtime": "workspace:*",
+    "vite-plus": "catalog:"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

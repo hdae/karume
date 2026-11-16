@@ -171,8 +171,10 @@ maintainer's ruling of 2026-11-06).
      without UI code, the record `karume-workbench/1`, the dev server's write-back under `outputs/workbench/`, the Node
      command — and the entries `kernel-check`, `geometry-sweep` and `attention-bench`, whose pages left the Playground;
      [spec/workbench.md](spec/workbench.md).)* Left, in this order:
-     - A tracked generator from sweep and bench records to the per-adapter geometry profiles (today untracked scripts
-       under `outputs/diag/` write those files; the Playground page's preview of a derived table went with the page).
+     - *(Landed 2026-11-16: the generator of the geometry profile tables, `tools/geometry-profiles/generate.ts` — the
+       registered table as base plus new workbench records; [spec/geometry-profiles.md](spec/geometry-profiles.md).)*
+       Left from it: `apple-metal-3` cites only records of the old sweep format, so it is regenerated from a new sweep
+       on M2 (its header and the two NVIDIA tables' headers are replaced when each table is regenerated).
      - The entries that read a local distribution (the Gemma 4 decode bench, the Session A/B, the cached-expert reads of
        the expert transfer): local only and left out of a public build; then their Playground pages go (the maintainer's
        ruling of 2026-11-16).
