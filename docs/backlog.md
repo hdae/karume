@@ -207,6 +207,21 @@ maintainer's ruling of 2026-11-06).
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.
 
+- **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction)**. A component whose upstream
+  checkpoint is BF16 and that a preset does not quantize to integers is stored as bf16, the upstream bits, instead of
+  being rounded to f16: what a preset does not ask to quantize follows the precision of the source. The f16 storage of
+  those components predates bf16 execution (ADR [0131](decisions/0131-bf16-weight-execution.md), 2026-10-17), and bf16
+  costs the same bytes in the download and in VRAM.
+  - Known today: Anima. Its four upstream components are BF16; every preset but `bf16` stores the text encoder, the
+    text conditioner and the VAE decoder as f16, and `f16` / `f16-c16` store the transformer as f16.
+  - To inspect first: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice).
+    Not in scope: an F32 upstream stored as f16 (Wan's VAE, Irodori, Lucida) — that rounding halves the size and is a
+    separate choice.
+  - What it touches: the preset names (ADR [0074](decisions/0074-quant-seat-naming.md) spells the storage, so
+    `f16+dit8…` changes, the default preset's name with it — a breaking change), the re-export, the sha256 rows of
+    the affected lanes, the model cards and the Hugging Face repositories (each on the maintainer's go-ahead), and
+    whether the `:wbf16` kernels have their geometry per adapter.
+
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
   accepted; code items 1 and 2 are built, the rest is not; the order among them and against the other items is the maintainer's)**. Each code item is its
   own commit with its behaviour tests and states its blast radius:
