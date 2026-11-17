@@ -50,7 +50,7 @@ const results = openResults("gemma4");
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 if (!AVAILABLE) {
   console.warn(
-    `[karume] ${MIRROR_DIR.pathname} is missing (or not karume/5), so the sha reference rows of ` +
+    `[karume] ${MIRROR_DIR.pathname} is missing (or not karume/6), so the sha reference rows of ` +
       "gemma4's quant presets are SKIPPED. Create it with dist.py --pipeline gemma4 in tools/export-recipes",
   );
 }

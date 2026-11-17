@@ -1,5 +1,5 @@
 /**
- * Hand-written `karume/5` manifests for the session A/B entries' tests, and an in-memory
+ * Hand-written `karume/6` manifests for the session A/B entries' tests, and an in-memory
  * distribution that serves one, so an entry's run reaches its parameter checks without a mirror.
  */
 
@@ -54,7 +54,7 @@ export const manifestText = (input: {
     }
   }
   return JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: input.models[0],
     models: Object.fromEntries(

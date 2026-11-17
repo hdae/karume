@@ -175,7 +175,7 @@ const tokenizerText = mirrorPresent(WAN_MIRROR)
 
 if (!DIST_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5), so the umT5 e2e is SKIPPED. ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6), so the umT5 e2e is SKIPPED. ` +
       `Assemble it: ${ASSEMBLE} (an all-SKIP is a FAIL of the gate distribution_gate_test.ts)`,
   );
 } else if (!GOLDENS_PRESENT) {
@@ -185,7 +185,7 @@ if (!DIST_PRESENT) {
   );
 } else if (tokenizerText === undefined) {
   console.warn(
-    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so the Wan umT5 port check (its inputs come from Wan's TS tokenizer) is SKIPPED ` +
       "(fetch the karume-wan2.2 distribution into models/)",
   );

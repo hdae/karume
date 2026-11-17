@@ -101,7 +101,7 @@ const withContainer = (patch: Record<string, unknown>): Record<string, unknown> 
 });
 
 /**
- * The minimal v5 manifest with only the fields the checks need. `patch` overrides the contents of
+ * The minimal v6 manifest with only the fields the checks need. `patch` overrides the contents of
  * `models.m`, `envelope` the top level.
  */
 const withModel = (
@@ -109,7 +109,7 @@ const withModel = (
   envelope: Record<string, unknown> = {},
 ): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {
@@ -144,7 +144,7 @@ describe("parseManifest: every violation case of the fixture turns red with the 
 });
 
 test("parseManifest: broken JSON is rethrown wrapped in ManifestFormatError", () => {
-  const error = assertThrows(() => parseManifest('{"format": "karume/5",}'), ManifestFormatError);
+  const error = assertThrows(() => parseManifest('{"format": "karume/6",}'), ManifestFormatError);
   assert(error.cause instanceof SyntaxError, "keeps the original SyntaxError as cause");
 });
 
@@ -168,15 +168,15 @@ test("parseManifest: v1 (karume/1) is not read and fails as an unsupported major
     ManifestFormatError,
   );
   assert(
-    error.message.includes("karume/5"),
-    `${error.message} does not state "only karume/5 can be read"`,
+    error.message.includes("karume/6"),
+    `${error.message} does not state "only karume/6 can be read"`,
   );
 });
 
-test("parseManifest: the previous version (karume/4) is not read either, and the error states that the current one is karume/5", () => {
+test("parseManifest: an older version (karume/4) is not read either, and the error states that the current one is karume/6", () => {
   // v4 and v5 differ only in the content of a dtype entry (`shards` + `extras` → `container`); the
   // other fields are unchanged. Starting from the structure would give a peripheral diagnostic,
-  // "unknown key 'shards'", hiding the real reason (this version reads only karume/5). Only the
+  // "unknown key 'shards'", hiding the real reason (this version reads only karume/6). Only the
   // format string declares the break (ADR 0109 decision 1).
   const error = assertThrows(
     () =>
@@ -203,8 +203,8 @@ test("parseManifest: the previous version (karume/4) is not read either, and the
   );
   assert(error.message.includes("karume/4"), `${error.message} does not name the rejected version`);
   assert(
-    error.message.includes("karume/5"),
-    `${error.message} does not state "only karume/5 can be read"`,
+    error.message.includes("karume/6"),
+    `${error.message} does not state "only karume/6 can be read"`,
   );
   assert(
     error.message.includes("older versions"),
@@ -247,6 +247,143 @@ test("parseManifest: the karume/2 spelling (a dtype entry is {file}) also fails 
   );
 });
 
+describe("parseManifest: the previous version (karume/5) is refused, saying what to do", () => {
+  // karume/5 has the content of karume/6 without the name map, so only its format can refuse it,
+  // and the message is what tells the reader that the repository needs the upgraded manifest.
+  const error = assertThrows(
+    () => parseManifest(withModel({}, { format: "karume/5" })),
+    ManifestFormatError,
+  );
+
+  it("names the refused and the current version", () => {
+    assert(error.message.includes("'karume/5'"), error.message);
+    assert(error.message.includes("reads only karume/6"), error.message);
+  });
+
+  it("says the repository needs a karume/6 manifest and that the exporter's upgrade command writes it", () => {
+    assert(error.message.includes("needs a karume/6 manifest"), error.message);
+    assert(error.message.includes("`karume upgrade <repository directory>`"), error.message);
+  });
+
+  it("names the upgrade for karume/5 only — an older major is built again, a newer one needs a newer hub", () => {
+    const older = assertThrows(
+      () => parseManifest(withModel({}, { format: "karume/4" })),
+      ManifestFormatError,
+    );
+    assert(!older.message.includes("karume upgrade"), older.message);
+    assert(older.message.includes("builds the distribution again"), older.message);
+    const newer = assertThrows(
+      () => parseManifest(withModel({}, { format: "karume/7" })),
+      ManifestFormatError,
+    );
+    assert(!newer.message.includes("karume upgrade"), newer.message);
+    assert(newer.message.includes("the manifest is newer"), newer.message);
+  });
+});
+
+describe("parseManifest: the name map's reference (nameMap)", () => {
+  const NAME_MAP = { path: "name-map.json", size: 4096, sha256: "d7".repeat(32) };
+
+  it("a manifest without it parses and has no such field", () => {
+    const manifest = parseManifest(withModel());
+    assertEquals(manifest.format, "karume/6");
+    assertEquals(Object.hasOwn(manifest, "nameMap"), false);
+  });
+
+  it("a manifest with it parses and keeps the reference as declared", () => {
+    const manifest = parseManifest(withModel({}, { nameMap: NAME_MAP }));
+    assertEquals(manifest.nameMap, NAME_MAP);
+  });
+
+  it("an unknown top-level member next to it still fails", () => {
+    assertThrows(
+      () => parseManifest(withModel({}, { nameMap: NAME_MAP, nameMaps: NAME_MAP })),
+      ManifestReferenceError,
+    );
+  });
+
+  it("fails when it is not an object", () => {
+    for (const nameMap of [null, "name-map.json", [NAME_MAP]]) {
+      const error = assertThrows(
+        () => parseManifest(withModel({}, { nameMap })),
+        ManifestFormatError,
+      );
+      assert(error.message.startsWith("nameMap:"), error.message);
+    }
+  });
+
+  it("fails when a field of the set of 3 is missing or of the wrong type", () => {
+    const broken: readonly Record<string, unknown>[] = [
+      { size: NAME_MAP.size, sha256: NAME_MAP.sha256 },
+      { path: NAME_MAP.path, sha256: NAME_MAP.sha256 },
+      { path: NAME_MAP.path, size: NAME_MAP.size },
+      { ...NAME_MAP, size: "4096" },
+    ];
+    for (const nameMap of broken) {
+      assertThrows(() => parseManifest(withModel({}, { nameMap })), ManifestFormatError);
+    }
+  });
+
+  it("fails on a path outside the allow-list", () => {
+    for (const path of [
+      "../name-map.json",
+      "/name-map.json",
+      ".name-map.json",
+      "a//b.json",
+      "a b.json",
+    ]) {
+      const error = assertThrows(
+        () => parseManifest(withModel({}, { nameMap: { ...NAME_MAP, path } })),
+        ManifestPathError,
+      );
+      assertEquals(error.path, path);
+    }
+  });
+
+  it("fails on a size of 0, a size that is not a safe integer, or one over the file limit", () => {
+    for (const size of [0, -1, 1.5, 16 * 2 ** 30 + 1]) {
+      assertThrows(
+        () => parseManifest(withModel({}, { nameMap: { ...NAME_MAP, size } })),
+        ManifestFormatError,
+      );
+    }
+  });
+
+  it("fails on a sha256 that is not 64 lowercase hex digits", () => {
+    for (const sha256 of ["D7".repeat(32), "d7".repeat(31), "g7".repeat(32)]) {
+      assertThrows(
+        () => parseManifest(withModel({}, { nameMap: { ...NAME_MAP, sha256 } })),
+        ManifestFormatError,
+      );
+    }
+  });
+
+  it("fails on a cross-repo pair — the name map is a file of the repository itself", () => {
+    const error = assertThrows(
+      () =>
+        parseManifest(
+          withModel(
+            {},
+            { nameMap: { ...NAME_MAP, repo: "hdae/karume-anima", revision: "a".repeat(40) } },
+          ),
+        ),
+      ManifestReferenceError,
+    );
+    assert(error.message.includes("unknown key 'repo'"), error.message);
+  });
+
+  it("fails when another reference of the same path declares other bytes", () => {
+    const asset = { ...NAME_MAP, sha256: "e8".repeat(32) };
+    assertThrows(
+      () => parseManifest(withModel({ assets: { map: asset } }, { nameMap: NAME_MAP })),
+      ManifestReferenceError,
+    );
+    // The same set of 3 under both is one file, not a conflict.
+    const manifest = parseManifest(withModel({ assets: { map: NAME_MAP } }, { nameMap: NAME_MAP }));
+    assert(manifest.nameMap === manifest.models["m"].assets["map"]);
+  });
+});
+
 describe("parseManifest: rejects by the numeric size limits", () => {
   const modelEntry = (quantName: string) => ({
     pipeline: "anima/1",
@@ -263,7 +400,7 @@ describe("parseManifest: rejects by the numeric size limits", () => {
       models = { ...models, [`m${index}`]: modelEntry("q") };
     }
     const text = JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume/0.1.0",
       defaultModel: "m0",
       models,
@@ -466,7 +603,7 @@ test("parseManifest: errors carry the available model / quant / dtype labels", (
     () =>
       parseManifest(
         JSON.stringify({
-          format: "karume/5",
+          format: "karume/6",
           generator: "karume/0.1.0",
           defaultModel: "fast",
           models: {
@@ -513,7 +650,7 @@ test("parseManifest: a top-level violation carries only the model list (there is
 
 test("parseManifest: reads a valid manifest as declared", () => {
   const manifest = parseManifest(validManifestText);
-  assertEquals(manifest.format, "karume/5");
+  assertEquals(manifest.format, "karume/6");
   assertEquals(manifest.generator, "karume/0.1.0");
   assertEquals(manifest.defaultModel, "anima-turbo");
   assertEquals(Object.keys(manifest.models), ["anima-turbo", "anima-lite"]);

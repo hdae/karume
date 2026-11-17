@@ -1223,7 +1223,7 @@ def container_parts(path: str | Path) -> tuple[Path, ...]:
 @dataclass(frozen=True)
 class DocumentRef:
     """Expected values for one descriptor document (`container.descriptor` of manifest
-    `karume/5`).
+    `karume/6`).
 
     The **byte length + sha256** of each of the 2 documents — a fact separate from the sha256 of
     the part 0 file (ADR 0109 decision 3). The sha256 of the `graph` document is used as is for

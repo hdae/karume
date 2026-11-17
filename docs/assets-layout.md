@@ -172,9 +172,13 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   subtrees + `shared/`; **placement is always an independent copy** — the reason hard links are forbidden is also in an addendum of that ADR) +
   ADR [0075](decisions/0075-quant-presentation.md) (quant `label` / `description`,
   `requiredLimits`, the cross-repository `repo` / `revision` of file references) + ADR
-  [0109](decisions/0109-manifest-v5-container.md) (`weights.<component>.<dtype>.container`).
-  **The current format is `karume/5`** (hub parses a single form = reads nothing but `karume/5` —
-  `packages/hub/src/manifest.ts`).
+  [0109](decisions/0109-manifest-v5-container.md) (`weights.<component>.<dtype>.container`) + ADR
+  [0153](decisions/0153-manifest-v6-name-map.md) (the optional `nameMap`: the family's name map, copied to
+  `name-map.json` at the repository root when the recipe declares one — Anima's two repositories).
+  **The current format is `karume/6`** (hub parses a single form = reads nothing but `karume/6` —
+  `packages/hub/src/manifest.ts`). A mirror that still holds `karume/5` is rewritten in place with
+  `uv run karume upgrade <mirror> [--name-map <file>]` in `tools/exporter` (the manifest and the card only; no weights
+  file is touched).
   `karume.json` is derived from the actual files (hand-writing forbidden — ADR 0038).
 - Assembly is idempotent (a rerun replaces). `verify_dist` goes as far as matching the declarations against the actual files and the undeclared-file check,
   and the model card `README.md` is generated mechanically from the verified manifest (attribution via

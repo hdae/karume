@@ -20,10 +20,10 @@ const unigramAsset = (table: boolean) => ({
 /** Shaped like v4-large's Gemma BPE asset. */
 const GEMMA_ASSET = { format: "karume-gemma-tokenizer/1", vocab: ["<pad>"] };
 
-/** A `karume/5` manifest whose model has one tokenizer asset, its own or borrowed from v4-small. */
+/** A `karume/6` manifest whose model has one tokenizer asset, its own or borrowed from v4-small. */
 const manifestBytes = (tokenizer: Uint8Array<ArrayBuffer>, borrowed: boolean) =>
   bytesOf({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "m",
     models: {

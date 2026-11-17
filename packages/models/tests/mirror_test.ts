@@ -30,7 +30,7 @@ const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const TOKENIZER = new TextEncoder().encode('{"vocab":["a","b"]}');
 
 /** The manifest text of one model `test` with the component `dit` and the asset `tokenizer`. */
-const manifestText = (dit: unknown, tokenizer: unknown, format = "karume/5"): string =>
+const manifestText = (dit: unknown, tokenizer: unknown, format = "karume/6"): string =>
   JSON.stringify({
     format,
     generator: "karume-test/0",
@@ -118,7 +118,7 @@ describe("mirror: the root and the presence check", () => {
     assert(MODELS_ROOT.pathname.endsWith("/models/"));
   });
 
-  it("is present only when karume.json declares karume/5", async () => {
+  it("is present only when karume.json declares karume/6", async () => {
     await withModels(async ({ models, base }) => {
       assert(mirrorPresent(base));
       assertEquals(mirrorPresent(new URL("karume-missing/", models)), false);

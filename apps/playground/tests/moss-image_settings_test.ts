@@ -29,13 +29,13 @@ const container = (prefix: string) => ({
 });
 
 /**
- * A `karume/5` manifest shaped like `karume-moss-image`: one model, the two presets (the online one
+ * A `karume/6` manifest shaped like `karume-moss-image`: one model, the two presets (the online one
  * the default) and upstream's `pipelineConfig` (the empty negative prompt).
  */
 const mossLikeManifest = (pipelineConfig: unknown): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: "sft",
       models: {

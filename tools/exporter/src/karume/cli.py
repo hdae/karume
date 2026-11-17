@@ -1,10 +1,12 @@
-"""The `karume` command — subcommand dispatch for dist / migrate / verify.
+"""The `karume` command — subcommand dispatch for dist / migrate / upgrade / verify.
 
     karume dist --pipeline siglip2   # fails on core alone, whose accepted set is empty (NOTE below)
     karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
     # <old-mirror> = a mirror of the old karume/4 form (safetensors), outside the repository
     karume migrate <old-mirror>/<series>/model.f16.safetensors --out /tmp/krm \
         --license apache-2.0 --graph-name vision
+    # a karume/5 repository → the current manifest format, in place
+    karume upgrade ../../models/karume-siglip2
 
 MUST: the CLI **does not interpret arguments**. It dispatches on the first word and passes the rest
 unchanged to the matching `main(argv)` (`--help` passes through too, so usage comes from each
@@ -45,6 +47,12 @@ def run_migrate(argv: Sequence[str]) -> None:
     return migrate.main(argv)
 
 
+def run_upgrade(argv: Sequence[str]) -> None:
+    from karume import migrate
+
+    return migrate.upgrade_main(argv)
+
+
 def run_verify(argv: Sequence[str]) -> None:
     from karume import verify
 
@@ -57,6 +65,11 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "migrate": (
         run_migrate,
         "move an old distribution to containers (krm / krg); input is read-only",
+    ),
+    "upgrade": (
+        run_upgrade,
+        "rewrite a karume/5 repository's manifest in the current format, in place; no weights"
+        " file is touched",
     ),
     "verify": (run_verify, "verify a container (krm / krg) against every rule"),
 }

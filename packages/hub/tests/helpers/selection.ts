@@ -1,5 +1,5 @@
 /**
- * Test-side tools for selections. The `karume/5` hub has no flat "fetch key → FileRef" table (a
+ * Test-side tools for selections. The `karume/6` hub has no flat "fetch key → FileRef" table (a
  * selection is a structured type — ADR 0109 decision 6), so the tests build the table passed to
  * `fetchAssets` and the mock's serving table.
  *

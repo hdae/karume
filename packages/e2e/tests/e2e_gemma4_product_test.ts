@@ -223,7 +223,7 @@ const MODEL_PRESENT = mirrorPresent(MIRROR);
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] the distribution mirror ${MIRROR.pathname} is absent (or not karume/5), so the ` +
+    `[karume] the distribution mirror ${MIRROR.pathname} is absent (or not karume/6), so the ` +
       "Gemma 4 E2B product-graph cases SKIP",
   );
 }

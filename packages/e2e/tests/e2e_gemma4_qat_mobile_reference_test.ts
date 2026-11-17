@@ -50,7 +50,7 @@ const results = openResults("gemma4-qat-mobile");
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 if (!AVAILABLE) {
   console.warn(
-    `[karume] ${MIRROR_DIR.pathname} is absent (or not karume/5), so the gemma4-qat-mobile quant seats' ` +
+    `[karume] ${MIRROR_DIR.pathname} is absent (or not karume/6), so the gemma4-qat-mobile quant seats' ` +
       "sha256 reference rows SKIP. Assemble it with dist.py --pipeline gemma4-qat-mobile in tools/export-recipes",
   );
 }

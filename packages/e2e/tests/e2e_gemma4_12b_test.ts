@@ -180,7 +180,7 @@ const MODEL_PRESENT = MANIFEST !== undefined && Object.hasOwn(MANIFEST.models, C
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] the distribution mirror ${MIRROR.pathname} is absent, not karume/5, or has no model ` +
+    `[karume] the distribution mirror ${MIRROR.pathname} is absent, not karume/6, or has no model ` +
       `'${CHOICE.model}', so the Gemma 4 12B cases SKIP. Assemble: cd tools/export-recipes && uv run ` +
       "python dist.py --pipeline gemma4-qat",
   );

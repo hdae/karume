@@ -30,7 +30,7 @@ export type ContainerSink = {
 /** A length and the sha256 of those bytes. */
 export type Digest = { readonly length: number; readonly sha256: string };
 
-/** What a manifest entry needs of the written container (`container` of manifest `karume/5`). */
+/** What a manifest entry needs of the written container (`container` of manifest `karume/6`). */
 export type WrittenContainer = {
   /** Every part, part 0 included, in index order. */
   readonly parts: readonly Digest[];

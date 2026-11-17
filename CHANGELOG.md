@@ -47,6 +47,18 @@ measurements in `docs/research/`.
 - `karume-gemma4-qat` (Gemma 4 E2B / E4B / 12B / 26B): the `i4-gemvpar` preset is removed, because it declares the same
   numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
   `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
+- `@karume/hub`: the distribution manifest is `karume/6` and the hub reads only `karume/6`. A `karume/5` manifest is
+  refused as an unsupported format, with a message that names the exporter's upgrade command. `karume/6` is `karume/5`
+  plus one optional top-level member, `nameMap` (`Manifest.nameMap`): the reference (`path`, `size`, `sha256`) of the
+  repository's name map, a `karume-name-map/1` file that says which tensor of an upstream weights file is which
+  initializer of which component. It is checked like every file reference and names a file of the repository itself;
+  the hub does not read it, and no selection includes it. Every distribution repository's manifest is published again as
+  `karume/6` (with its card); the weights do not change, and `karume-anima` / `karume-anima-extra` gain `name-map.json`.
+  Published versions pin their repositories' revisions and keep working.
+- Exporter: `karume dist` writes `karume/6`. A recipe declares its family's name map (`Pipeline.name_map`); the assembly
+  checks its format tag, copies it to `name-map.json` at the repository root and references it. `karume upgrade
+  <repository directory> [--name-map <file>]` rewrites a `karume/5` repository's manifest in place (the same content,
+  the new format, the card's statement of the format; no weights file is touched).
 
 ### Added
 

@@ -9,7 +9,8 @@ What this document does not hold:
 - **The graph representation of IR v2 itself** → [ir-v2.md](ir-v2.md) is canonical (the differences
   from v1 are in §13; the canonical serialization rules are also in the "Canonical serialization"
   section of ir-v2.md)
-- **manifest `karume/5`** → ADR [0109](decisions/0109-manifest-v5-container.md) is canonical
+- **manifest `karume/6`** → ADR [0109](decisions/0109-manifest-v5-container.md) and
+  [0153](decisions/0153-manifest-v6-name-map.md) are canonical
 - **op contracts** → the implementation's contract table (`packages/runtime/src/ops/contracts.ts`)
   is canonical
 - **Execution defaults** (`session` / `gpuFeatures` / `requiredLimits` / `label` / `description`) →
@@ -280,7 +281,7 @@ Elements of `parts[]`:
 **Why `parts` starts at index 1**: part 0 contains the model descriptor itself, so writing part 0's
 sha256 into the model descriptor would be **self-referential** (the hash changes the moment it is
 written). Hence **the integrity of part 0 is covered by the outer expected hash + length** (① of
-§7). The FileRefs of manifest `karume/5` hold `size` / `sha256` for **all parts including part 0**,
+§7). The FileRefs of manifest `karume/6` hold `size` / `sha256` for **all parts including part 0**,
 so integrity as seen from outside has no hole.
 
 **Part 1 (the const region) is always declared, with length 0 even when there is no const at all**
@@ -830,7 +831,7 @@ Low-bit codecs presuppose packed int8 activations (ADR 0105).
 expected hash + length**:
 
 1. The reader receives **the expected sha256 and the expected byte length of each of the 2
-   documents** from outside (`container.descriptor` of manifest `karume/5`, or the pin that the
+   documents** from outside (`container.descriptor` of manifest `karume/6`, or the pin that the
    caller of `openContainer` passes as the second argument `expect` (`DescriptorExpectation`))
    (ADR 0109 decision 3 — a different fact from the sha256 of the part 0 file).
 2. Fetch part 0 (or the start of the single form), read the header and get the lengths of the 2
@@ -893,7 +894,7 @@ They are **the same byte order**; the only difference is "whether there are cuts
 
 - **`parts` lists only indices 1 and above** (writing part 0's sha256 into itself is
   self-referential — §2.2). The integrity of part 0 is covered by **the outer expected hash +
-  length** (§7). `container.parts` of manifest `karume/5` holds the FileRefs (`size` / `sha256`) of
+  length** (§7). `container.parts` of manifest `karume/6` holds the FileRefs (`size` / `sha256`) of
   **all parts including part 0**, in index order (ADR 0109 decision 3).
 - In split form a zero-length part (part 1 with empty const) is also **written as a 0-byte file**.
   The manifest holds its FileRef with `size: 0`, and the hub does not fetch it (ADR 0109
@@ -912,7 +913,7 @@ They are **the same byte order**; the only difference is "whether there are cuts
 - A split-form `krm` may contain its graph, or may hold in its descriptor only a **content reference
   to `graph`** (`{ sha256, size }`) that points to an external shared `krg`. Where the reference is
   fetched from is **given by the manifest as a FileRef** (the descriptor has no notion of a repo).
-  `karume/5` has no field for this — it is added in the step that needs it (step 5) (ADR 0109
+  `karume/6` has no field for this — it is added in the step that needs it (step 5) (ADR 0109
   decision 5).
 
 ## 9. Byte-copy extraction of `krg`
@@ -1072,11 +1073,15 @@ by "GPU transfer" below.
 ## 12. Migration CLI contract
 
 Reading the old format lives **only in this CLI**. The readers of the new packages read only
-`karume/5` and the new container, and **dual reading is not implemented**.
+`karume/6` and the new container, and **dual reading is not implemented**.
 
 - **Input**: old single-form safetensors / old shard sequences / old manifests (`karume/4`).
 - **Output**: new `krm` (and also `krg` when `--graph` is passed in per-component mode), plus, in
   whole-repository mode, a new manifest (`karume/5`).
+- **Upgrade** (`karume upgrade <repository directory> [--name-map <file>]` — ADR
+  [0153](decisions/0153-manifest-v6-name-map.md)): a `karume/5` repository — what whole-repository
+  mode writes — gets its `karume/6` manifest in place (the same content, the new format, and the
+  name map's file and reference when one is given); its containers are not touched.
 - **Old inputs are kept** (the CLI neither deletes nor rewrites its inputs).
 - Implemented in Python (`tools/exporter/src/karume/migrate.py`). Reading of old forms lives only in
   the migration CLI (`migrate.py` and `legacy.py`). `legacy.py` reads safetensors shard sequences

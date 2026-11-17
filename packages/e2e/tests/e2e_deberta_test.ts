@@ -598,7 +598,7 @@ for (const variant of VARIANTS) {
   if (variant.container.kind === "mirror" && !hasContainer) {
     console.warn(
       `[karume] skipping the real-weight DeBERTa E2E (${variant.name}): the distribution mirror ` +
-        `${MIRROR_ROOT.pathname} is absent (or not karume/5).`,
+        `${MIRROR_ROOT.pathname} is absent (or not karume/6).`,
     );
   }
 

@@ -246,7 +246,7 @@ const TILE_RUN_PRESENT =
   ti2vVaeChunkFixtures([DEGENERATE_CASE]).every(({ present }) => present);
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so the real-GPU checks of Wan2.2 TI2V's VAE decoder are SKIPPED. Assemble it: ${ASSEMBLE}`,
   );
 }

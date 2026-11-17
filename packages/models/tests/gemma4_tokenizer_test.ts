@@ -132,7 +132,7 @@ const GEMMA4_ASSET: RealAsset = {
       ? await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "e2b" })
       : undefined,
   absent:
-    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} is absent (or not karume/5), so ` +
+    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} is absent (or not karume/6), so ` +
     "the gemma4 full-vocabulary tokenizer cases SKIP. Assemble: cd tools/export-recipes && uv run " +
     "python dist.py --pipeline gemma4",
   suffix: "",

@@ -109,7 +109,7 @@ if (CASES.length === 0) {
 if (!MIRROR_PRESENT) {
   console.warn(
     `[karume] skipping the DeBERTa relative-position checks: the distribution mirror ` +
-      `${MIRROR_ROOT.pathname} is absent (or not karume/5).`,
+      `${MIRROR_ROOT.pathname} is absent (or not karume/6).`,
   );
 }
 

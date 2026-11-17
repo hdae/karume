@@ -170,7 +170,7 @@ const missingGoldens = (files: readonly URL[]): string[] =>
     .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
 
 /**
- * Whether this is a `karume/5` mirror with the drafter.
+ * Whether this is a `karume/6` mirror with the drafter.
  *
  * MUST: decided by **the manifest's declaration**, not by file names — a container part's path is
  * the writer's convention (`<stem>-NNNNN-of-NNNNN.krm`), and the names move when the part count

@@ -89,7 +89,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
+    """One dtype of weights (the `container` of `karume/6` — ADR 0109 decision 3).
 
     The card does not read `descriptor`, so only its shape follows the real one (lengths and sha256
     of the 2 documents).
@@ -116,7 +116,7 @@ def _birefnet_manifest(
     """
     side = int(model)
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {

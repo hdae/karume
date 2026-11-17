@@ -76,7 +76,7 @@ def _verified_graph(path: Path) -> Mapping[str, Any]:
     """Verifies the placed container **by every rule** and returns the IR v2 graph document.
 
     Replaces `verify_model` of `karume/4`. It recomputes even the blocks' sha256 (`blocks=True`),
-    so a distributed form that "was written but cannot be read" fails here. `karume/5` is one graph
+    so a distributed form that "was written but cannot be read" fails here. `karume/6` is one graph
     per container (ADR 0109 decision 2), so the only value of `graphs` is returned.
     """
     verified = verify_container(container_parts(path), blocks=True)

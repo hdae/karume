@@ -116,7 +116,7 @@ const containerFor = async (
 };
 
 const manifestText = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "karume/0.13.0",
   defaultModel: "m",
   models: {

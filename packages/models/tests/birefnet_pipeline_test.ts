@@ -94,7 +94,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
  */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.2.2",
     defaultModel: "hr",
     models: {

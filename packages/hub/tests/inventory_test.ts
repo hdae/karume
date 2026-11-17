@@ -547,7 +547,7 @@ const collisionManifest = async (): Promise<string> => {
     pipelineConfig: {},
   });
   return JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "target",
     models: {
@@ -747,7 +747,7 @@ const SINGLE_PARTS = ["net/model-00001-of-00002.krm", "net/model-00002-of-00002.
 const singleFileManifest = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
   const ref = { size: bytes.byteLength, sha256: await sha256Hex(bytes) };
   return JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {
@@ -853,7 +853,7 @@ const partRef = async (part: string) => ({
  * every part names the referenced coordinates.
  */
 const crossRepoManifest = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "karume/0.1.0",
   defaultModel: "m",
   models: {

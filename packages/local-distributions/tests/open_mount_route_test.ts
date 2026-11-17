@@ -10,11 +10,11 @@ const BASE = "http://127.0.0.1:8791/sub/";
 const hex = (character: string): string => character.repeat(64);
 
 /**
- * A minimal `karume/5` manifest of `anima-extra` whose one asset is a cross-repo reference into
+ * A minimal `karume/6` manifest of `anima-extra` whose one asset is a cross-repo reference into
  * `hdae/karume-anima` (the shape of the Anima fine-tunes).
  */
 const MANIFEST = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "test",
   defaultModel: "a",
   models: {

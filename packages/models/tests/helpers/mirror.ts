@@ -38,7 +38,7 @@ import {
 export const MODELS_ROOT: URL = new URL("../../../../models/", import.meta.url);
 
 /** The manifest major this version reads (older majors are not read — ADR 0109 decision 1). */
-export const MIRROR_FORMAT = "karume/5";
+export const MIRROR_FORMAT = "karume/6";
 
 /** The owner of the published distributions: a cross-repo reference `hdae/<name>` is `models/<name>`. */
 const MIRROR_OWNER = "hdae";
@@ -54,7 +54,7 @@ export const mirrorRoot = (repoDir: string): URL => new URL(`${repoDir}/`, MODEL
 
 /**
  * Whether `root` holds a distribution **this version can read** (`karume.json` declares
- * `karume/5`) together with every `hdae/<name>` mirror it references across repositories.
+ * `karume/6`) together with every `hdae/<name>` mirror it references across repositories.
  *
  * MUST: a mirror whose cross-repo sibling is absent is not present — opening it would throw in
  * {@link mirrorDirectory}, so a test guarded by this check SKIPs instead of erroring at module

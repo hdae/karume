@@ -1,5 +1,5 @@
 /**
- * Hand-written `karume/5` manifests shaped like the three Gemma 4 mirrors (the models, the presets
+ * Hand-written `karume/6` manifests shaped like the three Gemma 4 mirrors (the models, the presets
  * and the default preset of each, with a valid `pipelineConfig`), for the decode bench's tests:
  * `memoryDistributions` serves them, so an entry's run reaches its arm checks without a mirror.
  */
@@ -29,7 +29,7 @@ export const gemmaBenchManifestText = (input: {
   readonly defaultPreset: string;
 }): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: input.models[0],
     models: Object.fromEntries(

@@ -22,7 +22,7 @@ import { HEADER_BYTES } from "../../src/format/container/limits.ts";
 import type { IrGraph } from "../../src/format/ir.ts";
 
 /**
- * Only the fields of a `karume/5` manifest that this file reads (the distribution form carries
+ * Only the fields of a `karume/6` manifest that this file reads (the distribution form carries
  * the spellings).
  */
 export type ContainerManifest = {

@@ -955,7 +955,7 @@ const expectedCases = (target: string): readonly Sbv2Case[] =>
 if (!MIRROR_PRESENT) {
   console.warn(
     `[karume] skipping the SBV2 front / voice cases of the f16 and i8 series: the distribution ` +
-      `mirror ${MIRROR_ROOT.pathname} is absent (or not karume/5).`,
+      `mirror ${MIRROR_ROOT.pathname} is absent (or not karume/6).`,
   );
 }
 

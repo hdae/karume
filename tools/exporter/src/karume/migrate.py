@@ -8,8 +8,10 @@
     # decision 8)
     karume migrate --manifest ../../models/karume-irodori/karume.json \
         --out /tmp/karume-irodori --license apache-2.0
+    # A karume/5 repository → karume/6, in place (ADR 0153 — the manifest and the card only)
+    karume upgrade ../../models/karume-anima --name-map ../export-recipes/anima/name-map.json
 
-**Reading the old format lives only in this layer** (§12) — the new readers read only `karume/5`
+**Reading the old format lives only in this layer** (§12) — the new readers read only `karume/6`
 and the new container, and dual reading is not implemented. What this moves is only **the
 container and the shape of the declarations**:
 
@@ -44,13 +46,21 @@ Whole-repository mode (`--manifest`) adds four things (ADR 0109 decisions 3 / 4 
   `--cross-repo` points at, and `repo` / `revision` are added.
 - Ordinary files that were not converted (README / LICENSE / tokenizer / …) are copied as is, and
   the `karume/5` `karume.json` is written.
+
+The upgrade (`karume upgrade`, {@link upgrade_repository}) takes a `karume/5` repository — what
+whole-repository mode writes, and what every repository held until ADR 0153 — to the current
+format in place: the manifest keeps its content and gets the new format (and, when a name map is
+given, the copied file and its reference), and the card's statement of the format follows. Not a
+byte of a weights file is touched.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import re
 import shutil
 from collections import Counter
@@ -78,16 +88,22 @@ from karume.container import (
     sequence_siblings,
 )
 from karume.dims import MAX_SAFE_INT
+from karume.dist import MANIFEST_FORMAT as CURRENT_MANIFEST_FORMAT
 from karume.dist import (
+    MODEL_CARD_FILENAME,
+    NAME_MAP_FILENAME,
+    NAME_MAP_KEY,
     REPO_RE,
     REVISION_RE,
     DistError,
     assert_manifest_limits,
+    assert_name_map,
     assert_rel_path,
     file_ref,
     generator_tag,
     manifest_text,
     sha256_file,
+    verify_dist_files,
 )
 from karume.ir import IrGraph
 from karume.legacy import (
@@ -114,8 +130,10 @@ GRAPH_SUFFIX = ".krg"
 #: Format identifier of the old manifest that is read (no dual reading — ADR 0109 decision 1).
 LEGACY_MANIFEST_FORMAT = "karume/4"
 
-#: Format identifier of the manifest that is written (ADR 0109 decision 1).
-MANIFEST_FORMAT = "karume/5"
+#: Format identifier of the manifest whole-repository mode writes (ADR 0109 decision 1) — the
+#: format the upgrade reads ({@link upgrade_repository} writes the current one,
+#: {@link CURRENT_MANIFEST_FORMAT}).
+MIGRATED_MANIFEST_FORMAT = "karume/5"
 
 #: File name of the manifest (ADR 0041 decision 1 — a fixed name at the repository root).
 MANIFEST_FILE = "karume.json"
@@ -994,8 +1012,9 @@ def _crossed_container(cross: CrossRepo, entry: WeightEntry, seat: _Seat) -> Con
     where = f"{cross.repo}'s {MANIFEST_FILE}"
     root = _object(_read_json(cross.directory / MANIFEST_FILE, where), where)
     _require(
-        root.get("format") == MANIFEST_FORMAT,
-        f"{where}.format is '{root.get('format')}' — only '{MANIFEST_FORMAT}' can be copied",
+        root.get("format") == MIGRATED_MANIFEST_FORMAT,
+        f"{where}.format is '{root.get('format')}' — only '{MIGRATED_MANIFEST_FORMAT}' can be"
+        " copied",
     )
     directory, stem = _output_location(entry.shards, str(seat))
     wanted = f"{directory}/{stem}{MODEL_SUFFIX}"
@@ -1219,7 +1238,7 @@ def _manifest_document(
             "pipelineConfig": dict(model.pipeline_config),
         }
     return {
-        "format": MANIFEST_FORMAT,
+        "format": MIGRATED_MANIFEST_FORMAT,
         "generator": generator_tag(),
         "defaultModel": legacy.default_model,
         "models": models,
@@ -1563,6 +1582,168 @@ def _assert_ple_metadata(
         )
 
 
+# ---- Upgrade: a karume/5 repository → the current format, in place ------------------
+
+#: The top-level members of the manifest the upgrade reads (`karume/5` has no other).
+_MIGRATED_ENVELOPE = frozenset({"format", "generator", "defaultModel", "models"})
+
+#: The suffix of what the upgrade writes before it puts it in place (inside the repository).
+_PARTIAL_SUFFIX = ".partial"
+
+
+def card_format_statement(manifest_format: str) -> str:
+    """The model card's statement of the manifest format — every recipe's card spells it from the
+    manifest as `` `karume.json` (`<format>`) ``."""
+    return f"`{MANIFEST_FILE}` (`{manifest_format}`)"
+
+
+@dataclass(frozen=True)
+class UpgradeResult:
+    """What {@link upgrade_repository} did."""
+
+    manifest: Path
+    #: The manifest's format before the call.
+    previous_format: str
+    #: False when the manifest already had the current format: nothing was written.
+    upgraded: bool
+    #: Whether a name map was copied into the repository and referenced.
+    name_map: bool
+    #: How many statements of the format the card had and now spell the current one (0 = the card
+    #: is byte for byte as it was).
+    card_statements: int
+
+
+def upgrade_repository(
+    directory: str | Path, *, name_map: str | Path | None = None
+) -> UpgradeResult:
+    """Rewrite the `karume/5` manifest of the repository `directory` in the current format, in
+    place (ADR 0153).
+
+    The manifest keeps its content — models, weights, assets, quants, `generator` and every
+    cross-repository reference as they are — and gets the current `format`. Given `name_map` (the
+    family's `karume-name-map/1` file), the file is copied to the repository root and referenced
+    by the manifest. The card (`README.md`) is rewritten only where it states the format (the one
+    statement {@link card_format_statement} spells); a card that does not state it is left as it
+    is. Not a byte of any other file is touched, a weights file least of all.
+
+    A repository that already has the current format is left as it is (`upgraded` is false); a
+    name map given for it must be the one it references, since the upgrade does not change a
+    current manifest.
+
+    MUST: nothing is written until the repository passes the current checks as it is (structure,
+    limits, every declared file present with its size, no undeclared file) and the name map is a
+    `karume-name-map/1` document — a broken input leaves the repository byte for byte as it was.
+    Each new file is written under a temporary name inside the repository and read back before it
+    replaces the old one, the manifest last.
+    """
+    root = Path(directory)
+    manifest_path = root / MANIFEST_FILE
+    old = _object(_read_json(manifest_path, MANIFEST_FILE), MANIFEST_FILE)
+    previous = old.get("format")
+    source = None if name_map is None else Path(name_map)
+    if previous == CURRENT_MANIFEST_FORMAT:
+        _assert_name_map_referenced(old, source)
+        return UpgradeResult(manifest_path, previous, False, False, 0)
+    _require(
+        previous == MIGRATED_MANIFEST_FORMAT,
+        f"{MANIFEST_FILE}.format is {previous!r} — only '{MIGRATED_MANIFEST_FORMAT}' can be"
+        f" upgraded to '{CURRENT_MANIFEST_FORMAT}' (an older repository is built again)",
+    )
+    unknown = sorted(set(old) - _MIGRATED_ENVELOPE)
+    _require(
+        not unknown,
+        f"{MANIFEST_FILE} has top-level members {unknown} that '{MIGRATED_MANIFEST_FORMAT}' does"
+        " not have",
+    )
+    content: dict[str, Any] = {**old, "format": CURRENT_MANIFEST_FORMAT}
+    # The format is all that changes, so the repository as it is must already pass the current
+    # checks (a stray file at the name map's place included — no manifest declares it yet).
+    verify_dist_files(root, content)
+    staged: list[tuple[Path, bytes]] = []
+    if source is not None:
+        assert_name_map(source)
+        payload = source.read_bytes()
+        content[NAME_MAP_KEY] = {
+            "path": NAME_MAP_FILENAME,
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        staged.append((root / NAME_MAP_FILENAME, payload))
+    assert_manifest_limits(content)
+    statements = 0
+    card_path = root / MODEL_CARD_FILENAME
+    if card_path.is_file():
+        card = card_path.read_text(encoding="utf-8")
+        statement = card_format_statement(MIGRATED_MANIFEST_FORMAT)
+        statements = card.count(statement)
+        if statements:
+            current = card_format_statement(CURRENT_MANIFEST_FORMAT)
+            staged.append((card_path, card.replace(statement, current).encode("utf-8")))
+    text = manifest_text(content)
+    staged.append((manifest_path, text.encode("utf-8")))
+    _put_in_place(staged, content)
+    return UpgradeResult(manifest_path, previous, True, source is not None, statements)
+
+
+def _assert_name_map_referenced(manifest: Mapping[str, Any], source: Path | None) -> None:
+    """For a repository already in the current format: a name map given to the upgrade must be the
+    one the manifest references (the upgrade changes no current manifest, so another one would be
+    silently left out)."""
+    if source is None:
+        return
+    declared = manifest.get(NAME_MAP_KEY)
+    _require(
+        isinstance(declared, dict),
+        f"{MANIFEST_FILE} is already '{CURRENT_MANIFEST_FORMAT}' and references no name map — the"
+        " upgrade does not change a current manifest (build the distribution again to add one)",
+    )
+    digest = sha256_file(source)
+    _require(
+        declared.get("sha256") == digest,
+        f"{MANIFEST_FILE} is already '{CURRENT_MANIFEST_FORMAT}' and references another name map"
+        f" than {source} (declared {declared.get('sha256')} / given {digest}) — the upgrade does"
+        " not change a current manifest",
+    )
+
+
+def _put_in_place(staged: Sequence[tuple[Path, bytes]], manifest: Mapping[str, Any]) -> None:
+    """Write each `(final path, bytes)` under its temporary name, read every one back, then
+    replace the finals in order (the manifest is the last entry, so it is replaced last).
+
+    MUST: the read-back compares the bytes and parses the manifest again — a short write found
+    after the rename would leave a repository that declares what it does not hold. A failure
+    before the renames removes every temporary file, so the repository is as it was.
+    MUST: the manifest is replaced last — a failure while replacing leaves the old manifest, so
+    the repository never declares a file that is not in place (at most the name map is already
+    there, and the next run reports it as a file the manifest does not declare).
+    """
+    temporaries = [(final.with_name(final.name + _PARTIAL_SUFFIX), final) for final, _ in staged]
+    try:
+        for (temporary, _), (_, data) in zip(temporaries, staged, strict=True):
+            temporary.write_bytes(data)
+        for (temporary, final), (_, data) in zip(temporaries, staged, strict=True):
+            _require(
+                temporary.read_bytes() == data,
+                f"{temporary}: the bytes read back differ from the bytes written for {final.name}",
+            )
+        manifest_temporary = temporaries[-1][0]
+        _require(
+            json.loads(manifest_temporary.read_text(encoding="utf-8")) == manifest,
+            f"{manifest_temporary}: the manifest read back differs from the one written",
+        )
+    except BaseException:
+        for temporary, _ in temporaries:
+            temporary.unlink(missing_ok=True)
+        raise
+    for index, (temporary, final) in enumerate(temporaries):
+        try:
+            os.replace(temporary, final)
+        except BaseException:
+            for rest, _ in temporaries[index:]:
+                rest.unlink(missing_ok=True)
+            raise
+
+
 # ---- CLI ------------------------------------------------------------------
 
 
@@ -1719,6 +1900,44 @@ def _run_repository(args: argparse.Namespace, provenance: Provenance) -> None:
     print(
         f"{result.manifest}: containers={len(result.converted)}"
         f" crossed={result.crossed} copied={result.copied}"
+    )
+
+
+def build_upgrade_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="karume upgrade",
+        description=f"Rewrite the {MIGRATED_MANIFEST_FORMAT} manifest of a distribution repository"
+        f" as {CURRENT_MANIFEST_FORMAT}, in place (the content is kept; no weights file is"
+        " touched)",
+    )
+    parser.add_argument(
+        "directory", type=Path, help=f"the repository directory (the one holding {MANIFEST_FILE})"
+    )
+    parser.add_argument(
+        "--name-map",
+        type=Path,
+        default=None,
+        help=f"the family's name map (karume-name-map/1) to copy to {NAME_MAP_FILENAME} and"
+        " reference from the manifest (default: the repository carries none)",
+    )
+    return parser
+
+
+def upgrade_main(argv: Sequence[str] | None = None) -> None:
+    """Upgrade one repository ({@link upgrade_repository}) and say what was written."""
+    args = build_upgrade_parser().parse_args(argv)
+    result = upgrade_repository(args.directory, name_map=args.name_map)
+    if not result.upgraded:
+        print(f"{result.manifest}: already {CURRENT_MANIFEST_FORMAT} — nothing to do")
+        return
+    name_map = f", name map {NAME_MAP_FILENAME} referenced" if result.name_map else ""
+    card = (
+        f"card: {result.card_statements} format statement(s) rewritten"
+        if result.card_statements
+        else "card: unchanged (it does not state the format)"
+    )
+    print(
+        f"{result.manifest}: {result.previous_format} → {CURRENT_MANIFEST_FORMAT}{name_map}; {card}"
     )
 
 

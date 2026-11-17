@@ -105,7 +105,7 @@ const MISSING_FIXTURES = FETCHED
   : `fetch: ${FETCH}`;
 if (!I8_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so the convCompute 'a8' A/B of the int8 VAE decoder is SKIPPED. Assemble it: ${ASSEMBLE}`,
   );
 } else if (!FIXTURES_PRESENT) {

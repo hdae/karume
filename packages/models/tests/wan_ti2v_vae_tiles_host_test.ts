@@ -277,7 +277,7 @@ const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
 
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so the real-asset layout check of Wan2.2 TI2V's VAE tiles is SKIPPED. Assemble it: ${ASSEMBLE}`,
   );
 }

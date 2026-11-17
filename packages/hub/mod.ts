@@ -1,5 +1,5 @@
 /**
- * `@karume/hub` — resolves distribution manifest v5 (`karume.json` / `karume/5`) and fetches from
+ * `@karume/hub` — resolves distribution manifest v6 (`karume.json` / `karume/6`) and fetches from
  * Hugging Face or a local directory.
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
@@ -22,8 +22,9 @@
  * — it does not fetch) / remove the stored files of one selection ({@link evictCachedAssets} — files
  * used by other selections and cross-repository references are kept).
  *
- * The specification is `docs/decisions/0109-manifest-v5-container.md` (the physical container
- * format is `docs/container-v1.md`, the fetch layer is `0038-manifest-v1.md` §5).
+ * The specification is `docs/decisions/0109-manifest-v5-container.md` with
+ * `docs/decisions/0153-manifest-v6-name-map.md` (the physical container format is
+ * `docs/container-v1.md`, the fetch layer is `0038-manifest-v1.md` §5).
  *
  * ## Versions and manifests
  *
@@ -44,6 +45,9 @@
  * | 0.13.x | `karume/5` | The distribution becomes containers (`krm`) — dtype entries become
  * `{ container }` (the descriptor's expected values + the FileRef list of parts); `shards` / `extras`
  * retired (ADR 0109) |
+ * | Unreleased | `karume/6` | The optional `nameMap` (the reference of the repository's name map,
+ * ADR 0153); the content of `karume/5` otherwise, so a `karume/5` repository is rewritten in place
+ * with the exporter's `karume upgrade` |
  *
  * The procedure for re-publishing a distribution is `docs/release-runbook.md`.
  */

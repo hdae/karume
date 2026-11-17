@@ -73,7 +73,7 @@ const buildDist = async (
     await writeFile(`${root}/shared/${CROSS_PATH}`, encoder.encode("xxxx"));
   }
   const manifest = {
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/test",
     defaultModel: "m",
     models: {

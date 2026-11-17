@@ -26,7 +26,7 @@
  *
  * ## Component-replacement option ({@link LoadContainerOptions.components} — ADR 0108 decision 19)
  *
- * Replaces a component by role → {@link ComponentSource} (the same role in another `karume/5`
+ * Replaces a component by role → {@link ComponentSource} (the same role in another `karume/6`
  * repo). Admission runs **before a single byte of weights is fetched**: (1) the sha256 of the graph
  * descriptor matches the manifest's declaration (only components with an identical graph contract),
  * (2) zero shortage / excess in the binding table (`openContainer` reports it from the descriptor
@@ -133,7 +133,7 @@ export type ComponentOpener = (key: string) => ModelComponent;
 
 /**
  * Source of a component replacement (ADR 0108 decision 19 / ADR 0109 decision 10) — **the same
- * role** in another `karume/5` repo. `model` / `quant` default to that repo's defaults when omitted.
+ * role** in another `karume/6` repo. `model` / `quant` default to that repo's defaults when omitted.
  */
 export type ComponentSource = {
   readonly source: string | HubRepoRef | DistributionSource;

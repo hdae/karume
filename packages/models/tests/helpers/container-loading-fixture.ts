@@ -1,4 +1,4 @@
-// The fake HF fetch layer and the `karume/5` distribution form shared by the checks of
+// The fake HF fetch layer and the `karume/6` distribution form shared by the checks of
 // container-path loading (`src/hub/components.ts`) (container_loading_test.ts,
 // container_loading_test.ts and container_loading_test.ts).
 //
@@ -164,7 +164,7 @@ export const serveContainer = async (
 export const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume-test/0",
       defaultModel: "test",
       models,

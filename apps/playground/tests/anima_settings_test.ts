@@ -37,7 +37,7 @@ const container = (prefix: string, crossRepo: boolean) => ({
 });
 
 /**
- * A `karume/5` manifest shaped like the Anima ones: per model a transformer of its own and a text
+ * A `karume/6` manifest shaped like the Anima ones: per model a transformer of its own and a text
  * encoder (cross-repo to the official repository when `crossRepo`), a tokenizer asset likewise, and
  * an Anima-like `pipelineConfig`.
  */
@@ -47,7 +47,7 @@ const animaLikeManifest = (
 ): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: models[0],
       models: Object.fromEntries(

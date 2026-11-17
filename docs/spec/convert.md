@@ -73,7 +73,7 @@ are a `ConvertError` naming the initializer, the tensor and the element.
 - Part 0 goes last: the model descriptor serialized again with the real hashes (the same length, so the header and the
   graph descriptor do not change).
 - It returns every part's length and sha256 (part 0 included) and the length and sha256 of the two documents, in the
-  shape of `DescriptorExpectation`: what a manifest entry (`container` of `karume/5`) needs.
+  shape of `DescriptorExpectation`: what a manifest entry (`container` of `karume/6`) needs.
 - A part's sha256 is one Web Crypto digest over the whole part, so a whole part is held while it is hashed and written.
 
 Guarantee: for the tensors of a distributed preset, the parts written against the plan of a preset made from the same
@@ -86,6 +86,12 @@ written container opens with `openContainer` as an unverified source, every bloc
 Data that says which tensor of a weights file is which initializer of which component: one JSON document per model,
 written beside its export recipe, where both names are known (Anima: `tools/export-recipes/anima/name-map.json`). It
 holds no function and no tensor operation (select, slice, reshape): a tensor goes to its initializer as it is.
+
+A distribution carries its family's map: the recipe declares the file (`Pipeline.name_map` of the exporter), the
+assembly checks that it is JSON with the format tag below, copies it to `name-map.json` at the repository root and
+references it from the manifest as `nameMap` (`karume/6` — ADR [0153](../decisions/0153-manifest-v6-name-map.md)), a
+reference the hub checks like every file reference. Anima's two repositories, `karume-anima` and `karume-anima-extra`,
+carry the map above. Nothing reads the map from a distribution yet: `placeTensors` takes the map as a value.
 
 | Field | What it is |
 | --- | --- |

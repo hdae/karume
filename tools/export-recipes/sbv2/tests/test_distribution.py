@@ -1174,7 +1174,7 @@ class TestSbv2Manifest:
             assert [path.rsplit("/", 1)[-1] for path in paths] == expected
 
     def test_every_dtype_seat_declares_an_ordered_part_list(self, sbv2_assembled) -> None:
-        """The part list of `karume/5` **always has 2 or more entries** (part 0 of the graph
+        """The part list of `karume/6` **always has 2 or more entries** (part 0 of the graph
         description + the following parts — the always-split form of container-v1 §8).
 
         This used to pin "always 1 entry" (an observation point from the time when the split rule

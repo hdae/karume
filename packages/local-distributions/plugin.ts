@@ -303,14 +303,19 @@ export type HfServingTable = {
   readonly unserved: readonly string[];
 };
 
-/** Every file reference of the manifest (all models × weights × dtypes, plus the assets). */
-const allFileRefs = (manifest: Manifest): readonly FileRef[] =>
-  Object.values(manifest.models).flatMap((model) => [
+/**
+ * Every file reference of the manifest (all models × weights × dtypes, the assets, and the
+ * repository's name map).
+ */
+const allFileRefs = (manifest: Manifest): readonly FileRef[] => [
+  ...Object.values(manifest.models).flatMap((model) => [
     ...Object.values(model.weights).flatMap((entry) =>
       Object.values(entry).flatMap((dtype) => dtype.container.parts),
     ),
     ...Object.values(model.assets),
-  ]);
+  ]),
+  ...(manifest.nameMap === undefined ? [] : [manifest.nameMap]),
+];
 
 /**
  * Builds the serving table from the mounts as they are on disk now (called per request, so a

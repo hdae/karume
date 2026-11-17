@@ -54,6 +54,9 @@ from karume.dist import (
     MAX_QUANT_DESCRIPTION_CHARS,
     MAX_QUANT_LABEL_CHARS,
     MODEL_CARD_FILENAME,
+    NAME_MAP_FILENAME,
+    NAME_MAP_FORMAT,
+    NAME_MAP_KEY,
     PIPELINES,
     SHARED_DIRNAME,
     STORAGE_DTYPE_LABELS,
@@ -67,6 +70,7 @@ from karume.dist import (
     assemble_family,
     assert_manifest_limits,
     assert_model_name,
+    assert_name_map,
     assert_quant_presentation,
     build_parser,
     complete_quant_weights,
@@ -332,7 +336,7 @@ class TestManifestLimits:
 
 
 class TestPartDeclaration:
-    """The weights of `karume/5` have **a container entry** per dtype (the field of ADR 0109
+    """The weights of `karume/6` have **a container entry** per dtype (the field of ADR 0109
     decision 3).
 
     This checks **the form of the field** (no v2 `file` left over, the three fields reach the
@@ -357,15 +361,16 @@ class TestPartDeclaration:
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
-    def test_the_format_identifier_names_the_fifth_manifest_version(self) -> None:
+    def test_the_format_identifier_names_the_sixth_manifest_version(self) -> None:
         """The format identifier cannot differ from the hub's by a single character (the hub reads
         one form only).
 
         `karume/5` is the form that replaced the dtype entries of weights with **container
-        entries** (ADR 0109 decision 3) — old majors are not read, so forgetting the bump makes
-        the hub fail with unsupported format.
+        entries** (ADR 0109 decision 3), and `karume/6` added the name map's reference (ADR 0153)
+        — old majors are not read, so forgetting the bump makes the hub fail with unsupported
+        format.
         """
-        assert MANIFEST_FORMAT == "karume/5"
+        assert MANIFEST_FORMAT == "karume/6"
 
     def test_it_declares_the_container_as_a_part_list_of_three_point_sets(
         self, tmp_path: Path
@@ -415,7 +420,7 @@ class TestPartDeclaration:
 
 
 class TestTheContainerEntryLimits:
-    """The limits and rules on one `container` entry of `karume/5` (ADR 0109 decision 6).
+    """The limits and rules on one `container` entry of `karume/6` (ADR 0109 decision 6).
 
     This function is **the only Python-side mirror** of the hub's parser (`parseContainer` in
     `packages/hub/src/manifest.ts`); a loosening would first surface on the user's side as "a
@@ -854,7 +859,7 @@ class TestManifestJsonLiterals:
             manifest_text({"format": MANIFEST_FORMAT, "models": {"a": {"scale": float("inf")}}})
 
     def test_it_writes_a_finite_manifest_with_a_trailing_newline(self) -> None:
-        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/5"\n}\n')
+        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/6"\n}\n')
 
     @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
     def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
@@ -1156,6 +1161,144 @@ class TestRootFiles:
 
         with pytest.raises(DistError, match=r"A/NOTICE\.md"):
             verify_dist(out_dir)
+
+
+def _name_map_file(path: Path, text: str | None = None) -> Path:
+    """A name map file (only its format tag is checked; the rules are not interpreted)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    default = json.dumps({"format": NAME_MAP_FORMAT, "layouts": []}) + "\n"
+    path.write_text(default if text is None else text, encoding="utf-8")
+    return path
+
+
+class TestNameMap:
+    """The repository's name map (`karume/6` — ADR 0153): copied to the repository root and
+    referenced when the recipe declares it, absent otherwise."""
+
+    def _assemble(self, tmp_path: Path, name_map: Path | None = None) -> tuple[Path, Any]:
+        out_dir = tmp_path / "models" / "mapped"
+        plan = _synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")
+        return out_dir, assemble_family([plan], out_dir, "A", name_map=name_map)
+
+    @staticmethod
+    def _rewrite(out_dir: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
+        """Rewrites the placed `karume.json` (the files stay as they are)."""
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        mutate(manifest)
+        (out_dir / MANIFEST_FILENAME).write_text(manifest_text(manifest), encoding="utf-8")
+
+    def test_without_one_the_manifest_has_no_member(self, tmp_path: Path) -> None:
+        out_dir, manifest = self._assemble(tmp_path)
+
+        assert manifest["format"] == "karume/6"
+        assert NAME_MAP_KEY not in manifest
+        assert not (out_dir / NAME_MAP_FILENAME).exists()
+
+    def test_a_declared_one_is_copied_to_the_root_and_referenced(self, tmp_path: Path) -> None:
+        source = _name_map_file(tmp_path / "recipe" / "name-map.json")
+        payload = source.read_bytes()
+
+        out_dir, manifest = self._assemble(tmp_path, source)
+
+        assert (out_dir / NAME_MAP_FILENAME).read_bytes() == payload
+        assert manifest[NAME_MAP_KEY] == {
+            "path": NAME_MAP_FILENAME,
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        assert json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")) == manifest
+        # The file is one the manifest declares: verify_dist lists it and does not call it stray.
+        assert verify_dist(out_dir)[NAME_MAP_FILENAME] == len(payload)
+
+    def test_the_pipeline_declaration_reaches_the_manifest(self, tmp_path: Path) -> None:
+        source = _name_map_file(tmp_path / "recipe" / "name-map.json")
+        pipeline = replace(_ONE_PROFILE_PIPELINE, name_map=source)
+        out_dir = tmp_path / "models" / "karume-solo-m"
+
+        main(
+            ["--pipeline", "solo", "--series", str(tmp_path / "series"), "--out", str(out_dir)],
+            pipelines={"solo": pipeline},
+        )
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert manifest[NAME_MAP_KEY]["path"] == NAME_MAP_FILENAME
+        assert (out_dir / NAME_MAP_FILENAME).read_bytes() == source.read_bytes()
+
+    @pytest.mark.parametrize(
+        ("text", "match"),
+        [
+            ("not json\n", "cannot be read as JSON"),
+            ('{"format": "karume-name-map/1", "x": NaN}\n', "cannot be read as JSON"),
+            ('["karume-name-map/1"]\n', "has the format None"),
+            ('{"layouts": []}\n', "has the format None"),
+            ('{"format": "karume-name-map/2"}\n', "has the format 'karume-name-map/2'"),
+        ],
+    )
+    def test_a_file_that_is_not_a_name_map_fails_before_anything_is_written(
+        self, tmp_path: Path, text: str, match: str
+    ) -> None:
+        source = _name_map_file(tmp_path / "recipe" / "name-map.json", text)
+        out_dir = tmp_path / "models" / "mapped"
+
+        with pytest.raises(DistError, match=match):
+            self._assemble(tmp_path, source)
+        assert not out_dir.exists()
+
+    def test_a_missing_file_fails_before_anything_is_written(self, tmp_path: Path) -> None:
+        with pytest.raises(DistError, match="does not exist"):
+            self._assemble(tmp_path, tmp_path / "recipe" / "absent.json")
+        assert not (tmp_path / "models" / "mapped").exists()
+
+    @pytest.mark.parametrize(
+        ("mutate", "match"),
+        [
+            (
+                lambda manifest: manifest[NAME_MAP_KEY].update(path="A/name-map.json"),
+                r"nameMap\.path is 'A/name-map\.json'",
+            ),
+            (
+                lambda manifest: manifest[NAME_MAP_KEY].update(
+                    repo="hdae/karume-anima", revision="a" * 40
+                ),
+                "the name map is a file of this repository",
+            ),
+            (lambda manifest: manifest[NAME_MAP_KEY].update(size=0), r"nameMap\.size is 0"),
+            (lambda manifest: manifest[NAME_MAP_KEY].update(size=7), "size differs"),
+            (lambda manifest: manifest.update(nameMap="name-map.json"), "nameMap is not an object"),
+            (lambda manifest: manifest.update(nameMaps={}), "unknown top-level members"),
+        ],
+    )
+    def test_verify_dist_refuses_a_broken_reference(
+        self, tmp_path: Path, mutate: Callable[[dict[str, Any]], None], match: str
+    ) -> None:
+        out_dir, _ = self._assemble(tmp_path, _name_map_file(tmp_path / "recipe" / "map.json"))
+        self._rewrite(out_dir, mutate)
+
+        with pytest.raises(DistError, match=match):
+            verify_dist(out_dir)
+
+    def test_verify_dist_refuses_a_name_map_file_the_manifest_does_not_declare(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = self._assemble(tmp_path)
+        _name_map_file(out_dir / NAME_MAP_FILENAME)
+
+        with pytest.raises(DistError, match=r"does not declare are mixed in: name-map\.json"):
+            verify_dist(out_dir)
+
+    def test_verify_dist_refuses_a_declared_name_map_that_is_missing(self, tmp_path: Path) -> None:
+        out_dir, _ = self._assemble(tmp_path, _name_map_file(tmp_path / "recipe" / "map.json"))
+        (out_dir / NAME_MAP_FILENAME).unlink()
+
+        with pytest.raises(DistError, match=r"references is missing: name-map\.json"):
+            verify_dist(out_dir)
+
+    def test_the_check_reads_only_the_format_tag(self, tmp_path: Path) -> None:
+        """The rules are not interpreted: any JSON object with the tag passes."""
+        source = _name_map_file(
+            tmp_path / "map.json", json.dumps({"format": NAME_MAP_FORMAT, "rules": 1})
+        )
+        assert_name_map(source)
 
 
 class TestAtomicReplacement:
@@ -3041,7 +3184,7 @@ class TestExternalPartitionedComponents:
 
 
 class TestTheManifestHubReads:
-    """The hub's `karume/5` rules accept the `karume.json` that `karume dist` wrote as is.
+    """The hub's `karume/6` rules accept the `karume.json` that `karume dist` wrote as is.
 
     What is checked is the surface **settled by declarations alone** (ADR 0109 decision 6) — the
     limits and the `size: 0` rule are {@link karume.dist.assert_container_limits}, and the form the
@@ -3064,7 +3207,7 @@ class TestTheManifestHubReads:
 
         written = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
-        assert written["format"] == "karume/5"
+        assert written["format"] == "karume/6"
         assert_manifest_limits(written)
         verify_dist(out_dir)
 

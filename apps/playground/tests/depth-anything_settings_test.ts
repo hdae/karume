@@ -13,7 +13,7 @@ const hex = (character: string): string => character.repeat(64);
 /** Two models; `small` is the default with `f32` as its default preset, `base` defaults to `f16`. */
 const manifest = parseManifest(
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "small",
     models: Object.fromEntries(

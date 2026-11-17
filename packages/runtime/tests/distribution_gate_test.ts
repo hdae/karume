@@ -157,7 +157,7 @@ const DISTRIBUTIONS = [
  * The distribution manifest major this version's reader accepts (older versions are not read — ADR
  * 0109 decision 1).
  */
-const MANIFEST_FORMAT = "karume/5";
+const MANIFEST_FORMAT = "karume/6";
 
 /**
  * The roster of the absence check (in the form the per-mirror checks look up "is it on the
@@ -281,7 +281,7 @@ const assertNoDistributionMissing = (models: URL, series: readonly string[]): vo
 };
 
 /**
- * Asserts that the mirror at `root` has a `karume/5` manifest and that **every container it
+ * Asserts that the mirror at `root` has a `karume/6` manifest and that **every container it
  * declares** — every model × weights key × dtype label, which covers every quant's selection —
  * is intact (ADR 0139 decision 5):
  *
@@ -306,7 +306,7 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
       "this is a half-built or leftover directory. Rebuild it with dist.py in tools/export-recipes, or remove it.",
   );
   const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
-  // The parse checks the major itself too, but `karume/5` is asserted **by name** — the day hub
+  // The parse checks the major itself too, but `karume/6` is asserted **by name** — the day hub
   // accepts more majors, this keeps the guard from letting "a mirror still on the old major"
   // through.
   assertEquals(manifest.format, MANIFEST_FORMAT, `${series}: manifest format`);
@@ -473,7 +473,7 @@ test.skipIf(ALLOW_NO_DISTRIBUTION)(
 for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
-    `distribution gate: ${series} parses as karume/5 and every declared container is intact (parts, documents, graph name)`,
+    `distribution gate: ${series} parses as karume/6 and every declared container is intact (parts, documents, graph name)`,
     () => assertDistributionIntact(root, series),
   );
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
@@ -828,7 +828,7 @@ describe("distribution gate verdict (every declared container against the mirror
     });
   });
 
-  it("the manifest is not karume/5: FAIL", async () => {
+  it("the manifest is not karume/6: FAIL", async () => {
     await withTemporaryRoot(async (root) => {
       await arrange(root, { format: "karume/4" });
       await assertRejects(() => assertDistributionIntact(root, "synthetic"), Error, "karume/4");

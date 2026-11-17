@@ -19,10 +19,10 @@ const GIB = 2 ** 30;
 
 const hex = (character: string): string => character.repeat(64);
 
-/** A `karume/5` manifest shaped like a Gemma 4 distribution: the one model `e2b`. */
+/** A `karume/6` manifest shaped like a Gemma 4 distribution: the one model `e2b`. */
 const MANIFEST = parseManifest(
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "e2b",
     models: {

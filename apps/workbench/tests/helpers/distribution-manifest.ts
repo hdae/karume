@@ -1,6 +1,6 @@
-/** A minimal `karume/5` manifest for the distribution openers' tests (it parses; its bytes are hashed). */
+/** A minimal `karume/6` manifest for the distribution openers' tests (it parses; its bytes are hashed). */
 export const DISTRIBUTION_MANIFEST = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "test",
   defaultModel: "a",
   models: {

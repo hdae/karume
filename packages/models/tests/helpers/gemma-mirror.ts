@@ -1,6 +1,6 @@
 /**
  * Builds gemma's full-surface input (`Assets`) and the PLE reader from a distribution mirror
- * (`karume/5`) — **the one helper the real-asset e2e tests share**.
+ * (`karume/6`) — **the one helper the real-asset e2e tests share**.
  *
  * ## Why the mirror, not the series output
  *

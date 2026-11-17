@@ -129,7 +129,7 @@ export const buildLocalDist = async (
   };
   const partRefs = await Promise.all(parts.map(({ path, bytes }) => fileRefJson(path, bytes)));
   const manifest = {
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.13.0",
     defaultModel: "m",
     models: {

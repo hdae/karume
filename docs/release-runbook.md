@@ -147,6 +147,37 @@ remains)).
 NOTE (for the next release only): the old `hdae/karume-anima-turbo` was retired by ADR 0087 — do not upload it again.
 How to handle the published repository (deprecation notice, replacing the README, etc.) is the maintainer's ruling at upload time.
 
+### The release after the manifest moved to `karume/6` (ADR [0153](decisions/0153-manifest-v6-name-map.md) — that release only)
+
+The hub of that release reads only `karume/6`, so **every published repository's manifest and card are uploaded again,
+in the cross-reference order; the weights are not uploaded again** (no container changed). The ordering invariant
+above still holds (bump → mirrors → upload → pins → JSR).
+
+1. **Upgrade every mirror in place**, in `tools/exporter`. The upgrade rewrites `karume.json` in the new format, the
+   card where it states the format (`` `karume.json` (`karume/5`) ``) and, given a name map, adds `name-map.json`; it
+   keeps `generator` and every cross-repository reference as they are and touches no weights file. A mirror already
+   upgraded reports "nothing to do".
+   - The Anima pair carries the recipe's name map:
+     `uv run karume upgrade ../../models/karume-anima --name-map ../export-recipes/anima/name-map.json` and the same
+     for `../../models/karume-anima-extra`.
+   - Every other repository: `uv run karume upgrade ../../models/<repo>`.
+2. **Upload the referenced repositories first** — `karume-anima`, `karume-umt5-xxl`, `karume-irodori-v4-small`, then
+   `karume-irodori-v4.1-small` (which `karume-irodori-v4.1-small-mf` references) — and the self-contained ones in any
+   order. Before each upload, compare HF's main with the mirror as in §2: the files that differ must be among
+   `karume.json`, `README.md` and, for the Anima pair, the new `name-map.json`; a container that differs means the
+   mirror is not the published one — stop. Upload only those files: the `--include` patterns of `hf upload`, passed through the script
+   (`tools/release/hf-upload.zsh upload <repo> --include karume.json --include README.md`, plus
+   `--include name-map.json` for the Anima pair — check `tools/.venv/bin/hf upload --help` for the option before the
+   first use).
+3. **Then the referencing repositories** (the table above): their upgraded manifests still reference the previous
+   commit of the repository they borrow from, which holds the same bytes; per the rule above, build each one again
+   against the referenced repository's new main after that one is uploaded (`dist.py … --resolve-refs hf`, as in the
+   procedures above — the build writes `karume/6`, and for `karume-anima-extra` the name map), compare with HF's main in
+   the same way (the same files may differ — the rebuilt containers are byte-identical to the published ones) and
+   upload them the same way.
+4. **Pins**: every uploaded repository's main moved, so every entry of `KARUME_SOURCES` is rewritten (§3) before the JSR
+   publish (§4).
+
 ## 1. Pre-release checks
 
 NOTE (Node version): run every `node` / `vp` / `pnpm` command of this runbook inside the repository, where `.node-version` pins Node

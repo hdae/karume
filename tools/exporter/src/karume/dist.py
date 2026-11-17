@@ -1,11 +1,12 @@
 """Assembly of the distribution directory — series directories → one repository form that can be
 uploaded to HF as is.
 
-The sources of truth are ADR 0109 (`docs/decisions/0109-manifest-v5-container.md`) for the shape
-of manifest `karume/5`, and ADR 0041 (`docs/decisions/0041-manifest-v2.md`) for the layout inside
-the repository. This module produces the files laid out in the shape of 0041 decision 2, the
-`karume.json` (`karume/5`) that declares them, and the model card `README.md` derived mechanically
-from the manifest (ADR 0037 §3's "a form that can be uploaded as an HF repository as is").
+The sources of truth are ADR 0109 (`docs/decisions/0109-manifest-v5-container.md`) and ADR 0153
+(`docs/decisions/0153-manifest-v6-name-map.md`) for the shape of manifest `karume/6`, and ADR 0041
+(`docs/decisions/0041-manifest-v2.md`) for the layout inside the repository. This module produces
+the files laid out in the shape of 0041 decision 2, the `karume.json` (`karume/6`) that declares
+them, and the model card `README.md` derived mechanically from the manifest (ADR 0037 §3's "a form
+that can be uploaded as an HF repository as is").
 
 **The layout inside the repository is uniformly "per-model subtrees + `shared/` + `karume.json` /
 `README.md` at the root"** (ADR 0041 decision 9). A single-model repository follows the same rule
@@ -127,11 +128,27 @@ MANIFEST_FILENAME = "karume.json"
 #: `karume/5` is the form in which the dtype entries of weights became **the container's entry
 #: point** (`{container: {descriptor, parts}}`); both the shard list of `karume/4`
 #: (`{shards, extras?}`) and the `extras` field were retired (the one kind of extras content,
-#: `rope_base`, moved into the container's assets — ADR 0109 decision 4).
+#: `rope_base`, moved into the container's assets — ADR 0109 decision 4). `karume/6` is `karume/5`
+#: plus the optional reference of the repository's name map ({@link NAME_MAP_KEY} — ADR 0153).
 #:
 #: MUST: old majors are not read (no dual reading is implemented — ADR 0109 decision 1). Instead
-#: of quietly staying readable, the break is declared through the major.
-MANIFEST_FORMAT = "karume/5"
+#: of quietly staying readable, the break is declared through the major. A `karume/5` repository
+#: is rewritten in place by the migration layer's upgrade (`karume.migrate.upgrade_repository`).
+MANIFEST_FORMAT = "karume/6"
+
+#: The member that references the repository's name map (ADR 0153): the 3-field set of a file of
+#: this repository, absent when the distribution carries no name map.
+NAME_MAP_KEY = "nameMap"
+
+#: The top-level members of the manifest (the hub refuses any other).
+ENVELOPE_KEYS = frozenset({"format", "generator", "defaultModel", "models", NAME_MAP_KEY})
+
+#: Where the name map sits in the repository: one fixed name at the root, like `karume.json` (one
+#: map per family repository, belonging to no model subtree).
+NAME_MAP_FILENAME = "name-map.json"
+
+#: The format tag of a name map's content (`docs/spec/convert.md`, "The name map").
+NAME_MAP_FORMAT = "karume-name-map/1"
 
 #: File name of the model card (ADR 0037 §3 — the fixed name whose frontmatter HF reads).
 MODEL_CARD_FILENAME = "README.md"
@@ -432,7 +449,7 @@ def table_payload(key: str, table: np.ndarray) -> bytes:
 def ir_graph(path: Path, verified: VerifiedContainer | None = None) -> Mapping[str, Any]:
     """Read **the IR v2 graph JSON** from a container's graph descriptor (reads only part 0).
 
-    A `karume/5` container has one graph per container (ADR 0109 decision 2), so the only value of
+    A `karume/6` container has one graph per container (ADR 0109 decision 2), so the only value of
     `graphs` is returned. IR v2 differs from v1 in 4 points (docs/ir-v2.md); the two that matter to
     callers are that **initializer names are renamed to tensor keys** and that `storage` moved out
     to the binding table.
@@ -443,7 +460,7 @@ def ir_graph(path: Path, verified: VerifiedContainer | None = None) -> Mapping[s
     """
     graphs = (verified if verified is not None else _container_of(path)).read.graph.graphs
     if len(graphs) != 1:
-        raise DistError(f"{path}: has {len(graphs)} graphs (`karume/5` is one graph per container)")
+        raise DistError(f"{path}: has {len(graphs)} graphs (`karume/6` is one graph per container)")
     return next(iter(graphs.values()))
 
 
@@ -509,7 +526,7 @@ def preprocessor_channels(
 
 @dataclass(frozen=True)
 class WeightFiles:
-    """One dtype of weights (`{container}` of `karume/5`). The content is **a role name**.
+    """One dtype of weights (`{container}` of `karume/6`). The content is **a role name**.
 
     The actual path belongs to {@link Artifact} — folding into `shared/` moves the path to
     `shared/…`, so if the declaring side held the path directly, the two places would move
@@ -594,7 +611,7 @@ def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
     matching shape and type: "a re-export changed the count but the declaration is the previous
     one".
 
-    The single form (files without numbering) passes through as a one-element list — `karume/5`'s
+    The single form (files without numbering) passes through as a one-element list — `karume/6`'s
     `container.parts` MUST have two or more elements (ADR 0109 decision 3), so
     {@link _assert_manifest_shape} fails it by name. For an expanded role, the representative role
     is **removed from artifacts** and an `Artifact` is made per part (the relative path is the
@@ -1260,7 +1277,7 @@ EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 
 
 def assert_container_limits(where: str, container: Mapping[str, Any]) -> None:
-    """Fail unless one container entry fits the limits and rules of `karume/5` (ADR 0109
+    """Fail unless one container entry fits the limits and rules of `karume/6` (ADR 0109
     decision 6).
 
     MUST: the limits are taken from **the container-side constants** (`karume.container`) — the
@@ -1410,8 +1427,12 @@ def _materialize_family(
     default_model: str,
     external: Mapping[str, Mapping[str, Any]],
     declared_parts: Mapping[Path, str],
+    name_map: Path | None = None,
 ) -> tuple[dict[str, Any], dict[FileRefKey, int]]:
     """Lay the checked plans out in `out_dir`, write `karume.json`, and return the manifest.
+
+    `name_map` (checked by {@link assemble_family}) is copied to {@link NAME_MAP_FILENAME} and
+    referenced by {@link NAME_MAP_KEY}; without it the manifest has no such member.
 
     The second return value is a derived value for the model card (part 0 identity
     {@link karume.modelcard.file_ref_key} → {@link container_asset_bytes}) — it does not go into
@@ -1528,12 +1549,17 @@ def _materialize_family(
             else:
                 descriptors[role] = _descriptor_refs(out_dir / placed[(plan.name, head)])
         models[plan.name] = _model_entry(plan, refs, item.parts, descriptors, host_assets)
-    manifest = {
+    manifest: dict[str, Any] = {
         "format": MANIFEST_FORMAT,
         "generator": generator_tag(),
         "defaultModel": default_model,
         "models": models,
     }
+    if name_map is not None:
+        place_file(name_map, out_dir / NAME_MAP_FILENAME)
+        manifest[NAME_MAP_KEY] = file_ref(
+            out_dir, NAME_MAP_FILENAME, sha256_file(out_dir / NAME_MAP_FILENAME)
+        )
     assert_manifest_limits(manifest)
     (out_dir / MANIFEST_FILENAME).write_text(manifest_text(manifest), encoding="utf-8")
     return manifest, host_assets
@@ -1547,6 +1573,7 @@ def assemble_family(
     root_files: Mapping[str, str] | None = None,
     external: Sequence[ExternalComponents] = (),
     check_references: ReferenceCheck | None = None,
+    name_map: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the planned models into one repository and **replace `out_dir` wholesale** with
     that form.
@@ -1582,6 +1609,11 @@ def assemble_family(
     revision really holds the referenced bytes; it runs once per target, after the references are
     resolved and before the first byte is written.
 
+    `name_map` (the recipe's declaration — {@link Pipeline.name_map}) is the family's name map
+    file: checked by {@link assert_name_map} before the first byte is written, copied to the
+    repository root as {@link NAME_MAP_FILENAME} and referenced by the manifest's
+    {@link NAME_MAP_KEY} (ADR 0153). Without it the manifest has no such member.
+
     MUST: the checks over all of `plans` are all settled **before the first byte is written** (not
     even staging is created) — a failure midway would mean laying out several GB again. Resolving
     cross-repository references (reading the referenced manifest, hashing the files) and the
@@ -1612,6 +1644,8 @@ def assemble_family(
     assert_plan_limits(plans)
     assert_plan_sources(plans)
     assert_root_files(root_files or {})
+    if name_map is not None:
+        assert_name_map(name_map)
     # Full verification of the input containers comes **after the existence checks and before
     # writing a single byte** (it reads only the headers, so placing it here does not mean
     # rereading several GB).
@@ -1661,7 +1695,7 @@ def assemble_family(
     try:
         with staged_publication(out_dir) as staging:
             manifest, host_assets = _materialize_family(
-                partitioned, staging, default_model, references, declared_parts
+                partitioned, staging, default_model, references, declared_parts, name_map
             )
             # Legal texts are placed **before** verification — unless their place on the exempt
             # side is exercised through {@link verify_dist} on every assembly, a run where the
@@ -1711,6 +1745,8 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
         for name, ref in assets.items():
             where = f"models.{model_name}.assets.{name}"
             yield where, _dist_part_ref(ref, where)
+    if NAME_MAP_KEY in manifest:
+        yield NAME_MAP_KEY, _dist_part_ref(manifest[NAME_MAP_KEY], NAME_MAP_KEY)
 
 
 def is_external_ref(ref: Mapping[str, Any]) -> bool:
@@ -1724,20 +1760,77 @@ def is_external_ref(ref: Mapping[str, Any]) -> bool:
     return "repo" in ref
 
 
+def assert_name_map(path: Path) -> None:
+    """Fail unless `path` is a name map a distribution can carry: a JSON object whose `format` is
+    {@link NAME_MAP_FORMAT}.
+
+    Only the document's identity is checked; the rules are not interpreted (their reader,
+    `@karume/convert`, refuses what it cannot place — `docs/spec/convert.md`). NaN / Infinity are
+    refused like any text that is not JSON (the reader's `JSON.parse` fails on them).
+    """
+    if not path.is_file():
+        raise DistError(f"The name map {path} does not exist")
+
+    def refuse(literal: str) -> Any:
+        raise ValueError(f"'{literal}' is not a JSON literal")
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"), parse_constant=refuse)
+    except (UnicodeDecodeError, ValueError) as cause:
+        raise DistError(f"The name map {path} cannot be read as JSON: {cause}") from cause
+    found = document.get("format") if isinstance(document, dict) else None
+    if found != NAME_MAP_FORMAT:
+        raise DistError(
+            f"The name map {path} has the format {found!r}, not '{NAME_MAP_FORMAT}'"
+            " (a JSON object with that format tag is required)"
+        )
+
+
+def _assert_name_map_ref(value: Any) -> None:
+    """The name map's reference: the 3-field set of a file of this repository, at
+    {@link NAME_MAP_FILENAME}, with content.
+
+    MUST: no cross-repository pair — the map is copied into each repository that carries it, and
+    the hub refuses `repo` / `revision` on this member.
+    """
+    ref = _dist_part_ref(value, NAME_MAP_KEY)
+    if set(ref) != {"path", "size", "sha256"}:
+        raise DistError(
+            f"{NAME_MAP_KEY}: fields are not ['path', 'sha256', 'size'] (actual: {sorted(ref)})"
+            " — the name map is a file of this repository"
+        )
+    if ref["path"] != NAME_MAP_FILENAME:
+        raise DistError(
+            f"{NAME_MAP_KEY}.path is {ref['path']!r}, not '{NAME_MAP_FILENAME}' — the name map"
+            " sits at the repository root under that one name"
+        )
+    if ref["size"] == 0:
+        raise DistError(f"{NAME_MAP_KEY}.size is 0 (a name map has content)")
+
+
 def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
-    """Structural consistency of `karume/5` (the writing side also checks whether it is a shape
+    """Structural consistency of `karume/6` (the writing side also checks whether it is a shape
     the hub's parser accepts).
 
-    Only **whether this distribution is closed on its own** is checked here — the targets of
-    `defaultModel` / `defaultQuant`, quants' total mapping of weights, the container entry points
-    of weights, and the layout (ADR 0041 decision 9). Copying every hub check would only create a
-    second source of truth, so only the rules that "break first when assembly breaks" are copied
-    (the limits and part rules are in {@link assert_container_limits}).
+    Only **whether this distribution is closed on its own** is checked here — the top-level
+    members, the targets of `defaultModel` / `defaultQuant`, quants' total mapping of weights, the
+    container entry points of weights, the name map's reference, and the layout (ADR 0041 decision
+    9). Copying every hub check would only create a second source of truth, so only the rules that
+    "break first when assembly breaks" are copied (the limits and part rules are in
+    {@link assert_container_limits}).
     """
     if manifest.get("format") != MANIFEST_FORMAT:
         raise DistError(f"format is not '{MANIFEST_FORMAT}': {manifest.get('format')!r}")
+    unknown = sorted(set(manifest) - ENVELOPE_KEYS)
+    if unknown:
+        raise DistError(
+            f"the manifest has unknown top-level members {unknown}"
+            f" (allowed: {sorted(ENVELOPE_KEYS)})"
+        )
     if not manifest.get("generator"):
         raise DistError("generator is missing / empty")
+    if NAME_MAP_KEY in manifest:
+        _assert_name_map_ref(manifest[NAME_MAP_KEY])
     models = manifest.get("models")
     if not isinstance(models, dict) or not models:
         raise DistError("models is not a non-empty object")
@@ -1807,6 +1900,9 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
                     )
     allowed_roots = set(models) | {SHARED_DIRNAME}
     for where, ref in _declared_refs(manifest):
+        if where == NAME_MAP_KEY:
+            # The one root file the manifest declares ({@link _assert_name_map_ref} fixed its path).
+            continue
         if is_external_ref(ref):
             # The path of a cross-repository reference is **in the target repository's layout**,
             # so it does not fit this repository's root set (only the shape is checked).
@@ -1873,6 +1969,13 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     {@link assert_external_ref}.
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    return verify_dist_files(out_dir, manifest)
+
+
+def verify_dist_files(out_dir: Path, manifest: Mapping[str, Any]) -> dict[str, int]:
+    """{@link verify_dist} for a manifest document given as a value — the check of a manifest
+    before it is written as the directory's `karume.json` (the migration layer's upgrade checks the
+    repository against the document it is about to write)."""
     _assert_manifest_shape(manifest)
     declared = _declared_sizes(manifest)
     for rel_path, size in sorted(declared.items()):
@@ -2281,8 +2384,8 @@ class Pipeline:
     The shared part (placement, shared folding, sha256, reconciling declarations with files)
     belongs to the generic functions above, so only these are listed here: "the default model
     name / the distribution repository name a model belongs to / the procedure that builds a plan
-    from a series and a model name / the model card renderer", plus the legal texts and the
-    cross-repository references a distribution declares.
+    from a series and a model name / the model card renderer", plus the legal texts, the
+    cross-repository references and the name map a distribution declares.
     """
 
     default_model: str
@@ -2308,6 +2411,11 @@ class Pipeline:
     #: model that declares references fails without a revision for each of them — it never falls
     #: back to a self-contained distribution silently.
     references: Callable[[str], tuple[CrossRepoReference, ...]] = self_contained
+    #: The family's name map file (`karume-name-map/1` — which tensor of an upstream weights file
+    #: is which initializer of which component), written beside the recipe, where both names are
+    #: known. Assembly copies it into the repository and references it ({@link assemble_family});
+    #: `None` (the default) = the distribution carries no name map.
+    name_map: Path | None = None
 
 
 def selected_models(pipeline: Pipeline, models: Sequence[str] | None) -> list[str]:
@@ -2595,6 +2703,7 @@ def main(
         root_files=pipeline.root_files,
         external=external,
         check_references=check_references,
+        name_map=pipeline.name_map,
     )
     verified = verify_dist(out_dir)
     for rel_path, size in sorted(verified.items()):

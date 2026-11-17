@@ -57,7 +57,7 @@ if (!ASSETS_AVAILABLE) {
   );
 }
 
-/** The fields of a `karume/5` manifest these cases read. */
+/** The fields of a `karume/6` manifest these cases read. */
 type ContainerRef = {
   readonly descriptor: DescriptorExpectation;
   readonly parts: readonly {

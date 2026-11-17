@@ -1,7 +1,7 @@
 /**
  * The MOSS-Image pipeline's manifest resolution (`../src/moss/pipeline.ts`, `../src/moss/config.ts`
  * and `mossPresetOf` of `../src/moss/preset.ts` — ADR 0138 addendum of 2026-11-01). CPU only, no
- * asset: a synthetic `karume/5` manifest shaped like the recipe's (`tools/export-recipes/moss/
+ * asset: a synthetic `karume/6` manifest shaped like the recipe's (`tools/export-recipes/moss/
  * distribution.py` — seven components, the tokenizer asset, the two presets, upstream's defaults).
  *
  * Pinned:
@@ -71,7 +71,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string => {
     ]),
   );
   return JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.15.0",
     defaultModel: MODEL,
     models: {

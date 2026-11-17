@@ -362,7 +362,7 @@ Image to video encodes one condition image with the Wan2.2 VAE encoder (chunk 0 
 `wan/export_vae_encoder.py` writes it as three graphs split around the middle attention, so the
 sizes stay symbolic: the attention's sequence length h·w cannot be written as an IR dimension
 expression (one symbol, linear), so it gets a graph of its own over `S`. One container holds one
-graph (`karume/5`), so the encoder is three parts. `wan/vae_encoder_patch.py` holds the rewrites:
+graph (`karume/6`), so the encoder is three parts. `wan/vae_encoder_patch.py` holds the rewrites:
 the causal conv3d folded to the last time slice that sees real data in chunk 0 (an identity in
 f64), `AvgDown3D` in the closed form of chunk 0 (mean as sum × 1/4), the asymmetric `ZeroPad2d` as
 a pad of the last axis with a permute, the attention in sequence form (row L2 normalization and
@@ -631,7 +631,7 @@ uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer [--fetch]   # asse
 uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-umt5-xxl
 ```
 
-| Manifest entry (`karume/5`) | Value                                                                                                                                       |
+| Manifest entry (`karume/6`) | Value                                                                                                                                       |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | model                       | `xxl` (pipeline `umt5-encoder/1`)                                                                                                           |
 | `weights`                   | `text_encoder` with one `i8` container (`text_encoder/model.i8.krm`)                                                                        |
@@ -785,7 +785,7 @@ produces; a build without a revision source fails before writing anything, so a 
 has to pass the real SHA or `--resolve-refs hf` (`docs/release-runbook.md` §0). A local reader
 resolves the reference through `crossRepo` and does not look at the revision.
 
-| Manifest entry (`karume/5`) | Value                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Manifest entry (`karume/6`) | Value                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `weights`                   | `text_encoder` with one `i8` container referenced from `karume-umt5-xxl` (`xxl/text_encoder/model.i8-*.krm`, every part pinned by repo, commit, size and SHA-256); `transformer` with an `f16` and an `i8` container (`model.f16.krm` / `model.i8.krm`); `vae_decoder_first` / `vae_decoder_next` with one `f16` container each — the key is the container's graph name (container-v1 §2.1)                                                        |

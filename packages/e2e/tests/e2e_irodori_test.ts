@@ -531,7 +531,7 @@ if (!AVAILABLE && !FETCHED) {
 if (!MIRROR_AVAILABLE) {
   console.warn(
     `[karume] Irodori per-target golden E2E SKIPs: the mirror ${MIRROR.pathname} is absent ` +
-      "(or unreadable here: not karume/5, or a mirror it references is absent)",
+      "(or unreadable here: not karume/6, or a mirror it references is absent)",
   );
 }
 

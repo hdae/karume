@@ -2,14 +2,19 @@
 
 The distribution layer of [Karume](https://github.com/hdae/karume), a general-purpose
 neural-network inference stack that runs on WebGPU. This package reads a Karume distribution
-manifest (`karume.json`, format `karume/5`), picks one model and one quantization out of it,
+manifest (`karume.json`, format `karume/6`), picks one model and one quantization out of it,
 fetches the referenced containers (`krm`) and assets with integrity checking, and caches them. Sources are Hugging Face
 repositories (pinned to a resolved revision) or a local directory. It depends only on packages
 built from Web-standard APIs, so the same code runs in the browser, on Node and on Deno. The other packages
 of the stack are `@karume/runtime` (IR execution) and `@karume/models` (pipelines and tokenizers).
 
+A manifest may also reference the repository's name map (`nameMap` — which tensor of an upstream weights file is
+which initializer of which component). The reference is checked like every file reference; this package does not
+read the file, and no selection includes it.
+
 Status: pre-1.0. Manifests of an older major are not read — the JSR packages and the `karume`
-exporter move in lockstep, so a distribution built by an older exporter has to be rebuilt.
+exporter move in lockstep, so a distribution built by an older exporter has to be rebuilt. A `karume/5`
+repository is rewritten in place by the exporter's `karume upgrade` (its containers are current).
 
 ## Install
 
@@ -108,9 +113,10 @@ await prefetchAssets(loaded, selectionRefs(resolveSelection(loaded.manifest)), {
 ## Documentation
 
 - [Repository](https://github.com/hdae/karume) — overview and examples
-- [docs/decisions/0109-manifest-v5-container.md](https://github.com/hdae/karume/blob/main/docs/decisions/0109-manifest-v5-container.md)
-  — the `karume/5` manifest, on top of
-  [0038](https://github.com/hdae/karume/blob/main/docs/decisions/0038-manifest-v1.md) and
+- [docs/decisions/0153-manifest-v6-name-map.md](https://github.com/hdae/karume/blob/main/docs/decisions/0153-manifest-v6-name-map.md)
+  — the `karume/6` manifest: the `karume/5` one of
+  [0109](https://github.com/hdae/karume/blob/main/docs/decisions/0109-manifest-v5-container.md) plus the name map's
+  reference, on top of [0038](https://github.com/hdae/karume/blob/main/docs/decisions/0038-manifest-v1.md) and
   [0041](https://github.com/hdae/karume/blob/main/docs/decisions/0041-manifest-v2.md)
 - [docs/container-v1.md](https://github.com/hdae/karume/blob/main/docs/container-v1.md) — the
   container format the manifest points at

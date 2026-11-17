@@ -14,7 +14,7 @@ chunk graphs):
   ({@link GOLDEN_CASES}).
 
 The containers are **3, one graph each** (3 components). The container format can carry several
-graphs in one container, but manifest `karume/5` does not use that ("one container, one graph;
+graphs in one container, but manifest `karume/6` does not use that ("one container, one graph;
 graph name = component name = the key under weights" — ADR 0109 decision 2, addendum 1), and the
 writer (`_graph_descriptor` of `karume.container`) writes only one graph either. The location is
 spelled the same as the decoder's (`vae_decoder_first/` / `vae_decoder_next/`): "series root /

@@ -24,7 +24,7 @@ const ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 const PRESENT = mirrorAvailable(ROOT);
 if (!PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the 12B f16 slot case " +
+    "[karume] models/karume-gemma4-qat/ is absent (or not karume/6), so the 12B f16 slot case " +
       "SKIPs (assemble it with dist.py in tools/export-recipes)",
   );
 }

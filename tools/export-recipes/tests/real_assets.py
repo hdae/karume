@@ -90,7 +90,7 @@ def require_test_asset(
 
 
 #: The manifest major these tests read (the TS side's `MIRROR_FORMAT`).
-MIRROR_FORMAT = "karume/5"
+MIRROR_FORMAT = "karume/6"
 
 #: The owner of the published distributions: a cross-repo reference `hdae/<name>` is
 #: `models/<name>`.

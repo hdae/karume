@@ -39,7 +39,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """One dtype of the weights (the `container` of `karume/5` — ADR 0109 decision 3).
+    """One dtype of the weights (the `container` of `karume/6` — ADR 0109 decision 3).
 
     The card does not read `descriptor`, so only its shape follows the real thing (the lengths and
     sha256 of the two documents).
@@ -58,7 +58,7 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """Minimal SigLIP2 manifest (fake values that do not overlap the real ones)."""
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {

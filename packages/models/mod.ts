@@ -47,7 +47,7 @@ export type { FromPretrainedHubOptions } from "./src/hub/load-options.ts";
 /**
  * The **component replacement option** shared by the `fromPretrained` option types of every family
  * (ADR 0108 decision 19 / ADR 0109 decision 10) — role (a weights name in the manifest) → the same
- * role in another `karume/5` repository. Only components whose **graph descriptor has the same
+ * role in another `karume/6` repository. Only components whose **graph descriptor has the same
  * sha256** can be replaced, and the identity is checked from the declarations of the two manifests
  * alone, before a single weight byte is fetched.
  */

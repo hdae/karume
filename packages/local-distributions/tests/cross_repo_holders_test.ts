@@ -6,11 +6,11 @@ import { crossRepoHolders, type DistributionIndex } from "../browser.ts";
 const hex = (character: string): string => character.repeat(64);
 const REVISION = "4".repeat(40);
 
-/** A `karume/5` manifest with one model per entry of `models`, each asset referencing its repo. */
+/** A `karume/6` manifest with one model per entry of `models`, each asset referencing its repo. */
 const manifestOf = (models: Readonly<Record<string, readonly (string | undefined)[]>>): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: Object.keys(models)[0],
       models: Object.fromEntries(

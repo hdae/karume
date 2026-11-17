@@ -17,7 +17,7 @@ the caller passed, 4 and 5 are additional conditions on the declaration:
    §4.1 / invariant 5 of §12).
 2. **Assets match**: role, logical length, payload, and trailing padding of 0x00.
 3. **The two documents**: byte length and sha256 of the graph descriptor / model descriptor (the
-   same fact as the value `container.descriptor` of manifest `karume/5` declares — ADR 0109
+   same fact as the value `container.descriptor` of manifest `karume/6` declares — ADR 0109
    decision 3).
 4. **`ternary` codes**: every 2-bit code of the payload is in `{1, 2, 3}` (container-v1 §6.3 —
    the same check as `karume verify`. The TS reader fails at load time, so fail before putting it

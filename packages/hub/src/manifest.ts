@@ -1,15 +1,16 @@
 /**
- * Parsing and full structural checking of `karume.json` (distribution manifest v5 = `karume/5`) —
- * the canonical implementation of ADR 0109 (the quant preset vocabulary is inherited from ADR
- * 0041).
+ * Parsing and full structural checking of `karume.json` (distribution manifest v6 = `karume/6`) —
+ * the canonical implementation of ADR 0109 and ADR 0153 (the quant preset vocabulary is inherited
+ * from ADR 0041).
  *
- * MUST: **older versions are not read**. A `format` other than `karume/5` fails as an unsupported
- * format (no two-format parsing — ADR 0109 decision 1). v5 is the version where the distribution
- * moved from shard lists in a safetensors dialect to containers (`krm` — ADR 0108 / container-v1),
- * and the contents of `weights.<component>.<dtype>` changed from `{ shards, extras }` to
- * `{ container }` (the descriptor expectations + the part FileRef list). The `quants` / `session` /
- * `gpuFeatures` / `requiredLimits` / `label` / `description` / `assets` / cross-repo reference
- * fields stay as in v4 (ADR 0109 decisions 2 / 4).
+ * MUST: **older versions are not read**. A `format` other than `karume/6` fails as an unsupported
+ * format (no two-format parsing — ADR 0109 decision 1, ADR 0153). v5 is the version where the
+ * distribution moved from shard lists in a safetensors dialect to containers (`krm` — ADR 0108 /
+ * container-v1), and the contents of `weights.<component>.<dtype>` changed from `{ shards, extras }`
+ * to `{ container }` (the descriptor expectations + the part FileRef list). The `quants` / `session`
+ * / `gpuFeatures` / `requiredLimits` / `label` / `description` / `assets` / cross-repo reference
+ * fields stay as in v4 (ADR 0109 decisions 2 / 4). v6 is v5 plus one optional top-level member,
+ * `nameMap`: the reference of the repository's name map file (ADR 0153).
  * MUST: hand-written parsing, Web standard APIs only, unsupported and unexpected input fails loudly
  * (no silent normalisation).
  * MUST: maps from the manifest are looked up only through `Object.hasOwn`, and composed only with
@@ -110,7 +111,7 @@ const CONTAINER_HEADER_BYTES = 24;
  */
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /** The `format` major hub understands. An unknown major fails loudly (ADR 0109 decision 1). */
-const FORMAT_MAJOR = 5;
+const FORMAT_MAJOR = 6;
 /** Length limits of the display fields (ADR 0075 decision 1). */
 const MAX_LABEL_CHARS = 64;
 const MAX_DESCRIPTION_CHARS = 200;
@@ -146,7 +147,18 @@ const REPO_SEGMENT_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
  */
 const FORBIDDEN_KEYS: readonly string[] = ["__proto__", "constructor", "prototype"];
 
-const ENVELOPE_KEYS: readonly string[] = ["format", "generator", "defaultModel", "models"];
+const ENVELOPE_KEYS: readonly string[] = [
+  "format",
+  "generator",
+  "defaultModel",
+  "models",
+  "nameMap",
+];
+/**
+ * The keys of the name map's reference. The name map is a file of the repository itself, so a
+ * cross-repo pair (`repo` / `revision`) is not one of them.
+ */
+const NAME_MAP_KEYS: readonly string[] = ["path", "size", "sha256"];
 const MODEL_KEYS: readonly string[] = [
   "pipeline",
   "weights",
@@ -485,6 +497,13 @@ export type Manifest = {
   /** The model name used when no model is given (required — ADR 0041 decision 2). */
   readonly defaultModel: string;
   readonly models: Readonly<Record<string, ModelEntry>>;
+  /**
+   * The repository's name map file (format `karume-name-map/1` — which tensor of an upstream
+   * weights file is which initializer of which component), when the distribution carries one.
+   * It is a file of the repository itself (no cross-repo reference) and belongs to no selection;
+   * hub checks the reference and reads nothing of the file.
+   */
+  readonly nameMap?: FileRef;
   /**
    * What can be chosen across the repo (`quants` / `dtypes` are empty, as there is no model
    * context).
@@ -871,7 +890,7 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
   if (!isRecord(descriptorRaw)) throw fail.format(`${where}.descriptor: missing / not an object`);
   assertAllowedKeys(fail, descriptorRaw, DESCRIPTOR_KEYS, `${where}.descriptor`);
   const graph = parseDocument(fail, descriptorRaw["graph"], `${where}.descriptor.graph`);
-  // A krm always has a model descriptor (karume/5 has no field that distributes a graph-only `krg`
+  // A krm always has a model descriptor (karume/6 has no field that distributes a graph-only `krg`
   // — ADR 0109 decision 5).
   const model = parseDocument(fail, descriptorRaw["model"], `${where}.descriptor.model`);
   const parts = parseParts(fail, raw["parts"], `${where}.parts`, scope);
@@ -1206,14 +1225,37 @@ const parseFormat = (fail: Fail, raw: unknown): string => {
     throw fail.format(`format: not 'karume/<major>' (mixed-up file): '${raw}'`);
   }
   const major = Number(matched[1]);
+  if (major < FORMAT_MAJOR) {
+    // The one older major whose content is the current one's is upgraded in place; an older one
+    // has another shape and is built again.
+    const remedy =
+      major === FORMAT_MAJOR - 1
+        ? `the exporter's upgrade command (\`karume upgrade <repository directory>\`) writes in place of this one`
+        : `the exporter writes when it builds the distribution again`;
+    throw fail.format(
+      `format: unsupported major '${raw}' — this version reads only karume/${FORMAT_MAJOR}` +
+        ` (there is no parser for older versions): the repository needs a karume/${FORMAT_MAJOR}` +
+        ` manifest, which ${remedy}, or use a version of @karume/hub that can read that manifest`,
+    );
+  }
   if (major !== FORMAT_MAJOR) {
     throw fail.format(
       `format: unsupported major '${raw}' — this version reads only karume/${FORMAT_MAJOR}` +
-        ` (there is no parser for older versions; re-upload the distribution as karume/${FORMAT_MAJOR},` +
-        ` or use a version of @karume/hub that can read that manifest)`,
+        ` (the manifest is newer): use a version of @karume/hub that can read that manifest`,
     );
   }
   return raw;
+};
+
+/**
+ * Reads the reference of the repository's name map (absent = the distribution carries none). It is
+ * checked like every file reference (path rules, size, sha256, agreement with another reference of
+ * the same path), and it names a file of the repository itself.
+ */
+const parseNameMap = (fail: Fail, raw: unknown, scope: RefScope): FileRef | undefined => {
+  if (raw === undefined) return undefined;
+  if (isRecord(raw)) assertAllowedKeys(fail, raw, NAME_MAP_KEYS, "nameMap");
+  return parseFileRef(fail, raw, "nameMap", scope);
 };
 
 const parsePipelineConfig = (
@@ -1356,7 +1398,7 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   const fail = createFail(survey);
   // MUST: check `format` **before** the unknown-key check. A v1 manifest spells its top level
   // entirely differently, so in the reverse order an off-target diagnostic `unknown key 'components'`
-  // would appear and hide the real reason (this version reads only karume/5) (ADR 0109
+  // would appear and hide the real reason (this version reads only karume/6) (ADR 0109
   // decision 1). The difference from v4 is only inside the dtype entries, so there it becomes the
   // minor diagnostic `unknown key 'shards'`.
   const format = parseFormat(fail, root["format"]);
@@ -1382,5 +1424,15 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
         ` (available: ${Object.keys(models).join(" / ")})`,
     );
   }
-  return { format, generator, defaultModel, models, available };
+  // The same table as the models' references: a name map at a path another reference declares
+  // must agree with it.
+  const nameMap = parseNameMap(fail, root["nameMap"], scope);
+  return {
+    format,
+    generator,
+    defaultModel,
+    models,
+    ...(nameMap === undefined ? {} : { nameMap }),
+    available,
+  };
 };

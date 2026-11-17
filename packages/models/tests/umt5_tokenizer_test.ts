@@ -98,7 +98,7 @@ const mirrorAsset = mirrorPresent(UMT5_MIRROR)
   : undefined;
 if (mirrorAsset === undefined) {
   console.warn(
-    `[karume] the mirror ${UMT5_MIRROR.pathname} is absent (or not karume/5), so the umT5 full-vocabulary check is ` +
+    `[karume] the mirror ${UMT5_MIRROR.pathname} is absent (or not karume/6), so the umT5 full-vocabulary check is ` +
       "SKIPPED (fetch the karume-umt5-xxl distribution into models/)",
   );
 }

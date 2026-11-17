@@ -323,7 +323,7 @@ class TestThePlanOverTheSeries:
 class TestTheCard:
     def _manifest(self) -> dict[str, Any]:
         return {
-            "format": "karume/5",
+            "format": "karume/6",
             "generator": "karume/0.15.0",
             "defaultModel": dist.MOSS_MODEL,
             "models": {

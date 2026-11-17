@@ -39,7 +39,7 @@ const PIPELINE_CONFIG = {
 const manifestWith = (pipelineConfig: Record<string, unknown>) =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: "v4.1-small",
       models: {

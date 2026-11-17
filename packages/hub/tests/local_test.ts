@@ -334,7 +334,7 @@ test("localDirectory: a karume.json over the limit is a ManifestFormatError", as
 
 test("localDirectory: a broken karume.json fails with the same ManifestFormatError every time", async () => {
   const broken = new Map<string, Uint8Array<ArrayBuffer>>([
-    [MANIFEST_FILENAME, new TextEncoder().encode('{"format": "karume/5"')],
+    [MANIFEST_FILENAME, new TextEncoder().encode('{"format": "karume/6"')],
   ]);
   const directory = memoryDirectory(broken);
   const source = localDirectory(directory.adapter, { label: LABEL });

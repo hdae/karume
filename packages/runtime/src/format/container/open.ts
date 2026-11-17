@@ -82,7 +82,7 @@ export type ContainerInput =
   | { readonly kind: "source"; readonly source: BlockSource };
 
 /**
- * Expected values of the 2 documents held outside (`container.descriptor` of manifest `karume/5` /
+ * Expected values of the 2 documents held outside (`container.descriptor` of manifest `karume/6` /
  * the caller's pin) (§7 step 1). `sha256` is 64 lowercase hex characters (the format is checked
  * here — callers are not required to pass a branded type).
  */

@@ -285,7 +285,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 const QAT_AVAILABLE = mirrorAvailable(GEMMA4_QAT_MIRROR);
 if (!QAT_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_QAT_MIRROR.pathname} is absent (or not karume/5), so the gemma4 summation-order` +
+    `[karume] ${GEMMA4_QAT_MIRROR.pathname} is absent (or not karume/6), so the gemma4 summation-order` +
       " census SKIPs (cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat)",
   );
 }

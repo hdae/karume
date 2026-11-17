@@ -140,7 +140,7 @@ const PRESENT: Record<Model, boolean> = {
 if (MODELS.some((model) => !PRESENT[model])) {
   console.warn(
     `[karume] ${MIRROR.pathname} lacks ${MODELS.filter((model) => !PRESENT[model]).join(" / ")}` +
-      ` (or is not karume/5), so those gemma4 bf16 mirror cases SKIP. Assemble: ${ASSEMBLE}`,
+      ` (or is not karume/6), so those gemma4 bf16 mirror cases SKIP. Assemble: ${ASSEMBLE}`,
   );
 }
 

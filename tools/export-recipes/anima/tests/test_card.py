@@ -43,6 +43,7 @@ from anima.card import (
     render_extra_card,
 )
 from anima.distribution import ANIMA_QUANT_ABBREVIATIONS, LICENSE_SOURCE_PATH
+from karume.migrate import card_format_statement
 
 #: The repository ID spelled into the usage snippet (dist passes it from the pipeline's
 #: declaration).
@@ -64,7 +65,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
+    """One dtype of weights (the `container` of `karume/6` — ADR 0109 decision 3).
 
     The card does not read `descriptor`, so only its shape follows the real one (the lengths and
     sha256 of the 2 documents).
@@ -96,7 +97,7 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
     """
     shared_encoder = _ref("shared/text_encoder/model.krm", 111, "a")
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": default_name,
         "models": {
@@ -277,6 +278,19 @@ class TestSplitDistribution:
         HF is `fromPretrained`."""
         for text in (card, split_card, extra_card):
             assert "fromAssets" not in text
+
+
+class TestTheFormatStatement:
+    def test_both_cards_state_the_manifest_format_once_as_the_upgrade_spells_it(
+        self, card: str, extra_card: str
+    ) -> None:
+        """The card names the manifest's format in the one statement the upgrade of a repository
+        rewrites (`karume.migrate.card_format_statement`), so an upgraded card says what it said
+        with the new format's name."""
+        statement = card_format_statement(_official_manifest()["format"])
+        assert statement == "`karume.json` (`karume/6`)"
+        assert card.count(statement) == 1
+        assert extra_card.count(card_format_statement(_extra_manifest()["format"])) == 1
 
 
 class TestOfficialCard:

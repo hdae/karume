@@ -1710,7 +1710,7 @@ const textEmbedsMirror = mirrorPresent(WAN_MIRROR)
   : undefined;
 if (textEmbedsMirror === undefined) {
   console.warn(
-    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/6, or a sibling it references is ` +
       "absent), so the check of the default negative against the asset's row is SKIPPED (the check against the " +
       `recipe's text runs on the fixture). Assemble the mirror: ${WAN_ASSEMBLE_COMMAND}`,
   );
@@ -1869,7 +1869,7 @@ describe("family admission: the umT5 graph declaration × the shapes the host bu
 const wanManifest = (weightNames: readonly string[]) =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume/0.1.0",
       defaultModel: "t2v-1.3b",
       models: {

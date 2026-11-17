@@ -66,7 +66,7 @@ const CONCURRENCY = 4;
  * The in-flight byte budget of the whole-file surface {@link fetchAssets} (1.5GiB =
  * 1,610,612,736 bytes).
  *
- * With `karume/5`, container parts (the weights) go through the warm-up surface (phase 1) and the
+ * With `karume/6`, container parts (the weights) go through the warm-up surface (phase 1) and the
  * container surface (`openContainerSource`); only the manifest's `assets` (tokenizer, style
  * vectors, …) go through this surface (the caller in `@karume/models` is the single place that
  * fetches assets). The "count 2, total = largest part length × 2" that ADR 0109 decision 7 set for

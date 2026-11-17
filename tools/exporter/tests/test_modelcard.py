@@ -172,7 +172,7 @@ def _manifest() -> dict[str, Any]:
     form as a shared component).
     """
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": "zeta",
         "models": {

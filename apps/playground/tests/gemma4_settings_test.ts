@@ -48,13 +48,13 @@ const PIPELINE_CONFIG = {
 };
 
 /**
- * A `karume/5` manifest shaped like the Gemma 4 distributions: each model has the presets `i4` and
+ * A `karume/6` manifest shaped like the Gemma 4 distributions: each model has the presets `i4` and
  * `i4-fast` (default); `withDrafter` adds drafter weights (mapped by both presets).
  */
 const gemmaManifest = (models: readonly string[], options: { withDrafter: boolean }): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: models[0],
       models: Object.fromEntries(

@@ -163,7 +163,7 @@ const ALL_T32 = T32_ASSETS.every(({ present }) => present);
 
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so the tile-32 gates SKIP. Assemble it: ${ASSEMBLE}`,
   );
 } else if (!SOURCE_PRESENT) {

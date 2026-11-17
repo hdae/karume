@@ -223,7 +223,7 @@ const WINDOW_SOURCES: readonly WindowSource[] = [
 if (!MIRROR_PRESENT) {
   console.warn(
     `[karume] skipping the voice window check: the distribution mirror ` +
-      `${MIRROR_ROOT.pathname} is absent (or not karume/5).`,
+      `${MIRROR_ROOT.pathname} is absent (or not karume/6).`,
   );
 }
 if (SERIES_CHECKS && !FLOW_SERIES_PRESENT) {

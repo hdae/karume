@@ -36,7 +36,7 @@ const ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 const PRESENT = mirrorAvailable(ROOT);
 if (!PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the 12B decode run-ahead " +
+    "[karume] models/karume-gemma4-qat/ is absent (or not karume/6), so the 12B decode run-ahead " +
       "cases SKIP (assemble it with dist.py in tools/export-recipes)",
   );
 }

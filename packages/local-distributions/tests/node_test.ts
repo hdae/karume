@@ -11,10 +11,10 @@ const hex = (character: string): string => character.repeat(64);
 const VAE = Uint8Array.from({ length: 4 }, (_, index) => index + 1);
 const ANIMA_REVISION = "b".repeat(40);
 
-/** A minimal `karume/5` manifest with one container of its own and the asset `vae`. */
+/** A minimal `karume/6` manifest with one container of its own and the asset `vae`. */
 const manifestText = (vae: Readonly<Record<string, string>>): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "a",
     models: {

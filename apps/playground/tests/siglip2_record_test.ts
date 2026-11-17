@@ -36,10 +36,10 @@ const MODELS: readonly (readonly [string, number, number, readonly string[]])[] 
   ["so400m", 384, 1152, ["f32", "f16"]],
 ];
 
-/** A `karume/5` manifest shaped like the SigLIP 2 distribution: base (default) and so400m. */
+/** A `karume/6` manifest shaped like the SigLIP 2 distribution: base (default) and so400m. */
 const manifest = parseManifest(
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "base",
     models: Object.fromEntries(

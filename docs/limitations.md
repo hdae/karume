@@ -2192,7 +2192,8 @@ E2B / E4B / 12B) are the real assets that take the split form.
 
 ## Distribution: the old distribution form (one safetensors file / a list of shards, manifest `karume/4` or earlier) cannot be read — migrate with `karume migrate` (`--manifest` for a whole repository for `karume/4`, positional arguments per component before that — ADR 0108 decision 18)
 
-The current packages read only manifest `karume/5` and containers (`krm` / `krg`), with no dual reading. An old manifest
+The current packages read only manifest `karume/6` and containers (`krm` / `krg`), with no dual reading (a `karume/5`
+repository has current containers, and `karume upgrade` of `tools/exporter` rewrites its manifest in place). An old manifest
 is rejected by hub as "unsupported major" (`packages/hub/src/manifest.ts`), and passing an old safetensors as a container makes the runtime
 fail with "unknown magic" (`packages/runtime/src/format/container/header.ts`). The processing that reads old formats lives only in the migration CLI
 (`uv run karume migrate` of `tools/exporter` — positional arguments per component, or the whole-repository mode of `--manifest`),

@@ -167,7 +167,7 @@ UMT5_QUANTS: Mapping[str, Any] = {
 }
 UMT5_DEFAULT_QUANT = "i8"
 
-#: There is no pipeline-owned configuration (no reader). `karume/5` states `{}` explicitly even when
+#: There is no pipeline-owned configuration (no reader). `karume/6` states `{}` explicitly even when
 #: empty.
 UMT5_PIPELINE_CONFIG: Mapping[str, Any] = {}
 

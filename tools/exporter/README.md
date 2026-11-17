@@ -84,8 +84,9 @@ Dispatch is a lazy import.
 
 | Subcommand       | Wrapped body                                                                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `karume dist`    | `karume.dist` (assembles the distribution form — `krm` parts plus a `karume/5` `karume.json` — from the pipeline registry it is handed) |
+| `karume dist`    | `karume.dist` (assembles the distribution form — `krm` parts plus a `karume/6` `karume.json` — from the pipeline registry it is handed) |
 | `karume migrate` | `karume.migrate` (converts the retired safetensors form into `krm` / `krg`; the input is only read)                                     |
+| `karume upgrade` | `karume.migrate` (rewrites a `karume/5` repository's manifest as `karume/6` in place; no weights file is touched)                       |
 | `karume verify`  | `karume.verify` (validates a `krm` / `krg` container: both descriptors, the merge of graph and binding table, and every block's sha256) |
 
 There is no `export-*` among them: every export script left the wheel for
@@ -120,6 +121,20 @@ repository driver
 [`tools/export-recipes/migrate_series.py`](../export-recipes/README.md#series-migration-driver)
 instead: it knows which directory holds which component, and the graph name is the component name,
 not the directory name.
+
+`karume upgrade <repository directory> [--name-map <file>]` takes a repository that holds a
+`karume/5` manifest to the current format in place (ADR 0153): the manifest keeps its content —
+`generator` and every cross-repository reference included — and gets `karume/6`; with `--name-map`
+the family's name map (`karume-name-map/1`) is copied to `name-map.json` and referenced. The card
+(`README.md`) is rewritten only where it states the format (`` `karume.json` (`karume/5`) ``). The
+repository must pass `verify_dist` as it is before anything is written; every new file is written
+under a temporary name, read back, and put in place with the manifest last. A `karume/6` repository
+is left as it is.
+
+```sh
+uv run karume upgrade ../../models/karume-siglip2
+uv run karume upgrade ../../models/karume-anima --name-map ../export-recipes/anima/name-map.json
+```
 
 ### `karume dist` — the assembly engine
 

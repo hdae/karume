@@ -36,7 +36,7 @@
 //
 // ## Assets
 //
-// The distribution mirror `models/karume-gemma4/` (`karume/5`). It is outside the repository, so
+// The distribution mirror `models/karume-gemma4/` (`karume/6`). It is outside the repository, so
 // where it is missing the cases **SKIP explicitly**. The seat is the regular line's `bf16` preset —
 // the checkpoint's own weights with the PLE on the host (`fromAssets` takes every part of its
 // container in RAM, about 9.3 GiB).

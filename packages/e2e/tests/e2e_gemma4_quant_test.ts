@@ -67,7 +67,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
   const available = mirrorAvailable(root);
   if (!available) {
     console.warn(
-      `[karume] ${root.pathname} is missing (or not karume/5), so the quant real-GPU check is SKIPPED`,
+      `[karume] ${root.pathname} is missing (or not karume/6), so the quant real-GPU check is SKIPPED`,
     );
   }
   describe.skipIf(!available || !GPU_AVAILABLE)(

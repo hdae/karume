@@ -56,7 +56,7 @@ export const goldenPresent = (url: URL): boolean => {
 
 /**
  * The mirror's manifest, or `undefined` when the mirror is absent or unreadable by this version
- * (`mirrorPresent` — not `karume/5`, or a referenced mirror is absent), so its cases SKIP instead of
+ * (`mirrorPresent` — not `karume/6`, or a referenced mirror is absent), so its cases SKIP instead of
  * failing at module evaluation in `parseManifest`.
  */
 export const manifestText: string | undefined = mirrorPresent(ASSETS_DIR)

@@ -439,7 +439,7 @@ test("loadManifest: a corrupted cached karume.json self-heals by fetching again 
   overwriteEntry(
     hubCache(caches),
     manifestBytes,
-    new TextEncoder().encode('{"format": "karume/5"'),
+    new TextEncoder().encode('{"format": "karume/6"'),
     { keepRecord: true },
   );
   const healedParse = createMockFetch({ files: serveAll() });
@@ -454,7 +454,7 @@ test("loadManifest: a corrupted cached karume.json self-heals by fetching again 
 
 test("loadManifest: a broken karume.json at the source of truth is a ManifestFormatError (and is not kept in the cache)", async () => {
   const caches = new MemoryCacheStorage();
-  const broken = new TextEncoder().encode('{"format": "karume/5"');
+  const broken = new TextEncoder().encode('{"format": "karume/6"');
   const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
   await assertRejects(
     () =>
@@ -1336,7 +1336,7 @@ const crossPart1 = async (path: string, mark: string) => ({
  * 3), so on the borrowing side every part names the referenced coordinates.
  */
 const crossRepoManifest = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "karume/0.1.0",
   defaultModel: "m",
   models: {
@@ -1585,7 +1585,7 @@ const splitBytes = SPLIT_PATHS.map((path) =>
 );
 
 const splitShardManifest = JSON.stringify({
-  format: "karume/5",
+  format: "karume/6",
   generator: "karume/0.1.0",
   defaultModel: "m",
   models: {

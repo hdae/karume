@@ -162,7 +162,7 @@ const fullBytes = mirrorPresent(GEMMA4_MIRROR)
 
 if (fullBytes === undefined) {
   console.warn(
-    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} is absent (or not karume/5), so ` +
+    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} is absent (or not karume/6), so ` +
       "the gemma4 chat full-vocabulary case SKIPs. Assemble: cd tools/export-recipes && uv run " +
       "python dist.py --pipeline gemma4",
   );

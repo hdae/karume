@@ -3,7 +3,7 @@
 What it returns is not one file but **a sequence of parts** (part 0 = the 2 documents, part 1 =
 the const region, part 2 onwards = weights) — the official HF distribution is the split form only
 (container-v1 §8), so a single-form fixture would not have the shape of the real thing
-(`container.parts` of `karume/5` MUST have 2 or more elements).
+(`container.parts` of `karume/6` MUST have 2 or more elements).
 
 The `karume.dist` assembly checks its input containers against every rule of the declarations
 ({@link karume.dist.assert_weight_components_verified}), so a fixture plugged into the weights

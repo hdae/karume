@@ -218,10 +218,14 @@ maintainer's ruling of 2026-11-06).
      — the JSON format `karume-name-map/1` and `placeTensors`; [spec/convert.md](spec/convert.md#the-name-map) — with
      Anima's map beside its recipe, `tools/export-recipes/anima/name-map.json` (the single file and the diffusers
      files). The upstream `anima-base-v1.0` and `anima-turbo-v1.1` single files give the distributed `i8` and `bf16`
-     transformer files and `bf16` text conditioner files byte for byte.)* Left from it: the runtime's
-     `parseSafetensors` moved into the reader package, the pipelines' `fromSingleFile` (and the exporter putting the
-     map into the distribution, the manifest pointing at it), `f16` and int4 targets, LoRA, the published-package
-     setup.
+     transformer files and `bf16` text conditioner files byte for byte.)* *(Landed 2026-11-17: manifest `karume/6`
+     — ADR [0153](decisions/0153-manifest-v6-name-map.md). The optional `nameMap` references the repository's name
+     map (`name-map.json` at the root), checked like every file reference; the hub reads `karume/6` only; a recipe
+     declares its map (`Pipeline.name_map`) and the assembly copies and references it — Anima's two repositories;
+     `karume upgrade` rewrites a `karume/5` repository in place. Every repository's manifest is re-uploaded at the next
+     release — [release-runbook](release-runbook.md) §0.)* Left from it: the runtime's `parseSafetensors` moved into
+     the reader package, the pipelines' `fromSingleFile` (reading the distribution's map), `f16` and int4 targets,
+     LoRA, the published-package setup.
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.

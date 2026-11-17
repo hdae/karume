@@ -64,7 +64,7 @@ export type FromPretrainedHubOptions = {
  */
 export type FromPretrainedComponentOptions = {
   /**
-   * Role (the manifest's weights name) → **the same role** in another `karume/5` repo. Only the
+   * Role (the manifest's weights name) → **the same role** in another `karume/6` repo. Only the
    * components of the given roles come from that source; the rest are built from the original repo.
    *
    * MUST: only components with an **identical graph descriptor (sha256 of `descriptor.graph`)** can

@@ -605,7 +605,7 @@ const FULL_AVAILABLE = MIRROR_PRESENT && goldensPresent(FULL_CASES.map(({ name }
 
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so Wan's DiT e2e is SKIPPED. Assemble it: ` +
       `${WAN_ASSEMBLE_COMMAND} (an all-SKIP is a FAIL of the gate distribution_gate_test.ts)`,
   );

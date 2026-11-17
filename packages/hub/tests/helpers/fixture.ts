@@ -1,5 +1,5 @@
 /**
- * Shared helpers for reading `tests/fixtures/manifest-fetch.json` (`karume/5`).
+ * Shared helpers for reading `tests/fixtures/manifest-fetch.json` (`karume/6`).
  *
  * The fixture is in the **container distribution form** (ADR 0109), so one component has a list of
  * parts. Tests look up those paths by name (`TEXT_ENCODER_PARTS` and so on). The tools that build

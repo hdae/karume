@@ -567,7 +567,7 @@ if (!ANY_FIXTURE) {
 const TEXT_EMBEDS_READABLE = mirrorPresent(WAN_TI2V_DIST_ROOT);
 if (ANY_FIXTURE && !TEXT_EMBEDS_READABLE) {
   console.warn(
-    `[karume] the mirror ${WAN_TI2V_DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${WAN_TI2V_DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so Wan2.2's host self-consistency check (it reads the mirror's ${TEXT_EMBEDS}) is SKIPPED`,
   );
 }

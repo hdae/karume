@@ -1,5 +1,5 @@
 /**
- * Tooling for tests to build **`krm` containers** and the `karume/5` distribution form (the one
+ * Tooling for tests to build **`krm` containers** and the `karume/6` distribution form (the one
  * helper the models tests share).
  *
  * NOTE: the container **writer** is borrowed from

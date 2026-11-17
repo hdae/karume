@@ -5,10 +5,10 @@ import { manifestPresets, modelChoices, presetChoices } from "../src/lib/presets
 
 const hex = (character: string): string => character.repeat(64);
 
-/** A minimal `karume/5` manifest with two models; `b` is the default, its `i8` preset is labelled. */
+/** A minimal `karume/6` manifest with two models; `b` is the default, its `i8` preset is labelled. */
 const manifest = parseManifest(
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "b",
     models: Object.fromEntries(

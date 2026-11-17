@@ -42,7 +42,8 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   (gpu / codegen / kernels / format / ops / reference / runtime / tune). When it is used from Node, pass a WebGPU
   implementation (Dawn) to `acquireGpu({ gpu })`
 - `packages/hub/` — manifest resolution, fetch, cache (the spec's source of truth is ADR 0038 §4 + 0041 +
-  0075 (display names of quants) + 0109 (manifest is `karume/5`) + 0080 (fetch layer) + 0086 (source abstraction)).
+  0075 (display names of quants) + 0109 (container entries) + 0153 (manifest is `karume/6`, with the name map's
+  reference) + 0080 (fetch layer) + 0086 (source abstraction)).
   The only runtime-specific subpaths are `hub/node` (`nodeDirectory`) and `hub/deno` (`denoDirectory`)
 - `packages/models/` — **both a barrel (mod.ts) and per-family subpath exports**
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)

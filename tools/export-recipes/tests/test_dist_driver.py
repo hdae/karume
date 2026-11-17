@@ -42,10 +42,12 @@ from karume.dist import (
     CrossRepoReference,
     DistError,
     ExternalComponents,
+    assert_name_map,
     declared_references,
     resolve_repo,
 )
 from karume.dist import PIPELINES as CORE_PIPELINES
+from karume.migrate import card_format_statement
 from karume.modelcard import HF_OWNER, UNOFFICIAL_CONVERSION_NOTICE
 from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
@@ -123,6 +125,20 @@ class TestRegistry:
 
         assert official is not extra
         assert official.root_files["NOTICE.md"] != extra.root_files["NOTICE.md"]
+
+    def test_both_anima_repositories_and_no_other_declare_the_recipe_name_map(self) -> None:
+        """Anima's name map (`tools/export-recipes/anima/name-map.json`) goes into both of its
+        repositories (ADR 0153); no other family has one yet, so none declares one."""
+        recipe_map = (REPO_ROOT / "tools" / "export-recipes" / "anima" / "name-map.json").resolve()
+
+        declaring = {
+            name: pipeline.name_map.resolve()
+            for name, pipeline in dist.PIPELINES.items()
+            if pipeline.name_map is not None
+        }
+
+        assert declaring == {"anima": recipe_map, "anima-extra": recipe_map}
+        assert_name_map(recipe_map)
 
     def test_the_two_birefnet_repositories_stay_separate_pipelines(self) -> None:
         """BiRefNet HR and its derivative Lucida are **separate entries** too (ADR 0092 decision
@@ -397,6 +413,29 @@ class TestTheHouseSentenceOnEveryCard:
                     continue
                 title = next(index for index, line in enumerate(lines) if line.startswith("# "))
                 assert sentences == [lines[title + 2]], manifest_path
+
+
+#: The pipelines whose card does not state the manifest format (the upgrade leaves it as it is).
+CARDS_WITHOUT_THE_FORMAT = frozenset({"gemma4-qat-mobile"})
+
+
+class TestTheFormatStatementOnEveryCard:
+    """Every card that names the manifest format does it once, in the one statement the upgrade of
+    a repository rewrites (`karume.migrate.card_format_statement` — ADR 0153), drawn from each
+    local mirror's own manifest."""
+
+    @pytest.mark.parametrize("name", sorted(dist.PIPELINES))
+    def test_the_card_states_the_format_as_the_upgrade_spells_it(self, name: str) -> None:
+        mirrors = _mirrors_built_by(name)
+        if not mirrors:
+            pytest.skip(f"no distribution mirror under {DIST_ROOT} is built by --pipeline {name}")
+        expected = 0 if name in CARDS_WITHOUT_THE_FORMAT else 1
+        for manifest_path in mirrors:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            statement = card_format_statement(manifest["format"])
+            for render_card in dist.PIPELINES[name].card_profiles.values():
+                card = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}")
+                assert card.count(statement) == expected, manifest_path
 
 
 #: A reference of the synthetic cases below.

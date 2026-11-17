@@ -49,7 +49,7 @@ const results = openResults("gemma4-qat");
 const AVAILABLE = mirrorAvailable(MIRROR);
 if (!AVAILABLE) {
   console.warn(
-    `[karume] ${MIRROR.pathname} is absent (or not karume/5), so the q4_0 QAT line's sha256` +
+    `[karume] ${MIRROR.pathname} is absent (or not karume/6), so the q4_0 QAT line's sha256` +
       " reference rows SKIP. Assemble it with dist.py --pipeline gemma4-qat in tools/export-recipes",
   );
 }

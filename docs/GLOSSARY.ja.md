@@ -119,9 +119,8 @@
 | three hash roles | ハッシュの役割 3 分離 | 期待ハッシュ・派生キャッシュキー・内容ハッシュを同じ欄で兼ねない規律 | — | ADR 0108 決定 8 |
 | piece | piece | 上限を超えるテンソルの行範囲分割（束縛表の `pieces[]`） | — | container-v1 §5 |
 | shard | shard（旧配布形の話に限る — 現行の話では part と言う） | 旧配布形のファイル分割単位 | — | ADR 0081 / 0090 |
-| manifest `karume/5` | manifest v5 / `karume/5` | コンテナ配布形の入口の manifest | — | ADR 0109 |
-| cross-repository reference | 越境参照 | manifest の FileRef が別の HF リポの commit を指して部品を読む形 | — | ADR 0038 §7 追記・ADR 0109 決定 3 |
-| component replacement (`components`) | 部品の差し替え（`components`） | 別の `karume/5` リポの同じ役割の部品で差し替えること | 部品差し替え席 | ADR 0108 決定 19・ADR 0109 決定 10 |
+| manifest `karume/6` | manifest v6 / `karume/6` | コンテナ配布形の入口の manifest（`karume/5` に `nameMap` を足した形） | — | ADR 0109・ADR 0153 || cross-repository reference | 越境参照 | manifest の FileRef が別の HF リポの commit を指して部品を読む形 | — | ADR 0038 §7 追記・ADR 0109 決定 3 |
+| component replacement (`components`) | 部品の差し替え（`components`） | 別の `karume/6` リポの同じ役割の部品で差し替えること | 部品差し替え席 | ADR 0108 決定 19・ADR 0109 決定 10 |
 | PLE index schema 3 | PLE 索引 schema 3 | コンテナの資産に入れた PLE の索引。scale は行ごとに f32 が 1 つ | — | ADR 0085 追記 2026-09-22 |
 | PLE index schema 4 △ | PLE 索引 schema 4 | schema 3 に必須の `groupSize` を足し、`groupSize` 個の値ごとに f32 の scale を 1 つ持つ PLE の索引。q4_0 QAT 系の int4 の表（`groupSize` 32）の形 | — | ADR 0085 追記 2026-11-04（schema 4） |
 | PLE index schema 5 △ | PLE 索引 schema 5 | bf16 の表の PLE の索引。値はチェックポイントの bf16 のまま（1 値 2 バイト）で、scale の表を持たない。通常の gemma4 の `bf16` プリセットの形 | — | ADR 0085 追記 2026-11-04（schema 5） |

@@ -234,7 +234,7 @@ test("resolveSelection: the list of quants is the one of the specified model", (
 test("resolveSelection: a component name and an asset name with the same name do not collide (separate fields)", () => {
   const collide = parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume/0.1.0",
       defaultModel: "m",
       models: {

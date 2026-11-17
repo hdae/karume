@@ -19,16 +19,26 @@ const CROSS_PART = Uint8Array.from({ length: 64 }, (_, index) => 255 - index);
 
 const hex = (character: string): string => character.repeat(64);
 
-/** A minimal `karume/5` manifest; `cross` puts its one container in another repo. */
-const manifestText = (cross?: { readonly repo: string; readonly revision: string }): string =>
+/**
+ * A minimal `karume/6` manifest; `cross` puts its one container in another repo, `assets` replaces
+ * the model's assets and `nameMap` adds the name map's reference.
+ */
+const manifestText = (
+  cross?: { readonly repo: string; readonly revision: string },
+  {
+    assets,
+    nameMap,
+  }: { readonly assets?: Readonly<Record<string, unknown>>; readonly nameMap?: unknown } = {},
+): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "m",
+    ...(nameMap === undefined ? {} : { nameMap }),
     models: {
       m: {
         pipeline: "wan-ti2v/1",
-        assets: { notes: { path: "sub/blob.krm", size: 64, sha256: hex("c") } },
+        assets: assets ?? { notes: { path: "sub/blob.krm", size: 64, sha256: hex("c") } },
         weights: {
           text_encoder: {
             i8: {
@@ -365,5 +375,55 @@ describe("a referenced revision on a mount that opts in to aliases", () => {
         : mount,
     );
     await expect(hfServingTable(stray)).rejects.toThrow(/does not list that file as its own/);
+  });
+
+  it("counts the name map among the mount's own files", async () => {
+    const holder = "owner/karume-map-holder";
+    const bytes = new TextEncoder().encode('{"format":"karume-name-map/1","layouts":[]}\n');
+    const nameMap = {
+      path: "name-map.json",
+      size: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const holderRoot = join(dir, "karume-map-holder");
+    const referrerRoot = join(dir, "karume-map-referrer");
+    await mkdir(holderRoot, { recursive: true });
+    await mkdir(referrerRoot, { recursive: true });
+    await writeFile(join(holderRoot, "karume.json"), manifestText(undefined, { nameMap }));
+    await writeFile(join(holderRoot, "name-map.json"), bytes);
+    // The referrer takes the holder's name map, at an older revision, as an asset of its own.
+    await writeFile(
+      join(referrerRoot, "karume.json"),
+      manifestText(undefined, {
+        assets: { map: { ...nameMap, repo: holder, revision: CROSS_REVISION } },
+      }),
+    );
+    const mapMounts: DistributionMount[] = [
+      {
+        name: "map-referrer",
+        root: referrerRoot,
+        label: "models/karume-map-referrer",
+        hfRepo: "owner/karume-map-referrer",
+      },
+      {
+        name: "map-holder",
+        root: holderRoot,
+        label: "models/karume-map-holder",
+        hfRepo: holder,
+        aliasReferencedRevisions: true,
+      },
+    ];
+    const response = responded(
+      await handleDistributionRequest(
+        {
+          method: "GET",
+          url: `/hf/${holder}/resolve/${CROSS_REVISION}/name-map.json`,
+          headers: {},
+        },
+        mapMounts,
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(await fileBytes(response)).toEqual(bytes);
   });
 });

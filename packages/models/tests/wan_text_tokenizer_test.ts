@@ -99,7 +99,7 @@ const mirrorAsset = mirrorPresent(WAN_MIRROR)
   : undefined;
 if (mirrorAsset === undefined) {
   console.warn(
-    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/6, or a sibling it references is ` +
       "absent), so the Wan full-vocabulary check is SKIPPED (fetch the karume-wan2.2 and karume-umt5-xxl " +
       "distributions into models/)",
   );

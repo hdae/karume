@@ -432,11 +432,11 @@ const references = openReferences(
  */
 const caseIds: string[] = [];
 
-/** Whether the distribution mirror is present (`karume/5`). */
+/** Whether the distribution mirror is present (`karume/6`). */
 const MIRROR_PRESENT = mirrorPresent(MIRROR);
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] The distribution mirror ${MIRROR.pathname} is absent (or not karume/5), so the ` +
+    `[karume] The distribution mirror ${MIRROR.pathname} is absent (or not karume/6), so the ` +
       "real-weight SigLIP2 vision E2E is skipped (place the published distribution under models/).",
   );
 }

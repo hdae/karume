@@ -4,7 +4,7 @@
       "name": "envelope-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -100,7 +100,7 @@
       "name": "format-unknown-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/6",
+        "format": "karume/7",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -511,7 +511,7 @@
       "name": "generator-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "defaultModel": "m",
         "models": {
           "m": {
@@ -605,7 +605,7 @@
       "name": "generator-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "",
         "defaultModel": "m",
         "models": {
@@ -700,7 +700,7 @@
       "name": "default-model-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": 0,
         "models": {
@@ -795,7 +795,7 @@
       "name": "default-model-dangling",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "absent",
         "models": {
@@ -890,7 +890,7 @@
       "name": "models-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m"
       }
@@ -899,7 +899,7 @@
       "name": "models-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {}
@@ -909,7 +909,7 @@
       "name": "models-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": []
@@ -919,7 +919,7 @@
       "name": "model-entry-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -931,7 +931,7 @@
       "name": "proto-key-as-model-name",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1110,7 +1110,7 @@
       "name": "proto-key-inside-pipeline-config",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1216,7 +1216,7 @@
       "name": "model-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1312,7 +1312,7 @@
       "name": "pipeline-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1406,7 +1406,7 @@
       "name": "pipeline-without-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1501,7 +1501,7 @@
       "name": "pipeline-non-integer-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1596,7 +1596,7 @@
       "name": "pipeline-major-overflows-to-infinity",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1691,7 +1691,7 @@
       "name": "pipeline-major-beyond-safe-integer",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1786,7 +1786,7 @@
       "name": "weights-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1825,7 +1825,7 @@
       "name": "weights-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1865,7 +1865,7 @@
       "name": "weights-entry-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1907,7 +1907,7 @@
       "name": "weights-entry-without-dtype-key",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1949,7 +1949,7 @@
       "name": "weights-v1-file-shape-rejected",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1997,7 +1997,7 @@
       "name": "weight-dtype-entry-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2093,7 +2093,7 @@
       "name": "weight-dtype-entry-missing-container",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2163,7 +2163,7 @@
       "name": "parts-not-array",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2251,7 +2251,7 @@
       "name": "parts-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2335,7 +2335,7 @@
       "name": "parts-single-element",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2425,7 +2425,7 @@
       "name": "parts-duplicate-path-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2525,7 +2525,7 @@
       "name": "weight-dtype-entry-extras-retired",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2621,7 +2621,7 @@
       "name": "weight-dtype-entry-shards-retired",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2717,7 +2717,7 @@
       "name": "assets-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2805,7 +2805,7 @@
       "name": "assets-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2894,7 +2894,7 @@
       "name": "assets-entry-not-file-ref",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2991,7 +2991,7 @@
       "name": "quants-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3070,7 +3070,7 @@
       "name": "quants-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3150,7 +3150,7 @@
       "name": "quant-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3238,7 +3238,7 @@
       "name": "default-quant-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3333,7 +3333,7 @@
       "name": "default-quant-dangling",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3428,7 +3428,7 @@
       "name": "pipeline-config-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3522,7 +3522,7 @@
       "name": "pipeline-config-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3617,7 +3617,7 @@
       "name": "quant-weights-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3709,7 +3709,7 @@
       "name": "quant-weights-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3802,7 +3802,7 @@
       "name": "quant-weights-incomplete",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3895,7 +3895,7 @@
       "name": "quant-weights-unknown-name",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3991,7 +3991,7 @@
       "name": "quant-weights-names-asset",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4087,7 +4087,7 @@
       "name": "quant-weights-unknown-dtype",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4182,7 +4182,7 @@
       "name": "quant-weights-label-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4277,7 +4277,7 @@
       "name": "quant-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4373,7 +4373,7 @@
       "name": "session-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4466,7 +4466,7 @@
       "name": "session-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4562,7 +4562,7 @@
       "name": "session-submit-policy-rejected",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4658,7 +4658,7 @@
       "name": "session-unknown-value",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4753,7 +4753,7 @@
       "name": "gpu-features-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4851,7 +4851,7 @@
       "name": "gpu-features-non-boolean",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4949,7 +4949,7 @@
       "name": "file-ref-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5045,7 +5045,7 @@
       "name": "file-ref-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5136,7 +5136,7 @@
       "name": "sha256-uppercase",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5231,7 +5231,7 @@
       "name": "sha256-too-short",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5326,7 +5326,7 @@
       "name": "sha256-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5420,7 +5420,7 @@
       "name": "size-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5514,7 +5514,7 @@
       "name": "size-zero",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5609,7 +5609,7 @@
       "name": "part-zero-size-at-index-0",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5704,7 +5704,7 @@
       "name": "part-zero-size-wrong-sha256",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5799,7 +5799,7 @@
       "name": "size-negative",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5894,7 +5894,7 @@
       "name": "size-fractional",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -5989,7 +5989,7 @@
       "name": "size-over-16gib",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6084,7 +6084,7 @@
       "name": "part-size-over-1024mib",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6184,7 +6184,7 @@
       "name": "path-parent-traversal",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6279,7 +6279,7 @@
       "name": "path-current-dir-segment",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6374,7 +6374,7 @@
       "name": "path-leading-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6469,7 +6469,7 @@
       "name": "path-double-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6564,7 +6564,7 @@
       "name": "path-trailing-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6659,7 +6659,7 @@
       "name": "path-leading-dot-segment",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6754,7 +6754,7 @@
       "name": "path-forbidden-character",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6849,7 +6849,7 @@
       "name": "path-empty",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -6944,7 +6944,7 @@
       "name": "duplicate-path-size-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7044,7 +7044,7 @@
       "name": "duplicate-path-sha256-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7144,7 +7144,7 @@
       "name": "duplicate-path-cross-model-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7283,7 +7283,7 @@
       "name": "quant-label-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7339,7 +7339,7 @@
       "name": "quant-label-too-long",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7395,7 +7395,7 @@
       "name": "quant-description-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7451,7 +7451,7 @@
       "name": "quant-description-too-long",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7507,7 +7507,7 @@
       "name": "quant-required-limits-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7563,7 +7563,7 @@
       "name": "quant-required-limits-unknown-name",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7621,7 +7621,7 @@
       "name": "quant-required-limits-zero",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7679,7 +7679,7 @@
       "name": "quant-required-limits-negative",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7737,7 +7737,7 @@
       "name": "quant-required-limits-fractional",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7795,7 +7795,7 @@
       "name": "quant-required-limits-not-number",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7853,7 +7853,7 @@
       "name": "file-ref-repo-without-revision",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7909,7 +7909,7 @@
       "name": "file-ref-revision-without-repo",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -7965,7 +7965,7 @@
       "name": "file-ref-revision-branch",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8024,7 +8024,7 @@
       "name": "file-ref-revision-short-sha",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8083,7 +8083,7 @@
       "name": "file-ref-revision-uppercase",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8142,7 +8142,7 @@
       "name": "file-ref-repo-single-segment",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8201,7 +8201,7 @@
       "name": "file-ref-repo-parent-traversal",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8260,7 +8260,7 @@
       "name": "file-ref-repo-forbidden-character",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -8319,7 +8319,7 @@
       "name": "cross-repo-duplicate-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {

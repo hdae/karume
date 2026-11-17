@@ -29,11 +29,11 @@ const jvnvConfig = (
   },
 });
 
-/** A minimal `karume/5` manifest with the given models' pipelineConfig; the last model is the default. */
+/** A minimal `karume/6` manifest with the given models' pipelineConfig; the last model is the default. */
 const manifestOf = (configs: Readonly<Record<string, Record<string, unknown>>>) =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: Object.keys(configs).at(-1),
       models: Object.fromEntries(

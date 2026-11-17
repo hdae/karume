@@ -91,7 +91,7 @@ for (const name of WEIGHT_NAMES) {
 /** The skeleton of `models/karume-anima/karume.json` (only the fields the checks need). */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "anima-turbo",
     models: {

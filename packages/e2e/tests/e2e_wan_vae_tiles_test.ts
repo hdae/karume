@@ -141,7 +141,7 @@ const fileExists = (url: URL): boolean => {
 const MIRROR_PRESENT = mirrorPresent(WAN_DIST_ROOT);
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the mirror ${WAN_DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+    `[karume] the mirror ${WAN_DIST_ROOT.pathname} is absent (or not karume/6, or a sibling it references is ` +
       `absent), so Wan's VAE tile-decode and chunk-sequence checks are SKIPPED. Assemble it: ${WAN_ASSEMBLE_COMMAND}`,
   );
 }

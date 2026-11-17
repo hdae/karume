@@ -20,7 +20,7 @@ const root = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.ur
 const available = mirrorAvailable(root);
 if (!available) {
   console.warn(
-    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/5), so the mobile QAT real-weight checks SKIP. Assemble it with dist.py --pipeline gemma4-qat-mobile in tools/export-recipes.",
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/6), so the mobile QAT real-weight checks SKIP. Assemble it with dist.py --pipeline gemma4-qat-mobile in tools/export-recipes.",
   );
 }
 for (const model of ["e2b", "e4b"] as const) {

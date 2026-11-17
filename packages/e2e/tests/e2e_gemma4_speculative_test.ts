@@ -200,7 +200,7 @@ const exists = (url: URL): boolean => {
 const goldenPath = (name: string): URL => new URL(`${GOLDEN_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT);
 
 /**
- * Whether the mirror is a `karume/5` one with the drafter.
+ * Whether the mirror is a `karume/6` one with the drafter.
  *
  * MUST: judge by **the manifest's declaration**, not by file names — a container part's path is
  * the writer's convention (`<stem>-NNNNN-of-NNNNN.krm`) and changes when the part count changes

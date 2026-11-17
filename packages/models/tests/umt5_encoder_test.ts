@@ -160,7 +160,7 @@ const TOKENIZER_REF = { path: "xxl/tokenizer/tokenizer.json", size: 8, sha256: "
 const manifestOf = (textEncoder: Record<string, unknown>, patch: Record<string, unknown> = {}) =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume/0.1.0",
       defaultModel: "xxl",
       models: {

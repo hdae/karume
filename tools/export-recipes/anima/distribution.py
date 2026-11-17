@@ -1173,6 +1173,12 @@ def _extra_references(_model: str) -> tuple[CrossRepoReference, ...]:
     )
 
 
+#: The family's name map (`karume-name-map/1` — `docs/spec/convert.md`, "The name map"), beside
+#: this recipe, where both the upstream tensor names and the initializer names are known. Both
+#: repositories carry it (`karume.dist.Pipeline.name_map`): the fine-tunes of the extra one ship in
+#: the same layouts as the official variants.
+NAME_MAP_PATH = Path(__file__).with_name("name-map.json")
+
 #: The entry for `--pipeline anima` (the official repository karume-anima — CircleStone's 5
 #: variants together, default = Turbo (upstream README's recommendation; ruling of 2026-09-01)).
 #:
@@ -1187,6 +1193,7 @@ OFFICIAL_PIPELINE = Pipeline(
     # The upstream licence's redistribution terms (§3) apply per distribution repository, so the
     # texts are read **once, here**, however many times the assembly runs.
     root_files=root_files(OFFICIAL_NOTICE_MARKDOWN),
+    name_map=NAME_MAP_PATH,
 )
 
 #: The entry for `--pipeline anima-extra` (the extra repository karume-anima-extra — third-party
@@ -1202,4 +1209,5 @@ EXTRA_PIPELINE = Pipeline(
     },
     root_files=root_files(EXTRA_NOTICE_MARKDOWN),
     references=_extra_references,
+    name_map=NAME_MAP_PATH,
 )

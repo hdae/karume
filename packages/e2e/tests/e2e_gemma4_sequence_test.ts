@@ -243,7 +243,7 @@ const AVAILABLE = MODEL_PRESENT && !GOLDENS_SKIP;
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] the distribution mirror ${MIRROR_DIR.pathname} is absent (or not karume/5), so the ` +
+    `[karume] the distribution mirror ${MIRROR_DIR.pathname} is absent (or not karume/6), so the ` +
       "Gemma 4 E2B sequence cases ①〜⑤ SKIP",
   );
 }
@@ -651,7 +651,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 // int4 seats.
 
 /**
- * Whether the mirror is a `karume/5` one with the drafter (⑥'s premise — it runs both speculative
+ * Whether the mirror is a `karume/6` one with the drafter (⑥'s premise — it runs both speculative
  * modes).
  *
  * MUST: judge by the manifest's declaration, not by file names (as

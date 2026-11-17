@@ -24,7 +24,7 @@ pipelines use the same template while provenance, licence and citation change en
 family whose weights are distributed, so only that part is split into a profile and **the caller
 states it explicitly** (the rule for choosing is {@link karume.dist.resolve_card_renderer}).
 
-The manifest (`karume/5` today — made multi-model by ADR 0041, given display fields on quants by
+The manifest (`karume/6` today — made multi-model by ADR 0041, given display fields on quants by
 ADR 0075 decision 1, and with the dtype entries of weights turned into **the container's entry
 point** by ADR 0109 decision 3) can hold **several models in one repository**, so the card takes
 the shape "description of the whole repository → model list → usage → a section per model". The

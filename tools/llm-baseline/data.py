@@ -14,7 +14,7 @@ from gemma4 import sources
 
 def profiles(root: Path) -> dict:
     """Evaluable models → the official checkpoint, the directory its **tokenizer** is read from,
-    the **distribution** (`karume.json` of `karume/5`) and the **quant** whose stored `model`
+    the **distribution** (`karume.json` of `karume/6`) and the **quant** whose stored `model`
     weights `--weights stored` measures.
 
     MUST: the quant is named, never taken from the manifest's `defaultQuant` — a distribution's

@@ -275,7 +275,7 @@ const manifestText = (pipelineConfig: Readonly<Record<string, unknown>> = CONFIG
     mapping = { ...mapping, [name]: "f32" };
   }
   return JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "v4-small",
     models: {

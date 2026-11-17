@@ -32,13 +32,13 @@ const container = (prefix: string, borrowed: boolean | string) => ({
 });
 
 /**
- * A `karume/5` manifest shaped like Irodori v4.1-small-mf (ADR 0150): only `dit` is its own; the
+ * A `karume/6` manifest shaped like Irodori v4.1-small-mf (ADR 0150): only `dit` is its own; the
  * duration predictor points at v4.1-small's repository, the backbone and the tokenizer at v4-small's.
  */
 const mfManifest = (): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: "v4.1-small-mf",
       models: {
@@ -67,13 +67,13 @@ const mfManifest = (): Manifest =>
   );
 
 /**
- * A `karume/5` manifest shaped like Irodori v4-large: its own graphs and tokenizer asset, and the
+ * A `karume/6` manifest shaped like Irodori v4-large: its own graphs and tokenizer asset, and the
  * codec pair pointing at v4-small's repository (the published containers).
  */
 const largeManifest = (): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: "v4-large",
       models: {
@@ -102,7 +102,7 @@ const largeManifest = (): Manifest =>
   );
 
 /**
- * A `karume/5` manifest shaped like Irodori v4.1-small: with `borrowing`, the components it shares
+ * A `karume/6` manifest shaped like Irodori v4.1-small: with `borrowing`, the components it shares
  * with v4-small (`backbone`, `dit` in i8, the tokenizer) point at v4-small's repository while
  * `duration` and the i4 `dit` stay its own — the per-container rule. Without it, the distribution
  * built before the references (everything its own).
@@ -110,7 +110,7 @@ const largeManifest = (): Manifest =>
 const v41Manifest = (borrowing: boolean): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "test",
       defaultModel: "v4.1-small",
       models: {

@@ -669,7 +669,7 @@ type Discovery = {
   readonly realAvailable: boolean;
   /** Whether the golden of the geometry case (`io.disc`) is present. */
   readonly discAvailable: boolean;
-  /** Whether the distribution mirror that ships the container is present (`karume/5`). */
+  /** Whether the distribution mirror that ships the container is present (`karume/6`). */
   readonly mirror: boolean;
 };
 
@@ -707,7 +707,7 @@ for (const series of SERIES) {
   }
   if (!found.mirror) {
     console.warn(
-      `[karume] The distribution mirror ${mirrorOf(series).pathname} is absent (or not karume/5), ` +
+      `[karume] The distribution mirror ${mirrorOf(series).pathname} is absent (or not karume/6), ` +
         `so the real-weight BiRefNet E2E of ${series.name} that runs the container is skipped ` +
         "(place the mirror of the published distribution under models/).",
     );

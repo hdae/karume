@@ -72,7 +72,7 @@ for (const name of WEIGHT_NAMES) {
 /** Skeleton of `models/karume-sbv2-jvnv/karume.json` (only the fields the checks need). */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.1.0",
     defaultModel: "FN4",
     models: {

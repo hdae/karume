@@ -251,7 +251,7 @@ describe("captureThenAbort: stops the generation at the observation point", () =
 describe("overrideQuantSession: the temporary manifest of a fault injection", () => {
   it("replaces only the named preset's session and leaves the original untouched", () => {
     const raw = {
-      format: "karume/5",
+      format: "karume/6",
       models: {
         m: {
           defaultQuant: "i8-a8",

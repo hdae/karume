@@ -107,7 +107,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** The skeleton of the distribution (only the fields the checks need). `patch` overrides the contents of `models["crnn-epoch3"]`. */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "karume/0.2.2",
     defaultModel: "crnn-epoch3",
     models: {

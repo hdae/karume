@@ -52,7 +52,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
+    """One dtype of weights (the `container` of `karume/6` — ADR 0109 decision 3).
 
     `descriptor` is a field the card does not read, so only its shape follows the real thing (the
     lengths and sha256 of the 2 documents).
@@ -72,7 +72,7 @@ def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """A minimal SigLIP2 manifest (the counterpart for looking at the template mix-up gate in both
     directions)."""
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
@@ -107,7 +107,7 @@ def _sbv2_manifest() -> dict[str, Any]:
     text_encoder = _ref("shared/text_encoder/model.i8-00001-of-00003.krm", 555, "e")
     tokenizer = _ref("shared/tokenizer/fake-tokenizer.json", 11, "3")
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": "ZA",
         "models": {

@@ -70,12 +70,12 @@ const RECOMMENDED = { temperature: 1, topK: 64, topP: 0.95 } as const;
 
 const MIRROR = new URL("../../../models/karume-gemma4/karume.json", import.meta.url);
 /** The major of the distribution manifest this version reads (older versions are not read — ADR 0109 decision 1). */
-const MANIFEST_FORMAT = "karume/5";
+const MANIFEST_FORMAT = "karume/6";
 
 /**
  * The distribution mirror's `karume.json` (skipped on a machine without it / with an old major).
  *
- * MUST: decide by "is the format `karume/5`". On a machine where a pre-migration mirror remains, the parse itself
+ * MUST: decide by "is the format `karume/6`". On a machine where a pre-migration mirror remains, the parse itself
  * fails, so conditioning on "the file exists" would only turn the check red and tell nothing (the same discipline
  * as `distributionFormat` in `tools/_shared` — the coexistence period of ADR 0109 decision 9).
  */

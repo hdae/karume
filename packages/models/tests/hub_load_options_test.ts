@@ -134,7 +134,7 @@ const weightEntry = (stem: string) => ({
 });
 
 const MANIFEST = {
-  format: "karume/5",
+  format: "karume/6",
   generator: "karume/0.11.0",
   defaultModel: "anima",
   models: {

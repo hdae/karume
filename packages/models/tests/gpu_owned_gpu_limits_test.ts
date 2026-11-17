@@ -55,7 +55,7 @@ const manifestOf = (
 ): Manifest =>
   parseManifest(
     JSON.stringify({
-      format: "karume/5",
+      format: "karume/6",
       generator: "karume/0.1.0",
       defaultModel: "test",
       models: {

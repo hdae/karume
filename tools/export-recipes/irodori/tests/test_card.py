@@ -33,7 +33,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """One dtype of `weights` (the `container` of `karume/5` — ADR 0109 decision 3).
+    """One dtype of `weights` (the `container` of `karume/6` — ADR 0109 decision 3).
 
     The card does not read `descriptor`, so it only has the real shape (the length and sha256 of
     the 2 documents).
@@ -59,7 +59,7 @@ def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
     """Minimal Irodori manifest (every value but the model name is fake and differs from the
     real ones)."""
     return {
-        "format": "karume/5",
+        "format": "karume/6",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {

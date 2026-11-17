@@ -114,14 +114,14 @@ const PROBE_SKIP_REASON = PROBE_SKIP
 
 if (!QAT_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/5), so the PLE GPU-resident " +
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/6), so the PLE GPU-resident " +
       "golden case ①② and the QAT generation-parity cases SKIP (assemble it with dist.py in " +
       "tools/export-recipes)",
   );
 }
 if (!GEMMA_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the gemma pipeline's E2B " +
+    "[karume] models/karume-gemma4-qat/ is absent (or not karume/6), so the gemma pipeline's E2B " +
       "PLE GPU-resident generation-parity case SKIPs (assemble it with dist.py in " +
       "tools/export-recipes)",
   );

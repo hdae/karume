@@ -52,6 +52,7 @@ from anima.distribution import (
     EXTRA_PIPELINE,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
+    NAME_MAP_PATH,
     NVIDIA_LICENSE_SOURCE_PATH,
     OFFICIAL_MODELS,
     OFFICIAL_NOTICE_MARKDOWN,
@@ -80,6 +81,7 @@ from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
+    NAME_MAP_FILENAME,
     SHARED_DIRNAME,
     Artifact,
     DistError,
@@ -2059,9 +2061,26 @@ class TestModelCard:
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert '  repo: "hdae/karume-anima",' in card
 
+    def test_it_carries_the_recipe_name_map(self, tmp_path: Path) -> None:
+        """The pipeline's name map is copied to the repository root, byte for byte, and the
+        manifest references it (ADR 0153)."""
+        out_dir = self._run(tmp_path)
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        payload = NAME_MAP_PATH.read_bytes()
+
+        assert (out_dir / NAME_MAP_FILENAME).read_bytes() == payload
+        assert manifest["nameMap"] == {
+            "path": NAME_MAP_FILENAME,
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+
     def test_it_leaves_the_tree_verifiable_after_writing_the_card(self, tmp_path: Path) -> None:
         out_dir = self._run(tmp_path)
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_TURBO_MODEL_NAME))
+        # The pipeline declares the recipe's name map, which the manifest references at the root.
+        assert sorted(verify_dist(out_dir)) == sorted(
+            [*_in_subtree(ANIMA_TURBO_MODEL_NAME), NAME_MAP_FILENAME]
+        )
 
     def test_it_reassembles_over_a_previous_card(self, tmp_path: Path) -> None:
         out_dir = self._run(tmp_path)
@@ -2311,7 +2330,9 @@ class TestLegalTexts:
         """The manifest does not declare the 2 root files — they are on the exception side of the
         undeclared-file check."""
         out_dir = self._run(tmp_path)
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_TURBO_MODEL_NAME))
+        assert sorted(verify_dist(out_dir)) == sorted(
+            [*_in_subtree(ANIMA_TURBO_MODEL_NAME), NAME_MAP_FILENAME]
+        )
         assert (out_dir / "LICENSE.md").is_file()
         assert (out_dir / "NOTICE.md").is_file()
 

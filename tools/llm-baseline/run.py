@@ -17,7 +17,7 @@ from scoring import accuracy, token_nll, windows
 from weights import MODEL_GRAPH, StoredWeights, fingerprint, load_float_model, load_qat
 
 #: Major version of the distribution manifest read (older ones are not read — ADR 0109 decision 1).
-MANIFEST_FORMAT = "karume/5"
+MANIFEST_FORMAT = "karume/6"
 
 
 def container_paths(profile: dict) -> list[Path]:

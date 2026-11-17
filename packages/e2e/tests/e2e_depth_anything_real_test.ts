@@ -350,7 +350,7 @@ const MIRROR_ABSENT = " (SKIP: distribution mirror absent)";
  */
 const PARITY_AVAILABLE = (GOLDEN_COUNT > 0 && IMAGES_PRESENT) || FETCHED;
 
-/** Whether the distribution mirror is present (`karume/5`). */
+/** Whether the distribution mirror is present (`karume/6`). */
 const MIRROR_PRESENT = mirrorPresent(MIRROR);
 /**
  * The discrimination and its sha256 rows: they need the mirror and the images (no golden tensor is

@@ -33,7 +33,7 @@ const limits = {
  */
 const manifest = parseManifest(
   JSON.stringify({
-    format: "karume/5",
+    format: "karume/6",
     generator: "test",
     defaultModel: "1024",
     models: Object.fromEntries(
