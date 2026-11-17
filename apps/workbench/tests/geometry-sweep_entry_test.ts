@@ -72,7 +72,7 @@ describe("geometrySweepResult", () => {
         CASE_LINE(CASE_A),
         CASE_LINE(CASE_B),
       ]);
-      expect(result.verdict).toBeUndefined();
+      expect(result.verdict).toBe("pass");
     });
 
     it("counts the rows with an error and the rows not identical to the default", async () => {
@@ -207,6 +207,131 @@ describe("geometrySweepResult", () => {
         `${k88Case.id} (×${k88Case.censusCount}): table r8x8w16x16 10.000 ms · best form ÷ table ×1.250 · identical yes · 0 mismatches · 0 errors`,
       );
       expect(summary.some((line) => line.startsWith(`${k88Case.id}: `))).toBe(false);
+    });
+  });
+});
+
+describe("the verdict of geometrySweepResult", () => {
+  const LOST = { reason: "unknown", message: "GPU process crashed" } as const;
+  const mismatch = (caseId: string): PerCaseOptions => ({
+    rows: [row(caseId, true), row(caseId, false, { identicalToDefault: false })],
+    candidateKernels: "unused",
+  });
+  const errored = (caseId: string): PerCaseOptions => ({
+    rows: [row(caseId, true), { ...row(caseId, false), error: "compile failed" }],
+    candidateKernels: "unused",
+  });
+  const caseOf = (options: GeometrySweepOptions): string => options.cases?.[0] ?? "";
+  const verdictOf = async (
+    extra: (call: number, options: GeometrySweepOptions) => PerCaseOptions,
+    controller = new AbortController(),
+  ) => geometrySweepResult(PLAN, await runWith(controller.signal, extra)).verdict;
+
+  describe("when a row of a finished case is not identical to its default", () => {
+    it("is fail", async () => {
+      expect(
+        await verdictOf((call, options) => (call === 1 ? mismatch(caseOf(options)) : {})),
+      ).toBe("fail");
+    });
+
+    it("is fail when a device loss then stopped the run short (a wrong result whatever else happened)", async () => {
+      expect(
+        await verdictOf((call, options) =>
+          call === 1 ? mismatch(caseOf(options)) : { deviceLost: LOST },
+        ),
+      ).toBe("fail");
+    });
+
+    it("is fail when the run was then cancelled", async () => {
+      const controller = new AbortController();
+      expect(
+        await verdictOf((call, options) => {
+          if (call === 1) controller.abort(new Error("Cancelled by the user"));
+          return mismatch(caseOf(options));
+        }, controller),
+      ).toBe("fail");
+    });
+  });
+
+  describe("when a device loss stopped the run short of its plan", () => {
+    it("is incomplete although a finished case before it had a row that errored (the loss comes first)", async () => {
+      expect(
+        await verdictOf((call, options) =>
+          call === 1 ? errored(caseOf(options)) : { ...errored(caseOf(options)), deviceLost: LOST },
+        ),
+      ).toBe("incomplete");
+    });
+
+    it("is incomplete when only the case it cut short has a mismatch (that case did not finish)", async () => {
+      expect(
+        await verdictOf((call, options) =>
+          call === 1 ? {} : { ...mismatch(caseOf(options)), deviceLost: LOST },
+        ),
+      ).toBe("incomplete");
+    });
+  });
+
+  describe("when an error stopped the run short of its plan", () => {
+    it("is incomplete although a finished case before it had a row that errored", () => {
+      const outcome: SweepRunOutcome = {
+        reports: [perCase(CASE_A, errored(CASE_A))],
+        stop: { kind: "error", error: new Error("GpuUnavailableError: no adapter") },
+      };
+      expect(geometrySweepResult(PLAN, outcome).verdict).toBe("incomplete");
+    });
+  });
+
+  describe("when every planned case finished and a row errored", () => {
+    it("is fail", async () => {
+      expect(await verdictOf((call, options) => (call === 2 ? errored(caseOf(options)) : {}))).toBe(
+        "fail",
+      );
+    });
+  });
+
+  describe("when the run was cancelled", () => {
+    it("has none when only the case it cut short has a row that errored or differed", async () => {
+      const controller = new AbortController();
+      expect(
+        await verdictOf((call, options) => {
+          if (call === 2) controller.abort(new Error("Cancelled by the user"));
+          return call === 2
+            ? {
+                rows: [
+                  row(caseOf(options), true),
+                  { ...row(caseOf(options), false), error: "compile failed" },
+                  row(caseOf(options), false, { identicalToDefault: false }),
+                ],
+                candidateKernels: "unused",
+                aborted: true,
+              }
+            : {};
+        }, controller),
+      ).toBeUndefined();
+    });
+
+    it("is fail when a finished case before the cancel had a row that errored (the errored row comes first)", async () => {
+      const controller = new AbortController();
+      expect(
+        await verdictOf((call, options) => {
+          if (call === 1) controller.abort(new Error("Cancelled by the user"));
+          return errored(caseOf(options));
+        }, controller),
+      ).toBe("fail");
+    });
+  });
+
+  describe("when every planned case finished with every row identical and none errored", () => {
+    it("is pass, however the candidates timed against the default (timing is not part of the verdict)", async () => {
+      expect(
+        await verdictOf((_call, options) => ({
+          rows: [
+            row(caseOf(options), true),
+            row(caseOf(options), false, { perDispatch: 40_000_000, speedupVsDefault: 0.5 }),
+          ],
+          candidateKernels: "unused",
+        })),
+      ).toBe("pass");
     });
   });
 });

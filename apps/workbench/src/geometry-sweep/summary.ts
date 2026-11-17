@@ -171,24 +171,47 @@ const k88Lines = (summary: K88Summary, unit: GeometrySweepTimingUnit): string[] 
   ];
 };
 
+/**
+ * The run's verdict, checked in this order: `fail` when a row of a finished case is not identical to
+ * its case's default (a wrong result, whatever else happened); `incomplete` when a device loss or an
+ * error stopped the run short of its plan (rows that errored in such a run are that stop's
+ * consequence); `fail` when a row of a finished case errored; none when the run was cancelled (the
+ * record says `cancelled`); otherwise `pass`. A finished case is one whose record neither a cancel
+ * nor a device loss cut short. No candidate of any set is allowed to differ from the default: a match
+ * is the sweep's own expectation (f32 by the K reduction order, i8a8 by exact integer arithmetic).
+ * Timing is not part of it (it depends on the machine).
+ */
+const sweepVerdict = (
+  reports: readonly GeometrySweepReport[],
+  stop: SweepStop,
+): EntryResult["verdict"] => {
+  const finishedRows = reports
+    .filter((one) => !one.aborted && one.deviceLost === null)
+    .flatMap((one) => one.rows);
+  if (finishedRows.some((row) => row.identicalToDefault === false)) return "fail";
+  if (stop.kind === "deviceLost" || stop.kind === "error") return "incomplete";
+  if (finishedRows.some((row) => row.error !== undefined)) return "fail";
+  if (stop.kind === "cancelled") return undefined;
+  return "pass";
+};
+
 /** The entry's result: the merged record (absent when no case finished) and its summary. */
 export type GeometrySweepResult = EntryResult & { readonly data: GeometrySweepReport | undefined };
 
 /**
  * The result of a run's outcome: the per-case records merged into one `karume-geometry-sweep/3`
  * record (the cases that finished before a cancel, a device loss or an error included), the totals
- * line, and one line per finished case — the K-88 lines for the evaluation set. A run that a device
- * loss or an error stopped short of its plan has the verdict `incomplete`, so the record does not read
- * as a finished sweep (a cancelled run is `cancelled` in the record already). A run that measured
- * nothing because a sweep threw rethrows that error; a merge that fails throws.
+ * line, and one line per finished case — the K-88 lines for the evaluation set — with the verdict
+ * of {@link sweepVerdict}. A run that measured nothing because a sweep threw rethrows that error; a
+ * merge that fails throws.
  */
 export const geometrySweepResult = (
   plan: SweepPlan,
   outcome: SweepRunOutcome,
 ): GeometrySweepResult => {
   const { reports, stop } = outcome;
-  const verdict =
-    stop.kind === "deviceLost" || stop.kind === "error" ? ({ verdict: "incomplete" } as const) : {};
+  const concluded = sweepVerdict(reports, stop);
+  const verdict = concluded === undefined ? {} : { verdict: concluded };
   if (reports.length === 0) {
     if (stop.kind === "error") throw stop.error;
     return { ...verdict, summary: [totalsLine(plan, reports, undefined, stop)], data: undefined };

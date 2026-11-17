@@ -5,6 +5,8 @@
  * derivation checks), and keeps the per-case records merged into one `karume-geometry-sweep/3`
  * record — the input `deriveGeometryProfile` reads, with no envelope of its own. The evaluation set
  * `k88` (perf-ledger K-88) gets the K-88 summary; no table is derived from its record.
+ * The run concludes a verdict from its rows (`sweepVerdict` of `../geometry-sweep/summary.ts`): a
+ * candidate that differs from its default or errored is a `fail`.
  *
  * `runGeometrySweep` acquires and destroys a dedicated device per call, so this entry acquires none.
  */
