@@ -104,6 +104,10 @@ Naming rules: ADR [0074](decisions/0074-quant-seat-naming.md); display names and
 Canonical source = `tools/exporter/src/karume/quantize.py` / `quant_calib.py` / `quant_methods.py`.
 The module docstrings of `quant_methods.py` / `quant_calib.py` declare "build no path into emit" as a MUST,
 so the code guarantees the line that **only four methods have a storage path: f16 / RTN i8 / RTN i4 / GPTQ-rtn i4**.
+f16 rounding and the bf16 rounding of the original-weights presets share one rule: they touch what the checkpoint
+carries (parameters and persistent buffers) and leave non-persistent buffers computed at init, such as RoPE's
+`inv_freq`, at f32 — so one component exported in either float storage has the same graph ("Float rounding" in
+[the exporter's README](../tools/exporter/README.md)).
 
 | Method                                         | Storage path                             | Status                     | Canonical source                                                                                                                                                                         |
 | ---------------------------------------------- | ---------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

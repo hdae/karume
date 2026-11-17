@@ -2268,6 +2268,12 @@ T5GEMMA2_F32_BUFFERS = {
 }
 
 
+def _non_persistent_buffers(module: nn.Module) -> dict[str, torch.Tensor]:
+    """FQN → buffer for every buffer `module` does not save (`persistent=False`)."""
+    carried = module.state_dict().keys()
+    return {name: buffer for name, buffer in module.named_buffers() if name not in carried}
+
+
 class ModernBertLikeHolder(nn.Module):
     """A holder whose embedded config is not T5Gemma2, with a non-persistent RoPE buffer off the
     f16 grid (what ModernBERT's `inv_freq` is)."""
@@ -2279,33 +2285,32 @@ class ModernBertLikeHolder(nn.Module):
         self.backbone.register_buffer("rope_inv_freq", torch.full((2,), 0.1), persistent=False)
 
 
-class TestT5Gemma2F16Buffers:
-    """Under f16, a T5Gemma2 backbone's non-persistent buffers (`embed_scale`, the RoPE
-    frequencies) stay at their f32 values, so the folded RoPE tables are upstream's own; everything
-    else is rounded as before."""
+class TestF16NonPersistentBuffers:
+    """Under f16, a backbone's non-persistent buffers (T5Gemma2's `embed_scale` and RoPE
+    frequencies, ModernBERT's `inv_freq`) stay at their f32 values — the rule of the exporter
+    core's `round_weights_to_f16`, which rounds only what the checkpoint carries — so the folded
+    RoPE tables are upstream's own; every parameter is rounded."""
 
-    def test_the_buffers_are_picked_by_the_embedded_config(self):
+    def test_the_t5gemma2_buffers_are_the_non_persistent_ones(self):
+        """The five buffers upstream computes at init are exactly what f16 leaves alone."""
         backbone = _tiny_t5gemma2_backbone()
 
-        assert set(ir.t5gemma2_f32_buffers(backbone)) == T5GEMMA2_F32_BUFFERS
-        assert ir.t5gemma2_f32_buffers(ModernBertLikeHolder()) == {}
+        assert set(_non_persistent_buffers(backbone)) == T5GEMMA2_F32_BUFFERS
 
     def test_f16_keeps_them_at_f32_and_rounds_the_parameters(self):
         backbone = _tiny_t5gemma2_backbone()
-        before = {name: t.clone() for name, t in ir.t5gemma2_f32_buffers(backbone).items()}
+        before = {name: t.clone() for name, t in _non_persistent_buffers(backbone).items()}
         assert not any(_is_f16_exact(t) for t in before.values()), (
             "already on the f16 grid, so the test would detect nothing"
         )
 
         quantized = ir.fake_quant("f16", {ir.TARGET_BACKBONE: backbone})
 
-        after = ir.t5gemma2_f32_buffers(backbone)
+        after = _non_persistent_buffers(backbone)
         for name, value in before.items():
             assert torch.equal(after[name], value), name
         assert all(_is_f16_exact(t) for t in backbone.parameters())
-        report = quantized.reports[ir.TARGET_BACKBONE]
-        assert "kept at f32: 5 non-persistent T5Gemma2 buffers" in report
-        assert "buffers 0 /" in report
+        assert "buffers 0 /" in quantized.reports[ir.TARGET_BACKBONE]
 
     def test_the_inner_copy_inside_a_larger_module_is_kept_too(self):
         """The whole DiT holds a copy of the backbone; the full-loop golden's upstream path encodes
@@ -2313,32 +2318,33 @@ class TestT5Gemma2F16Buffers:
         container = nn.Module()
         container.pretrained_text_backbone = _tiny_t5gemma2_backbone()
         container.proj = nn.Linear(4, 4)
-        before = {name: t.clone() for name, t in ir.t5gemma2_f32_buffers(container).items()}
+        before = {name: t.clone() for name, t in _non_persistent_buffers(container).items()}
 
         ir.fake_quant("f16", {ir.TARGET_DIT: container})
 
         assert set(before) == {f"pretrained_text_backbone.{name}" for name in T5GEMMA2_F32_BUFFERS}
-        after = ir.t5gemma2_f32_buffers(container)
+        after = _non_persistent_buffers(container)
         for name, value in before.items():
             assert torch.equal(after[name], value), name
 
-    def test_another_backbone_family_is_rounded_as_before(self):
-        """MUST: ModernBERT's non-persistent `inv_freq` is still rounded (the small models' bytes
-        do not move)."""
+    def test_another_backbone_family_keeps_them_at_f32_too(self):
+        """The rule is not a family's: ModernBERT's non-persistent `inv_freq` stays f32 as well (its
+        f16 series' folded RoPE tables change on the next export; the published files do not)."""
         holder = ModernBertLikeHolder()
-        assert not _is_f16_exact(holder.backbone.rope_inv_freq)
+        before = holder.backbone.rope_inv_freq.clone()
+        assert not _is_f16_exact(before)
 
-        quantized = ir.fake_quant("f16", {ir.TARGET_BACKBONE: holder})
+        ir.fake_quant("f16", {ir.TARGET_BACKBONE: holder})
 
-        assert _is_f16_exact(holder.backbone.rope_inv_freq)
-        assert "kept at f32" not in quantized.reports[ir.TARGET_BACKBONE]
+        assert torch.equal(holder.backbone.rope_inv_freq, before)
+        assert all(_is_f16_exact(t) for t in holder.parameters())
 
     def test_i8_leaves_the_buffers_alone(self):
         backbone = _tiny_t5gemma2_backbone()
-        before = {name: t.clone() for name, t in ir.t5gemma2_f32_buffers(backbone).items()}
+        before = {name: t.clone() for name, t in _non_persistent_buffers(backbone).items()}
 
         ir.fake_quant("i8", {ir.TARGET_BACKBONE: backbone})
 
-        after = ir.t5gemma2_f32_buffers(backbone)
+        after = _non_persistent_buffers(backbone)
         for name, value in before.items():
             assert torch.equal(after[name], value), name

@@ -112,6 +112,13 @@ measurements in `docs/research/`.
   no longer reads a device still on its idle clocks. In `runGeometrySweep` and in the single-dispatch timings of
   `runAttentionRouteBench`, a calibration whose pass comes out below a quarter of the 80 ms target is done again after
   a warm start, up to three calibrations in all. The records' formats do not change; a sweep takes a few seconds longer per case.
+- Exporter: `karume.quantize.round_weights_to_f16` follows the rule `round_weights_to_bf16` follows — it rounds only
+  what the checkpoint carries (every parameter and the persistent buffers) and leaves non-persistent buffers computed
+  at init, such as RoPE's `inv_freq`, at their f32 values. Before, it rounded every f32 buffer, so the constants an f16
+  export folds from such a buffer (the RoPE tables of Anima's text encoder and text conditioner, and of the ModernBERT
+  text backbone of the small Irodori models) came from a rounded seed, and a component exported with f16 storage was
+  a different graph from the same component exported with bf16 storage. From the next export on, those constants are
+  computed from the f32 seed; distributed files are unchanged until they are exported again.
 
 ## [0.22.0] - 2026-11-14
 

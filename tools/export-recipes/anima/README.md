@@ -355,7 +355,12 @@ f32 references taken with the same code (`--dtype f32`). One condition behind th
 `round_weights_to_bf16` leaves **non-persistent** buffers alone — the RoPE buffer
 `rotary_emb.inv_freq` of the text conditioner is computed in f32 at init rather than loaded from
 the checkpoint, and rounding it moved 31 of its 32 elements (by up to 4.37e-4, 1.4e-4 in the
-output) while no parameter moved. The f16 rounding still touches it (the f16 series is frozen).
+output) while no parameter moved. `round_weights_to_f16` follows the same rule, so an f16 export
+of the text encoder or the text conditioner folds the same RoPE tables as the bf16 one, and the two
+have the same graph descriptor (measured 2026-11-17 on the base text conditioner: f16 and bf16
+exports give the same graph sha256, which is the distributed bf16 one). The f16 files distributed
+before then were exported when the f16 rounding still rounded `inv_freq`; their RoPE tables move on
+their next export.
 
 The export of `text_encoder` needs `disable_packed_sequence_detection` (applied by
 `build_text_encoder`): without an `attention_mask`, `Qwen3Model` looks for packed sequences in

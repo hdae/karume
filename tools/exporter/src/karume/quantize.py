@@ -47,72 +47,31 @@ class RoundReport:
         return f"parameters {self.parameters} / buffers {self.buffers} / {self.elements:,} elements"
 
 
-def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
-    """Round parameters and f32 buffers to values representable in f16 (compute stays f32).
+def _round_carried_tensors(
+    model: torch.nn.Module, dtype: torch.dtype, label: str, range_note: str
+) -> RoundReport:
+    """Round the f32 tensors **the checkpoint carries** (every parameter and the persistent
+    buffers) to values representable in `dtype`, in place — the one path f16 and bf16 share.
 
-    The targets are "parameters + f32 buffers" because the initializers that can be stored as f16
-    come only from there (convolution constants and folded constants are part of the graph
-    semantics, and the golden is computed with their original values, so they are stored as f32
-    — the eligibility check is on the emit.py side).
+    MUST: non-persistent buffers (`persistent=False` — absent from `state_dict()`) are not rounded,
+    whatever the storage. They are not in the checkpoint but computed in f32 at init (such as the
+    RoPE `inv_freq`), and upstream inference uses them in f32 as well. Storage rounding stands for
+    "the bits a checkpoint in this storage would hold", so it touches what the checkpoint carries
+    and nothing a module computes: rounding the seed of a folded constant would put an error
+    upstream does not have into the golden (observed: 1.4e-4 in Anima's text_conditioner — ADR
+    0131 decision 2), and would make the same component a different graph in each float storage
+    (the folded tables would come from a different seed).
 
-    MUST: fail loudly when a finite value saturates to non-finite. `Tensor.to(float16)` silently
-    turns elements beyond the f16 range (|x| ≤ 65504) into ±inf, so without the check "a model with
-    inf in its weights" and "a reference computed with the same inf" **agree**, and the output
-    breaks while E2E stays green.
+    MUST: fail loudly when a finite value saturates to non-finite — `Tensor.to` silently turns
+    elements beyond the target's range into ±inf, so without the check "a model with inf in its
+    weights" and "a reference computed with the same inf" **agree**, and the output breaks while
+    E2E stays green.
     """
     counts = {"parameter": 0, "buffer": 0}
     elements = 0
     with torch.no_grad():
         # named_parameters / named_buffers yield duplicates (shared weights) only once by default.
-        # f16 rounding is idempotent, so hitting one twice would not change the values, but the
-        # count is the number of actual tensors.
-        targets = [("parameter", name, t) for name, t in model.named_parameters()]
-        targets += [("buffer", name, t) for name, t in model.named_buffers()]
-        for kind, name, tensor in targets:
-            if tensor.dtype is not torch.float32:
-                continue
-            rounded = tensor.to(torch.float16).to(torch.float32)
-            # Per element: elements that were non-finite to begin with are not the rounding's
-            # fault, so they are not counted.
-            saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
-            if saturated.any():
-                overflow = int(saturated.sum())
-                raise QuantizeError(
-                    f"'{name}': rounding to f16 saturated {overflow} finite values to non-finite"
-                    f" (the f16 range is |x| ≤ 65504; actual max |x| = "
-                    f"{float(tensor.abs().max()):.4g})"
-                )
-            tensor.copy_(rounded)
-            counts[kind] += 1
-            elements += tensor.numel()
-    return RoundReport(parameters=counts["parameter"], buffers=counts["buffer"], elements=elements)
-
-
-def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
-    """Round parameters and the f32 buffers **the checkpoint carries** to values representable in
-    bf16 (compute stays f32).
-
-    The counterpart of {@link round_weights_to_f16} (same idempotence and counting). The rounding
-    is the RNE of `Tensor.to(bfloat16)` (bf16 = the upper 16 bits of f32).
-
-    MUST: non-persistent buffers (`persistent=False` — absent from `state_dict()`) are not rounded.
-    They are not in the checkpoint but computed in f32 at init (such as the RoPE `inv_freq`), and
-    upstream inference uses them in f32 as well. A bf16 asset is "the upstream bits + the same f32
-    computed constants as upstream"; rounding them would put an error upstream does not have into
-    the golden (observed: 1.4e-4 in Anima's text_conditioner — ADR 0131 decision 2). The f16
-    version keeps rounding every buffer as before, so the existing series and goldens do not move.
-
-    MUST: fail loudly when a finite value saturates to non-finite. bf16 has the same exponent range
-    as f32 but a 7-bit mantissa, so its largest finite value is (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38, and the
-    top of the f32 range above it (|x| ≥ (2 − 2⁻⁸)·2¹²⁷) silently rounds up to ±inf under RNE —
-    without the check, as for f16, "a model with inf in its weights" and "a reference computed
-    with the same inf" agree.
-    """
-    counts = {"parameter": 0, "buffer": 0}
-    elements = 0
-    with torch.no_grad():
-        # named_parameters / named_buffers yield duplicates (shared weights) only once by default.
-        # bf16 rounding is idempotent, so hitting one twice would not change the values, but the
+        # The rounding is idempotent, so hitting one twice would not change the values, but the
         # count is the number of actual tensors.
         # state_dict keys = the tensors the checkpoint carries (non-persistent buffers are absent).
         carried = model.state_dict().keys()
@@ -121,21 +80,54 @@ def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
         for kind, name, tensor in targets:
             if tensor.dtype is not torch.float32:
                 continue
-            rounded = tensor.to(torch.bfloat16).to(torch.float32)
+            rounded = tensor.to(dtype).to(torch.float32)
             # Per element: elements that were non-finite to begin with are not the rounding's
             # fault, so they are not counted.
             saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
             if saturated.any():
                 overflow = int(saturated.sum())
                 raise QuantizeError(
-                    f"'{name}': rounding to bf16 saturated {overflow} finite values to non-finite"
-                    f" (the largest finite bf16 value is ≈3.39e38; actual max |x| = "
+                    f"'{name}': rounding to {label} saturated {overflow} finite values to"
+                    f" non-finite ({range_note}; actual max |x| = "
                     f"{float(tensor.abs().max()):.4g})"
                 )
             tensor.copy_(rounded)
             counts[kind] += 1
             elements += tensor.numel()
     return RoundReport(parameters=counts["parameter"], buffers=counts["buffer"], elements=elements)
+
+
+def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
+    """Round parameters and the f32 buffers **the checkpoint carries** to values representable in
+    f16 (compute stays f32).
+
+    The targets are what the checkpoint carries because the initializers that can be stored as f16
+    come only from there (convolution constants and folded constants are part of the graph
+    semantics, and the golden is computed with their original values, so they are stored as f32
+    — the eligibility check is on the emit.py side). Non-persistent buffers stay f32 — the rule
+    and its reasons are those of {@link _round_carried_tensors}, shared with
+    {@link round_weights_to_bf16}.
+
+    MUST: fail loudly when a finite value saturates to non-finite (the f16 range is |x| ≤ 65504).
+    """
+    return _round_carried_tensors(model, torch.float16, "f16", "the f16 range is |x| ≤ 65504")
+
+
+def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
+    """Round parameters and the f32 buffers **the checkpoint carries** to values representable in
+    bf16 (compute stays f32).
+
+    The counterpart of {@link round_weights_to_f16} (same targets, idempotence and counting — one
+    path, {@link _round_carried_tensors}). The rounding is the RNE of `Tensor.to(bfloat16)` (bf16 =
+    the upper 16 bits of f32).
+
+    MUST: fail loudly when a finite value saturates to non-finite. bf16 has the same exponent range
+    as f32 but a 7-bit mantissa, so its largest finite value is (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38, and the
+    top of the f32 range above it (|x| ≥ (2 − 2⁻⁸)·2¹²⁷) silently rounds up to ±inf under RNE.
+    """
+    return _round_carried_tensors(
+        model, torch.bfloat16, "bf16", "the largest finite bf16 value is ≈3.39e38"
+    )
 
 
 # ---- i8 (per-channel symmetric) — ADR 0019 ---------------------------------

@@ -355,6 +355,18 @@ compressed, how the fake-quant is defined, and what is handed to the container. 
 per-model measurements these rules were derived against stay with the recipes (for example
 [`../export-recipes/anima/README.md`](../export-recipes/anima/README.md)).
 
+### Float rounding (f16 / bf16)
+
+`round_weights_to_f16` and `round_weights_to_bf16` (`src/karume/quantize.py`) share one rule:
+**storage rounding touches what the checkpoint carries, nothing a module computes.** They round
+every f32 parameter and every persistent f32 buffer (the tensors of `state_dict()`) in place, and
+leave a non-persistent buffer (`persistent=False`, computed in f32 at init, such as RoPE's
+`inv_freq`) at its f32 value, as upstream uses it. The constants an export folds from such a buffer
+are therefore the same whatever the float storage, so a component exported with f16 storage and the
+same component exported with bf16 storage have the same graph descriptor. Non-f32 tensors are not
+touched, the semantics stay f32, and a finite value that rounding would turn into ±inf fails
+loudly (`QuantizeError`).
+
 ### Eligibility and placement
 
 **Eligibility is the AND of 2 conditions** (`src/karume/emit.py`):

@@ -257,6 +257,69 @@ class TestBf16Rounding:
         assert torch.isinf(model.linear.weight[0, 0])
 
 
+class WithComputedBuffer(nn.Module):
+    """A persistent f32 buffer (carried by the checkpoint) next to a non-persistent one (computed
+    at init, as RoPE's `inv_freq` is) — both off the f16 and bf16 grids."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 3)
+        self.register_buffer("carried", torch.tensor([1 + 2**-12, 0.1, 3.3]))
+        self.register_buffer("computed", torch.tensor([1 + 2**-12, 0.1, 3.3]), persistent=False)
+
+
+@pytest.mark.parametrize(
+    ("round_weights", "is_exact"),
+    [(round_weights_to_f16, is_f16_exact), (round_weights_to_bf16, is_bf16_exact)],
+    ids=["f16", "bf16"],
+)
+class TestWhatTheCheckpointCarries:
+    """One rule for both float storages: storage rounding touches what the checkpoint carries
+    (`state_dict()`), nothing a module computes. Without it, a component exported in f16 and the
+    same component in bf16 fold their constants (the RoPE tables) from different seeds and become
+    different graphs."""
+
+    def test_a_persistent_buffer_is_rounded(self, round_weights, is_exact):
+        model = WithComputedBuffer()
+        assert not is_exact(model.carried), "already on the grid, so the test detects nothing"
+
+        round_weights(model)
+
+        assert is_exact(model.carried)
+        assert is_exact(model.linear.weight)
+
+    def test_a_non_persistent_buffer_keeps_its_f32_values(self, round_weights, is_exact):
+        model = WithComputedBuffer()
+        before = model.computed.clone()
+        assert "computed" not in model.state_dict()
+        assert not is_exact(before), "already on the grid, so the test detects nothing"
+
+        round_weights(model)
+
+        assert torch.equal(model.computed, before)
+
+    def test_the_report_counts_only_the_carried_buffer(self, round_weights, is_exact):
+        report = round_weights(WithComputedBuffer())
+
+        assert report.parameters == 2  # weight / bias
+        assert report.buffers == 1  # carried only
+        assert report.elements == 4 * 3 + 3 + 3
+
+    def test_a_non_persistent_buffer_inside_a_submodule_is_left_alone(
+        self, round_weights, is_exact
+    ):
+        """The FQNs of `state_dict()` and `named_buffers()` are matched with their prefixes — a
+        nested owner is the shape of a real model (`model.rotary_emb.inv_freq`)."""
+        outer = nn.Module()
+        outer.inner = WithComputedBuffer()
+        before = outer.inner.computed.clone()
+
+        round_weights(outer)
+
+        assert torch.equal(outer.inner.computed, before)
+        assert is_exact(outer.inner.carried)
+
+
 class Weighted(nn.Module):
     """Modules equivalent to all 6 ops of `WEIGHT_SLOTS` (exercises every kind of i8 per-channel
     axis)."""

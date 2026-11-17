@@ -187,10 +187,12 @@ uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir ../../
 - Measured on 2026-11-14 (CPU): 134.6 s wall, 30.0 GiB peak RSS for the f32 series (13.2 GB checkpoint). Step 2 still
   reads the codec's real latent (`dacvae-32dim/host`, step 5), which is model-independent.
 - The f16 series keeps the five non-persistent buffers of the T5Gemma2 backbone at f32 through the rounding
-  (`embed_scale` and the four RoPE `inv_freq` — `t5gemma2_f32_buffers`), so the folded RoPE tables are upstream's own
-  values: rounded to f16, the full layers' scaled frequencies lose up to 15% (they fall into f16's subnormal range).
-  Measured on the backbone alone against f32 (2026-11-14): 61.3 → 68.6 dB on the two long caption cases. ModernBERT's
-  buffers are rounded as before (its published bytes do not change).
+  (`embed_scale` and the four RoPE `inv_freq` — the exporter core's `round_weights_to_f16` rounds only what the
+  checkpoint carries), so the folded RoPE tables are upstream's own values: rounded to f16, the full layers' scaled
+  frequencies lose up to 15% (they fall into f16's subnormal range). Measured on the backbone alone against f32
+  (2026-11-14): 61.3 → 68.6 dB on the two long caption cases. The same rule covers ModernBERT's `inv_freq` in the
+  small models' f16 series: their folded RoPE tables change on the next export (the published files do not change
+  until then).
 - The containers of this model carry the provenance licence `gemma` (`provenance_of`), the small models `mit`.
 - The `dit` io goldens of this model do not carry the 48 condition K/V inputs: they are the same bytes in all seven
   cases (597 MB each) and equal to the outputs of `dit-context/io.dit-cond-min.safetensors`. Each `dit` io names that

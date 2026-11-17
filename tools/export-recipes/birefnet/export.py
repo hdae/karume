@@ -622,8 +622,9 @@ def round_to_storage(model: nn.Module, dtype: str) -> RoundReport | None:
     """Round the weights to values representable in the storage dtype (f32 does nothing —
     fake-quant, ADR 0006).
 
-    f16 rounds every parameter and every f32 buffer (`karume.quantize.round_weights_to_f16`). The
-    ineligible ones (biases / BatchNorm statistics) are rounded in value too, but their storage
+    f16 rounds every parameter and every f32 buffer the checkpoint carries
+    (`karume.quantize.round_weights_to_f16` — a non-persistent buffer stays f32). The ineligible
+    ones (biases / BatchNorm statistics) are rounded in value too, but their storage
     stays f32 — emit's eligibility check makes only the weight slots f16. The values are rounded so
     that the correspondence of the golden and the GPU computing **the same numbers** (ADR 0006) also
     holds on the ineligible side.
