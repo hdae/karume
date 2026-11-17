@@ -685,6 +685,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "DeriveLinearGemvOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvSweepCandidateSet",
         "kind": "typeAlias"
       },
@@ -702,6 +706,10 @@
       },
       {
         "name": "GemvSweepGates",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepInput",
         "kind": "typeAlias"
       },
       {
@@ -782,6 +790,18 @@
       },
       {
         "name": "JudgeSessionAbOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvDecision",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvDerivation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvGain",
         "kind": "typeAlias"
       },
       {
@@ -866,6 +886,10 @@
       },
       {
         "name": "deriveGeometryProfile",
+        "kind": "function"
+      },
+      {
+        "name": "deriveLinearGemvChoices",
         "kind": "function"
       },
       {

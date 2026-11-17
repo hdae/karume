@@ -1,9 +1,9 @@
 /**
- * The header comment of a generated table: what the table is, which op families this generation
- * derived and from which records (and how each record was made), which families it carried over
- * from the registered table and from which commit, and the adoption rule with the derivation's
- * verdict lines. Pure over the derivation's inputs and outputs: no date, machine name or absolute
- * path enters it, so the same inputs give the same bytes.
+ * The header comment of a generated table: what the table is, which op families (and whether the
+ * GEMV choices of linear) this generation derived and from which records (and how each record was
+ * made), which it carried over from the registered table and from which commit, and the adoption
+ * rules with the derivations' verdict lines. Pure over the derivation's inputs and outputs: no
+ * date, machine name or absolute path enters it, so the same inputs give the same bytes.
  */
 
 import type { GeometryProfile } from "@karume/runtime";
@@ -21,6 +21,16 @@ export type HeaderInput = {
   readonly attentionBench: readonly LoadedRecord[];
   /** The adoption threshold the derivation was given. */
   readonly minSpeedup: number;
+  /**
+   * The GEMV sweep records the GEMV choices of linear were derived from, with the rule's threshold
+   * and steadiness bound; absent when this generation did not derive them (their verdict lines are
+   * among `verdicts`).
+   */
+  readonly gemv?: {
+    readonly records: readonly LoadedRecord[];
+    readonly minSpeedup: number;
+    readonly steadySpread: number;
+  };
   /**
    * The registered table the derivation took as its base: the last commit that touched its file
    * and the file's repository-relative path. Absent for a first table.
@@ -143,14 +153,25 @@ const derivedFamilies = (
 
 const ONLINE = "the online attention's key axis (attention-bench records)";
 
+const GEMV = "the GEMV choices of linear (GEMV sweep records)";
+
 /** The header comment (with its closing line and a final newline). */
 export const profileHeader = (input: HeaderInput): string => {
-  const { profile, records, attentionBench, base, minSpeedup } = input;
+  const { profile, records, attentionBench, base, minSpeedup, gemv } = input;
   const { derived, carried } = derivedFamilies(profile, records);
   const benchGiven = attentionBench.length > 0;
   const benchCarried = !benchGiven && profile.provenance?.attentionBench !== undefined;
-  const derivedNames = [...derived, ...(benchGiven ? [ONLINE] : [])];
-  const carriedNames = [...carried, ...(benchCarried ? [ONLINE] : [])];
+  const gemvCarried = gemv === undefined && profile.linearGemv !== undefined;
+  const derivedNames = [
+    ...derived,
+    ...(benchGiven ? [ONLINE] : []),
+    ...(gemv === undefined ? [] : [GEMV]),
+  ];
+  const carriedNames = [
+    ...carried,
+    ...(benchCarried ? [ONLINE] : []),
+    ...(gemvCarried ? ["the GEMV choices of linear"] : []),
+  ];
   const lines = [
     `Geometry profile \`${profile.id}\` (**generated — do not edit by hand**).`,
     "",
@@ -158,10 +179,16 @@ export const profileHeader = (input: HeaderInput): string => {
     "The runtime only selects the table by the adapter's match; nothing is measured at run time.",
     "To change a value, take a sweep with the workbench's `geometry-sweep` entry and regenerate the",
     `table with \`node tools/geometry-profiles/generate.ts ${profile.id} --records=<path>[,<path>…]\`.`,
+    ...(gemv === undefined && profile.linearGemv === undefined
+      ? []
+      : [
+          "The GEMV choices of linear (`linearGemv`) come from records of the `gemv-sweep` entry",
+          "(`--gemv-records=<path>,<path>[,…]`).",
+        ]),
     "",
     `Derived in this generation: ${derivedNames.length === 0 ? "none" : derivedNames.join(", ")}.`,
     "",
-    ...[...records, ...attentionBench].flatMap(recordLines),
+    ...[...records, ...attentionBench, ...(gemv?.records ?? [])].flatMap(recordLines),
     ...(base === undefined
       ? []
       : [
@@ -171,20 +198,36 @@ export const profileHeader = (input: HeaderInput): string => {
           }.`,
           `Their adoption lines are in \`git show ${base.commit}:${base.path}\`.`,
         ]),
-    "",
-    "Adoption: a geometry replaces the default of a field only when, on every case of the field,",
-    `its output is identical to the default geometry's and it is at least ${ratio(minSpeedup)} faster;`,
-    "among those, the one with the largest geometric mean of the ratios is taken, else the default",
-    "stays.",
-    "A case whose default re-measurement ratio lies outside 0.9–1.1 (or whose re-measurement failed",
-    "or is missing) is dropped from that record's ratios, as is an observation whose timestamp",
-    "rounding could move its ratio by more than 1%; output mismatches and failures still count.",
-    ...(benchGiven
-      ? [
-          "The online attention's tiled key axis is adopted only when every shape of every",
-          `attention-bench record is identical and every shape gains at least ${ratio(minSpeedup)}.`,
-        ]
-      : []),
+    ...(records.length === 0
+      ? []
+      : [
+          "",
+          "Adoption: a geometry replaces the default of a field only when, on every case of the field,",
+          `its output is identical to the default geometry's and it is at least ${ratio(minSpeedup)} faster;`,
+          "among those, the one with the largest geometric mean of the ratios is taken, else the default",
+          "stays.",
+          "A case whose default re-measurement ratio lies outside 0.9–1.1 (or whose re-measurement failed",
+          "or is missing) is dropped from that record's ratios, as is an observation whose timestamp",
+          "rounding could move its ratio by more than 1%; output mismatches and failures still count.",
+          ...(benchGiven
+            ? [
+                "The online attention's tiled key axis is adopted only when every shape of every",
+                `attention-bench record is identical and every shape gains at least ${ratio(minSpeedup)}.`,
+              ]
+            : []),
+        ]),
+    ...(gemv === undefined
+      ? []
+      : [
+          "",
+          "GEMV choices: a candidate replaces the default profile's choice for a shape only when it is at",
+          `least ${ratio(gemv.minSpeedup)} faster than that choice in every GEMV sweep record, with its words equal to`,
+          "the baseline's (identical class: the sequential variant's per-shape exceptions) or inside the",
+          "band (reorder class: the parallel rows, measured at every row count of the parallel range and",
+          "not slower at any) in every record; among those, the one whose smallest gain is largest. A shape",
+          `that a record measured while the baseline's rounds spread beyond ${ratio(gemv.steadySpread)} keeps the default,`,
+          "and so do the shared sequential keys whose cases disagree and the rows with packed activations.",
+        ]),
     "",
     ...input.verdicts,
   ];

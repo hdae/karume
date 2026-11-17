@@ -33,8 +33,9 @@
  * One field is a kernel variant rather than a geometry: the key-axis form of the online attention's
  * quantised Vᵀ (`attentionOnline`), read through the attention route only. Another holds the GEMV
  * choices of linear (`linearGemv` — which sequential variant, how many rows per row block, which
- * shapes take the parallel GEMV and how): no sweep covers it, so no generated table carries it and
- * every table runs with the default profile's ({@link resolveGeometryProfile}).
+ * shapes take the parallel GEMV and how): GEMV sweep records decide it (`deriveLinearGemvChoices` of
+ * `@karume/runtime/tune`), and a table without the field runs with the default profile's
+ * ({@link resolveGeometryProfile}).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -220,8 +221,8 @@ export type GeometryProfile = {
    * The GEMV choices of linear (1 ≤ M ≤ 64 over i2 / i4 / i8 weights, M = 1 over f16 / bf16 /
    * f32 — src/kernels/linear-gemv.ts): the sequential variant and its per-shape exceptions, the
    * row-block thread target and the shape rows of the parallel GEMV with their lanes and packed /
-   * staged flags. Kernel-variant choices rather than geometries, like {@link attentionOnline}. No
-   * generator derives them yet, so no generated table carries the field.
+   * staged flags. Kernel-variant choices rather than geometries, like {@link attentionOnline}. GEMV
+   * sweep records decide them (`deriveLinearGemvChoices` of `@karume/runtime/tune`).
    *
    * Absent = the default profile's ({@link DEFAULT_GEOMETRY_PROFILE}), resolved in one place, where
    * a Session selects its profile ({@link resolveGeometryProfile}): every reader sees a

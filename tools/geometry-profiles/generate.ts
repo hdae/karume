@@ -2,16 +2,18 @@
  * The generator of the runtime's embedded geometry profile tables
  * (`packages/runtime/src/kernels/geometry-profiles/<id>.ts`). From the repository root:
  *
- *   node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,<path>…]
- *     [--attention-bench=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]]
- *     [--min-speedup=<x>] [--dry-run]
+ *   node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]]
+ *     [--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]]
+ *     [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
  *
  * It always works as "the registered table as base + new records for some op families": a
  * registered id takes that table as `base` of `deriveGeometryProfile`, so the families the records
  * do not cover are carried over unchanged, and its adapter match is the table's own. An id that is
  * not registered is a new adapter's first table: the match options are required and there is no
  * base. It never re-derives a whole table from its historical records and never lifts an old record
- * format.
+ * format. GEMV sweep records (`--gemv-records`) derive the table's GEMV choices of linear
+ * (`linearGemv`, with `deriveLinearGemvChoices`) onto the table; without them a base's field is
+ * carried. A registered table can take GEMV sweep records alone; a first table needs `--records`.
  *
  * Exit codes: 0 on success, 2 for a command line it cannot act on, 1 for anything else (the
  * derivation's error message on stderr, unchanged).
@@ -25,9 +27,11 @@ import { join } from "node:path";
 import { BUILTIN_GEOMETRY_PROFILES, type GeometryProfile } from "@karume/runtime";
 import {
   deriveGeometryProfile,
+  deriveLinearGemvChoices,
   type GeometryProfileDerivation,
   type GeometryProfileTarget,
   geometryProfileJson,
+  type LinearGemvDerivation,
 } from "@karume/runtime/tune";
 import { differenceLine, profileDifferences } from "./differences.ts";
 import { formatTypeScript, REPOSITORY_ROOT } from "./format.ts";
@@ -54,9 +58,9 @@ export const PROFILES_DIRECTORY = "packages/runtime/src/kernels/geometry-profile
 export const DEFAULT_MIN_SPEEDUP = 1.05;
 
 const USAGE =
-  "usage: node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,<path>…] " +
-  "[--attention-bench=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] " +
-  "[--min-speedup=<x>] [--dry-run]";
+  "usage: node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] " +
+  "[--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]] " +
+  "[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]";
 
 /** A table id is also its file name: kebab-case, as every registered id is. */
 const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -71,6 +75,7 @@ export type Request = {
   readonly id: string;
   readonly records: readonly string[];
   readonly attentionBench: readonly string[];
+  readonly gemvRecords: readonly string[];
   readonly match?: AdapterMatch;
   readonly minSpeedup: number;
   readonly dryRun: boolean;
@@ -79,6 +84,7 @@ export type Request = {
 const VALUE_OPTIONS = [
   "records",
   "attention-bench",
+  "gemv-records",
   "vendor",
   "architecture",
   "description",
@@ -122,7 +128,10 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
     throw new UsageError(`The profile id ${JSON.stringify(id)} is not kebab-case`);
   }
   const records = pathList(values.get("records"));
-  if (records.length === 0) throw new UsageError("--records names no record");
+  const gemvRecords = pathList(values.get("gemv-records"));
+  if (records.length === 0 && gemvRecords.length === 0) {
+    throw new UsageError("Neither --records nor --gemv-records names a record");
+  }
   const vendor = values.get("vendor");
   const architecture = values.get("architecture");
   const description = values.get("description");
@@ -138,6 +147,7 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
     id,
     records,
     attentionBench: pathList(values.get("attention-bench")),
+    gemvRecords,
     ...(vendor === undefined
       ? {}
       : {
@@ -196,6 +206,39 @@ export const deriveTable = (input: {
       ...(input.base === undefined ? {} : { base: input.base }),
     },
   );
+
+/**
+ * `table` with `linearGemv` set to the given field, or without it when the field is absent. The
+ * field goes where the profile's type places it, before the provenance, so the printer writes the
+ * fields in one order.
+ */
+export const withLinearGemv = (
+  table: GeometryProfile,
+  linearGemv: GeometryProfile["linearGemv"],
+): GeometryProfile => {
+  const { linearGemv: _replaced, provenance, ...fields } = table;
+  return {
+    ...fields,
+    ...(linearGemv === undefined ? {} : { linearGemv }),
+    ...(provenance === undefined ? {} : { provenance }),
+  };
+};
+
+/**
+ * The generator's GEMV step: `deriveLinearGemvChoices` over the loaded GEMV sweep records for
+ * `table` (the tile geometry's derivation, or the registered table when only GEMV records are
+ * given), and the table with the derived field in place. Its errors pass through unchanged.
+ */
+export const deriveGemvTable = (
+  table: GeometryProfile,
+  records: readonly LoadedRecord[],
+): { readonly profile: GeometryProfile; readonly derivation: LinearGemvDerivation } => {
+  const derivation = deriveLinearGemvChoices(
+    records.map(({ report, path, sha256 }) => ({ report, path, sha256 })),
+    { table },
+  );
+  return { profile: withLinearGemv(table, derivation.linearGemv), derivation };
+};
 
 export type CommandEnvironment = {
   /** Where record paths resolve and the table and registration files are. */
@@ -262,29 +305,61 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
       `'${request.id}' is not registered: a first table needs its adapter match (--vendor, with --architecture and --description as needed)`,
     );
   }
+  if (request.records.length === 0 && (base === undefined || request.attentionBench.length > 0)) {
+    throw new UsageError(
+      base === undefined
+        ? `'${request.id}' is not registered: a first table needs --records (the tile geometry)`
+        : "--attention-bench needs --records (the derivation of the tile geometry reads them together)",
+    );
+  }
   const records = await readRecords(repositoryRoot, request.records, "records");
   const attentionBench = await readRecords(
     repositoryRoot,
     request.attentionBench,
     "attention-bench",
   );
-  const { profile, verdicts } = deriveTable({
-    id: request.id,
-    ...(request.match === undefined ? {} : { match: request.match }),
-    minSpeedup: request.minSpeedup,
-    records,
-    attentionBench,
-    ...(base === undefined ? {} : { base }),
-  });
+  const gemvRecords = await readRecords(repositoryRoot, request.gemvRecords, "gemv-records");
+  const geometry =
+    records.length === 0
+      ? undefined
+      : deriveTable({
+          id: request.id,
+          ...(request.match === undefined ? {} : { match: request.match }),
+          minSpeedup: request.minSpeedup,
+          records,
+          attentionBench,
+          ...(base === undefined ? {} : { base }),
+        });
+  const tiled = geometry?.profile ?? base;
+  if (tiled === undefined) throw new Error("No table to derive the GEMV choices for");
+  const gemv = gemvRecords.length === 0 ? undefined : deriveGemvTable(tiled, gemvRecords);
+  const profile = gemv?.profile ?? tiled;
+  const verdicts = [...(geometry?.verdicts ?? []), ...(gemv?.derivation.verdicts ?? [])];
   const tablePath = `${PROFILES_DIRECTORY}/${request.id}.ts`;
   if (request.dryRun) {
     stdout(`Dry run: nothing written. The derived profile of '${request.id}':`);
     stdout(geometryProfileJson(profile));
     stdout("Verdicts:");
     for (const line of verdicts) stdout(line);
+    if (gemv !== undefined) {
+      stdout(
+        gemv.derivation.linearGemv === undefined
+          ? "linearGemv: absent from the table (every GEMV choice stays the default's)"
+          : "linearGemv: written to the table (the default's choices with the adopted ones in place)",
+      );
+    }
     if (base !== undefined) {
-      const { fields, provenance } = profileDifferences(base, profile);
-      stdout(`Fields that differ from the registered table (${tablePath}):`);
+      // A side without linearGemv runs with the default's choices: compare what each table runs with
+      const runsWith = (table: GeometryProfile): GeometryProfile =>
+        gemv === undefined
+          ? table
+          : withLinearGemv(table, table.linearGemv ?? gemv.derivation.defaults);
+      const { fields, provenance } = profileDifferences(runsWith(base), runsWith(profile));
+      stdout(
+        `Fields that differ from the registered table (${tablePath}${
+          gemv === undefined ? "" : "; linearGemv as each table runs with it"
+        }):`,
+      );
       stdout(
         fields.length === 0 ? "  none" : fields.map((d) => `  ${differenceLine(d)}`).join("\n"),
       );
@@ -302,6 +377,15 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
     verdicts,
     records,
     attentionBench,
+    ...(gemv === undefined
+      ? {}
+      : {
+          gemv: {
+            records: gemvRecords,
+            minSpeedup: gemv.derivation.rule.minSpeedup,
+            steadySpread: gemv.derivation.rule.steadySpread,
+          },
+        }),
     minSpeedup: request.minSpeedup,
     ...(base === undefined
       ? {}

@@ -93,7 +93,9 @@
  * fields of that family and its provenance entry verbatim, after its `kernels` and `caseSet` are
  * checked against the current runtime ({@link carryOver}); the attention-bench block and
  * `attentionOnline` likewise when no attention-bench records are given. Without `base` (or for a
- * family `base` has no entry for), an uncovered family keeps the default and gets no entry.
+ * family `base` has no entry for), an uncovered family keeps the default and gets no entry. A
+ * base's `linearGemv` (the GEMV choices, which only GEMV sweep records decide —
+ * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is.
  */
 import {
   defaultGemmGeometry,
@@ -2325,7 +2327,7 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * `provenance.attentionBench` (the records' paths / sha256 / dates joined with `", "`, the id of the
  * bench's shape set, and the online attention's kernel fingerprint exactly when the field is
  * adopted) whatever the verdict. Without them, a carried block brings the base's `attentionOnline`
- * (if any) with it.
+ * (if any) with it. A carried base brings its `linearGemv` as it is (no sweep record decides it).
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
@@ -2389,9 +2391,13 @@ export const buildGeometryProfile = (
       : adopted
         ? ({ keyWords: "tiled" } as const)
         : undefined;
+  // The GEMV choices come from GEMV sweep records (`deriveLinearGemvChoices`), never from these: a
+  // base's field is carried as it is, so a regeneration of the tile geometry does not drop it
+  const linearGemv = carry?.base.linearGemv;
   const table: GeometryProfile = {
     ...fields,
     ...(attentionOnline === undefined ? {} : { attentionOnline }),
+    ...(linearGemv === undefined ? {} : { linearGemv }),
   };
   const attentionBench: AttentionBenchProvenance | undefined =
     attention === undefined
@@ -2590,6 +2596,7 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * copied verbatim once the entry's `kernels` and `caseSet` are checked against the current runtime
    * (a stale entry throws — sweep that family again), and, without `attentionBench`, its
    * `attentionOnline` and attention-bench block likewise (stale: measure the attention bench again).
+   * Its `linearGemv` is carried as it is: GEMV sweep records decide it (`deriveLinearGemvChoices`).
    * The records must cover every family they have a row of completely (every case of its current
    * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
    * these options.

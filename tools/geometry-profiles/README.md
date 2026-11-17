@@ -11,14 +11,18 @@ derived from them, and every other family is carried over from the registered ta
 whole table from all its historical records, and it never lifts an old record format. A new adapter's first table has
 no base.
 
+GEMV sweep records (`--gemv-records`, the workbench's `gemv-sweep` entry) derive the table's GEMV choices of linear
+(`linearGemv`) with `deriveLinearGemvChoices` of `@karume/runtime/tune`, onto the table the sweep records give (or
+onto the registered table when only GEMV records are given). Without them, a table that carries the field keeps it.
+
 ## The command
 
 From the repository root:
 
 ```sh
-node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,<path>…] \
-  [--attention-bench=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] \
-  [--min-speedup=<x>] [--dry-run]
+node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
+  [--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]] \
+  [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
 ```
 
 - A registered id takes the registered table as its base and the table's own adapter match; the match options are then
@@ -26,10 +30,20 @@ node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,<path>�
   has no base.
 - `--attention-bench` adds attention-bench records, which decide the online attention's key axis; without them that
   field is carried over from the base.
-- `--min-speedup` is the adoption threshold (default ×1.05, the runtime's default).
+- `--gemv-records` adds two or more GEMV sweep records of the table's adapter, which decide `linearGemv`: a candidate
+  replaces the default profile's choice for a shape only at ×1.10 or more over it in every record, its check held in
+  every record, a shape a record measured while the baseline's rounds spread beyond ×1.25 keeps the default, and a
+  parallel row changes only when every record is of the `full` set (it serves M = 1 to 8)
+  ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). The field is written only when a
+  choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
+  table needs `--records`, and `--attention-bench` needs `--records`.
+- `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
+  keep their own ×1.10.
 - Without `--dry-run` it writes the table file and prints what it wrote and the verdict lines. With `--dry-run` it
   writes nothing and prints the derived profile as JSON, the verdict lines and, for a registered id, every field that
-  differs from the registered table (the provenance fields listed apart).
+  differs from the registered table (the provenance fields listed apart). With GEMV records the verdict lines end with
+  the GEMV decisions shape by shape (the default's choice, the derived one, the gains per record, or why it was kept)
+  and a line that says whether the table would carry the field; `linearGemv` is compared as each table runs with it.
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else (the derivation's message on
   stderr, unchanged).
 
@@ -39,6 +53,13 @@ workbench on the RTX 5070 Ti):
 ```sh
 node tools/geometry-profiles/generate.ts nvidia-blackwell --dry-run \
   --records=outputs/workbench/browser-nvidia-geforce-rtx-5070-ti/geometry-sweep_<time>.json
+```
+
+Derive the GEMV choices of a registered table from two GEMV sweeps, its tile geometry unchanged:
+
+```sh
+node tools/geometry-profiles/generate.ts nvidia-ampere --dry-run \
+  --gemv-records=outputs/workbench/node-nvidia-geforce-rtx-3080-ti/gemv-sweep_<time 1>.json,outputs/workbench/node-nvidia-geforce-rtx-3080-ti/gemv-sweep_<time 2>.json
 ```
 
 A new adapter's first table:
@@ -51,16 +72,18 @@ node tools/geometry-profiles/generate.ts intel-xe2 --vendor=intel --architecture
 ## What a record may be
 
 - A workbench record (`karume-workbench/1`, written by `apps/workbench`): the `geometry-sweep` entry's record for
-  `--records`, the `attention-bench` entry's record for `--attention-bench`. It is unwrapped to its `data`. A record
+  `--records`, the `attention-bench` entry's record for `--attention-bench`, the `gemv-sweep` entry's record for
+  `--gemv-records`. It is unwrapped to its `data`. A record
   without `data` (a run that failed) is an error that names the file and the outcome.
 - A bare runtime record (`karume-geometry-sweep/*` or `karume-attention-bench/*`, written before the workbench
-  existed), passed as it is.
+  existed, or `karume-gemv-sweep/*`), passed as it is.
 - Each path is repository-relative or absolute and must lie inside the repository: the table's provenance cites it
   repository-relative, with the sha256 of the file's bytes as stored (for a workbench record, of the envelope file).
 
-Whether a record is usable — its format version (only `karume-geometry-sweep/3` and `karume-attention-bench/2` are
-accepted), its adapter, its case sets, a sweep that covers a family only in part while a base exists — is the
-derivation's decision; its errors are printed as they are.
+Whether a record is usable — its format version (only `karume-geometry-sweep/3`, `karume-attention-bench/2` and
+`karume-gemv-sweep/2` are accepted), its adapter, its case sets, its fingerprints, a sweep that covers a family only in
+part while a base exists, fewer than two GEMV records — is the derivation's decision; its errors are printed as they
+are.
 
 ## What the header says
 
@@ -73,7 +96,9 @@ inputs give the same bytes):
   the checkout commit and whether it was dirty; for a bare record: what the record carries);
 - "Carried over": the families taken from the registered table and the last commit that touched the table file, so
   their adoption lines are one `git show <commit>:<path>` away (absent for a first table);
-- "Adoption": the adoption rule with the threshold used, then the derivation's verdict lines.
+- "Adoption": the adoption rule with the threshold used (left out when no sweep record was given), the GEMV choices'
+  rule when GEMV records were given, then the derivations' verdict lines. The GEMV choices are named among the things
+  derived or carried over like an op family.
 
 The headers of the three tables registered before this tool existed (`apple-metal-3`, `nvidia-ampere`,
 `nvidia-blackwell`) are hand-edited prose; they stay until a table is regenerated, which replaces its header with the

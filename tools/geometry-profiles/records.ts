@@ -3,7 +3,8 @@
  * file may hold. Pure over a path and the file's bytes (the command reads the file).
  *
  * A record is a workbench record (format `karume-workbench/1`, unwrapped to its `data`) or a bare
- * runtime record (a sweep or attention-bench record written before the workbench existed). Whether
+ * runtime record (a sweep or attention-bench record written before the workbench existed, or a GEMV
+ * sweep record as `runGemvSweep` returns it). Whether
  * the runtime record is usable — its format version, adapter, case sets, an aborted sweep — is the
  * derivation's call, not this module's: it passes the record on unread.
  */
@@ -21,8 +22,8 @@ export class RecordError extends Error {
   override name = "RecordError";
 }
 
-/** Which option a record was given to: sweep records or attention-bench records. */
-export type RecordKind = "records" | "attention-bench";
+/** Which option a record was given to: sweep, attention-bench or GEMV sweep records. */
+export type RecordKind = "records" | "attention-bench" | "gemv-records";
 
 /** How a workbench run was made, as its envelope records it. */
 export type WorkbenchOrigin = {
@@ -52,6 +53,7 @@ const EXPECTED: Readonly<Record<RecordKind, { readonly entry: string; readonly f
   {
     records: { entry: "geometry-sweep", format: "karume-geometry-sweep/" },
     "attention-bench": { entry: "attention-bench", format: "karume-attention-bench/" },
+    "gemv-records": { entry: "gemv-sweep", format: "karume-gemv-sweep/" },
   };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

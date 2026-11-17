@@ -302,7 +302,7 @@ const readGemvParallelShape = (value: unknown, path: string): LinearGemvParallel
   };
 };
 
-/** `linearGemv` (the GEMV choices of linear — no generated table writes it yet). */
+/** `linearGemv` (the GEMV choices of linear — `deriveLinearGemvChoices` of gemv-derive.ts derives it). */
 const readLinearGemv = (value: unknown, path: string): LinearGemvChoices => {
   const fields = readRecord(value, path, ["sequential", "rowsThreadTarget", "parallelShapes"]);
   const sequentialPath = child(path, "sequential");

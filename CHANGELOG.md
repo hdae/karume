@@ -81,6 +81,19 @@ measurements in `docs/research/`.
   a table without the field runs with them, so no Session changes. `acquireGpu({ geometryProfile })` and
   `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field.
   `SessionOptions.linearGemvRowsThreadTarget` still replaces the thread target when given.
+- `@karume/runtime/tune`: `deriveLinearGemvChoices`, which derives a table's `linearGemv` from two or more GEMV sweep
+  records of its adapter. A candidate replaces the default profile's choice for a shape only when it is at least ×1.10
+  faster than that choice in every record and its check holds in every record; a shape that a record measured while
+  the baseline's rounds spread beyond ×1.25 keeps the default. The identical class writes the sequential variant's
+  per-shape exceptions (no Session's numbers change), the reorder class the parallel rows' lanes and staged flag
+  (Sessions at `reorder` change their numbers inside the band; only from records of the `full` set, which measure
+  every row count a parallel row serves); the thread target, the general variant and the rows
+  with packed activations stay. It returns the field (absent when nothing is adopted), one decision per shape with
+  the gains per record or why it was kept, the lines that state them and the records used, and refuses records of
+  another format, adapter, case table or kernels, wall-clock or quantized ones, and fewer than two. Also the types
+  `DeriveLinearGemvOptions`, `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation` and `LinearGemvGain`.
+  The generator of the embedded tables (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for
+  a registered table; no embedded table changes.
 - `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
   canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
   `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and
@@ -89,6 +102,8 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
+  dropped the field before.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the
   cause and, where the caller can act, what to do. Code that matched on such a citation in a message needs another
   substring.

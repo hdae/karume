@@ -10,11 +10,13 @@
 
 import { defaultGemmGeometry, type GemmGeometry } from "../../src/kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../../src/kernels/i8a8-geometry.ts";
-import type { SweepOp } from "../../src/tune/cases.ts";
+import type { GeometryProfileFamily } from "../../src/kernels/geometry-profile.ts";
+import { caseShape, SWEEP_CASES, type SweepOp } from "../../src/tune/cases.ts";
 import { gemmCandidate } from "../../src/tune/geometries.ts";
 import { parseSweepReport, type SlotVerdict, type SweepSource } from "../../src/tune/derive.ts";
-import type { GeometryProfileFamilyIds } from "../../src/tune/families.ts";
+import { familyEntries, type GeometryProfileFamilyIds } from "../../src/tune/families.ts";
 import { sweepCaseSetIds, sweepDefaultKernelsIds } from "../../src/tune/fingerprint.ts";
+import { casePlan } from "../../src/tune/harness.ts";
 import { REPORT_FORMAT } from "../../src/tune/report.ts";
 
 let currentKeys:
@@ -244,3 +246,17 @@ export const SPEC = {
 } as const;
 
 export const SOURCES = [sweep("a.json", "sha-a"), sweep("b.json", "sha-b")];
+
+/**
+ * The default row of every case of `family` in the sweep's table, from the sweep's own case plan: a
+ * record of them covers the family completely and adopts nothing (a base table, or a regeneration
+ * of it that changes no geometry).
+ */
+export const familyDefaultRows = (family: GeometryProfileFamily): Record<string, unknown>[] =>
+  familyEntries(SWEEP_CASES, family).map((sweepCase) =>
+    row(
+      { caseId: sweepCase.id, op: sweepCase.op, shape: caseShape(sweepCase) },
+      casePlan(sweepCase, 65535, false).defaultCandidate,
+      true,
+    ),
+  );

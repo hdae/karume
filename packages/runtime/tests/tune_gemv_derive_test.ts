@@ -1,0 +1,504 @@
+// The GEMV derivation without a GPU (src/tune/gemv-derive.ts — deriveLinearGemvChoices of
+// `@karume/runtime/tune`): synthetic GEMV sweep records over the current runtime's cases and plans
+// (tests/helpers/gemv-sweep-records.ts), so their fingerprints and default-profile choices are what a
+// sweep of the current runtime writes.
+//
+// What this pins: ① a candidate is adopted only at ×1.10 or more in every record, the one with the
+// largest smallest gain among several; ② an unsteady record, a failed check in one record, the
+// packed rows, a shared sequential key whose cases disagree, a row count of the parallel range a
+// record did not measure and a regression at one keep the default; ③ the refusals — one record, the same record twice, another
+// format, case table, kernels, default-profile choice or adapter, wall-clock or quantized timing;
+// ④ what the field gets (the exception row replaced, added or removed; the parallel row replaced in
+// place; nothing when nothing is adopted) and the provenance and lines that name the records; ⑤ a
+// regeneration of the tile geometry carries a base table's `linearGemv`.
+//
+// Faults injected: record 2 at ×1.09 (one record below the bar); a baseline spread of ×1.26 in
+// record 2 (unsteady); differing words, and a reorder row outside the band, in record 2; the two cases
+// of one sequential key adopting different variants; a parallel candidate ×0.95 at M = 4; record 2
+// without M = 8, and records of M = 1 alone, for a parallel row; the
+// record's kernel and case-table fingerprints replaced, a row's choice changed under a kept
+// fingerprint, the reorder choice of a summary renamed, the format, unit, quantized flag and adapter
+// changed.
+
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { describe, it } from "vite-plus/test";
+import {
+  deriveGeometryProfile,
+  deriveLinearGemvChoices,
+  type GemvSweepInput,
+  type LinearGemvDecision,
+  type LinearGemvDerivation,
+  parseGeometryProfileJson,
+  geometryProfileJson,
+} from "../tune.ts";
+import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
+import type { GemvSweepReport } from "../src/tune/gemv-report.ts";
+import {
+  BASE_TIME,
+  GEMV_ADAPTER,
+  type GemvCaseSpec,
+  gemvRecord,
+} from "./helpers/gemv-sweep-records.ts";
+import { familyDefaultRows, report } from "./helpers/sweep-records.ts";
+
+/** A table of the records' adapter (its match and provenance name it). */
+const TABLE: GeometryProfile = {
+  ...DEFAULT_GEOMETRY_PROFILE,
+  id: "test-gpu",
+  match: { vendor: GEMV_ADAPTER.vendor, architecture: GEMV_ADAPTER.architecture },
+};
+
+const DEFAULTS: LinearGemvChoices = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+
+/** E2B's per_layer_model_projection: i4 g32, a parallel row at 4 lanes, no sequential exception. */
+const PLE = "i4g32-n8960-k1536";
+/** E2B's i8 output head: the sequential exception c16u4 and a parallel row at 16 lanes. */
+const HEAD_I8 = "i8-n262144-k1536";
+/** QAT E2B's o (sliding): its default row takes packed activations. */
+const PACKED = "i4g2048-n1536-k2048";
+/** Two cases of one sequential key (i4 n2048 k1536): g32 and g512. */
+const Q_G32 = "i4g32-n2048-k1536";
+const Q_G512 = "i4g512-n2048-k1536";
+
+/** The row counts a parallel row serves that the case table has: a record must measure all three. */
+const PARALLEL_ROWS = [1, 4, 8];
+
+/** A time that makes a kernel `gain` times faster than {@link BASE_TIME}. */
+const faster = (gain: number): number => BASE_TIME / gain;
+
+const input = (
+  path: string,
+  specs: readonly GemvCaseSpec[],
+  change: (record: GemvSweepReport) => unknown = (record) => record,
+): GemvSweepInput => ({
+  report: change(gemvRecord(`2026-11-17T0${path.length % 10}:00:00.000Z`, specs)),
+  path,
+  sha256: `sha-${path}`,
+});
+
+const derive = (
+  first: readonly GemvCaseSpec[],
+  second: readonly GemvCaseSpec[] = first,
+  table: GeometryProfile = TABLE,
+): LinearGemvDerivation =>
+  deriveLinearGemvChoices([input("a.json", first), input("bb.json", second)], { table });
+
+const decisionOf = (
+  derivation: LinearGemvDerivation,
+  field: LinearGemvDecision["field"],
+  caseId: string,
+): LinearGemvDecision => {
+  const found = derivation.decisions.find(
+    (decision) => decision.field === field && decision.cases.includes(caseId),
+  );
+  assert(found !== undefined, `no ${field} decision of ${caseId}`);
+  return found;
+};
+
+const at1 = (times: Readonly<Record<string, number>>): GemvCaseSpec["times"] => ({ 1: times });
+
+describe("deriveLinearGemvChoices: the identical class (sequential.shapes)", () => {
+  it("adopts a variant ×1.10 or more faster than the baseline in every record, as the shape's exception", () => {
+    const derivation = derive([{ caseId: PLE, times: at1({ c64u8: faster(1.2) }) }]);
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "adopted");
+    assertEquals([decision.defaultChoice, decision.derivedChoice], ["c32u4", "c64u8"]);
+    assertEquals(
+      decision.gains.map(({ record, gain }) => [record, gain.toFixed(3)]),
+      [
+        ["a.json", "1.200"],
+        ["bb.json", "1.200"],
+      ],
+    );
+    assertEquals(derivation.linearGemv?.sequential.shapes, [
+      ...DEFAULTS.sequential.shapes,
+      { storage: "i4", n: 8960, k: 1536, variant: { cols: 64, unroll: 8 } },
+    ]);
+    // The other fields stay the default's
+    assertEquals(derivation.linearGemv?.parallelShapes, DEFAULTS.parallelShapes);
+    assertEquals(derivation.linearGemv?.sequential.variant, DEFAULTS.sequential.variant);
+    assertEquals(derivation.linearGemv?.rowsThreadTarget, DEFAULTS.rowsThreadTarget);
+  });
+
+  it("keeps the default when one record is below ×1.10 (fault: record 2 at ×1.09)", () => {
+    const derivation = derive(
+      [{ caseId: PLE, times: at1({ c64u8: faster(1.2) }) }],
+      [{ caseId: PLE, times: at1({ c64u8: faster(1.09) }) }],
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertStringIncludes(decision.reason ?? "", "×1.090 < ×1.100 in [2]");
+    assertEquals(decision.candidate, "c64u8");
+    assertEquals(derivation.linearGemv, undefined);
+  });
+
+  it("takes, among several, the candidate whose smallest gain over the records is largest", () => {
+    const derivation = derive(
+      [{ caseId: PLE, times: at1({ c64u8: faster(1.5), c128u4: faster(1.3) }) }],
+      [{ caseId: PLE, times: at1({ c64u8: faster(1.11), c128u4: faster(1.25) }) }],
+    );
+    assertEquals(decisionOf(derivation, "sequential.shapes", PLE).derivedChoice, "c128u4");
+  });
+
+  it("keeps a shape with an unsteady record (fault: baseline spread ×1.26 in record 2), and takes ×1.25 as steady", () => {
+    const times = at1({ c64u8: faster(1.2) });
+    const unsteady = derive([{ caseId: PLE, times }], [{ caseId: PLE, times, spread: 1.26 }]);
+    const decision = decisionOf(unsteady, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertStringIncludes(
+      decision.reason ?? "",
+      "unsteady in [2] at M=1 (baseline spread ×1.260 > ×1.250)",
+    );
+    const bound = derive([{ caseId: PLE, times }], [{ caseId: PLE, times, spread: 1.25 }]);
+    assertEquals(decisionOf(bound, "sequential.shapes", PLE).outcome, "adopted");
+  });
+
+  it("keeps the default when the candidate's words differ from the baseline's in one record (fault)", () => {
+    const derivation = derive(
+      [{ caseId: PLE, times: at1({ c64u8: faster(1.2) }) }],
+      [
+        {
+          caseId: PLE,
+          times: at1({ c64u8: faster(1.2) }),
+          fields: { 1: { c64u8: { identicalToBaseline: false, differingWords: 3 } } },
+        },
+      ],
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertStringIncludes(decision.reason ?? "", "its words differ from the baseline's in [2]");
+  });
+
+  it("replaces a key's exception row, and removes it when the general variant wins", () => {
+    const replaced = derive([{ caseId: HEAD_I8, times: at1({ c16u8: faster(1.2) }) }]);
+    assertEquals(replaced.linearGemv?.sequential.shapes, [
+      { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 8 } },
+    ]);
+    const removed = derive([{ caseId: HEAD_I8, times: at1({ c32u4: faster(1.2) }) }]);
+    const decision = decisionOf(removed, "sequential.shapes", HEAD_I8);
+    assertEquals([decision.defaultChoice, decision.derivedChoice], ["c16u4", "c32u4"]);
+    assertEquals(removed.linearGemv?.sequential.shapes, []);
+  });
+
+  it("adopts on a key whose cases agree, and keeps the default when they disagree (fault: g32 c64u8, g512 c16u8)", () => {
+    const agree = derive([
+      { caseId: Q_G32, times: at1({ c64u8: faster(1.2) }) },
+      { caseId: Q_G512, times: at1({ c64u8: faster(1.3) }) },
+    ]);
+    const agreed = decisionOf(agree, "sequential.shapes", Q_G32);
+    assertEquals(agreed.cases, [Q_G32, Q_G512]);
+    assertEquals([agreed.outcome, agreed.derivedChoice], ["adopted", "c64u8"]);
+    assertEquals(agreed.gains.length, 4);
+    const disagree = derive([
+      { caseId: Q_G32, times: at1({ c64u8: faster(1.2) }) },
+      { caseId: Q_G512, times: at1({ c16u8: faster(1.3) }) },
+    ]);
+    const decision = decisionOf(disagree, "sequential.shapes", Q_G32);
+    assertEquals([decision.outcome, decision.derivedChoice], ["kept", "c32u4"]);
+    assertStringIncludes(decision.reason ?? "", "the cases that share the key disagree");
+    assertStringIncludes(decision.reason ?? "", `${Q_G32} adopts c64u8`);
+    assertStringIncludes(decision.reason ?? "", `${Q_G512} adopts c16u8`);
+    assertEquals(disagree.linearGemv, undefined);
+  });
+});
+
+describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
+  it("replaces the shape's row in place with the adopted lanes and staged flag", () => {
+    const derivation = derive([
+      { caseId: PLE, rows: PARALLEL_ROWS, times: at1({ "staged-l8": faster(1.3) }) },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(
+      [decision.outcome, decision.defaultChoice, decision.derivedChoice],
+      ["adopted", "parallel-l4", "staged-l8"],
+    );
+    const index = DEFAULTS.parallelShapes.findIndex(
+      ({ storage, n, k, group }) => storage === "i4" && n === 8960 && k === 1536 && group === 32,
+    );
+    assertEquals(derivation.linearGemv?.parallelShapes[index], {
+      storage: "i4",
+      n: 8960,
+      k: 1536,
+      group: 32,
+      lanes: 8,
+      packedActivations: false,
+      stagedActivations: true,
+    });
+    assertEquals(
+      derivation.linearGemv?.parallelShapes.filter((_, at) => at !== index),
+      DEFAULTS.parallelShapes.filter((_, at) => at !== index),
+    );
+    // The sequential side is the identical class's alone
+    assertEquals(derivation.linearGemv?.sequential, DEFAULTS.sequential);
+  });
+
+  it("gains against the default's choice at reorder, not against the baseline", () => {
+    // parallel-l4 (the default's) twice as fast as the baseline; staged-l8 ×1.05 over it
+    const derivation = derive([
+      {
+        caseId: PLE,
+        rows: PARALLEL_ROWS,
+        times: at1({ "parallel-l4": faster(2), "staged-l8": faster(2.1) }),
+      },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertEquals(
+      decision.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.050", "1.050"],
+    );
+  });
+
+  it("keeps the default when the candidate is outside the band in one record (fault)", () => {
+    const times = at1({ "staged-l8": faster(1.3) });
+    const derivation = derive(
+      [{ caseId: PLE, rows: PARALLEL_ROWS, times }],
+      [
+        {
+          caseId: PLE,
+          rows: PARALLEL_ROWS,
+          times,
+          fields: { 1: { "staged-l8": { withinBand: false } } },
+        },
+      ],
+    );
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertEquals(decision.candidate, "staged-l8");
+    assertStringIncludes(decision.reason ?? "", "outside the band in [2] at M=1");
+  });
+
+  it("keeps the default when the candidate is slower at another row count of the parallel range (fault: ×0.95 at M = 4)", () => {
+    const regressed = derive([
+      {
+        caseId: PLE,
+        rows: PARALLEL_ROWS,
+        times: { 1: { "staged-l8": faster(1.3) }, 4: { "staged-l8": faster(0.95) } },
+      },
+    ]);
+    const decision = decisionOf(regressed, "parallelShapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertStringIncludes(decision.reason ?? "", "slower than the default's choice in [1] at M=4");
+    const even = derive([
+      { caseId: PLE, rows: PARALLEL_ROWS, times: { 1: { "staged-l8": faster(1.3) } } },
+    ]);
+    assertEquals(decisionOf(even, "parallelShapes", PLE).outcome, "adopted");
+  });
+
+  it("keeps the row when a record did not measure a row count the row serves (fault: record 2 without M = 8; quick records)", () => {
+    const times = at1({ c64u8: faster(1.2), "staged-l8": faster(1.3) });
+    const partial = derive(
+      [{ caseId: PLE, rows: PARALLEL_ROWS, times }],
+      [{ caseId: PLE, rows: [1, 4], times }],
+    );
+    const decision = decisionOf(partial, "parallelShapes", PLE);
+    assertEquals([decision.outcome, decision.candidate], ["kept", "staged-l8"]);
+    assertStringIncludes(decision.reason ?? "", "M=8 is not measured in [2]");
+    // What M = 1 showed is still reported
+    assertEquals(
+      decision.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.300", "1.300"],
+    );
+    const quick = derive([{ caseId: PLE, times }]);
+    assertStringIncludes(
+      decisionOf(quick, "parallelShapes", PLE).reason ?? "",
+      "M=4 is not measured in [1]",
+    );
+    // The sequential exception is read at M = 1 alone, so quick records still decide it
+    assertEquals(decisionOf(quick, "sequential.shapes", PLE).outcome, "adopted");
+    assertEquals(quick.linearGemv?.parallelShapes, DEFAULTS.parallelShapes);
+  });
+
+  it("leaves a row whose default takes packed activations as it is", () => {
+    const derivation = derive([{ caseId: PACKED, times: at1({ "staged-l16": faster(1.5) }) }]);
+    const decision = decisionOf(derivation, "parallelShapes", PACKED);
+    assertEquals([decision.outcome, decision.defaultChoice], ["kept", "packed-l32"]);
+    assertStringIncludes(decision.reason ?? "", "packed activations");
+    assertEquals(derivation.linearGemv, undefined);
+  });
+
+  it("writes no row for a subgroup candidate and names it in the decision's notes", () => {
+    const derivation = derive([
+      { caseId: PLE, rows: PARALLEL_ROWS, times: at1({ "subgroup32-l8": faster(1.4) }) },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertEquals(decision.notes.length, 1);
+    assertStringIncludes(decision.notes[0] ?? "", "subgroup32-l8 meets the rule too");
+    assertEquals(derivation.linearGemv, undefined);
+  });
+});
+
+describe("deriveLinearGemvChoices: the derivation", () => {
+  it("keeps the thread target, and has no field when nothing is adopted", () => {
+    const derivation = derive([{ caseId: PLE }]);
+    assertEquals(derivation.linearGemv, undefined);
+    assertEquals(derivation.defaults, DEFAULTS);
+    const target = derivation.decisions.at(-1);
+    assertEquals([target?.field, target?.outcome], ["rowsThreadTarget", "kept"]);
+    assertStringIncludes(target?.reason ?? "", "only records of the full set");
+    const full = derive([{ caseId: PLE, rows: [1, 16] }]);
+    assertStringIncludes(full.decisions.at(-1)?.reason ?? "", "no rule turns the heights into it");
+  });
+
+  it("names the records in its provenance and its lines, with the rule it used", () => {
+    const derivation = derive([{ caseId: PLE, times: at1({ c64u8: faster(1.2) }) }]);
+    assertEquals(
+      derivation.provenance.records.map(({ path, sha256, candidateSet }) => [
+        path,
+        sha256,
+        candidateSet,
+      ]),
+      [
+        ["a.json", "sha-a.json", "quick"],
+        ["bb.json", "sha-bb.json", "quick"],
+      ],
+    );
+    assertEquals(derivation.provenance.adapter, GEMV_ADAPTER);
+    assertEquals(derivation.rule, { minSpeedup: 1.1, steadySpread: 1.25 });
+    assertEquals(derivation.verdicts[1]?.startsWith("  - [1] a.json ("), true);
+    assert(
+      derivation.verdicts.includes(
+        `  - i4 n8960 k1536 (case ${PLE}): c32u4 -> c64u8 (×1.200 [1], ×1.200 [2])`,
+      ),
+      derivation.verdicts.join("\n"),
+    );
+  });
+
+  it("gives a field the saved-table reader reads back", () => {
+    const { linearGemv } = derive([
+      { caseId: PLE, rows: PARALLEL_ROWS, times: at1({ "staged-l8": faster(1.3) }) },
+    ]);
+    assert(linearGemv !== undefined);
+    const table = { ...TABLE, linearGemv };
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(table)).linearGemv, linearGemv);
+  });
+});
+
+describe("deriveLinearGemvChoices: the refusals", () => {
+  const specs = [{ caseId: PLE }];
+  const refused = (inputs: readonly GemvSweepInput[], message: string, table = TABLE): void => {
+    assertThrows(() => deriveLinearGemvChoices(inputs, { table }), Error, message);
+  };
+
+  it("refuses one record, and the same record twice", () => {
+    refused([input("a.json", specs)], "at least 2 GEMV sweep records of one adapter (1 given)");
+    const record = input("a.json", specs);
+    refused([record, { ...record, path: "copy.json" }], "passed twice (a.json and copy.json)");
+  });
+
+  it("refuses a record of other kernels or another case table (fault: the fingerprints replaced)", () => {
+    refused(
+      [
+        input("a.json", specs),
+        input("bb.json", specs, (record) => ({ ...record, kernels: "0000000000000000" })),
+      ],
+      "bb.json: its kernel fingerprint 0000000000000000 is not the current runtime's",
+    );
+    // A row's kernel changed under the record's own fingerprint
+    const changed = input("bb.json", specs, (record) => ({
+      ...record,
+      rows: record.rows.map((entry) =>
+        entry.candidate === "c64u8"
+          ? { ...entry, choice: { ...entry.choice, variant: { cols: 64, unroll: 2 } } }
+          : entry,
+      ),
+    }));
+    refused([input("a.json", specs), changed], "bb.json: its kernel fingerprint");
+    refused(
+      [
+        input("a.json", specs),
+        input("bb.json", specs, (record) => ({ ...record, caseTable: "0123456789abcdef" })),
+      ],
+      "bb.json: its case table 0123456789abcdef is not the current runtime's",
+    );
+  });
+
+  it("refuses a record measured against other default-profile choices (fault: the reorder choice renamed)", () => {
+    const renamed = input("bb.json", specs, (record) => ({
+      ...record,
+      summaries: record.summaries.map((summary) => ({
+        ...summary,
+        profile: { ...summary.profile, reorder: "parallel-l8" },
+      })),
+    }));
+    refused(
+      [input("a.json", specs), renamed],
+      "is parallel-l8 in the record, parallel-l4 in the current runtime",
+    );
+  });
+
+  it("refuses another format, wall-clock or quantized timing", () => {
+    for (const [change, message] of [
+      [
+        (record: GemvSweepReport) => ({ ...record, format: "karume-gemv-sweep/1" }),
+        "format is not karume-gemv-sweep/2",
+      ],
+      [
+        (record: GemvSweepReport) => ({
+          ...record,
+          gpuTiming: { ...record.gpuTiming, unit: "wall" },
+        }),
+        'gpuTiming.unit is "wall"',
+      ],
+      [
+        (record: GemvSweepReport) => ({
+          ...record,
+          gpuTiming: { ...record.gpuTiming, quantized: true },
+        }),
+        "quantized timestamps are not read",
+      ],
+    ] as const) {
+      refused([input("a.json", specs), input("bb.json", specs, change)], message);
+    }
+  });
+
+  it("refuses records of two adapters, and records the table's match or provenance does not name", () => {
+    refused(
+      [
+        input("a.json", specs),
+        input("bb.json", specs, (record) => ({
+          ...record,
+          adapter: { ...record.adapter, device: "0x9999" },
+        })),
+      ],
+      'bb.json: adapter device "0x9999" differs from a.json',
+    );
+    const inputs = [input("a.json", specs), input("bb.json", specs)];
+    refused(inputs, "is not table 'other''s match", {
+      ...TABLE,
+      id: "other",
+      match: { vendor: "nvidia" },
+    });
+    const withProvenance: GeometryProfile = {
+      ...TABLE,
+      provenance: { adapter: { ...GEMV_ADAPTER, description: "Another GPU" }, families: {} },
+    };
+    refused(inputs, "differs from table 'test-gpu''s provenance", withProvenance);
+  });
+});
+
+describe("a regeneration of the tile geometry (deriveGeometryProfile with a base)", () => {
+  it("carries the base's linearGemv as it is", () => {
+    const sweep = (path: string) => ({
+      report: report(familyDefaultRows("gemm")),
+      path,
+      sha256: `sha-${path}`,
+    });
+    const target = { vendor: "apple", architecture: "metal-3" } as const;
+    const base = deriveGeometryProfile([sweep("base.json")], { ...target, id: "test-gpu" }).profile;
+    assertEquals(base.linearGemv, undefined);
+    const { linearGemv } = derive([{ caseId: PLE, times: at1({ c64u8: faster(1.2) }) }]);
+    assert(linearGemv !== undefined);
+    const { profile } = deriveGeometryProfile([sweep("new.json")], {
+      ...target,
+      id: "test-gpu",
+      base: { ...base, linearGemv },
+    });
+    assertEquals(profile.linearGemv, linearGemv);
+    // Before the provenance, as the type orders the fields (the printer writes them in this order)
+    const keys = Object.keys(profile);
+    assertEquals(keys.indexOf("linearGemv"), keys.indexOf("provenance") - 1);
+  });
+});

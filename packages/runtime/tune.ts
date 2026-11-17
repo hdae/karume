@@ -73,8 +73,15 @@
  * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/2`). Each
  * candidate's output is checked in the sweep: a candidate of the baseline's summation order must
  * write the baseline's words, a reordering one must stay inside the band of `linear` against an f64
- * oracle on the host. Nothing derives a profile from its record yet. The same rule applies: never
- * alongside inference on the same GPU.
+ * oracle on the host. The same rule applies: never alongside inference on the same GPU.
+ * {@link deriveLinearGemvChoices} turns two or more of its records of one adapter into a profile's
+ * `linearGemv`: a candidate replaces the default profile's choice for a shape only when it is at
+ * least ×1.10 faster than that choice in every record with its check held in every record, and a
+ * shape a record measured while the device was unsteady (the baseline's rounds spread beyond ×1.25)
+ * keeps the default. The identical class writes the sequential variant's per-shape exceptions, which
+ * change no number of any Session; the reorder class writes the parallel rows, which change the
+ * numbers of Sessions at `reorder`, inside the band, and only from records of the `full` set (a
+ * parallel row serves M = 1 to 8, and a `quick` record measures M = 1 alone).
  *
  * {@link runSessionAb} is the wall-clock A/B of whole runs, the measurement a fusion rule (built-in
  * or external) is accepted or dropped on: two or more arms — Session configurations built with
@@ -213,6 +220,22 @@ export type {
  * rows.
  */
 export { gemvSweepKernelsId } from "./src/tune/gemv-fingerprint.ts";
+
+/**
+ * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from two or more GEMV
+ * sweep records of its adapter: per shape and class a decision (adopted or kept, the gains per
+ * record, why it was kept), the lines that state them, and the records used. The field is absent
+ * from the result when every choice stays the default's. Records of another format, adapter, case
+ * table or kernels, wall-clock or quantized ones, and fewer than two records are refused.
+ */
+export { deriveLinearGemvChoices } from "./src/tune/gemv-derive.ts";
+export type {
+  DeriveLinearGemvOptions,
+  GemvSweepInput,
+  LinearGemvDecision,
+  LinearGemvDerivation,
+  LinearGemvGain,
+} from "./src/tune/gemv-derive.ts";
 
 /**
  * Times the s16 and online routes of a8 fused attention at given shapes (default:

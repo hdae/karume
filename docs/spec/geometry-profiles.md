@@ -17,14 +17,18 @@ adapter's match and measures nothing at run time.
   base, a covered family is derived from every case of its current case set, so a sweep of only some of a family's
   ops is refused.
 - A new adapter's first table has no base and needs its adapter match on the command line.
+- The GEMV choices of linear come from GEMV sweep records ([below](#deriving-the-gemv-choices)), given next to the
+  sweep records or alone for a registered table. Without them, a base table's `linearGemv` is carried as it is,
+  also through a regeneration that derives only the tile geometry.
 - A whole table is never re-derived from all the records it ever came from, and a record of an older format is never
   rewritten to pass. The records cited by a family of an older format stay cited until that family is swept again.
 
 ## A record
 
 - A workbench record (`karume-workbench/1`), unwrapped to its `data`, or a bare runtime record
-  (`karume-geometry-sweep/*`, `karume-attention-bench/*`) written before the workbench existed. A workbench record of
-  another entry and a workbench record without `data` are errors that name the file.
+  (`karume-geometry-sweep/*`, `karume-attention-bench/*`) written before the workbench existed, or a bare GEMV sweep
+  record (`karume-gemv-sweep/*`) as `runGemvSweep` returns it. A workbench record of another entry than the option
+  takes and a workbench record without `data` are errors that name the file.
 - A record path lies inside the repository. The table's provenance cites it repository-relative, with the sha256 of
   the file's bytes as stored (for a workbench record, of the whole file).
 - The records live outside git (`outputs/`).
@@ -38,6 +42,10 @@ adapter's match and measures nothing at run time.
   quantised, the checkout); the families carried over and the last commit that touched the table file, where their
   adoption lines are; the adoption rule with the threshold used; the verdict lines of the derivation. It holds no
   date of generation and no absolute path: the same inputs give the same bytes.
+- When the table carries the GEMV choices, the header says where they come from. When this generation derived them,
+  they are among the things derived, their records are listed with the others, their rule follows the tile
+  geometry's (which is left out when no sweep record was given) and their decisions follow the verdict lines; when
+  they were carried, they are among the things carried over.
 - The headers of the three tables registered before the generator existed (`apple-metal-3`, `nvidia-ampere`,
   `nvidia-blackwell`) are older prose. Each is replaced when its table is regenerated.
 
@@ -56,19 +64,66 @@ adapter's match and measures nothing at run time.
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
   profile's.
+- A table carries the field only as a whole: the default's choices with the derived ones in place. Its provenance has
+  no entry for the field (the profile's type holds none); the records it came from are in the table's header.
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
 - The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
   reads it.
 
+## Deriving the GEMV choices
+
+`deriveLinearGemvChoices` of `@karume/runtime/tune` derives `linearGemv` for a table from GEMV sweep records. It
+measures nothing and changes no default value.
+
+- **Inputs**: two or more `karume-gemv-sweep/2` records of one adapter — the table's match selects it and, when the
+  table has provenance, its four adapter fields are the table's —, with GPU timestamps (`ns` or `deno-raw-tick`)
+  that are not quantised, whose case-table and kernel fingerprints equal the current runtime's (the kernel fingerprint
+  recomputed over the record's rows) and whose summaries name the current default profile's choice at `exact` and
+  at `reorder` for every case and row count. Any other record is refused with the reason, and so are fewer than two
+  records and the same record twice: the timing of these small dispatches moves between runs, so one record is not
+  evidence.
+- **Adoption**: a candidate replaces the default profile's choice for a shape only when it is at least ×1.10 faster than
+  that choice in every record and its check holds in every record (identical class: its words equal the baseline's;
+  reorder class: inside the band). Among several, the one whose smallest gain over the records is largest. A
+  candidate's time is the record's `perDispatch` (the minimum of its rounds ÷ `reps`). The identical class gains
+  against the baseline, the reorder class against the default's choice at `reorder`.
+- **Steadiness**: a (case, row count) whose baseline spread (`baselineSpread`) exceeds 1.25 in a record is unsteady
+  in that record. A shape whose decision reads an unsteady (case, row count), or one a record did not measure, keeps
+  the default. The bound comes from the two `quick` records of the RTX 3080 Ti of 2026-11-17: below 1.25 the spread
+  did not predict a less repeatable gain.
+- **The identical class** writes the sequential variant's per-shape exceptions (`sequential.shapes`) from M = 1. Its
+  key has no group length: the cases that share a key must reach the same decision, or the key keeps the default. An
+  adopted variant replaces the key's exception or adds one; when it is the general variant, the key's exception goes.
+  It changes no number of any Session.
+- **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
+  staged candidates at M = 1. A parallel row serves M = 1 to 8, so every record must also have measured the case's
+  other row counts of that range (M = 4 and 8: the `full` set; a `quick` record keeps the row), with the candidate
+  not slower than the default's choice at any of them. The adopted row replaces the shape's row in place. A row whose default
+  takes packed activations stays: the packed kernels are not measured. A subgroup candidate that meets the rule is
+  named in the decision's notes and writes nothing: the subgroup form is a Session option, not a row. It changes the
+  numbers of Sessions at `reorder`, inside the band.
+- **Not derived**: the row-block thread target (one number for every shape, while the `full` set measures a row-block
+  height per case and row count, and no rule turns those into it) and the general sequential variant (it also sets the
+  row blocks' columns and read-ahead).
+- **Output**: the field (absent when nothing is adopted), the default profile's choices, one decision per sequential
+  key, per parallel row and for the thread target (adopted or kept, the default's choice and the derived one, the gains
+  per record, why it was kept), the lines that state them, the rule's two numbers and the records used (path, sha256,
+  date, candidate set, user agent, kernel fingerprint; the adapter and the case table).
+
 ## The command
 
-`node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,…] [--attention-bench=<path>[,…]]
-[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]`
+`node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,…]] [--attention-bench=<path>[,…]]
+[--gemv-records=<path>,<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>]
+[--dry-run]`
 
 - A registered id uses its table as base and its table's match; giving a match is an error. An id that is not
-  registered needs `--vendor`.
-- `--dry-run` writes nothing and prints the derived profile, the verdict lines and every field that differs from the
-  registered table.
+  registered needs `--vendor` and `--records`.
+- At least one of `--records` and `--gemv-records` is given. With `--gemv-records` alone, a registered table keeps its
+  tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`. `--min-speedup` is the tile
+  geometry's threshold only.
+- `--dry-run` writes nothing and prints the derived profile, the verdict lines (with the GEMV decisions shape by shape
+  and whether the table would carry the field) and every field that differs from the registered table; with GEMV
+  records, `linearGemv` is compared as each table runs with it (the default's choices where a table has no field).
 - A new table is written but not registered: the command prints the two edits registration needs (the array of
   `BUILTIN_GEOMETRY_PROFILES` and the list `geometry_profile_test.ts` compares it with).
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else.
@@ -83,3 +138,5 @@ adapter's match and measures nothing at run time.
 - `apple-metal-3` has no such case: every record it cites has a format the derivation no longer accepts.
 - The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
   the profile, and a profile with other choices changes the selection and the pipeline key (core lane).
+- The GEMV derivation on hand-built records: the adoption rule, the steadiness bound, the kept cases and the refusals
+  (core lane); the generator's dry run, its write path and the carry-over of an existing `linearGemv`.
