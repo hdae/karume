@@ -27,6 +27,8 @@ const PLAN: SweepPlan = {
   caseIds: [CASE_A, CASE_B],
   ops: ["i8a8-conv3d"],
   candidateSet: "full",
+  geometries: [],
+  quickLookMargin: 1.25,
   rounds: 5,
   idleSeconds: 0,
 };
@@ -61,14 +63,14 @@ describe("geometrySweepResult", () => {
     it("keeps the record merged from every case as its data", async () => {
       const result = geometrySweepResult(PLAN, await runWith(new AbortController().signal));
       const record = recordOf(result.data);
-      expect(record.format).toBe("karume-geometry-sweep/3");
+      expect(record.format).toBe("karume-geometry-sweep/4");
       expect(record.settings.cases).toEqual([CASE_A, CASE_B]);
     });
 
     it("sums up the totals, then one line per case", async () => {
       const result = geometrySweepResult(PLAN, await runWith(new AbortController().signal));
       expect(result.summary).toEqual([
-        "2 of 2 planned cases finished · 4 rows · 0 with an error · 0 not identical to the default",
+        "2 of 2 planned cases finished · 4 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default",
         CASE_LINE(CASE_A),
         CASE_LINE(CASE_B),
       ]);
@@ -90,7 +92,7 @@ describe("geometrySweepResult", () => {
       );
       const [totals] = geometrySweepResult(PLAN, outcome).summary;
       expect(totals).toBe(
-        "2 of 2 planned cases finished · 5 rows · 1 with an error · 1 not identical to the default",
+        "2 of 2 planned cases finished · 5 rows · 0 screened by the quick look (margin ×1.25) · 1 with an error · 1 not identical to the default",
       );
     });
   });
@@ -106,7 +108,7 @@ describe("geometrySweepResult", () => {
       // The cancel between cases is what marks the record aborted (the case itself finished).
       expect(recordOf(result.data).aborted).toBe(true);
       expect(result.summary).toEqual([
-        "1 of 2 planned cases finished · 2 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
+        "1 of 2 planned cases finished · 2 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default · stopped: cancelled",
         CASE_LINE(CASE_A),
       ]);
     });
@@ -121,7 +123,7 @@ describe("geometrySweepResult", () => {
       });
       const result = geometrySweepResult(PLAN, outcome);
       expect(result.summary[0]).toBe(
-        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
+        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default · stopped: cancelled",
       );
     });
   });
@@ -133,7 +135,7 @@ describe("geometrySweepResult", () => {
       }));
       const result = geometrySweepResult(PLAN, outcome);
       expect(result.summary[0]).toBe(
-        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 with an error · 0 not identical to the default · stopped: device lost (unknown): GPU process crashed",
+        "0 of 2 planned cases finished · 1 cut short · 2 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default · stopped: device lost (unknown): GPU process crashed",
       );
       expect(result.verdict).toBe("incomplete");
     });
@@ -165,7 +167,7 @@ describe("geometrySweepResult", () => {
       const result = geometrySweepResult(PLAN, { reports: [], stop: { kind: "cancelled" } });
       expect(result.data).toBeUndefined();
       expect(result.summary).toEqual([
-        "0 of 2 planned cases finished · 0 rows · 0 with an error · 0 not identical to the default · stopped: cancelled",
+        "0 of 2 planned cases finished · 0 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default · stopped: cancelled",
       ]);
       expect(result.verdict).toBeUndefined();
     });
@@ -198,7 +200,7 @@ describe("geometrySweepResult", () => {
         stop: { kind: "completed" },
       });
       expect(summary[0]).toBe(
-        "1 of 1 planned cases finished · 2 rows · 0 with an error · 0 not identical to the default",
+        "1 of 1 planned cases finished · 2 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default",
       );
       expect(summary[1]).toBe(
         "K-88 against this adapter's table geometry (default); a ratio is the table's time ÷ the variant's (above ×1 the variant is faster)",
@@ -352,7 +354,10 @@ describe("progressLine", () => {
     );
     // Case a finished (its summary is the sweep's last event of it), then case b started.
     const measuring = after([
-      { kind: "sweep", progress: { kind: "case", summary: { caseId: "a", elapsedMs: 1 } } },
+      {
+        kind: "sweep",
+        progress: { kind: "case", summary: { caseId: "a", elapsedMs: 1, screened: 0 } },
+      },
       { kind: "case", index: 1, caseId: "b" },
       {
         kind: "sweep",

@@ -1,4 +1,4 @@
-// Synthetic fixture of sweep records (`karume-geometry-sweep/3`) — shared by the tests of the
+// Synthetic fixture of sweep records (`karume-geometry-sweep/4`) — shared by the tests of the
 // generator (src/tune/derive.ts). Every record carries the per-family matching keys a writer records
 // for every case of the sweep's table (`recordKeys` — the generator requires them for every family a
 // record has rows of).

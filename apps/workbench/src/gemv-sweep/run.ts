@@ -43,8 +43,8 @@ export type GemvRunDeps = {
 };
 
 /**
- * Sweeps the plan's cases one `runGemvSweep` call each with the plan's candidate set and rounds,
- * idling before every case but the first (`runPerCase` — its cancel and device-loss rules). Never
+ * Sweeps the plan's cases one `runGemvSweep` call each with the plan's candidate set, row counts,
+ * candidates, quick-look margin and rounds, idling before every case but the first (`runPerCase` — its cancel and device-loss rules). Never
  * rejects: the records so far come back with the reason the run ended.
  */
 export const runGemvPlan = (plan: GemvSweepPlan, deps: GemvRunDeps): Promise<GemvRunOutcome> => {
@@ -57,6 +57,9 @@ export const runGemvPlan = (plan: GemvSweepPlan, deps: GemvRunDeps): Promise<Gem
         ...(deps.gpu === undefined ? {} : { gpu: deps.gpu }),
         candidateSet: plan.candidateSet,
         cases: [caseId],
+        ...(plan.rows.length === 0 ? {} : { rows: plan.rows }),
+        ...(plan.candidates.length === 0 ? {} : { candidates: plan.candidates }),
+        quickLookMargin: plan.quickLookMargin,
         rounds: plan.rounds,
         signal,
         onProgress,

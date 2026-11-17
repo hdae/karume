@@ -1,4 +1,3 @@
-import { gemvSweepKernelsId } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mergeGemvSweepReports } from "../src/gemv-sweep/record.ts";
@@ -13,6 +12,9 @@ const PLANNED = { plannedCaseIds: [CASE_A, CASE_B], cancelledBetweenCases: false
 const PLAN: GemvSweepPlan = {
   caseIds: [CASE_A, CASE_B],
   candidateSet: "quick",
+  rows: [],
+  candidates: [],
+  quickLookMargin: 1.25,
   rounds: 5,
   idleSeconds: 10,
 };
@@ -40,9 +42,17 @@ describe("mergeGemvSweepReports", () => {
       expect(merged.settings.cases).toEqual([CASE_A, CASE_B]);
     });
 
-    it("recomputes the kernel fingerprint over the merged rows", () => {
-      expect(merged.kernels).toBe(gemvSweepKernelsId(merged.rows));
-      expect(merged.kernels).not.toBe(gemvPerCase(CASE_A).kernels);
+    it("keeps each row's and each case's own fingerprint as the per-case records wrote them", () => {
+      expect(merged.rows.map(({ kernel }) => kernel)).toEqual(
+        [gemvPerCase(CASE_A), gemvPerCase(CASE_B)].flatMap(({ rows }) =>
+          rows.map(({ kernel }) => kernel),
+        ),
+      );
+      expect(merged.cases.map(({ fingerprint }) => fingerprint)).toEqual([
+        gemvPerCase(CASE_A).cases[0]?.fingerprint,
+        gemvPerCase(CASE_B).cases[0]?.fingerprint,
+      ]);
+      expect(Object.keys(merged)).not.toContain("kernels");
     });
 
     it("takes the first record's start and the last record's end", () => {
@@ -98,8 +108,9 @@ describe("mergeGemvSweepReports", () => {
       );
     });
 
-    it("throws for another case table", () => {
-      const other = { ...gemvPerCase(CASE_B), caseTable: "fedcba9876543210" };
+    it("throws for another quick-look margin", () => {
+      const base = gemvPerCase(CASE_B);
+      const other = { ...base, settings: { ...base.settings, quickLookMargin: 0 } };
       expect(() => mergeGemvSweepReports([gemvPerCase(CASE_A), other], PLANNED)).toThrow(
         /Record 1 differs/,
       );
@@ -126,11 +137,11 @@ describe("the summary", () => {
     const line = (caseId: string): string =>
       `${caseId} M=1: baseline c32u4 0.020 ms · spread 1.004 · fastest identical c64u8 ×1.250 · fastest reorder parallel-l4 ×2.000 · exact c32u4 ×0.800 of the fastest identical · reorder parallel-l4 ×1.000 of the fastest reorder`;
     expect(result.summary).toEqual([
-      "2 of 2 planned cases finished · 6 rows · 0 with an error · 0 not identical to the baseline · 0 outside the band",
+      "2 of 2 planned cases finished · 6 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the baseline · 0 outside the band",
       line(CASE_A),
       line(CASE_B),
     ]);
-    expect(result.data?.format).toBe("karume-gemv-sweep/2");
+    expect(result.data?.format).toBe("karume-gemv-sweep/3");
   });
 
   it("shows no spread for a row count without one (its baseline failed)", () => {
@@ -156,9 +167,30 @@ describe("the summary", () => {
       { reports: [gemvPerCase(CASE_A, { rows })], stop: COMPLETED },
     );
     expect(result.summary).toEqual([
-      "1 of 1 planned cases finished · 3 rows · 0 with an error · 1 not identical to the baseline · 1 outside the band",
+      "1 of 1 planned cases finished · 3 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 1 not identical to the baseline · 1 outside the band",
       `${CASE_A} M=1: baseline c32u4 0.020 ms · spread 1.004 · exact c32u4 ×1.000 of the fastest identical · reorder parallel-l4 outside the band`,
     ]);
+  });
+
+  it("counts the kernels the quick look screened out, per case and in the totals, and says when it was off; a screened row is never wrong", () => {
+    const {
+      perDispatch: _time,
+      identicalToBaseline: _same,
+      ...identical
+    } = gemvRow(CASE_A, "identical");
+    const rows = [
+      gemvRow(CASE_A, "baseline"),
+      { ...identical, screened: true as const, quickPerDispatch: 40_000 },
+      gemvRow(CASE_A, "reorder"),
+    ];
+    const outcome = { reports: [gemvPerCase(CASE_A, { rows })], stop: COMPLETED };
+    const result = gemvSweepResult({ ...PLAN, caseIds: [CASE_A] }, outcome);
+    expect(result.summary[0]).toContain("3 rows · 1 screened by the quick look (margin ×1.25)");
+    expect(result.summary[1]).toContain("· 1 screened");
+    expect(result.summary[1]).not.toContain("fastest identical c64u8");
+    expect(result.verdict).toBe("pass");
+    const off = gemvSweepResult({ ...PLAN, caseIds: [CASE_A], quickLookMargin: 0 }, outcome);
+    expect(off.summary[0]).toContain("3 rows · quick look off ·");
   });
 
   it("says why the run stopped, and rethrows the error of a run that measured nothing", () => {
@@ -171,7 +203,7 @@ describe("the summary", () => {
       stop: { kind: "cancelled" },
     });
     expect(cancelled.summary[0]).toBe(
-      "1 of 2 planned cases finished · 3 rows · 0 with an error · 0 not identical to the baseline · 0 outside the band · stopped: cancelled",
+      "1 of 2 planned cases finished · 3 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the baseline · 0 outside the band · stopped: cancelled",
     );
     expect(cancelled.data?.aborted).toBe(true);
   });

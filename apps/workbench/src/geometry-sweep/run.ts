@@ -51,7 +51,7 @@ export type SweepRunDeps = {
 
 /**
  * Sweeps the plan's cases one `runGeometrySweep` call each with the plan's candidate set, op
- * families and rounds, idling before every case but the first (`runPerCase` — its cancel and
+ * families, geometries, quick-look margin and rounds, idling before every case but the first (`runPerCase` — its cancel and
  * device-loss rules). Never rejects: the records so far come back with the reason the run ended.
  */
 export const runSweepPlan = (plan: SweepPlan, deps: SweepRunDeps): Promise<SweepRunOutcome> => {
@@ -65,6 +65,8 @@ export const runSweepPlan = (plan: SweepPlan, deps: SweepRunDeps): Promise<Sweep
         candidateSet: plan.candidateSet,
         ops: plan.ops,
         cases: [caseId],
+        ...(plan.geometries.length === 0 ? {} : { geometries: plan.geometries }),
+        quickLookMargin: plan.quickLookMargin,
         rounds: plan.rounds,
         signal,
         onProgress,

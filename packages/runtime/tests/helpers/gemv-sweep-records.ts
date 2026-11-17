@@ -1,14 +1,20 @@
-// Synthetic GEMV sweep records (`karume-gemv-sweep/2`) for the tests of the GEMV derivation
+// Synthetic GEMV sweep records (`karume-gemv-sweep/3`) for the tests of the GEMV derivation
 // (src/tune/gemv-derive.ts) and of the generator that uses it (tools/geometry-profiles — tools may
 // reach into tests/helpers: ADR 0008 addendum 2026-09-05). The rows are the sweep's own measurement
-// plans (`gemvMeasurementPlans`, the full set) of the current runtime, and the record is assembled by
-// the sweep's own `gemvSweepReport`, so its fingerprints and its default-profile choices are what a
-// sweep of the current runtime writes. Every kernel takes `BASE_TIME` unless a case gives it another
-// time, so a candidate's gain is `BASE_TIME ÷ its time`. No GPU.
+// plans (`gemvMeasurementPlans`, the full set or the row-blocks set by row count) of the current
+// runtime, each with the fingerprint of its kernel, and the record is assembled by the sweep's own
+// `gemvSweepReport`, so its fingerprints and its default-profile choices are what a sweep of the
+// current runtime writes. Every kernel takes `BASE_TIME` unless a case gives it another time, so a
+// candidate's gain is `BASE_TIME ÷ its time`. No GPU.
 
 import { opTolerance } from "../../src/reference/op-tolerance.ts";
-import { type GemvGates, gemvMeasurementPlans } from "../../src/tune/gemv-candidates.ts";
+import {
+  type GemvGates,
+  gemvMeasurementPlans,
+  PARALLEL_MAX_ROWS,
+} from "../../src/tune/gemv-candidates.ts";
 import { gemvCaseOf } from "../../src/tune/gemv-cases.ts";
+import { gemvKernelId } from "../../src/tune/gemv-fingerprint.ts";
 import {
   choiceRecord,
   type GemvSweepCaseSummary,
@@ -36,18 +42,43 @@ export type GemvCaseSpec = {
   readonly rows?: readonly number[];
   /** The time per dispatch of a kernel by row count and candidate name (default {@link BASE_TIME}). */
   readonly times?: Readonly<Record<number, Readonly<Record<string, number>>>>;
-  /** Fields laid over a row by row count and candidate name (a failed check, an error). */
+  /**
+   * Fields laid over a row by row count and candidate name (a failed check, an error, an old
+   * kernel fingerprint). A row given `screened: true` loses its time and its checks, as the sweep
+   * writes it.
+   */
   readonly fields?: Readonly<Record<number, Readonly<Record<string, Partial<GemvSweepRow>>>>>;
-  /** The baseline spread of every row count (default 1.01). */
-  readonly spread?: number;
+  /** The baseline spread of every row count (default 1.01), or per row count. */
+  readonly spread?: number | Readonly<Record<number, number>>;
+  /** Fields laid over the summary of a row count (another default-profile choice, say). */
+  readonly summaries?: Readonly<Record<number, Partial<GemvSweepCaseSummary>>>;
 };
 
 export type GemvRecordOptions = {
   readonly adapter?: GemvSweepReport["adapter"];
-  readonly candidateSet?: "quick" | "full";
+  readonly candidateSet?: "quick" | "full" | "row-blocks";
 };
 
-/** A record of the cases, its rows the full set's plans at each case's row counts. */
+/** A row the quick look screened out: its identity, launch fields and quick time only. */
+const screenedRow = (row: GemvSweepRow): GemvSweepRow => {
+  const {
+    reps: _reps,
+    rounds: _rounds,
+    wallRounds: _wallRounds,
+    perDispatch,
+    speedupVsBaseline: _speedup,
+    identicalToBaseline: _identical,
+    differingWords: _differing,
+    maxAbsError: _error,
+    bandUse: _bandUse,
+    withinBand: _within,
+    nonFiniteOutputs: _nonFinite,
+    ...rest
+  } = row;
+  return { ...rest, ...(perDispatch === undefined ? {} : { quickPerDispatch: perDispatch }) };
+};
+
+/** A record of the cases, its rows the plans of the sets at each case's row counts. */
 export const gemvRecord = (
   date: string,
   specs: readonly GemvCaseSpec[],
@@ -59,20 +90,26 @@ export const gemvRecord = (
     const gemvCase = gemvCaseOf(spec.caseId);
     if (gemvCase === undefined) throw new Error(`no case ${spec.caseId}`);
     const counts = spec.rows ?? [1];
-    for (const plan of gemvMeasurementPlans(gemvCase, "full", GATES)) {
+    const plans = [
+      ...gemvMeasurementPlans(gemvCase, "full", GATES),
+      ...gemvMeasurementPlans(gemvCase, "row-blocks", GATES),
+    ];
+    for (const plan of plans) {
       if (!counts.includes(plan.m)) continue;
       const time = (name: string): number => spec.times?.[plan.m]?.[name] ?? BASE_TIME;
       const baseline = time(plan.baseline.name);
+      let screened = 0;
       for (const [index, candidate] of [plan.baseline, ...plan.candidates].entries()) {
         const isBaseline = index === 0;
         const perDispatch = time(candidate.name);
-        rows.push({
+        const row: GemvSweepRow = {
           caseId: gemvCase.id,
           m: plan.m,
           candidate: candidate.name,
           class: candidate.class,
           isBaseline,
           choice: choiceRecord(candidate.choice, gemvCase.storage),
+          kernel: gemvKernelId(gemvCase, plan.m, candidate.choice),
           reps: 100,
           // Off Chrome's 100 µs step, so the record does not look quantized
           rounds: [perDispatch * 100 + 1, perDispatch * 101 + 1],
@@ -84,14 +121,20 @@ export const gemvRecord = (
               : { identicalToBaseline: true, differingWords: 0 }
             : { maxAbsError: 1e-6, bandUse: 0.01, withinBand: true, nonFiniteOutputs: 0 }),
           ...spec.fields?.[plan.m]?.[candidate.name],
-        });
+        };
+        if (row.screened === true) screened += 1;
+        rows.push(row.screened === true ? screenedRow(row) : row);
       }
+      const spread =
+        typeof spec.spread === "number" ? spec.spread : (spec.spread?.[plan.m] ?? 1.01);
       summaries.push({
         caseId: gemvCase.id,
         m: plan.m,
         elapsedMs: 1000,
         profile: plan.profile,
-        baselineSpread: spec.spread ?? 1.01,
+        baselineSpread: spread,
+        screened,
+        ...spec.summaries?.[plan.m],
       });
     }
   }
@@ -99,10 +142,15 @@ export const gemvRecord = (
     const gemvCase = gemvCaseOf(caseId);
     return gemvCase === undefined ? [] : [gemvCase];
   });
+  const measured = specs.flatMap(({ rows: counts }) => counts ?? [1]);
   const candidateSet =
     options.candidateSet ??
-    (specs.some(({ rows: counts }) => counts?.some((m) => m > 1)) ? "full" : "quick");
-  return gemvSweepReport({
+    (measured.some((m) => m > PARALLEL_MAX_ROWS)
+      ? "row-blocks"
+      : measured.some((m) => m > 1)
+        ? "full"
+        : "quick");
+  const record = gemvSweepReport({
     startedAt: date,
     date,
     aborted: false,
@@ -116,11 +164,21 @@ export const gemvRecord = (
     timing: { feature: true, unit: "ns" },
     candidateSet,
     caseIds: cases.map(({ id }) => id),
+    selection: {},
     rounds: 2,
+    quickLookMargin: 1.25,
     tolerance: opTolerance("linear"),
     deviceLost: null,
     cases,
     summaries,
     rows,
   });
+  // The planned cases list the row counts the record measured (a test may mix the sets' counts)
+  return {
+    ...record,
+    cases: record.cases.map((entry) => {
+      const spec = specs.find(({ caseId }) => caseId === entry.id);
+      return { ...entry, rows: spec?.rows ?? [1] };
+    }),
+  };
 };

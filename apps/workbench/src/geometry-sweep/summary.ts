@@ -40,8 +40,8 @@ export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): str
 
 /**
  * Cases planned and finished, a case cut short (Cancel or a device loss stopped it midway: its rows so
- * far are in the record, and it is not a finished case), rows, failed rows, rows whose output
- * differed, and why the run stopped.
+ * far are in the record, and it is not a finished case), rows, the rows the quick look screened out
+ * (with its margin), failed rows, rows whose output differed, and why the run stopped.
  */
 const totalsLine = (
   plan: SweepPlan,
@@ -55,6 +55,9 @@ const totalsLine = (
     `${reports.length - short} of ${plan.caseIds.length} planned cases finished`,
     short === 0 ? undefined : `${short} cut short`,
     `${rows.length} rows`,
+    plan.quickLookMargin === 0
+      ? "quick look off"
+      : `${rows.filter((row) => row.screened === true).length} screened by the quick look (margin ×${plan.quickLookMargin})`,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.identicalToDefault === false).length} not identical to the default`,
     stopText(stop),
@@ -146,7 +149,7 @@ const sweepVerdict = (
 export type GeometrySweepResult = EntryResult & { readonly data: GeometrySweepReport | undefined };
 
 /**
- * The result of a run's outcome: the per-case records merged into one `karume-geometry-sweep/3`
+ * The result of a run's outcome: the per-case records merged into one `karume-geometry-sweep/4`
  * record (the cases that finished before a cancel, a device loss or an error included), the totals
  * line, and one line per finished case — the K-88 lines for the evaluation set — with the verdict
  * of {@link sweepVerdict}. A run that measured nothing because a sweep threw rethrows that error; a

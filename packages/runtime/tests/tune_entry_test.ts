@@ -254,7 +254,7 @@ describe("runGeometrySweep: real GPU", () => {
         signal: AbortSignal.abort(),
         onProgress: (progress) => kinds.push(progress.kind),
       });
-      assertEquals(swept.format, "karume-geometry-sweep/3");
+      assertEquals(swept.format, "karume-geometry-sweep/4");
       assertEquals(kinds, ["started"]);
       assertEquals(swept.aborted, true);
       assertRecordFields(swept);

@@ -1,6 +1,6 @@
 /**
  * The geometry sweep entry's settings: what a run is asked for (candidate set, op families, cases,
- * rounds, idle seconds between cases) and its plan (the case list `runGeometrySweep` is called with,
+ * geometries, the quick look's margin, rounds, idle seconds between cases) and its plan (the case list `runGeometrySweep` is called with,
  * one case per call). Pure, so the case selection is tested without a GPU.
  *
  * The case list depends on the candidate set: the evaluation set `k88` sweeps a table of its own
@@ -18,8 +18,10 @@ import {
   choicesValue,
   choiceValue,
   integerValue,
+  numberValue,
   ParameterError,
   type ParameterValues,
+  textValue,
 } from "../entry.ts";
 import { K88_SET } from "./k88.ts";
 
@@ -44,6 +46,14 @@ export type SweepSelection = {
    * chosen case of an op that is not chosen is not swept.
    */
   readonly cases: readonly string[];
+  /**
+   * The candidate geometries to measure, by name, besides the default geometry (always measured);
+   * empty = every candidate of the set. Every name must be a candidate of every chosen case (the
+   * runtime refuses it otherwise, before the GPU is touched).
+   */
+  readonly geometries: readonly string[];
+  /** The quick look's margin (0: off). */
+  readonly quickLookMargin: number;
   readonly rounds: number;
   /** Idle time before every case but the first (cooling). */
   readonly idleSeconds: number;
@@ -56,6 +66,8 @@ export type SweepPlan = {
   /** The op families of those cases, in the table's order (`ops` of every call). */
   readonly ops: readonly GeometrySweepOp[];
   readonly candidateSet: GeometrySweepCandidateSet;
+  readonly geometries: readonly string[];
+  readonly quickLookMargin: number;
   readonly rounds: number;
   /** Idle time before every case but the first (cooling). */
   readonly idleSeconds: number;
@@ -75,14 +87,32 @@ export const SWEEP_OPS: readonly GeometrySweepOp[] = sweepOps(BOTH_TABLES);
 /** Every case id of the two case tables, in table order (the options of `cases`). */
 export const SWEEP_CASE_IDS: readonly string[] = [...new Set(BOTH_TABLES.map(({ id }) => id))];
 
-/** The selection the entry's parameters (`candidateSet`, `ops`, `cases`, `rounds`, `idleSeconds`) give. */
-export const sweepSelection = (values: ParameterValues): SweepSelection => ({
-  candidateSet: choiceValue(values, "candidateSet", CANDIDATE_SETS),
-  ops: choicesValue(values, "ops", SWEEP_OPS),
-  cases: choicesValue(values, "cases", SWEEP_CASE_IDS),
-  rounds: integerValue(values, "rounds"),
-  idleSeconds: integerValue(values, "idleSeconds"),
-});
+/**
+ * The selection the entry's parameters (`candidateSet`, `ops`, `cases`, `geometries` — names
+ * separated by commas —, `quickLookMargin`, `rounds`, `idleSeconds`) give. A margin between 0 and
+ * 1 is a {@link ParameterError}: it would screen out every geometry but the default.
+ */
+export const sweepSelection = (values: ParameterValues): SweepSelection => {
+  const quickLookMargin = numberValue(values, "quickLookMargin");
+  if (quickLookMargin > 0 && quickLookMargin < 1) {
+    throw new ParameterError(
+      "quickLookMargin",
+      `${quickLookMargin} is neither 0 (the quick look off) nor at least 1`,
+    );
+  }
+  return {
+    candidateSet: choiceValue(values, "candidateSet", CANDIDATE_SETS),
+    ops: choicesValue(values, "ops", SWEEP_OPS),
+    cases: choicesValue(values, "cases", SWEEP_CASE_IDS),
+    geometries: textValue(values, "geometries")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name !== ""),
+    quickLookMargin,
+    rounds: integerValue(values, "rounds"),
+    idleSeconds: integerValue(values, "idleSeconds"),
+  };
+};
 
 /**
  * The plan of a selection over the chosen set's case table. Throws {@link ParameterError} for a
@@ -107,6 +137,8 @@ export const planSweep = (
     caseIds: chosen.map(({ id }) => id),
     ops: sweepOps(chosen),
     candidateSet: selection.candidateSet,
+    geometries: selection.geometries,
+    quickLookMargin: selection.quickLookMargin,
     rounds: selection.rounds,
     idleSeconds: selection.idleSeconds,
   };

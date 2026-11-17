@@ -1,5 +1,5 @@
 /**
- * Small hand-built records for the generator's tests: a `karume-geometry-sweep/3` record of one
+ * Small hand-built records for the generator's tests: a `karume-geometry-sweep/4` record of one
  * linear case (the default geometry and one ×1.2 faster candidate with identical output) carrying
  * the matching keys of the current runtime, and the workbench envelope around a record. Built from
  * the public surface `@karume/runtime/tune` only, so the keys follow the runtime without a GPU.
@@ -60,7 +60,7 @@ export const sweepRecord = (date: string, speedup = 1.2): Record<string, unknown
     throw new Error("the sweep's table has no gemm case");
   }
   return {
-    format: "karume-geometry-sweep/3",
+    format: "karume-geometry-sweep/4",
     date,
     startedAt: date,
     aborted: false,
@@ -71,9 +71,17 @@ export const sweepRecord = (date: string, speedup = 1.2): Record<string, unknown
     adapter: ADAPTER,
     gpuTiming: { feature: true, unit: "ns", quantized: false },
     dp4a: true,
-    settings: { candidateSet: "full", quick: false, ops: ["linear"], cases: [CASE_ID] },
+    settings: {
+      candidateSet: "full",
+      quick: false,
+      ops: ["linear"],
+      cases: [CASE_ID],
+      quickLookMargin: 1.25,
+    },
     deviceLost: null,
-    cases: [{ caseId: CASE_ID, defaultRepeat: { perDispatch: 1_000_000, driftRatio: 1 } }],
+    cases: [
+      { caseId: CASE_ID, screened: 0, defaultRepeat: { perDispatch: 1_000_000, driftRatio: 1 } },
+    ],
     rows,
   };
 };

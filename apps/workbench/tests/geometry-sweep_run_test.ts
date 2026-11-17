@@ -19,6 +19,8 @@ const PLAN: SweepPlan = {
   caseIds: ["a", "b", "c"],
   ops: ["i8a8-conv3d"],
   candidateSet: "full",
+  geometries: [],
+  quickLookMargin: 1.25,
   rounds: 5,
   idleSeconds: 90,
 };
@@ -285,7 +287,7 @@ describe("foldSweepEvent (the live view)", () => {
       }),
       sweep({ kind: "status", message: "a: g (1/48)" }),
       sweep({ kind: "row", row: measured }),
-      sweep({ kind: "case", summary: { caseId: "a", elapsedMs: 1 } }),
+      sweep({ kind: "case", summary: { caseId: "a", elapsedMs: 1, screened: 0 } }),
       { kind: "idle", index: 1, until: 5000 },
     ];
     const states = events.reduce(

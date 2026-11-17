@@ -92,6 +92,45 @@ export const RECALIBRATE_BELOW = 0.25;
 export const CALIBRATION_ATTEMPTS = 3;
 
 /**
+ * The quick look's margin (harness.ts's `quickLook` and `quickLookGoesOn`): after the warm start
+ * that opens a group of kernels measured together, every kernel gets one short timed pass, and only
+ * the references and the kernels whose quick time is at most this many times the bar of their class
+ * go on to the calibration's check, the correctness check and the rounds. The bar is what the
+ * derivation compares the class's kernels with in that group: the fastest quick time of the class
+ * where it picks a winner (the GEMV sweep at M = 1), the quick time of the reference where it asks
+ * only whether a kernel clears a threshold over it (the parallel GEMV's other row counts, which must
+ * not be slower than the default's choice; every case of the geometry sweep, where a geometry must
+ * be `minSpeedup` faster than the default in every case of its class). `0` turns the quick look off.
+ *
+ * Source: the two `full` GEMV sweeps of 2026-11-17 (5,580 rows each, 528 groups of a case, a row
+ * count and a class), on an RTX 5070 Ti under Chrome and an RTX 3080 Ti under Node, reading each
+ * row's first round as its quick look. Per group, 1.9 of 10.6 candidates are within 10 % of the
+ * fastest. Against the fastest of the class, ×1.15 keeps 23 % of the rows on the 5070 Ti and drops
+ * the candidate that wins on the full timing in 0 of 528 groups (×1.25: 28 %, 0); on the 3080 Ti,
+ * whose timing is unsteady, ×1.15 drops it in 25 groups and ×1.25 in 18. Against the fastest alone, the parallel candidate each record would adopt was screened
+ * at M = 4 or 8 in 8 of 58 cases (5070 Ti) and 13 of 39 (3080 Ti) at ×1.25 — its no-regression
+ * check would have had nothing to read; with the reference as the bar there, in none, the rows that
+ * go on being 46 % and 48 % (the references included). The geometry sweep's `quick+` record of the
+ * 5070 Ti of 2026-11-16 (821 rows): against the fastest of the case, ×1.25 changes one of its six
+ * adopted fields (`i8a8.conv3d`); against the default, none, keeping 71 % of the rows (the M2's
+ * record of 2026-11-17: none either way).
+ */
+export const QUICK_LOOK_MARGIN = 1.25;
+
+/**
+ * A sweep's quick-look margin: {@link QUICK_LOOK_MARGIN} when not given; 0 (off) or a finite number
+ * of at least 1 otherwise (below 1 would screen out every kernel but the references, the fastest
+ * included). Throws for any other value — before a sweep touches the GPU.
+ */
+export const quickLookMarginOf = (margin: number | undefined): number => {
+  if (margin === undefined) return QUICK_LOOK_MARGIN;
+  if (margin === 0 || (Number.isFinite(margin) && margin >= 1)) return margin;
+  throw new Error(
+    `quickLookMargin must be 0 (the quick look off) or a number of at least 1 (${margin})`,
+  );
+};
+
+/**
  * Decides, from the estimated ns of one dispatch, the repetition count that fills the target length
  * (at least 1, capped at the upper bound). An estimate of 0 or non-finite gives the upper bound
  * (too fast to measure = stack as many as possible).

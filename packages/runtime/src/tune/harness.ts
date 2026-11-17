@@ -33,10 +33,20 @@
  *    `pinClocks`, with the same cut-off of {@link WARMUP_MAX_PASSES} passes). The cumulative time
  *    counts GPU time for unit `ns` and wall clock for `deno-raw-tick` / `wall` (raw ticks are not
  *    ns).
- * 4. At the end of a case, measure the default geometry once more and keep the ratio to the first
+ * 4. The **quick look** (both sweeps — measurement.ts's `QUICK_LOOK_MARGIN` states the rule and its
+ *    evidence): after the warm start of a group of kernels measured together (a geometry case; a
+ *    GEMV case at one row count), every kernel gets one short timed pass — the calibration's probe
+ *    with timestamps, read at its last pass ({@link quickLook}) — in a shuffled order
+ *    ({@link quickLookOrder}). Only the references (the default geometry; the GEMV baseline and the
+ *    default profile's choice at `reorder`) and the kernels whose quick time is within the margin of
+ *    their class's bar ({@link quickLookGoesOn}) go on to the calibration's check (from the probe's
+ *    reps), the correctness check and the rounds. A kernel that does not go on is a row with its
+ *    quick time and `screened: true`: no rounds, no correctness verdict, never evidence for a
+ *    derivation. A margin of 0 turns the quick look off.
+ * 5. At the end of a case, measure the default geometry once more and keep the ratio to the first
  *    (`driftRatio`) per case — a sign of whether heat or clocks moved during the sweep (whether the
  *    default value the ratios rest on is unstable).
- * 5. Never compare absolute values with another machine — only ratios within one machine (speed
+ * 6. Never compare absolute values with another machine — only ratios within one machine (speed
  *    relative to the default geometry) are valid.
  *
  * NOTE: unlike opbench, the input of the `reps` estimate is the **wall clock** (stack `reps` by
@@ -236,6 +246,11 @@ export type SweepSettings = {
   readonly geometries?: readonly string[];
   /** The unit when timestamp-query is enabled (Chrome = `ns`, Deno = `deno-raw-tick`). */
   readonly timestampUnit: "ns" | "deno-raw-tick";
+  /**
+   * The quick look's margin (protocol rule 4 — measurement.ts's `QUICK_LOOK_MARGIN` by default in
+   * the entry point; 0 turns the quick look off and every geometry is timed).
+   */
+  readonly quickLookMargin: number;
 };
 
 export type SweepHooks = {
@@ -1363,16 +1378,24 @@ export type Timing = {
   readonly wallNsPerDispatch: number;
 };
 
+/** A probe's outcome: the reps that fill the target, and its last pass with that pass's dispatches. */
+type Probe = {
+  readonly reps: number;
+  readonly last: { readonly dispatches: number; readonly sample: PassSample };
+};
+
 /**
  * Estimates the `reps` that make one pass of `ready` about {@link TARGET_PASS_MS} (the module doc's
- * NOTE — double by wall clock and take the slope of the last two points).
+ * NOTE — double by wall clock and take the slope of the last two points). With `timed`, its passes
+ * also take timestamps (the quick look reads its last one); the estimate reads the wall clock either
+ * way.
  */
-const probeReps = async (context: SweepContext, ready: ReadyLaunch): Promise<number> => {
+const probe = async (context: SweepContext, ready: ReadyLaunch, timed: boolean): Promise<Probe> => {
   let reps = 1;
   let previous: { readonly reps: number; readonly wallNs: number } | undefined;
-  let probeNs: number;
   for (;;) {
-    const { wallNs } = await runPass(context, ready, reps, false);
+    const sample = await runPass(context, ready, reps, timed);
+    const { wallNs } = sample;
     if (wallNs >= PROBE_MIN_NS || reps >= SWEEP_MAX_REPS) {
       const average = wallNs / reps;
       const slope =
@@ -1380,13 +1403,120 @@ const probeReps = async (context: SweepContext, ready: ReadyLaunch): Promise<num
       // Without a usable slope (reached on the first point / negative from noise), fall back to the
       // average. A quarter of the average is the floor, so that a slope flattened by noise does
       // not push the pass beyond 4 times the target
-      probeNs = slope > 0 ? Math.max(slope, average / 4) : average;
-      break;
+      const probeNs = slope > 0 ? Math.max(slope, average / 4) : average;
+      return {
+        reps: calibrateReps(probeNs, TARGET_PASS_MS, SWEEP_MAX_REPS),
+        last: { dispatches: reps, sample },
+      };
     }
     previous = { reps, wallNs };
     reps = Math.min(SWEEP_MAX_REPS, reps * 2);
   }
-  return calibrateReps(probeNs, TARGET_PASS_MS, SWEEP_MAX_REPS);
+};
+
+/** The reps of a probe without timestamps (the calibration's and the warm start's). */
+const probeReps = async (context: SweepContext, ready: ReadyLaunch): Promise<number> =>
+  (await probe(context, ready, false)).reps;
+
+/** What a kernel's quick look read (protocol rule 4). */
+export type QuickLook = {
+  /** The reps the probe gives for the target pass: the calibration goes on from them. */
+  readonly reps: number;
+  /**
+   * The probe's last pass ÷ its dispatches (the context's unit: its timestamp difference, or its
+   * wall clock under `wall`); absent when that pass's difference was negative.
+   */
+  readonly perDispatch?: number;
+};
+
+/**
+ * The quick look at one kernel (protocol rule 4): the calibration's probe with timestamps on its
+ * passes, its last pass — at least half the target long by the wall clock, or at the reps bound —
+ * read as the kernel's time. A kernel that goes on calibrates from the probe's reps
+ * ({@link calibrate}), so it pays for no second probe.
+ */
+export const quickLook = async (context: SweepContext, ready: ReadyLaunch): Promise<QuickLook> => {
+  const { reps, last } = await probe(context, ready, context.unit !== "wall");
+  const { sample, dispatches } = last;
+  return sample.clamped
+    ? { reps }
+    : { reps, perDispatch: (sample.gpu ?? sample.wallNs) / dispatches };
+};
+
+/** One kernel the quick look has read, as {@link quickLookGoesOn} weighs it. */
+export type QuickLookKernel = {
+  readonly name: string;
+  /** The kernels of one class are weighed against one bar. */
+  readonly class: string;
+  /** Its quick look's time per dispatch (absent: nothing to screen it on — it goes on). */
+  readonly perDispatch?: number;
+  /** A reference of the group (the baseline, a default's choice, the default geometry): it always goes on. */
+  readonly reference: boolean;
+};
+
+/**
+ * What the margin multiplies for a class: the fastest quick time of the class (the derivation picks
+ * a winner among them), or the quick time of the kernel named (the derivation asks only whether a
+ * kernel clears a threshold over that reference; the fastest when the reference has no quick time).
+ */
+export type QuickLookBar =
+  | { readonly against: "fastest" }
+  | { readonly against: "reference"; readonly reference: string };
+
+/**
+ * Which kernels go on after the quick look (protocol rule 4), in the order given: every reference,
+ * every kernel without a quick time, and every kernel whose quick time is at most `margin` times its
+ * class's bar (`barOf`). A margin of 0 lets every kernel go on (the quick look is off). Pure.
+ */
+export const quickLookGoesOn = (
+  kernels: readonly QuickLookKernel[],
+  margin: number,
+  barOf: (kernelClass: string) => QuickLookBar,
+): boolean[] => {
+  if (margin === 0) return kernels.map(() => true);
+  const fastest = new Map<string, number>();
+  for (const kernel of kernels) {
+    if (kernel.perDispatch === undefined) continue;
+    const best = fastest.get(kernel.class);
+    if (best === undefined || kernel.perDispatch < best) {
+      fastest.set(kernel.class, kernel.perDispatch);
+    }
+  }
+  return kernels.map((kernel) => {
+    if (kernel.reference || kernel.perDispatch === undefined) return true;
+    const bar = barOf(kernel.class);
+    const reference =
+      bar.against === "reference"
+        ? kernels.find((other) => other.name === bar.reference)?.perDispatch
+        : undefined;
+    const against = reference ?? fastest.get(kernel.class);
+    return against === undefined || kernel.perDispatch <= margin * against;
+  });
+};
+
+/** FNV-1a 32 bit of a string's UTF-16 code units (a seed; no fingerprint). */
+const seedOf = (label: string): number => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < label.length; index += 1) {
+    hash = Math.imul(hash ^ label.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash;
+};
+
+/**
+ * The order of a group's quick looks (protocol rule 4): the items shuffled by a generator seeded
+ * from the group's `label`, so a kernel's place does not follow the plan's order (the baseline first,
+ * one class after the other) — a device whose state moves during the quick looks does not favour
+ * the kernels of one class — and the same group takes the same order in every run.
+ */
+export const quickLookOrder = <T>(items: readonly T[], label: string): T[] => {
+  const next = xorshift(seedOf(label));
+  const order = [...items];
+  for (let index = order.length - 1; index > 0; index -= 1) {
+    const other = next() % (index + 1);
+    [order[index], order[other]] = [order[other], order[index]];
+  }
+  return order;
 };
 
 /**
@@ -1470,10 +1600,15 @@ const RECALIBRATE_BELOW_NS = RECALIBRATE_BELOW * TARGET_PASS_MS * 1e6;
  * runs: a warm start loads the device and the probe is taken again, up to
  * {@link CALIBRATION_ATTEMPTS} probes, the last accepted unchecked. Reps at {@link SWEEP_MAX_REPS}
  * are accepted as they are (a dispatch too short to fill the target at the bound is measured at the
- * bound).
+ * bound). `probed` is the reps of a probe already taken (the kernel's quick look): it stands for the
+ * first probe.
  */
-export const calibrate = async (context: SweepContext, ready: ReadyLaunch): Promise<number> => {
-  let reps = await probeReps(context, ready);
+export const calibrate = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  probed?: number,
+): Promise<number> => {
+  let reps = probed ?? (await probeReps(context, ready));
   for (let attempt = 1; attempt < CALIBRATION_ATTEMPTS && reps < SWEEP_MAX_REPS; attempt += 1) {
     const sample = await runPass(context, ready, reps, context.unit === "ns");
     if (loadNsOf(context, sample) >= RECALIBRATE_BELOW_NS) return reps;
@@ -1513,20 +1648,21 @@ export const roundsTiming = (reps: number, samples: readonly PassSample[]): Timi
 
 /**
  * Measures one geometry: reset the output to 0 and run once → with `warmStart` (the first
- * measurement of a case), a warm start on it → calibrate `reps` → idle runs → `rounds`
- * measurements (protocol rules 1–3).
+ * measurement of a case without a quick look), a warm start on it → calibrate `reps` (from
+ * `probed`, its quick look's reps, when given) → idle runs → `rounds` measurements (protocol rules
+ * 1–3).
  */
 export const timeLaunch = async (
   context: SweepContext,
   ready: ReadyLaunch,
   output: GPUBuffer,
   rounds: number,
-  options: { readonly warmStart?: boolean } = {},
+  options: { readonly warmStart?: boolean; readonly probed?: number } = {},
 ): Promise<Timing> => {
   // The first run starts from an output reset to 0 (unwritten tiles show as a digest mismatch)
   await runPass(context, ready, 1, false, output);
   if (options.warmStart === true) await warmStart(context, ready);
-  const reps = await calibrate(context, ready);
+  const reps = await calibrate(context, ready, options.probed);
   await warmUp(context, ready, reps);
   const samples: PassSample[] = [];
   for (let round = 0; round < rounds; round += 1) {
@@ -1670,8 +1806,8 @@ export const compareBufferWords = async (
 };
 
 /**
- * Prepares and measures one candidate's dispatch (params are released after measuring); with
- * `opensCase`, the case's first measurement, after a warm start on it (protocol rule 3).
+ * Prepares and measures one candidate's dispatch from a calibration of its own (params are released
+ * after measuring) — the default geometry's re-measurement at the end of a case (protocol rule 5).
  */
 const timeCandidate = async (
   context: SweepContext,
@@ -1679,16 +1815,12 @@ const timeCandidate = async (
   resources: ReadonlyMap<string, GPUBuffer>,
   candidate: GeometryCandidate,
   rounds: number,
-  opensCase = false,
 ): Promise<{ readonly launch: Launch; readonly timing: Timing }> => {
   const output = resources.get(plan.output);
   if (output === undefined) throw new Error(`Output ${plan.output} is missing`);
   const ready = await prepareLaunch(context, plan.launch(candidate), resources);
   try {
-    return {
-      launch: ready.launch,
-      timing: await timeLaunch(context, ready, output, rounds, { warmStart: opensCase }),
-    };
+    return { launch: ready.launch, timing: await timeLaunch(context, ready, output, rounds) };
   } finally {
     ready.params.destroy();
   }
@@ -1697,34 +1829,64 @@ const timeCandidate = async (
 const ALL_ROUNDS_NEGATIVE =
   "timestamp negative in every round (only samples clamped to 0, so no min can be taken)";
 
+/** The identity fields of a geometry's row. */
+const rowHead = (
+  sweepCase: SweepCase,
+  candidate: GeometryCandidate,
+  isDefault: boolean,
+): Pick<
+  SweepRow,
+  "caseId" | "op" | "shape" | "censusCount" | "geometry" | "geometryParams" | "isDefault"
+> => ({
+  caseId: sweepCase.id,
+  op: sweepCase.op,
+  shape: caseShape(sweepCase),
+  censusCount: sweepCase.censusCount,
+  geometry: candidate.name,
+  geometryParams: candidate.geometry,
+  isDefault,
+});
+
+/** The row of a geometry the quick look did not let go on (protocol rule 4): its quick time only. */
+const screenedRow = (
+  sweepCase: SweepCase,
+  candidate: GeometryCandidate,
+  ready: ReadyLaunch,
+  quick: QuickLook | undefined,
+): SweepRow => ({
+  ...rowHead(sweepCase, candidate, false),
+  key: ready.launch.key,
+  workgroups: ready.launch.workgroups,
+  ...(quick?.perDispatch === undefined ? {} : { quickPerDispatch: quick.perDispatch }),
+  screened: true,
+});
+
+/**
+ * Measures one prepared geometry (protocol rules 1–3, its calibration going on from its quick
+ * look's reps when it had one) and reads its output's digest.
+ */
 const measureGeometry = async (
   context: SweepContext,
   sweepCase: SweepCase,
-  plan: CasePlan,
-  resources: ReadonlyMap<string, GPUBuffer>,
+  output: GPUBuffer,
   candidate: GeometryCandidate,
   isDefault: boolean,
   rounds: number,
+  ready: ReadyLaunch,
+  quick: QuickLook | undefined,
 ): Promise<SweepRow> => {
-  // The default geometry is the case's first measurement: the case starts warm on it
-  const { launch, timing } = await timeCandidate(
+  const timing = await timeLaunch(
     context,
-    plan,
-    resources,
-    candidate,
+    ready,
+    output,
     rounds,
-    isDefault,
+    quick === undefined ? {} : { probed: quick.reps },
   );
   const measured = {
-    caseId: sweepCase.id,
-    op: sweepCase.op,
-    shape: caseShape(sweepCase),
-    censusCount: sweepCase.censusCount,
-    geometry: candidate.name,
-    geometryParams: candidate.geometry,
-    isDefault,
-    key: launch.key,
-    workgroups: launch.workgroups,
+    ...rowHead(sweepCase, candidate, isDefault),
+    key: ready.launch.key,
+    workgroups: ready.launch.workgroups,
+    ...(quick?.perDispatch === undefined ? {} : { quickPerDispatch: quick.perDispatch }),
     reps: timing.reps,
     rounds: timing.rounds,
     wallRounds: timing.wallRounds,
@@ -1736,8 +1898,6 @@ const measureGeometry = async (
   // Raw ticks are not ns, so TFLOPS comes from the wall clock (the definition of `tflops` in
   // report.ts)
   const realNs = context.unit === "ns" ? timing.perDispatch : timing.wallNsPerDispatch;
-  const output = resources.get(plan.output);
-  if (output === undefined) throw new Error(`${sweepCase.id}: output ${plan.output} is missing`);
   return {
     ...measured,
     perDispatch: timing.perDispatch,
@@ -1746,6 +1906,12 @@ const measureGeometry = async (
     outputSha256: await outputDigest(context, output),
   };
 };
+
+/** Where one geometry of a case stands before its row is made. */
+type GeometryState =
+  | { readonly kind: "planned" }
+  | { readonly kind: "prepared"; readonly ready: ReadyLaunch; readonly quick?: QuickLook }
+  | { readonly kind: "failed"; readonly cause: unknown };
 
 /** The result of one case (the rows of every geometry and the per-case record). */
 export type CaseResult = {
@@ -1759,19 +1925,23 @@ export type CaseResult = {
 };
 
 /**
- * Measures one case with every candidate geometry (the default geometry first, after the case's
- * warm start on it — protocol rule 3 —, the rest in candidate order). When done, measures the
- * default geometry once more and keeps the ratio to the first in the per-case record (protocol
- * rule 4). If planning, resource allocation or the prelude fails, every geometry becomes a failure
- * row. If the device is lost, the rest become failure rows;
- * if aborted, no rows are made for the rest (and no re-measurement). The case's wall clock
- * (`elapsedMs`) covers every step from planning to the re-measurement.
+ * Measures one case: every geometry's pipeline first, a warm start on the default geometry (protocol
+ * rule 3), the quick look at every geometry in a shuffled order and the screening against the
+ * default's quick time (protocol rule 4 — skipped at a margin of 0), then the default geometry and
+ * every candidate that goes on, in candidate order, each timed from its own calibration (rules 1–3);
+ * a screened candidate's row holds its quick time only. When done, measures the default geometry once
+ * more and keeps the ratio to the first in the per-case record (rule 5). If planning, resource
+ * allocation or the prelude fails, every geometry becomes a failure row; a geometry whose pipeline,
+ * warm start, quick look or timing fails becomes its own failure row. If the device is lost, the
+ * rest become failure rows; if aborted, no rows are made for the rest (and no re-measurement — an
+ * abort before the timing makes no row of the case). The case's wall clock (`elapsedMs`) covers every
+ * step from planning to the re-measurement.
  */
 export const sweepCase = async (
   context: SweepContext,
   target: SweepCase,
   candidates: readonly GeometryCandidate[],
-  settings: Pick<SweepSettings, "rounds">,
+  settings: Pick<SweepSettings, "rounds" | "quickLookMargin">,
   hooks: SweepHooks = {},
 ): Promise<CaseResult> => {
   const { gpu } = context;
@@ -1782,8 +1952,12 @@ export const sweepCase = async (
     rows.push(row);
     hooks.onRow?.(row);
   };
-  const finish = (summary: Omit<CaseSummary, "elapsedMs">): CaseResult => {
-    const timed: CaseSummary = { ...summary, elapsedMs: performance.now() - started };
+  const finish = (summary: Omit<CaseSummary, "elapsedMs" | "screened">): CaseResult => {
+    const timed: CaseSummary = {
+      ...summary,
+      elapsedMs: performance.now() - started,
+      screened: rows.filter((row) => row.screened === true).length,
+    };
     hooks.onCase?.(timed);
     return { rows, summary: timed, aborted };
   };
@@ -1828,36 +2002,121 @@ export const sweepCase = async (
       ordered.forEach((candidate, index) => emit(errorRow(target, candidate, index === 0, cause)));
       return finish({ caseId: target.id });
     }
+    const output = resources.get(plan.output);
+    if (output === undefined) throw new Error(`${target.id}: output ${plan.output} is missing`);
+    const states: GeometryState[] = ordered.map(() => ({ kind: "planned" }));
+    const prepared: ReadyLaunch[] = [];
+    const abortRequested = (): boolean => hooks.signal?.aborted === true;
     let reference: DefaultReference = {};
-    for (const [index, candidate] of ordered.entries()) {
-      if (hooks.signal?.aborted === true) {
-        aborted = true;
-        break;
+    try {
+      // 1. Every pipeline first (a compile idles the device)
+      for (const [index, candidate] of ordered.entries()) {
+        if (abortRequested()) {
+          aborted = true;
+          return finish({ caseId: target.id });
+        }
+        if (gpu.lost !== undefined) break;
+        try {
+          const ready = await prepareLaunch(context, plan.launch(candidate), resources);
+          prepared.push(ready);
+          states[index] = { kind: "prepared", ready };
+        } catch (cause) {
+          states[index] = { kind: "failed", cause };
+        }
       }
-      const isDefault = index === 0;
-      if (gpu.lost !== undefined) {
-        emit(errorRow(target, candidate, isDefault, new Error(`device lost: ${gpu.lost.message}`)));
-        continue;
+      // 2. The warm start, on the default geometry unless it failed (then on the next that did not)
+      for (const [index, state] of states.entries()) {
+        if (abortRequested()) {
+          aborted = true;
+          return finish({ caseId: target.id });
+        }
+        if (gpu.lost !== undefined) break;
+        if (state.kind !== "prepared") continue;
+        hooks.onProgress?.(`${target.id}: warm start on ${ordered[index].name}`);
+        try {
+          await warmStart(context, state.ready);
+          break;
+        } catch (cause) {
+          states[index] = { kind: "failed", cause };
+        }
       }
-      hooks.onProgress?.(`${target.id}: ${candidate.name} (${index + 1}/${ordered.length})`);
-      let row: SweepRow;
-      try {
-        row = await measureGeometry(
-          context,
-          target,
-          plan,
-          resources,
-          candidate,
-          isDefault,
-          settings.rounds,
-        );
-      } catch (cause) {
-        row = errorRow(target, candidate, isDefault, cause);
+      // 3. The quick looks, in an order that does not follow the candidates'
+      if (settings.quickLookMargin > 0) {
+        const order = quickLookOrder([...states.keys()], target.id);
+        for (const [position, index] of order.entries()) {
+          if (abortRequested()) {
+            aborted = true;
+            return finish({ caseId: target.id });
+          }
+          if (gpu.lost !== undefined) break;
+          const state = states[index];
+          if (state.kind !== "prepared") continue;
+          hooks.onProgress?.(`${target.id}: quick look ${position + 1}/${order.length}`);
+          try {
+            states[index] = { ...state, quick: await quickLook(context, state.ready) };
+          } catch (cause) {
+            states[index] = { kind: "failed", cause };
+          }
+        }
       }
-      if (isDefault) {
-        reference = { perDispatch: row.perDispatch, outputSha256: row.outputSha256 };
+      // A geometry is judged against the default in every case of its class: the default's quick
+      // time is the bar
+      const goesOn = quickLookGoesOn(
+        ordered.map((candidate, index) => {
+          const state = states[index];
+          const quick = state.kind === "prepared" ? state.quick?.perDispatch : undefined;
+          return {
+            name: candidate.name,
+            class: "geometry",
+            ...(quick === undefined ? {} : { perDispatch: quick }),
+            reference: index === 0,
+          };
+        }),
+        settings.quickLookMargin,
+        () => ({ against: "reference", reference: plan.defaultCandidate.name }),
+      );
+      // 4. The default geometry and the candidates that go on, in candidate order
+      for (const [index, candidate] of ordered.entries()) {
+        if (abortRequested()) {
+          aborted = true;
+          break;
+        }
+        const isDefault = index === 0;
+        const state = states[index];
+        if (gpu.lost !== undefined || state.kind === "planned") {
+          const lost = new Error(`device lost: ${gpu.lost?.message ?? "no loss reported"}`);
+          emit(errorRow(target, candidate, isDefault, lost));
+          continue;
+        }
+        let row: SweepRow;
+        if (state.kind === "failed") {
+          row = errorRow(target, candidate, isDefault, state.cause);
+        } else if (goesOn[index] !== true) {
+          row = screenedRow(target, candidate, state.ready, state.quick);
+        } else {
+          hooks.onProgress?.(`${target.id}: ${candidate.name} (${index + 1}/${ordered.length})`);
+          try {
+            row = await measureGeometry(
+              context,
+              target,
+              output,
+              candidate,
+              isDefault,
+              settings.rounds,
+              state.ready,
+              state.quick,
+            );
+          } catch (cause) {
+            row = errorRow(target, candidate, isDefault, cause);
+          }
+        }
+        if (isDefault) {
+          reference = { perDispatch: row.perDispatch, outputSha256: row.outputSha256 };
+        }
+        emit(compareToDefault(row, reference));
       }
-      emit(compareToDefault(row, reference));
+    } finally {
+      for (const ready of prepared) ready.params.destroy();
     }
     const initial = reference.perDispatch;
     // A case whose first default measurement failed, is 0 (a broken timestamp with a difference of

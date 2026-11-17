@@ -54,7 +54,7 @@ describe("mergeSweepReports", () => {
     });
 
     it("stays in the sweep record's format (no envelope)", () => {
-      expect(merged.format).toBe("karume-geometry-sweep/3");
+      expect(merged.format).toBe("karume-geometry-sweep/4");
       expect(Object.keys(merged).sort()).toEqual(Object.keys(first).sort());
     });
   });
@@ -176,7 +176,12 @@ describe("caseSummaryRows", () => {
     ];
     expect(
       caseSummaryRows(rows, [
-        { caseId: CASE_A, elapsedMs: 90_000, defaultRepeat: { perDispatch: 1, driftRatio: 1.02 } },
+        {
+          caseId: CASE_A,
+          elapsedMs: 90_000,
+          screened: 0,
+          defaultRepeat: { perDispatch: 1, driftRatio: 1.02 },
+        },
       ]),
     ).toEqual([
       {
@@ -207,7 +212,7 @@ describe("caseSummaryRows", () => {
   it("carries the re-measurement's failure", () => {
     const [summary] = caseSummaryRows(
       [row(CASE_A, true)],
-      [{ caseId: CASE_A, elapsedMs: 1000, defaultRepeatError: "out of memory" }],
+      [{ caseId: CASE_A, elapsedMs: 1000, screened: 0, defaultRepeatError: "out of memory" }],
     );
     expect(summary?.driftError).toBe("out of memory");
   });

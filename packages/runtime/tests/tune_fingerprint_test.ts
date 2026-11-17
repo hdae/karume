@@ -550,7 +550,7 @@ describe("the provenance of the built-in tables matches the current runtime's va
   // Re-derive the family's entry of every embedded table with the current runtime (ADR 0117 decision
   // 4: the regeneration makes the machine say that the kernels changed, and the per-profile GPU test
   // gpu_geometry_profile_test.ts re-checks output identity on the new kernels). Records are read
-  // only in format karume-geometry-sweep/3 with the per-family keys (ADR 0117 addendum 2026-11-12),
+  // only in format karume-geometry-sweep/4 with the per-family keys (ADR 0117 addendum 2026-11-12),
   // so a family whose keys moved needs a new sweep of that family, which can re-pick its fields; the
   // other families are carried over from the table (deriveGeometryProfile's `base`).
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {

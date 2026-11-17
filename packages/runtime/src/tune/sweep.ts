@@ -35,7 +35,13 @@ import {
   selectedCandidates,
   SWEEP_MAX_REPS,
 } from "./harness.ts";
-import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
+import {
+  quickLookMarginOf,
+  ROUNDS,
+  TARGET_PASS_MS,
+  WARMUP_MIN_RUNS,
+  WARMUP_NS,
+} from "./measurement.ts";
 import {
   type CaseSummary,
   type Report,
@@ -116,6 +122,14 @@ export type GeometrySweepOptions = {
    */
   readonly rounds?: number;
   /**
+   * The quick look's margin (default measurement.ts's `QUICK_LOOK_MARGIN`, ×1.25): after a case's
+   * warm start every geometry gets one short timed pass, and only the default geometry and the
+   * candidates whose quick time is at most this many times the default's are timed in full; the
+   * others are rows with their quick time and `screened: true`, which no derivation reads as
+   * evidence. 0 turns the quick look off (every geometry is timed); any other value below 1 throws.
+   */
+  readonly quickLookMargin?: number;
+  /**
    * Measures with GPU timestamps when the adapter lists `timestamp-query` (default true). With
    * `false`, or on an adapter that does not list it, measures by wall clock (unit `wall` — the
    * record can be kept, but the generator does not build a table from it).
@@ -138,6 +152,7 @@ type SweepPlan = {
   /** The `geometries` option (absent when omitted or empty). */
   readonly geometries?: readonly string[];
   readonly rounds: number;
+  readonly quickLookMargin: number;
   readonly cases: readonly SweepCase[];
 };
 
@@ -172,6 +187,7 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
+  const quickLookMargin = quickLookMarginOf(options.quickLookMargin);
   const cases = table.filter(
     (sweepCase) =>
       ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),
@@ -193,6 +209,7 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
     caseIds,
     ...(geometries === undefined ? {} : { geometries }),
     rounds,
+    quickLookMargin,
     cases,
   };
 };
@@ -247,7 +264,7 @@ export const acquireSweepGpu = async (options: SweepDeviceOptions): Promise<GpuC
 
 /**
  * Acquires a dedicated device, sweeps the cases, and returns the record
- * (`karume-geometry-sweep/3`). The device is discarded when done (also on abort or failure).
+ * (`karume-geometry-sweep/4`). The device is discarded when done (also on abort or failure).
  * Per-row failures (allocation, compilation, device lost) are kept as rows of the record and the
  * sweep continues; option errors and environments where no device can be acquired throw before
  * touching the GPU / at the acquisition step.
@@ -301,6 +318,7 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
           candidateSet: plan.candidateSet,
           ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
           timestampUnit,
+          quickLookMargin: plan.quickLookMargin,
         },
         {
           signal: options.signal,
@@ -345,6 +363,7 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
         ...(plan.caseIds.length === 0 ? {} : { cases: plan.caseIds }),
         ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
         rounds: plan.rounds,
+        quickLookMargin: plan.quickLookMargin,
         targetPassMs: TARGET_PASS_MS,
         maxReps: SWEEP_MAX_REPS,
         warmupNs: WARMUP_NS,

@@ -1,4 +1,9 @@
-import { type GemvSweepOptions, type GemvSweepReport, gemvSweepCases } from "@karume/runtime/tune";
+import {
+  type GemvSweepOptions,
+  type GemvSweepReport,
+  gemvSweepCases,
+  QUICK_LOOK_MARGIN,
+} from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { parseParameters } from "../src/entry.ts";
@@ -11,7 +16,9 @@ import {
   runGemvPlan,
 } from "../src/gemv-sweep/run.ts";
 import {
+  GEMV_CANDIDATE_NAMES,
   GEMV_CASE_IDS,
+  GEMV_ROW_COUNTS,
   type GemvSweepPlan,
   gemvSweepSelection,
   planGemvSweep,
@@ -23,20 +30,54 @@ import { CASE_A, CASE_B, gemvPerCase } from "./helpers/gemv-sweep-report.ts";
 const PLAN: GemvSweepPlan = {
   caseIds: [CASE_A, CASE_B],
   candidateSet: "full",
+  rows: [],
+  candidates: [],
+  quickLookMargin: 1.25,
   rounds: 3,
   idleSeconds: 10,
 };
 
 describe("the gemv-sweep entry's settings", () => {
-  it("default to the quick set over every case of the runtime's table, 5 rounds and 10 s idle", () => {
+  it("default to the quick set over every case of the runtime's table, every row count and candidate, the quick look at ×1.25, 5 rounds and 10 s idle", () => {
     const plan = planGemvSweep(gemvSweepSelection(parseParameters(entry.parameters, {})));
     expect(plan).toEqual({
       caseIds: gemvSweepCases().map(({ id }) => id),
       candidateSet: "quick",
+      rows: [],
+      candidates: [],
+      quickLookMargin: QUICK_LOOK_MARGIN,
       rounds: 5,
       idleSeconds: 10,
     });
     expect(GEMV_CASE_IDS).toEqual(plan.caseIds);
+  });
+
+  it("take the row counts as numbers, the candidates by name and the margin, and refuse a margin between 0 and 1", () => {
+    const plan = planGemvSweep(
+      gemvSweepSelection(
+        parseParameters(entry.parameters, {
+          candidateSet: "row-blocks",
+          rows: "64,16",
+          candidates: "c32u4r2,c32u4r1",
+          quickLookMargin: "0",
+        }),
+      ),
+    );
+    // Choices come back in the order of their options
+    expect([plan.candidateSet, plan.rows, plan.quickLookMargin]).toEqual([
+      "row-blocks",
+      [16, 64],
+      0,
+    ]);
+    expect([...plan.candidates].sort()).toEqual(["c32u4r1", "c32u4r2"]);
+    expect(GEMV_ROW_COUNTS).toEqual(["1", "4", "8", "16", "64"]);
+    expect(GEMV_CANDIDATE_NAMES).toContain("staged-l32");
+    expect(() =>
+      gemvSweepSelection(parseParameters(entry.parameters, { quickLookMargin: "0.5" })),
+    ).toThrow(/Parameter quickLookMargin: 0.5 is neither 0/);
+    expect(() => parseParameters(entry.parameters, { candidates: "parallel-l3" })).toThrow(
+      /Parameter candidates/,
+    );
   });
 
   it("keep the chosen cases in the table's order", () => {
@@ -94,11 +135,28 @@ describe("runGemvPlan", () => {
     expect(run.calls[1]).toMatchObject({
       candidateSet: "full",
       cases: [CASE_B],
+      quickLookMargin: 1.25,
       rounds: 3,
       signal,
     });
+    // Nothing narrowed: no row counts and no candidates are passed
+    expect(Object.keys(run.calls[1] ?? {})).not.toContain("rows");
+    expect(Object.keys(run.calls[1] ?? {})).not.toContain("candidates");
     expect(outcome.stop).toEqual({ kind: "completed" });
     expect(outcome.reports).toHaveLength(2);
+  });
+
+  it("passes the plan's row counts and candidates to every call", async () => {
+    const run = harness();
+    const outcome = await runGemvPlan(
+      { ...PLAN, rows: [4], candidates: ["staged-l8"], quickLookMargin: 0 },
+      run.deps(new AbortController().signal),
+    );
+    expect(run.calls).toHaveLength(2);
+    for (const call of run.calls) {
+      expect(call).toMatchObject({ rows: [4], candidates: ["staged-l8"], quickLookMargin: 0 });
+    }
+    expect(outcome.stop).toEqual({ kind: "completed" });
   });
 
   it("stops after the case the device was lost in (the shared loop's rule)", async () => {

@@ -2,12 +2,12 @@
  * The GEMV choices of linear in the command (`--gemv-records`): a dry run prints the derivation's
  * decisions and the field differences and writes nothing; a written table carries the derived
  * field, its records and its rule in the header; a table that carries the field keeps it through a
- * regeneration of the tile geometry alone; one GEMV record and a first table without tile-geometry
- * records are refused. Each case runs on a temporary repository whose registered table is built here
+ * regeneration of the tile geometry alone; one GEMV record derives nothing, and a first table
+ * without tile-geometry records is refused. Each case runs on a temporary repository whose registered table is built here
  * from synthetic records of one adapter (the GEMV records from the runtime's own measurement plans —
  * packages/runtime/tests/helpers/gemv-sweep-records.ts). The formatter is the real one. No GPU.
  *
- * Faults injected: one GEMV record instead of two (refused). The carry-over case fails when the
+ * Faults injected: one GEMV record instead of two (nothing adopted). The carry-over case fails when the
  * tile-geometry derivation does not carry a base's `linearGemv` (checked by removing the carry).
  */
 
@@ -167,13 +167,15 @@ describe("--gemv-records on a registered table", () => {
     );
   });
 
-  it("refuses one GEMV record, with the derivation's message (fault: one record)", async () => {
+  it("derives nothing from one GEMV record: its groups are one record's evidence (fault: one record)", async () => {
     const code = await main(
-      ["test-gpu", `--gemv-records=${GEMV_A}`],
+      ["test-gpu", "--dry-run", `--gemv-records=${GEMV_A}`],
       environment(registeredTable()),
     );
-    assertEquals(code, 1);
-    assertStringIncludes(stderr[0] ?? "", "at least 2 GEMV sweep records of one adapter (1 given)");
+    assertEquals(code, 0, stderr.join("\n"));
+    const printed = stdout.join("\n");
+    assertStringIncludes(printed, "evidence at M=1 from fewer than 2 records");
+    assertStringIncludes(printed, "linearGemv: absent from the table");
     assertEquals(readdirSync(join(root, PROFILES_DIRECTORY)), []);
   });
 

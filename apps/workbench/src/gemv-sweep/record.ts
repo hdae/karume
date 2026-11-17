@@ -1,10 +1,11 @@
 /**
  * The GEMV sweep entry's record: the per-case records of `runGemvSweep` (one call per case, idle
- * time between them) merged into one `karume-gemv-sweep/2` record in the shape one call over the
- * planned cases writes. Pure.
+ * time between them) merged into one `karume-gemv-sweep/3` record in the shape one call over the
+ * planned cases writes. Pure: every fingerprint is a row's or a case's own, so nothing is
+ * recomputed.
  */
 
-import { type GemvSweepReport, gemvSweepKernelsId } from "@karume/runtime/tune";
+import type { GemvSweepReport } from "@karume/runtime/tune";
 
 import { type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
 
@@ -13,7 +14,6 @@ const sharedFields = (report: GemvSweepReport) => {
   const { cases: _cases, ...settings } = report.settings;
   return {
     format: report.format,
-    caseTable: report.caseTable,
     userAgent: report.userAgent,
     adapter: report.adapter,
     gates: report.gates,
@@ -26,13 +26,12 @@ const sharedFields = (report: GemvSweepReport) => {
 /**
  * Merges the per-case records: rows, cases and summaries in run order, the envelope of
  * `mergePerCase` (`startedAt`, `date`, `aborted`, `deviceLost`), `settings.cases` = the planned
- * cases, `kernels` recomputed over the merged rows (each record fingerprints only its own rows), and
- * `gpuTiming.quantized` when any record's rounds looked quantized (the safe side, as for the
- * geometry sweep's merge).
+ * cases, and `gpuTiming.quantized` when any record's rounds looked quantized (the safe side, as for
+ * the geometry sweep's merge).
  *
- * Throws when the records do not belong to one sweep (format, case table, browser, adapter, gates,
- * timing, settings other than `cases`), when a record is not per-case, or when a case is unplanned
- * or comes twice.
+ * Throws when the records do not belong to one sweep (format, browser, adapter, gates, timing,
+ * settings other than `cases`), when a record is not per-case, or when a case is unplanned or comes
+ * twice.
  */
 export const mergeGemvSweepReports = (
   reports: readonly GemvSweepReport[],
@@ -42,13 +41,12 @@ export const mergeGemvSweepReports = (
     reports,
     options,
     sharedFields,
-    "its format, case table, browser, adapter, gates, timing or settings",
+    "its format, browser, adapter, gates, timing or settings",
   );
   const rows = reports.flatMap((report) => report.rows);
   return {
     ...first,
     ...envelope,
-    kernels: gemvSweepKernelsId(rows),
     gpuTiming: {
       ...first.gpuTiming,
       quantized: reports.some((report) => report.gpuTiming.quantized),

@@ -12,7 +12,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { gemvSweepKernelsId, runGemvSweep } from "../tune.ts";
+import { runGemvSweep } from "../tune.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import {
@@ -24,8 +24,8 @@ import {
   gemvProfileChoice,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
-import { gemvCaseTableId } from "../src/tune/gemv-fingerprint.ts";
-import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
+import { gemvCaseFingerprint, gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
+import { choiceOfRecord, type GemvSweepRow } from "../src/tune/gemv-report.ts";
 import {
   type GemvCaseResult,
   type GemvCaseSettings,
@@ -115,7 +115,8 @@ const sweepWith = async (
         subgroups: gates.subgroups,
         maxComputeWorkgroupsPerDimension: gates.maxComputeWorkgroupsPerDimension,
       }),
-      { rounds: 1, tolerance: opTolerance("linear"), ...settings },
+      // Every kernel timed (no quick look): these cases check every candidate kind's output
+      { rounds: 1, tolerance: opTolerance("linear"), quickLookMargin: 0, ...settings },
     );
   } finally {
     destroySweepContext(context);
@@ -216,7 +217,7 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
   it("returns the record of the public entry point over one case of the table", async () => {
     const caseId = "i8-n1536-k256";
     const record = await runGemvSweep({ candidateSet: "quick", cases: [caseId], rounds: 1 });
-    assertEquals(record.format, "karume-gemv-sweep/2");
+    assertEquals(record.format, "karume-gemv-sweep/3");
     assertEquals(record.deviceLost, null);
     assertEquals(record.aborted, false);
     assertEquals(record.settings.cases, [caseId]);
@@ -224,15 +225,37 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
       record.cases.map(({ id, rows }) => [id, rows]),
       [[caseId, [1]]],
     );
-    assertEquals(record.caseTable, gemvCaseTableId());
-    assertEquals(record.kernels, gemvSweepKernelsId(record.rows));
+    const planned = GEMV_CASES.find(({ id }) => id === caseId);
+    assert(planned !== undefined);
+    assertEquals(
+      record.cases.map(({ fingerprint }) => fingerprint),
+      [gemvCaseFingerprint(planned)],
+    );
+    for (const row of record.rows) {
+      assertEquals(
+        row.kernel,
+        gemvKernelId(planned, row.m, choiceOfRecord(row.choice)),
+        rowLabel(row),
+      );
+    }
+    assertEquals(record.settings.quickLookMargin, 1.25);
     assertEquals(record.gpuTiming.unit, timestampQuery ? "ns" : "wall");
     assertEquals(record.rows.filter((row) => row.isBaseline).length, 1);
     for (const row of record.rows) {
       assertEquals(row.error, undefined, rowLabel(row));
       if (row.isBaseline) continue;
+      // The quick look times in full only the kernels near enough to matter: a screened row has its
+      // quick time and no check
+      if (row.screened === true) {
+        assert(row.quickPerDispatch !== undefined && row.rounds === undefined, rowLabel(row));
+        continue;
+      }
       if (row.class === "identical") assertEquals(row.identicalToBaseline, true, rowLabel(row));
       else assertEquals(row.withinBand, true, rowLabel(row));
+    }
+    // The references always go on
+    for (const name of ["c32u4", "parallel-l4"]) {
+      assertEquals(record.rows.find((row) => row.candidate === name)?.screened, undefined, name);
     }
     assertEquals(
       record.rows.some((row) => row.choice.id === "gemv-parallel-subgroup32"),

@@ -41,10 +41,15 @@ import {
 import type { NumericLevel } from "../runtime/numerics.ts";
 import type { NodePlan } from "../runtime/plan.ts";
 import { executionKnobDefaults } from "../runtime/session-options-check.ts";
-import type { GemvCase } from "./gemv-cases.ts";
+import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
 
-/** The candidate sets: `quick` (M = 1, a small identical grid) and `full` (every row count, the whole grid). */
-export const GEMV_CANDIDATE_SETS = ["quick", "full"] as const;
+/**
+ * The candidate sets: `quick` (M = 1, a small identical grid), `full` (every row count a derivation
+ * rule reads — the parallel GEMV's range, M = 1, 4 and 8 —, the whole grid) and `row-blocks` (the
+ * row-block form's row counts beyond that range, M = 16 and 64, which only a future row-block rule
+ * would read).
+ */
+export const GEMV_CANDIDATE_SETS = ["quick", "full", "row-blocks"] as const;
 export type GemvCandidateSet = (typeof GEMV_CANDIDATE_SETS)[number];
 
 export const isGemvCandidateSet = (value: string): value is GemvCandidateSet =>
@@ -78,8 +83,8 @@ const GEMV_COLS: readonly number[] = [16, 32, 64, 128, 256];
 /** The words read ahead of the sequential M = 1 kernel's grid. */
 const GEMV_UNROLLS: readonly number[] = [1, 2, 4, 8, 16];
 
-/** The largest row count the parallel GEMV takes (the selection's range). */
-const PARALLEL_MAX_ROWS = 8;
+/** The largest row count the parallel GEMV takes (the selection's range: its rows serve M = 1 to 8). */
+export const PARALLEL_MAX_ROWS = 8;
 
 /** The profile the baseline and the profile's choices are read from. */
 const PROFILE: ResolvedGeometryProfile = DEFAULT_GEOMETRY_PROFILE;
@@ -170,9 +175,35 @@ export const gemvProfileChoice = (
 export const gemvBaseline = (gemvCase: GemvCase, m: number): GemvCandidate =>
   gemvProfileChoice(gemvCase, m, "exact");
 
-/** The row counts a set measures of a case: M = 1 for `quick`, every row count of the case for `full`. */
+/**
+ * The row counts a set measures of a case: M = 1 for `quick`, the case's row counts of the parallel
+ * range for `full`, the ones beyond it for `row-blocks`.
+ */
 export const gemvRowCountsIn = (gemvCase: GemvCase, set: GemvCandidateSet): readonly number[] =>
-  set === "quick" ? gemvCase.rows.filter((m) => m === 1) : gemvCase.rows;
+  gemvCase.rows.filter((m) =>
+    set === "quick" ? m === 1 : set === "full" ? m <= PARALLEL_MAX_ROWS : m > PARALLEL_MAX_ROWS,
+  );
+
+/**
+ * What the derivation (`deriveLinearGemvChoices`) reads the kernels of a class at a row count for —
+ * one statement that the derivation, the sweep's quick look and the plan of what is missing share:
+ * - `winner`: M = 1. The derivation picks, among the candidates that clear the threshold over the
+ *   class's reference (the baseline; the default's choice at `reorder`), the one with the largest
+ *   gain.
+ * - `no-regression`: the reorder class at the other row counts of the parallel range (a parallel
+ *   row serves M = 1 to 8). The derivation asks only that a candidate is not slower than the
+ *   default's choice at `reorder`.
+ * - `unread`: the identical class at M ≥ 2 (the row-block heights, which no rule turns into the
+ *   thread target) and every row count beyond the parallel range.
+ */
+export type GemvGroupRole = "winner" | "no-regression" | "unread";
+
+export const gemvGroupRole = (m: number, candidateClass: GemvCandidateClass): GemvGroupRole =>
+  m === 1
+    ? "winner"
+    : candidateClass === "reorder" && m <= PARALLEL_MAX_ROWS
+      ? "no-regression"
+      : "unread";
 
 /** The value of `grid` next below and next above `value`, and `value` itself. */
 const around = (grid: readonly number[], value: number): number[] => {
@@ -286,13 +317,14 @@ export const programWorkgroups = (
       : [Math.ceil(grid.items / grid.workgroupSize), 1, 1],
   );
 
-/** Whether every dispatch of a choice's program fits the device's grid limit. */
+/** Whether every dispatch of a choice's program fits the device's grid limit (no limit: no program built). */
 const dispatchable = (
   gemvCase: GemvCase,
   m: number,
   choice: LinearGemvChoice,
   limit: number,
 ): boolean =>
+  limit === Number.POSITIVE_INFINITY ||
   programWorkgroups(gemvProgram(gemvCase, m, choice)).every((axes) =>
     axes.every((count) => count <= limit),
   );
@@ -331,18 +363,74 @@ export type GemvMeasurementPlan = {
   readonly profile: { readonly exact: string; readonly reorder: string };
 };
 
-/** The measurement plans of a case in a set, one per row count the set measures. */
+/**
+ * Narrows what a sweep measures of a set: the row counts and the candidates, by name (absent: all).
+ * The references — the baseline and the default profile's choice at `reorder` — are measured either
+ * way: every gain is read against them.
+ */
+export type GemvSelection = {
+  readonly rows?: readonly number[];
+  readonly candidates?: readonly string[];
+};
+
+/**
+ * The measurement plans of a case in a set, one per row count the set measures (and the selection
+ * keeps), with the candidates the selection names and the reference at `reorder`.
+ */
 export const gemvMeasurementPlans = (
   gemvCase: GemvCase,
   set: GemvCandidateSet,
   gates: GemvGates,
+  selection: GemvSelection = {},
 ): GemvMeasurementPlan[] =>
-  gemvRowCountsIn(gemvCase, set).map((m) => {
-    const baseline = gemvBaseline(gemvCase, m);
-    return {
-      m,
-      baseline,
-      candidates: gemvCandidates(gemvCase, m, set, gates),
-      profile: { exact: baseline.name, reorder: gemvProfileChoice(gemvCase, m, "reorder").name },
-    };
-  });
+  gemvRowCountsIn(gemvCase, set)
+    .filter((m) => selection.rows === undefined || selection.rows.includes(m))
+    .map((m) => {
+      const baseline = gemvBaseline(gemvCase, m);
+      const reorder = gemvProfileChoice(gemvCase, m, "reorder").name;
+      const named = selection.candidates;
+      return {
+        m,
+        baseline,
+        candidates: gemvCandidates(gemvCase, m, set, gates).filter(
+          ({ name }) => named === undefined || name === reorder || named.includes(name),
+        ),
+        profile: { exact: baseline.name, reorder },
+      };
+    });
+
+/** Gates that hold every candidate: the subgroup form, and no grid limit. */
+const EVERY_CANDIDATE: GemvGates = {
+  subgroups: true,
+  maxComputeWorkgroupsPerDimension: Number.POSITIVE_INFINITY,
+};
+
+/**
+ * Every kernel the current runtime can measure of a case at `m` rows in a set, whatever the device:
+ * the baseline first, then the set's candidates with the subgroup form and no grid limit (by default
+ * the whole grid, which holds every set's). A record's row stands for the current runtime only when
+ * its candidate is one of these and builds the same kernel.
+ */
+export const gemvKernelsAt = (
+  gemvCase: GemvCase,
+  m: number,
+  set: GemvCandidateSet = "full",
+): GemvCandidate[] => [
+  gemvBaseline(gemvCase, m),
+  ...gemvCandidates(gemvCase, m, set, EVERY_CANDIDATE),
+];
+
+/**
+ * Every candidate name of the case table, at every row count of every set, with the subgroup form
+ * and no grid limit, each once in the order first met: the names `GemvSweepOptions.candidates`
+ * takes. A new array on every call.
+ */
+export const gemvSweepCandidateNames = (cases: readonly GemvCase[] = GEMV_CASES): string[] => [
+  ...new Set(
+    cases.flatMap((gemvCase) =>
+      gemvCase.rows.flatMap((m) =>
+        gemvCandidates(gemvCase, m, "full", EVERY_CANDIDATE).map(({ name }) => name),
+      ),
+    ),
+  ),
+];

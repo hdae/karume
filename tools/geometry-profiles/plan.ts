@@ -1,0 +1,172 @@
+/**
+ * The generator's plan of GEMV measurements (`--gemv-plan`): what the GEMV sweep records at hand
+ * lack for `deriveLinearGemvChoices` to be complete under the current runtime — per case and row
+ * count, the candidates fewer than two records hold a current group of (`planGemvMeasurements` of
+ * `@karume/runtime/tune`) — written as a workbench batch (`karume-workbench-batch/1`) whose steps
+ * measure exactly that, twice. With no record at hand the batch is the whole measurement (the `full`
+ * set, twice). Pure over the records; the command writes the file.
+ *
+ * A step is one `gemv-sweep` run of the `full` set narrowed to cases, row counts and candidates
+ * that miss the same: the (case, row count) pairs that miss one list of candidates are grouped, and
+ * their cases grouped again by the row counts they miss it at. The references (the baseline and the
+ * default's choice at `reorder`) are measured with every step by the sweep itself.
+ *
+ * SPEC: docs/spec/geometry-profiles.md#planning-the-gemv-measurements
+ */
+
+import type { GeometryProfile } from "@karume/runtime";
+import {
+  type GemvMissingMeasurement,
+  gemvSweepCases,
+  planGemvMeasurements,
+} from "@karume/runtime/tune";
+import type { LoadedRecord } from "./records.ts";
+
+/** The format of a workbench batch file (the workbench's `BATCH_FORMAT`). */
+export const BATCH_FORMAT = "karume-workbench-batch/1";
+
+/** Where the workbench reads untracked batches, repository-relative (its `UNTRACKED_BATCHES_DIRECTORY`). */
+export const UNTRACKED_BATCHES_DIRECTORY = "inputs/workbench/batches";
+
+/** How many times the batch measures what is missing: one record is not evidence. */
+export const PLAN_PASSES = 2;
+
+/** One step of the batch: the workbench's `{ id, parameters }`. */
+export type PlanStep = {
+  readonly id: "gemv-sweep";
+  readonly parameters: {
+    readonly candidateSet: "full";
+    readonly cases?: readonly string[];
+    readonly rows?: readonly string[];
+    readonly candidates?: readonly string[];
+  };
+};
+
+/** The batch file's content. */
+export type PlanBatch = {
+  readonly format: typeof BATCH_FORMAT;
+  readonly title: string;
+  readonly description: string;
+  readonly steps: readonly PlanStep[];
+};
+
+/**
+ * The planned measurement: its batch (absent when nothing is missing — a batch has at least one
+ * step), the batch's id (the file name without `.json`) and its lines.
+ */
+export type GemvPlan = {
+  readonly batchId: string;
+  readonly batch?: PlanBatch;
+  readonly missing: readonly GemvMissingMeasurement[];
+  /** What a person reads: what is missing, what is not current, the steps. */
+  readonly lines: readonly string[];
+};
+
+/** The batch id of a profile's plan. */
+export const planBatchId = (profileId: string): string => `gemv-plan-${profileId}`;
+
+/** The steps of one pass over the missing measurements (see the module doc's grouping). */
+export const planSteps = (missing: readonly GemvMissingMeasurement[]): PlanStep[] => {
+  const order = gemvSweepCases().map(({ id }) => id);
+  // Per list of candidates: the row counts each case misses it at, in table order
+  const byNames = new Map<string, { names: readonly string[]; rows: Map<string, number[]> }>();
+  for (const { caseId, m, candidates } of missing) {
+    const key = candidates.join(",");
+    const entry = byNames.get(key) ?? { names: candidates, rows: new Map<string, number[]>() };
+    entry.rows.set(caseId, [...(entry.rows.get(caseId) ?? []), m]);
+    byNames.set(key, entry);
+  }
+  const steps: PlanStep[] = [];
+  for (const { names, rows } of byNames.values()) {
+    // The cases that miss the list at the same row counts make one step
+    const byRows = new Map<string, { rows: readonly number[]; cases: string[] }>();
+    const cases = [...rows.keys()].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    for (const caseId of cases) {
+      const counts = [...(rows.get(caseId) ?? [])].sort((a, b) => a - b);
+      const key = counts.join(",");
+      const entry = byRows.get(key) ?? { rows: counts, cases: [] };
+      entry.cases.push(caseId);
+      byRows.set(key, entry);
+    }
+    for (const entry of byRows.values()) {
+      steps.push({
+        id: "gemv-sweep",
+        parameters: {
+          candidateSet: "full",
+          cases: entry.cases,
+          rows: entry.rows.map(String),
+          candidates: names,
+        },
+      });
+    }
+  }
+  return steps;
+};
+
+/**
+ * The plan for a profile from the GEMV records at hand: the runtime's missing measurements and the
+ * batch that measures them {@link PLAN_PASSES} times. `table` is the registered table of the id when
+ * there is one (the records must be of its adapter, as for the derivation).
+ */
+export const gemvPlan = (input: {
+  readonly profileId: string;
+  readonly records: readonly LoadedRecord[];
+  readonly table?: GeometryProfile;
+}): GemvPlan => {
+  const { profileId, records } = input;
+  const batchId = planBatchId(profileId);
+  const command = `node tools/geometry-profiles/generate.ts ${profileId} --gemv-plan`;
+  if (records.length === 0) {
+    const steps = Array.from({ length: PLAN_PASSES }, (): PlanStep => ({
+      id: "gemv-sweep",
+      parameters: { candidateSet: "full" },
+    }));
+    return {
+      batchId,
+      batch: {
+        format: BATCH_FORMAT,
+        title: `GEMV sweep for ${profileId}: the whole measurement, twice`,
+        description: `Written by ${command} with no GEMV sweep record at hand: the full set (M = 1, 4 and 8, every candidate), ${PLAN_PASSES} times — the derivation reads groups of two records or more.`,
+        steps,
+      },
+      missing: [],
+      lines: ["No GEMV sweep record given: the batch measures everything (the full set), twice."],
+    };
+  }
+  const planning = planGemvMeasurements(
+    records.map(({ report, path, sha256 }) => ({ report, path, sha256 })),
+    input.table === undefined ? {} : { table: input.table },
+  );
+  const { missing, stale } = planning;
+  const pass = planSteps(missing);
+  const measurements = missing.reduce((sum, { candidates }) => sum + candidates.length, 0);
+  const lines = [
+    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (fewer than two records hold a current, steady group with the candidate's row).`,
+    `Groups of the records that are not current: ${stale.length}.`,
+    ...(pass.length === 0
+      ? ["Nothing is missing: the derivation is complete under the current runtime."]
+      : [
+          `Each pass has ${pass.length} step${pass.length === 1 ? "" : "s"} (the batch runs the pass ${PLAN_PASSES} times):`,
+          ...pass.map(
+            ({ parameters }, index) =>
+              `  ${index + 1}. ${parameters.cases?.length ?? 0} cases at M=${parameters.rows?.join(", ") ?? "?"}: ${parameters.candidates?.length ?? 0} candidates (${parameters.candidates?.join(", ") ?? ""})`,
+          ),
+        ]),
+  ];
+  if (pass.length === 0) return { batchId, missing, lines };
+  const steps = Array.from({ length: PLAN_PASSES }, () => pass).flat();
+  return {
+    batchId,
+    batch: {
+      format: BATCH_FORMAT,
+      title: `GEMV sweep for ${profileId}: what the derivation lacks, twice`,
+      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates fewer than two of those records hold a current, steady group of; each step measures them with the references, and the steps run ${PLAN_PASSES} times.`,
+      steps,
+    },
+    missing,
+    lines,
+  };
+};
+
+/** The batch file's text (two-space JSON and a final newline). */
+export const planBatchText = (batch: PlanBatch): string => `${JSON.stringify(batch, null, 2)}\n`;

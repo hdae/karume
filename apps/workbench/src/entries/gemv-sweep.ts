@@ -3,9 +3,10 @@
  * `@karume/runtime/tune` — per case and row count the baseline (what a Session at the level `exact`
  * runs with the default profile), the identical class (the sequential variants and the row-block
  * heights, whose words must be the baseline's) and the reorder class (the parallel GEMV at each lane
- * count, plain, staged and subgroup, held to the band of `linear` against an f64 oracle on the host).
- * One call per case with idle time before every case but the first, the per-case records merged into
- * one `karume-gemv-sweep/2` record. Nothing derives a table from it yet.
+ * count, plain, staged and subgroup, held to the band of `linear` against an f64 oracle on the host),
+ * each row count after a quick look that times in full only the references and the kernels near
+ * enough to matter. One call per case with idle time before every case but the first, the per-case
+ * records merged into one `karume-gemv-sweep/3` record — what `deriveLinearGemvChoices` reads.
  *
  * The run concludes a verdict from its rows (`gemvSweepVerdict` of `../gemv-sweep/summary.ts`): an
  * identical candidate whose words differ, a reorder candidate outside the band, or a row that errored
@@ -13,11 +14,15 @@
  * acquires none.
  */
 
+import { QUICK_LOOK_MARGIN } from "@karume/runtime/tune";
+
 import type { Entry } from "../entry.ts";
 import { foldGemvEvent, INITIAL_GEMV_LIVE, runGemvPlan } from "../gemv-sweep/run.ts";
 import {
+  GEMV_CANDIDATE_NAMES,
   GEMV_CANDIDATE_SETS,
   GEMV_CASE_IDS,
+  GEMV_ROW_COUNTS,
   gemvSweepSelection,
   planGemvSweep,
 } from "../gemv-sweep/settings.ts";
@@ -28,12 +33,13 @@ const entry: Entry = {
   id: "gemv-sweep",
   title: "GEMV sweep",
   description:
-    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases), merged into one karume-gemv-sweep/2 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
+    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing), merged into one karume-gemv-sweep/3 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
   parameters: [
     {
       kind: "choice",
       name: "candidateSet",
-      label: "Candidate set (quick: M = 1; full: every row count, the whole grid)",
+      label:
+        "Candidate set (quick: M = 1; full: M = 1, 4 and 8, the whole grid; row-blocks: M = 16 and 64)",
       options: GEMV_CANDIDATE_SETS,
       default: "quick",
     },
@@ -43,6 +49,28 @@ const entry: Entry = {
       label: "Cases (none: every case)",
       options: GEMV_CASE_IDS,
       default: [],
+    },
+    {
+      kind: "choices",
+      name: "rows",
+      label: "Row counts (none: every row count of the set)",
+      options: GEMV_ROW_COUNTS,
+      default: [],
+    },
+    {
+      kind: "choices",
+      name: "candidates",
+      label: "Candidates besides the references (none: every candidate)",
+      options: GEMV_CANDIDATE_NAMES,
+      default: [],
+    },
+    {
+      kind: "number",
+      name: "quickLookMargin",
+      label: "Quick look margin (0: off — every kernel is timed in full)",
+      min: 0,
+      max: 1000,
+      default: QUICK_LOOK_MARGIN,
     },
     {
       kind: "integer",

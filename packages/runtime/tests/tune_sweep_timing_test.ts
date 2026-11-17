@@ -3,6 +3,15 @@
 // and the GEMV sweep's row count (src/tune/gemv-sweep.ts) — its warm start on the baseline, its
 // interleaved rounds and the spread of the baseline's rounds.
 //
+// The quick look of both sweeps: the kernels within the margin of their class's bar go on, the rest
+// are screened rows (fault: a candidate at ×1.3 the fastest, a geometry at ×1.5 the default); a
+// margin of 0 times everything (fault: a candidate at ×3); the references go on whatever their time
+// (fault: the baseline and the default's choice at reorder at ×3); a group the derivation reads only
+// for a regression weighs the reorder class against the default's choice (fault: a candidate at
+// ×2.25 the fastest but faster than that choice); a kernel that goes on calibrates from its quick
+// look's probe (fault: a calibration that probes again would add untimed passes); the quick looks
+// follow the group's shuffled order.
+//
 // The fake device's passes take the time the test gives them: a timed pass's timestamp difference
 // (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the real wall clock a pass
 // takes to complete (`wallMs` — the probe reads only that). GpuContext is the real one; only the
@@ -31,23 +40,31 @@ import {
   gemvProfileChoice,
   gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
-import type { GemvCase } from "../src/tune/gemv-cases.ts";
+import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
+import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
 import { gemvLaunch, sweepGemvCase } from "../src/tune/gemv-sweep.ts";
 import {
   calibrate,
+  candidatesFor,
   casePlan,
   createResources,
   createSweepContext,
   destroySweepContext,
   prepareLaunch,
+  quickLookOrder,
   type ReadyLaunch,
   runSweep,
+  sweepCase,
   SWEEP_MAX_REPS,
   type SweepContext,
   WARM_START_MAX_PASSES,
   warmStart,
 } from "../src/tune/harness.ts";
-import { WARM_START_MAX_NS, WARM_START_MIN_NS } from "../src/tune/measurement.ts";
+import {
+  QUICK_LOOK_MARGIN,
+  WARM_START_MAX_NS,
+  WARM_START_MIN_NS,
+} from "../src/tune/measurement.ts";
 
 /** One pass the fake device ran. */
 type FakePass = {
@@ -350,6 +367,7 @@ describe("the geometry sweep", () => {
           rounds: 1,
           candidateSet: "quick",
           timestampUnit: "ns",
+          quickLookMargin: QUICK_LOOK_MARGIN,
         });
         return log;
       },
@@ -402,13 +420,14 @@ const sweepPlan = (
   plan: GemvMeasurementPlan,
   rounds: number,
   signal?: AbortSignal,
+  margin = QUICK_LOOK_MARGIN,
 ) =>
   withContext(timing, async (context, passes) => ({
     result: await sweepGemvCase(
       context,
       GEMV_CASE,
       [plan],
-      { rounds, tolerance: opTolerance("linear") },
+      { rounds, tolerance: opTolerance("linear"), quickLookMargin: margin },
       signal === undefined ? {} : { signal },
     ),
     passes,
@@ -497,5 +516,222 @@ describe("the GEMV sweep's row count", () => {
       controller.signal,
     );
     assertEquals(result, { rows: [], summaries: [], aborted: true });
+  });
+});
+
+/** E2B's per_layer_model_projection: its default's choice at reorder is parallel-l4 (a parallel row). */
+const PLE_CASE: GemvCase = (() => {
+  const found = GEMV_CASES.find(({ id }) => id === "i4g32-n8960-k1536");
+  if (found === undefined) throw new Error("no case i4g32-n8960-k1536");
+  return found;
+})();
+
+/** The plan of `gemvCase` at `m` rows with the candidates `names` of the full set. */
+const namedPlan = (
+  gemvCase: GemvCase,
+  m: number,
+  names: readonly string[],
+): GemvMeasurementPlan => {
+  const all = gemvCandidates(gemvCase, m, "full", GATES);
+  const baseline = gemvBaseline(gemvCase, m);
+  return {
+    m,
+    baseline,
+    candidates: names.map((name) => {
+      const found = all.find((one) => one.name === name);
+      if (found === undefined) throw new Error(`${gemvCase.id} M=${m}: no candidate ${name}`);
+      return found;
+    }),
+    profile: { exact: baseline.name, reorder: gemvProfileChoice(gemvCase, m, "reorder").name },
+  };
+};
+
+/** The pipeline key of a kernel of a case at a row count. */
+const keyAt = (gemvCase: GemvCase, m: number, candidate: GemvCandidate): string =>
+  gemvLaunch(gemvProgram(gemvCase, m, candidate.choice), "out", 65535).key;
+
+/** Each kernel's time per dispatch by its key (5 µs where `perKernel` names none). */
+const byKey =
+  (times: ReadonlyMap<string, number>): FakeTiming["gpuNs"] =>
+  (pass) =>
+    pass.dispatches * (times.get(pass.key) ?? 5_000);
+
+/** Sweeps one plan of any case on a fake device. */
+const sweepCasePlan = (
+  gemvCase: GemvCase,
+  timing: FakeTiming,
+  plan: GemvMeasurementPlan,
+  margin: number,
+) =>
+  withContext(timing, async (context, passes) => ({
+    result: await sweepGemvCase(context, gemvCase, [plan], {
+      rounds: 2,
+      tolerance: opTolerance("linear"),
+      quickLookMargin: margin,
+    }),
+    passes,
+  }));
+
+const rowOf = (rows: readonly GemvSweepRow[], name: string): GemvSweepRow => {
+  const found = rows.find((row) => row.candidate === name);
+  if (found === undefined) throw new Error(`no row ${name}`);
+  return found;
+};
+
+describe("the GEMV sweep's quick look", () => {
+  it("lets the kernels within the margin of their class's fastest go on and screens the rest: no rounds, no check, its quick time (fault: c64u8 at ×1.3 the fastest)", async () => {
+    const plan = planOf(["c16u2", "c64u8"]);
+    const times = new Map([[keyOf(plan.candidates[1]), 6_500]]);
+    const { result } = await sweepPlan({ gpuNs: byKey(times) }, plan, 2);
+    const screened = rowOf(result.rows, "c64u8");
+    assertEquals(screened.screened, true);
+    assertEquals(screened.quickPerDispatch, 6_500);
+    assertEquals(
+      [screened.rounds, screened.perDispatch, screened.identicalToBaseline, screened.error],
+      [undefined, undefined, undefined, undefined],
+    );
+    assertEquals(screened.kernel?.length, 16);
+    const timed = rowOf(result.rows, "c16u2");
+    assertEquals(
+      [timed.screened, timed.rounds?.length, timed.quickPerDispatch],
+      [undefined, 2, 5_000],
+    );
+    assertEquals(result.summaries[0]?.screened, 1);
+  });
+
+  it("times every kernel at a margin of 0 (fault: c64u8 at ×3 the fastest)", async () => {
+    const plan = planOf(["c16u2", "c64u8"]);
+    const times = new Map([[keyOf(plan.candidates[1]), 15_000]]);
+    const { result } = await sweepPlan({ gpuNs: byKey(times) }, plan, 2, undefined, 0);
+    for (const row of result.rows) {
+      assertEquals(
+        [row.screened, row.rounds?.length, row.quickPerDispatch],
+        [undefined, 2, undefined],
+      );
+    }
+    assertEquals(result.summaries[0]?.screened, 0);
+  });
+
+  it("lets the references go on whatever their time (fault: the baseline and the default's choice at reorder 3 times the fastest of their classes)", async () => {
+    const plan = namedPlan(PLE_CASE, 1, ["c64u8", "parallel-l4", "parallel-l8", "staged-l32"]);
+    assertEquals(plan.profile.reorder, "parallel-l4");
+    const slow = [plan.baseline, plan.candidates[1]].map((candidate) =>
+      keyAt(PLE_CASE, 1, candidate),
+    );
+    const times = new Map(slow.map((key) => [key, 15_000]));
+    const { result } = await sweepCasePlan(
+      PLE_CASE,
+      { gpuNs: byKey(times) },
+      plan,
+      QUICK_LOOK_MARGIN,
+    );
+    for (const name of [plan.baseline.name, "parallel-l4"]) {
+      const row = rowOf(result.rows, name);
+      assertEquals([row.screened, row.rounds?.length], [undefined, 2], name);
+    }
+    for (const name of ["c64u8", "parallel-l8", "staged-l32"]) {
+      assertEquals(rowOf(result.rows, name).screened, undefined, name);
+    }
+  });
+
+  it("weighs the reorder class against the default's choice where the derivation only checks a regression (M = 4: parallel-l8 at ×2.25 the fastest but faster than parallel-l4 goes on; staged-l2 at ×1.3 parallel-l4 does not)", async () => {
+    const plan = namedPlan(PLE_CASE, 4, ["parallel-l4", "parallel-l8", "staged-l2", "staged-l32"]);
+    assertEquals(plan.profile.reorder, "parallel-l4");
+    const key = (name: string): string => {
+      const candidate = plan.candidates.find((one) => one.name === name);
+      if (candidate === undefined) throw new Error(name);
+      return keyAt(PLE_CASE, 4, candidate);
+    };
+    const times = new Map([
+      [key("parallel-l4"), 10_000],
+      [key("parallel-l8"), 9_000],
+      [key("staged-l2"), 13_000],
+      [key("staged-l32"), 4_000],
+    ]);
+    const { result } = await sweepCasePlan(
+      PLE_CASE,
+      { gpuNs: byKey(times) },
+      plan,
+      QUICK_LOOK_MARGIN,
+    );
+    assertEquals(rowOf(result.rows, "parallel-l8").screened, undefined);
+    assertEquals(rowOf(result.rows, "staged-l2").screened, true);
+    assertEquals(rowOf(result.rows, "staged-l32").screened, undefined);
+  });
+
+  it("calibrates a kernel that goes on from its quick look's probe: no second probe (fault: a calibration that probes again)", async () => {
+    const plan = planOf(["c16u2", "c64u8"]);
+    const { passes } = await sweepPlan({ gpuNs: byKey(new Map()) }, plan, 2);
+    const key = keyOf(plan.candidates[0]);
+    // The quick look's probe is timed; after it the kernel's one untimed pass is its run from a
+    // zeroed output (a probe of its own would add 15 untimed passes of 1 to 16384 dispatches)
+    assertEquals(
+      passes.filter((pass) => pass.key === key && !pass.timed).map((pass) => pass.dispatches),
+      [1],
+    );
+  });
+
+  it("takes the quick looks in the group's shuffled order, not the plan's", async () => {
+    const plan = planOf(["c16u2", "c64u8", "c16u8", "c64u2", "c32u8"]);
+    const { passes } = await sweepPlan({ gpuNs: byKey(new Map()) }, plan, 2);
+    const kernels = [plan.baseline, ...plan.candidates];
+    const looked = timedOf(passes)
+      .filter((pass) => pass.dispatches === 1)
+      .map((pass) => pass.key);
+    const expected = quickLookOrder(kernels, `${GEMV_CASE.id} M=1`).map(keyOf);
+    assertEquals(looked, expected);
+    assert(
+      expected.some((key, index) => key !== kernels.map(keyOf)[index]),
+      "the shuffle kept the plan's order",
+    );
+  });
+});
+
+describe("the geometry sweep's quick look", () => {
+  const plan = casePlan(SMALLEST, 65535, false);
+  const [near, far] = candidatesFor(SMALLEST, "quick").filter(
+    (candidate) => candidate.name !== plan.defaultCandidate.name,
+  );
+  const times = new Map([
+    [plan.launch(plan.defaultCandidate).key, 5_000],
+    [plan.launch(near).key, 5_500],
+    [plan.launch(far).key, 7_500],
+  ]);
+  const sweep = (margin: number) =>
+    withContext({ gpuNs: byKey(times) }, (context) =>
+      sweepCase(context, SMALLEST, [near, far], { rounds: 2, quickLookMargin: margin }),
+    );
+
+  it("times the default and a candidate within the margin of the default's quick time, and screens one beyond it (fault: a geometry at ×1.5 the default)", async () => {
+    const { rows, summary } = await sweep(QUICK_LOOK_MARGIN);
+    const [base, kept, screened] = rows;
+    assertEquals([base.isDefault, base.rounds?.length], [true, 2]);
+    assertEquals([kept.geometry, kept.screened, kept.rounds?.length], [near.name, undefined, 2]);
+    assertEquals(kept.quickPerDispatch, 5_500);
+    assertEquals(
+      [screened.geometry, screened.screened, screened.quickPerDispatch],
+      [far.name, true, 7_500],
+    );
+    assertEquals(
+      [
+        screened.rounds,
+        screened.outputSha256,
+        screened.identicalToDefault,
+        screened.speedupVsDefault,
+      ],
+      [undefined, undefined, undefined, undefined],
+    );
+    assertEquals(summary.screened, 1);
+  });
+
+  it("times every geometry at a margin of 0", async () => {
+    const { rows, summary } = await sweep(0);
+    for (const row of rows) {
+      assertEquals(
+        [row.screened, row.rounds?.length, row.quickPerDispatch],
+        [undefined, 2, undefined],
+      );
+    }
+    assertEquals(summary.screened, 0);
   });
 });

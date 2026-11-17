@@ -14,6 +14,7 @@ no base.
 GEMV sweep records (`--gemv-records`, the workbench's `gemv-sweep` entry) derive the table's GEMV choices of linear
 (`linearGemv`) with `deriveLinearGemvChoices` of `@karume/runtime/tune`, onto the table the sweep records give (or
 onto the registered table when only GEMV records are given). Without them, a table that carries the field keeps it.
+`--gemv-plan` writes, instead, the workbench batch that measures what those records lack.
 
 ## The command
 
@@ -21,8 +22,9 @@ From the repository root:
 
 ```sh
 node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
-  [--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]] \
+  [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] \
   [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
+node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-records=<path>[,<path>…]] [--dry-run]
 ```
 
 - A registered id takes the registered table as its base and the table's own adapter match; the match options are then
@@ -30,12 +32,13 @@ node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>�
   has no base.
 - `--attention-bench` adds attention-bench records, which decide the online attention's key axis; without them that
   field is carried over from the base.
-- `--gemv-records` adds two or more GEMV sweep records of the table's adapter, which decide `linearGemv`: a candidate
-  replaces the default profile's choice for a shape only at ×1.10 or more over it in every record, its check held in
-  every record, a shape a record measured while the baseline's rounds spread beyond ×1.25 keeps the default, and a
-  parallel row changes only when every record is of the `full` set (it serves M = 1 to 8)
-  ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). The field is written only when a
-  choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
+- `--gemv-records` adds GEMV sweep records of the table's adapter, which decide `linearGemv` group by group (one
+  record's case at one row count): a candidate replaces the default profile's choice for a shape only at ×1.10 or more
+  over it in every group that is evidence — current (its rows' and its case's fingerprints are the current runtime's)
+  and steady (the baseline's rounds spread at most ×1.25) —, from at least two records, its check held; a parallel row
+  also needs that evidence at M = 4 and 8 without a regression (it serves M = 1 to 8: the `full` set)
+  ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). Groups that are not current are
+  reported in the verdict lines, not refused. The field is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
 - `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
   keep their own ×1.10.
@@ -44,6 +47,13 @@ node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>�
   differs from the registered table (the provenance fields listed apart). With GEMV records the verdict lines end with
   the GEMV decisions shape by shape (the default's choice, the derived one, the gains per record, or why it was kept)
   and a line that says whether the table would carry the field; `linearGemv` is compared as each table runs with it.
+- `--gemv-plan` derives nothing. From the GEMV records given (none: nothing at hand) it prints, per case and row
+  count of the `full` set, how many candidates the derivation would still miss — those fewer than two records hold a
+  current, steady group of ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)) — and
+  writes `inputs/workbench/batches/gemv-plan-<profile id>.json` (outside git; the workbench lists it as an untracked
+  batch): `gemv-sweep` steps of the `full` set narrowed to the cases, row counts and candidates that miss the same,
+  run twice. With no record at hand the batch is the whole `full` set, twice; with nothing missing no batch is
+  written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else (the derivation's message on
   stderr, unchanged).
 
@@ -55,7 +65,15 @@ node tools/geometry-profiles/generate.ts nvidia-blackwell --dry-run \
   --records=outputs/workbench/browser-nvidia-geforce-rtx-5070-ti/geometry-sweep_<time>.json
 ```
 
-Derive the GEMV choices of a registered table from two GEMV sweeps, its tile geometry unchanged:
+Say what the GEMV sweeps at hand lack, and write the batch that measures it (run it from the workbench's menu, or
+under Node with `flock /tmp/karume-gpu.lock node apps/workbench/run.ts --batch=inputs/workbench/batches/gemv-plan-nvidia-ampere.json`):
+
+```sh
+node tools/geometry-profiles/generate.ts nvidia-ampere --gemv-plan \
+  --gemv-records=outputs/workbench/node-nvidia-geforce-rtx-3080-ti/gemv-sweep_<time 1>.json,outputs/workbench/node-nvidia-geforce-rtx-3080-ti/gemv-sweep_<time 2>.json
+```
+
+Derive the GEMV choices of a registered table from GEMV sweeps, its tile geometry unchanged:
 
 ```sh
 node tools/geometry-profiles/generate.ts nvidia-ampere --dry-run \
@@ -80,10 +98,10 @@ node tools/geometry-profiles/generate.ts intel-xe2 --vendor=intel --architecture
 - Each path is repository-relative or absolute and must lie inside the repository: the table's provenance cites it
   repository-relative, with the sha256 of the file's bytes as stored (for a workbench record, of the envelope file).
 
-Whether a record is usable — its format version (only `karume-geometry-sweep/3`, `karume-attention-bench/2` and
-`karume-gemv-sweep/2` are accepted), its adapter, its case sets, its fingerprints, a sweep that covers a family only in
-part while a base exists, fewer than two GEMV records — is the derivation's decision; its errors are printed as they
-are.
+Whether a record is usable — its format version (only `karume-geometry-sweep/4`, `karume-attention-bench/2` and
+`karume-gemv-sweep/3` are accepted), its adapter, its case sets, its fingerprints, a sweep that covers a family only in
+part while a base exists — is the derivation's decision; its errors are printed as they are. Of a GEMV record, the
+groups that are not of the current runtime are reported, not refused.
 
 ## What the header says
 
@@ -117,4 +135,6 @@ selection for every adapter it matches. It prints the two edits, with line numbe
 ## Tests
 
 `vp test tools/geometry-profiles` (the core lane; no GPU). The regeneration case needs the records the registered
-tables cite under `outputs/` (outside git) and is skipped, naming the missing files, on a machine without them.
+tables cite under `outputs/` (outside git) and is skipped, naming the missing files, on a machine without them; the
+records cited today are `karume-geometry-sweep/3`, so it checks that the derivation refuses them by their format.
+The plan's case reads the batch it writes with the workbench's own batch reader.

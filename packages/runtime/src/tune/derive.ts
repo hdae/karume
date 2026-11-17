@@ -1,6 +1,6 @@
 /**
  * Pure functions that derive one adapter's **geometry profile** (`GeometryProfile` in the runtime's
- * `src/kernels/geometry-profile.ts`) from sweep records (`karume-geometry-sweep/3` — `report.ts`)
+ * `src/kernels/geometry-profile.ts`) from sweep records (`karume-geometry-sweep/4` — `report.ts`)
  * (perf-ledger K-71). Independent of Deno's API — {@link deriveGeometryProfile} of the public
  * surface `@karume/runtime/tune` (user applications), the CLI (`main.ts profile` of
  * `tools/geometry-sweep`) and the browser page (the profile tab of `tools/gpu-lab`) — both tools
@@ -36,6 +36,9 @@
  * - If several sweeps measured the same (case, geometry), the ratio is the geometric mean of the
  *   observations, and match and failure are judged over all observations (for overlaying quick and
  *   full — a geometry that mismatched or failed even once is not taken).
+ * - A row the quick look screened out (`screened`, harness.ts's protocol rule 4) is no observation:
+ *   it has no ratio and no output match, so a geometry screened out in a case that no other sweep
+ *   timed it in is not taken (its verdict says so).
  * - If the geometry of the sweep's default row differs from the current runtime's default, nothing
  *   is generated (fail loudly). The ratio to the default is relative to the default row, so if the
  *   baseline differs from the current default, "faster than the default" does not hold on the
@@ -221,6 +224,11 @@ type SweepObservation = {
   readonly identicalToDefault?: boolean;
   readonly error?: string;
   /**
+   * The quick look screened the geometry out in this case (report.ts): no ratio, no output match,
+   * never ratio material.
+   */
+  readonly screened?: true;
+  /**
    * The pass time per measurement round (unit: `gpuTiming.unit`; negative rounds stay clamped to 0
    * — report.ts). Only the rounding-error bound ({@link roundingBound}) reads it.
    */
@@ -297,6 +305,8 @@ const isBoolean = (value: unknown): value is boolean => typeof value === "boolea
 
 const isString = (value: unknown): value is string => typeof value === "string";
 
+const isTrue = (value: unknown): value is true => value === true;
+
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
@@ -369,6 +379,10 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
   const identicalToDefault = optional(value, "identicalToDefault", isBoolean, where);
   const error = optional(value, "error", isString, where);
   const rounds = optional(value, "rounds", isRounds, where);
+  const screened = optional(value, "screened", isTrue, where);
+  if (screened === true && isDefault) {
+    throw new Error(`${where}: the default row is screened (the default geometry always goes on)`);
+  }
   // reps is only checked: the rounding-error bound e = q ÷ min(round) bounds the relative error of
   // perDispatch (= min ÷ reps) because reps is an integer and carries no error (ADR 0117 decision
   // 3). The value itself does not affect the bound
@@ -384,6 +398,7 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
     ...(identicalToDefault === undefined ? {} : { identicalToDefault }),
     ...(error === undefined ? {} : { error }),
     ...(rounds === undefined ? {} : { rounds }),
+    ...(screened === undefined ? {} : { screened }),
   };
 };
 
@@ -1216,7 +1231,9 @@ const judgeCandidate = (
         eligible: false,
         reason: unmeasured.has(caseId)
           ? `not measured in ${caseId} (dropped from the ratio material in every sweep)`
-          : `not measured in ${caseId}`,
+          : all.length > 0 && all.every((row) => row.screened === true)
+            ? `screened out by the quick look in ${caseId} (no timing to compare)`
+            : `not measured in ${caseId}`,
       };
     }
     const speedups: number[] = [];
@@ -1502,9 +1519,14 @@ export const deriveProfile = (
           },
         });
       }
+      // A screened row is no ratio material (it has no ratio) and no exclusion either: the quick
+      // look left it out, and judgeCandidate names it
       bySlot.set(slot, [
         ...(bySlot.get(slot) ?? []),
-        { row, included: caseReason === undefined && rowReason === undefined },
+        {
+          row,
+          included: caseReason === undefined && rowReason === undefined && row.screened !== true,
+        },
       ]);
     }
     // Ascending case id → per-case exclusions first → ascending geometry name

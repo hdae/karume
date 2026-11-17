@@ -70,18 +70,23 @@
  *
  * {@link runGemvSweep} measures the GEMV choices of `linear` (the sequential variant, the row-block
  * height, the parallel GEMV's lane count, staged or subgroup) on a dedicated device, at the shapes of
- * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/2`). Each
- * candidate's output is checked in the sweep: a candidate of the baseline's summation order must
- * write the baseline's words, a reordering one must stay inside the band of `linear` against an f64
- * oracle on the host. The same rule applies: never alongside inference on the same GPU.
- * {@link deriveLinearGemvChoices} turns two or more of its records of one adapter into a profile's
- * `linearGemv`: a candidate replaces the default profile's choice for a shape only when it is at
- * least ×1.10 faster than that choice in every record with its check held in every record, and a
- * shape a record measured while the device was unsteady (the baseline's rounds spread beyond ×1.25)
- * keeps the default. The identical class writes the sequential variant's per-shape exceptions, which
- * change no number of any Session; the reorder class writes the parallel rows, which change the
- * numbers of Sessions at `reorder`, inside the band, and only from records of the `full` set (a
- * parallel row serves M = 1 to 8, and a `quick` record measures M = 1 alone).
+ * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/3`). After a warm
+ * start, every kernel of a row count gets a quick look, and only the references and the kernels near
+ * enough to matter are timed and checked: a screened kernel's row holds its quick time only. Each
+ * timed candidate's output is checked in the sweep: a candidate of the baseline's summation order
+ * must write the baseline's words, a reordering one must stay inside the band of `linear` against
+ * an f64 oracle on the host. The same rule applies: never alongside inference on the same GPU.
+ * {@link deriveLinearGemvChoices} turns any number of its records of one adapter into a profile's
+ * `linearGemv`, reading them group by group (a record's case at a row count): a group is evidence
+ * when its rows are of the current runtime (each row and each case carries its own fingerprint) and
+ * the device was steady (the baseline's rounds spread at most ×1.25). A candidate replaces the
+ * default profile's choice for a shape only when groups of two or more records are evidence for it,
+ * it is at least ×1.10 faster than that choice in every one, and its check held. The identical class
+ * writes the sequential variant's per-shape exceptions, which change no number of any Session; the
+ * reorder class writes the parallel rows, which change the numbers of Sessions at `reorder`, inside
+ * the band, and need evidence at every row count a row serves (M = 1 to 8: the `full` set). Groups
+ * that are not current are reported, not refused. {@link planGemvMeasurements} says what the records
+ * lack for that derivation to be complete.
  *
  * {@link runSessionAb} is the wall-clock A/B of whole runs, the measurement a fusion rule (built-in
  * or external) is accepted or dropped on: two or more arms — Session configurations built with
@@ -111,7 +116,10 @@
 
 /**
  * Sweeps the tile geometries on a dedicated device and returns the sweep record
- * (`karume-geometry-sweep/3`). Uses GPU timestamps when the adapter lists `timestamp-query`.
+ * (`karume-geometry-sweep/4`). Uses GPU timestamps when the adapter lists `timestamp-query`. After
+ * a case's warm start every geometry gets a quick look, and only the default geometry and the
+ * candidates whose quick time is within the margin of the default's are timed in full
+ * (`GeometrySweepOptions.quickLookMargin`; 0 times every geometry).
  */
 export { runGeometrySweep } from "./src/tune/sweep.ts";
 export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/sweep.ts";
@@ -190,24 +198,41 @@ export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 
 /**
  * Measures the GEMV choices of `linear` on a dedicated device and returns the record
- * (`karume-gemv-sweep/2`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
+ * (`karume-gemv-sweep/3`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
  * in the models) and row count, the baseline — what a Session at the level `exact` runs with the
  * default profile — and the candidates in two classes: `identical` (the sequential M = 1 variants and
  * the row-block heights, whose output words must be the baseline's) and `reorder` (the parallel GEMV
  * at each lane count, plain, staged and — where the device has the features — subgroup, held to the
- * band of `linear` against an f64 oracle on the host). The kernels of a row count are timed in
- * interleaved rounds after a warm start on the baseline; the spread of the baseline's rounds says how
- * steady the device was. It derives no table and changes no choice.
+ * band of `linear` against an f64 oracle on the host). After a warm start on the baseline, every
+ * kernel of a row count gets a quick look; the references and the kernels near enough to matter are
+ * timed in interleaved rounds, and the spread of the baseline's rounds says how steady the device
+ * was. The options narrow it by case, row count and candidate (the references are measured either
+ * way). It derives no table and changes no choice.
  */
 export { runGemvSweep } from "./src/tune/gemv-sweep.ts";
+/**
+ * The quick look's default margin of both sweeps (`GeometrySweepOptions.quickLookMargin`,
+ * `GemvSweepOptions.quickLookMargin`): ×1.25.
+ */
+export { QUICK_LOOK_MARGIN } from "./src/tune/measurement.ts";
 export type { GemvSweepOptions, GemvSweepProgress } from "./src/tune/gemv-sweep.ts";
-/** The GEMV sweep's candidate set: `"quick"` (M = 1, about half an hour) or `"full"`. */
+/**
+ * The GEMV sweep's candidate set: `"quick"` (M = 1, a small identical grid), `"full"` (M = 1, 4
+ * and 8 — every row count a derivation rule reads —, the whole grid) or `"row-blocks"` (M = 16 and
+ * 64, which no rule reads yet).
+ */
 export type { GemvCandidateSet as GemvSweepCandidateSet } from "./src/tune/gemv-candidates.ts";
 /** Every case of the GEMV sweep's table (the ids `GemvSweepOptions.cases` takes). A new array on every call. */
 export { gemvSweepCaseEntries as gemvSweepCases } from "./src/tune/gemv-cases.ts";
+/**
+ * Every candidate name of the GEMV sweep's table, at every row count of every set (the names
+ * `GemvSweepOptions.candidates` takes). A new array on every call.
+ */
+export { gemvSweepCandidateNames } from "./src/tune/gemv-candidates.ts";
 export type { GemvCase as GemvSweepCase } from "./src/tune/gemv-cases.ts";
 /** The GEMV sweep record and its parts. */
 export type {
+  GemvSweepCaseEntry,
   GemvSweepCaseSummary,
   GemvSweepChoice,
   GemvSweepGates,
@@ -215,26 +240,29 @@ export type {
   GemvSweepRow,
 } from "./src/tune/gemv-report.ts";
 /**
- * The kernel fingerprint of a GEMV sweep record's rows (its `kernels`), derived without a GPU. An
- * application that merges the records of several `runGemvSweep` calls recomputes it over the merged
- * rows.
+ * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from GEMV sweep
+ * records of its adapter, group by group: per shape and class a decision (adopted or kept, the gains
+ * per group that is evidence, why it was kept), the groups that are not of the current runtime, the
+ * lines that state them, and the records used with how much of each is current. The field is absent
+ * from the result when every choice stays the default's. A record of another format or adapter, a
+ * wall-clock or quantized one, the same record twice and no record at all are refused.
+ *
+ * {@link planGemvMeasurements} reads the same records and says, per case and row count of the
+ * `full` set, the candidates the derivation reads there that fewer than two records hold a current
+ * group of — what a sweep must measure for the derivation to be complete.
  */
-export { gemvSweepKernelsId } from "./src/tune/gemv-fingerprint.ts";
-
-/**
- * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from two or more GEMV
- * sweep records of its adapter: per shape and class a decision (adopted or kept, the gains per
- * record, why it was kept), the lines that state them, and the records used. The field is absent
- * from the result when every choice stays the default's. Records of another format, adapter, case
- * table or kernels, wall-clock or quantized ones, and fewer than two records are refused.
- */
-export { deriveLinearGemvChoices } from "./src/tune/gemv-derive.ts";
+export { deriveLinearGemvChoices, planGemvMeasurements } from "./src/tune/gemv-derive.ts";
 export type {
   DeriveLinearGemvOptions,
+  GemvMeasurementPlanning,
+  GemvMissingMeasurement,
   GemvSweepInput,
   LinearGemvDecision,
   LinearGemvDerivation,
   LinearGemvGain,
+  LinearGemvRecordGroups,
+  LinearGemvStaleGroup,
+  PlanGemvMeasurementsOptions,
 } from "./src/tune/gemv-derive.ts";
 
 /**

@@ -197,7 +197,8 @@ const sweepPair = async (
   const context = await createSweepContext(gpu, "deno-raw-tick");
   try {
     assertEquals(context.unit, gpuTiming ? "deno-raw-tick" : "wall");
-    return await sweepCase(context, target, [other], { rounds: 1 });
+    // Every geometry timed (no quick look): these cases check the kernels' outputs
+    return await sweepCase(context, target, [other], { rounds: 1, quickLookMargin: 0 });
   } finally {
     destroySweepContext(context);
     gpu.destroy();
@@ -524,7 +525,7 @@ test.skipIf(adapter === null)(
     const gpu = await acquireGpu(timestampQuery ? { gpuTiming: true } : {});
     const context = await createSweepContext(gpu, "deno-raw-tick");
     try {
-      const { rows } = await sweepCase(context, target, [], { rounds: 1 });
+      const { rows } = await sweepCase(context, target, [], { rounds: 1, quickLookMargin: 0 });
       assertEquals(rows.length, 1);
       assertEquals(rows[0].error, undefined, rows[0].error);
       const digest = rows[0].outputSha256;
@@ -582,7 +583,10 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
   const gpu = await acquireGpu(timestampQuery ? { gpuTiming: true } : {});
   const context = await createSweepContext(gpu, "deno-raw-tick");
   try {
-    const { rows } = await sweepCase(context, target, [GEMM_64X64], { rounds: 1 });
+    const { rows } = await sweepCase(context, target, [GEMM_64X64], {
+      rounds: 1,
+      quickLookMargin: 0,
+    });
     assertEquals(rows.length, 2);
     for (const row of rows) assertEquals(row.error, undefined, row.error);
     const digest = rows[0].outputSha256;
@@ -646,7 +650,10 @@ test.skipIf(adapter === null)(
     const gpu = await acquireGpu(timestampQuery ? { gpuTiming: true } : {});
     const context = await createSweepContext(gpu, "deno-raw-tick");
     try {
-      const { rows } = await sweepCase(context, target, [I8A8_64X64], { rounds: 1 });
+      const { rows } = await sweepCase(context, target, [I8A8_64X64], {
+        rounds: 1,
+        quickLookMargin: 0,
+      });
       assertEquals(rows.length, 2);
       for (const row of rows) assertEquals(row.error, undefined, row.error);
       assertEquals(

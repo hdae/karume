@@ -1,39 +1,59 @@
 /**
  * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from GEMV sweep records
- * (`karume-gemv-sweep/2` — gemv-report.ts): {@link deriveLinearGemvChoices} of
- * `@karume/runtime/tune`. A pure function of the records and the current runtime (its case table,
- * its kernels and the default profile's choices); it measures nothing.
+ * (`karume-gemv-sweep/3` — gemv-report.ts): {@link deriveLinearGemvChoices} of
+ * `@karume/runtime/tune`; and says what the records lack for that derivation to be complete under
+ * the current runtime ({@link planGemvMeasurements}). Pure functions of the records and the current
+ * runtime (its case table, its kernels and the default profile's choices); they measure nothing.
+ *
+ * ## The unit of evidence: a group
+ *
+ * A group is one record's measurement of one case at one row count (its summary and its rows). Any
+ * number of records of one adapter are read group by group, so a record that holds half of the
+ * cases, or one whose kernels changed in part, leaves its other groups standing:
+ *
+ * - A row is current when the current runtime has its candidate at that case and row count
+ *   (`gemvKernelsAt`) and builds the same kernel for it (the row's `kernel` fingerprint).
+ * - A group is current when its case is the current runtime's (the record's case fingerprint, and
+ *   the row count in the case table), the default profile's choices its summary names are the
+ *   current ones, and the rows of those choices — the baseline, and the choice at `reorder` where
+ *   the sweep measures it — are current and timed. It is steady when its baseline spread is at most
+ *   {@link GEMV_STEADY_SPREAD}.
+ * - A group is evidence for a candidate when it is current and steady and the candidate's row is
+ *   current and timed (not screened out by the quick look) with its check held. A row that failed or
+ *   whose check failed in a current group, steady or not, rules the candidate out: correctness does
+ *   not depend on heat.
+ *
+ * Records and groups that are not current are reported (the verdict lines, the provenance's counts
+ * and {@link LinearGemvDerivation.stale}), never refused wholesale. A record is refused only for what
+ * no group of it could stand for: another format (no older one is read), wall-clock or quantized
+ * timing, another adapter, the same record twice.
  *
  * ## The adoption rule (the maintainer, 2026-11-17)
  *
  * The timing of these small dispatches moves between runs, so one record is not evidence:
  *
- * - The input is two or more records of one adapter, measured with the current kernels and case
- *   table (the records' fingerprints, recomputed here), with GPU timestamps that are not quantized,
- *   against the current default profile's choices. Any other record is refused, and so are fewer
- *   than two.
- * - A candidate replaces the default profile's choice for a shape only when it is at least
- *   {@link GEMV_MIN_SPEEDUP} faster than that choice in every record, its check holding in every
- *   record (identical class: the baseline's words; reorder class: inside the band). Among several,
- *   the one whose smallest gain over the records is largest. A candidate's time is the record's
- *   `perDispatch` (the minimum of its rounds ÷ `reps`).
- * - A (case, row count) whose baseline spread exceeds {@link GEMV_STEADY_SPREAD} in a record is
- *   unsteady in that record; a shape the decision reads at an unsteady (case, row count) is kept.
+ * - A candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at
+ *   least {@link MIN_RECORDS} different records are evidence for it and it is at least
+ *   {@link GEMV_MIN_SPEEDUP} faster than that choice in every one, its check holding in every current
+ *   group (identical class: the baseline's words; reorder class: inside the band). Among several,
+ *   the one whose smallest gain is largest. A candidate's time is its row's `perDispatch` (the
+ *   minimum of its rounds ÷ `reps`).
  * - The two classes are derived separately: the identical class writes the sequential variant's
  *   per-shape exceptions (`sequential.shapes`, from M = 1) and changes no number of any Session; the
  *   reorder class writes the parallel rows (`parallelShapes`: lanes and the staged flag, from the
  *   plain and staged candidates at M = 1) and changes the numbers of Sessions at `reorder`, inside
- *   the band. A parallel row serves M = 1 to 8, so every record must have measured the case's other
- *   row counts of that range (the `full` set does; a `quick` record keeps the row), the candidate
- *   not slower than the default's choice at any of them: a path that was not measured is not moved
- *   by a table.
+ *   the band. A parallel row serves M = 1 to 8, so at each other row count of that range (the
+ *   `no-regression` role of gemv-candidates.ts's `gemvGroupRole` — M = 4 and 8 in the case table)
+ *   groups of at least {@link MIN_RECORDS} records must be evidence for the candidate, and it may be
+ *   slower than the default's choice in none of them: a path that was not measured is not moved by a
+ *   table.
  *
  * What the field does not let the records decide: a sequential key has no group length, so cases
  * that share it and disagree keep the default; a row whose default takes packed activations stays
  * (the packed kernels are not measured); the subgroup candidates are a Session option, not a row,
  * and only show in the decision's notes; the row-block thread target is one number for every shape,
- * and no rule turns the per-shape row-block heights of the `full` set into it, so it stays; the
- * general sequential variant also sets the row blocks' columns and read-ahead, so it stays.
+ * and no rule turns the per-shape row-block heights into it, so it stays; the general sequential
+ * variant also sets the row blocks' columns and read-ahead, so it stays.
  *
  * SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices
  */
@@ -56,24 +76,28 @@ import {
   type GemvCandidateClass,
   type GemvCandidateSet,
   gemvBaseline,
+  gemvCandidates,
+  type GemvGates,
+  gemvGroupRole,
+  gemvKernelsAt,
   gemvProfileChoice,
+  gemvRowCountsIn,
   isGemvCandidateSet,
 } from "./gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, gemvCaseOf, type GemvSweepStorage } from "./gemv-cases.ts";
-import { gemvCaseTableId, gemvKernelsId } from "./gemv-fingerprint.ts";
+import { gemvCaseFingerprint, gemvCaseTableId, gemvKernelId } from "./gemv-fingerprint.ts";
 import { GEMV_SWEEP_FORMAT, type GemvSweepChoice } from "./gemv-report.ts";
 
 /**
  * The adoption threshold of the GEMV choices (the maintainer, 2026-11-17): a candidate replaces the
  * default profile's choice for a shape only when it is at least this much faster than that choice in
- * every record. It is not the tile geometry's `minSpeedup`.
+ * every group that is evidence. It is not the tile geometry's `minSpeedup`.
  */
 export const GEMV_MIN_SPEEDUP = 1.1;
 
 /**
- * The steadiness bound: a (case, row count) whose baseline rounds spread (`baselineSpread`, the
- * baseline's largest round ÷ its smallest) beyond this in a record is unsteady in that record, and a
- * shape with an unsteady record is not changed.
+ * The steadiness bound: a group whose baseline rounds spread (`baselineSpread`, the baseline's
+ * largest round ÷ its smallest) beyond this is unsteady, and no evidence.
  *
  * Source: the two `karume-gemv-sweep/2` records of the `quick` set on the RTX 3080 Ti under Node
  * (2026-11-17T11-51-15 and T12-29-00), grouped by the worse spread of a case over the two records: a
@@ -85,17 +109,14 @@ export const GEMV_MIN_SPEEDUP = 1.1;
  */
 export const GEMV_STEADY_SPREAD = 1.25;
 
-/** The fewest records a derivation takes: one record is not evidence. */
+/** The fewest different records whose groups must be evidence: one record is not evidence. */
 const MIN_RECORDS = 2;
 
 /**
- * At a row count of the parallel range other than M = 1, a parallel candidate may not be slower than
- * the default's choice (a gain below this is a regression).
+ * At a row count of the `no-regression` role, a parallel candidate may not be slower than the
+ * default's choice (a gain below this is a regression).
  */
 const NO_REGRESSION = 1;
-
-/** The largest row count the parallel GEMV serves (its rows apply at M = 1..8). */
-const PARALLEL_MAX_ROWS = 8;
 
 /**
  * One GEMV sweep record given to {@link deriveLinearGemvChoices}: the record (`runGemvSweep`'s
@@ -117,7 +138,7 @@ type Adapter = {
   readonly description: string;
 };
 
-/** The fields of one row the derivation reads (and the fingerprint recomputes). */
+/** The fields of one row the derivation reads. */
 type RowObservation = {
   readonly caseId: string;
   readonly m: number;
@@ -125,14 +146,19 @@ type RowObservation = {
   readonly class: GemvCandidateClass;
   readonly isBaseline: boolean;
   readonly choice: GemvSweepChoice;
+  readonly kernel?: string;
   readonly perDispatch?: number;
   readonly identicalToBaseline?: boolean;
   readonly withinBand?: boolean;
+  readonly screened?: true;
   readonly error?: string;
 };
 
-/** One measured (case, row count) of a record: its baseline spread and its rows by candidate. */
-type Measured = {
+/** One record's measurement of a case at a row count: its summary's fields and its rows by candidate. */
+type GroupObservation = {
+  readonly caseId: string;
+  readonly m: number;
+  readonly profile: { readonly exact: string; readonly reorder: string };
   readonly baselineSpread?: number;
   readonly rows: ReadonlyMap<string, RowObservation>;
 };
@@ -145,14 +171,14 @@ type GemvSweepSource = {
   readonly candidateSet: GemvCandidateSet;
   readonly userAgent?: string;
   readonly adapter: Adapter;
-  readonly kernels: string;
-  /** In the record's order. */
-  readonly rows: readonly RowObservation[];
-  /** By {@link measuredKey}. */
-  readonly measured: ReadonlyMap<string, Measured>;
+  readonly gates: GemvGates;
+  /** The planned cases' fingerprints, by id. */
+  readonly cases: ReadonlyMap<string, string>;
+  /** By {@link groupKey}, in the record's order. */
+  readonly groups: ReadonlyMap<string, GroupObservation>;
 };
 
-const measuredKey = (caseId: string, m: number): string => `${caseId} M=${m}`;
+const groupKey = (caseId: string, m: number): string => `${caseId} M=${m}`;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -189,6 +215,7 @@ const optionalAt = <T>(
 
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 const isString = (value: unknown): value is string => typeof value === "string";
+const isTrue = (value: unknown): value is true => value === true;
 
 const CHOICE_IDS = [
   "gemv-m1",
@@ -260,10 +287,15 @@ const parseRow = (value: unknown, where: string): RowObservation => {
   if (!isPositiveInteger(m)) throw new Error(`${where}: m is not a positive integer`);
   if (!isClass(row.class)) throw new Error(`${where}: class is neither identical nor reorder`);
   if (!isBoolean(isBaseline)) throw new Error(`${where}: isBaseline is not a boolean`);
+  const kernel = optionalAt(row, "kernel", isString, where);
   const perDispatch = optionalAt(row, "perDispatch", isPositiveNumber, where);
   const identicalToBaseline = optionalAt(row, "identicalToBaseline", isBoolean, where);
   const withinBand = optionalAt(row, "withinBand", isBoolean, where);
+  const screened = optionalAt(row, "screened", isTrue, where);
   const error = optionalAt(row, "error", isString, where);
+  if (screened === true && (isBaseline || perDispatch !== undefined)) {
+    throw new Error(`${where}: a screened row is no baseline and has no time`);
+  }
   return {
     caseId: stringAt(row, "caseId", where),
     m,
@@ -271,32 +303,20 @@ const parseRow = (value: unknown, where: string): RowObservation => {
     class: row.class,
     isBaseline,
     choice: parseChoice(row.choice, where),
+    ...(kernel === undefined ? {} : { kernel }),
     ...(perDispatch === undefined ? {} : { perDispatch }),
     ...(identicalToBaseline === undefined ? {} : { identicalToBaseline }),
     ...(withinBand === undefined ? {} : { withinBand }),
+    ...(screened === undefined ? {} : { screened }),
     ...(error === undefined ? {} : { error }),
   };
 };
 
-/** The case of a record's id at a row count it plans (fail loudly — measure again). */
-const currentCase = (caseId: string, m: number, where: string): GemvCase => {
-  const gemvCase = gemvCaseOf(caseId);
-  if (gemvCase === undefined) {
-    throw new Error(`${where}: case ${caseId} is not in the GEMV sweep's case table`);
-  }
-  if (!gemvCase.rows.includes(m)) {
-    throw new Error(
-      `${where}: case ${caseId} has no row count ${m} in the GEMV sweep's case table`,
-    );
-  }
-  return gemvCase;
-};
-
 /**
- * Reads a GEMV sweep record (the `unknown` boundary — checks what the derivation reads and that the
- * record stands for the current runtime, and fails loudly): the format, GPU timestamps that are not
- * quantized, the case table's and the kernels' fingerprints, and per (case, row count) the default
- * profile's choices the record measured against.
+ * Reads a GEMV sweep record (the `unknown` boundary — checks what the derivation reads and fails
+ * loudly on what no group could stand for): the format, GPU timestamps that are not quantized, the
+ * adapter, the gates, the planned cases with their fingerprints and the groups. Whether a group is of
+ * the current runtime is not decided here ({@link groupStates}).
  */
 const parseGemvSweepRecord = (
   report: unknown,
@@ -306,7 +326,7 @@ const parseGemvSweepRecord = (
   const record = objectAt(report, `${where}: the JSON`);
   if (record.format !== GEMV_SWEEP_FORMAT) {
     throw new Error(
-      `${where}: format is not ${GEMV_SWEEP_FORMAT} (${JSON.stringify(record.format)}) — measure again with the current runtime`,
+      `${where}: format ${JSON.stringify(record.format)} is not ${GEMV_SWEEP_FORMAT} — a record of an older format is not read; measure again with the current runtime`,
     );
   }
   const timing = objectAt(record.gpuTiming, `${where} gpuTiming`);
@@ -322,17 +342,10 @@ const parseGemvSweepRecord = (
       `${where}: gpuTiming.quantized is ${JSON.stringify(timing.quantized)} (quantized timestamps are not read)`,
     );
   }
-  const caseTable = stringAt(record, "caseTable", where);
-  const currentTable = gemvCaseTableId();
-  if (caseTable !== currentTable) {
-    throw new Error(
-      `${where}: its case table ${caseTable} is not the current runtime's ${currentTable} — measure again with the current runtime`,
-    );
-  }
   const candidateSet = objectAt(record.settings, `${where} settings`).candidateSet;
   if (typeof candidateSet !== "string" || !isGemvCandidateSet(candidateSet)) {
     throw new Error(
-      `${where}: settings.candidateSet ${JSON.stringify(candidateSet)} is neither quick nor full`,
+      `${where}: settings.candidateSet ${JSON.stringify(candidateSet)} is none of quick, full, row-blocks`,
     );
   }
   const adapterAt = objectAt(record.adapter, `${where} adapter`);
@@ -342,72 +355,60 @@ const parseGemvSweepRecord = (
     device: stringAt(adapterAt, "device", `${where} adapter`),
     description: stringAt(adapterAt, "description", `${where} adapter`),
   };
-  if (!Array.isArray(record.rows)) throw new Error(`${where}: rows is not an array`);
-  const rows = record.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
-  const kernels = stringAt(record, "kernels", where);
-  let currentKernels: string;
-  try {
-    currentKernels = gemvKernelsId(rows);
-  } catch (cause) {
-    throw new Error(`${where}: ${cause instanceof Error ? cause.message : String(cause)}`, {
-      cause,
-    });
-  }
-  if (kernels !== currentKernels) {
+  const gatesAt = objectAt(record.gates, `${where} gates`);
+  const { subgroups, maxComputeWorkgroupsPerDimension: limit } = gatesAt;
+  if (!isBoolean(subgroups) || !isPositiveInteger(limit)) {
     throw new Error(
-      `${where}: its kernel fingerprint ${kernels} is not the current runtime's ${currentKernels} for its rows — measure again with the current runtime`,
+      `${where}: gates.subgroups is not a boolean or gates.maxComputeWorkgroupsPerDimension not a positive integer`,
     );
   }
+  if (!Array.isArray(record.cases)) throw new Error(`${where}: cases is not an array`);
+  const cases = new Map<string, string>();
+  record.cases.forEach((value, index) => {
+    const at = `${where} cases[${index}]`;
+    const entry = objectAt(value, at);
+    const id = stringAt(entry, "id", at);
+    if (cases.has(id)) throw new Error(`${at}: case ${id} twice`);
+    cases.set(id, stringAt(entry, "fingerprint", at));
+  });
   if (!Array.isArray(record.summaries)) throw new Error(`${where}: summaries is not an array`);
-  const measured = new Map<
-    string,
-    { baselineSpread?: number; rows: Map<string, RowObservation> }
-  >();
+  const groups = new Map<string, GroupObservation & { rows: Map<string, RowObservation> }>();
   record.summaries.forEach((value, index) => {
     const at = `${where} summaries[${index}]`;
     const summary = objectAt(value, at);
     const caseId = stringAt(summary, "caseId", at);
     const { m } = summary;
     if (!isPositiveInteger(m)) throw new Error(`${at}: m is not a positive integer`);
-    const gemvCase = currentCase(caseId, m, at);
-    const profile = objectAt(summary.profile, `${at} profile`);
-    // MUST: the gains are against the default profile's choices; a record measured against other
-    // choices (the default moved since) labels other kernels as the baseline and the reorder choice
-    const expected = {
-      exact: gemvBaseline(gemvCase, m).name,
-      reorder: gemvProfileChoice(gemvCase, m, "reorder").name,
-    };
-    for (const level of ["exact", "reorder"] as const) {
-      const named = stringAt(profile, level, `${at} profile`);
-      if (named !== expected[level]) {
-        throw new Error(
-          `${at}: the default profile's choice at ${level} for ${caseId} at M=${m} is ${named} in the record, ${expected[level]} in the current runtime — measure again with the current runtime`,
-        );
-      }
-    }
-    const key = measuredKey(caseId, m);
-    if (measured.has(key)) throw new Error(`${at}: ${key} is summarised twice`);
+    if (!cases.has(caseId)) throw new Error(`${at}: case ${caseId} is not among the planned cases`);
+    const profileAt = objectAt(summary.profile, `${at} profile`);
+    const key = groupKey(caseId, m);
+    if (groups.has(key)) throw new Error(`${at}: ${key} is summarised twice`);
     const baselineSpread = optionalAt(summary, "baselineSpread", isPositiveNumber, at);
-    measured.set(key, {
+    groups.set(key, {
+      caseId,
+      m,
+      profile: {
+        exact: stringAt(profileAt, "exact", `${at} profile`),
+        reorder: stringAt(profileAt, "reorder", `${at} profile`),
+      },
       ...(baselineSpread === undefined ? {} : { baselineSpread }),
       rows: new Map(),
     });
   });
-  rows.forEach((row, index) => {
+  if (!Array.isArray(record.rows)) throw new Error(`${where}: rows is not an array`);
+  record.rows.forEach((value, index) => {
     const at = `${where} rows[${index}]`;
-    const key = measuredKey(row.caseId, row.m);
-    const entry = measured.get(key);
-    if (entry === undefined) throw new Error(`${at}: ${key} has no summary`);
-    if (entry.rows.has(row.candidate)) throw new Error(`${at}: ${row.candidate} of ${key} twice`);
-    if (
-      row.isBaseline &&
-      row.candidate !== gemvBaseline(currentCase(row.caseId, row.m, at), row.m).name
-    ) {
+    const row = parseRow(value, at);
+    const key = groupKey(row.caseId, row.m);
+    const group = groups.get(key);
+    if (group === undefined) throw new Error(`${at}: ${key} has no summary`);
+    if (group.rows.has(row.candidate)) throw new Error(`${at}: ${row.candidate} of ${key} twice`);
+    if (row.isBaseline !== (row.candidate === group.profile.exact)) {
       throw new Error(
-        `${at}: the baseline of ${key} is ${row.candidate}, not the current runtime's`,
+        `${at}: ${row.candidate} of ${key} is ${row.isBaseline ? "" : "not "}the baseline, while the summary names ${group.profile.exact}`,
       );
     }
-    entry.rows.set(row.candidate, row);
+    group.rows.set(row.candidate, row);
   });
   const userAgent = typeof record.userAgent === "string" ? record.userAgent : undefined;
   return {
@@ -417,13 +418,208 @@ const parseGemvSweepRecord = (
     candidateSet,
     ...(userAgent === undefined ? {} : { userAgent }),
     adapter,
-    kernels,
-    rows,
-    measured,
+    gates: { subgroups, maxComputeWorkgroupsPerDimension: limit },
+    cases,
+    groups,
   };
 };
 
-/** The gain of a candidate in one record: the default's choice's time ÷ its own. */
+/** The current runtime's kernels of a case at a row count, by candidate name (fingerprints). */
+type CurrentKernels = (gemvCase: GemvCase, m: number) => ReadonlyMap<string, string>;
+
+/** {@link CurrentKernels} with each (case, row count) built once. */
+const currentKernels = (): CurrentKernels => {
+  const cache = new Map<string, ReadonlyMap<string, string>>();
+  return (gemvCase, m) => {
+    const key = groupKey(gemvCase.id, m);
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    const kernels = new Map(
+      gemvKernelsAt(gemvCase, m).map(({ name, choice }) => [
+        name,
+        gemvKernelId(gemvCase, m, choice),
+      ]),
+    );
+    cache.set(key, kernels);
+    return kernels;
+  };
+};
+
+/** Why a row of a current group is not of the current runtime (undefined: it is). */
+const rowStaleness = (
+  row: RowObservation,
+  kernels: ReadonlyMap<string, string>,
+): string | undefined => {
+  const current = kernels.get(row.candidate);
+  if (current === undefined) return "no longer a candidate";
+  if (row.kernel === undefined) return "no kernel fingerprint (its program was not built)";
+  return row.kernel === current ? undefined : "its kernel changed";
+};
+
+/** What a group is to the current runtime. */
+type GroupState =
+  | {
+      readonly kind: "current";
+      readonly group: GroupObservation;
+      readonly gemvCase: GemvCase;
+      /** The current kernels of the group's case and row count. */
+      readonly kernels: ReadonlyMap<string, string>;
+      /** Why it is unsteady (undefined: steady). */
+      readonly unsteady?: string;
+    }
+  | {
+      readonly kind: "stale";
+      readonly group: GroupObservation;
+      /** What is not current: the case, the default's choices or a reference. */
+      readonly cause: "case" | "choices" | "references";
+      readonly reason: string;
+    };
+
+/** A group's state against the current runtime (the module doc's "current" and "steady"). */
+const groupState = (
+  source: GemvSweepSource,
+  group: GroupObservation,
+  kernelsOf: CurrentKernels,
+): GroupState => {
+  const { caseId, m } = group;
+  const stale = (cause: "case" | "choices" | "references", reason: string): GroupState => ({
+    kind: "stale",
+    group,
+    cause,
+    reason,
+  });
+  const gemvCase = gemvCaseOf(caseId);
+  if (gemvCase === undefined) return stale("case", `case ${caseId} is not in the case table`);
+  if (source.cases.get(caseId) !== gemvCaseFingerprint(gemvCase)) {
+    return stale("case", `case ${caseId} changed (its fingerprint differs)`);
+  }
+  if (!gemvCase.rows.includes(m)) {
+    return stale("case", `case ${caseId} has no row count ${m} in the case table`);
+  }
+  const expected = {
+    exact: gemvBaseline(gemvCase, m).name,
+    reorder: gemvProfileChoice(gemvCase, m, "reorder").name,
+  };
+  for (const level of ["exact", "reorder"] as const) {
+    if (group.profile[level] !== expected[level]) {
+      return stale(
+        "choices",
+        `the default profile's choice at ${level} is ${group.profile[level]} in the record, ${expected[level]} now`,
+      );
+    }
+  }
+  const kernels = kernelsOf(gemvCase, m);
+  // The choice at reorder is a reference where the sweep measures it (not a packed row)
+  const references = [
+    expected.exact,
+    ...(expected.reorder !== expected.exact && kernels.has(expected.reorder)
+      ? [expected.reorder]
+      : []),
+  ];
+  for (const name of references) {
+    const row = group.rows.get(name);
+    if (row === undefined) return stale("references", `the reference ${name} has no row`);
+    if (row.error !== undefined) {
+      return stale("references", `the reference ${name} failed (${row.error})`);
+    }
+    if (row.perDispatch === undefined) {
+      return stale("references", `the reference ${name} has no time`);
+    }
+    const staleness = rowStaleness(row, kernels);
+    if (staleness !== undefined) {
+      return stale("references", `the reference ${name} is not current (${staleness})`);
+    }
+  }
+  const spread = group.baselineSpread;
+  const unsteady =
+    spread === undefined
+      ? "no baseline spread"
+      : spread > GEMV_STEADY_SPREAD
+        ? `baseline spread ${formatRatio(spread)} > ${formatRatio(GEMV_STEADY_SPREAD)}`
+        : undefined;
+  return {
+    kind: "current",
+    group,
+    gemvCase,
+    kernels,
+    ...(unsteady === undefined ? {} : { unsteady }),
+  };
+};
+
+/** A record with its groups' states and its label in the verdict lines (its 1-based position). */
+type Labelled = {
+  readonly source: GemvSweepSource;
+  readonly label: string;
+  /** By {@link groupKey}. */
+  readonly states: ReadonlyMap<string, GroupState>;
+};
+
+const labelled = (sources: readonly GemvSweepSource[], kernelsOf: CurrentKernels): Labelled[] =>
+  sources.map((source, index) => ({
+    source,
+    label: `[${index + 1}]`,
+    states: new Map(
+      [...source.groups].map(([key, group]) => [key, groupState(source, group, kernelsOf)]),
+    ),
+  }));
+
+/** A candidate in one group, against the default's choice of its class there. */
+type Reading =
+  | { readonly kind: "evidence"; readonly gain: number }
+  /** A failure or a failed check in a current group: the candidate is not taken. */
+  | { readonly kind: "ruled-out"; readonly reason: string; readonly gain?: number }
+  /** The group is no evidence for it (not measured, stale, screened, unsteady). */
+  | { readonly kind: "none"; readonly reason: string };
+
+const readGroup = (
+  { states, label }: Labelled,
+  caseId: string,
+  m: number,
+  candidate: string,
+  reference: string,
+  candidateClass: GemvCandidateClass,
+): Reading => {
+  const state = states.get(groupKey(caseId, m));
+  if (state === undefined) return { kind: "none", reason: `M=${m} is not measured in ${label}` };
+  if (state.kind === "stale") {
+    return { kind: "none", reason: `M=${m} is not current in ${label} (${state.reason})` };
+  }
+  const row = state.group.rows.get(candidate);
+  if (row === undefined) return { kind: "none", reason: `not measured in ${label} at M=${m}` };
+  const staleness = rowStaleness(row, state.kernels);
+  if (staleness !== undefined) {
+    return { kind: "none", reason: `not current in ${label} at M=${m} (${staleness})` };
+  }
+  if (row.error !== undefined) {
+    return { kind: "ruled-out", reason: `failed in ${label} at M=${m} (${row.error})` };
+  }
+  if (row.screened === true) {
+    return { kind: "none", reason: `screened out by the quick look in ${label} at M=${m}` };
+  }
+  // The group is current, so the reference has a time
+  const time = state.group.rows.get(reference)?.perDispatch;
+  // A failed check keeps its gain: the reader sees how fast the candidate was
+  const gain =
+    time === undefined || row.perDispatch === undefined ? undefined : time / row.perDispatch;
+  const withGain = gain === undefined ? {} : { gain };
+  if (candidateClass === "identical" && row.identicalToBaseline !== true) {
+    return {
+      kind: "ruled-out",
+      reason: `its words differ from the baseline's in ${label} at M=${m}`,
+      ...withGain,
+    };
+  }
+  if (candidateClass === "reorder" && row.withinBand !== true) {
+    return { kind: "ruled-out", reason: `outside the band in ${label} at M=${m}`, ...withGain };
+  }
+  if (state.unsteady !== undefined) {
+    return { kind: "none", reason: `unsteady in ${label} at M=${m} (${state.unsteady})` };
+  }
+  if (gain === undefined) return { kind: "none", reason: `has no time in ${label} at M=${m}` };
+  return { kind: "evidence", gain };
+};
+
+/** The gain of a candidate in one group that is evidence: the default's choice's time ÷ its own. */
 export type LinearGemvGain = {
   /** The record (its path, as given). */
   readonly record: string;
@@ -454,10 +650,32 @@ export type LinearGemvDecision = {
    * rule. Absent when no candidate was compared.
    */
   readonly candidate?: string;
-  /** At M = 1, per record (and per case of the key). */
+  /** At M = 1, per group that is evidence (and per case of the key). */
   readonly gains: readonly LinearGemvGain[];
   /** What the records showed that the field does not hold (the subgroup form). */
   readonly notes: readonly string[];
+};
+
+/** A group of a record that is not of the current runtime. */
+export type LinearGemvStaleGroup = {
+  readonly record: string;
+  readonly caseId: string;
+  readonly m: number;
+  /** What is not current: the case, the default's choices or a reference's row. */
+  readonly cause: "case" | "choices" | "references";
+  readonly reason: string;
+};
+
+/** How much of a record stands for the current runtime. */
+export type LinearGemvRecordGroups = {
+  /** Current and steady: evidence for its current rows. */
+  readonly current: number;
+  /** Current but unsteady (no evidence; a failure or a failed check still rules out). */
+  readonly unsteady: number;
+  /** Not current (each in {@link LinearGemvDerivation.stale}). */
+  readonly stale: number;
+  /** Rows of current groups that are not current (their candidate's kernel changed, or it went). */
+  readonly staleRows: number;
 };
 
 /** The return value of {@link deriveLinearGemvChoices}. */
@@ -471,6 +689,8 @@ export type LinearGemvDerivation = {
   readonly defaults: LinearGemvChoices;
   /** Per class and shape, in the case table's order; the thread target last. */
   readonly decisions: readonly LinearGemvDecision[];
+  /** The groups no evidence comes from because they are not of the current runtime. */
+  readonly stale: readonly LinearGemvStaleGroup[];
   /** The decisions as lines (a generated table's header, a generator's dry run). */
   readonly verdicts: readonly string[];
   /** The rule's threshold and steadiness bound. */
@@ -485,7 +705,7 @@ export type LinearGemvDerivation = {
       readonly date: string;
       readonly candidateSet: GemvCandidateSet;
       readonly userAgent?: string;
-      readonly kernels: string;
+      readonly groups: LinearGemvRecordGroups;
     }[];
   };
 };
@@ -502,7 +722,10 @@ export type DeriveLinearGemvOptions = {
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
 
 /** The records agree on the adapter, which the table's match selects and its provenance names. */
-const assertOneAdapter = (sources: readonly GemvSweepSource[], table: GeometryProfile): void => {
+const assertOneAdapter = (
+  sources: readonly GemvSweepSource[],
+  table: GeometryProfile | undefined,
+): void => {
   const [first] = sources;
   for (const source of sources) {
     for (const field of ADAPTER_FIELDS) {
@@ -513,6 +736,7 @@ const assertOneAdapter = (sources: readonly GemvSweepSource[], table: GeometryPr
       }
     }
   }
+  if (table === undefined) return;
   const { match, provenance } = table;
   if (match !== undefined) {
     for (const field of ["vendor", "architecture", "description"] as const) {
@@ -535,42 +759,28 @@ const assertOneAdapter = (sources: readonly GemvSweepSource[], table: GeometryPr
   }
 };
 
-/** A record's label in the verdict lines: its 1-based position. */
-type Labelled = { readonly source: GemvSweepSource; readonly label: string };
-
-/** The time of a candidate against the default's choice in one record at one (case, row count). */
-type Reading = { readonly gain?: number; readonly failure?: string };
-
-const readGain = (
-  { source, label }: Labelled,
-  caseId: string,
-  m: number,
-  candidate: string,
-  reference: string,
-  candidateClass: GemvCandidateClass,
-): Reading => {
-  const at = source.measured.get(measuredKey(caseId, m));
-  if (at === undefined) return { failure: `M=${m} not measured in ${label}` };
-  const row = at.rows.get(candidate);
-  if (row === undefined) return { failure: `not measured in ${label} at M=${m}` };
-  if (row.error !== undefined) return { failure: `failed in ${label} at M=${m} (${row.error})` };
-  if (row.perDispatch === undefined) return { failure: `has no time in ${label} at M=${m}` };
-  const time = at.rows.get(reference)?.perDispatch;
-  if (time === undefined) {
-    return { failure: `the default's ${reference} has no time in ${label} at M=${m}` };
+/** Reads the records and checks what no group of them could stand for (fails loudly). */
+const readRecords = (
+  inputs: readonly GemvSweepInput[],
+  table: GeometryProfile | undefined,
+): GemvSweepSource[] => {
+  if (inputs.length === 0) throw new Error("No GEMV sweep record is given");
+  const seen = new Map<string, string>();
+  for (const { path, sha256 } of inputs) {
+    const twin = seen.get(sha256);
+    if (twin !== undefined) {
+      throw new Error(`The same GEMV sweep record is passed twice (${twin} and ${path})`);
+    }
+    seen.set(sha256, path);
   }
-  // A failed check keeps its gain: the reader sees how fast the candidate was
-  const gain = time / row.perDispatch;
-  if (candidateClass === "identical" && row.identicalToBaseline !== true) {
-    return { gain, failure: `its words differ from the baseline's in ${label} at M=${m}` };
-  }
-  if (candidateClass === "reorder" && row.withinBand !== true) {
-    return { gain, failure: `outside the band in ${label} at M=${m}` };
-  }
-  return { gain };
+  const sources = inputs.map(({ report, path, sha256 }) =>
+    parseGemvSweepRecord(report, { path, sha256 }),
+  );
+  assertOneAdapter(sources, table);
+  return sources;
 };
 
-/** A candidate's gains at M = 1 over the records, and the first way it fails the rule (if any). */
+/** A candidate's gains at M = 1 over its evidence, and the first way it fails the rule (if any). */
 type Evaluation = {
   readonly name: string;
   readonly choice: GemvSweepChoice;
@@ -578,30 +788,25 @@ type Evaluation = {
   readonly failure?: string;
 };
 
-/** The smallest of an evaluation's gains (0 when a record has none — never the largest). */
-const smallestGain = (evaluation: Evaluation, records: number): number =>
-  evaluation.gains.length < records ? 0 : Math.min(...evaluation.gains.map(({ gain }) => gain));
+/** The smallest of an evaluation's gains (0 without any — never the largest). */
+const smallestGain = (evaluation: Evaluation): number =>
+  evaluation.gains.length === 0 ? 0 : Math.min(...evaluation.gains.map(({ gain }) => gain));
 
 /** The evaluation whose smallest gain is largest (the first of a tie); undefined for none. */
-const largestSmallest = (
-  evaluations: readonly Evaluation[],
-  records: number,
-): Evaluation | undefined =>
+const largestSmallest = (evaluations: readonly Evaluation[]): Evaluation | undefined =>
   evaluations.reduce<Evaluation | undefined>(
     (best, entry) =>
-      best === undefined || smallestGain(entry, records) > smallestGain(best, records)
-        ? entry
-        : best,
+      best === undefined || smallestGain(entry) > smallestGain(best) ? entry : best,
     undefined,
   );
 
 /**
- * The row counts of the parallel range above 1 in the case table. MUST: a parallel row serves all
- * of them, so a record that did not measure one cannot move the row (a `quick` record measures
- * M = 1 only).
+ * The case's row counts of the `no-regression` role (gemv-candidates.ts's `gemvGroupRole`). MUST: a
+ * parallel row serves all of them, so a candidate without evidence at one of them cannot move the row
+ * (a `quick` record measures M = 1 only).
  */
-const otherParallelRows = (gemvCase: GemvCase): number[] =>
-  gemvCase.rows.filter((m) => m > 1 && m <= PARALLEL_MAX_ROWS);
+const noRegressionRows = (gemvCase: GemvCase): number[] =>
+  gemvCase.rows.filter((m) => gemvGroupRole(m, "reorder") === "no-regression");
 
 /** How a candidate set is judged for one case and class. */
 type CaseJudgement = {
@@ -610,27 +815,48 @@ type CaseJudgement = {
   /** The default's choice at row count `m` (by candidate name). */
   readonly reference: (m: number) => string;
   /** The candidates at M = 1 this judgement compares (by the row). */
-  readonly takes: (row: RowObservation) => boolean;
-  /** The row counts besides M = 1 the decision reads in every record (no regression allowed there). */
+  readonly takes: (row: Pick<RowObservation, "class" | "choice">) => boolean;
+  /** The row counts besides M = 1 the decision reads (no regression allowed there). */
   readonly others: readonly number[];
 };
 
-/** Every candidate the judgement takes, over the records, in the order they were first measured. */
+/**
+ * Every candidate the judgement takes that a record measured at M = 1 and the current runtime still
+ * has there, in the order they were first measured.
+ */
 const candidatesOf = (
   records: readonly Labelled[],
   judgement: CaseJudgement,
+  kernelsOf: CurrentKernels,
 ): { readonly name: string; readonly choice: GemvSweepChoice }[] => {
   const found = new Map<string, GemvSweepChoice>();
   const reference = judgement.reference(1);
+  const current = kernelsOf(judgement.gemvCase, 1);
   for (const { source } of records) {
-    const at = source.measured.get(measuredKey(judgement.gemvCase.id, 1));
-    for (const row of at?.rows.values() ?? []) {
+    const group = source.groups.get(groupKey(judgement.gemvCase.id, 1));
+    for (const row of group?.rows.values() ?? []) {
       if (row.candidate === reference || row.isBaseline || !judgement.takes(row)) continue;
+      if (!current.has(row.candidate)) continue;
       if (!found.has(row.candidate)) found.set(row.candidate, row.choice);
     }
   }
   return [...found].map(([name, choice]) => ({ name, choice }));
 };
+
+/** The distinct records of a list of readings that are evidence. */
+const evidenceRecords = (
+  readings: readonly { readonly label: string; readonly reading: Reading }[],
+): string[] => [
+  ...new Set(
+    readings.flatMap(({ label, reading }) => (reading.kind === "evidence" ? [label] : [])),
+  ),
+];
+
+/** The reasons a row count has too little evidence, in record order. */
+const noEvidenceText = (
+  readings: readonly { readonly label: string; readonly reading: Reading }[],
+): string =>
+  readings.flatMap(({ reading }) => (reading.kind === "none" ? [reading.reason] : [])).join("; ");
 
 const evaluate = (
   records: readonly Labelled[],
@@ -638,65 +864,53 @@ const evaluate = (
   candidate: { readonly name: string; readonly choice: GemvSweepChoice },
 ): Evaluation => {
   const { gemvCase } = judgement;
-  const gains: LinearGemvGain[] = [];
   let failure: string | undefined;
   const fail = (text: string): void => {
     failure ??= text;
   };
-  for (const record of records) {
-    const first = readGain(
-      record,
-      gemvCase.id,
-      1,
-      candidate.name,
-      judgement.reference(1),
-      judgement.class,
-    );
-    if (first.failure !== undefined) fail(first.failure);
-    if (first.gain === undefined) continue;
-    gains.push({ record: record.source.path, caseId: gemvCase.id, gain: first.gain });
-    if (first.gain < GEMV_MIN_SPEEDUP) {
-      fail(`${formatRatio(first.gain)} < ${formatRatio(GEMV_MIN_SPEEDUP)} in ${record.label}`);
-    }
-    for (const m of judgement.others) {
-      const other = readGain(
+  const readAt = (m: number) =>
+    records.map((record) => ({
+      label: record.label,
+      path: record.source.path,
+      reading: readGroup(
         record,
         gemvCase.id,
         m,
         candidate.name,
         judgement.reference(m),
         judgement.class,
-      );
-      if (other.failure !== undefined) fail(other.failure);
-      else if (other.gain !== undefined && other.gain < NO_REGRESSION) {
+      ),
+    }));
+  const first = readAt(1);
+  const gains: LinearGemvGain[] = [];
+  for (const { reading, path, label } of first) {
+    if (reading.kind === "ruled-out") fail(reading.reason);
+    if (reading.kind !== "evidence") continue;
+    gains.push({ record: path, caseId: gemvCase.id, gain: reading.gain });
+    if (reading.gain < GEMV_MIN_SPEEDUP) {
+      fail(`${formatRatio(reading.gain)} < ${formatRatio(GEMV_MIN_SPEEDUP)} in ${label}`);
+    }
+  }
+  if (evidenceRecords(first).length < MIN_RECORDS) {
+    fail(`evidence at M=1 from fewer than ${MIN_RECORDS} records (${noEvidenceText(first)})`);
+  }
+  for (const m of judgement.others) {
+    const other = readAt(m);
+    for (const { reading, label } of other) {
+      if (reading.kind === "ruled-out") fail(reading.reason);
+      else if (reading.kind === "evidence" && reading.gain < NO_REGRESSION) {
         fail(
-          `slower than the default's choice in ${record.label} at M=${m} (${formatRatio(other.gain)})`,
+          `slower than the default's choice in ${label} at M=${m} (${formatRatio(reading.gain)})`,
         );
       }
     }
-  }
-  return { ...candidate, gains, ...(failure === undefined ? {} : { failure }) };
-};
-
-/** Why a case cannot change in some record (not measured, or unsteady), or undefined. */
-const unusable = (records: readonly Labelled[], judgement: CaseJudgement): string | undefined => {
-  const { gemvCase } = judgement;
-  for (const { source, label } of records) {
-    for (const m of [1, ...judgement.others]) {
-      const at = source.measured.get(measuredKey(gemvCase.id, m));
-      if (at === undefined) {
-        return m === 1
-          ? `not measured in ${label}`
-          : `M=${m} is not measured in ${label} (a parallel row serves M = 1 to ${PARALLEL_MAX_ROWS}: records of the full set measure them)`;
-      }
-      const spread = at.baselineSpread;
-      if (spread === undefined) return `no baseline spread in ${label} at M=${m}`;
-      if (spread > GEMV_STEADY_SPREAD) {
-        return `unsteady in ${label} at M=${m} (baseline spread ${formatRatio(spread)} > ${formatRatio(GEMV_STEADY_SPREAD)})`;
-      }
+    if (evidenceRecords(other).length < MIN_RECORDS) {
+      fail(
+        `evidence at M=${m} from fewer than ${MIN_RECORDS} records (a parallel row serves M = 1 to 8: ${noEvidenceText(other)})`,
+      );
     }
   }
-  return undefined;
+  return { ...candidate, gains, ...(failure === undefined ? {} : { failure }) };
 };
 
 /** The outcome of one case and class: the adopted candidate, or why the default stays. */
@@ -704,21 +918,22 @@ type CaseOutcome =
   | { readonly kind: "adopted"; readonly evaluation: Evaluation }
   | { readonly kind: "kept"; readonly reason: string; readonly nearest?: Evaluation };
 
-const judgeCase = (records: readonly Labelled[], judgement: CaseJudgement): CaseOutcome => {
-  const evaluations = candidatesOf(records, judgement).map((candidate) =>
+const judgeCase = (
+  records: readonly Labelled[],
+  judgement: CaseJudgement,
+  kernelsOf: CurrentKernels,
+): CaseOutcome => {
+  const evaluations = candidatesOf(records, judgement, kernelsOf).map((candidate) =>
     evaluate(records, judgement, candidate),
   );
   const qualifying = evaluations.filter((evaluation) => evaluation.failure === undefined);
-  const best = largestSmallest(qualifying, records.length);
-  const nearest = best ?? largestSmallest(evaluations, records.length);
-  const withNearest = nearest === undefined ? {} : { nearest };
-  const blocked = unusable(records, judgement);
-  if (blocked !== undefined) return { kind: "kept", reason: blocked, ...withNearest };
+  const best = largestSmallest(qualifying);
   if (best !== undefined) return { kind: "adopted", evaluation: best };
+  const nearest = largestSmallest(evaluations);
   if (nearest === undefined) return { kind: "kept", reason: "no candidate was measured" };
   return {
     kind: "kept",
-    reason: `no candidate is ${formatRatio(GEMV_MIN_SPEEDUP)} faster in every record with its check held (nearest ${nearest.name}: ${nearest.failure ?? "?"})`,
+    reason: `no candidate is ${formatRatio(GEMV_MIN_SPEEDUP)} faster in the groups of ${MIN_RECORDS} or more records that are evidence, with its check held (nearest ${nearest.name}: ${nearest.failure ?? "?"})`,
     nearest,
   };
 };
@@ -765,7 +980,7 @@ const reorderJudgement = (
   class: "reorder",
   reference: (m) => gemvProfileChoice(gemvCase, m, "reorder").name,
   takes: (row) => row.class === "reorder" && ids.includes(row.choice.id),
-  others: otherParallelRows(gemvCase),
+  others: noRegressionRows(gemvCase),
 });
 
 const gainsText = (gains: readonly LinearGemvGain[], records: readonly Labelled[]): string => {
@@ -783,6 +998,7 @@ const sequentialDecision = (
   records: readonly Labelled[],
   cases: readonly GemvCase[],
   defaults: LinearGemvChoices,
+  kernelsOf: CurrentKernels,
 ): { readonly decision: LinearGemvDecision; readonly variant?: LinearGemvVariant } => {
   const [first] = cases;
   const defaultChoice = variantName(
@@ -791,7 +1007,7 @@ const sequentialDecision = (
   );
   const outcomes = cases.map((gemvCase) => ({
     gemvCase,
-    outcome: judgeCase(records, identicalJudgement(gemvCase)),
+    outcome: judgeCase(records, identicalJudgement(gemvCase), kernelsOf),
   }));
   const head = {
     class: "identical",
@@ -853,13 +1069,18 @@ const parallelDecision = (
   records: readonly Labelled[],
   gemvCase: GemvCase,
   defaults: LinearGemvChoices,
+  kernelsOf: CurrentKernels,
 ): { readonly decision: LinearGemvDecision; readonly row?: LinearGemvParallelShape } => {
   const defaultRow = defaults.parallelShapes.find((row) => sameParallelShape(row, gemvCase));
   const defaultChoice =
     defaultRow === undefined
       ? `no row (${gemvBaseline(gemvCase, 1).name})`
       : parallelName(defaultRow);
-  const subgroup = judgeCase(records, reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"]));
+  const subgroup = judgeCase(
+    records,
+    reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"]),
+    kernelsOf,
+  );
   const notes =
     subgroup.kind === "adopted"
       ? [
@@ -888,6 +1109,7 @@ const parallelDecision = (
   const outcome = judgeCase(
     records,
     reorderJudgement(gemvCase, ["gemv-parallel", "gemv-parallel-staged"]),
+    kernelsOf,
   );
   if (outcome.kind === "kept") {
     return {
@@ -930,7 +1152,7 @@ const threadTargetDecision = (
   records: readonly Labelled[],
   defaults: LinearGemvChoices,
 ): LinearGemvDecision => {
-  const full = records.filter(({ source }) => source.candidateSet === "full");
+  const rowBlocks = records.filter(({ source }) => source.candidateSet !== "quick");
   const target = String(defaults.rowsThreadTarget);
   return {
     class: "identical",
@@ -941,9 +1163,9 @@ const threadTargetDecision = (
     derivedChoice: target,
     outcome: "kept",
     reason:
-      full.length === 0
-        ? "only records of the full set measure row blocks (M ≥ 2), and none is given"
-        : "the full set measures the row-block heights per case and row count, but the field is one thread target for every shape, and no rule turns the heights into it",
+      rowBlocks.length === 0
+        ? "only records of the full and row-blocks sets measure row blocks (M ≥ 2), and none is given"
+        : "the full and row-blocks sets measure the row-block heights per case and row count, but the field is one thread target for every shape, and no rule turns the heights into it",
     gains: [],
     notes: [],
   };
@@ -982,15 +1204,72 @@ const classLines = (
   ];
 };
 
+/** How much of each record stands for the current runtime. */
+const recordGroups = (record: Labelled): LinearGemvRecordGroups => {
+  const states = [...record.states.values()];
+  let staleRows = 0;
+  for (const state of states) {
+    if (state.kind !== "current") continue;
+    for (const row of state.group.rows.values()) {
+      if (rowStaleness(row, state.kernels) !== undefined) staleRows += 1;
+    }
+  }
+  const current = states.filter(
+    (state) => state.kind === "current" && state.unsteady === undefined,
+  ).length;
+  const unsteady = states.filter(
+    (state) => state.kind === "current" && state.unsteady !== undefined,
+  ).length;
+  return { current, unsteady, stale: states.length - current - unsteady, staleRows };
+};
+
+/** The groups of the records that are not current, in record order. */
+const staleGroups = (records: readonly Labelled[]): LinearGemvStaleGroup[] =>
+  records.flatMap(({ source, states }) =>
+    [...states.values()].flatMap((state) =>
+      state.kind === "stale"
+        ? [
+            {
+              record: source.path,
+              caseId: state.group.caseId,
+              m: state.group.m,
+              cause: state.cause,
+              reason: state.reason,
+            },
+          ]
+        : [],
+    ),
+  );
+
+const CAUSE_TEXT = {
+  case: "the case is not the current one",
+  choices: "the default profile's choices moved",
+  references: "a reference's row is not current",
+} as const satisfies Record<LinearGemvStaleGroup["cause"], string>;
+
+/** One record's line, and per cause the stale groups it has. */
+const recordLines = (record: Labelled, stale: readonly LinearGemvStaleGroup[]): string[] => {
+  const { source, label } = record;
+  const groups = recordGroups(record);
+  const total = groups.current + groups.unsteady + groups.stale;
+  const mine = stale.filter((entry) => entry.record === source.path);
+  const causes = (Object.keys(CAUSE_TEXT) as LinearGemvStaleGroup["cause"][]).flatMap((cause) => {
+    const count = mine.filter((entry) => entry.cause === cause).length;
+    return count === 0 ? [] : [`    - ${count} not current: ${CAUSE_TEXT[cause]}`];
+  });
+  return [
+    `  - ${label} ${source.path} (${source.date}, set ${source.candidateSet}): ${total} groups — ${groups.current} current and steady, ${groups.unsteady} unsteady, ${groups.stale} not current; ${groups.staleRows} rows of current groups not current`,
+    ...causes,
+  ];
+};
+
 const verdictLinesOf = (
   decisions: readonly LinearGemvDecision[],
   records: readonly Labelled[],
+  stale: readonly LinearGemvStaleGroup[],
 ): string[] => [
   `- linearGemv (the GEMV choices of linear), from ${records.length} GEMV sweep records:`,
-  ...records.map(
-    ({ source, label }) =>
-      `  - ${label} ${source.path} (${source.date}, set ${source.candidateSet})`,
-  ),
+  ...records.flatMap((record) => recordLines(record, stale)),
   ...classLines(
     decisions.filter(({ field }) => field === "sequential.shapes"),
     records,
@@ -1011,38 +1290,24 @@ const verdictLinesOf = (
 ];
 
 /**
- * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from two or more GEMV sweep
- * records of one adapter, by the rule of the module doc: per shape and class, a candidate at least
- * {@link GEMV_MIN_SPEEDUP} faster than the default profile's choice in every record, its check held in
- * every record and no (case, row count) the decision reads unsteady (baseline spread above
- * {@link GEMV_STEADY_SPREAD}), replaces that choice; otherwise the default's stays. Input that fails a
- * check throws with the reason (fail loudly).
+ * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from GEMV sweep records of one
+ * adapter, by the rule of the module doc: per shape and class, a candidate at least
+ * {@link GEMV_MIN_SPEEDUP} faster than the default profile's choice in every group that is evidence
+ * — groups of at least two records, current and steady — with its check held in every current group,
+ * and at the parallel row's other row counts not slower in any, replaces that choice; otherwise the
+ * default's stays. Groups that are not current are reported, not refused; a record that no group
+ * could stand for throws with the reason (fail loudly).
  */
 export const deriveLinearGemvChoices = (
   inputs: readonly GemvSweepInput[],
   options: DeriveLinearGemvOptions,
 ): LinearGemvDerivation => {
-  if (inputs.length < MIN_RECORDS) {
-    throw new Error(
-      `The GEMV choices are derived from at least ${MIN_RECORDS} GEMV sweep records of one adapter (${inputs.length} given): the timing of these dispatches moves between runs, so one record is not evidence — measure again`,
-    );
-  }
-  const seen = new Map<string, string>();
-  for (const { path, sha256 } of inputs) {
-    const twin = seen.get(sha256);
-    if (twin !== undefined) {
-      throw new Error(`The same GEMV sweep record is passed twice (${twin} and ${path})`);
-    }
-    seen.set(sha256, path);
-  }
-  const sources = inputs.map(({ report, path, sha256 }) =>
-    parseGemvSweepRecord(report, { path, sha256 }),
-  );
-  assertOneAdapter(sources, options.table);
-  const records: Labelled[] = sources.map((source, index) => ({ source, label: `[${index + 1}]` }));
+  const sources = readRecords(inputs, options.table);
+  const kernelsOf = currentKernels();
+  const records = labelled(sources, kernelsOf);
   const defaults = DEFAULT_GEOMETRY_PROFILE.linearGemv;
   const cases = GEMV_CASES.filter((gemvCase) =>
-    sources.some((source) => source.rows.some((row) => row.caseId === gemvCase.id)),
+    sources.some((source) => source.cases.has(gemvCase.id)),
   );
   // Sequential keys in the order of their first case
   const keys = new Map<string, GemvCase[]>();
@@ -1051,9 +1316,11 @@ export const deriveLinearGemvChoices = (
     keys.set(key, [...(keys.get(key) ?? []), gemvCase]);
   }
   const sequential = [...keys.values()].map((shared) =>
-    sequentialDecision(records, shared, defaults),
+    sequentialDecision(records, shared, defaults, kernelsOf),
   );
-  const parallel = cases.map((gemvCase) => parallelDecision(records, gemvCase, defaults));
+  const parallel = cases.map((gemvCase) =>
+    parallelDecision(records, gemvCase, defaults, kernelsOf),
+  );
   let shapes: LinearGemvShapeVariant[] = [...defaults.sequential.shapes];
   for (const { decision, variant } of sequential) {
     if (variant === undefined) continue;
@@ -1109,24 +1376,112 @@ export const deriveLinearGemvChoices = (
     }
     throw cause;
   }
+  const stale = staleGroups(records);
   const [first] = sources;
   return {
     ...(changed ? { linearGemv: choices } : {}),
     defaults,
     decisions,
-    verdicts: verdictLinesOf(decisions, records),
+    stale,
+    verdicts: verdictLinesOf(decisions, records, stale),
     rule: { minSpeedup: GEMV_MIN_SPEEDUP, steadySpread: GEMV_STEADY_SPREAD },
     provenance: {
       adapter: first.adapter,
       caseTable: gemvCaseTableId(),
-      records: sources.map((source) => ({
-        path: source.path,
-        sha256: source.sha256,
-        date: source.date,
-        candidateSet: source.candidateSet,
-        ...(source.userAgent === undefined ? {} : { userAgent: source.userAgent }),
-        kernels: source.kernels,
+      records: records.map((record) => ({
+        path: record.source.path,
+        sha256: record.source.sha256,
+        date: record.source.date,
+        candidateSet: record.source.candidateSet,
+        ...(record.source.userAgent === undefined ? {} : { userAgent: record.source.userAgent }),
+        groups: recordGroups(record),
       })),
     },
   };
+};
+
+/** A case and row count the records hold too little of, and the candidates missing there. */
+export type GemvMissingMeasurement = {
+  readonly caseId: string;
+  readonly m: number;
+  /** In the sweep's measuring order. */
+  readonly candidates: readonly string[];
+};
+
+/** The return value of {@link planGemvMeasurements}. */
+export type GemvMeasurementPlanning = {
+  /** The device facts the records were measured under, which decide the candidates. */
+  readonly gates: GemvGates;
+  /** The (case, row count) pairs of the `full` set the plan read. */
+  readonly groups: number;
+  /** In the case table's order, then by row count. */
+  readonly missing: readonly GemvMissingMeasurement[];
+  /** The groups of the records that are not current. */
+  readonly stale: readonly LinearGemvStaleGroup[];
+};
+
+/** Options of {@link planGemvMeasurements}. */
+export type PlanGemvMeasurementsOptions = {
+  /** The table the records will derive for: as {@link DeriveLinearGemvOptions.table}, checked alike. */
+  readonly table?: GeometryProfile;
+};
+
+/**
+ * What the records lack for {@link deriveLinearGemvChoices} to be complete under the current
+ * runtime: per case and row count of the `full` set, the candidates the derivation reads there (the
+ * `winner` and `no-regression` roles of gemv-candidates.ts's `gemvGroupRole`, on the records' gates)
+ * that fewer than two records hold a current, steady group with a current row of — timed, or screened
+ * out by the quick look (a screened row is a current look that the candidate did not come near
+ * enough to matter; measuring it again would screen it again). A row that failed is missing. A case
+ * and row count no record has a current, steady group of misses every candidate. Measures nothing.
+ * At least one record; with none there is nothing to plan from — measure everything.
+ */
+export const planGemvMeasurements = (
+  inputs: readonly GemvSweepInput[],
+  options: PlanGemvMeasurementsOptions = {},
+): GemvMeasurementPlanning => {
+  const sources = readRecords(inputs, options.table);
+  const [first] = sources;
+  const gates = first.gates;
+  for (const source of sources) {
+    if (
+      source.gates.subgroups !== gates.subgroups ||
+      source.gates.maxComputeWorkgroupsPerDimension !== gates.maxComputeWorkgroupsPerDimension
+    ) {
+      throw new Error(
+        `${source.path}: its gates (subgroups ${String(source.gates.subgroups)}, grid limit ${source.gates.maxComputeWorkgroupsPerDimension}) differ from ${first.path}'s (records of one device configuration only)`,
+      );
+    }
+  }
+  const kernelsOf = currentKernels();
+  const records = labelled(sources, kernelsOf);
+  const missing: GemvMissingMeasurement[] = [];
+  let groups = 0;
+  for (const gemvCase of GEMV_CASES) {
+    for (const m of gemvRowCountsIn(gemvCase, "full")) {
+      groups += 1;
+      // The default's choice at reorder is a reference: every measurement of the group takes it
+      const reference = gemvProfileChoice(gemvCase, m, "reorder").name;
+      const read = gemvCandidates(gemvCase, m, "full", gates).filter(
+        (candidate) =>
+          candidate.name !== reference && gemvGroupRole(m, candidate.class) !== "unread",
+      );
+      const covered = (name: string): number =>
+        records.filter(({ states }) => {
+          const state = states.get(groupKey(gemvCase.id, m));
+          if (state?.kind !== "current" || state.unsteady !== undefined) return false;
+          const row = state.group.rows.get(name);
+          return (
+            row !== undefined &&
+            row.error === undefined &&
+            rowStaleness(row, state.kernels) === undefined
+          );
+        }).length;
+      const lacking = read
+        .filter(({ name }) => covered(name) < MIN_RECORDS)
+        .map(({ name }) => name);
+      if (lacking.length > 0) missing.push({ caseId: gemvCase.id, m, candidates: lacking });
+    }
+  }
+  return { gates, groups, missing, stale: staleGroups(records) };
 };

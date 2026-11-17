@@ -174,6 +174,32 @@ describe("deriveProfile: rule extraction", () => {
     assertStringIncludes(rejectionOf(verdict, B), "failed in linear-m4096 (device lost)");
   });
 
+  it("does not adopt a geometry the quick look screened out in a case of the class, and takes it where another sweep timed it there (fault: B screened in linear-m4096)", () => {
+    const screened = {
+      ...row(linearCase(4096), gemmCandidate(B), false),
+      screened: true,
+      quickPerDispatch: 2,
+    };
+    const first = source([
+      ...caseRows(linearCase(1024), BIG, [[B, { speedup: 1.5 }]]),
+      ...caseRows(linearCase(4096), BIG, []),
+      screened,
+    ]);
+    const alone = verdictOf(deriveProfile([first], OPTIONS), "gemmRows > 512");
+    assertEquals(alone.outcome.kind, "default");
+    assertStringIncludes(rejectionOf(alone, B), "screened out by the quick look in linear-m4096");
+    // A screened row is no observation: it counts neither as a failure nor as a mismatch
+    const timed = source(
+      [
+        ...caseRows(linearCase(1024), BIG, [[B, { speedup: 1.5 }]]),
+        ...caseRows(linearCase(4096), BIG, [[B, { speedup: 1.4 }]]),
+      ],
+      "sweep-2.json",
+    );
+    const both = verdictOf(deriveProfile([first, timed], OPTIONS), "gemmRows > 512");
+    assertEquals([both.outcome.kind, both.outcome.geometry], ["adopted", B]);
+  });
+
   it("compares candidates by geometric mean (a pair for which the arithmetic mean picks the other)", () => {
     // A: (1.6, 1.06) arithmetic 1.33, geometric 1.302 / B: (1.31, 1.31) arithmetic 1.31, geometric
     // 1.31
@@ -1843,14 +1869,16 @@ describe("the record's matching keys caseSets / defaultKernels (ADR 0117 decisio
     );
   });
 
-  it("reads format karume-geometry-sweep/3 only (a /2 record with the single caseSet is refused)", () => {
+  it("reads format karume-geometry-sweep/4 only (a /3 record, without the quick look, and a /2 record with the single caseSet are refused)", () => {
+    const three = { ...record(), format: "karume-geometry-sweep/3" };
+    assertThrows(() => derive(three), Error, "sweep-0.json: format is not karume-geometry-sweep/4");
     const older = {
       ...record(),
       format: "karume-geometry-sweep/2",
       caseSet: current.caseSets.gemm,
       caseSets: undefined,
     };
-    assertThrows(() => derive(older), Error, "sweep-0.json: format is not karume-geometry-sweep/3");
+    assertThrows(() => derive(older), Error, "sweep-0.json: format is not karume-geometry-sweep/4");
   });
 
   it("aborted, startedAt and cases[].elapsedMs do not affect the generator's verdicts", () => {

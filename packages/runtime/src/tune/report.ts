@@ -1,5 +1,5 @@
 /**
- * The shape of the sweep record (`karume-geometry-sweep/3`) and the pure functions that compare
+ * The shape of the sweep record (`karume-geometry-sweep/4`) and the pure functions that compare
  * rows with the default geometry.
  *
  * Only the sweep entry point `runGeometrySweep` (`sweep.ts`) assembles the record, so the Deno CLI
@@ -18,10 +18,11 @@ import type { CandidateSet } from "./geometries.ts";
  * The record format. /2 = /1 with `nsPerDispatch` renamed to the unit-neutral `perDispatch`, plus
  * the per-case `cases[]` (re-measurement of the default geometry) and the idle-run and wall-clock
  * notes in `settings`. /3 = /2 with the single `caseSet` and `defaultKernels` replaced by one value
- * per op family, `caseSets` and `defaultKernels` (ADR 0117 addendum 2026-11-12); the generator reads
- * /3 only.
+ * per op family, `caseSets` and `defaultKernels` (ADR 0117 addendum 2026-11-12). /4 = /3 with the
+ * quick look (harness.ts's protocol rule 4): `settings.quickLookMargin`, a row's `quickPerDispatch`
+ * and `screened`, a case's `screened`; the generator reads /4 only.
  */
-export const REPORT_FORMAT = "karume-geometry-sweep/3";
+export const REPORT_FORMAT = "karume-geometry-sweep/4";
 
 /**
  * When the ratio of the default geometry's re-measurement (re-measurement ÷ first) is outside this
@@ -76,6 +77,17 @@ export type SweepRow = {
   readonly isDefault: boolean;
   readonly key?: string;
   readonly workgroups?: readonly [number, number, number];
+  /**
+   * The quick look's time of one dispatch (the last pass of its probe ÷ its dispatches, unit:
+   * `gpuTiming.unit`) — absent when the quick look was off or read no time.
+   */
+  readonly quickPerDispatch?: number;
+  /**
+   * The quick look did not let this geometry go on (its quick time was beyond the margin of the
+   * default geometry's): the row has no rounds, no digest and no comparison with the default, and
+   * no derivation reads it as evidence.
+   */
+  readonly screened?: true;
   /** The number of dispatches stacked in one pass. */
   readonly reps?: number;
   /** The whole pass's time per measurement round (unit: the report's `gpuTiming.unit`). */
@@ -133,6 +145,8 @@ export type CaseSummary = {
    * 0117 decision 8); the generator does not read it. JSON from before this field lacks it.
    */
   readonly elapsedMs: number;
+  /** How many of the case's geometries the quick look screened out (0 with the quick look off). */
+  readonly screened: number;
   readonly defaultRepeat?: { readonly perDispatch: number; readonly driftRatio: number };
   readonly defaultRepeatError?: string;
 };
@@ -146,7 +160,7 @@ export type ReportAdapter = {
 };
 
 /**
- * The sweep record (`karume-geometry-sweep/3` — the input of the generator `derive.ts`, the shape
+ * The sweep record (`karume-geometry-sweep/4` — the input of the generator `derive.ts`, the shape
  * written as JSON).
  */
 export type Report = {
@@ -247,6 +261,12 @@ export type Report = {
      */
     readonly geometries?: readonly string[];
     readonly rounds: number;
+    /**
+     * The quick look's margin (harness.ts's protocol rule 4 — measurement.ts's `QUICK_LOOK_MARGIN`
+     * unless the caller gave another): a candidate whose quick time was beyond this many times the
+     * default geometry's was screened out. 0: the quick look was off.
+     */
+    readonly quickLookMargin: number;
     readonly targetPassMs: number;
     /**
      * This sweep's upper bound of `reps` (harness.ts's `SWEEP_MAX_REPS`). JSON from before the

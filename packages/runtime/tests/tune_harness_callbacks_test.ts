@@ -167,7 +167,13 @@ const withSweepContext = async (
   return { leaked: buffers.filter((buffer) => !buffer.destroyed).map((buffer) => buffer.label) };
 };
 
-const SETTINGS = { rounds: 2, candidateSet: "quick", timestampUnit: "deno-raw-tick" } as const;
+// Every geometry timed (no quick look): these cases are about the callbacks around each row
+const SETTINGS = {
+  rounds: 2,
+  candidateSet: "quick",
+  timestampUnit: "deno-raw-tick",
+  quickLookMargin: 0,
+} as const;
 
 /**
  * Sweeps the smallest case with the quick candidates (the default row first, the candidate rows
@@ -300,7 +306,7 @@ describe("a default whose perDispatch is 0 (a timestamp difference of 0) is not 
           "the candidate row is not positive",
         );
         assertEquals(candidate.speedupVsDefault, undefined);
-        assertEquals(cases, [{ caseId: SMALLEST.id, elapsedMs: cases[0].elapsedMs }]);
+        assertEquals(cases, [{ caseId: SMALLEST.id, elapsedMs: cases[0].elapsedMs, screened: 0 }]);
         for (const gpuTiming of [
           { unit: "deno-raw-tick", quantized: false },
           { unit: "ns", quantized: true },

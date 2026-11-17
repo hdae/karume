@@ -1,12 +1,16 @@
 /**
- * The GEMV sweep's record (`karume-gemv-sweep/2`) and the pure pieces it is assembled from. Its own
+ * The GEMV sweep's record (`karume-gemv-sweep/3`) and the pure pieces it is assembled from. Its own
  * format: its rows are kernels of the GEMV family at a case and a row count, not geometries of one
  * kernel, so they share no row shape with the geometry sweep's record.
  *
  * `/2` replaced `/1` when the rounds became interleaved across the kernels of a row count: a `/1`
  * summary held the baseline measured once more at the end of the row count (`baselineRepeat`, a
  * drift ratio), a `/2` summary holds the spread of the baseline's own rounds, and the settings name
- * the warm start and the calibration check instead of the per-kernel warm-up.
+ * the warm start and the calibration check instead of the per-kernel warm-up. `/3` replaced `/2`
+ * when the evidence became per row: a row carries the fingerprint of its own kernel and a case its
+ * own (the record-wide `caseTable` and `kernels` are gone), and the quick look adds a row's quick
+ * time and its `screened` mark, a summary's count of screened kernels and the settings' margin,
+ * candidates and row counts.
  */
 
 import type { LinearGemvParallelLanes } from "../kernels/linear-gemv.ts";
@@ -15,7 +19,7 @@ import type { GemvCandidateClass, GemvCandidateSet } from "./gemv-candidates.ts"
 import type { GemvCase, GemvSweepStorage } from "./gemv-cases.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 
-export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/2";
+export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/3";
 
 /**
  * A candidate's choice as the record writes it (a `LinearGemvChoice` without its unset fields): the
@@ -41,9 +45,25 @@ export type GemvSweepRow = {
   /** Whether this is the baseline: what a Session at the level `exact` runs with the default profile. */
   readonly isBaseline: boolean;
   readonly choice: GemvSweepChoice;
+  /**
+   * The fingerprint of the kernel the row measured (gemv-fingerprint.ts's `gemvProgramKernelId` of
+   * its program): a derivation reads the row as current only when its runtime builds the same kernel
+   * for the candidate. Absent when the program could not be built.
+   */
+  readonly kernel?: string;
   /** The pipeline keys of the program's dispatches (one for every GEMV program). */
   readonly keys?: readonly string[];
   readonly workgroups?: readonly [number, number, number];
+  /**
+   * The quick look's time of one dispatch (the last pass of its probe ÷ its dispatches, unit: the
+   * record's `gpuTiming.unit`) — absent when the quick look was off or read no time.
+   */
+  readonly quickPerDispatch?: number;
+  /**
+   * The quick look did not let the kernel go on (its quick time was beyond the margin of its class's
+   * bar): the row has no rounds and no check, and no derivation reads it as evidence.
+   */
+  readonly screened?: true;
   /** Dispatches stacked in one pass. */
   readonly reps?: number;
   /**
@@ -101,6 +121,18 @@ export type GemvSweepCaseSummary = {
    * positive round.
    */
   readonly baselineSpread?: number;
+  /** How many kernels of the row count the quick look screened out (0 with the quick look off). */
+  readonly screened: number;
+};
+
+/** A planned case as the record lists it. */
+export type GemvSweepCaseEntry = GemvCase & {
+  /**
+   * The fingerprint of the case's dispatch-deciding fields (gemv-fingerprint.ts's
+   * `gemvCaseFingerprint`): a derivation reads the case's rows as current only when its runtime's
+   * case of that id has the same.
+   */
+  readonly fingerprint: string;
 };
 
 /** The device facts that decided which candidates exist. */
@@ -122,7 +154,7 @@ export const GEMV_SWEEP_NOT_MEASURED =
   "The packed-activation form of the parallel GEMV is not measured: it reads the int8 codes of the " +
   "quantizing producer (static_quantize), which the sweep does not run.";
 
-/** The sweep record (`karume-gemv-sweep/2`). */
+/** The sweep record (`karume-gemv-sweep/3`). */
 export type GemvSweepReport = {
   readonly format: typeof GEMV_SWEEP_FORMAT;
   /** When the record was assembled (ISO 8601 — the sweep's end). */
@@ -131,10 +163,6 @@ export type GemvSweepReport = {
   readonly startedAt: string;
   /** A cancel stopped the sweep before every planned measurement was made. */
   readonly aborted: boolean;
-  /** The fingerprint of the case table (its dispatch-deciding fields). */
-  readonly caseTable: string;
-  /** The fingerprint of the kernels the rows without an error measured. */
-  readonly kernels: string;
   readonly userAgent: string;
   readonly adapter: ReportAdapter;
   readonly gates: GemvSweepGates;
@@ -148,7 +176,19 @@ export type GemvSweepReport = {
     readonly candidateSet: GemvCandidateSet;
     /** When narrowed by case id. */
     readonly cases?: readonly string[];
+    /** When narrowed by row count (of the set's). */
+    readonly rows?: readonly number[];
+    /**
+     * When narrowed by candidate name: the candidates measured besides the references (the baseline
+     * and the default profile's choice at `reorder`, measured either way).
+     */
+    readonly candidates?: readonly string[];
     readonly rounds: number;
+    /**
+     * The quick look's margin (harness.ts's protocol rule 4 — measurement.ts's `QUICK_LOOK_MARGIN`
+     * unless the caller gave another; 0: the quick look was off).
+     */
+    readonly quickLookMargin: number;
     readonly targetPassMs: number;
     readonly maxReps: number;
     /**
@@ -176,8 +216,11 @@ export type GemvSweepReport = {
     readonly notMeasured: string;
   };
   readonly deviceLost: { readonly reason: string; readonly message: string } | null;
-  /** The planned cases with their sources, each with the row counts the set measures. */
-  readonly cases: readonly GemvCase[];
+  /**
+   * The planned cases with their sources and fingerprints, each with the row counts the set (and the
+   * narrowing by row count) measures.
+   */
+  readonly cases: readonly GemvSweepCaseEntry[];
   readonly summaries: readonly GemvSweepCaseSummary[];
   readonly rows: readonly GemvSweepRow[];
 };

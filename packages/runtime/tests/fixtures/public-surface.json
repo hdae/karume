@@ -689,11 +689,23 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvMeasurementPlanning",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvMissingMeasurement",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvSweepCandidateSet",
         "kind": "typeAlias"
       },
       {
         "name": "GemvSweepCase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepCaseEntry",
         "kind": "typeAlias"
       },
       {
@@ -805,8 +817,24 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvRecordGroups",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvStaleGroup",
+        "kind": "typeAlias"
+      },
+      {
         "name": "NanPolicy",
         "kind": "typeAlias"
+      },
+      {
+        "name": "PlanGemvMeasurementsOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "QUICK_LOOK_MARGIN",
+        "kind": "variable"
       },
       {
         "name": "SessionAbAdapter",
@@ -893,11 +921,11 @@
         "kind": "function"
       },
       {
-        "name": "gemvSweepCases",
+        "name": "gemvSweepCandidateNames",
         "kind": "function"
       },
       {
-        "name": "gemvSweepKernelsId",
+        "name": "gemvSweepCases",
         "kind": "function"
       },
       {
@@ -918,6 +946,10 @@
       },
       {
         "name": "parseGeometryProfileJson",
+        "kind": "function"
+      },
+      {
+        "name": "planGemvMeasurements",
         "kind": "function"
       },
       {

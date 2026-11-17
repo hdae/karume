@@ -1,7 +1,7 @@
 /**
  * The geometry sweep entry's record: the per-case records of `runGeometrySweep` (one call per case,
  * idle time between them) merged into one sweep record that `deriveGeometryProfile` reads as it is
- * (`karume-geometry-sweep/3` — no envelope of its own), and the per-case summary. Pure.
+ * (`karume-geometry-sweep/4` — no envelope of its own), and the per-case summary. Pure.
  */
 
 import {

@@ -60,20 +60,35 @@ measurements in `docs/research/`.
   <repository directory> [--name-map <file>]` rewrites a `karume/5` repository's manifest in place (the same content,
   the new format, the card's statement of the format; no weights file is touched).
 
+- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a quick look: after the case's warm start every
+  geometry gets one short timed pass, and only the default geometry and the candidates whose quick time is at most
+  `GeometrySweepOptions.quickLookMargin` (×1.25, `QUICK_LOOK_MARGIN`) times the default's are timed in full; the others
+  are rows marked `screened` with their quick time (`quickPerDispatch`) and no rounds, digest or comparison. A margin
+  of 0 times every geometry. The record is `karume-geometry-sweep/4` (`settings.quickLookMargin`, the rows'
+  `quickPerDispatch` and `screened`, each case's `screened` count), and `deriveGeometryProfile` reads `/4` only: a
+  `/3` record is refused, naming its format, and a screened row is no observation (a geometry screened out in a case no
+  record timed it in is not adopted for that case's class). The records the registered tables cite are `/3` and no
+  longer derive them; a family regenerates from a new sweep.
+
 ### Added
 
 - `@karume/runtime/tune`: `runGemvSweep`, the GEMV sweep. On a dedicated device it measures the GEMV choices of
-  `linear` at the shapes of the default profile's GEMV rows and the row counts 1, 4, 8, 16 and 64: per case the
+  `linear` at the shapes of the default profile's GEMV rows and the row counts 1, 4, 8, 16 and 64 (the sets `quick`:
+  M = 1; `full`: M = 1, 4 and 8; `row-blocks`: M = 16 and 64): per case the
   baseline (what a Session at the level `exact` runs), the sequential variants and row-block heights, whose output
   words must equal the baseline's, and the parallel GEMV at each lane count, plain, staged and — where the device has
   the subgroup features — subgroup, held to the band of `linear` against an f64 oracle on the host. The kernels of a
-  case at a row count are measured together: a warm start on the baseline, then every kernel calibrated, then rounds
-  that each time every kernel once in a rotating order, so a drift of the device lands on every kernel alike. It
-  returns a `karume-gemv-sweep/2` record (`GemvSweepReport`) with fingerprints of its case table and of the kernels
-  measured and, per case and row count, the spread of the baseline's rounds (`baselineSpread`), and changes no
-  choice. Also `gemvSweepCases` (the case table) and `gemvSweepKernelsId` (the kernel fingerprint of
-  a merged record's rows), and the types `GemvSweepOptions`, `GemvSweepProgress`, `GemvSweepCandidateSet`,
-  `GemvSweepCase`, `GemvSweepCaseSummary`, `GemvSweepChoice`, `GemvSweepGates` and `GemvSweepRow`.
+  case at a row count are measured together: a warm start on the baseline, a quick look at every kernel (only the
+  baseline, the default profile's choice at `reorder` and the kernels within `quickLookMargin` of their class's bar
+  go on; the others are `screened` rows), the kernels that go on calibrated and checked, then rounds that each time
+  every one of them once in a rotating order, so a drift of the device lands on every kernel alike. The options
+  narrow it by case, row count (`rows`) and candidate (`candidates`; the references are measured either way). It
+  returns a `karume-gemv-sweep/3` record (`GemvSweepReport`): each row carries the fingerprint of its kernel and its
+  quick time, each case its own fingerprint, each case and row count the spread of the baseline's rounds
+  (`baselineSpread`) and the count of kernels screened; it changes no choice. Also `gemvSweepCases` (the case
+  table), `gemvSweepCandidateNames` (every candidate name), `QUICK_LOOK_MARGIN` (the quick look's default margin of
+  both sweeps), and the types `GemvSweepOptions`, `GemvSweepProgress`, `GemvSweepCandidateSet`, `GemvSweepCase`,
+  `GemvSweepCaseEntry`, `GemvSweepCaseSummary`, `GemvSweepChoice`, `GemvSweepGates` and `GemvSweepRow`.
 - `@karume/runtime`: `GeometryProfile.linearGemv`, an optional field of a geometry profile that holds the GEMV
   choices of `linear` (1 to 64 rows over i2 / i4 / i8 weights): the sequential variant and its per-shape exceptions,
   the thread target of the row-block height, and the shapes that take the parallel GEMV with their lane count and
@@ -81,19 +96,25 @@ measurements in `docs/research/`.
   a table without the field runs with them, so no Session changes. `acquireGpu({ geometryProfile })` and
   `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field.
   `SessionOptions.linearGemvRowsThreadTarget` still replaces the thread target when given.
-- `@karume/runtime/tune`: `deriveLinearGemvChoices`, which derives a table's `linearGemv` from two or more GEMV sweep
-  records of its adapter. A candidate replaces the default profile's choice for a shape only when it is at least ×1.10
-  faster than that choice in every record and its check holds in every record; a shape that a record measured while
-  the baseline's rounds spread beyond ×1.25 keeps the default. The identical class writes the sequential variant's
-  per-shape exceptions (no Session's numbers change), the reorder class the parallel rows' lanes and staged flag
-  (Sessions at `reorder` change their numbers inside the band; only from records of the `full` set, which measure
-  every row count a parallel row serves); the thread target, the general variant and the rows
-  with packed activations stay. It returns the field (absent when nothing is adopted), one decision per shape with
-  the gains per record or why it was kept, the lines that state them and the records used, and refuses records of
-  another format, adapter, case table or kernels, wall-clock or quantized ones, and fewer than two. Also the types
-  `DeriveLinearGemvOptions`, `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation` and `LinearGemvGain`.
-  The generator of the embedded tables (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for
-  a registered table; no embedded table changes.
+- `@karume/runtime/tune`: `deriveLinearGemvChoices`, which derives a table's `linearGemv` from GEMV sweep records of
+  its adapter, read group by group (a record's case at one row count): a group is evidence where its rows and its case
+  carry the current runtime's fingerprints, the default profile's choices it names are the current ones and its
+  baseline's rounds spread at most ×1.25, so a change to one kernel or one case leaves the other groups standing and
+  records that each hold part of the cases add up. A candidate replaces the default profile's choice for a shape only
+  when groups of at least two records are evidence for it, it is at least ×1.10 faster than that choice in every one,
+  and its check held in every current group. The identical class writes the sequential variant's per-shape exceptions
+  (no Session's numbers change), the reorder class the parallel rows' lanes and staged flag (Sessions at `reorder`
+  change their numbers inside the band; only with that evidence at every row count a parallel row serves); the thread
+  target, the general variant and the rows with packed activations stay. It returns the field (absent when nothing is
+  adopted), one decision per shape with the gains per group or why it was kept, the groups that are not current, the
+  lines that state them and the records used with how much of each is current, and refuses another format, adapter,
+  wall-clock or quantized timing, the same record twice and no record. `planGemvMeasurements` reads the same records
+  and lists, per case and row count, the candidates the derivation reads that fewer than two records hold a current
+  group of. Also the types `DeriveLinearGemvOptions`, `GemvMeasurementPlanning`, `GemvMissingMeasurement`,
+  `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation`, `LinearGemvGain`, `LinearGemvRecordGroups`,
+  `LinearGemvStaleGroup` and `PlanGemvMeasurementsOptions`. The generator of the embedded tables
+  (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for a registered table, and with
+  `--gemv-plan` writes the workbench batch that measures, twice, what they lack; no embedded table changes.
 - `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
   canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
   `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and

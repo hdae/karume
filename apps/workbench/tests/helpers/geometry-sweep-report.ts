@@ -73,7 +73,7 @@ export type PerCaseOptions = {
 export const perCase = (caseId: string, options: PerCaseOptions = {}): GeometrySweepReport => {
   const rows = options.rows ?? [row(caseId, true), row(caseId, false)];
   return {
-    format: "karume-geometry-sweep/3",
+    format: "karume-geometry-sweep/4",
     date: options.date ?? "2026-10-28T10:05:00.000Z",
     startedAt: "2026-10-28T10:00:00.000Z",
     aborted: options.aborted ?? false,
@@ -90,6 +90,7 @@ export const perCase = (caseId: string, options: PerCaseOptions = {}): GeometryS
       ops: ["i8a8-conv3d"],
       cases: [caseId],
       rounds: 5,
+      quickLookMargin: 1.25,
       targetPassMs: 80,
       maxReps: 16384,
       warmupNs: 1,
@@ -98,7 +99,12 @@ export const perCase = (caseId: string, options: PerCaseOptions = {}): GeometryS
     },
     deviceLost: options.deviceLost ?? null,
     cases: [
-      { caseId, elapsedMs: 120_000, defaultRepeat: { perDispatch: 20_000_000, driftRatio: 1.01 } },
+      {
+        caseId,
+        elapsedMs: 120_000,
+        screened: rows.filter((one) => one.screened === true).length,
+        defaultRepeat: { perDispatch: 20_000_000, driftRatio: 1.01 },
+      },
     ],
     rows,
   };

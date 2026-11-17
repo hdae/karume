@@ -3,8 +3,10 @@
  * (`packages/runtime/src/kernels/geometry-profiles/<id>.ts`). From the repository root:
  *
  *   node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]]
- *     [--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]]
+ *     [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]]
  *     [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
+ *   node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-records=<path>[,…]]
+ *     [--dry-run]
  *
  * It always works as "the registered table as base + new records for some op families": a
  * registered id takes that table as `base` of `deriveGeometryProfile`, so the families the records
@@ -15,13 +17,18 @@
  * (`linearGemv`, with `deriveLinearGemvChoices`) onto the table; without them a base's field is
  * carried. A registered table can take GEMV sweep records alone; a first table needs `--records`.
  *
+ * `--gemv-plan` derives nothing: it writes the workbench batch `inputs/workbench/batches/
+ * gemv-plan-<profile id>.json` that measures, twice, what the GEMV sweep records at hand lack for the
+ * GEMV derivation to be complete under the current runtime (plan.ts) — the whole `full` set when
+ * no record is given.
+ *
  * Exit codes: 0 on success, 2 for a command line it cannot act on, 1 for anything else (the
  * derivation's error message on stderr, unchanged).
  *
  * SPEC: docs/spec/geometry-profiles.md#where-a-table-comes-from
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { BUILTIN_GEOMETRY_PROFILES, type GeometryProfile } from "@karume/runtime";
@@ -37,6 +44,7 @@ import { differenceLine, profileDifferences } from "./differences.ts";
 import { formatTypeScript, REPOSITORY_ROOT } from "./format.ts";
 import { profileHeader } from "./header.ts";
 import { profileModule } from "./literal.ts";
+import { gemvPlan, planBatchText, UNTRACKED_BATCHES_DIRECTORY } from "./plan.ts";
 import {
   type LoadedRecord,
   loadRecord,
@@ -59,8 +67,10 @@ export const DEFAULT_MIN_SPEEDUP = 1.05;
 
 const USAGE =
   "usage: node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] " +
-  "[--attention-bench=<path>[,…]] [--gemv-records=<path>,<path>[,…]] " +
-  "[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]";
+  "[--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] " +
+  "[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]\n" +
+  "       node tools/geometry-profiles/generate.ts <profile id> --gemv-plan " +
+  "[--gemv-records=<path>[,<path>…]] [--dry-run]";
 
 /** A table id is also its file name: kebab-case, as every registered id is. */
 const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -79,6 +89,8 @@ export type Request = {
   readonly match?: AdapterMatch;
   readonly minSpeedup: number;
   readonly dryRun: boolean;
+  /** Write the batch of what the GEMV records lack instead of deriving (`--gemv-plan`). */
+  readonly gemvPlan: boolean;
 };
 
 const VALUE_OPTIONS = [
@@ -103,9 +115,14 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
   const values = new Map<ValueOption, string>();
   const positional: string[] = [];
   let dryRun = false;
+  let gemvPlan = false;
   for (const argument of argv) {
     if (argument === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (argument === "--gemv-plan") {
+      gemvPlan = true;
       continue;
     }
     if (!argument.startsWith("--")) {
@@ -129,7 +146,16 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
   }
   const records = pathList(values.get("records"));
   const gemvRecords = pathList(values.get("gemv-records"));
-  if (records.length === 0 && gemvRecords.length === 0) {
+  if (gemvPlan) {
+    const derivationOnly = VALUE_OPTIONS.filter(
+      (option) => option !== "gemv-records" && values.has(option),
+    );
+    if (derivationOnly.length > 0) {
+      throw new UsageError(
+        `--gemv-plan reads GEMV sweep records only (drop ${derivationOnly.map((option) => `--${option}`).join(", ")})`,
+      );
+    }
+  } else if (records.length === 0 && gemvRecords.length === 0) {
     throw new UsageError("Neither --records nor --gemv-records names a record");
   }
   const vendor = values.get("vendor");
@@ -159,6 +185,7 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
         }),
     minSpeedup,
     dryRun,
+    gemvPlan,
   };
 };
 
@@ -291,10 +318,50 @@ const readRecords = async (
   return records;
 };
 
+/**
+ * `--gemv-plan`: the plan of what the GEMV records lack (plan.ts), printed, and its batch written
+ * under the workbench's untracked batches (with `--dry-run`, printed instead). Nothing is written
+ * when nothing is missing.
+ */
+const writePlan = async (
+  request: Request,
+  base: GeometryProfile | undefined,
+  environment: CommandEnvironment,
+): Promise<void> => {
+  const { repositoryRoot, stdout } = environment;
+  const records = await readRecords(repositoryRoot, request.gemvRecords, "gemv-records");
+  const plan = gemvPlan({
+    profileId: request.id,
+    records,
+    ...(base === undefined ? {} : { table: base }),
+  });
+  for (const line of plan.lines) stdout(line);
+  if (plan.batch === undefined) {
+    stdout("No batch written: there is nothing to measure.");
+    return;
+  }
+  const path = `${UNTRACKED_BATCHES_DIRECTORY}/${plan.batchId}.json`;
+  const text = planBatchText(plan.batch);
+  if (request.dryRun) {
+    stdout(`Dry run: nothing written. The batch ${path}:`);
+    stdout(text.trimEnd());
+    return;
+  }
+  await mkdir(join(repositoryRoot, UNTRACKED_BATCHES_DIRECTORY), { recursive: true });
+  await writeFile(join(repositoryRoot, path), text);
+  stdout(
+    `Wrote ${path} (${plan.batch.steps.length} steps): the workbench lists it as the untracked batch ${plan.batchId}; under Node, node apps/workbench/run.ts --batch=${path}`,
+  );
+};
+
 const run = async (argv: readonly string[], environment: CommandEnvironment): Promise<void> => {
   const { repositoryRoot, stdout } = environment;
   const request = parseCommandLine(argv);
   const base = environment.registered.find((profile) => profile.id === request.id);
+  if (request.gemvPlan) {
+    await writePlan(request, base, environment);
+    return;
+  }
   if (base !== undefined && request.match !== undefined) {
     throw new UsageError(
       `'${request.id}' is registered: its adapter match is the table's own (drop --vendor, --architecture and --description)`,

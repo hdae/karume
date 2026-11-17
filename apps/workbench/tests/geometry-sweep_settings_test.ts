@@ -1,4 +1,8 @@
-import { type GeometrySweepCase, geometrySweepCases } from "@karume/runtime/tune";
+import {
+  type GeometrySweepCase,
+  geometrySweepCases,
+  QUICK_LOOK_MARGIN,
+} from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import geometrySweep from "../src/entries/geometry-sweep.ts";
@@ -33,11 +37,13 @@ describe("the defaults", () => {
     expect(plan.candidateSet).toBe("quick+");
   });
 
-  it("are quick+, every op family of the sweep's own table, no case chosen, 5 rounds and 90 s idle", () => {
+  it("are quick+, every op family of the sweep's own table, no case or geometry chosen, the quick look at ×1.25, 5 rounds and 90 s idle", () => {
     expect(DEFAULTS).toEqual({
       candidateSet: "quick+",
       ops: [...new Set(geometrySweepCases().map(({ op }) => op))],
       cases: [],
+      geometries: [],
+      quickLookMargin: QUICK_LOOK_MARGIN,
       rounds: 5,
       idleSeconds: 90,
     });
@@ -49,6 +55,24 @@ describe("the parameters", () => {
     const tables = [...geometrySweepCases(), ...geometrySweepCases("k88")];
     expect(SWEEP_OPS).toEqual([...new Set(tables.map(({ op }) => op))]);
     expect(SWEEP_CASE_IDS).toEqual(tables.map(({ id }) => id));
+  });
+
+  it("take the geometries as comma-separated names, and refuse a quick-look margin between 0 and 1", () => {
+    expect(
+      selectionOf({ geometries: " tile64x64r8x4w16x8, tile32x64r4x4w16x8 ,," }).geometries,
+    ).toEqual(["tile64x64r8x4w16x8", "tile32x64r4x4w16x8"]);
+    expect(selectionOf({ quickLookMargin: "0" }).quickLookMargin).toBe(0);
+    expect(() => selectionOf({ quickLookMargin: "0.9" })).toThrow(
+      /^Parameter quickLookMargin: 0.9 is neither 0/,
+    );
+  });
+
+  it("carry the geometries and the margin into the plan", () => {
+    const plan = planSweep(
+      { ...DEFAULTS, geometries: ["tile64x64r8x4w16x8"], quickLookMargin: 0 },
+      CASES,
+    );
+    expect([plan.geometries, plan.quickLookMargin]).toEqual([["tile64x64r8x4w16x8"], 0]);
   });
 
   it("take no idle at all but no fewer seconds, and at least one round", () => {

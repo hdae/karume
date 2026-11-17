@@ -1,6 +1,7 @@
 // The GEMV sweep without a GPU (src/tune/gemv-*.ts): the case table and its pin to the default
-// profile's GEMV rows, the baseline and the candidates of each set and class, the launch a program
-// becomes, the host oracle and the band reading, the fingerprints and the record's shape.
+// profile's GEMV rows, the baseline and the candidates of each set and class, the narrowing by row
+// count and candidate, the roles the derivation reads a group for, the launch a program becomes, the
+// host oracle and the band reading, the fingerprints and the record's shape.
 //
 // Faults injected: a profile row without a case (the pin reports it); a kernel whose WGSL gains a
 // token, and a case whose n changes (each fingerprint moves); an output off the oracle by more than
@@ -8,7 +9,7 @@
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { gemvSweepCases, gemvSweepKernelsId } from "../tune.ts";
+import { gemvSweepCandidateNames, gemvSweepCases } from "../tune.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
@@ -18,18 +19,20 @@ import {
   type GemvGates,
   gemvBaseline,
   gemvCandidates,
+  gemvGroupRole,
+  gemvKernelsAt,
   gemvMeasurementPlans,
   gemvProfileChoice,
   gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, GEMV_SWEEP_ROW_COUNTS, type GemvCase } from "../src/tune/gemv-cases.ts";
 import {
+  gemvCaseFingerprint,
   gemvCaseTableId,
-  gemvKernelsId,
-  type GemvMeasuredRow,
+  gemvKernelId,
 } from "../src/tune/gemv-fingerprint.ts";
 import { bandAgainstOracle, gemvOracle } from "../src/tune/gemv-oracle.ts";
-import { choiceRecord, type GemvSweepRow } from "../src/tune/gemv-report.ts";
+import { choiceOfRecord, choiceRecord, type GemvSweepRow } from "../src/tune/gemv-report.ts";
 import { gemvLaunch, gemvSweepGates, gemvSweepReport } from "../src/tune/gemv-sweep.ts";
 import { assertBindingRoles, WARM_START_MAX_PASSES } from "../src/tune/harness.ts";
 import {
@@ -189,10 +192,10 @@ describe("the candidates", () => {
   });
 
   describe("of the full set", () => {
-    it("measure every row count of the case", () => {
+    it("measure the row counts a derivation rule reads: the parallel range of the case", () => {
       assertEquals(
         gemvMeasurementPlans(PLE, "full", GATES).map(({ m }) => m),
-        [1, 4, 8, 16, 64],
+        [1, 4, 8],
       );
     });
 
@@ -210,10 +213,14 @@ describe("the candidates", () => {
           gemvCandidates(PLE, m, "full", GATES).filter(({ class: kind }) => kind === "identical"),
         );
       assertEquals(at(4), ["c32u4r1", "c32u4r4"]);
-      assertEquals(at(64), ["c32u4r1", "c32u4r2", "c32u4r4"]);
+      assertEquals(names(gemvCandidates(PLE, 64, "row-blocks", GATES)), [
+        "c32u4r1",
+        "c32u4r2",
+        "c32u4r4",
+      ]);
       // i8 holds 16 rows a word, i2 4.
-      assertEquals(gemvCandidates(HEAD_I8, 64, "full", GATES).length, 4);
-      assertEquals(gemvCandidates(caseOf("i2-n12288-k1536"), 64, "full", GATES).length, 2);
+      assertEquals(gemvCandidates(HEAD_I8, 64, "row-blocks", GATES).length, 4);
+      assertEquals(gemvCandidates(caseOf("i2-n12288-k1536"), 64, "row-blocks", GATES).length, 2);
     });
 
     it("take the reorder class at M = 1, 4 and 8 only", () => {
@@ -224,6 +231,70 @@ describe("the candidates", () => {
         assertEquals(reorder.length, m <= 8 ? 15 : 0, `M=${m}`);
       }
     });
+  });
+
+  describe("of the row-blocks set", () => {
+    it("measure the row counts beyond the parallel range: M = 16 and 64, the identical class alone", () => {
+      const plans = gemvMeasurementPlans(PLE, "row-blocks", GATES);
+      assertEquals(
+        plans.map(({ m }) => m),
+        [16, 64],
+      );
+      for (const plan of plans) {
+        assert(plan.candidates.every((candidate) => candidate.class === "identical"));
+      }
+    });
+
+    it("and the full set together measure every row count of the case", () => {
+      assertEquals(
+        [
+          ...gemvMeasurementPlans(PLE, "full", GATES),
+          ...gemvMeasurementPlans(PLE, "row-blocks", GATES),
+        ].map(({ m }) => m),
+        GEMV_SWEEP_ROW_COUNTS,
+      );
+    });
+  });
+
+  describe("narrowed by row count and candidate", () => {
+    it("keep the row counts named, and the references with the candidates named", () => {
+      const plans = gemvMeasurementPlans(PLE, "full", GATES, {
+        rows: [4],
+        candidates: ["staged-l8", "c32u4r1"],
+      });
+      assertEquals(
+        plans.map(({ m }) => m),
+        [4],
+      );
+      // The default's choice at reorder is measured with them, the baseline is the plan's own
+      assertEquals(names(plans[0]?.candidates ?? []), ["c32u4r1", "parallel-l4", "staged-l8"]);
+      assertEquals(plans[0]?.baseline.name, gemvBaseline(PLE, 4).name);
+    });
+
+    it("name every candidate of the table among the public names, each once", () => {
+      const all = gemvSweepCandidateNames();
+      assertEquals(new Set(all).size, all.length);
+      for (const gemvCase of [PLE, HEAD_I8, HEAD_12B]) {
+        for (const m of gemvCase.rows) {
+          for (const { name } of gemvKernelsAt(gemvCase, m).slice(1)) {
+            assert(all.includes(name), `${gemvCase.id} M=${m}: ${name}`);
+          }
+        }
+      }
+    });
+  });
+
+  it("are read by the derivation for a winner at M = 1, for a regression in the reorder class up to M = 8, and not at all otherwise", () => {
+    assertEquals(
+      [1, 4, 8, 16, 64].map((m) => [gemvGroupRole(m, "identical"), gemvGroupRole(m, "reorder")]),
+      [
+        ["winner", "winner"],
+        ["unread", "no-regression"],
+        ["unread", "no-regression"],
+        ["unread", "unread"],
+        ["unread", "unread"],
+      ],
+    );
   });
 
   it("leave the subgroup form out on a device without the features", () => {
@@ -244,7 +315,11 @@ describe("the candidates", () => {
 
   it("class every kernel by its summation order, and include the profile's choice at reorder", () => {
     for (const gemvCase of [PLE, HEAD_I8, HEAD_12B]) {
-      for (const plan of gemvMeasurementPlans(gemvCase, "full", GATES)) {
+      const plans = [
+        ...gemvMeasurementPlans(gemvCase, "full", GATES),
+        ...gemvMeasurementPlans(gemvCase, "row-blocks", GATES),
+      ];
+      for (const plan of plans) {
         for (const candidate of plan.candidates) {
           const sequential =
             candidate.choice.id === "gemv-m1" || candidate.choice.id === "gemv-rows";
@@ -262,7 +337,10 @@ describe("the candidates", () => {
 
 describe("the launch of a candidate's program", () => {
   it("binds the case's resources at the program's positions, which the WGSL's roles accept", () => {
-    const candidates = gemvMeasurementPlans(PLE, "full", GATES).flatMap((plan) =>
+    const candidates = [
+      ...gemvMeasurementPlans(PLE, "full", GATES),
+      ...gemvMeasurementPlans(PLE, "row-blocks", GATES),
+    ].flatMap((plan) =>
       [plan.baseline, ...plan.candidates].map((candidate) => ({ m: plan.m, candidate })),
     );
     for (const { m, candidate } of candidates) {
@@ -390,16 +468,9 @@ describe("the band reading", () => {
   });
 });
 
-/** A measured row of a case (the fields the fingerprint reads). */
-const measured = (gemvCase: GemvCase, m: number, candidate: GemvCandidate): GemvMeasuredRow => ({
-  caseId: gemvCase.id,
-  m,
-  choice: choiceRecord(candidate.choice, gemvCase.storage),
-});
-
 describe("the fingerprints", () => {
-  const rows = gemvMeasurementPlans(PLE, "quick", GATES).flatMap((plan) =>
-    [plan.baseline, ...plan.candidates].map((candidate) => measured(PLE, plan.m, candidate)),
+  const kernels = gemvMeasurementPlans(PLE, "quick", GATES).flatMap((plan) =>
+    [plan.baseline, ...plan.candidates].map((candidate) => ({ m: plan.m, candidate })),
   );
 
   it("of the case table moves with a dispatch-deciding field, not with a source (fault: n changed)", () => {
@@ -413,7 +484,18 @@ describe("the fingerprints", () => {
     assertEquals(gemvCaseTableId(described), gemvCaseTableId());
   });
 
-  it("of the kernels moves when a kernel's text changes, not with a comment (fault: one token added)", () => {
+  it("of a case moves with a dispatch-deciding field, not with a source or the row counts, and not with another case (fault: n changed)", () => {
+    const [first, second] = GEMV_CASES;
+    assertNotEquals(gemvCaseFingerprint({ ...first, n: first.n + 32 }), gemvCaseFingerprint(first));
+    assertEquals(
+      gemvCaseFingerprint({ ...first, source: "another description" }),
+      gemvCaseFingerprint(first),
+    );
+    assertEquals(gemvCaseFingerprint({ ...first, rows: [1] }), gemvCaseFingerprint(first));
+    assertNotEquals(gemvCaseFingerprint(second), gemvCaseFingerprint(first));
+  });
+
+  it("of a kernel moves when its text changes, not with a comment, and not with another kernel's (fault: one token added)", () => {
     const edited =
       (edit: (wgsl: string) => string) =>
       (gemvCase: GemvCase, m: number, choice: GemvCandidate["choice"]) => {
@@ -426,30 +508,31 @@ describe("the fingerprints", () => {
           })),
         };
       };
-    const base = gemvKernelsId(rows);
-    assertEquals(gemvSweepKernelsId(rows), base);
-    assertNotEquals(
-      gemvKernelsId(
-        rows,
-        GEMV_CASES,
-        edited((wgsl) => `${wgsl}\nconst extra = 1u;`),
-      ),
-      base,
-    );
-    assertEquals(
-      gemvKernelsId(
-        rows,
-        GEMV_CASES,
-        edited((wgsl) => `// note\n${wgsl}`),
-      ),
-      base,
-    );
-  });
-
-  it("of the kernels skips failed rows and refuses a case the table does not have", () => {
-    const failed: GemvMeasuredRow = { ...rows[1], error: "compile error" };
-    assertEquals(gemvKernelsId([rows[0], failed]), gemvKernelsId([rows[0]]));
-    assertThrows(() => gemvKernelsId([{ ...rows[0], caseId: "nowhere" }]), Error, "nowhere");
+    for (const { m, candidate } of kernels) {
+      const base = gemvKernelId(PLE, m, candidate.choice);
+      assertNotEquals(
+        gemvKernelId(
+          PLE,
+          m,
+          candidate.choice,
+          edited((wgsl) => `${wgsl}\nconst extra = 1u;`),
+        ),
+        base,
+        candidate.name,
+      );
+      assertEquals(
+        gemvKernelId(
+          PLE,
+          m,
+          candidate.choice,
+          edited((wgsl) => `// note\n${wgsl}`),
+        ),
+        base,
+        candidate.name,
+      );
+    }
+    const ids = kernels.map(({ m, candidate }) => gemvKernelId(PLE, m, candidate.choice));
+    assertEquals(new Set(ids).size, ids.length);
   });
 });
 
@@ -462,6 +545,7 @@ describe("the record", () => {
     class: candidate.class,
     isBaseline,
     choice: choiceRecord(candidate.choice, PLE.storage),
+    kernel: gemvKernelId(PLE, 1, candidate.choice),
     keys: [gemvProgram(PLE, 1, candidate.choice).dispatches[0]?.key ?? ""],
     rounds: [150_000, 200_000],
     perDispatch: 1000,
@@ -481,20 +565,34 @@ describe("the record", () => {
     timing: { feature: true, unit: "ns" },
     candidateSet: "quick",
     caseIds: [PLE.id],
+    selection: { candidates: ["c64u8"] },
     rounds: 5,
+    quickLookMargin: 1.25,
     tolerance: opTolerance("linear"),
     deviceLost: null,
     cases: [PLE],
     summaries: [
-      { caseId: PLE.id, m: 1, elapsedMs: 1, profile: plan.profile, baselineSpread: 1.004 },
+      {
+        caseId: PLE.id,
+        m: 1,
+        elapsedMs: 1,
+        profile: plan.profile,
+        baselineSpread: 1.004,
+        screened: 0,
+      },
     ],
     rows,
   });
 
-  it("is a karume-gemv-sweep/2 record with the fingerprints of this runtime", () => {
-    assertEquals(report.format, "karume-gemv-sweep/2");
-    assertEquals(report.caseTable, gemvCaseTableId());
-    assertEquals(report.kernels, gemvKernelsId(rows));
+  it("is a karume-gemv-sweep/3 record whose cases and rows carry the fingerprints of this runtime", () => {
+    assertEquals(report.format, "karume-gemv-sweep/3");
+    assertEquals(
+      report.cases.map(({ fingerprint }) => fingerprint),
+      [gemvCaseFingerprint(PLE)],
+    );
+    for (const row of report.rows) {
+      assertEquals(row.kernel, gemvKernelId(PLE, 1, choiceOfRecord(row.choice)), row.candidate);
+    }
   });
 
   it("names the features that gated candidates (the subgroup form needs all three)", () => {
@@ -505,9 +603,12 @@ describe("the record", () => {
     });
   });
 
-  it("states its settings: the set, the narrowed cases, the band and what it does not measure", () => {
+  it("states its settings: the set, the narrowed cases and candidates, the quick look's margin, the band and what it does not measure", () => {
     assertEquals(report.settings.candidateSet, "quick");
     assertEquals(report.settings.cases, [PLE.id]);
+    assertEquals(report.settings.candidates, ["c64u8"]);
+    assertEquals(report.settings.rows, undefined);
+    assertEquals(report.settings.quickLookMargin, 1.25);
     assertEquals(report.settings.tolerance, opTolerance("linear"));
     assert(report.settings.notMeasured.includes("packed-activation"));
   });
@@ -528,8 +629,8 @@ describe("the record", () => {
     );
   });
 
-  it("lists the planned cases with their source and the row counts the set measured", () => {
-    assertEquals(report.cases, [{ ...PLE, rows: [1] }]);
+  it("lists the planned cases with their source, fingerprint and the row counts the set measured", () => {
+    assertEquals(report.cases, [{ ...PLE, rows: [1], fingerprint: gemvCaseFingerprint(PLE) }]);
   });
 
   it("is not quantized when the rounds are not all multiples of 100 µs", () => {
