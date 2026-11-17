@@ -83,14 +83,14 @@ const entry: Entry = {
       label: "Idle before every case but the first (s)",
       min: 0,
       max: Number.MAX_SAFE_INTEGER,
-      default: 90,
+      default: 10,
     },
   ],
   run: async ({ parameters, gpuOptions, signal, progress }) => {
     const selection = sweepSelection(parameters);
     const plan = planSweep(selection, geometrySweepCases(selection.candidateSet));
     let live = INITIAL_LIVE;
-    // The idle wait reports nothing for 90 s by default: the live line counts it down.
+    // The idle wait reports nothing for 10 s by default: the live line counts it down.
     const line = liveLine(() => progress(progressLine(plan, live, performance.now())));
     try {
       const outcome = await runSweepPlan(plan, {

@@ -37,7 +37,7 @@ describe("the defaults", () => {
     expect(plan.candidateSet).toBe("quick+");
   });
 
-  it("are quick+, every op family of the sweep's own table, no case or geometry chosen, the quick look at ×1.25, 5 rounds and 90 s idle", () => {
+  it("are quick+, every op family of the sweep's own table, no case or geometry chosen, the quick look at ×1.25, 5 rounds and 10 s idle", () => {
     expect(DEFAULTS).toEqual({
       candidateSet: "quick+",
       ops: [...new Set(geometrySweepCases().map(({ op }) => op))],
@@ -45,7 +45,7 @@ describe("the defaults", () => {
       geometries: [],
       quickLookMargin: QUICK_LOOK_MARGIN,
       rounds: 5,
-      idleSeconds: 90,
+      idleSeconds: 10,
     });
   });
 });
