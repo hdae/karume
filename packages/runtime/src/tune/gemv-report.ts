@@ -1,7 +1,12 @@
 /**
- * The GEMV sweep's record (`karume-gemv-sweep/1`) and the pure pieces it is assembled from. Its own
+ * The GEMV sweep's record (`karume-gemv-sweep/2`) and the pure pieces it is assembled from. Its own
  * format: its rows are kernels of the GEMV family at a case and a row count, not geometries of one
  * kernel, so they share no row shape with the geometry sweep's record.
+ *
+ * `/2` replaced `/1` when the rounds became interleaved across the kernels of a row count: a `/1`
+ * summary held the baseline measured once more at the end of the row count (`baselineRepeat`, a
+ * drift ratio), a `/2` summary holds the spread of the baseline's own rounds, and the settings name
+ * the warm start and the calibration check instead of the per-kernel warm-up.
  */
 
 import type { LinearGemvParallelLanes } from "../kernels/linear-gemv.ts";
@@ -10,7 +15,7 @@ import type { GemvCandidateClass, GemvCandidateSet } from "./gemv-candidates.ts"
 import type { GemvCase, GemvSweepStorage } from "./gemv-cases.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 
-export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/1";
+export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/2";
 
 /**
  * A candidate's choice as the record writes it (a `LinearGemvChoice` without its unset fields): the
@@ -41,7 +46,10 @@ export type GemvSweepRow = {
   readonly workgroups?: readonly [number, number, number];
   /** Dispatches stacked in one pass. */
   readonly reps?: number;
-  /** The pass's time per round (unit: the record's `gpuTiming.unit`). */
+  /**
+   * The pass's time per round, in round order (unit: the record's `gpuTiming.unit`). Every round
+   * times every kernel of the row count once, so round `i` of two rows was taken in the same round.
+   */
   readonly rounds?: readonly number[];
   /** The pass's wall clock per round (submit → completion, ns). */
   readonly wallRounds?: readonly number[];
@@ -80,15 +88,19 @@ export type GemvSweepCaseSummary = {
   readonly caseId: string;
   readonly m: number;
   /**
-   * The wall clock of this row count of the case (ms): its rows and the re-measurement (the case's
-   * buffers and the host oracle are made once per case, before its first row count).
+   * The wall clock of this row count of the case (ms): its pipelines, warm start, calibrations and
+   * rounds (the case's buffers and the host oracle are made once per case, before its first row
+   * count).
    */
   readonly elapsedMs: number;
   /** The candidates the default profile chooses for the shape at each level (by name). */
   readonly profile: { readonly exact: string; readonly reorder: string };
-  /** The baseline measured once more at the end: its time and the ratio to the first measurement. */
-  readonly baselineRepeat?: { readonly perDispatch: number; readonly driftRatio: number };
-  readonly baselineRepeatError?: string;
+  /**
+   * How steady the device was over the rounds: the baseline's largest round ÷ its smallest (rounds
+   * clamped to 0 left out; 1 with a single round). Absent when the baseline's row failed or has no
+   * positive round.
+   */
+  readonly baselineSpread?: number;
 };
 
 /** The device facts that decided which candidates exist. */
@@ -110,7 +122,7 @@ export const GEMV_SWEEP_NOT_MEASURED =
   "The packed-activation form of the parallel GEMV is not measured: it reads the int8 codes of the " +
   "quantizing producer (static_quantize), which the sweep does not run.";
 
-/** The sweep record (`karume-gemv-sweep/1`). */
+/** The sweep record (`karume-gemv-sweep/2`). */
 export type GemvSweepReport = {
   readonly format: typeof GEMV_SWEEP_FORMAT;
   /** When the record was assembled (ISO 8601 — the sweep's end). */
@@ -139,8 +151,25 @@ export type GemvSweepReport = {
     readonly rounds: number;
     readonly targetPassMs: number;
     readonly maxReps: number;
-    readonly warmupNs: number;
-    readonly warmupMinRuns: number;
+    /**
+     * The warm start before a row count's calibrations (measurement.ts's `WARM_START_*` and
+     * harness.ts's `WARM_START_MAX_PASSES`): the time under load it spends at least and at most
+     * (ns), the passes it runs at most, and how many consecutive passes must agree within
+     * `tolerance` (largest ÷ smallest at most 1 + it).
+     */
+    readonly warmStart: {
+      readonly minNs: number;
+      readonly maxNs: number;
+      readonly maxPasses: number;
+      readonly stablePasses: number;
+      readonly tolerance: number;
+    };
+    /**
+     * A calibration whose pass is below this share of `targetPassMs` is done again after a warm
+     * start, up to `calibrationAttempts` calibrations (measurement.ts's `RECALIBRATE_BELOW`).
+     */
+    readonly recalibrateBelow: number;
+    readonly calibrationAttempts: number;
     readonly wallTimingNote: string;
     /** The band of `linear` the reorder class is held to. */
     readonly tolerance: { readonly atol: number; readonly rtol: number };

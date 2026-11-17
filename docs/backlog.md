@@ -194,7 +194,7 @@ maintainer's ruling of 2026-11-06).
        runs with the default's values.)* *(Landed 2026-11-17: the GEMV sweep on synthetic tensors that measures them —
        `runGemvSweep` and the workbench entry `gemv-sweep`, at the LLM decode shapes of the default profile's rows;
        the bit-identical and the reordering candidates are both measured, each held to its own check, and recorded as
-       `karume-gemv-sweep/1`.)* Open: the generator that derives the field from those records (the maintainer,
+       `karume-gemv-sweep/2`.)* Open: the generator that derives the field from those records (the maintainer,
        2026-11-17: the bit-identical and the reordering choices are applied separately), and the integer and
        byte-plane GEMV tables, which are still in the kernel source.
   7. **Weights from outside the exporter.** `fromSingleFile` on the pipelines, the counterpart of diffusers'

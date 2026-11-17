@@ -2,14 +2,26 @@
  * The GEMV sweep (`runGemvSweep` of `@karume/runtime/tune`): measures the GEMV choices of `linear` —
  * which sequential variant, how many rows per row block, which lane count of the parallel GEMV,
  * staged or not, subgroup or not — on a dedicated device, case by case, and returns the record
- * (`karume-gemv-sweep/1`). It derives no table and changes no choice.
+ * (`karume-gemv-sweep/2`). It derives no table and changes no choice.
  *
- * Per case and row count it measures the baseline first (what a Session at the level `exact` runs
- * with the default profile), then every candidate of the set (gemv-candidates.ts), then the baseline
- * once more (the drift ratio). Timing is the geometry sweep's protocol through harness.ts's
- * primitives (`createResources`, `prepareLaunch`, `timeLaunch`): reps per pass from the wall-clock
- * slope, the warm-up, the min of the rounds, GPU timestamps or the wall clock. The inputs are the
- * harness's seeded fills, one buffer set per case at the case's largest row count.
+ * Per case and row count it measures the baseline (what a Session at the level `exact` runs with
+ * the default profile) and every candidate of the set (gemv-candidates.ts) together, through
+ * harness.ts's primitives (its measurement protocol):
+ * 1. the pipelines of every kernel are made first, so no compile leaves the device idle later;
+ * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady;
+ * 3. every kernel, the baseline first, is run once from a zeroed output, calibrated (`calibrate`:
+ *    reps per pass from the wall-clock slope, done again after more load when its pass comes out
+ *    far below the target) and checked while its output is still in the buffer;
+ * 4. the rounds: each times every kernel once, the baseline included, in plan order rotated so that
+ *    round r starts at kernel ⌊r · kernels / rounds⌋ (at kernel r mod kernels when there are more
+ *    rounds than kernels). A kernel's time is the min of its rounds, GPU timestamps or the wall
+ *    clock.
+ * Interleaving puts every kernel under the device states the row count went through, so a heating
+ * device slows them alike instead of whichever was measured last; how far the state moved is the
+ * spread of the baseline's rounds (the summary's `baselineSpread`). There is no per-kernel warm-up
+ * (the geometry sweep's protocol rule 3): after the warm start, the calibrations and the rounds keep
+ * the device loaded. The inputs are the harness's seeded fills, one buffer set per case at the
+ * case's largest row count.
  *
  * Correctness, per row:
  * - identical class: every output word equals the baseline's (`compareBufferWords`); a difference
@@ -51,21 +63,37 @@ import {
   type GemvSweepRow,
 } from "./gemv-report.ts";
 import {
+  calibrate,
   compareBufferWords,
   createResources,
   createSweepContext,
   destroySweepContext,
   type Launch,
+  measurePass,
+  type PassSample,
   prepareLaunch,
   readBufferWords,
+  type ReadyLaunch,
   type ResourceSpec,
   resourceWordStream,
+  roundsTiming,
+  runLaunchOnce,
   SWEEP_MAX_REPS,
   type SweepContext,
-  timeLaunch,
   type Timing,
+  WARM_START_MAX_PASSES,
+  warmStart,
 } from "./harness.ts";
-import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
+import {
+  CALIBRATION_ATTEMPTS,
+  RECALIBRATE_BELOW,
+  ROUNDS,
+  TARGET_PASS_MS,
+  WARM_START_MAX_NS,
+  WARM_START_MIN_NS,
+  WARM_START_PASSES,
+  WARM_START_TOLERANCE,
+} from "./measurement.ts";
 import {
   type ReportAdapter,
   roundsLookQuantized,
@@ -76,8 +104,9 @@ import { acquireSweepGpu, timestampUnitFor } from "./sweep.ts";
 
 /**
  * Sweep progress: `started` once the device and the measurement context exist; `status` — what is
- * measured now; `row` — one row is final (a case's row count starts with its baseline); `case` — a
- * case is measured, with its summaries (one per row count); `deviceLost`.
+ * measured now; `row` — one row is final (the rows of a row count come together once its rounds are
+ * done, its baseline first); `case` — a case is measured, with its summaries (one per row count);
+ * `deviceLost`.
  */
 export type GemvSweepProgress =
   | {
@@ -110,7 +139,10 @@ export type GemvSweepOptions = {
   readonly cases?: readonly string[];
   /** Measurement rounds per kernel (default 5 — the min is kept). */
   readonly rounds?: number;
-  /** Abort: stops once the current kernel is measured; the record holds what was measured. */
+  /**
+   * Abort: stops once the current pass is done. The record holds the row counts measured before; the
+   * row count it stopped in leaves no row (its kernels are measured together, so none was finished).
+   */
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: GemvSweepProgress) => void;
 };
@@ -274,12 +306,75 @@ const speedFields = (
     ? { speedupVsBaseline: baseline.perDispatch / row.perDispatch }
     : {};
 
+/** The correctness fields a kernel's check reads (by class — none for a candidate without a baseline). */
+type CheckFields = Pick<
+  GemvSweepRow,
+  | "identicalToBaseline"
+  | "differingWords"
+  | "firstDifference"
+  | "maxAbsError"
+  | "bandUse"
+  | "withinBand"
+  | "nonFiniteOutputs"
+>;
+
+/** Where a kernel of a row count stands. */
+type KernelState =
+  | { readonly kind: "planned" }
+  | { readonly kind: "prepared"; readonly launch: Launch; readonly ready: ReadyLaunch }
+  | {
+      readonly kind: "calibrated";
+      readonly launch: Launch;
+      readonly ready: ReadyLaunch;
+      readonly reps: number;
+      /** Read right after its calibration, while its output is still in the buffer. */
+      readonly checks: CheckFields;
+      /** Its rounds so far, in round order. */
+      readonly samples: PassSample[];
+    }
+  | { readonly kind: "failed"; readonly cause: unknown };
+
+/** One kernel of a row count: its row's identity, the buffer it writes and its state. */
+type Kernel = {
+  readonly candidate: GemvCandidate;
+  readonly head: GemvSweepRow;
+  readonly output: "out" | "reference";
+  state: KernelState;
+};
+
+/**
+ * The kernels of round `round` of `rounds`: plan order rotated to start at kernel
+ * ⌊round · kernels / rounds⌋ — with more rounds than kernels, at kernel `round mod kernels`. A
+ * kernel's place in the round moves by an even step from round to round, so each kernel takes the
+ * early and the late places of a round alike, and two consecutive rounds never share an order (of
+ * two kernels or more).
+ */
+const roundOrder = <T>(kernels: readonly T[], round: number, rounds: number): T[] => {
+  if (kernels.length === 0) return [];
+  const start =
+    rounds > kernels.length
+      ? round % kernels.length
+      : Math.floor((round * kernels.length) / rounds);
+  return [...kernels.slice(start), ...kernels.slice(0, start)];
+};
+
+/** The baseline's largest positive round ÷ its smallest (rounds clamped to 0 left out). */
+const spreadOf = (samples: readonly PassSample[]): Pick<GemvSweepCaseSummary, "baselineSpread"> => {
+  const kept = samples
+    .filter((sample) => !sample.clamped)
+    .map((sample) => sample.gpu ?? sample.wallNs);
+  const smallest = Math.min(...kept);
+  return kept.length > 0 && smallest > 0 ? { baselineSpread: Math.max(...kept) / smallest } : {};
+};
+
 /**
  * Measures one case: its buffers once, at its largest row count, and the host oracle once, at the
- * largest row count with reorder candidates; then per measurement plan the baseline, the
- * candidates and the baseline again. A failure of the buffers makes every row a failure row; a lost
- * device makes the rest failure rows; an abort makes no rows for the rest (the summary of the row
- * count it stopped in has no re-measurement). The user's callbacks run outside the measurement's
+ * largest row count with reorder candidates; then per measurement plan its kernels together (the
+ * module doc's steps 1–4), their rows coming at the end of the plan, the baseline's first. A failure
+ * of the buffers makes every row a failure row; a kernel that fails to be prepared, warmed on,
+ * calibrated, checked or timed makes its own failure row and leaves the rounds; a lost device makes
+ * every kernel without all its rounds a failure row, in this plan and the rest; an abort makes no
+ * row for the plan it stops in or the rest. The user's callbacks run outside the measurement's
  * `try`, so an exception they throw is the caller's, never a failure row.
  */
 export const sweepGemvCase = async (
@@ -323,15 +418,6 @@ export const sweepGemvCase = async (
     if (found === undefined) throw new Error(`${gemvCase.id}: resource ${name} is missing`);
     return found;
   };
-  /** Prepares and times one launch (its params buffer released after). */
-  const time = async (launch: Launch): Promise<Timing> => {
-    const ready = await prepareLaunch(context, launch, resources);
-    try {
-      return await timeLaunch(context, ready, buffer(launch.writes[0] ?? ""), settings.rounds);
-    } finally {
-      ready.params.destroy();
-    }
-  };
   const launchOf = (m: number, candidate: GemvCandidate, output: "out" | "reference"): Launch =>
     gemvLaunch(gemvProgram(gemvCase, m, candidate.choice), output, limit);
   let oracle: Float64Array<ArrayBuffer> | Error | undefined;
@@ -346,52 +432,149 @@ export const sweepGemvCase = async (
       settings.tolerance,
     );
   };
-  /** The correctness fields and the ratio to the baseline of a timed row. */
-  const checked = async (
-    row: GemvSweepRow,
-    m: number,
-    baseline: GemvSweepRow | undefined,
-  ): Promise<GemvSweepRow> => {
-    if (row.isBaseline) return m <= oracleRows ? { ...row, ...(await band("reference", m)) } : row;
-    if (baseline === undefined || baseline.error !== undefined) return row;
-    const speed = speedFields(baseline, row);
-    if (row.class === "reorder") return { ...row, ...speed, ...(await band("out", m)) };
+  /**
+   * The correctness fields of a kernel whose output is in its buffer: the baseline's band reading
+   * at a row count with reorder rows; a candidate's words against the baseline's (identical class)
+   * or its band reading (reorder class) — none when the baseline has no output to compare with.
+   */
+  const checksOf = async (kernel: Kernel, m: number, baseline: Kernel): Promise<CheckFields> => {
+    if (kernel.head.isBaseline) return m <= oracleRows ? await band("reference", m) : {};
+    if (baseline.state.kind !== "calibrated") return {};
+    if (kernel.head.class === "reorder") return await band("out", m);
     const words = await compareBufferWords(
       context,
       buffer("reference"),
       buffer("out"),
       m * gemvCase.n * 4,
     );
-    return { ...row, ...speed, ...identicalFields(words) };
-  };
-  /** The baseline measured once more (the drift ratio), unless it has no first time or the device is lost. */
-  const repeatBaseline = async (
-    plan: GemvMeasurementPlan,
-    baseline: GemvSweepRow | undefined,
-  ): Promise<Pick<GemvSweepCaseSummary, "baselineRepeat" | "baselineRepeatError">> => {
-    const initial = baseline?.perDispatch;
-    if (initial === undefined || !(initial > 0) || gpu.lost !== undefined) return {};
-    hooks.onProgress?.(`${gemvCase.id} M=${plan.m}: re-measuring the baseline`);
-    try {
-      const timing = await time(launchOf(plan.m, plan.baseline, "reference"));
-      if (timing.perDispatch === undefined) throw new Error(ALL_ROUNDS_NEGATIVE);
-      if (!(timing.perDispatch > 0)) {
-        throw new Error(
-          "perDispatch of the baseline re-measurement is 0 (no ratio can be computed)",
-        );
-      }
-      return {
-        baselineRepeat: {
-          perDispatch: timing.perDispatch,
-          driftRatio: timing.perDispatch / initial,
-        },
-      };
-    } catch (cause) {
-      return { baselineRepeatError: describeCause(cause) };
-    }
+    return identicalFields(words);
   };
   /** Read afresh each time: the signal is aborted from outside while the case awaits the GPU. */
   const abortRequested = (): boolean => hooks.signal?.aborted === true;
+  /**
+   * The kernels of one plan through the module doc's steps 1–4, or nothing when an abort stopped
+   * it. Every params buffer it made is released before it returns.
+   */
+  const measurePlan = async (
+    plan: GemvMeasurementPlan,
+  ): Promise<{ rows: GemvSweepRow[]; summary: GemvSweepCaseSummary } | undefined> => {
+    const started = performance.now();
+    const { m } = plan;
+    const label = `${gemvCase.id} M=${m}`;
+    const kernels: Kernel[] = [plan.baseline, ...plan.candidates].map((candidate, index) => ({
+      candidate,
+      head: rowHead(gemvCase, m, candidate, index === 0),
+      output: index === 0 ? "reference" : "out",
+      state: { kind: "planned" },
+    }));
+    const [baseline] = kernels;
+    const prepared: ReadyLaunch[] = [];
+    try {
+      // 1. Every pipeline first (compiling idles the device)
+      hooks.onProgress?.(`${label}: preparing ${kernels.length} kernels`);
+      for (const kernel of kernels) {
+        if (abortRequested()) return undefined;
+        if (gpu.lost !== undefined) break;
+        try {
+          const launch = launchOf(m, kernel.candidate, kernel.output);
+          const ready = await prepareLaunch(context, launch, resources);
+          prepared.push(ready);
+          kernel.state = { kind: "prepared", launch, ready };
+        } catch (cause) {
+          kernel.state = { kind: "failed", cause };
+        }
+      }
+      // 2. The warm start, on the baseline unless it failed (then on the next kernel that did not)
+      for (const kernel of kernels) {
+        if (abortRequested()) return undefined;
+        const { state } = kernel;
+        if (gpu.lost !== undefined) break;
+        if (state.kind !== "prepared") continue;
+        hooks.onProgress?.(`${label}: warm start on ${kernel.head.candidate}`);
+        try {
+          await warmStart(context, state.ready);
+          break;
+        } catch (cause) {
+          kernel.state = { kind: "failed", cause };
+        }
+      }
+      // 3. Every kernel's calibration and check
+      for (const [index, kernel] of kernels.entries()) {
+        if (abortRequested()) return undefined;
+        const { state } = kernel;
+        if (gpu.lost !== undefined) break;
+        if (state.kind !== "prepared") continue;
+        hooks.onProgress?.(
+          `${label}: calibrating ${kernel.head.candidate} (${index + 1}/${kernels.length})`,
+        );
+        try {
+          await runLaunchOnce(context, state.ready, buffer(kernel.output));
+          const reps = await calibrate(context, state.ready);
+          const checks = await checksOf(kernel, m, baseline);
+          kernel.state = { ...state, kind: "calibrated", reps, checks, samples: [] };
+        } catch (cause) {
+          kernel.state = { kind: "failed", cause };
+        }
+      }
+      // 4. The rounds, interleaved
+      const timed = kernels.filter((kernel) => kernel.state.kind === "calibrated");
+      for (
+        let round = 0;
+        round < settings.rounds && timed.length > 0 && gpu.lost === undefined;
+        round += 1
+      ) {
+        hooks.onProgress?.(`${label}: round ${round + 1}/${settings.rounds}`);
+        for (const kernel of roundOrder(timed, round, settings.rounds)) {
+          if (abortRequested()) return undefined;
+          const { state } = kernel;
+          if (gpu.lost !== undefined) break;
+          if (state.kind !== "calibrated") continue;
+          try {
+            state.samples.push(await measurePass(context, state.ready, state.reps));
+          } catch (cause) {
+            kernel.state = { kind: "failed", cause };
+          }
+        }
+      }
+    } finally {
+      for (const ready of prepared) ready.params.destroy();
+    }
+    /** A kernel's row without the comparison with the baseline, and the checks it read. */
+    const measuredOf = (kernel: Kernel): { row: GemvSweepRow; checks: CheckFields } => {
+      const { state } = kernel;
+      if (state.kind === "failed") return { row: errorRow(kernel.head, state.cause), checks: {} };
+      if (state.kind !== "calibrated" || state.samples.length < settings.rounds) {
+        // Only a lost device stops a kernel short of its rounds without a failure of its own
+        const lost = new Error(`device lost: ${gpu.lost?.message ?? "no loss reported"}`);
+        return { row: errorRow(kernel.head, lost), checks: {} };
+      }
+      return {
+        row: timedRow(kernel.head, state.launch, roundsTiming(state.reps, state.samples)),
+        checks: state.checks,
+      };
+    };
+    const first = measuredOf(baseline);
+    const baselineRow =
+      first.row.error === undefined ? { ...first.row, ...first.checks } : first.row;
+    const candidateRows = kernels.slice(1).map((kernel) => {
+      const { row, checks } = measuredOf(kernel);
+      // Without the baseline's time there is no ratio, and no words or band are compared with it
+      if (row.error !== undefined || baselineRow.error !== undefined) return row;
+      return { ...row, ...speedFields(baselineRow, row), ...checks };
+    });
+    return {
+      rows: [baselineRow, ...candidateRows],
+      summary: {
+        caseId: gemvCase.id,
+        m,
+        elapsedMs: performance.now() - started,
+        profile: plan.profile,
+        ...(baselineRow.error === undefined && baseline.state.kind === "calibrated"
+          ? spreadOf(baseline.state.samples)
+          : {}),
+      },
+    };
+  };
   let aborted = false;
   try {
     if (oracleRows > 0) {
@@ -408,47 +591,13 @@ export const sweepGemvCase = async (
       }
     }
     for (const plan of plans) {
-      if (abortRequested()) {
+      const measured = abortRequested() ? undefined : await measurePlan(plan);
+      if (measured === undefined) {
         aborted = true;
         break;
       }
-      const started = performance.now();
-      const { m } = plan;
-      const ordered = [plan.baseline, ...plan.candidates];
-      let baseline: GemvSweepRow | undefined;
-      for (const [index, candidate] of ordered.entries()) {
-        if (abortRequested()) {
-          aborted = true;
-          break;
-        }
-        const head = rowHead(gemvCase, m, candidate, index === 0);
-        if (gpu.lost !== undefined) {
-          emit(errorRow(head, new Error(`device lost: ${gpu.lost.message}`)));
-          continue;
-        }
-        hooks.onProgress?.(
-          `${gemvCase.id} M=${m}: ${candidate.name} (${index + 1}/${ordered.length})`,
-        );
-        let row: GemvSweepRow;
-        try {
-          const launch = launchOf(m, candidate, head.isBaseline ? "reference" : "out");
-          row = timedRow(head, launch, await time(launch));
-          if (row.error === undefined) row = await checked(row, m, baseline);
-        } catch (cause) {
-          row = errorRow(head, cause);
-        }
-        if (head.isBaseline) baseline = row;
-        emit(row);
-      }
-      const repeat = aborted ? {} : await repeatBaseline(plan, baseline);
-      summaries.push({
-        caseId: gemvCase.id,
-        m,
-        elapsedMs: performance.now() - started,
-        profile: plan.profile,
-        ...repeat,
-      });
-      if (aborted) break;
+      for (const row of measured.rows) emit(row);
+      summaries.push(measured.summary);
     }
   } finally {
     for (const resource of resources.values()) resource.destroy();
@@ -547,8 +696,15 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
     rounds: parts.rounds,
     targetPassMs: TARGET_PASS_MS,
     maxReps: SWEEP_MAX_REPS,
-    warmupNs: WARMUP_NS,
-    warmupMinRuns: WARMUP_MIN_RUNS,
+    warmStart: {
+      minNs: WARM_START_MIN_NS,
+      maxNs: WARM_START_MAX_NS,
+      maxPasses: WARM_START_MAX_PASSES,
+      stablePasses: WARM_START_PASSES,
+      tolerance: WARM_START_TOLERANCE,
+    },
+    recalibrateBelow: RECALIBRATE_BELOW,
+    calibrationAttempts: CALIBRATION_ATTEMPTS,
     wallTimingNote: WALL_TIMING_NOTE,
     tolerance: { atol: parts.tolerance.atol, rtol: parts.tolerance.rtol },
     notMeasured: GEMV_SWEEP_NOT_MEASURED,
@@ -570,7 +726,7 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
 /**
  * Acquires a dedicated device (with the subgroup features where the device runs them, and
  * `timestamp-query` where the adapter lists it), sweeps the chosen cases and returns the record
- * (`karume-gemv-sweep/1`). The device is destroyed when done (also on abort or failure). Per-row
+ * (`karume-gemv-sweep/2`). The device is destroyed when done (also on abort or failure). Per-row
  * failures stay rows of the record and the sweep goes on; option errors throw before the GPU is
  * touched. A lost device ends the sweep after the case it was lost in.
  */

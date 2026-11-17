@@ -14,14 +14,25 @@
  * 1. Stack `reps` copies of the same dispatch in one compute pass, and take the difference of the
  *    pass's `timestampWrites` (beginning / end) ÷ `reps` as the time of one dispatch. `reps` is the
  *    count that makes one pass ≈ {@link TARGET_PASS_MS} ({@link calibrateReps}; the upper bound is
- *    the sweep-specific {@link SWEEP_MAX_REPS}).
+ *    the sweep-specific {@link SWEEP_MAX_REPS}). A calibration whose pass comes out below
+ *    {@link RECALIBRATE_BELOW} of the target while its reps are under the bound is done again after
+ *    a warm start, up to {@link CALIBRATION_ATTEMPTS} calibrations ({@link calibrate}): an estimate
+ *    taken while the dispatch was slow (a cold device, a stall) would leave every round a short pass
+ *    on a device that is no longer under load.
  * 2. The representative value is the **min** of `rounds` (absorbs thermal drift). A round whose
  *    timestamp difference is negative is clamped to 0 and kept in the record, but excluded from the
  *    min candidates (if every round is negative, the row fails).
- * 3. For each geometry, before measuring, run passes idle until "cumulative ≥ {@link WARMUP_NS} and
- *    ≥ {@link WARMUP_MIN_RUNS} runs" (the same lower bounds as opbench's `pinClocks`, with the same
- *    cut-off of {@link WARMUP_MAX_PASSES} passes). The cumulative time counts GPU time for unit
- *    `ns` and wall clock for `deno-raw-tick` / `wall` (raw ticks are not ns).
+ * 3. Before the first measurement of a case (its buffers and prelude made), a **warm start** runs
+ *    that measurement's dispatch under load, each pass kept near the target length, until
+ *    {@link WARM_START_PASSES} consecutive passes agree within {@link WARM_START_TOLERANCE},
+ *    spending at least {@link WARM_START_MIN_NS} and at most {@link WARM_START_MAX_NS} of load (and
+ *    at most {@link WARM_START_MAX_PASSES} passes) ({@link warmStart}): the case's first
+ *    calibration then reads a device that left its idle
+ *    clocks. For each geometry, before measuring, run passes idle until "cumulative ≥
+ *    {@link WARMUP_NS} and ≥ {@link WARMUP_MIN_RUNS} runs" (the same lower bounds as opbench's
+ *    `pinClocks`, with the same cut-off of {@link WARMUP_MAX_PASSES} passes). The cumulative time
+ *    counts GPU time for unit `ns` and wall clock for `deno-raw-tick` / `wall` (raw ticks are not
+ *    ns).
  * 4. At the end of a case, measure the default geometry once more and keep the ratio to the first
  *    (`driftRatio`) per case — a sign of whether heat or clocks moved during the sweep (whether the
  *    default value the ratios rest on is unstable).
@@ -127,7 +138,18 @@ import {
   conv3dI8a8Workgroups,
 } from "../kernels/conv3d-i8a8.ts";
 import { scoreStorageBytes } from "../kernels/score-storage.ts";
-import { calibrateReps, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
+import {
+  CALIBRATION_ATTEMPTS,
+  calibrateReps,
+  RECALIBRATE_BELOW,
+  TARGET_PASS_MS,
+  WARM_START_MAX_NS,
+  WARM_START_MIN_NS,
+  WARM_START_PASSES,
+  WARM_START_TOLERANCE,
+  WARMUP_MIN_RUNS,
+  WARMUP_NS,
+} from "./measurement.ts";
 import {
   type AttentionCase,
   type BmmCase,
@@ -184,6 +206,15 @@ export const WARMUP_MAX_PASSES = 64;
  * NOTE).
  */
 const PROBE_MIN_NS = (TARGET_PASS_MS / 2) * 1e6;
+
+/**
+ * The cut-off of a warm start's passes (protocol rule 3): its ceiling of load over the shortest pass
+ * it keeps while its reps are under the bound (half the target — a shorter pass is resized), 125. So
+ * it binds only on a dispatch whose passes stay short at {@link SWEEP_MAX_REPS}: such a pass costs
+ * more time than it loads the device (encoding and submitting 16,384 dispatches), and the bounds of
+ * load alone would take far longer than they say.
+ */
+export const WARM_START_MAX_PASSES = Math.ceil(WARM_START_MAX_NS / PROBE_MIN_NS);
 
 /**
  * One chunk of output readback and input writes (64 MiB — a 1 GiB S is never loaded into JS whole).
@@ -1189,7 +1220,8 @@ export const prepareLaunch = async (
   }
 };
 
-type PassSample = {
+/** One pass's times. */
+export type PassSample = {
   readonly wallNs: number;
   /** The timestamp difference (unit = the context's unit). Absent on passes that are not timed. */
   readonly gpu?: number;
@@ -1358,41 +1390,149 @@ const probeReps = async (context: SweepContext, ready: ReadyLaunch): Promise<num
 };
 
 /**
- * Measures one geometry: reset the output to 0 and run once → estimate `reps` → idle runs →
- * `rounds` measurements (protocol rules 1–3).
+ * The time a pass kept the device loaded (ns): its timestamp difference for unit `ns`, else its
+ * wall clock — also for a pass whose difference is not positive (raw ticks are not ns, and a broken
+ * timestamp would never add up to a bound).
+ */
+const loadNsOf = (context: SweepContext, sample: PassSample): number =>
+  context.unit === "ns" && !sample.clamped && sample.gpu !== undefined && sample.gpu > 0
+    ? sample.gpu
+    : sample.wallNs;
+
+/**
+ * Whether the last passes agree: {@link WARM_START_PASSES} positive times whose largest ÷ smallest
+ * is at most 1 + {@link WARM_START_TOLERANCE}.
+ */
+const passesAgree = (times: readonly number[]): boolean => {
+  if (times.length < WARM_START_PASSES) return false;
+  const smallest = Math.min(...times);
+  return smallest > 0 && Math.max(...times) / smallest <= 1 + WARM_START_TOLERANCE;
+};
+
+/** What a warm start did. */
+export type WarmStart = {
+  /**
+   * The last passes agreed (else it stopped at {@link WARM_START_MAX_NS} of load or after
+   * {@link WARM_START_MAX_PASSES} passes).
+   */
+  readonly stable: boolean;
+  /** The time under load it spent (ns, summed over its passes; the probe that sized them not counted). */
+  readonly loadNs: number;
+  /** Its passes (likewise without the probe's). */
+  readonly passes: number;
+};
+
+/**
+ * Brings the device to a steady state on `ready` (protocol rule 3): passes of the dispatch, back to
+ * back, until the last {@link WARM_START_PASSES} agree within {@link WARM_START_TOLERANCE} with at
+ * least {@link WARM_START_MIN_NS} of load spent, or until {@link WARM_START_MAX_NS} of load is
+ * spent or {@link WARM_START_MAX_PASSES} passes have run. A pass compares by its timestamp
+ * difference (its wall clock without timestamps); a clamped difference agrees with nothing. The
+ * first passes take the reps a probe gives, which a cold device underestimates: a pass that falls
+ * below half the target as the dispatch speeds up gets the reps that fill the target again (the
+ * comparison then starts over — passes of other lengths do not compare), so the load stays
+ * continuous.
+ */
+export const warmStart = async (context: SweepContext, ready: ReadyLaunch): Promise<WarmStart> => {
+  const timed = context.unit !== "wall";
+  let reps = await probeReps(context, ready);
+  let times: number[] = [];
+  let loadNs = 0;
+  let passes = 0;
+  for (;;) {
+    const sample = await runPass(context, ready, reps, timed);
+    passes += 1;
+    const load = loadNsOf(context, sample);
+    loadNs += load;
+    times = [...times, sample.clamped ? 0 : (sample.gpu ?? sample.wallNs)].slice(
+      -WARM_START_PASSES,
+    );
+    if (loadNs >= WARM_START_MIN_NS && passesAgree(times)) return { stable: true, loadNs, passes };
+    if (loadNs >= WARM_START_MAX_NS || passes >= WARM_START_MAX_PASSES) {
+      return { stable: false, loadNs, passes };
+    }
+    if (load < PROBE_MIN_NS) {
+      const filling = calibrateReps(load / reps, TARGET_PASS_MS, SWEEP_MAX_REPS);
+      if (filling !== reps) {
+        reps = filling;
+        times = [];
+      }
+    }
+  }
+};
+
+/** The pass length below which a calibration is done again (ns — protocol rule 1). */
+const RECALIBRATE_BELOW_NS = RECALIBRATE_BELOW * TARGET_PASS_MS * 1e6;
+
+/**
+ * The `reps` of `ready` (protocol rule 1): a probe, then one pass at its reps that checks it. A pass
+ * below {@link RECALIBRATE_BELOW} of the target means the probe read the dispatch slower than it
+ * runs: a warm start loads the device and the probe is taken again, up to
+ * {@link CALIBRATION_ATTEMPTS} probes, the last accepted unchecked. Reps at {@link SWEEP_MAX_REPS}
+ * are accepted as they are (a dispatch too short to fill the target at the bound is measured at the
+ * bound).
+ */
+export const calibrate = async (context: SweepContext, ready: ReadyLaunch): Promise<number> => {
+  let reps = await probeReps(context, ready);
+  for (let attempt = 1; attempt < CALIBRATION_ATTEMPTS && reps < SWEEP_MAX_REPS; attempt += 1) {
+    const sample = await runPass(context, ready, reps, context.unit === "ns");
+    if (loadNsOf(context, sample) >= RECALIBRATE_BELOW_NS) return reps;
+    await warmStart(context, ready);
+    reps = await probeReps(context, ready);
+  }
+  return reps;
+};
+
+/** One measured pass of `reps` dispatches — a round (timestamps unless the unit is `wall`). */
+export const measurePass = (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  reps: number,
+): Promise<PassSample> => runPass(context, ready, reps, context.unit !== "wall");
+
+/**
+ * The timing of rounds of `reps` dispatches per pass (protocol rule 2): a round's value is its
+ * timestamp difference, or its wall clock when the pass was not timed. Takes at least one round.
+ */
+export const roundsTiming = (reps: number, samples: readonly PassSample[]): Timing => {
+  const valueOf = (sample: PassSample): number => sample.gpu ?? sample.wallNs;
+  const rounds = samples.map(valueOf);
+  const wallRounds = samples.map((sample) => sample.wallNs);
+  // MUST: a sample clamped to 0 stays in the record but is excluded from the min candidates (a 0
+  // taking the min would turn the speed ratio into infinity)
+  const kept = samples.filter((sample) => !sample.clamped).map(valueOf);
+  return {
+    reps,
+    rounds,
+    wallRounds,
+    clampedNegativeSamples: rounds.length - kept.length,
+    ...(kept.length === 0 ? {} : { perDispatch: Math.min(...kept) / reps }),
+    wallNsPerDispatch: Math.min(...wallRounds) / reps,
+  };
+};
+
+/**
+ * Measures one geometry: reset the output to 0 and run once → with `warmStart` (the first
+ * measurement of a case), a warm start on it → calibrate `reps` → idle runs → `rounds`
+ * measurements (protocol rules 1–3).
  */
 export const timeLaunch = async (
   context: SweepContext,
   ready: ReadyLaunch,
   output: GPUBuffer,
   rounds: number,
+  options: { readonly warmStart?: boolean } = {},
 ): Promise<Timing> => {
   // The first run starts from an output reset to 0 (unwritten tiles show as a digest mismatch)
   await runPass(context, ready, 1, false, output);
-  const reps = await probeReps(context, ready);
+  if (options.warmStart === true) await warmStart(context, ready);
+  const reps = await calibrate(context, ready);
   await warmUp(context, ready, reps);
-  const gpuRounds: number[] = [];
-  const wallRounds: number[] = [];
-  const kept: number[] = [];
-  let clamped = 0;
+  const samples: PassSample[] = [];
   for (let round = 0; round < rounds; round += 1) {
-    const sample = await runPass(context, ready, reps, context.unit !== "wall");
-    const value = sample.gpu ?? sample.wallNs;
-    gpuRounds.push(value);
-    wallRounds.push(sample.wallNs);
-    // MUST: a sample clamped to 0 stays in the record but is excluded from the min candidates (a 0
-    // taking the min would turn the speed ratio into infinity)
-    if (sample.clamped) clamped += 1;
-    else kept.push(value);
+    samples.push(await measurePass(context, ready, reps));
   }
-  return {
-    reps,
-    rounds: gpuRounds,
-    wallRounds,
-    clampedNegativeSamples: clamped,
-    ...(kept.length === 0 ? {} : { perDispatch: Math.min(...kept) / reps }),
-    wallNsPerDispatch: Math.min(...wallRounds) / reps,
-  };
+  return roundsTiming(reps, samples);
 };
 
 /** The order of the four passes of one paired round: A, B, B, A (a drift within the round cancels). */
@@ -1529,19 +1669,26 @@ export const compareBufferWords = async (
   return { words: bytes / 4, differing, ...(first === undefined ? {} : { first }) };
 };
 
-/** Prepares and measures one candidate's dispatch (params are released after measuring). */
+/**
+ * Prepares and measures one candidate's dispatch (params are released after measuring); with
+ * `opensCase`, the case's first measurement, after a warm start on it (protocol rule 3).
+ */
 const timeCandidate = async (
   context: SweepContext,
   plan: CasePlan,
   resources: ReadonlyMap<string, GPUBuffer>,
   candidate: GeometryCandidate,
   rounds: number,
+  opensCase = false,
 ): Promise<{ readonly launch: Launch; readonly timing: Timing }> => {
   const output = resources.get(plan.output);
   if (output === undefined) throw new Error(`Output ${plan.output} is missing`);
   const ready = await prepareLaunch(context, plan.launch(candidate), resources);
   try {
-    return { launch: ready.launch, timing: await timeLaunch(context, ready, output, rounds) };
+    return {
+      launch: ready.launch,
+      timing: await timeLaunch(context, ready, output, rounds, { warmStart: opensCase }),
+    };
   } finally {
     ready.params.destroy();
   }
@@ -1559,7 +1706,15 @@ const measureGeometry = async (
   isDefault: boolean,
   rounds: number,
 ): Promise<SweepRow> => {
-  const { launch, timing } = await timeCandidate(context, plan, resources, candidate, rounds);
+  // The default geometry is the case's first measurement: the case starts warm on it
+  const { launch, timing } = await timeCandidate(
+    context,
+    plan,
+    resources,
+    candidate,
+    rounds,
+    isDefault,
+  );
   const measured = {
     caseId: sweepCase.id,
     op: sweepCase.op,
@@ -1604,10 +1759,11 @@ export type CaseResult = {
 };
 
 /**
- * Measures one case with every candidate geometry (the default geometry first, the rest in
- * candidate order). When done, measures the default geometry once more and keeps the ratio to the
- * first in the per-case record (protocol rule 4). If planning, resource allocation or the prelude
- * fails, every geometry becomes a failure row. If the device is lost, the rest become failure rows;
+ * Measures one case with every candidate geometry (the default geometry first, after the case's
+ * warm start on it — protocol rule 3 —, the rest in candidate order). When done, measures the
+ * default geometry once more and keeps the ratio to the first in the per-case record (protocol
+ * rule 4). If planning, resource allocation or the prelude fails, every geometry becomes a failure
+ * row. If the device is lost, the rest become failure rows;
  * if aborted, no rows are made for the rest (and no re-measurement). The case's wall clock
  * (`elapsedMs`) covers every step from planning to the re-measurement.
  */

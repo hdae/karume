@@ -1,6 +1,6 @@
 /**
  * The GEMV sweep entry's record: the per-case records of `runGemvSweep` (one call per case, idle
- * time between them) merged into one `karume-gemv-sweep/1` record in the shape one call over the
+ * time between them) merged into one `karume-gemv-sweep/2` record in the shape one call over the
  * planned cases writes. Pure.
  */
 

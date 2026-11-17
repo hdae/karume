@@ -326,8 +326,14 @@ describe("a default whose perDispatch is 0 (a timestamp difference of 0) is not 
   });
 
   it("when the first measurement is positive and only the re-measurement is 0, it writes no ratio of 0 and keeps a re-measurement failure (only the case drops out)", async () => {
+    // The default's timestamps read 0 once a candidate geometry's pass was timed: the default's
+    // first measurement (its warm start's timed passes included) is over, its re-measurement next
+    let candidateTimed = false;
     await withSweepContext(
-      (key, read) => (key === DEFAULT_KEY && read >= SETTINGS.rounds ? 0 : 1000),
+      (key) => {
+        if (key !== DEFAULT_KEY) candidateTimed = true;
+        return key === DEFAULT_KEY && candidateTimed ? 0 : 1000;
+      },
       async (context) => {
         const { cases } = await sweepSmallest(context, {});
         assertEquals(cases[0].defaultRepeat, undefined);

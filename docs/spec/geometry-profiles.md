@@ -51,7 +51,7 @@ adapter's match and measures nothing at run time.
   profile's GEMV rows; per case and row count it measures the baseline (what a Session at the level `exact` runs with
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
   and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`. Its
-  record is `karume-gemv-sweep/1` ([workbench.md](workbench.md#the-gemv-sweeps-record)).
+  record is `karume-gemv-sweep/2` ([workbench.md](workbench.md#the-gemv-sweeps-record)).
 - No registered table carries them. A table without them runs with the default profile's, the values measured on the
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default

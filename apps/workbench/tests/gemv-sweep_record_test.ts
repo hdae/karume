@@ -53,6 +53,17 @@ describe("mergeGemvSweepReports", () => {
     });
   });
 
+  it("carries each case's baseline spread", () => {
+    const merged = mergeGemvSweepReports(
+      [gemvPerCase(CASE_A), gemvPerCase(CASE_B, { summary: { baselineSpread: 1.25 } })],
+      PLANNED,
+    );
+    expect(merged.summaries.map(({ caseId, baselineSpread }) => [caseId, baselineSpread])).toEqual([
+      [CASE_A, 1.004],
+      [CASE_B, 1.25],
+    ]);
+  });
+
   it("marks the record aborted when Cancel stopped the sweep between cases, and keeps the first device loss", () => {
     const lost = { reason: "unknown", message: "GPU process crashed" };
     const cancelled = mergeGemvSweepReports([gemvPerCase(CASE_A)], {
@@ -113,13 +124,25 @@ describe("the summary", () => {
       stop: COMPLETED,
     });
     const line = (caseId: string): string =>
-      `${caseId} M=1: baseline c32u4 0.020 ms · fastest identical c64u8 ×1.250 · fastest reorder parallel-l4 ×2.000 · exact c32u4 ×0.800 of the fastest identical · reorder parallel-l4 ×1.000 of the fastest reorder`;
+      `${caseId} M=1: baseline c32u4 0.020 ms · spread 1.004 · fastest identical c64u8 ×1.250 · fastest reorder parallel-l4 ×2.000 · exact c32u4 ×0.800 of the fastest identical · reorder parallel-l4 ×1.000 of the fastest reorder`;
     expect(result.summary).toEqual([
       "2 of 2 planned cases finished · 6 rows · 0 with an error · 0 not identical to the baseline · 0 outside the band",
       line(CASE_A),
       line(CASE_B),
     ]);
-    expect(result.data?.format).toBe("karume-gemv-sweep/1");
+    expect(result.data?.format).toBe("karume-gemv-sweep/2");
+  });
+
+  it("shows no spread for a row count without one (its baseline failed)", () => {
+    const rows = [gemvRow(CASE_A, "baseline", { error: "compile error" })];
+    const report = gemvPerCase(CASE_A, { rows, summary: { baselineSpread: undefined } });
+    const result = gemvSweepResult(
+      { ...PLAN, caseIds: [CASE_A] },
+      { reports: [report], stop: COMPLETED },
+    );
+    expect(result.summary[1]).toBe(
+      `${CASE_A} M=1: baseline c32u4 failed: compile error · exact c32u4 failed · reorder parallel-l4 not measured`,
+    );
   });
 
   it("leaves a candidate that failed its check out of the fastest, and says the profile's choice failed it", () => {
@@ -134,7 +157,7 @@ describe("the summary", () => {
     );
     expect(result.summary).toEqual([
       "1 of 1 planned cases finished · 3 rows · 0 with an error · 1 not identical to the baseline · 1 outside the band",
-      `${CASE_A} M=1: baseline c32u4 0.020 ms · exact c32u4 ×1.000 of the fastest identical · reorder parallel-l4 outside the band`,
+      `${CASE_A} M=1: baseline c32u4 0.020 ms · spread 1.004 · exact c32u4 ×1.000 of the fastest identical · reorder parallel-l4 outside the band`,
     ]);
   });
 

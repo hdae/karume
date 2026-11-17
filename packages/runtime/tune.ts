@@ -70,7 +70,7 @@
  *
  * {@link runGemvSweep} measures the GEMV choices of `linear` (the sequential variant, the row-block
  * height, the parallel GEMV's lane count, staged or subgroup) on a dedicated device, at the shapes of
- * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/1`). Each
+ * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/2`). Each
  * candidate's output is checked in the sweep: a candidate of the baseline's summation order must
  * write the baseline's words, a reordering one must stay inside the band of `linear` against an f64
  * oracle on the host. Nothing derives a profile from its record yet. The same rule applies: never
@@ -183,12 +183,14 @@ export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 
 /**
  * Measures the GEMV choices of `linear` on a dedicated device and returns the record
- * (`karume-gemv-sweep/1`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
+ * (`karume-gemv-sweep/2`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
  * in the models) and row count, the baseline — what a Session at the level `exact` runs with the
  * default profile — and the candidates in two classes: `identical` (the sequential M = 1 variants and
  * the row-block heights, whose output words must be the baseline's) and `reorder` (the parallel GEMV
  * at each lane count, plain, staged and — where the device has the features — subgroup, held to the
- * band of `linear` against an f64 oracle on the host). It derives no table and changes no choice.
+ * band of `linear` against an f64 oracle on the host). The kernels of a row count are timed in
+ * interleaved rounds after a warm start on the baseline; the spread of the baseline's rounds says how
+ * steady the device was. It derives no table and changes no choice.
  */
 export { runGemvSweep } from "./src/tune/gemv-sweep.ts";
 export type { GemvSweepOptions, GemvSweepProgress } from "./src/tune/gemv-sweep.ts";

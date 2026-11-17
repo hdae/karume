@@ -1,9 +1,9 @@
 /**
  * What a person reads of a GEMV sweep run: the live status line, and after the run the totals and one
- * line per case and row count — the baseline's time, the fastest identical candidate and the fastest
- * reorder candidate with their speed against the baseline, and what the default profile chooses at
- * each level with its share of the fastest of its class's speed. Pure, over the per-case records the
- * record body is merged from.
+ * line per case and row count — the baseline's time and the spread of its rounds (how steady the
+ * device was), the fastest identical candidate and the fastest reorder candidate with their speed
+ * against the baseline, and what the default profile chooses at each level with its share of the
+ * fastest of its class's speed. Pure, over the per-case records the record body is merged from.
  */
 
 import type {
@@ -114,6 +114,9 @@ const caseLine = (
       : baseline.error === undefined
         ? `baseline ${baseline.candidate} ${formatPerDispatch(baseline.perDispatch, unit)}`
         : `baseline ${baseline.candidate} failed: ${baseline.error}`,
+    summary.baselineSpread === undefined
+      ? undefined
+      : `spread ${summary.baselineSpread.toFixed(3)}`,
     fastestText("identical", fastest(candidates.filter((row) => row.class === "identical"))),
     fastestText("reorder", fastest(candidates.filter((row) => row.class === "reorder"))),
     choiceText("exact", summary.profile.exact, rows, baseline),
@@ -170,7 +173,7 @@ export const gemvSweepVerdict = (
 export type GemvSweepResult = EntryResult & { readonly data: GemvSweepReport | undefined };
 
 /**
- * The result of a run's outcome: the per-case records merged into one `karume-gemv-sweep/1` record
+ * The result of a run's outcome: the per-case records merged into one `karume-gemv-sweep/2` record
  * (the cases that finished before a cancel, a device loss or an error included), the totals line and
  * one line per case and row count, with the verdict of {@link gemvSweepVerdict}. A run that measured
  * nothing because a sweep threw rethrows that error; a merge that fails throws.

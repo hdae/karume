@@ -31,7 +31,15 @@ import {
 import { bandAgainstOracle, gemvOracle } from "../src/tune/gemv-oracle.ts";
 import { choiceRecord, type GemvSweepRow } from "../src/tune/gemv-report.ts";
 import { gemvLaunch, gemvSweepGates, gemvSweepReport } from "../src/tune/gemv-sweep.ts";
-import { assertBindingRoles } from "../src/tune/harness.ts";
+import { assertBindingRoles, WARM_START_MAX_PASSES } from "../src/tune/harness.ts";
+import {
+  CALIBRATION_ATTEMPTS,
+  RECALIBRATE_BELOW,
+  WARM_START_MAX_NS,
+  WARM_START_MIN_NS,
+  WARM_START_PASSES,
+  WARM_START_TOLERANCE,
+} from "../src/tune/measurement.ts";
 
 const GATES: GemvGates = { subgroups: true, maxComputeWorkgroupsPerDimension: 65535 };
 const NO_SUBGROUPS: GemvGates = { ...GATES, subgroups: false };
@@ -477,12 +485,14 @@ describe("the record", () => {
     tolerance: opTolerance("linear"),
     deviceLost: null,
     cases: [PLE],
-    summaries: [{ caseId: PLE.id, m: 1, elapsedMs: 1, profile: plan.profile }],
+    summaries: [
+      { caseId: PLE.id, m: 1, elapsedMs: 1, profile: plan.profile, baselineSpread: 1.004 },
+    ],
     rows,
   });
 
-  it("is a karume-gemv-sweep/1 record with the fingerprints of this runtime", () => {
-    assertEquals(report.format, "karume-gemv-sweep/1");
+  it("is a karume-gemv-sweep/2 record with the fingerprints of this runtime", () => {
+    assertEquals(report.format, "karume-gemv-sweep/2");
     assertEquals(report.caseTable, gemvCaseTableId());
     assertEquals(report.kernels, gemvKernelsId(rows));
   });
@@ -500,6 +510,22 @@ describe("the record", () => {
     assertEquals(report.settings.cases, [PLE.id]);
     assertEquals(report.settings.tolerance, opTolerance("linear"));
     assert(report.settings.notMeasured.includes("packed-activation"));
+  });
+
+  it("states the warm start and the calibration check it timed with, and carries each summary's baseline spread", () => {
+    assertEquals(report.settings.warmStart, {
+      minNs: WARM_START_MIN_NS,
+      maxNs: WARM_START_MAX_NS,
+      maxPasses: WARM_START_MAX_PASSES,
+      stablePasses: WARM_START_PASSES,
+      tolerance: WARM_START_TOLERANCE,
+    });
+    assertEquals(report.settings.recalibrateBelow, RECALIBRATE_BELOW);
+    assertEquals(report.settings.calibrationAttempts, CALIBRATION_ATTEMPTS);
+    assertEquals(
+      report.summaries.map(({ baselineSpread }) => baselineSpread),
+      [1.004],
+    );
   });
 
   it("lists the planned cases with their source and the row counts the set measured", () => {

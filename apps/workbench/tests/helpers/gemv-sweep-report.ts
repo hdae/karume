@@ -84,7 +84,7 @@ export const gemvPerCase = (caseId: string, options: PerCaseOptions = {}): GemvS
   const gemvCase = gemvSweepCases().find(({ id }) => id === caseId);
   if (gemvCase === undefined) throw new Error(`no case ${caseId}`);
   return {
-    format: "karume-gemv-sweep/1",
+    format: "karume-gemv-sweep/2",
     date: options.date ?? "2026-11-17T10:05:00.000Z",
     startedAt: "2026-11-17T10:00:00.000Z",
     aborted: options.aborted ?? false,
@@ -104,8 +104,9 @@ export const gemvPerCase = (caseId: string, options: PerCaseOptions = {}): GemvS
       rounds: 5,
       targetPassMs: 80,
       maxReps: 16384,
-      warmupNs: 500e6,
-      warmupMinRuns: 3,
+      warmStart: { minNs: 1e9, maxNs: 5e9, maxPasses: 125, stablePasses: 3, tolerance: 0.02 },
+      recalibrateBelow: 0.25,
+      calibrationAttempts: 3,
       wallTimingNote: "note",
       tolerance: { atol: 2e-4, rtol: 4e-6 },
       notMeasured: "packed",
@@ -118,7 +119,7 @@ export const gemvPerCase = (caseId: string, options: PerCaseOptions = {}): GemvS
         m: 1,
         elapsedMs: 30_000,
         profile: { exact: "c32u4", reorder: "parallel-l4" },
-        baselineRepeat: { perDispatch: 20_200, driftRatio: 1.01 },
+        baselineSpread: 1.004,
         ...options.summary,
       },
     ],

@@ -66,9 +66,12 @@ measurements in `docs/research/`.
   `linear` at the shapes of the default profile's GEMV rows and the row counts 1, 4, 8, 16 and 64: per case the
   baseline (what a Session at the level `exact` runs), the sequential variants and row-block heights, whose output
   words must equal the baseline's, and the parallel GEMV at each lane count, plain, staged and — where the device has
-  the subgroup features — subgroup, held to the band of `linear` against an f64 oracle on the host. It returns a
-  `karume-gemv-sweep/1` record (`GemvSweepReport`) with fingerprints of its case table and of the kernels measured,
-  and changes no choice. Also `gemvSweepCases` (the case table) and `gemvSweepKernelsId` (the kernel fingerprint of
+  the subgroup features — subgroup, held to the band of `linear` against an f64 oracle on the host. The kernels of a
+  case at a row count are measured together: a warm start on the baseline, then every kernel calibrated, then rounds
+  that each time every kernel once in a rotating order, so a drift of the device lands on every kernel alike. It
+  returns a `karume-gemv-sweep/2` record (`GemvSweepReport`) with fingerprints of its case table and of the kernels
+  measured and, per case and row count, the spread of the baseline's rounds (`baselineSpread`), and changes no
+  choice. Also `gemvSweepCases` (the case table) and `gemvSweepKernelsId` (the kernel fingerprint of
   a merged record's rows), and the types `GemvSweepOptions`, `GemvSweepProgress`, `GemvSweepCandidateSet`,
   `GemvSweepCase`, `GemvSweepCaseSummary`, `GemvSweepChoice`, `GemvSweepGates` and `GemvSweepRow`.
 - `@karume/runtime`: `GeometryProfile.linearGemv`, an optional field of a geometry profile that holds the GEMV
@@ -89,6 +92,11 @@ measurements in `docs/research/`.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the
   cause and, where the caller can act, what to do. Code that matched on such a citation in a message needs another
   substring.
+- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a warm start on its default geometry (passes under
+  load until three in a row agree within 2 %, at least 1 s and at most 5 s of load or 125 passes), so the case's first calibration
+  no longer reads a device still on its idle clocks. In `runGeometrySweep` and in the single-dispatch timings of
+  `runAttentionRouteBench`, a calibration whose pass comes out below a quarter of the 80 ms target is done again after
+  a warm start, up to three calibrations in all. The records' formats do not change; a sweep takes a few seconds longer per case.
 
 ## [0.22.0] - 2026-11-14
 

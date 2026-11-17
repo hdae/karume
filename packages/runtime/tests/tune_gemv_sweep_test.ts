@@ -1,11 +1,14 @@
 // The GEMV sweep on a real GPU (src/tune/gemv-sweep.ts): one small shape per storage with every
 // candidate kind — the column variants, a row-block height, the parallel GEMV plain and staged, and
-// the subgroup form where the device has it — measured through the sweep's own path, and the public
-// entry point over one case of the table. The GPU sections are SKIPped explicitly without an adapter.
+// the subgroup form where the device has it — measured through the sweep's own path, the public
+// entry point over one case of the table, and the calibration of a case's first kernel after the
+// workbench entry's idle time. The GPU sections are SKIPped explicitly without an adapter.
 //
 // Faults injected, one per check: a reordering kernel put into the identical class (its words must
 // differ from the baseline's); a band of zero width (every reordering row and the baseline must read
-// outside it).
+// outside it); a case that starts after 10 s of idle (the cold device the warm start exists for:
+// measured without it, the baseline of i4g512-n256-k1536 got 8 and 7 reps where most kernels after
+// it got thousands, in both quick runs of 2026-11-17 on an RTX 3080 Ti).
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -20,7 +23,7 @@ import {
   type GemvMeasurementPlan,
   gemvProfileChoice,
 } from "../src/tune/gemv-candidates.ts";
-import type { GemvCase } from "../src/tune/gemv-cases.ts";
+import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
 import { gemvCaseTableId } from "../src/tune/gemv-fingerprint.ts";
 import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
 import {
@@ -122,6 +125,9 @@ const sweepWith = async (
 
 const rowLabel = (row: GemvSweepRow): string => `${row.caseId} M=${row.m} ${row.candidate}`;
 
+/** The idle time before every case but the first of the workbench's gemv-sweep entry (its default). */
+const ENTRY_IDLE_MS = 10_000;
+
 describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
   for (const gemvCase of SMALL) {
     it(`measures every candidate kind of ${gemvCase.id}: identical words equal the baseline's, reordered outputs stay in the band`, async () => {
@@ -156,11 +162,30 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
         result.summaries.map(({ m }) => m),
         [1, 4, 16],
       );
-      for (const summary of result.summaries) {
-        assert(summary.baselineRepeat !== undefined && summary.baselineRepeat.driftRatio > 0);
-      }
+      // One round: the baseline's largest round is its smallest.
+      for (const summary of result.summaries) assertEquals(summary.baselineSpread, 1);
     });
   }
+
+  it("calibrates the first kernel of a case that starts after the entry's idle time like the same kernel later in the case (fault: a cold device)", async () => {
+    const gemvCase = GEMV_CASES.find(({ id }) => id === "i4g512-n256-k1536");
+    if (gemvCase === undefined) throw new Error("no case i4g512-n256-k1536");
+    const baseline = gemvBaseline(gemvCase, 1);
+    await new Promise((resolve) => setTimeout(resolve, ENTRY_IDLE_MS));
+    const result = await sweepWith(gemvCase, (gates) => [
+      planOf(gemvCase, 1, [
+        ...pick(gemvCase, 1, gates, ["c16u2", "c64u8"]),
+        // The baseline's kernel once more, as the last kernel of the row count.
+        { ...baseline, name: "baseline-again" },
+      ]),
+    ]);
+    const first = result.rows.find((row) => row.isBaseline);
+    const again = result.rows.find((row) => row.candidate === "baseline-again");
+    assert(first?.reps !== undefined && again?.reps !== undefined, "a row has no reps");
+    assertEquals(again.identicalToBaseline, true);
+    const ratio = Math.max(first.reps, again.reps) / Math.min(first.reps, again.reps);
+    assert(ratio <= 2, `reps ${first.reps} first, ${again.reps} later in the case`);
+  });
 
   it("fails the identical check of a kernel that sums in another order (fault: parallel-l32 put into the identical class)", async () => {
     const [gemvCase] = SMALL;
@@ -191,7 +216,7 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
   it("returns the record of the public entry point over one case of the table", async () => {
     const caseId = "i8-n1536-k256";
     const record = await runGemvSweep({ candidateSet: "quick", cases: [caseId], rounds: 1 });
-    assertEquals(record.format, "karume-gemv-sweep/1");
+    assertEquals(record.format, "karume-gemv-sweep/2");
     assertEquals(record.deviceLost, null);
     assertEquals(record.aborted, false);
     assertEquals(record.settings.cases, [caseId]);
