@@ -30,11 +30,12 @@
  *   cannot contract across it. The staged barrier of the entry (`stagedLoopWgsl`) is an elementwise
  *   loop and does not fit a reduction leaf. That the barrier holds is measured behaviour, not a WGSL
  *   guarantee: the XOR form is measured to hold on Vulkan and D3D12 on NVIDIA (this rule's u32
- *   check, and its D3D12 runs in perf-ledger V-10). On Metal the same form was measured not to act
- *   as a barrier in other kernels (docs/known-issues.md), and this rule has not been run there. It
- *   runs on Metal all the same (a backend difference is recorded, not gated — ADR 0148 addendum of
- *   2026-11-12); where the barrier does not hold, its output can differ from the unfused plan by the
- *   rounding of a contracted multiply-add.
+ *   check, and its D3D12 runs in perf-ledger V-10). On Metal it does not hold: Chrome on an Apple
+ *   M2 returned 749,031 of the anima VAE decode's 786,432 output words different from the unfused
+ *   plan, the first by 6 in the last place (measured 2026-11-17 — docs/known-issues.md). It runs on
+ *   Metal all the same (a backend difference is recorded, not gated — ADR 0148 addendum of
+ *   2026-11-12); there its output differs from the unfused plan by the rounding of contracted
+ *   multiply-adds.
  *
  * The geometry is fixed: 8 channel groups of a workgroup, 32 pixels per workgroup (`g8` in the key).
  * The 4-group form (64 pixels) measured within the noise floor of it and went away with the adoption.

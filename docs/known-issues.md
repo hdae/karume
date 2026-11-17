@@ -195,7 +195,7 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   Metal. A release reads the Metal page against this table (release runbook). What to do about Metal beyond that is
   undecided. 2026-11-13: the state-attention rows stay recorded; a barrier spike is filed under later in the backlog.
 
-## On Metal, the VAE fusion rule `models/vae_rms_silu` may differ from the unfused plan (not measured; recorded by the ruling of 2026-11-12)
+## On Metal, the VAE fusion rule `models/vae_rms_silu` differs from the unfused plan (measured 2026-11-17; recorded by the ruling of 2026-11-12)
 
 The Wan (2.1 and 2.2) and anima pipelines pass the fusion rule `models/vae_rms_silu` by default to their VAE decoder
 Sessions on every backend (ADR [0148](decisions/0148-external-fusion-rules.md) addendum of 2026-11-12 on it). Its bit
@@ -206,13 +206,15 @@ Chrome / D3D12 runs of [perf-ledger](perf-ledger.md) V-10). On Metal the same XO
 barrier in other kernels (the attention i8a8 section above: the bitcast round trip with an XOR of 0 was ineffective
 on the M2 — ADR [0105](decisions/0105-packed-static-quantize-activations.md) addendum 4).
 
-- **Not measured**: the rule has not been run on Metal. Where its barrier does not hold, the VAE decoder's output can
-  differ from the unfused plan by the rounding of a contracted multiply-add, so Wan's frames and anima's images on Metal
-  may not be the unfused plan's words.
+- **Measured (2026-11-17, the maintainer's M2 / Chrome 157 / metal-3, runtime 0.22.0)**: the workbench's `session-ab`
+  entry on the anima VAE decode found 749,031 of the forward's 786,432 output words different from the unfused plan (the
+  first, word 0 of `clamp_30`, by 6 in the last place; the record keeps only the first differing word), while the
+  unfused plan repeated its own words over 20 runs. The rule is 10% faster there (median −231 ms of 2,313 ms). So
+  anima's images on Metal are not the unfused plan's words; Wan's VAE passes the same rule and was not run there. The
+  entry's verdict on Metal is `fail`, because it requires identity.
 - **Ruling (2026-11-12)**: the rule runs on Metal too, and a difference there is recorded rather than gated, as for the
-  Chrome-on-Metal kernel rewrites just above; no option turns it off. A measurement would be the workbench's `session-ab`
-  entry on its VAE targets in Chrome on a Mac, or the same entry under Node there: both
-  compare every output word of a forward with and without the rule.
+  Chrome-on-Metal kernel rewrites just above; no option turns it off. The maintainer saw the measurement above and
+  kept the ruling for now (2026-11-17).
 
 ## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
 
