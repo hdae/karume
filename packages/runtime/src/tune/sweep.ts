@@ -13,7 +13,7 @@
  * run time (ADR 0022 addendum's ban on autotuning, ADR 0117 decision 9). Measuring happens only
  * when the user calls this explicitly.
  */
-import { acquireGpu } from "../gpu/device.ts";
+import { acquireGpu, type GpuContext } from "../gpu/device.ts";
 import { selectGeometryProfile } from "../kernels/geometry-profile.ts";
 import { SWEEP_OPS, type SweepCase, sweepCasesFor, type SweepOp } from "./cases.ts";
 import {
@@ -207,6 +207,44 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
 export const timestampUnitFor = (userAgent: string): "ns" | "deno-raw-tick" =>
   userAgent.startsWith("Deno/") ? "deno-raw-tick" : "ns";
 
+/** How a sweep acquires its dedicated device. */
+export type SweepDeviceOptions = {
+  readonly gpu?: GPU;
+  readonly adapter?: GPURequestAdapterOptions;
+  /** `false` measures by wall clock even where the adapter lists `timestamp-query`. */
+  readonly timestamps?: boolean;
+  /** Passed to `acquireGpu` (the GEMV sweep asks for the subgroup features where they run). */
+  readonly subgroups?: "available";
+  readonly onDeviceLost: (lost: { readonly reason: string; readonly message: string }) => void;
+};
+
+/**
+ * Acquires the dedicated device of a sweep: with `timestamp-query` when the adapter lists it and
+ * `timestamps` is not `false`, and with the device loss reported to `onDeviceLost`.
+ *
+ * timestamp-query is requested when the adapter lists it (decision 2). acquireGpu's gpuTiming is
+ * either "required" or "not requested" and has no "use if present", so an adapter is acquired once
+ * and discarded only to look at the list. NOTE: the specification does not guarantee that calling
+ * requestAdapter twice picks the same physical adapter — if the re-picked adapter lacks
+ * timestamp-query, acquireGpu fails with GpuFeatureError (it does not silently drop to wall clock).
+ * Without navigator.gpu, acquireGpu fails with GpuUnavailableError.
+ */
+export const acquireSweepGpu = async (options: SweepDeviceOptions): Promise<GpuContext> => {
+  const webgpu: GPU | undefined = options.gpu ?? navigator.gpu;
+  const probe =
+    options.timestamps === false || webgpu === undefined
+      ? null
+      : await webgpu.requestAdapter(options.adapter);
+  const timestamps = probe?.features.has(TIMESTAMP_QUERY) === true;
+  return await acquireGpu({
+    ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+    ...(options.adapter === undefined ? {} : { adapter: options.adapter }),
+    ...(timestamps ? { gpuTiming: true } : {}),
+    ...(options.subgroups === undefined ? {} : { subgroups: options.subgroups }),
+    onDeviceLost: (info) => options.onDeviceLost({ reason: info.reason, message: info.message }),
+  });
+};
+
 /**
  * Acquires a dedicated device, sweeps the cases, and returns the record
  * (`karume-geometry-sweep/3`). The device is discarded when done (also on abort or failure).
@@ -224,26 +262,14 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
   // the end time — the difference is the duration, ADR 0117 decision 8)
   const startedAt = new Date().toISOString();
   const notify = options.onProgress;
-  // timestamp-query is requested when the adapter lists it (decision 2). acquireGpu's gpuTiming is
-  // either "required" or "not requested" and has no "use if present", so an adapter is acquired
-  // once and discarded only to look at the list. NOTE: the specification does not guarantee that
-  // calling requestAdapter twice picks the same physical adapter — if the re-picked adapter lacks
-  // timestamp-query, acquireGpu fails with GpuFeatureError (it does not silently drop to wall
-  // clock). Without navigator.gpu, acquireGpu fails with GpuUnavailableError.
-  const webgpu: GPU | undefined = options.gpu ?? navigator.gpu;
-  const probe =
-    options.timestamps === false || webgpu === undefined
-      ? null
-      : await webgpu.requestAdapter(options.adapter);
-  const timestamps = probe?.features.has(TIMESTAMP_QUERY) === true;
   let deviceLost: Report["deviceLost"] = null;
-  const gpu = await acquireGpu({
+  const gpu = await acquireSweepGpu({
     ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
     ...(options.adapter === undefined ? {} : { adapter: options.adapter }),
-    ...(timestamps ? { gpuTiming: true } : {}),
-    onDeviceLost: (info) => {
-      deviceLost = { reason: info.reason, message: info.message };
-      notify?.({ kind: "deviceLost", reason: info.reason, message: info.message });
+    ...(options.timestamps === undefined ? {} : { timestamps: options.timestamps }),
+    onDeviceLost: (lost) => {
+      deviceLost = lost;
+      notify?.({ kind: "deviceLost", reason: lost.reason, message: lost.message });
     },
   });
   try {

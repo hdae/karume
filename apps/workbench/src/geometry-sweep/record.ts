@@ -12,6 +12,10 @@ import {
   sweepCandidateKernelsId,
 } from "@karume/runtime/tune";
 
+import { type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
+
+export type { MergeOptions };
+
 /**
  * The fields every per-case record of one sweep shares (anything else is a different sweep). The
  * per-family keys `caseSets` / `defaultKernels` are not among them: each per-case record holds the
@@ -28,17 +32,6 @@ const sharedFields = (report: GeometrySweepReport) => {
     timingUnit: report.gpuTiming.unit,
     settings,
   };
-};
-
-/** The one case a per-case record swept (`settings.cases` of a call with `cases: [id]`). */
-const caseOf = (report: GeometrySweepReport, index: number): string => {
-  const ids = report.settings.cases ?? [];
-  if (ids.length !== 1) {
-    throw new Error(
-      `Record ${index} is not a per-case record (settings.cases is ${JSON.stringify(ids)})`,
-    );
-  }
-  return ids[0];
 };
 
 /**
@@ -69,13 +62,6 @@ const unionFamilyKeys = (
   );
 };
 
-export type MergeOptions = {
-  /** Every case the sweep was planned to run, in order (`settings.cases` of the merged record). */
-  readonly plannedCaseIds: readonly string[];
-  /** Cancel stopped the sweep before every planned case had a record. */
-  readonly cancelledBetweenCases: boolean;
-};
-
 /**
  * Merges the per-case records into one record in the shape one `runGeometrySweep` call over the
  * planned cases writes: rows and cases in run order, `startedAt` of the first and `date` of the
@@ -100,39 +86,24 @@ export const mergeSweepReports = (
   reports: readonly GeometrySweepReport[],
   options: MergeOptions,
 ): GeometrySweepReport => {
-  const [first] = reports;
-  const last = reports.at(-1);
-  if (first === undefined || last === undefined) throw new Error("No per-case record to merge");
-  const shared = JSON.stringify(sharedFields(first));
-  const seen = new Set<string>();
-  reports.forEach((report, index) => {
-    if (JSON.stringify(sharedFields(report)) !== shared) {
-      throw new Error(
-        `Record ${index} differs from record 0 in its format, browser, adapter, dp4a, timing or settings`,
-      );
-    }
-    const caseId = caseOf(report, index);
-    if (!options.plannedCaseIds.includes(caseId)) {
-      throw new Error(`Record ${index} swept ${caseId}, which is not a planned case`);
-    }
-    if (seen.has(caseId)) throw new Error(`Case ${caseId} has two records`);
-    seen.add(caseId);
-  });
+  const { first, ...envelope } = mergePerCase(
+    reports,
+    options,
+    sharedFields,
+    "its format, browser, adapter, dp4a, timing or settings",
+  );
   const rows = reports.flatMap((report) => report.rows);
   return {
     ...first,
     caseSets: unionFamilyKeys(reports, "caseSets"),
     defaultKernels: unionFamilyKeys(reports, "defaultKernels"),
-    date: last.date,
-    startedAt: first.startedAt,
-    aborted: options.cancelledBetweenCases || reports.some((report) => report.aborted),
+    ...envelope,
     candidateKernels: sweepCandidateKernelsId(rows, first.dp4a),
     gpuTiming: {
       ...first.gpuTiming,
       quantized: reports.some((report) => report.gpuTiming.quantized),
     },
     settings: { ...first.settings, cases: [...options.plannedCaseIds] },
-    deviceLost: reports.find((report) => report.deviceLost !== null)?.deviceLost ?? null,
     cases: reports.flatMap((report) => report.cases),
     rows,
   };

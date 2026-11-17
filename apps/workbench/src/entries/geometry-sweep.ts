@@ -24,6 +24,7 @@ import {
   sweepSelection,
 } from "../geometry-sweep/settings.ts";
 import { geometrySweepResult, progressLine } from "../geometry-sweep/summary.ts";
+import { liveLine } from "../per-case-sweep.ts";
 
 const entry: Entry = {
   id: "geometry-sweep",
@@ -73,27 +74,20 @@ const entry: Entry = {
     const selection = sweepSelection(parameters);
     const plan = planSweep(selection, geometrySweepCases(selection.candidateSet));
     let live = INITIAL_LIVE;
-    const show = (): void => progress(progressLine(plan, live, performance.now()));
-    // The idle wait reports nothing for 90 s by default: a ticker counts it down.
-    let ticker: ReturnType<typeof setInterval> | undefined;
+    // The idle wait reports nothing for 90 s by default: the live line counts it down.
+    const line = liveLine(() => progress(progressLine(plan, live, performance.now())));
     try {
       const outcome = await runSweepPlan(plan, {
         gpu: gpuOptions.gpu,
         signal,
         onEvent: (event) => {
           live = foldSweepEvent(live, event);
-          if (live.phase.kind === "idle") {
-            ticker ??= setInterval(show, 1000);
-          } else {
-            clearInterval(ticker);
-            ticker = undefined;
-          }
-          show();
+          line.update(live.phase.kind === "idle");
         },
       });
       return geometrySweepResult(plan, outcome);
     } finally {
-      clearInterval(ticker);
+      line.stop();
     }
   },
 };

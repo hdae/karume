@@ -46,10 +46,16 @@ adapter's match and measures nothing at run time.
 - A profile can also hold the GEMV choices of linear (`linearGemv`): the variant of the sequential kernel and its
   per-shape exceptions, the thread target that decides the row-block height, and the rows of the shapes that take the
   parallel GEMV with their lane count and their packed and staged flags.
-- The generator does not derive them and no registered table carries them. A table without them runs with the default
-  profile's, the values measured on the RTX 3080 Ti: the Session fills them in once, where it selects its profile, so
-  the linear selection, the fusion pass and the recipe builder all read the same choices. The memory estimate, which
-  has no adapter, reads the default profile's.
+- What measures them on a host's GPU is the GEMV sweep: `runGemvSweep` of `@karume/runtime/tune`, run by the
+  workbench's `gemv-sweep` entry ([workbench.md](workbench.md#the-entries)). Its cases are the shapes of the default
+  profile's GEMV rows; per case and row count it measures the baseline (what a Session at the level `exact` runs with
+  the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
+  and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`. Its
+  record is `karume-gemv-sweep/1` ([workbench.md](workbench.md#the-gemv-sweeps-record)).
+- No registered table carries them. A table without them runs with the default profile's, the values measured on the
+  RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
+  and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
+  profile's.
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
 - The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
   reads it.

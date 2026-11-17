@@ -328,7 +328,10 @@ export const looksQuantized = (gpu: QuantizationSample): boolean =>
  * Suspected Chrome 100 µs quantization ({@link looksQuantized} reused on per-pass values). Judged
  * only when the unit is ns — raw ticks and wall clock have no quantization step.
  */
-export const roundsLookQuantized = (rows: readonly SweepRow[], unit: TimingUnit): boolean => {
+export const roundsLookQuantized = (
+  rows: readonly Pick<SweepRow, "rounds">[],
+  unit: TimingUnit,
+): boolean => {
   if (unit !== "ns") return false;
   const entries = rows.flatMap((row) => (row.rounds ?? []).map((ns) => ({ ns })));
   return looksQuantized({

@@ -68,6 +68,14 @@
  * caller's device, and returns a JSON-serializable record. It chooses nothing and changes no
  * profile. The same rule applies: do not run it while inference runs on the same GPU.
  *
+ * {@link runGemvSweep} measures the GEMV choices of `linear` (the sequential variant, the row-block
+ * height, the parallel GEMV's lane count, staged or subgroup) on a dedicated device, at the shapes of
+ * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/1`). Each
+ * candidate's output is checked in the sweep: a candidate of the baseline's summation order must
+ * write the baseline's words, a reordering one must stay inside the band of `linear` against an f64
+ * oracle on the host. Nothing derives a profile from its record yet. The same rule applies: never
+ * alongside inference on the same GPU.
+ *
  * {@link runSessionAb} is the wall-clock A/B of whole runs, the measurement a fusion rule (built-in
  * or external) is accepted or dropped on: two or more arms — Session configurations built with
  * {@link sessionArm}, or a caller's own pipeline — run the same work in alternating order (one
@@ -172,6 +180,37 @@ export type { GeometryProfileFamilyIds } from "./src/tune/families.ts";
  * holds the entries of the op families of its own cases.
  */
 export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
+
+/**
+ * Measures the GEMV choices of `linear` on a dedicated device and returns the record
+ * (`karume-gemv-sweep/1`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
+ * in the models) and row count, the baseline — what a Session at the level `exact` runs with the
+ * default profile — and the candidates in two classes: `identical` (the sequential M = 1 variants and
+ * the row-block heights, whose output words must be the baseline's) and `reorder` (the parallel GEMV
+ * at each lane count, plain, staged and — where the device has the features — subgroup, held to the
+ * band of `linear` against an f64 oracle on the host). It derives no table and changes no choice.
+ */
+export { runGemvSweep } from "./src/tune/gemv-sweep.ts";
+export type { GemvSweepOptions, GemvSweepProgress } from "./src/tune/gemv-sweep.ts";
+/** The GEMV sweep's candidate set: `"quick"` (M = 1, about half an hour) or `"full"`. */
+export type { GemvCandidateSet as GemvSweepCandidateSet } from "./src/tune/gemv-candidates.ts";
+/** Every case of the GEMV sweep's table (the ids `GemvSweepOptions.cases` takes). A new array on every call. */
+export { gemvSweepCaseEntries as gemvSweepCases } from "./src/tune/gemv-cases.ts";
+export type { GemvCase as GemvSweepCase } from "./src/tune/gemv-cases.ts";
+/** The GEMV sweep record and its parts. */
+export type {
+  GemvSweepCaseSummary,
+  GemvSweepChoice,
+  GemvSweepGates,
+  GemvSweepReport,
+  GemvSweepRow,
+} from "./src/tune/gemv-report.ts";
+/**
+ * The kernel fingerprint of a GEMV sweep record's rows (its `kernels`), derived without a GPU. An
+ * application that merges the records of several `runGemvSweep` calls recomputes it over the merged
+ * rows.
+ */
+export { gemvSweepKernelsId } from "./src/tune/gemv-fingerprint.ts";
 
 /**
  * Times the s16 and online routes of a8 fused attention at given shapes (default:

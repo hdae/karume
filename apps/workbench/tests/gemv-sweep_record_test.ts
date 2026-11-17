@@ -1,0 +1,212 @@
+import { gemvSweepKernelsId } from "@karume/runtime/tune";
+import { describe, expect, it } from "vite-plus/test";
+
+import { mergeGemvSweepReports } from "../src/gemv-sweep/record.ts";
+import type { GemvRunOutcome } from "../src/gemv-sweep/run.ts";
+import type { GemvSweepPlan } from "../src/gemv-sweep/settings.ts";
+import { gemvSweepResult, gemvSweepVerdict } from "../src/gemv-sweep/summary.ts";
+import type { PerCaseStop } from "../src/per-case-sweep.ts";
+import { CASE_A, CASE_B, CASE_C, gemvPerCase, gemvRow } from "./helpers/gemv-sweep-report.ts";
+
+const PLANNED = { plannedCaseIds: [CASE_A, CASE_B], cancelledBetweenCases: false };
+
+const PLAN: GemvSweepPlan = {
+  caseIds: [CASE_A, CASE_B],
+  candidateSet: "quick",
+  rounds: 5,
+  idleSeconds: 10,
+};
+
+const COMPLETED: PerCaseStop = { kind: "completed" };
+
+describe("mergeGemvSweepReports", () => {
+  describe("when every planned case has its record", () => {
+    const merged = mergeGemvSweepReports(
+      [gemvPerCase(CASE_A), gemvPerCase(CASE_B, { date: "2026-11-17T10:09:00.000Z" })],
+      PLANNED,
+    );
+
+    it("keeps the rows, cases and summaries in run order and the planned cases in the settings", () => {
+      expect(merged.rows.map(({ caseId }) => caseId)).toEqual([
+        CASE_A,
+        CASE_A,
+        CASE_A,
+        CASE_B,
+        CASE_B,
+        CASE_B,
+      ]);
+      expect(merged.cases.map(({ id }) => id)).toEqual([CASE_A, CASE_B]);
+      expect(merged.summaries.map(({ caseId }) => caseId)).toEqual([CASE_A, CASE_B]);
+      expect(merged.settings.cases).toEqual([CASE_A, CASE_B]);
+    });
+
+    it("recomputes the kernel fingerprint over the merged rows", () => {
+      expect(merged.kernels).toBe(gemvSweepKernelsId(merged.rows));
+      expect(merged.kernels).not.toBe(gemvPerCase(CASE_A).kernels);
+    });
+
+    it("takes the first record's start and the last record's end", () => {
+      expect(merged.startedAt).toBe("2026-11-17T10:00:00.000Z");
+      expect(merged.date).toBe("2026-11-17T10:09:00.000Z");
+      expect(merged.aborted).toBe(false);
+      expect(merged.deviceLost).toBeNull();
+    });
+  });
+
+  it("marks the record aborted when Cancel stopped the sweep between cases, and keeps the first device loss", () => {
+    const lost = { reason: "unknown", message: "GPU process crashed" };
+    const cancelled = mergeGemvSweepReports([gemvPerCase(CASE_A)], {
+      ...PLANNED,
+      cancelledBetweenCases: true,
+    });
+    expect(cancelled.aborted).toBe(true);
+    const lostRun = mergeGemvSweepReports([gemvPerCase(CASE_A, { deviceLost: lost })], PLANNED);
+    expect(lostRun.deviceLost).toEqual(lost);
+    expect(lostRun.aborted).toBe(false);
+  });
+
+  it("marks the record quantized when any record's rounds looked quantized", () => {
+    const merged = mergeGemvSweepReports(
+      [gemvPerCase(CASE_A), gemvPerCase(CASE_B, { quantized: true })],
+      PLANNED,
+    );
+    expect(merged.gpuTiming.quantized).toBe(true);
+  });
+
+  describe("when the records do not belong to one sweep", () => {
+    it("throws for other gates (another device's candidates)", () => {
+      const other = gemvPerCase(CASE_B, {
+        gates: {
+          subgroups: false,
+          features: { subgroups: false, subgroupSizeControl: false, subgroupId: false },
+          maxComputeWorkgroupsPerDimension: 65535,
+        },
+      });
+      expect(() => mergeGemvSweepReports([gemvPerCase(CASE_A), other], PLANNED)).toThrow(
+        /Record 1 differs from record 0/,
+      );
+    });
+
+    it("throws for another case table", () => {
+      const other = { ...gemvPerCase(CASE_B), caseTable: "fedcba9876543210" };
+      expect(() => mergeGemvSweepReports([gemvPerCase(CASE_A), other], PLANNED)).toThrow(
+        /Record 1 differs/,
+      );
+    });
+
+    it("throws for an unplanned case, a case twice and no record", () => {
+      expect(() => mergeGemvSweepReports([gemvPerCase(CASE_C)], PLANNED)).toThrow(
+        /not a planned case/,
+      );
+      expect(() =>
+        mergeGemvSweepReports([gemvPerCase(CASE_A), gemvPerCase(CASE_A)], PLANNED),
+      ).toThrow(/has two records/);
+      expect(() => mergeGemvSweepReports([], PLANNED)).toThrow(/No per-case record/);
+    });
+  });
+});
+
+describe("the summary", () => {
+  it("sums up the totals, then one line per case and row count", () => {
+    const result = gemvSweepResult(PLAN, {
+      reports: [gemvPerCase(CASE_A), gemvPerCase(CASE_B)],
+      stop: COMPLETED,
+    });
+    const line = (caseId: string): string =>
+      `${caseId} M=1: baseline c32u4 0.020 ms · fastest identical c64u8 ×1.250 · fastest reorder parallel-l4 ×2.000 · exact c32u4 ×0.800 of the fastest identical · reorder parallel-l4 ×1.000 of the fastest reorder`;
+    expect(result.summary).toEqual([
+      "2 of 2 planned cases finished · 6 rows · 0 with an error · 0 not identical to the baseline · 0 outside the band",
+      line(CASE_A),
+      line(CASE_B),
+    ]);
+    expect(result.data?.format).toBe("karume-gemv-sweep/1");
+  });
+
+  it("leaves a candidate that failed its check out of the fastest, and says the profile's choice failed it", () => {
+    const rows = [
+      gemvRow(CASE_A, "baseline"),
+      gemvRow(CASE_A, "identical", { identicalToBaseline: false, differingWords: 3 }),
+      gemvRow(CASE_A, "reorder", { withinBand: false, bandUse: 1.5 }),
+    ];
+    const result = gemvSweepResult(
+      { ...PLAN, caseIds: [CASE_A] },
+      { reports: [gemvPerCase(CASE_A, { rows })], stop: COMPLETED },
+    );
+    expect(result.summary).toEqual([
+      "1 of 1 planned cases finished · 3 rows · 0 with an error · 1 not identical to the baseline · 1 outside the band",
+      `${CASE_A} M=1: baseline c32u4 0.020 ms · exact c32u4 ×1.000 of the fastest identical · reorder parallel-l4 outside the band`,
+    ]);
+  });
+
+  it("says why the run stopped, and rethrows the error of a run that measured nothing", () => {
+    const failure = new Error("GpuUnavailableError");
+    expect(() =>
+      gemvSweepResult(PLAN, { reports: [], stop: { kind: "error", error: failure } }),
+    ).toThrow(failure);
+    const cancelled = gemvSweepResult(PLAN, {
+      reports: [gemvPerCase(CASE_A)],
+      stop: { kind: "cancelled" },
+    });
+    expect(cancelled.summary[0]).toBe(
+      "1 of 2 planned cases finished · 3 rows · 0 with an error · 0 not identical to the baseline · 0 outside the band · stopped: cancelled",
+    );
+    expect(cancelled.data?.aborted).toBe(true);
+  });
+});
+
+describe("gemvSweepVerdict", () => {
+  const verdict = (outcome: GemvRunOutcome) => gemvSweepVerdict(outcome);
+  const clean = gemvPerCase(CASE_A);
+  const lost: PerCaseStop = { kind: "deviceLost", reason: "unknown", message: "crashed" };
+  const differing = gemvPerCase(CASE_A, {
+    rows: [
+      gemvRow(CASE_A, "baseline"),
+      gemvRow(CASE_A, "identical", { identicalToBaseline: false }),
+    ],
+  });
+  const outside = gemvPerCase(CASE_A, {
+    rows: [gemvRow(CASE_A, "baseline"), gemvRow(CASE_A, "reorder", { withinBand: false })],
+  });
+  const errored = gemvPerCase(CASE_A, {
+    rows: [gemvRow(CASE_A, "baseline"), gemvRow(CASE_A, "reorder", { error: "compile error" })],
+  });
+
+  it("is fail when an identical row of a finished case differs from the baseline, even when the run then stopped", () => {
+    expect(verdict({ reports: [differing], stop: COMPLETED })).toBe("fail");
+    expect(verdict({ reports: [differing, gemvPerCase(CASE_B)], stop: lost })).toBe("fail");
+  });
+
+  it("is fail when a reorder row of a finished case is outside the band", () => {
+    expect(verdict({ reports: [outside], stop: COMPLETED })).toBe("fail");
+  });
+
+  it("is incomplete when a device loss or an error stopped the run, errored rows notwithstanding", () => {
+    expect(verdict({ reports: [errored], stop: lost })).toBe("incomplete");
+    expect(verdict({ reports: [clean], stop: { kind: "error", error: new Error("x") } })).toBe(
+      "incomplete",
+    );
+  });
+
+  it("is fail when a row of a finished case errored", () => {
+    expect(verdict({ reports: [errored], stop: COMPLETED })).toBe("fail");
+  });
+
+  it("is none when the run was cancelled, and does not count the case the cancel cut short", () => {
+    const cutShort = gemvPerCase(CASE_B, {
+      aborted: true,
+      rows: [gemvRow(CASE_B, "baseline"), gemvRow(CASE_B, "reorder", { withinBand: false })],
+    });
+    expect(verdict({ reports: [clean, cutShort], stop: { kind: "cancelled" } })).toBeUndefined();
+  });
+
+  it("is pass when every planned case finished clean", () => {
+    expect(verdict({ reports: [clean, gemvPerCase(CASE_B)], stop: COMPLETED })).toBe("pass");
+  });
+
+  it("does not hold the baseline to the band (its reading is shown, not judged)", () => {
+    const baselineOutside = gemvPerCase(CASE_A, {
+      rows: [gemvRow(CASE_A, "baseline", { withinBand: false }), gemvRow(CASE_A, "reorder")],
+    });
+    expect(verdict({ reports: [baselineOutside], stop: COMPLETED })).toBe("pass");
+  });
+});

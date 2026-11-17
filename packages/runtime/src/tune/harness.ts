@@ -1484,6 +1484,23 @@ const readChunk = async (
 };
 
 /**
+ * Reads the first `bytes` of `buffer` into one array, one staging chunk at a time (the GEMV sweep's
+ * comparison with its host oracle).
+ */
+export const readBufferWords = async (
+  context: SweepContext,
+  buffer: GPUBuffer,
+  bytes: number,
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const words = new Uint32Array(bytes / 4);
+  for (let offset = 0; offset < bytes; offset += context.staging.size) {
+    const length = Math.min(context.staging.size, bytes - offset);
+    words.set(await readChunk(context, buffer, offset, length), offset / 4);
+  }
+  return words;
+};
+
+/**
  * Compares the first `bytes` of two buffers word for word, one staging chunk at a time (the JS
  * side holds two chunks at most): the number of words, of differing words, and the first difference.
  */

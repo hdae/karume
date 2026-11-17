@@ -685,6 +685,42 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvSweepCandidateSet",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepCase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepCaseSummary",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepChoice",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepGates",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepReport",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepRow",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeometryProfileDerivation",
         "kind": "typeAlias"
       },
@@ -833,6 +869,14 @@
         "kind": "function"
       },
       {
+        "name": "gemvSweepCases",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSweepKernelsId",
+        "kind": "function"
+      },
+      {
         "name": "geometryProfileJson",
         "kind": "function"
       },
@@ -854,6 +898,10 @@
       },
       {
         "name": "runAttentionRouteBench",
+        "kind": "function"
+      },
+      {
+        "name": "runGemvSweep",
         "kind": "function"
       },
       {

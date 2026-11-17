@@ -191,10 +191,12 @@ maintainer's ruling of 2026-11-06).
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
      - Per-adapter generation of the hand-written GEMV shape tables. *(Landed 2026-11-17: the sequential variant,
        the row-block thread target and the parallel shapes are the geometry profile's `linearGemv`; every table still
-       runs with the default's values.)* Open: the GEMV sweep on synthetic tensors that measures them (the maintainer,
-       2026-11-17: the LLM decode first; the bit-identical and the reordering candidates are both measured, and
-       applied separately), the generator that derives the field, and the integer and byte-plane GEMV tables, which
-       are still in the kernel source.
+       runs with the default's values.)* *(Landed 2026-11-17: the GEMV sweep on synthetic tensors that measures them —
+       `runGemvSweep` and the workbench entry `gemv-sweep`, at the LLM decode shapes of the default profile's rows;
+       the bit-identical and the reordering candidates are both measured, each held to its own check, and recorded as
+       `karume-gemv-sweep/1`.)* Open: the generator that derives the field from those records (the maintainer,
+       2026-11-17: the bit-identical and the reordering choices are applied separately), and the integer and
+       byte-plane GEMV tables, which are still in the kernel source.
   7. **Weights from outside the exporter.** `fromSingleFile` on the pipelines, the counterpart of diffusers'
      `from_single_file`: a single file is converted while it loads, against the plan of a preset of a distribution's
      manifest, and keeping the result as a `krm` is optional (the maintainer, 2026-11-17). The format readers are

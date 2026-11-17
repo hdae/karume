@@ -110,6 +110,11 @@ from sweeps timed with GPU timestamps (a row whose speed-up could be off by more
 timestamp rounding is left out), and the runtime does not check an injected
 profile against the adapter.
 
+`runGemvSweep()` measures the GEMV forms of `linear` (the decode path of the language models) the same
+way: per shape, the candidates that keep the baseline's sum order must give its words, and the ones
+that reorder the sum must stay inside the band of `linear`. It returns a record; no profile is
+derived from it.
+
 ## Fusion rules outside the runtime (`@karume/runtime/kernel`, experimental)
 
 The `./kernel` entry is for writing a fusion rule in another package or an application. A rule

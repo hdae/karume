@@ -11,75 +11,32 @@ import {
 } from "@karume/runtime/tune";
 
 import type { EntryResult } from "../entry.ts";
-import { messageText } from "../record.ts";
+import {
+  cutShort,
+  formatPerDispatch,
+  joined,
+  perCaseProgressLine,
+  perCaseVerdict,
+  ratioText,
+  stopText,
+} from "../per-case-sweep.ts";
 import { K88_SET, type K88Summary, k88Summary } from "./k88.ts";
 import { type CaseSummaryRow, caseSummaryRows, mergeSweepReports } from "./record.ts";
 import type { SweepLive, SweepRunOutcome, SweepStop } from "./run.ts";
 import type { SweepPlan } from "./settings.ts";
 
-/** ns (GPU time, or wall clock submit → completion) as ms; raw Deno ticks as they are. */
-const formatPerDispatch = (
-  value: number | undefined,
-  unit: GeometrySweepTimingUnit | undefined,
-): string =>
-  value === undefined
-    ? ""
-    : unit === "ns"
-      ? `${(value / 1e6).toFixed(3)} ms`
-      : unit === "wall"
-        ? `${(value / 1e6).toFixed(3)} ms wall`
-        : `${value.toFixed(0)} ${unit ?? ""}`;
-
-/** A ratio as `×1.234`, or empty. */
-const ratioText = (value: number | undefined): string =>
-  value === undefined ? "" : `×${value.toFixed(3)}`;
-
-const joined = (parts: readonly (string | undefined)[]): string =>
-  parts.filter((part) => part !== undefined && part !== "").join(" · ");
-
 /**
- * The live status as one line: the cases done, then the case being swept (with its rows so far and
- * the sweep's own status — the geometry measured now) or the seconds left of the idle wait before the
- * next case.
+ * The live status as one line: the cases done, then the case being swept (with its rows so far, the
+ * sweep's own status — the geometry measured now — and the timing once it started) or the seconds left
+ * of the idle wait before the next case.
  */
-export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): string => {
-  const total = plan.caseIds.length;
-  const position = `case ${live.caseIndex + 1} / ${total}`;
-  const done = `${live.casesDone} / ${total} cases done`;
-  if (live.deviceLost !== undefined) {
-    return `device lost (${live.deviceLost.reason}): ${live.deviceLost.message} — the sweep stops after ${position}`;
-  }
-  const { phase } = live;
-  switch (phase.kind) {
-    case "waiting":
-      return `starting ${total} case${total === 1 ? "" : "s"}`;
-    case "idle":
-      return `${done} · idle before ${position}: ${Math.max(0, (phase.until - now) / 1000).toFixed(0)} s left`;
-    case "sweeping": {
-      const caseId = plan.caseIds[live.caseIndex] ?? "";
-      return joined([
-        done,
-        `${position} ${caseId}`,
-        `${live.caseRows} rows`,
-        phase.status ?? "acquiring the device",
-        live.unit === undefined ? undefined : `timing ${live.unit}, dp4a ${String(live.dp4a)}`,
-      ]);
-    }
-  }
-};
-
-const stopText = (stop: SweepStop): string | undefined => {
-  switch (stop.kind) {
-    case "completed":
-      return undefined;
-    case "cancelled":
-      return "stopped: cancelled";
-    case "deviceLost":
-      return `stopped: device lost (${stop.reason}): ${stop.message}`;
-    case "error":
-      return `stopped: ${messageText(stop.error)}`;
-  }
-};
+export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): string =>
+  perCaseProgressLine(
+    plan.caseIds,
+    live,
+    now,
+    live.unit === undefined ? undefined : `timing ${live.unit}, dp4a ${String(live.dp4a)}`,
+  );
 
 /**
  * Cases planned and finished, a case cut short (Cancel or a device loss stopped it midway: its rows so
@@ -93,10 +50,10 @@ const totalsLine = (
   stop: SweepStop,
 ): string => {
   const rows = report?.rows ?? [];
-  const cutShort = reports.filter((one) => one.aborted || one.deviceLost !== null).length;
+  const short = reports.filter(cutShort).length;
   return joined([
-    `${reports.length - cutShort} of ${plan.caseIds.length} planned cases finished`,
-    cutShort === 0 ? undefined : `${cutShort} cut short`,
+    `${reports.length - short} of ${plan.caseIds.length} planned cases finished`,
+    short === 0 ? undefined : `${short} cut short`,
     `${rows.length} rows`,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.identicalToDefault === false).length} not identical to the default`,
@@ -172,28 +129,18 @@ const k88Lines = (summary: K88Summary, unit: GeometrySweepTimingUnit): string[] 
 };
 
 /**
- * The run's verdict, checked in this order: `fail` when a row of a finished case is not identical to
- * its case's default (a wrong result, whatever else happened); `incomplete` when a device loss or an
- * error stopped the run short of its plan (rows that errored in such a run are that stop's
- * consequence); `fail` when a row of a finished case errored; none when the run was cancelled (the
- * record says `cancelled`); otherwise `pass`. A finished case is one whose record neither a cancel
- * nor a device loss cut short. No candidate of any set is allowed to differ from the default: a match
+ * The run's verdict (`perCaseVerdict` — its order): a row of a finished case that is not identical to
+ * its case's default is wrong. No candidate of any set is allowed to differ from the default: a match
  * is the sweep's own expectation (f32 by the K reduction order, i8a8 by exact integer arithmetic).
- * Timing is not part of it (it depends on the machine).
  */
 const sweepVerdict = (
   reports: readonly GeometrySweepReport[],
   stop: SweepStop,
-): EntryResult["verdict"] => {
-  const finishedRows = reports
-    .filter((one) => !one.aborted && one.deviceLost === null)
-    .flatMap((one) => one.rows);
-  if (finishedRows.some((row) => row.identicalToDefault === false)) return "fail";
-  if (stop.kind === "deviceLost" || stop.kind === "error") return "incomplete";
-  if (finishedRows.some((row) => row.error !== undefined)) return "fail";
-  if (stop.kind === "cancelled") return undefined;
-  return "pass";
-};
+): EntryResult["verdict"] =>
+  perCaseVerdict(reports, stop, {
+    wrong: (row) => row.identicalToDefault === false,
+    errored: (row) => row.error !== undefined,
+  });
 
 /** The entry's result: the merged record (absent when no case finished) and its summary. */
 export type GeometrySweepResult = EntryResult & { readonly data: GeometrySweepReport | undefined };

@@ -29,8 +29,8 @@ The workbench is private (not published) and is not part of the lanes: its tests
 - `run` resolves to an optional `verdict`, a `summary` (the lines a person reads first) and `data` (the entry's own
   record body). A check concludes `pass` or `fail`; `incomplete` says the run did not cover what was asked (a check
   the device cannot run, a sweep that a device loss or an error stopped). A sweep that finished concludes `pass` or
-  `fail` too: every candidate's output is checked against its default's. An entry that only measures and finished has
-  no verdict.
+  `fail` too: every candidate's output is checked — against its default's words, or, for a GEMV candidate that sums in
+  another order, against the band of `linear`. An entry that only measures and finished has no verdict.
 
 ### Local distributions
 
@@ -54,11 +54,29 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | Entry | What it runs | Inputs |
 | --- | --- | --- |
 | `kernel-check` | The twelve kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on the host's backend. Parameter `checks`: which of the twelve (default: all). `pass` needs every check run and passed; a check the device cannot run is not available, never a pass. | Synthetic (built in memory); no distribution |
+| `gemv-sweep` | `runGemvSweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-gemv-sweep/1` record (`data`, [below](#the-gemv-sweeps-record)) through the per-case loop the `geometry-sweep` entry uses. Per case (a shape of the default profile's GEMV rows) and row count: the baseline — what a Session at the level `exact` runs with the default profile —, the identical class (the sequential M = 1 variants, the row-block heights) and the reorder class (the parallel GEMV at each lane count, plain, staged and, where the device has the features, subgroup, at 1 to 8 rows), then the baseline again. Parameters: `candidateSet` (`quick` — M = 1, the identical class on the 3 × 3 grid of columns and read-ahead around the baseline, the reorder class in full; sized for about half an hour on a desktop GPU —, or `full` — every row count and the whole grid), `cases` (none: every case), `rounds` (5), `idleSeconds` (10). The summary has a totals line, then per case and row count the baseline's time, the fastest identical and the fastest reorder candidate with their speed against the baseline, and the default profile's choice at each level with its share of the fastest of its class's speed. The verdict, checked in this order: `fail` when a row of a finished case is in the identical class and its words differ from the baseline's, or in the reorder class and outside the band; `incomplete` when a device loss or an error stopped the run; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. Timing is not part of the verdict. | Synthetic; no distribution |
 | `geometry-sweep` | `runGeometrySweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-geometry-sweep/3` record (`data`) — what `deriveGeometryProfile` reads. Parameters: `candidateSet` (`quick`, `quick+`, `full`, or the evaluation set `k88`), `ops`, `cases` (none: every case of the chosen op families in the chosen set; a case that is not in the chosen set is an error), `rounds`, `idleSeconds`. A cancelled run, a lost device and a sweep that threw keep the cases that finished. The verdict, checked in this order: `fail` when a row of a finished case (one that neither a cancel nor a device loss cut short) is not identical to its case's default; `incomplete` when a device loss or an error stopped the run short of its plan; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. Every candidate of every set is expected to match its default (f32 by the K reduction order, i8a8 by exact integer arithmetic); timing is not part of the verdict. | Synthetic; no distribution |
 | `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
 | `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch or off × the integer GEMV × the PLE on the GPU × the decode run-ahead depth — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token. Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
+
+### The GEMV sweep's record
+
+`karume-gemv-sweep/1`, the `data` of a `gemv-sweep` run (and what `runGemvSweep` returns):
+
+| Field | Content |
+| --- | --- |
+| `format`, `startedAt`, `date`, `aborted` | The format; when the sweep started and when its record was assembled; whether a cancel cut it short |
+| `caseTable`, `kernels` | Fingerprints, built as the geometry sweep's: of the case table's dispatch-deciding fields, and of the kernels the rows without an error measured (a merged record recomputes it over its rows) |
+| `userAgent`, `adapter` | The host and the four adapter fields |
+| `gates` | The device facts that decided which candidates exist: the subgroup features (`subgroups`, `subgroup-size-control`, the WGSL `subgroup_id`; the subgroup form needs all three) and `maxComputeWorkgroupsPerDimension` (a candidate whose grid exceeds it, such as 32 lanes on a 262144-column head, is not measured) |
+| `gpuTiming` | Whether `timestamp-query` was enabled, the unit (`ns` or `wall`), whether every round looks quantized |
+| `settings` | The candidate set, the cases when narrowed, the rounds and the timing protocol's constants, the band (`tolerance`, the band of `linear`) and `notMeasured` (the packed-activation form: it reads the quantizing producer's codes, which the sweep does not run) |
+| `cases` | The planned cases: id, storage, i4 group, `n`, `k`, the row counts measured and where the shape comes from (the model and the role of the linear) |
+| `summaries` | Per case and row count: the default profile's choice at `exact` and at `reorder` (by candidate name), the wall time, and the baseline re-measured at the end with its ratio to the first measurement (`baselineRepeat.driftRatio`) or why that failed |
+| `rows` | One per measured kernel: the case, the row count `m`, the candidate's name, its class, whether it is the baseline, its choice (the member of the GEMV family, lanes, column and row form), the pipeline keys, the workgroups, the time per dispatch (`perDispatch`) with its `rounds` and wall-clock rounds, the speed against the baseline; for the identical class whether every word equals the baseline's and how many differ; for the reorder class — and for the baseline at a row count with reorder rows — the largest absolute error against the host's f64 oracle, its use of the band, whether it is inside and the non-finite outputs; an `error` when it failed |
+| `deviceLost` | The loss that ended the sweep, or `null` |
 
 ## The record
 
@@ -209,9 +227,10 @@ run in order on one click or one command.
 - A production build asks for no untracked batch and lists only the tracked batches whose every step names an entry it
   holds: it holds no entry that reads a local distribution, and so no batch that needs one.
 - The page has no file picker and no paste box: the menu is the way in.
-- `synthetic-quick` is the tracked quick look at the three synthetic entries: `kernel-check` with its defaults,
+- `synthetic-quick` is the tracked quick look at three of the synthetic entries: `kernel-check` with its defaults,
   `geometry-sweep` at the `quick` set with one round and no idle time, `attention-bench` with its defaults. It is not
-  the evidence run.
+  the evidence run. `gemv-sweep` is not a step of it: its `quick` set measures about 1,600 kernels (about 1,250 without the
+  subgroup features), each with its own warm-up, which is no quick look even at one round.
 
 ### A batch run
 

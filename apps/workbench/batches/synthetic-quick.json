@@ -1,7 +1,7 @@
 {
   "format": "karume-workbench-batch/1",
   "title": "Synthetic entries: a quick look",
-  "description": "The three entries that read no distribution, one after the other, to see that they run on this host: the kernel checks (all twelve), a geometry sweep of the quick candidate set with one round per geometry and no idle time between cases, and the attention route bench. A quick look, not the evidence run: a sweep with one round and no cooling is no record to derive a geometry table from.",
+  "description": "Three of the entries that read no distribution, one after the other, to see that they run on this host: the kernel checks (all twelve), a geometry sweep of the quick candidate set with one round per geometry and no idle time between cases, and the attention route bench. A quick look, not the evidence run: a sweep with one round and no cooling is no record to derive a geometry table from. The GEMV sweep is left out: its quick set measures about 1,600 kernels.",
   "steps": [
     { "id": "kernel-check" },
     {
