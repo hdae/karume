@@ -13,6 +13,9 @@
  *   together in one {@link ConvertError}.
  * - {@link writeContainer} optionally writes what a source serves as a container, part by part, to
  *   a sink, with the real sha256 of every block and part, and returns what a manifest entry needs.
+ * - {@link placeTensors} reads a name map — JSON that says, per layout of a model's upstream files,
+ *   which key of a file is which initializer of which component — against a file's keys, and gives
+ *   per component the initializer name → key mapping the tensor list is built from.
  *
  * Web standard APIs only; no side effects at import.
  *
@@ -20,6 +23,14 @@
  */
 
 export { ConvertError } from "./src/errors.ts";
+export { NAME_MAP_FORMAT, placeTensors } from "./src/name-map.ts";
+export type {
+  NameMap,
+  NameMapComponent,
+  NameMapLayout,
+  NameMapRule,
+  TensorPlacement,
+} from "./src/name-map.ts";
 export type { SourceTensor, TensorDtype, TensorList } from "./src/tensors.ts";
 export { INVALID_SHA256, openConvertingSource } from "./src/source.ts";
 export type { ConvertingSource, ConvertingSourceInput } from "./src/source.ts";

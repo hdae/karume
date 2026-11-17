@@ -53,6 +53,9 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `packages/convert/` (private for now) — weights converted while a Session reads them: a tensor list encoded against
   the plan of a distributed preset (its part 0) and served as that preset's container, optionally written as a `krm`
   ([docs/spec/convert.md](docs/spec/convert.md)); depends on `@karume/runtime` and its `./container` subpath only
+- `packages/safetensors/` (private for now) — the safetensors reader for files too large to hold: a `Blob` or a ranged
+  reader opened from its header alone, each tensor read with one ranged read
+  ([docs/spec/safetensors.md](docs/spec/safetensors.md)); no dependency, not even the runtime
 - `packages/gemma4-app-support/` (private) — the Gemma 4 helpers the playground's chat page and the workbench's Gemma
   entries share: the mounts and their entry points, the expert cache's text forms, the stop record and the turn timing;
   only those two apps import it

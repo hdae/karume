@@ -14,7 +14,8 @@ the container format is [container-v1](../container-v1.md).
 - **The tensor list**: tensor name → element type (`F32`, `F16` or `BF16`), shape, and a function that reads that
   tensor's bytes (little endian, row-major, `numel × element size`). Nothing is read when the list is built or when the
   converting source is built; a tensor is read when a block of it is read.
-- **The name map**: initializer name → tensor name. It is the identity when omitted.
+- **The tensor names** (`tensorName`): initializer name → tensor name. It is the identity when omitted. A
+  [name map](#the-name-map) gives this mapping per component of a file.
 
 ## What is served
 
@@ -79,3 +80,63 @@ Guarantee: for the tensors of a distributed preset, the parts written against th
 values by the exporter are byte-identical to that preset's files (checked on the Anima transformer, bf16 tensors
 against the `i8` plan, and on a text conditioner's `bf16` copy — `packages/e2e/tests/e2e_anima_convert_test.ts`). The
 written container opens with `openContainer` as an unverified source, every block hash checked.
+
+## The name map
+
+Data that says which tensor of a weights file is which initializer of which component: one JSON document per model,
+written beside its export recipe, where both names are known (Anima: `tools/export-recipes/anima/name-map.json`). It
+holds no function and no tensor operation (select, slice, reshape): a tensor goes to its initializer as it is.
+
+| Field | What it is |
+| --- | --- |
+| `format` | `karume-name-map/1` |
+| `layouts[]` | Every layout the model's files exist in upstream (a single file, a file per component) |
+| `layouts[].name`, `.source` | The layout's name, and where its prefixes and markers come from (the recipe's lines, the upstream function) |
+| `layouts[].stripPrefix` | Prefixes one of which every key of the file starts with, the same one for every key; it is removed from every key first. Empty: the keys are taken as they are |
+| `layouts[].markers` | Keys, after that prefix is removed, that a file of the layout holds |
+| `layouts[].components[]` | `role` (the component's role in the distribution), `source` (where its rule list comes from), `route`, `rules` and `initializerPrefix` |
+
+A key goes to the component whose `route` is the longest prefix it starts with (`""` takes every key). The
+component's `rules` apply in order, each to the key as the rules before it left it; the order is part of the data
+(Anima's `adaln_modulation_self_attn.1` must be rewritten before `self_attn`, or it becomes
+`adaln_modulation_attn1.1`).
+
+| Rule | Effect |
+| --- | --- |
+| `{ "stripPrefix": p }` | Removes `p` when the key starts with it |
+| `{ "replace": a, "with": b }` | Replaces every occurrence of `a`, left to right, with `b` taken literally (Python's `str.replace`) |
+| `{ "exclude": s }` | Takes the key out when it contains `s`: the graph does not use that tensor |
+
+The initializer name is `initializerPrefix` followed by what the rules leave.
+
+### Placing a file's tensors
+
+`placeTensors(map, keys)` reads a map against a file's keys and gives:
+
+- `layout`: the one layout that recognises the file — every key carries the same one of its `stripPrefix` prefixes
+  (when it lists some), and the file holds every one of its markers;
+- `components`: per role of that layout (every role, possibly empty), initializer name → file key, in file order. The
+  component's tensor list is the file's tensors under these initializer names: `openConvertingSource` then needs no
+  `tensorName`, and an initializer no key is placed at is reported as missing, never read from a key of its name;
+- `excluded`: the keys an exclusion rule took out, and `unplaced`: the keys no route takes (both in file order; neither
+  is an error — whether the plan's initializers are all there is the converting source's check).
+
+Refused with one `ConvertError`, every problem listed together:
+
+- a map whose `format` is not `karume-name-map/1`;
+- a file no layout recognises (each layout's reason: the prefix, or the marker keys the file does not hold), or one
+  that more than one layout recognises;
+- two keys that map to one initializer of a component (both keys and the initializer are named);
+- a key whose longest route is the route of two components.
+
+Anima's map has three layouts. The single file: `model.diffusion_model.` or `net.` is stripped, `llm_adapter.*` goes to
+`text_conditioner` with that prefix removed, and every other key goes to `transformer` through diffusers' 23 Cosmos 2.0
+renames and 8 exclusions, as `anima/single_file.py` runs them. The diffusers repository's `transformer` and
+`text_conditioner` files: their keys as they are. Every initializer name carries `model.`, the attribute of the
+recipe's wrapper module.
+
+Guarantee: on the upstream single files `anima-base-v1.0` and `anima-turbo-v1.1` (685 keys each), the single-file
+layout places 567 keys in `transformer` and 118 in `text_conditioner`, excludes none and leaves none, and their tensors,
+read with [the safetensors reader](safetensors.md) and written against the `i8` and `bf16` transformer plans and the
+`bf16` text conditioner plan of the distributed models, are byte-identical to those presets' files
+(`packages/e2e/tests/e2e_anima_single_file_test.ts`).

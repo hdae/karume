@@ -212,8 +212,16 @@ maintainer's ruling of 2026-11-06).
      target preset's part 0, the `int8-sym` / `bf16` / `f32` encoders against fixtures from the exporter's Python, the
      converting `BlockSource` and the optional writer — and the runtime's subpath `@karume/runtime/container`;
      [spec/convert.md](spec/convert.md). The Anima transformer's `bf16` tensors written against the `i8` plan give
-     the 11 `i8` files byte for byte.)* Left from it: the safetensors reader and the name maps, the pipelines'
-     `fromSingleFile`, `f16` and int4 targets, LoRA, the published-package setup.
+     the 11 `i8` files byte for byte.)* *(Landed 2026-11-17, stage 2: the private package `@karume/safetensors` — a
+     `Blob` or ranged reader opened from its header alone, one ranged read per tensor, the runtime reader's checks
+     plus the 100 MB header bound; [spec/safetensors.md](spec/safetensors.md) — and the name map in `@karume/convert`
+     — the JSON format `karume-name-map/1` and `placeTensors`; [spec/convert.md](spec/convert.md#the-name-map) — with
+     Anima's map beside its recipe, `tools/export-recipes/anima/name-map.json` (the single file and the diffusers
+     files). The upstream `anima-base-v1.0` and `anima-turbo-v1.1` single files give the distributed `i8` and `bf16`
+     transformer files and `bf16` text conditioner files byte for byte.)* Left from it: the runtime's
+     `parseSafetensors` moved into the reader package, the pipelines' `fromSingleFile` (and the exporter putting the
+     map into the distribution, the manifest pointing at it), `f16` and int4 targets, LoRA, the published-package
+     setup.
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.

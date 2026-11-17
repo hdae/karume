@@ -1,0 +1,93 @@
+{
+  "format": "karume-name-map/1",
+  "layouts": [
+    {
+      "name": "single-file",
+      "source": "The upstream single files (circlestone-labs/Anima split_files/diffusion_models/*.safetensors, and Civitai fine-tunes): tools/export-recipes/anima/single_file.py KNOWN_PREFIXES (line 52) and _strip_prefix (lines 89-98), which require every key to carry the same one of the two prefixes. Markers: the first two keys diffusers 0.39.0 recognises Cosmos 2.0 by (CHECKPOINT_KEY_NAMES['cosmos-2.0'], diffusers/loaders/single_file_utils.py lines 146-150, without the prefix) and the text conditioner's embedding (CONDITIONER_PREFIX, single_file.py line 55).",
+      "stripPrefix": ["model.diffusion_model.", "net."],
+      "markers": [
+        "x_embedder.proj.1.weight",
+        "blocks.0.self_attn.q_proj.weight",
+        "llm_adapter.embed.weight"
+      ],
+      "components": [
+        {
+          "role": "text_conditioner",
+          "source": "tools/export-recipes/anima/single_file.py convert() lines 212-217: the keys under CONDITIONER_PREFIX 'llm_adapter.' (line 55) go to text_conditioner with that prefix removed and no rename. The 'model.' prefix: anima/export.py lines 445 and 471 load the text conditioner and wrap it in patch.AnimaConditioner, which holds it as self.model (patch.py line 307).",
+          "route": "llm_adapter.",
+          "rules": [{ "stripPrefix": "llm_adapter." }],
+          "initializerPrefix": "model."
+        },
+        {
+          "role": "transformer",
+          "source": "tools/export-recipes/anima/single_file.py convert() lines 218-221: every other key goes through diffusers 0.39.0 convert_cosmos_transformer_checkpoint_to_diffusers (diffusers/loaders/single_file_utils.py lines 3668-3778, the Cosmos 2.0 branch): the replacements are TRANSFORMER_KEYS_RENAME_DICT_COSMOS_2_0 (lines 3717-3741) in its order, each applied to every occurrence (str.replace, lines 3767-3768); the exclusions are TRANSFORMER_SPECIAL_KEYS_REMAP_COSMOS_2_0 (lines 3743-3752), a key containing one is removed after the renames (lines 3771-3776). The 'model.' prefix: anima/export.py lines 525, 541 and 600 load the transformer and wrap it in patch.AnimaDit / patch.AnimaDitTokens, which hold it as self.model (patch.py lines 375 and 475).",
+          "route": "",
+          "rules": [
+            { "replace": "t_embedder.1", "with": "time_embed.t_embedder" },
+            { "replace": "t_embedding_norm", "with": "time_embed.norm" },
+            { "replace": "blocks", "with": "transformer_blocks" },
+            { "replace": "adaln_modulation_self_attn.1", "with": "norm1.linear_1" },
+            { "replace": "adaln_modulation_self_attn.2", "with": "norm1.linear_2" },
+            { "replace": "adaln_modulation_cross_attn.1", "with": "norm2.linear_1" },
+            { "replace": "adaln_modulation_cross_attn.2", "with": "norm2.linear_2" },
+            { "replace": "adaln_modulation_mlp.1", "with": "norm3.linear_1" },
+            { "replace": "adaln_modulation_mlp.2", "with": "norm3.linear_2" },
+            { "replace": "self_attn", "with": "attn1" },
+            { "replace": "cross_attn", "with": "attn2" },
+            { "replace": "q_proj", "with": "to_q" },
+            { "replace": "k_proj", "with": "to_k" },
+            { "replace": "v_proj", "with": "to_v" },
+            { "replace": "output_proj", "with": "to_out.0" },
+            { "replace": "q_norm", "with": "norm_q" },
+            { "replace": "k_norm", "with": "norm_k" },
+            { "replace": "mlp.layer1", "with": "ff.net.0.proj" },
+            { "replace": "mlp.layer2", "with": "ff.net.2" },
+            { "replace": "x_embedder.proj.1", "with": "patch_embed.proj" },
+            { "replace": "final_layer.adaln_modulation.1", "with": "norm_out.linear_1" },
+            { "replace": "final_layer.adaln_modulation.2", "with": "norm_out.linear_2" },
+            { "replace": "final_layer.linear", "with": "proj_out" },
+            { "exclude": "accum_video_sample_counter" },
+            { "exclude": "accum_image_sample_counter" },
+            { "exclude": "accum_iteration" },
+            { "exclude": "accum_train_in_hours" },
+            { "exclude": "pos_embedder.seq" },
+            { "exclude": "pos_embedder.dim_spatial_range" },
+            { "exclude": "pos_embedder.dim_temporal_range" },
+            { "exclude": "_extra_state" }
+          ],
+          "initializerPrefix": "model."
+        }
+      ]
+    },
+    {
+      "name": "diffusers-transformer",
+      "source": "The transformer file of the diffusers repository (circlestone-labs/Anima-Base-v1.0-Diffusers, BASE_REPO of tools/export-recipes/anima/single_file.py line 47; transformer/diffusion_pytorch_model.safetensors). Markers: keys of that file.",
+      "stripPrefix": [],
+      "markers": ["patch_embed.proj.weight", "transformer_blocks.0.attn1.to_q.weight"],
+      "components": [
+        {
+          "role": "transformer",
+          "source": "tools/export-recipes/anima/export.py line 525 loads the file with CosmosTransformer3DModel.from_pretrained(subfolder='transformer'), whose parameter names are the file's keys; lines 541 and 600 wrap it in patch.AnimaDit / patch.AnimaDitTokens, which hold it as self.model (patch.py lines 375 and 475).",
+          "route": "",
+          "rules": [],
+          "initializerPrefix": "model."
+        }
+      ]
+    },
+    {
+      "name": "diffusers-text-conditioner",
+      "source": "The text conditioner file of the diffusers repository (circlestone-labs/Anima-Base-v1.0-Diffusers, BASE_REPO of tools/export-recipes/anima/single_file.py line 47; text_conditioner/diffusion_pytorch_model.safetensors). Markers: keys of that file.",
+      "stripPrefix": [],
+      "markers": ["embed.weight", "blocks.0.cross_attn.q_proj.weight"],
+      "components": [
+        {
+          "role": "text_conditioner",
+          "source": "tools/export-recipes/anima/export.py line 445 loads the file with AnimaTextConditioner.from_pretrained(subfolder='text_conditioner'), whose parameter names are the file's keys; line 471 wraps it in patch.AnimaConditioner, which holds it as self.model (patch.py line 307).",
+          "route": "",
+          "rules": [],
+          "initializerPrefix": "model."
+        }
+      ]
+    }
+  ]
+}
