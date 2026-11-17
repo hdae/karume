@@ -60,6 +60,64 @@
       ]
     },
     {
+      "name": "single-file-unprefixed",
+      "source": "A single file whose keys carry no prefix (a 40-block fine-tune is saved this way): tools/export-recipes/anima/single_file.py UNPREFIXED_MARKERS (lines 63-67) and _strip_prefix (lines 128-129), which take a file whose keys carry neither known prefix as it is only when it holds every one of those keys. Markers: UNPREFIXED_MARKERS, the same keys as the single-file layout's markers.",
+      "stripPrefix": [],
+      "markers": [
+        "x_embedder.proj.1.weight",
+        "blocks.0.self_attn.q_proj.weight",
+        "llm_adapter.embed.weight"
+      ],
+      "components": [
+        {
+          "role": "text_conditioner",
+          "source": "tools/export-recipes/anima/single_file.py convert() lines 306-311: the keys under CONDITIONER_PREFIX 'llm_adapter.' (line 70) go to text_conditioner with that prefix removed and no rename, as for the single-file layout. The 'model.' prefix: anima/export.py lines 445 and 471 load the text conditioner and wrap it in patch.AnimaConditioner, which holds it as self.model (patch.py line 307).",
+          "route": "llm_adapter.",
+          "rules": [{ "stripPrefix": "llm_adapter." }],
+          "initializerPrefix": "model."
+        },
+        {
+          "role": "transformer",
+          "source": "tools/export-recipes/anima/single_file.py convert() lines 312-315: every other key goes through diffusers 0.39.0 convert_cosmos_transformer_checkpoint_to_diffusers with the same replacements and exclusions as the single-file layout (diffusers/loaders/single_file_utils.py lines 3668-3778). The rules hold for any block count: the replacements do not name a block index. The 'model.' prefix: anima/export.py lines 525, 541 and 600 load the transformer and wrap it in patch.AnimaDit / patch.AnimaDitTokens, which hold it as self.model (patch.py lines 375 and 475).",
+          "route": "",
+          "rules": [
+            { "replace": "t_embedder.1", "with": "time_embed.t_embedder" },
+            { "replace": "t_embedding_norm", "with": "time_embed.norm" },
+            { "replace": "blocks", "with": "transformer_blocks" },
+            { "replace": "adaln_modulation_self_attn.1", "with": "norm1.linear_1" },
+            { "replace": "adaln_modulation_self_attn.2", "with": "norm1.linear_2" },
+            { "replace": "adaln_modulation_cross_attn.1", "with": "norm2.linear_1" },
+            { "replace": "adaln_modulation_cross_attn.2", "with": "norm2.linear_2" },
+            { "replace": "adaln_modulation_mlp.1", "with": "norm3.linear_1" },
+            { "replace": "adaln_modulation_mlp.2", "with": "norm3.linear_2" },
+            { "replace": "self_attn", "with": "attn1" },
+            { "replace": "cross_attn", "with": "attn2" },
+            { "replace": "q_proj", "with": "to_q" },
+            { "replace": "k_proj", "with": "to_k" },
+            { "replace": "v_proj", "with": "to_v" },
+            { "replace": "output_proj", "with": "to_out.0" },
+            { "replace": "q_norm", "with": "norm_q" },
+            { "replace": "k_norm", "with": "norm_k" },
+            { "replace": "mlp.layer1", "with": "ff.net.0.proj" },
+            { "replace": "mlp.layer2", "with": "ff.net.2" },
+            { "replace": "x_embedder.proj.1", "with": "patch_embed.proj" },
+            { "replace": "final_layer.adaln_modulation.1", "with": "norm_out.linear_1" },
+            { "replace": "final_layer.adaln_modulation.2", "with": "norm_out.linear_2" },
+            { "replace": "final_layer.linear", "with": "proj_out" },
+            { "exclude": "accum_video_sample_counter" },
+            { "exclude": "accum_image_sample_counter" },
+            { "exclude": "accum_iteration" },
+            { "exclude": "accum_train_in_hours" },
+            { "exclude": "pos_embedder.seq" },
+            { "exclude": "pos_embedder.dim_spatial_range" },
+            { "exclude": "pos_embedder.dim_temporal_range" },
+            { "exclude": "_extra_state" }
+          ],
+          "initializerPrefix": "model."
+        }
+      ]
+    },
+    {
       "name": "diffusers-transformer",
       "source": "The transformer file of the diffusers repository (circlestone-labs/Anima-Base-v1.0-Diffusers, BASE_REPO of tools/export-recipes/anima/single_file.py line 47; transformer/diffusion_pytorch_model.safetensors). Markers: keys of that file.",
       "stripPrefix": [],

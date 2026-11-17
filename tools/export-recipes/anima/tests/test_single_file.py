@@ -14,7 +14,17 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from anima.single_file import _assert_covers, _link, _source_provenance, _strip_prefix
+from anima.single_file import (
+    UNPREFIXED_MARKERS,
+    _assert_covers,
+    _block_count,
+    _declared_shapes,
+    _file_shapes,
+    _link,
+    _source_provenance,
+    _strip_prefix,
+    _transformer_config,
+)
 
 
 def _state(prefix: str) -> dict[str, torch.Tensor]:
@@ -48,36 +58,158 @@ class TestStripPrefix:
         with pytest.raises(SystemExit, match="unknown key prefix"):
             _strip_prefix(mixed)
 
+    def test_it_takes_a_file_without_a_prefix_that_holds_the_markers(self) -> None:
+        """A fine-tune saved without a wrapping (keys as the DiT names them) is normalized the
+        same way."""
+        state = {**dict.fromkeys(UNPREFIXED_MARKERS, torch.zeros(1)), **_state("")}
+
+        stripped = _strip_prefix(state)
+
+        assert sorted(stripped) == sorted(f"net.{name}" for name in state)
+
+    def test_it_refuses_a_file_without_a_prefix_that_lacks_a_marker(self) -> None:
+        """Without every marker, "no prefix" is not assumed — an unknown wrapping would pass as
+        one otherwise."""
+        state = {**dict.fromkeys(UNPREFIXED_MARKERS[:-1], torch.zeros(1)), **_state("")}
+
+        with pytest.raises(SystemExit, match="unknown key prefix"):
+            _strip_prefix(state)
+
+
+class TestBlockCount:
+    """The DiT's block count comes from the checkpoint's keys (a deeper fine-tune declares it
+    nowhere else)."""
+
+    @staticmethod
+    def _blocks(*indices: int) -> dict[str, torch.Tensor]:
+        state = {f"net.blocks.{index}.self_attn.q_proj.weight": torch.zeros(1) for index in indices}
+        # The conditioner's blocks are not the DiT's.
+        state["net.llm_adapter.blocks.7.cross_attn.q_proj.weight"] = torch.zeros(1)
+        return state
+
+    def test_it_counts_the_dit_blocks(self) -> None:
+        assert _block_count(self._blocks(*range(40))) == 40
+
+    def test_it_refuses_a_gap_in_the_indices(self) -> None:
+        with pytest.raises(SystemExit, match=r"missing \[2\]"):
+            _block_count(self._blocks(0, 1, 3))
+
+    def test_it_refuses_a_checkpoint_without_blocks(self) -> None:
+        with pytest.raises(SystemExit, match="no DiT block"):
+            _block_count(self._blocks())
+
+
+class TestTransformerConfig:
+    """The transformer's config is base's with the block count of the checkpoint."""
+
+    BASE = (
+        b'{\n  "_class_name": "CosmosTransformer3DModel",\n  "num_layers": 28,\n'
+        b'  "in_channels": 16\n}'
+    )
+
+    def test_base_s_count_keeps_base_s_bytes(self) -> None:
+        assert _transformer_config(self.BASE, 28) == self.BASE
+
+    def test_another_count_changes_that_field_only(self) -> None:
+        config = json.loads(_transformer_config(self.BASE, 40))
+
+        assert config == {**json.loads(self.BASE), "num_layers": 40}
+
 
 class TestAssertCovers:
     """The check that keeps "weights only partly carried over" from being written the day the
     conversion table moves upstream."""
 
     @pytest.fixture
-    def reference(self, tmp_path: Path) -> Path:
+    def reference(self, tmp_path: Path) -> dict[str, tuple[int, ...]]:
+        """Base's file, read the way the rebuild reads it (shapes from its header)."""
         path = tmp_path / "reference.safetensors"
         save_file({"a": torch.zeros(2, 3), "b": torch.zeros(4)}, path)
-        return path
+        return _file_shapes(path)
 
-    def test_it_passes_when_the_keys_and_shapes_match(self, reference: Path) -> None:
-        _assert_covers({"a": torch.zeros(2, 3), "b": torch.zeros(4)}, reference, "t")
+    def test_it_passes_when_the_keys_and_shapes_match(self, reference) -> None:
+        _assert_covers({"a": torch.zeros(2, 3), "b": torch.zeros(4)}, reference, "t", "base")
 
-    def test_it_stops_when_a_key_is_missing(self, reference: Path) -> None:
+    def test_it_stops_when_a_key_is_missing(self, reference) -> None:
         with pytest.raises(SystemExit, match="1 missing"):
-            _assert_covers({"a": torch.zeros(2, 3)}, reference, "t")
+            _assert_covers({"a": torch.zeros(2, 3)}, reference, "t", "base")
 
-    def test_it_stops_when_an_unexpected_key_is_left_over(self, reference: Path) -> None:
+    def test_it_stops_when_an_unexpected_key_is_left_over(self, reference) -> None:
         """A leftover key is a sign that "the table hit a different model", so this fails too."""
         state = {"a": torch.zeros(2, 3), "b": torch.zeros(4), "c": torch.zeros(1)}
 
         with pytest.raises(SystemExit, match="1 extra"):
-            _assert_covers(state, reference, "t")
+            _assert_covers(state, reference, "t", "base")
 
-    def test_it_stops_when_a_shape_differs(self, reference: Path) -> None:
+    def test_it_stops_when_a_shape_differs(self, reference) -> None:
         """Even with matching key names, a different shape means another architecture — it loads,
         but the picture breaks."""
         with pytest.raises(SystemExit, match="shape differs from base"):
-            _assert_covers({"a": torch.zeros(3, 2), "b": torch.zeros(4)}, reference, "t")
+            _assert_covers({"a": torch.zeros(3, 2), "b": torch.zeros(4)}, reference, "t", "base")
+
+
+#: Base's transformer config (circlestone-labs/Anima-Base-v1.0-Diffusers `transformer/config.json`)
+#: with a reduced block count — the declared state is built on the meta device, so the real width
+#: costs nothing.
+COSMOS_CONFIG = {
+    "_class_name": "CosmosTransformer3DModel",
+    "adaln_lora_dim": 256,
+    "attention_head_dim": 128,
+    "concat_padding_mask": True,
+    "controlnet_block_every_n": None,
+    "crossattn_proj_in_channels": 1024,
+    "encoder_hidden_states_channels": 1024,
+    "extra_pos_embed_type": None,
+    "img_context_dim_in": None,
+    "img_context_dim_out": 2048,
+    "img_context_num_tokens": 256,
+    "in_channels": 16,
+    "max_size": [128, 240, 240],
+    "mlp_ratio": 4.0,
+    "num_attention_heads": 16,
+    "num_layers": 2,
+    "out_channels": 16,
+    "patch_size": [1, 2, 2],
+    "rope_scale": [1.0, 4.0, 4.0],
+    "text_embed_dim": 1024,
+    "use_crossattn_projection": False,
+}
+
+
+class TestDeclaredTransformer:
+    """The transformer is compared against what a transformer of the checkpoint's block count
+    declares — a deeper fine-tune passes against its own count and fails against base's."""
+
+    @pytest.fixture(autouse=True)
+    def _diffusers(self) -> None:
+        pytest.importorskip("diffusers")
+
+    @staticmethod
+    def _declared(num_layers: int) -> dict[str, tuple[int, ...]]:
+        base = json.dumps(COSMOS_CONFIG).encode()
+        return _declared_shapes(_transformer_config(base, num_layers))
+
+    def test_one_more_block_declares_one_more_block_of_keys(self) -> None:
+        two, three = self._declared(2), self._declared(3)
+        added = sorted(set(three) - set(two))
+
+        assert added and all(name.startswith("transformer_blocks.2.") for name in added)
+        assert set(two) <= set(three)
+
+    def test_a_deeper_state_passes_against_its_own_count(self) -> None:
+        state = {
+            name: torch.empty(shape, device="meta") for name, shape in self._declared(3).items()
+        }
+
+        _assert_covers(state, self._declared(3), "transformer", "a transformer of 3 blocks")
+
+    def test_a_deeper_state_fails_against_base_s_count(self) -> None:
+        state = {
+            name: torch.empty(shape, device="meta") for name, shape in self._declared(3).items()
+        }
+
+        with pytest.raises(SystemExit, match="extra"):
+            _assert_covers(state, self._declared(2), "transformer", "a transformer of 2 blocks")
 
 
 class TestLink:

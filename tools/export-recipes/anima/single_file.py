@@ -13,13 +13,18 @@ The resulting directory is "a copy of base with only transformer and text_condit
 - **The checkpoint holds only two parts: the DiT (567 tensors) and llm_adapter (118 tensors)**;
   text_encoder / VAE / tokenizer are not in it (measured 2026-08-22). So those are taken from base
   as they are (**symlinks** — several GB are not duplicated per variant).
-- The key names use the ComfyUI-style spelling (a `net.` or `model.diffusion_model.` prefix), so
-  they go through diffusers' conversion table for Cosmos. Measured, they cover the keys of base's
-  transformer **exactly, with nothing missing or extra**, and with 0 shape mismatches.
+- The key names use the ComfyUI-style spelling (a `net.` or `model.diffusion_model.` prefix, or
+  none), so they go through diffusers' conversion table for Cosmos. Measured, they cover the keys of
+  base's transformer **exactly, with nothing missing or extra**, and with 0 shape mismatches.
+- A fine-tune may deepen the DiT (a 40-block fine-tune: 12 blocks inserted, the width unchanged).
+  The block count comes from the checkpoint's keys, and the transformer's `config.json` is base's
+  with that one field changed (byte for byte base's when the count is base's).
 
-MUST: compare the converted key set with base's actual files before writing. If the table
-changes upstream and "weights only partly carried over" are written out silently, both the
-export and the distribution pass and **only the images break, silently**.
+MUST: compare the converted key set before writing — the transformer against the state a
+transformer of the checkpoint's block count declares (built from that config on the meta device),
+the text conditioner against base's file. If the table changes upstream and "weights only partly
+carried over" are written out silently, both the export and the distribution pass and **only the
+images break, silently**.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 # MUST: import `diffusers` / `huggingface_hub` **inside functions** (the same practice as the
@@ -47,18 +53,43 @@ from safetensors.torch import load_file, save_file
 BASE_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
 #: The prefix the conversion table expects. The civitai side wraps keys in either `net.` or
-#: `model.diffusion_model.`.
+#: `model.diffusion_model.`, or not at all ({@link UNPREFIXED_MARKERS}).
 CANONICAL_PREFIX = "net."
 KNOWN_PREFIXES = ("model.diffusion_model.", "net.")
 
+#: Keys a single file **without a prefix** holds (the markers of the name map's layout of such a
+#: file — `name-map.json`): a file whose keys carry no known prefix is taken as it is only when it
+#: holds all of them, so an unknown wrapping still fails instead of passing as "no prefix".
+UNPREFIXED_MARKERS = (
+    "x_embedder.proj.1.weight",
+    "blocks.0.self_attn.q_proj.weight",
+    "llm_adapter.embed.weight",
+)
+
 #: The subtree on the checkpoint side that corresponds to text_conditioner.
 CONDITIONER_PREFIX = "llm_adapter."
+
+#: A DiT block's keys on the checkpoint side, after {@link _strip_prefix} (`llm_adapter.blocks.*`
+#: is the conditioner's and does not match).
+TRANSFORMER_BLOCK_KEY = re.compile(rf"{re.escape(CANONICAL_PREFIX)}blocks\.(\d+)\.")
+
+#: The field of the transformer's `config.json` that holds the block count.
+NUM_LAYERS_FIELD = "num_layers"
 
 #: The parts taken from base by symlink (what the checkpoint does not hold).
 SHARED_ENTRIES = ("text_encoder", "vae", "tokenizer", "t5_tokenizer", "scheduler")
 
 #: The two parts that are replaced, and their weight file name (the diffusers default).
 WEIGHT_FILENAME = "diffusion_pytorch_model.safetensors"
+
+#: What the rebuild reads from base: both configs, the text conditioner's file (the comparison
+#: before writing) and the linked parts. Base's transformer weights are not among them — the
+#: transformer is compared against the state its config declares.
+BASE_PATTERNS = (
+    "transformer/config.json",
+    "text_conditioner/*",
+    *(f"{entry}/*" for entry in SHARED_ENTRIES),
+)
 
 #: The record of where the conversion came from (for people to trace — the distribution's
 #: attribution is held by `anima/card.py`).
@@ -87,33 +118,92 @@ CIVITAI_CARRIED_FIELDS = (
 
 
 def _strip_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Strip a known prefix and normalize to the `net.` the conversion table expects."""
+    """Strip a known prefix (or none — {@link UNPREFIXED_MARKERS}) and normalize to the `net.`
+    the conversion table expects."""
     for prefix in KNOWN_PREFIXES:
         if all(name.startswith(prefix) for name in state):
             return {
                 f"{CANONICAL_PREFIX}{name.removeprefix(prefix)}": value
                 for name, value in state.items()
             }
+    if all(marker in state for marker in UNPREFIXED_MARKERS):
+        return {f"{CANONICAL_PREFIX}{name}": value for name, value in state.items()}
     heads = sorted({name.split(".")[0] for name in state})
-    raise SystemExit(f"unknown key prefix: {heads} (expected: {', '.join(KNOWN_PREFIXES)})")
+    raise SystemExit(
+        f"unknown key prefix: {heads} (expected: {', '.join(KNOWN_PREFIXES)}, or no prefix with"
+        f" the keys {', '.join(UNPREFIXED_MARKERS)})"
+    )
 
 
-def _assert_covers(converted: Mapping[str, torch.Tensor], reference: Path, label: str) -> None:
-    """Check that the converted state covers base's actual files exactly (key set and shapes)."""
-    expected = load_file(reference)
+def _block_count(stripped: Mapping[str, torch.Tensor]) -> int:
+    """The DiT's block count, from the checkpoint's keys (after {@link _strip_prefix}).
+
+    MUST: the indices run from 0 without a gap — a hole would make the config declare blocks the
+    file does not fill, and the comparison would then report them as "missing" one by one instead
+    of naming the cause.
+    """
+    indices = {
+        int(match.group(1)) for name in stripped if (match := TRANSFORMER_BLOCK_KEY.match(name))
+    }
+    if not indices:
+        raise SystemExit("the checkpoint holds no DiT block (no key 'blocks.<index>.*')")
+    if indices != set(range(len(indices))):
+        gaps = sorted(set(range(max(indices) + 1)) - indices)
+        raise SystemExit(
+            f"the DiT block indices are not 0..{len(indices) - 1}: {len(indices)} blocks up to"
+            f" index {max(indices)}, missing {gaps[:5]}"
+        )
+    return len(indices)
+
+
+def _transformer_config(base_config: bytes, num_layers: int) -> bytes:
+    """Base's transformer `config.json` with the block count set to `num_layers` (the same bytes
+    when it is base's count)."""
+    config = json.loads(base_config)
+    if config[NUM_LAYERS_FIELD] == num_layers:
+        return base_config
+    return (json.dumps({**config, NUM_LAYERS_FIELD: num_layers}, indent=2) + "\n").encode()
+
+
+def _declared_shapes(config: bytes) -> dict[str, tuple[int, ...]]:
+    """The state a transformer built from `config` declares (name → shape), on the meta device —
+    no weight is allocated."""
+    from diffusers import CosmosTransformer3DModel
+
+    with torch.device("meta"):
+        model = CosmosTransformer3DModel.from_config(json.loads(config))
+    return {name: tuple(tensor.shape) for name, tensor in model.state_dict().items()}
+
+
+def _file_shapes(path: Path) -> dict[str, tuple[int, ...]]:
+    """The tensors of a safetensors file (name → shape), read from its header."""
+    with safe_open(path, "pt") as handle:
+        # `safe_open` is not a mapping: its names come from `keys()` only.
+        names = handle.keys()
+        return {name: tuple(handle.get_slice(name).get_shape()) for name in names}
+
+
+def _assert_covers(
+    converted: Mapping[str, torch.Tensor],
+    expected: Mapping[str, tuple[int, ...]],
+    label: str,
+    against: str,
+) -> None:
+    """Check that the converted state covers `expected` exactly (key set and shapes); `against`
+    names what `expected` is in the diagnostics."""
     missing = sorted(set(expected) - set(converted))
     extra = sorted(set(converted) - set(expected))
     if missing or extra:
         raise SystemExit(
-            f"{label}: the converted keys do not match base — {len(missing)} missing"
+            f"{label}: the converted keys do not match {against} — {len(missing)} missing"
             f" {missing[:3]} / {len(extra)} extra {extra[:3]}"
         )
     mismatched = [
-        name for name in expected if tuple(expected[name].shape) != tuple(converted[name].shape)
+        name for name in expected if tuple(expected[name]) != tuple(converted[name].shape)
     ]
     if mismatched:
         raise SystemExit(
-            f"{label}: shape differs from base in {len(mismatched)} keys {mismatched[:3]}"
+            f"{label}: shape differs from {against} in {len(mismatched)} keys {mismatched[:3]}"
         )
 
 
@@ -200,8 +290,12 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     # Read the record **before the heavy work** (if it is broken, fail before minutes of
     # conversion).
     provenance = _source_provenance(checkpoint, base_repo)
-    base = Path(snapshot_download(base_repo))
+    base = Path(snapshot_download(base_repo, allow_patterns=list(BASE_PATTERNS)))
     stripped = _strip_prefix(load_file(checkpoint))
+    num_layers = _block_count(stripped)
+    transformer_config = _transformer_config(
+        (base / "transformer" / "config.json").read_bytes(), num_layers
+    )
     # MUST: text_conditioner **does not go through the conversion table**, and **is taken out
     # before the table is called**. (1) The Cosmos table rewrites even the inside of llm_adapter
     # to diffusers names (`transformer_blocks.0.attn1.*`), but base's text_conditioner keeps the
@@ -219,18 +313,33 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     transformer = {
         name: value for name, value in converted.items() if not name.startswith(CONDITIONER_PREFIX)
     }
-    _assert_covers(transformer, base / "transformer" / WEIGHT_FILENAME, "transformer")
-    _assert_covers(conditioner, base / "text_conditioner" / WEIGHT_FILENAME, "text_conditioner")
+    _assert_covers(
+        transformer,
+        _declared_shapes(transformer_config),
+        "transformer",
+        f"a transformer of {num_layers} blocks",
+    )
+    _assert_covers(
+        conditioner,
+        _file_shapes(base / "text_conditioner" / WEIGHT_FILENAME),
+        "text_conditioner",
+        "base",
+    )
 
     out.mkdir(parents=True, exist_ok=True)
+    # The checkpoint has no config: the text conditioner's is base's, the transformer's base's with
+    # the checkpoint's block count.
+    configs = {
+        "transformer": transformer_config,
+        "text_conditioner": (base / "text_conditioner" / "config.json").read_bytes(),
+    }
     for name, state in (("transformer", transformer), ("text_conditioner", conditioner)):
         target = out / name
         target.mkdir(parents=True, exist_ok=True)
-        # The checkpoint has no config (the architecture is identical to base), so copy it from
-        # base.
-        (target / "config.json").write_bytes((base / name / "config.json").read_bytes())
+        (target / "config.json").write_bytes(configs[name])
         save_file(state, target / WEIGHT_FILENAME)
         print(f"[single-file] {name}: {len(state)} tensors", flush=True)
+    print(f"[single-file] transformer: {num_layers} blocks", flush=True)
 
     for entry in SHARED_ENTRIES:
         _link(base / entry, out / entry)

@@ -135,11 +135,12 @@ Refused with one `ConvertError`, every problem listed together:
 - two keys that map to one initializer of a component (both keys and the initializer are named);
 - a key whose longest route is the route of two components.
 
-Anima's map has three layouts. The single file: `model.diffusion_model.` or `net.` is stripped, `llm_adapter.*` goes to
+Anima's map has four layouts. The single file: `model.diffusion_model.` or `net.` is stripped, `llm_adapter.*` goes to
 `text_conditioner` with that prefix removed, and every other key goes to `transformer` through diffusers' 23 Cosmos 2.0
-renames and 8 exclusions, as `anima/single_file.py` runs them. The diffusers repository's `transformer` and
-`text_conditioner` files: their keys as they are. Every initializer name carries `model.`, the attribute of the
-recipe's wrapper module.
+renames and 8 exclusions, as `anima/single_file.py` runs them. The single file without a prefix: the same markers and
+the same components, with no prefix stripped (a 40-block fine-tune is saved this way; the rules name no block index,
+so they hold for any block count). The diffusers repository's `transformer` and `text_conditioner` files: their keys
+as they are. Every initializer name carries `model.`, the attribute of the recipe's wrapper module.
 
 Guarantee: on the upstream single files `anima-base-v1.0` and `anima-turbo-v1.1` (685 keys each), the single-file
 layout places 567 keys in `transformer` and 118 in `text_conditioner`, excludes none and leaves none, and their tensors,
