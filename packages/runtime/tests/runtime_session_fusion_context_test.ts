@@ -8,6 +8,7 @@
 import { describe, it } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { FUSION_RULES } from "../src/runtime/fusion.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import {
   plannedResidentWeights,
@@ -54,6 +55,7 @@ const RESIDENT: ReadonlyMap<string, ResidentWeightStorage> = new Map<string, Res
 const contextOf = (knobs: Partial<SessionFusionKnobs>) =>
   sessionFusionContext({
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     knobs: { ...DEFAULT_KNOBS, ...knobs },
     useCounts: new Map(),
     outputNames: new Set(),

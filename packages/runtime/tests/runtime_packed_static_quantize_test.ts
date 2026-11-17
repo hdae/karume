@@ -11,6 +11,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import { FUSION_RULES, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
@@ -37,6 +38,9 @@ import {
 import { type DeclarationJson, GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 type Storage = "i2" | "i4" | "i8";
+
+/** The default profile's GEMV choices (the table the predicates read before it moved there). */
+const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 /**
  * One row of the measured table (`PARALLEL_SHAPES`) — points to the consumer linear's shape as is.
@@ -222,6 +226,7 @@ const plan = (o: Options = {}, context: Partial<Parameters<typeof planFusions>[1
   const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === shape.k);
   return planFusions(planGraph(ir, {}).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {
@@ -354,6 +359,7 @@ describe("pairing of packed int8 activations (ADR 0105)", () => {
     const ir: IrGraph = mergeGraph(graph, storageMap({ shape: DEFAULT_SHAPE }));
     const fused = planFusions(planGraph(ir, {}).nodes, {
       rules: FUSION_RULES,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: {
@@ -390,22 +396,30 @@ describe("per-shape decisions (ADR 0105 addendum 1)", () => {
     for (const shape of PACKED_SHAPES) {
       const label = JSON.stringify(shape);
       const { storage, n, k, group, lanes } = shape;
-      assertEquals(linearGemvParallelEligible(storage, 1, n, k, group), lanes, label);
-      assertEquals(linearGemvPackedEligible(storage, 1, n, k, group), lanes, label);
+      assertEquals(linearGemvParallelEligible(GEMV, storage, 1, n, k, group), lanes, label);
+      assertEquals(linearGemvPackedEligible(GEMV, storage, 1, n, k, group), lanes, label);
     }
     for (const shape of PLAIN_SHAPES) {
       const label = JSON.stringify(shape);
       const { storage, n, k, group, lanes } = shape;
-      assertEquals(linearGemvParallelEligible(storage, 1, n, k, group), lanes, label);
-      assertEquals(linearGemvPackedEligible(storage, 1, n, k, group), undefined, label);
+      assertEquals(linearGemvParallelEligible(GEMV, storage, 1, n, k, group), lanes, label);
+      assertEquals(linearGemvPackedEligible(GEMV, storage, 1, n, k, group), undefined, label);
     }
   });
 
   it("shapes not in the table and M > 8 are undefined for both predicates", () => {
-    assertEquals(linearGemvPackedEligible("i2", 1, 260, 1536), undefined, "n not in the table");
+    assertEquals(
+      linearGemvPackedEligible(GEMV, "i2", 1, 260, 1536),
+      undefined,
+      "n not in the table",
+    );
     const { storage, n, k, group } = PACKED_SHAPES[0];
-    assertEquals(linearGemvParallelEligible(storage, 9, n, k, group), undefined, "M=9 parallel");
-    assertEquals(linearGemvPackedEligible(storage, 9, n, k, group), undefined, "M=9 packed");
+    assertEquals(
+      linearGemvParallelEligible(GEMV, storage, 9, n, k, group),
+      undefined,
+      "M=9 parallel",
+    );
+    assertEquals(linearGemvPackedEligible(GEMV, storage, 9, n, k, group), undefined, "M=9 packed");
   });
 });
 
@@ -488,6 +502,7 @@ const fuseLinearStaticQuantize = (
       : { storage: o.storage ?? "i8" };
   return planFusions(planGraph(graph, {}).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {

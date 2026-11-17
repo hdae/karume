@@ -11,7 +11,12 @@ import {
   expertLinearUnit,
   expertLinearWgsl,
 } from "../src/kernels/expert-linear.ts";
-import { linearGemvParams, linearGemvWgsl } from "../src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import {
+  defaultLinearGemvVariant,
+  linearGemvParams,
+  linearGemvWgsl,
+} from "../src/kernels/linear-gemv.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
@@ -113,7 +118,13 @@ describe.skipIf(!GPU_AVAILABLE)("expert_linear kernel (real GPU)", () => {
           const group = storage === "f32" ? undefined : GROUP;
           const data = fixture(storage, experts, n, k);
           const steps = widened(data, storage);
-          const gemv = await pipelineOf(linearGemvWgsl(storage === "f32" ? "f32" : "i4", group));
+          const gemv = await pipelineOf(
+            linearGemvWgsl(
+              storage === "f32" ? "f32" : "i4",
+              group,
+              defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv),
+            ),
+          );
           const kernel = await pipelineOf(expertLinearWgsl(storage, group));
           for (const sharedX of [true, false]) {
             const xRows = sharedX ? tokens : tokens * picks;

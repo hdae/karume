@@ -2,7 +2,9 @@ import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { CodecName } from "../src/format/container/codecs.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
+  defaultLinearGemvVariant,
   type LinearGemvParallelLanes,
   linearGemvParallelWgsl,
   linearGemvParams,
@@ -173,7 +175,17 @@ describe.skipIf(!GPU_AVAILABLE)("parallel accumulation of the quantized GEMV (re
               return out.slice(0, m * n);
             };
             const baseline = new Float32Array(
-              (await run(linearGemvWgsl(storage, group), 32, 1)).buffer,
+              (
+                await run(
+                  linearGemvWgsl(
+                    storage,
+                    group,
+                    defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv),
+                  ),
+                  32,
+                  1,
+                )
+              ).buffer,
             );
             for (const lanes of [2, 4, 8, 16, 32] satisfies LinearGemvParallelLanes[]) {
               let first: Uint32Array<ArrayBuffer> | undefined;

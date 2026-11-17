@@ -20,7 +20,12 @@ import {
   expertLinearParams,
   expertLinearWgsl,
 } from "../../runtime/src/kernels/expert-linear.ts";
-import { linearGemvParams, linearGemvWgsl } from "../../runtime/src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
+import {
+  defaultLinearGemvVariant,
+  linearGemvParams,
+  linearGemvWgsl,
+} from "../../runtime/src/kernels/linear-gemv.ts";
 import {
   type CheckCase,
   type CheckOptions,
@@ -178,8 +183,15 @@ export const checkExpertLinear = async (
             expertLinearDispatch(rows, n, gpu.limits.maxComputeWorkgroupsPerDimension),
           ),
         );
-        // The oracle: linear's M = 1 GEMV over one expert's rows (bias 0, steps widened).
-        const gemv = await compile(linearGemvWgsl("i4", GROUP));
+        // The oracle: linear's M = 1 GEMV over one expert's rows (bias 0, steps widened), in the
+        // default profile's variant (built without a Session, so no adapter's table applies).
+        const gemv = await compile(
+          linearGemvWgsl(
+            "i4",
+            GROUP,
+            defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv),
+          ),
+        );
         const experts = Array.from({ length: EXPERTS }, (_, expert) => ({
           weight: make(data.packed.slice((expert * n * k) / 8, ((expert + 1) * n * k) / 8)),
           steps: make(data.widened.slice((expert * n * k) / GROUP, ((expert + 1) * n * k) / GROUP)),

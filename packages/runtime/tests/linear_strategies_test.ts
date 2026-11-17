@@ -7,6 +7,7 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import {
   LINEAR_STRATEGIES,
@@ -61,6 +62,7 @@ const facts = (
   weightStorage,
   groupSize: overrides.groupSize,
   knobs: { ...DEFAULTS, ...overrides.knobs },
+  linearGemv: overrides.linearGemv ?? DEFAULT_GEOMETRY_PROFILE.linearGemv,
   packed: overrides.packed,
   prologue: overrides.prologue,
 });

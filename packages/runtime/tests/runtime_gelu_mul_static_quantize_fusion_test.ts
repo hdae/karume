@@ -7,6 +7,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { prologueUnaryWgsl } from "../src/codegen/elementwise.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import {
   GELU_MUL_STATIC_QUANTIZE_WORKGROUP_SIZE,
@@ -38,6 +39,7 @@ const planned = (options: GeluMulStaticQuantizeGraphOptions = {}) => {
   );
   const context: FusionContext = {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {

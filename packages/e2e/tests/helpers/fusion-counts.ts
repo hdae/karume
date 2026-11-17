@@ -17,6 +17,7 @@
 
 import { isNotFound, stat } from "@karume/test-support/fs";
 import type { IrGraph } from "../../../runtime/src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../../runtime/src/kernels/geometry-profile.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
   type ExternalRuleName,
@@ -182,6 +183,8 @@ export const planDistributionFusions = (
   const residency = planWeightResidency(graph);
   const context = sessionFusionContext({
     rules,
+    // No device: the default profile's GEMV choices (the ones every embedded table resolves to).
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     knobs: sessionKnobs(options, rules),
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),

@@ -162,7 +162,8 @@ import {
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { expertLinearKey } from "../../runtime/src/kernels/expert-linear.ts";
 import { linearKey } from "../../runtime/src/kernels/linear.ts";
-import { linearGemvKey } from "../../runtime/src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
+import { defaultLinearGemvVariant, linearGemvKey } from "../../runtime/src/kernels/linear-gemv.ts";
 import {
   type CensusRow,
   countDispatches,
@@ -1314,7 +1315,9 @@ const PARALLEL_SPECULATION = { slots: 64, depth: 4 } as const;
 /** The family of a pipeline key (before the first `:`). */
 const keyFamily = (key: string): string => key.split(":")[0];
 /** The sequential GEMV's family and the row-block GEMM's (spelled from the key functions). */
-const SEQUENTIAL_GEMV_FAMILY = keyFamily(linearGemvKey("i4", 32));
+const SEQUENTIAL_GEMV_FAMILY = keyFamily(
+  linearGemvKey("i4", 32, defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv)),
+);
 const GEMM_FAMILY = keyFamily(linearKey("f32", true));
 /** The pooled `expert_linear` key of the cache (i4 codes, f16 steps, group 32 — ADR 0145). */
 const POOLED_EXPERT_KEY = expertLinearKey("i4f16", 32, true);

@@ -31,7 +31,10 @@
  * ③ₜ), the row blocks of decomposed attention and the implicit GEMM of conv1d keep the default
  * selection (outside the sweep — a path that was not measured is not moved by a table).
  * One field is a kernel variant rather than a geometry: the key-axis form of the online attention's
- * quantised Vᵀ (`attentionOnline`), read through the attention route only.
+ * quantised Vᵀ (`attentionOnline`), read through the attention route only. Another holds the GEMV
+ * choices of linear (`linearGemv` — which sequential variant, how many rows per row block, which
+ * shapes take the parallel GEMV and how): no sweep covers it, so no generated table carries it and
+ * every table runs with the default profile's ({@link resolveGeometryProfile}).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -51,6 +54,12 @@ import {
   i8a8WorkgroupStorageBytes,
 } from "./i8a8-geometry.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
+import {
+  assertLinearGemvVariant,
+  type LinearGemvChoices,
+  type LinearGemvParallelLanes,
+} from "./linear-gemv.ts";
+import type { WeightStorage } from "./weight-storage.ts";
 
 /**
  * One row-count bucket rule. The first rule with `rows <= maxRows` is used ({@link gemmRowsGeometry}).
@@ -208,6 +217,20 @@ export type GeometryProfile = {
    */
   readonly attentionOnline?: { readonly keyWords: "tiled" };
   /**
+   * The GEMV choices of linear (1 ≤ M ≤ 64 over i2 / i4 / i8 weights, M = 1 over f16 / bf16 /
+   * f32 — src/kernels/linear-gemv.ts): the sequential variant and its per-shape exceptions, the
+   * row-block thread target and the shape rows of the parallel GEMV with their lanes and packed /
+   * staged flags. Kernel-variant choices rather than geometries, like {@link attentionOnline}. No
+   * generator derives them yet, so no generated table carries the field.
+   *
+   * Absent = the default profile's ({@link DEFAULT_GEOMETRY_PROFILE}), resolved in one place, where
+   * a Session selects its profile ({@link resolveGeometryProfile}): every reader sees a
+   * {@link ResolvedGeometryProfile}, so a table without the field keeps every key, WGSL and plan it
+   * had.
+   * SPEC: docs/spec/geometry-profiles.md#the-gemv-choices-of-linear
+   */
+  readonly linearGemv?: LinearGemvChoices;
+  /**
    * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
    * decision 4, per op family since its addendum 2026-11-12). Only the generator
    * (`deriveGeometryProfile` of `@karume/runtime/tune`) writes it, and `geometryProfileMismatch` of
@@ -253,15 +276,276 @@ export type GeometryProfile = {
 };
 
 /**
+ * The GEMV choices of the default profile ({@link GeometryProfile.linearGemv}): the values measured
+ * on the reference device (RTX 3080 Ti). This table is their one place — the kernel
+ * (src/kernels/linear-gemv.ts) has no default of its own and reads them as an argument — and every
+ * table without the field runs with them ({@link resolveGeometryProfile}).
+ */
+const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
+  sequential: {
+    /**
+     * The default variant. Census-weighted best in **the sweep of the 12 real shapes + 4 remainder
+     * shapes of gemma4 E2B decode on an RTX 3080 Ti** (`c32 u4`, ×8.45 over the default — ADR 0082 /
+     * docs/research/2026-08-30-gemma4-decode-wallclock.md §7). The large-vocabulary INT8 shape
+     * measured at M=1 (addendum 10) selects c16 (`shapes`).
+     * MUST: a change of the default goes together with re-measuring the bit-identity check
+     * (tests/gpu_linear_gemv_test.ts).
+     */
+    variant: { cols: 32, unroll: 4 },
+    // DECIDED: only the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
+    // docs/decisions/0082-linear-gemv-decode.md
+    shapes: [{ storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } }],
+  },
+  /**
+   * In the RTX 3080 Ti sweep, shapes below this value were faster buying parallelism with y tiles,
+   * and shapes above it were faster reducing weight re-reads with `rows` (the mechanism in the
+   * module doc of src/kernels/linear-gemv.ts).
+   * NOTE: **a value baked from the saturation point of the reference device (RTX 3080 Ti, 80 SMs)**,
+   * not a portable optimum. On GPUs whose saturation point is an order of magnitude smaller
+   * (integrated GPUs, Apple M series) it buys too many y tiles and the weight re-reads exceed the
+   * optimum. For other devices the value is replaced with `SessionOptions.linearGemvRowsThreadTarget`
+   * (a **static** knob fixed at Session creation = the limit that flows into the 5th argument of
+   * `linearGemvRowsForShape`; the selection stays a pure function). Nothing chooses it
+   * automatically by looking at the device (the ban on run-time autotuning (ADR 0022) —
+   * docs/limitations.md).
+   * MUST: a change goes together with a re-measured sweep (the check in tests/gpu_linear_gemv_test.ts
+   * does not pin the value — it only checks that the selection is a pure function of (storage, m, n,
+   * target)).
+   */
+  rowsThreadTarget: 16384,
+  // DECIDED: only measured shapes are eligible for the parallel GEMV (linear at the level `reorder`).
+  // Not an automatic selection by GPU name.
+  // docs/decisions/0098-linear-gemv-parallel.md
+  parallelShapes: [
+    { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
+    {
+      storage: "i4",
+      n: 1536,
+      k: 2048,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    {
+      storage: "i4",
+      n: 1536,
+      k: 6144,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false },
+    {
+      storage: "i4",
+      n: 1536,
+      k: 4096,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    {
+      storage: "i4",
+      n: 1536,
+      k: 12288,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false },
+    { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32, packedActivations: false },
+    { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+    { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32, packedActivations: true },
+    { storage: "i8", n: 256, k: 1536, lanes: 32, packedActivations: false },
+    { storage: "i8", n: 1536, k: 256, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 1536, group: 512, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32, packedActivations: false },
+    { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+    { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
+    { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
+    // ---- E4B (added 2026-09-26) — **none of the rows below is measured**. lanes / packedActivations
+    // are guesses copied from the E2B row with the same role, to be revisited with E4B's flag-bench
+    // (per-key census and GPU time) (ADR 0098 addendum 2026-09-26). The shapes are the real ones, read
+    // for regular E4B from the upstream config (hidden 2560, intermediate 10240, kv 2, 42 layers, PLE
+    // 256) and for QAT E4B from the container descriptor of the distribution mirror.
+    // E4B regular i4 g32: per_layer_model_projection (42×256) — lanes from E2B 8960×1536 (unmeasured)
+    { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    // E4B regular i4 g32: q (sliding) — lanes from E2B 2048×1536 (unmeasured)
+    { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    // E4B regular i4 g32: k / v (sliding) — lanes from E2B 256×1536 (unmeasured)
+    { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
+    // E4B regular i4 g32: per_layer_input_gate — lanes from E2B 256×1536 (unmeasured)
+    { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false },
+    // E4B regular i4 g32: o (sliding) — lanes from E2B 1536×2048 (unmeasured)
+    {
+      storage: "i4",
+      n: 2560,
+      k: 2048,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // E4B regular i4 g32: gate / up — lanes from E2B 6144×1536 (unmeasured)
+    { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    // E4B regular i4 g32: down — lanes from E2B 1536×6144 (unmeasured)
+    {
+      storage: "i4",
+      n: 2560,
+      k: 10240,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // E4B regular i4 g32: per_layer_projection — lanes from E2B 1536×256 (unmeasured)
+    { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
+    // E4B regular i4 g32: q (full) — lanes from E2B 4096×1536 (unmeasured)
+    { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    // E4B regular i4 g32: k / v (full) — lanes from E2B 512×1536 (unmeasured)
+    { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
+    // E4B regular i4 g32: o (full) — lanes from E2B 1536×4096 (unmeasured)
+    {
+      storage: "i4",
+      n: 2560,
+      k: 4096,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // E4B regular i8: lm_head (tied embedding) — lanes from E2B 262144×1536 (unmeasured)
+    { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
+    // E4B QAT i4 g512: q (sliding) — lanes from E2B QAT 2048×1536 g512 (unmeasured)
+    { storage: "i4", n: 2048, k: 2560, group: 512, lanes: 4, packedActivations: false },
+    // E4B QAT i4 g512: k / v (sliding) — lanes from E2B QAT 256×1536 g512 (unmeasured)
+    { storage: "i4", n: 512, k: 2560, group: 512, lanes: 32, packedActivations: false },
+    // E4B QAT i4 g2048: o (sliding) — lanes / packed from E2B QAT 1536×2048 g2048 (unmeasured)
+    { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+    // E4B QAT i4 g512: gate / up — lanes from E2B QAT 6144×1536 g512 (unmeasured)
+    { storage: "i4", n: 10240, k: 2560, group: 512, lanes: 4, packedActivations: false },
+    // E4B QAT i4 g2048: down — lanes / packed from E2B QAT 1536×6144 g2048 (unmeasured)
+    { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
+    // E4B QAT i8: per_layer_input_gate — lanes from E2B QAT 256×1536 i8 (unmeasured)
+    { storage: "i8", n: 256, k: 2560, lanes: 32, packedActivations: false },
+    // E4B QAT i8: per_layer_projection — lanes from E2B QAT 1536×256 i8 (unmeasured)
+    { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false },
+    // E4B QAT i4 g512: q (full) — lanes from E2B QAT 4096×1536 g512 (unmeasured)
+    { storage: "i4", n: 4096, k: 2560, group: 512, lanes: 4, packedActivations: false },
+    // E4B QAT i4 g512: k / v (full) — lanes from E2B QAT 512×1536 g512 (unmeasured)
+    { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
+    // E4B QAT i4 g4096: o (full) — lanes / packed from E2B QAT 1536×4096 g4096 (unmeasured)
+    { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+    // ---- 12B q4_0 QAT (added 2026-11-06) — lanes measured as whole-model decode on the RTX 3080 Ti
+    // (ADR 0098 addendum 2026-11-06): 4 beats 16 and 32 on the rows that widen, staged 32 ties 16 and
+    // beats plain 32 on the rows that narrow, and the output head takes 16 (32 does not build).
+    // gate / up
+    { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
+    // q (full), q (sliding), k / v (sliding)
+    { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false },
+    // k (full)
+    { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false },
+    // o (sliding), o (full), down
+    {
+      storage: "i4",
+      n: 3840,
+      k: 4096,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    {
+      storage: "i4",
+      n: 3840,
+      k: 8192,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    {
+      storage: "i4",
+      n: 3840,
+      k: 15360,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // lm_head (tied embedding)
+    { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
+    // ---- 26B A4B q4_0 QAT (added 2026-11-10) — the dense linears of the mixture of experts (the
+    // routed experts run on `expert_linear`, which has no parallel form). Lanes measured per kernel
+    // as whole-model decode on the RTX 3080 Ti (ADR 0098 addendum 2026-11-10): on the rows that
+    // widen 4, 16 and 32 tie and 2 and 8 lose, so they take 12B's 4; the router and the full k take
+    // 32; the rows that narrow take staged 32 (staged 16 ties, unstaged 32 and plain 4 lose); and
+    // the output head takes 4, which beats 8 and 16 here (32 does not build).
+    // q (full), q (sliding), k / v (sliding), gate / up
+    { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    // k (full), router
+    { storage: "i4", n: 1024, k: 2816, group: 32, lanes: 32, packedActivations: false },
+    { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
+    // o (sliding), o (full), down
+    {
+      storage: "i4",
+      n: 2816,
+      k: 4096,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    {
+      storage: "i4",
+      n: 2816,
+      k: 8192,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    {
+      storage: "i4",
+      n: 2816,
+      k: 2112,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // lm_head (tied embedding)
+    { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  ],
+};
+
+/**
  * The default profile (the table used by an adapter that no generated table matches).
  *
- * MUST: the values are built **by referencing** the existing selection functions (not copied —
+ * MUST: the geometries are built **by referencing** the existing selection functions (not copied —
  * copying would put the default in 2 places, and when only one is fixed, the Session path and the
- * shape-pure-function path would choose different geometries). On a machine where this table is
- * chosen, key, WGSL and dispatch do not differ by a single byte from before profiles were introduced
- * (the codegen snapshots and tests/geometry_profile_test.ts are the detectors).
+ * shape-pure-function path would choose different geometries). The GEMV choices have no such
+ * function: {@link DEFAULT_LINEAR_GEMV} is their one place. On a machine where this table is chosen,
+ * key, WGSL and dispatch do not differ by a single byte from before profiles were introduced (the
+ * codegen snapshots and tests/geometry_profile_test.ts are the detectors).
  */
-export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
+export const DEFAULT_GEOMETRY_PROFILE: ResolvedGeometryProfile = {
   id: "default",
   match: {},
   gemmRows: GEMM_ROWS_BUCKETS,
@@ -276,7 +560,27 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
     attentionPv: defaultI8a8Geometry("attention_pv"),
     conv3d: defaultI8a8Geometry("conv3d"),
   },
+  linearGemv: DEFAULT_LINEAR_GEMV,
 };
+
+/**
+ * A profile as every reader sees it: the optional fields that fall back to the default profile's
+ * values are resolved ({@link GeometryProfile.linearGemv}).
+ */
+export type ResolvedGeometryProfile = GeometryProfile & { readonly linearGemv: LinearGemvChoices };
+
+/**
+ * Resolves a selected or injected table to the profile a Session runs with: a table without
+ * `linearGemv` takes the default profile's GEMV choices; every other field is the table's own.
+ *
+ * MUST: called in one place, where a Session selects its profile (`sessionGeometryProfile` in
+ * src/runtime/geometry-selection.ts). The selection and the embedded list return the tables as they
+ * are, so a table read back or compared by identity is the table that was registered.
+ */
+export const resolveGeometryProfile = (profile: GeometryProfile): ResolvedGeometryProfile => ({
+  ...profile,
+  linearGemv: profile.linearGemv ?? DEFAULT_LINEAR_GEMV,
+});
 
 /**
  * Guard on the row-count bucket rules of one field (`field` — `gemmRows` or `i8a8.linear`, the one
@@ -565,6 +869,97 @@ const assertAttentionOnlineShape = (value: unknown, where: string): void => {
   }
 };
 
+/** The storages a per-shape exception of the sequential variant may name (M = 1 takes every one). */
+const SEQUENTIAL_GEMV_STORAGES: readonly WeightStorage[] = ["f32", "f16", "bf16", "i8", "i4", "i2"];
+
+/** The storages of the parallel GEMV. */
+const PARALLEL_GEMV_STORAGES: readonly WeightStorage[] = ["i2", "i4", "i8"];
+
+/** The lane counts the parallel GEMV generates. */
+const PARALLEL_GEMV_LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
+
+const assertPositiveInteger = (value: unknown, where: string, path: string): void => {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) return;
+  throw new CodegenError(`${where}: ${path} must be a positive integer (${String(value)})`);
+};
+
+const assertOneOf = (
+  values: readonly (string | number)[],
+  value: unknown,
+  where: string,
+  path: string,
+): void => {
+  if (values.some((candidate) => candidate === value)) return;
+  throw new CodegenError(
+    `${where}: ${path} must be one of ${values.join(" / ")} (${JSON.stringify(value)})`,
+  );
+};
+
+/** The rows of an array field (rejects a non-array and holes with the field path). */
+const rowsOf = (value: unknown, where: string, path: string): readonly unknown[] => {
+  if (!Array.isArray(value)) throw new CodegenError(`${where}: ${path} is not an array`);
+  return denseEntriesOf(value, where, path);
+};
+
+/** A sequential variant: its field types here, its ranges by the kernel's own guard. */
+const assertGemvVariantShape = (value: unknown, where: string, path: string): void => {
+  const { cols, unroll } = recordOf(value, where, path);
+  if (typeof cols !== "number" || typeof unroll !== "number") {
+    throw new CodegenError(`${where}: ${path}: cols and unroll must be numbers`);
+  }
+  assertLinearGemvVariant({ cols, unroll }, `${where}: ${path}`);
+};
+
+const assertGemvShapeVariantShape = (value: unknown, where: string, path: string): void => {
+  const { storage, n, k, variant } = recordOf(value, where, path);
+  assertOneOf(SEQUENTIAL_GEMV_STORAGES, storage, where, `${path}.storage`);
+  assertPositiveInteger(n, where, `${path}.n`);
+  assertPositiveInteger(k, where, `${path}.k`);
+  assertGemvVariantShape(variant, where, `${path}.variant`);
+};
+
+const assertGemvParallelShapeShape = (value: unknown, where: string, path: string): void => {
+  const { storage, n, k, group, lanes, packedActivations, stagedActivations } = recordOf(
+    value,
+    where,
+    path,
+  );
+  assertOneOf(PARALLEL_GEMV_STORAGES, storage, where, `${path}.storage`);
+  assertPositiveInteger(n, where, `${path}.n`);
+  assertPositiveInteger(k, where, `${path}.k`);
+  if (group !== undefined) assertPositiveInteger(group, where, `${path}.group`);
+  assertOneOf(PARALLEL_GEMV_LANES, lanes, where, `${path}.lanes`);
+  if (typeof packedActivations !== "boolean") {
+    throw new CodegenError(`${where}: ${path}.packedActivations is not a boolean`);
+  }
+  if (stagedActivations !== undefined && stagedActivations !== true) {
+    throw new CodegenError(
+      `${where}: ${path}.stagedActivations must be true or absent (${JSON.stringify(
+        stagedActivations,
+      )})`,
+    );
+  }
+};
+
+/**
+ * Guard on the optional {@link GeometryProfile.linearGemv}: the field types, and the ranges the
+ * kernels and the lookup need — a variant the kernel would refuse, a thread target that is not a
+ * positive integer (a NaN would silently keep every row block at its ceiling), a lane count the
+ * parallel GEMV does not generate.
+ */
+const assertLinearGemvShape = (value: unknown, where: string): void => {
+  const { sequential, rowsThreadTarget, parallelShapes } = recordOf(value, where, "linearGemv");
+  const { variant, shapes } = recordOf(sequential, where, "linearGemv.sequential");
+  assertGemvVariantShape(variant, where, "linearGemv.sequential.variant");
+  rowsOf(shapes, where, "linearGemv.sequential.shapes").forEach((row, index) =>
+    assertGemvShapeVariantShape(row, where, `linearGemv.sequential.shapes[${index}]`),
+  );
+  assertPositiveInteger(rowsThreadTarget, where, "linearGemv.rowsThreadTarget");
+  rowsOf(parallelShapes, where, "linearGemv.parallelShapes").forEach((row, index) =>
+    assertGemvParallelShapeShape(row, where, `linearGemv.parallelShapes[${index}]`),
+  );
+};
+
 /**
  * Guard on one profile (shape of match, the rules, divisibility conditions of the geometry in every
  * field).
@@ -652,6 +1047,7 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
   }
   if (fields.attentionOnline !== undefined)
     assertAttentionOnlineShape(fields.attentionOnline, where);
+  if (fields.linearGemv !== undefined) assertLinearGemvShape(fields.linearGemv, where);
   if (fields.provenance !== undefined) assertProvenanceShape(fields.provenance, where);
 };
 

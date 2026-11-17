@@ -48,6 +48,16 @@ measurements in `docs/research/`.
   numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
   `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
 
+### Added
+
+- `@karume/runtime`: `GeometryProfile.linearGemv`, an optional field of a geometry profile that holds the GEMV
+  choices of `linear` (1 to 64 rows over i2 / i4 / i8 weights): the sequential variant and its per-shape exceptions,
+  the thread target of the row-block height, and the shapes that take the parallel GEMV with their lane count and
+  their packed and staged flags. These values were constants of the kernel; they are now the default profile's, and
+  a table without the field runs with them, so no Session changes. `acquireGpu({ geometryProfile })` and
+  `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field.
+  `SessionOptions.linearGemvRowsThreadTarget` still replaces the thread target when given.
+
 ### Changed
 
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the

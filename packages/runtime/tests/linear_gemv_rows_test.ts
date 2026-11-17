@@ -26,6 +26,7 @@
 import { describe, it, test } from "vite-plus/test";
 import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
@@ -43,6 +44,15 @@ import {
   linearGemvWgsl,
 } from "../src/kernels/linear-gemv.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
+
+/**
+ * The GEMV choices every check here selects with: the default profile's (the values the selection
+ * read as module constants before they moved into the geometry profile).
+ */
+const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+
+/** The default profile's sequential variant (what a key or WGSL without a shape is built with). */
+const SEQUENTIAL = defaultLinearGemvVariant(GEMV);
 
 /** One row of the selection table (the M → rows mapping for one (storage, n)). */
 type RowsTable = {
@@ -165,20 +175,20 @@ const ROWS_TABLES: readonly RowsTable[] = [
 test("the row-block rows is a pure function of (storage, m, n) and follows the table taken from the sweep", () => {
   for (const { storage, n, note, picks } of ROWS_TABLES) {
     for (const [m, rows] of picks) {
-      const actual = linearGemvRowsForShape(storage, m, n);
+      const actual = linearGemvRowsForShape(GEMV, storage, m, n);
       assertEquals(actual, rows, `${storage} n=${n} m=${m}（${note}）`);
       // The same input looked up twice gives the same value (the selection has no state = the
       // premise of the key-to-WGSL mapping)
       assertEquals(
-        linearGemvRowsForShape(storage, m, n),
+        linearGemvRowsForShape(GEMV, storage, m, n),
         actual,
         `${storage} n=${n} m=${m}: reproduced`,
       );
       // The default variant inherits cols / unroll from the M=1 variant; only rows comes from this
       // pure function
       assertEquals(
-        defaultLinearGemvRowsVariant(storage, m, n),
-        { ...defaultLinearGemvVariant(), rows },
+        defaultLinearGemvRowsVariant(GEMV, storage, m, n),
+        { ...defaultLinearGemvVariant(GEMV), rows },
         `${storage} n=${n} m=${m}: default variant`,
       );
     }
@@ -191,36 +201,40 @@ test("lowering the parallelism target raises rows (a static knob for other devic
   // re-reads). For i4, m=4, n=2048 the thread count = 2048 × ceil(4 / rows), so with the target
   // 16384 it drops all the way to rows=1, and each halving of the target moves the stopping point
   // up one step.
-  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 16384), 1, "default target");
-  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 4096), 2, "target 1/4");
-  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 2048), 4, "target 1/8");
+  assertEquals(linearGemvRowsForShape(GEMV, "i4", 4, 2048, 16384), 1, "default target");
+  assertEquals(linearGemvRowsForShape(GEMV, "i4", 4, 2048, 4096), 2, "target 1/4");
+  assertEquals(linearGemvRowsForShape(GEMV, "i4", 4, 2048, 2048), 4, "target 1/8");
   // Lowering the target does not exceed the ceiling (256 elements per word = 8 rows for i4).
-  assertEquals(linearGemvRowsForShape("i4", 64, 2048, 1), 8, "the i4 ceiling 8 even with target 1");
+  assertEquals(
+    linearGemvRowsForShape(GEMV, "i4", 64, 2048, 1),
+    8,
+    "the i4 ceiling 8 even with target 1",
+  );
   // Omitting the fourth argument = passing the default target (16384) (existing calls give the same
   // result unchanged).
   for (const { storage, n, picks } of ROWS_TABLES) {
     for (const [m] of picks) {
       assertEquals(
-        linearGemvRowsForShape(storage, m, n),
-        linearGemvRowsForShape(storage, m, n, 16384),
+        linearGemvRowsForShape(GEMV, storage, m, n),
+        linearGemvRowsForShape(GEMV, storage, m, n, 16384),
         `${storage} n=${n} m=${m}: omitted = default 16384`,
       );
       assertEquals(
-        defaultLinearGemvRowsVariant(storage, m, n),
-        defaultLinearGemvRowsVariant(storage, m, n, 16384),
+        defaultLinearGemvRowsVariant(GEMV, storage, m, n),
+        defaultLinearGemvRowsVariant(GEMV, storage, m, n, 16384),
         `${storage} n=${n} m=${m}: the variant matches too`,
       );
     }
   }
   // The target also reaches the variant side (the key's `r<rows>` moves = the generated code is a
   // different text).
-  assertEquals(defaultLinearGemvRowsVariant("i4", 4, 2048, 2048).rows, 4);
+  assertEquals(defaultLinearGemvRowsVariant(GEMV, "i4", 4, 2048, 2048).rows, 4);
 });
 
 test("M=1 gives rows=1 regardless of n (decode's generated code is not row-blocked)", () => {
   for (const n of [1, 256, 2048, 16384, 262144]) {
-    assertEquals(linearGemvRowsForShape("i4", 1, n), 1, `i4 n=${n}`);
-    assertEquals(linearGemvRowsForShape("i8", 1, n), 1, `i8 n=${n}`);
+    assertEquals(linearGemvRowsForShape(GEMV, "i4", 1, n), 1, `i4 n=${n}`);
+    assertEquals(linearGemvRowsForShape(GEMV, "i8", 1, n), 1, `i8 n=${n}`);
   }
 });
 
@@ -228,45 +242,53 @@ test("(m, n) outside the gate fail instead of being silently rounded", () => {
   // The range of m: 1..LINEAR_GEMV_MAX_ROWS. Beyond the limit the default GEMM skeleton takes the
   // shape, so silently rounding to the limit here would be a silent wrong value: "a shape the gate
   // closed runs as a row block".
-  assertThrows(() => linearGemvRowsForShape("i4", 0, 2048), CodegenError, "row count 0");
+  assertThrows(() => linearGemvRowsForShape(GEMV, "i4", 0, 2048), CodegenError, "row count 0");
   assertThrows(
-    () => linearGemvRowsForShape("i4", LINEAR_GEMV_MAX_ROWS + 1, 2048),
+    () => linearGemvRowsForShape(GEMV, "i4", LINEAR_GEMV_MAX_ROWS + 1, 2048),
     CodegenError,
     `row count ${LINEAR_GEMV_MAX_ROWS + 1}`,
   );
-  assertThrows(() => linearGemvRowsForShape("i8", -1, 2048), CodegenError, "row count -1");
-  assertThrows(() => linearGemvRowsForShape("i4", 1.5, 2048), CodegenError, "row count 1.5");
+  assertThrows(() => linearGemvRowsForShape(GEMV, "i8", -1, 2048), CodegenError, "row count -1");
+  assertThrows(() => linearGemvRowsForShape(GEMV, "i4", 1.5, 2048), CodegenError, "row count 1.5");
   // The range of n: positive integers. For 0 / a non-integer the "thread count" computation has no
   // meaning at all.
-  assertThrows(() => linearGemvRowsForShape("i4", 8, 0), CodegenError, "column count 0");
-  assertThrows(() => linearGemvRowsForShape("i8", 8, -256), CodegenError, "column count -256");
-  assertThrows(() => linearGemvRowsForShape("i4", 8, 2048.5), CodegenError, "column count 2048.5");
+  assertThrows(() => linearGemvRowsForShape(GEMV, "i4", 8, 0), CodegenError, "column count 0");
+  assertThrows(
+    () => linearGemvRowsForShape(GEMV, "i8", 8, -256),
+    CodegenError,
+    "column count -256",
+  );
+  assertThrows(
+    () => linearGemvRowsForShape(GEMV, "i4", 8, 2048.5),
+    CodegenError,
+    "column count 2048.5",
+  );
   // Only the two compressed storage types (staying within the measured range — ADR 0082 decision 4)
-  assertThrows(() => linearGemvRowsForShape("f32", 8, 2048), CodegenError, "f32 storage");
+  assertThrows(() => linearGemvRowsForShape(GEMV, "f32", 8, 2048), CodegenError, "f32 storage");
 });
 
 test("rows is in the key, and a rows=1 row block has a different key from the M=1 variant", () => {
   assertEquals(
-    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 32, 2048)),
+    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant(GEMV, "i4", 32, 2048)),
     "linear_gemv:v2:f32:c32u4r4:wi4g32",
   );
   assertEquals(
-    linearGemvRowsKey("i4", 64, defaultLinearGemvRowsVariant("i4", 32, 12288)),
+    linearGemvRowsKey("i4", 64, defaultLinearGemvRowsVariant(GEMV, "i4", 32, 12288)),
     "linear_gemv:v2:f32:c32u4r8:wi4g64",
   );
   assertEquals(
-    linearGemvRowsKey("i8", undefined, defaultLinearGemvRowsVariant("i8", 32, 262144)),
+    linearGemvRowsKey("i8", undefined, defaultLinearGemvRowsVariant(GEMV, "i8", 32, 262144)),
     "linear_gemv:v2:f32:c32u4r16:wi8",
   );
   // MUST: `r1` differs from the M=1 variant's key (the text differs too — a y-tiled row block). If
   // they mapped to the same key, the M=1 asset would be handed to an M ≥ 2 dispatch and only one
   // row would be written.
   assertNotEquals(
-    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 2, 64)),
-    linearGemvKey("i4", 32),
+    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant(GEMV, "i4", 2, 64)),
+    linearGemvKey("i4", 32, SEQUENTIAL),
   );
   assertEquals(
-    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 2, 64)),
+    linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant(GEMV, "i4", 2, 64)),
     "linear_gemv:v2:f32:c32u4r1:wi4g32",
   );
   // rows has a range just like cols / unroll (if key generation let an out-of-range value through,
@@ -317,7 +339,7 @@ test("the f16 GEMV accepts only M=1 with 8-element alignment and refuses to gene
   assertThrows(() => linearGemvParams("f16", 1, 36, 36), CodegenError, "k");
   assertThrows(() => linearGemvParams("f16", 1, 36, 40, 32), CodegenError);
   assertThrows(
-    () => linearGemvRowsForShape("f16", 1, 36),
+    () => linearGemvRowsForShape(GEMV, "f16", 1, 36),
     CodegenError,
     "row blocks are not supported",
   );
@@ -341,7 +363,7 @@ test("the f32 GEMV accepts only M=1 with 4-element alignment and refuses to gene
   assertThrows(() => linearGemvParams("f32", 1, 36, 38), CodegenError, "k");
   assertThrows(() => linearGemvParams("f32", 1, 36, 40, 32), CodegenError);
   assertThrows(
-    () => linearGemvRowsForShape("f32", 1, 36),
+    () => linearGemvRowsForShape(GEMV, "f32", 1, 36),
     CodegenError,
     "row blocks are not supported",
   );
@@ -394,23 +416,26 @@ test("the INT4 and INT8 row blocks keep the shader under 12 KB at every default 
 
 describe("M=1 GEMV shape selection", () => {
   it("selects c16 for the measured large-vocabulary INT8 and tells the WGSL apart by a separate key", () => {
-    const selected = defaultLinearGemvVariant({ storage: "i8", n: 262144, k: 1536 });
+    const selected = defaultLinearGemvVariant(GEMV, { storage: "i8", n: 262144, k: 1536 });
     assertEquals(selected, { cols: 16, unroll: 4 });
     assertEquals(linearGemvKey("i8", undefined, selected), "linear_gemv:v1:f32:c16u4:wi8");
-    assertNotEquals(linearGemvKey("i8", undefined, selected), linearGemvKey("i8"));
+    assertNotEquals(
+      linearGemvKey("i8", undefined, selected),
+      linearGemvKey("i8", undefined, SEQUENTIAL),
+    );
     assertEquals(
       linearGemvWgsl("i8", undefined, selected),
-      linearGemvWgsl("i8")
+      linearGemvWgsl("i8", undefined, SEQUENTIAL)
         .replace("32 cols / wg", "16 cols / wg")
         .replace("@workgroup_size(32)", "@workgroup_size(16)"),
     );
   });
 
   it("keeps the former variant for a different storage type or matrix shape and for generation without a shape", () => {
-    assertEquals(defaultLinearGemvVariant(), { cols: 32, unroll: 4 });
+    assertEquals(defaultLinearGemvVariant(GEMV), { cols: 32, unroll: 4 });
     const storageTypes: readonly WeightStorage[] = ["i2", "i4", "f16", "f32"];
     for (const storage of storageTypes) {
-      assertEquals(defaultLinearGemvVariant({ storage, n: 262144, k: 1536 }), {
+      assertEquals(defaultLinearGemvVariant(GEMV, { storage, n: 262144, k: 1536 }), {
         cols: 32,
         unroll: 4,
       });
@@ -422,7 +447,10 @@ describe("M=1 GEMV shape selection", () => {
       [262144, 1552],
       [6144, 1536],
     ]) {
-      assertEquals(defaultLinearGemvVariant({ storage: "i8", n, k }), { cols: 32, unroll: 4 });
+      assertEquals(defaultLinearGemvVariant(GEMV, { storage: "i8", n, k }), {
+        cols: 32,
+        unroll: 4,
+      });
     }
   });
 });
@@ -430,19 +458,19 @@ describe("M=1 GEMV shape selection", () => {
 describe("GEMV parallel-sum selection and code generation", () => {
   it("selects the same geometry for decode and small-row verification, and does not extend it to prefill or unmeasured shapes", () => {
     for (const m of [1, 4, 8]) {
-      assertEquals(linearGemvParallelLanes("i4", m, 256, 1536, 32), 32);
-      assertEquals(linearGemvParallelLanes("i4", m, 6144, 1536, 512), 4);
-      assertEquals(linearGemvParallelLanes("i4", m, 1536, 4096, 4096), 32);
-      assertEquals(linearGemvParallelLanes("i2", m, 12288, 1536), 2);
-      assertEquals(linearGemvParallelLanes("i8", m, 262144, 1536), 16);
+      assertEquals(linearGemvParallelLanes(GEMV, "i4", m, 256, 1536, 32), 32);
+      assertEquals(linearGemvParallelLanes(GEMV, "i4", m, 6144, 1536, 512), 4);
+      assertEquals(linearGemvParallelLanes(GEMV, "i4", m, 1536, 4096, 4096), 32);
+      assertEquals(linearGemvParallelLanes(GEMV, "i2", m, 12288, 1536), 2);
+      assertEquals(linearGemvParallelLanes(GEMV, "i8", m, 262144, 1536), 16);
     }
     for (const m of [0, 9, 64, 65]) {
-      assertEquals(linearGemvParallelLanes("i4", m, 256, 1536, 32), undefined);
+      assertEquals(linearGemvParallelLanes(GEMV, "i4", m, 256, 1536, 32), undefined);
     }
-    assertEquals(linearGemvParallelLanes("i2", 1, 262144, 1536), undefined);
-    assertEquals(linearGemvParallelLanes("i4", 1, 256, 1536, 64), undefined);
-    assertEquals(linearGemvParallelLanes("i4", 1, 260, 1536, 32), undefined);
-    assertEquals(linearGemvParallelLanes("f16", 1, 256, 1536), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "i2", 1, 262144, 1536), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "i4", 1, 256, 1536, 64), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "i4", 1, 260, 1536, 32), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "f16", 1, 256, 1536), undefined);
   });
   it("selects the lanes of the matching E2B row for the regular E4B shapes (i4 g32 + i8 lm_head) (an unmeasured copy)", () => {
     // The shapes are real shapes derived from the upstream config (hidden 2560, intermediate 10240,
@@ -463,13 +491,13 @@ describe("GEMV parallel-sum selection and code generation", () => {
     ];
     for (const m of [1, 4, 8]) {
       for (const [n, k, lanes] of rows) {
-        assertEquals(linearGemvParallelLanes("i4", m, n, k, 32), lanes, `i4 ${n}×${k} M${m}`);
+        assertEquals(linearGemvParallelLanes(GEMV, "i4", m, n, k, 32), lanes, `i4 ${n}×${k} M${m}`);
       }
-      assertEquals(linearGemvParallelLanes("i8", m, 262144, 2560), 16);
+      assertEquals(linearGemvParallelLanes(GEMV, "i8", m, 262144, 2560), 16);
     }
-    assertEquals(linearGemvParallelLanes("i4", 9, 10240, 2560, 32), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "i4", 9, 10240, 2560, 32), undefined);
     // The i2 lm_head (QAT E4B) has no row in E2B either, so it is not added.
-    assertEquals(linearGemvParallelLanes("i2", 1, 262144, 2560), undefined);
+    assertEquals(linearGemvParallelLanes(GEMV, "i2", 1, 262144, 2560), undefined);
   });
   it("the key distinguishes the sum form, storage, group and lane", () => {
     const keys = new Map<string, string>();
@@ -478,7 +506,7 @@ describe("GEMV parallel-sum selection and code generation", () => {
         for (const lanes of [2, 4, 8, 16, 32] as const) {
           const key = linearGemvParallelKey(storage, group, lanes);
           const shader = linearGemvParallelWgsl(storage, group, lanes);
-          assertNotEquals(key, linearGemvKey(storage, group));
+          assertNotEquals(key, linearGemvKey(storage, group, SEQUENTIAL));
           assertEquals(keys.has(key), false);
           keys.set(key, shader);
           assertEquals(linearGemvParallelWgsl(storage, group, lanes), shader);

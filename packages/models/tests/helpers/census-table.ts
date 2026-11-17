@@ -67,7 +67,12 @@
 import type { SessionSpec } from "@karume/hub";
 import type { SessionDiagnostics, SessionOptions } from "@karume/runtime";
 import { linearKey } from "../../../runtime/src/kernels/linear.ts";
-import { linearGemvKey, linearGemvParallelKey } from "../../../runtime/src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../../runtime/src/kernels/geometry-profile.ts";
+import {
+  defaultLinearGemvVariant,
+  linearGemvKey,
+  linearGemvParallelKey,
+} from "../../../runtime/src/kernels/linear-gemv.ts";
 import { statePvKey, stateQkKey } from "../../../runtime/src/kernels/state-attention.ts";
 import {
   assertPipelineCensus,
@@ -177,9 +182,11 @@ const familyOf = (key: string): string => {
  * / row block), parallel GEMV).
  */
 const LINEAR_OP_FAMILIES: ReadonlySet<string> = new Set(
-  [linearKey("f32", true), linearGemvKey("i8"), linearGemvParallelKey("i8", undefined, 4)].map(
-    familyOf,
-  ),
+  [
+    linearKey("f32", true),
+    linearGemvKey("i8", undefined, defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv)),
+    linearGemvParallelKey("i8", undefined, 4),
+  ].map(familyOf),
 );
 
 /** Whether the key matches the predicate of any of the option's non-reference values. */

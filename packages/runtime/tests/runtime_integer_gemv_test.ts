@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { CodegenError } from "../src/codegen/errors.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   INTEGER_GEMV_EXACT_LIMIT,
   integerGemvKey,
@@ -800,6 +801,7 @@ const planOf = (options: GraphOptions, context: Partial<Context> = {}): FusionPl
   const ir = mergeGraph(integerGraph(options), storageOf(options));
   return planFusions(planGraph(ir, {}).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {

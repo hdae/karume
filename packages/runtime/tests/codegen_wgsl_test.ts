@@ -234,6 +234,7 @@ import {
 import { RMS_NORM_ROPE_WGSL } from "../src/kernels/rms-norm-rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
+  defaultLinearGemvVariant,
   linearGemvKey,
   linearGemvParallelPackedWgsl,
   linearGemvParallelStagedWgsl,
@@ -343,6 +344,9 @@ const fixture = (name: string): Promise<string> => readTextFile(fixtureUrl(name)
 // that change only the comments inside the WGSL templates (ADR 0130 step 2-9d): the diff of the
 // fixtures then has to be comment lines only, which the commit's review checks.
 const WRITE_SNAPSHOTS = process.env.KARUME_WGSL_SNAPSHOT === "write";
+
+/** The sequential GEMV variant of the default profile (what a shape-free M=1 GEMV is built with). */
+const SEQUENTIAL = defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv);
 
 /**
  * The vec4 skeleton of the i8a8 GEMM (perf-ledger K-85) at the geometry the spike measured on the
@@ -687,7 +691,7 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // body], so an output where only one side moved still builds normally).
     ["linear_wi2.wgsl", linearWgsl("i2", false)],
     ["linear_wi2_v4.wgsl", linearWgsl("i2", true)],
-    ["linear_gemv_wi2.wgsl", linearGemvWgsl("i2")],
+    ["linear_gemv_wi2.wgsl", linearGemvWgsl("i2", undefined, SEQUENTIAL)],
     ["linear_gemv_parallel_wi2_l2.wgsl", linearGemvParallelWgsl("i2", undefined, 2)],
     ["linear_gemv_static_quantize_wi2_l2.wgsl", linearGemvStaticQuantizeWgsl("i2", undefined, 2)],
     ["linear_gemv_static_quantize_g512_l4.wgsl", linearGemvStaticQuantizeWgsl("i4", 512, 4)],
@@ -736,12 +740,12 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // in the element count per word (32 / 16) and in how the scale is fetched (a group per word /
     // one channel scale outside the reduction), so an output where only one side moved still
     // builds normally.
-    ["linear_gemv_g32.wgsl", linearGemvWgsl("i4", 32)],
-    ["linear_gemv_g64.wgsl", linearGemvWgsl("i4", 64)],
-    ["linear_gemv_wi8.wgsl", linearGemvWgsl("i8")],
-    ["linear_gemv_wf16.wgsl", linearGemvWgsl("f16")],
-    ["linear_gemv_wbf16.wgsl", linearGemvWgsl("bf16")],
-    ["linear_gemv_f32.wgsl", linearGemvWgsl("f32")],
+    ["linear_gemv_g32.wgsl", linearGemvWgsl("i4", 32, SEQUENTIAL)],
+    ["linear_gemv_g64.wgsl", linearGemvWgsl("i4", 64, SEQUENTIAL)],
+    ["linear_gemv_wi8.wgsl", linearGemvWgsl("i8", undefined, SEQUENTIAL)],
+    ["linear_gemv_wf16.wgsl", linearGemvWgsl("f16", undefined, SEQUENTIAL)],
+    ["linear_gemv_wbf16.wgsl", linearGemvWgsl("bf16", undefined, SEQUENTIAL)],
+    ["linear_gemv_f32.wgsl", linearGemvWgsl("f32", undefined, SEQUENTIAL)],
     // The family's **row-block variants** (M ≥ 2 — ADR 0082 addendum 5 / perf-ledger K-21). The
     // condition is placing them **as a pair with the 3 M=1 ones above**: only this pair shows that
     // the row-block change does not move the decode (M=1) output by a single byte.
@@ -1232,14 +1236,26 @@ test("the same generator input always yields identical WGSL (every op × dtype �
   // That baking the shift holds no state is pinned over 3 groups.
   for (const groupSize of [32, 64, 128]) {
     assertEquals(
-      linearGemvWgsl("i4", groupSize),
-      linearGemvWgsl("i4", groupSize),
+      linearGemvWgsl("i4", groupSize, SEQUENTIAL),
+      linearGemvWgsl("i4", groupSize, SEQUENTIAL),
       `linear gemv:g=${groupSize}`,
     );
   }
-  assertEquals(linearGemvWgsl("i8"), linearGemvWgsl("i8"), "linear gemv:i8");
-  assertEquals(linearGemvWgsl("f16"), linearGemvWgsl("f16"), "linear gemv:f16");
-  assertEquals(linearGemvWgsl("f32"), linearGemvWgsl("f32"), "linear gemv:f32");
+  assertEquals(
+    linearGemvWgsl("i8", undefined, SEQUENTIAL),
+    linearGemvWgsl("i8", undefined, SEQUENTIAL),
+    "linear gemv:i8",
+  );
+  assertEquals(
+    linearGemvWgsl("f16", undefined, SEQUENTIAL),
+    linearGemvWgsl("f16", undefined, SEQUENTIAL),
+    "linear gemv:f16",
+  );
+  assertEquals(
+    linearGemvWgsl("f32", undefined, SEQUENTIAL),
+    linearGemvWgsl("f32", undefined, SEQUENTIAL),
+    "linear gemv:f32",
+  );
   // The row-block variants only add `rows` to the generator inputs (rows comes from a pure function
   // of (storage, m, n), and the generator bakes the number it receives as is). The unroll count
   // changes with rows, so the absence of state is pinned across heights.
@@ -1274,7 +1290,7 @@ test("the same generator input always yields identical WGSL (every op × dtype �
   // the y tiling would be gone).
   assertNotEquals(
     linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 1 }),
-    linearGemvWgsl("i4", 32),
+    linearGemvWgsl("i4", 32, SEQUENTIAL),
     "linear gemv:r1 and the M=1 variant are identical text",
   );
   // GEMM shares one skeleton across 6 ops × weight storage × v4 (pins that generation holds no
@@ -1557,13 +1573,13 @@ test("pipeline keys are unique per generator input (no two kernels map to the sa
     // type and the workgroup shape differ, so on a collision one WGSL is handed to the other's
     // dispatch, an immediate wrong value). A separate key per group length is the same discipline
     // as i4's default path (the shift is baked into the WGSL — ADR 0069).
-    ...[32, 64, 128].map((groupSize) => linearGemvKey("i4", groupSize)),
+    ...[32, 64, 128].map((groupSize) => linearGemvKey("i4", groupSize, SEQUENTIAL)),
     // The storage (i4 / i8) is in the key too — the element count per word differs, 32 / 16, so a
     // collision gives a silent wrong value where the reduction runs over half / double the row
     // (perf-ledger K-16).
-    linearGemvKey("i8"),
-    linearGemvKey("f16"),
-    linearGemvKey("f32"),
+    linearGemvKey("i8", undefined, SEQUENTIAL),
+    linearGemvKey("f16", undefined, SEQUENTIAL),
+    linearGemvKey("f32", undefined, SEQUENTIAL),
     // The variant (column count / prefetch count) is in the key too — without it, the pipeline
     // built for the first shape runs on another shape's dispatch, a silent wrong value from the
     // workgroup-shape mismatch.

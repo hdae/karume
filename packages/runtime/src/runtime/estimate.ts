@@ -60,6 +60,7 @@ import {
   topkK,
   WEIGHT_SLOTS,
 } from "../ops.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
 import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
 import { linearI8a8TempBytes } from "../kernels/linear-i8a8.ts";
 import { linearKnobsOf, resolveLinearStrategy } from "./linear-strategies.ts";
@@ -1234,7 +1235,9 @@ export type EstimateFusionFacts = Omit<
  * (`sessionFusionRules`), the knobs (`sessionFusionKnobs` — the disabled rule names checked against
  * that list), the weights' storage from the residency plan (`plannedResidentWeights`) and the
  * weights an external step may not bind (`sharedOrPooledWeights`, with the expert plan's pooled
- * weights — `pooled` — as the executor takes its pool's).
+ * weights — `pooled` — as the executor takes its pool's). The GEMV choices are the default
+ * profile's: an estimate has no adapter, and every embedded table resolves to them (no table carries
+ * its own `linearGemv` yet).
  *
  * `options` are checked values (the entry of {@link estimateGraphMemory} ran
  * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the
@@ -1270,6 +1273,7 @@ export const estimateFusionFacts = (
       rowBlockSplit: undefined,
     },
     attentionDevice,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     residentWeights: plannedResidentWeights(residency),
     sharedOrPooledWeights: sharedOrPooledWeights(residency, pooled),
     maxComputeWorkgroupsPerDimension:
@@ -1525,6 +1529,7 @@ const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean =>
     weightStorage: storage,
     groupSize: undefined,
     knobs: linearKnobsOf(knobs.fusion.knobs),
+    linearGemv: knobs.fusion.linearGemv,
     packed: undefined,
     prologue: undefined,
   });

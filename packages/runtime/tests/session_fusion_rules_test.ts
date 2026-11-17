@@ -30,6 +30,7 @@ import {
   planGraph,
 } from "../src/runtime/plan.ts";
 import { buildSessionState } from "../src/runtime/session-build.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { fakeDevice, fakeGpuContext, fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
@@ -183,6 +184,7 @@ describe("the Session's rule list in the fusion pass", () => {
     const graph = mergeGraph(SILU_GRAPH);
     return planFusions(planGraph(graph, bindSymbols(graph, { x: SHAPE })).nodes, {
       rules,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(graph),
       outputNames: new Set(graph.outputs),
       limits: {

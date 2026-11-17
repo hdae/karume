@@ -8,6 +8,10 @@ import {
   linearGemvParallelWgsl,
   linearGemvStagedEligible,
 } from "../src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+
+/** The default profile's GEMV choices (the table the selection read before it moved there). */
+const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 describe("linearGemvStagedEligible (K-90)", () => {
   it("marks the lanes-32 rows with K ≥ 2048 that measured faster, and the E4B rows with the same role", () => {
@@ -27,23 +31,23 @@ describe("linearGemvStagedEligible (K-90)", () => {
       [2816, 2112],
     ]) {
       for (const m of [1, 4, 8])
-        assertEquals(linearGemvStagedEligible("i4", m, n, k, 32), 32, `${n}×${k} M${m}`);
+        assertEquals(linearGemvStagedEligible(GEMV, "i4", m, n, k, 32), 32, `${n}×${k} M${m}`);
     }
   });
 
   it("leaves the rows that measured slower or were not measured on the plain variant", () => {
     // E2B k / v (K = 1536, ×0.86 staged) and the lanes-4 rows (×0.86–1.06)
-    assertEquals(linearGemvStagedEligible("i4", 1, 256, 1536, 32), undefined);
-    assertEquals(linearGemvStagedEligible("i4", 1, 12288, 1536, 32), undefined);
-    assertEquals(linearGemvStagedEligible("i4", 1, 2048, 1536, 32), undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 1, 256, 1536, 32), undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 1, 12288, 1536, 32), undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 1, 2048, 1536, 32), undefined);
     // E4B k / v copy the E2B k / v row
-    assertEquals(linearGemvStagedEligible("i4", 1, 512, 2560, 32), undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 1, 512, 2560, 32), undefined);
   });
 
   it("never marks a packed-activation row (ADR 0105) or a prefill M", () => {
-    assert(linearGemvPackedEligible("i4", 1, 1536, 2048, 2048) !== undefined);
-    assertEquals(linearGemvStagedEligible("i4", 1, 1536, 2048, 2048), undefined);
-    assertEquals(linearGemvStagedEligible("i4", 9, 1536, 2048, 32), undefined);
+    assert(linearGemvPackedEligible(GEMV, "i4", 1, 1536, 2048, 2048) !== undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 1, 1536, 2048, 2048), undefined);
+    assertEquals(linearGemvStagedEligible(GEMV, "i4", 9, 1536, 2048, 32), undefined);
   });
 });
 

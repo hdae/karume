@@ -131,7 +131,7 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
     const m = numel(linear.inputShapes[0].slice(0, -1));
     const [n, k] = linear.inputShapes[1];
     const group = weight.storage === "i4" ? weight.groupSize : undefined;
-    const lanes = linearGemvParallelEligible(weight.storage, m, n, k, group);
+    const lanes = linearGemvParallelEligible(context.linearGemv, weight.storage, m, n, k, group);
     if (lanes === undefined) return undefined;
     // The activation side arrives as packed int8 (ADR 0105). Acceptance is settled in one
     // place, planFusions; this only reads whether it arrives (the output-side SRQ stays f32).

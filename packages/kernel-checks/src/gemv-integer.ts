@@ -16,6 +16,7 @@
 
 import type { GpuContext } from "../../runtime/src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../../runtime/src/gpu/webgpu-constants.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
 import {
   type IntegerGemvLanes,
   integerGemvParams,
@@ -395,8 +396,11 @@ export const benchIntegerGemv = async (
       const out = make(n * 4, U.STORAGE);
       const { storage } = weight;
       const group = weight.storage === "i4" ? weight.groupSize : undefined;
-      const lanes = linearGemvParallelEligible(storage, 1, n, k, group);
-      const packed = linearGemvPackedEligible(storage, 1, n, k, group) !== undefined;
+      // Built without a Session, so the parallel GEMV of the default profile's table (no adapter's
+      // table applies).
+      const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+      const lanes = linearGemvParallelEligible(gemv, storage, 1, n, k, group);
+      const packed = linearGemvPackedEligible(gemv, storage, 1, n, k, group) !== undefined;
       const parallel =
         lanes === undefined
           ? []

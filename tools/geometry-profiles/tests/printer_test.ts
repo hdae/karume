@@ -45,3 +45,25 @@ describe("literal", () => {
     assertThrows(() => literal(null), PrinterError);
   });
 });
+
+describe("the printer and the GEMV choices of a table (linearGemv)", () => {
+  it("prints the field of a table that carries it, and nothing for a table without it (every registered table)", () => {
+    for (const profile of BUILTIN_GEOMETRY_PROFILES) {
+      assertEquals(profileModule(profile).includes("linearGemv"), false, profile.id);
+    }
+    const linearGemv = {
+      sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] },
+      rowsThreadTarget: 16384,
+      parallelShapes: [
+        { storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false },
+      ],
+    } as const;
+    const [table] = BUILTIN_GEOMETRY_PROFILES;
+    assertEquals(
+      profileModule({ ...table, linearGemv }).includes(
+        'linearGemv: { sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] }, rowsThreadTarget: 16384, parallelShapes: [{ storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false }] }',
+      ),
+      true,
+    );
+  });
+});

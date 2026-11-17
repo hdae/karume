@@ -30,6 +30,7 @@
 
 import type { GpuContext } from "../../runtime/src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../../runtime/src/gpu/webgpu-constants.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
 import {
   defaultLinearGemvVariant,
   linearGemvParams,
@@ -247,7 +248,8 @@ export const checkPlanesGemv = async (
     planes.set(variant, pipeline);
     return pipeline;
   };
-  const sequentialVariant = defaultLinearGemvVariant();
+  // Built without a Session, so the default profile's GEMV choices (no adapter's table applies).
+  const sequentialVariant = defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv);
   let sequentialPipeline: Promise<GPUComputePipeline> | undefined;
   for (const { k, n, kind } of RUNS) {
     const data = fixtureOf(n, k, kind);
@@ -452,7 +454,11 @@ export const benchPlanesGemv = async (
     const bias = make(new Float32Array(BENCH_N));
     const wscale = make(Float32Array.from({ length: BENCH_N }, (_, c) => ((c % 17) + 1) * 0.0031));
     const out = make(BENCH_N * 4, U.STORAGE);
-    const sequential = defaultLinearGemvVariant({ storage: "i2", n: BENCH_N, k: BENCH_K });
+    const sequential = defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv, {
+      storage: "i2",
+      n: BENCH_N,
+      k: BENCH_K,
+    });
     const kernels = [
       {
         name: `sequential c${sequential.cols}u${sequential.unroll}`,

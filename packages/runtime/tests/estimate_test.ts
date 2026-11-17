@@ -19,6 +19,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { numel, OpContractError } from "../src/ops.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";
 import {
@@ -1331,6 +1332,7 @@ test("in a form where no fusion applies, the estimator's intermediate total equa
   const plan = planGraph(model.graph, {});
   const fusion = planFusions(plan.nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(model.graph),
     outputNames: new Set(model.graph.outputs),
     limits: TEST_LIMITS,

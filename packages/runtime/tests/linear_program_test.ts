@@ -179,7 +179,11 @@ const CASES: readonly Case[] = [
     shape: { m: 1, n: 64, k: 64 },
     storage: "f16",
     keys: () => [
-      linearGemvKey("f16", undefined, defaultLinearGemvVariant({ storage: "f16", n: 64, k: 64 })),
+      linearGemvKey(
+        "f16",
+        undefined,
+        defaultLinearGemvVariant(PROFILE.linearGemv, { storage: "f16", n: 64, k: 64 }),
+      ),
     ],
   },
   {
@@ -188,7 +192,11 @@ const CASES: readonly Case[] = [
     shape: { m: 1, n: 64, k: 64 },
     storage: "i8",
     keys: () => [
-      linearGemvKey("i8", undefined, defaultLinearGemvVariant({ storage: "i8", n: 64, k: 64 })),
+      linearGemvKey(
+        "i8",
+        undefined,
+        defaultLinearGemvVariant(PROFILE.linearGemv, { storage: "i8", n: 64, k: 64 }),
+      ),
     ],
   },
   {
@@ -197,7 +205,9 @@ const CASES: readonly Case[] = [
     shape: { m: 8, n: 64, k: 64 },
     storage: "i4",
     groupSize: 32,
-    keys: () => [linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 8, 64))],
+    keys: () => [
+      linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant(PROFILE.linearGemv, "i4", 8, 64)),
+    ],
   },
   {
     name: "the parallel GEMV",
@@ -210,7 +220,10 @@ const CASES: readonly Case[] = [
       linearGemvParallelKey(
         "i4",
         32,
-        named(linearGemvParallelLanes("i4", 1, PARALLEL_I4.n, PARALLEL_I4.k, 32), "lanes"),
+        named(
+          linearGemvParallelLanes(PROFILE.linearGemv, "i4", 1, PARALLEL_I4.n, PARALLEL_I4.k, 32),
+          "lanes",
+        ),
       ),
     ],
   },
@@ -225,7 +238,10 @@ const CASES: readonly Case[] = [
       linearGemvParallelStagedKey(
         "i4",
         32,
-        named(linearGemvParallelLanes("i4", 1, STAGED_I4.n, STAGED_I4.k, 32), "lanes"),
+        named(
+          linearGemvParallelLanes(PROFILE.linearGemv, "i4", 1, STAGED_I4.n, STAGED_I4.k, 32),
+          "lanes",
+        ),
       ),
     ],
   },
@@ -240,7 +256,10 @@ const CASES: readonly Case[] = [
       linearGemvParallelPackedKey(
         "i2",
         undefined,
-        named(linearGemvParallelLanes("i2", 1, PACKED_I2.n, PACKED_I2.k), "lanes"),
+        named(
+          linearGemvParallelLanes(PROFILE.linearGemv, "i2", 1, PACKED_I2.n, PACKED_I2.k),
+          "lanes",
+        ),
       ),
     ],
   },
@@ -255,7 +274,10 @@ const CASES: readonly Case[] = [
       linearGemvSubgroupKey(
         "i4",
         32,
-        named(linearGemvParallelLanes("i4", 1, PARALLEL_I4.n, PARALLEL_I4.k, 32), "lanes"),
+        named(
+          linearGemvParallelLanes(PROFILE.linearGemv, "i4", 1, PARALLEL_I4.n, PARALLEL_I4.k, 32),
+          "lanes",
+        ),
       ),
     ],
   },
@@ -331,6 +353,7 @@ const choiceOf = (testCase: Case): { readonly plan: NodePlan; readonly choice: L
     weightStorage: testCase.storage,
     groupSize: testCase.groupSize,
     knobs: { ...DEFAULTS, ...testCase.knobs },
+    linearGemv: PROFILE.linearGemv,
     packed: testCase.packedScale === undefined ? undefined : { role: "read" },
     prologue: testCase.prologue,
   });

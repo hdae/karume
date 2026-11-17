@@ -20,7 +20,8 @@ import {
 } from "@karume/kernel-checks";
 import { describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { linearGemvKey } from "../src/kernels/linear-gemv.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import { defaultLinearGemvVariant, linearGemvKey } from "../src/kernels/linear-gemv.ts";
 import { planesGemvKey } from "../src/kernels/linear-gemv-planes.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { createSessionFromContainer, REORDER_STRATEGIES } from "../src/runtime/executor.ts";
@@ -37,6 +38,16 @@ import {
 } from "./helpers/model-fixture.ts";
 import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { type CensusRow, countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
+
+/**
+ * The sequential GEMV's key for an i2 linear, in the default profile's variant (the GEMV choices
+ * every embedded table resolves to).
+ */
+const SEQUENTIAL_I2_KEY = linearGemvKey(
+  "i2",
+  undefined,
+  defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv),
+);
 
 describe.skipIf(!GPU_AVAILABLE)("byte-plane GEMV: the class-R check (real GPU)", () => {
   it("passes every criterion of every case of the shared check", async () => {
@@ -226,7 +237,7 @@ describe.skipIf(!GPU_AVAILABLE)("linearGemvPlanes through a Session (real GPU)",
       where,
     );
     assertEquals(countDispatches(census, planesGemvKey({ lanes: 8, rows: 4 })), 1, where);
-    assertEquals(countDispatches(census, linearGemvKey("i2")), 0, where);
+    assertEquals(countDispatches(census, SEQUENTIAL_I2_KEY), 0, where);
     const { reference } = fixtureFor();
     let failures = 0;
     let first = -1;
@@ -246,7 +257,7 @@ describe.skipIf(!GPU_AVAILABLE)("linearGemvPlanes through a Session (real GPU)",
   it("runs the sequential GEMV's key at the lm_head shape with the option off", async () => {
     const where = "lm_head 262144×1536 (option off)";
     const { census } = await runTwice(fixtureFor(), {}, where);
-    assertEquals(countDispatches(census, linearGemvKey("i2")), 1, where);
+    assertEquals(countDispatches(census, SEQUENTIAL_I2_KEY), 1, where);
     assertEquals(countDispatches(census, isPlanes), 0, where);
   });
 

@@ -41,6 +41,19 @@ adapter's match and measures nothing at run time.
 - The headers of the three tables registered before the generator existed (`apple-metal-3`, `nvidia-ampere`,
   `nvidia-blackwell`) are older prose. Each is replaced when its table is regenerated.
 
+## The GEMV choices of linear
+
+- A profile can also hold the GEMV choices of linear (`linearGemv`): the variant of the sequential kernel and its
+  per-shape exceptions, the thread target that decides the row-block height, and the rows of the shapes that take the
+  parallel GEMV with their lane count and their packed and staged flags.
+- The generator does not derive them and no registered table carries them. A table without them runs with the default
+  profile's, the values measured on the RTX 3080 Ti: the Session fills them in once, where it selects its profile, so
+  the linear selection, the fusion pass and the recipe builder all read the same choices. The memory estimate, which
+  has no adapter, reads the default profile's.
+- `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
+- The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
+  reads it.
+
 ## The command
 
 `node tools/geometry-profiles/generate.ts <profile id> --records=<path>[,…] [--attention-bench=<path>[,…]]
@@ -62,3 +75,5 @@ adapter's match and measures nothing at run time.
   family cites, with the registered table as base, derive an object equal to the registered table, provenance
   included. Without the records the case is skipped and says which files are missing.
 - `apple-metal-3` has no such case: every record it cites has a format the derivation no longer accepts.
+- The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
+  the profile, and a profile with other choices changes the selection and the pipeline key (core lane).

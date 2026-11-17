@@ -30,8 +30,9 @@ import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
  * value (the default argument of selection) — with an import order that evaluates this module first,
  * that module's `const` is not yet initialised and access throws. Every geometry is a flat object of
  * numbers only, so a one-level copy is already deep. `provenance` nests `adapter`, `families` (one
- * entry per op family, each with its `userAgent` — an array of strings) and `attentionBench`, and
- * `attentionOnline` is one flat object, so those are copied and frozen too. The families are walked
+ * entry per op family, each with its `userAgent` — an array of strings) and `attentionBench`,
+ * `attentionOnline` is one flat object, and `linearGemv` nests its variants and its rows of flat
+ * objects, so those are copied and frozen too. The families are walked
  * by the entries the table has (not by `GEOMETRY_PROFILE_FAMILIES`, which this module must not read
  * at evaluation — see that constant).
  */
@@ -67,6 +68,24 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
     ...(profile.attentionOnline === undefined
       ? {}
       : { attentionOnline: Object.freeze({ ...profile.attentionOnline }) }),
+    ...(profile.linearGemv === undefined
+      ? {}
+      : {
+          linearGemv: Object.freeze({
+            sequential: Object.freeze({
+              variant: Object.freeze({ ...profile.linearGemv.sequential.variant }),
+              shapes: Object.freeze(
+                profile.linearGemv.sequential.shapes.map((row) =>
+                  Object.freeze({ ...row, variant: Object.freeze({ ...row.variant }) }),
+                ),
+              ),
+            }),
+            rowsThreadTarget: profile.linearGemv.rowsThreadTarget,
+            parallelShapes: Object.freeze(
+              profile.linearGemv.parallelShapes.map((row) => Object.freeze({ ...row })),
+            ),
+          }),
+        }),
     ...(profile.provenance === undefined
       ? {}
       : {

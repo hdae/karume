@@ -849,14 +849,14 @@ gemma4's prefill runs each chunk with the physical row count of "the smallest bu
   (M = 4 / 8). Of gemma4's default buckets (`gemma.CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256),
   4 and 8 fall into this range.
 
-## The linear GEMV family (1 ≤ M ≤ 64): the row-block height is chosen with constants of the reference device, and the first turn pays the shader parsing cost
+## The linear GEMV family (1 ≤ M ≤ 64): the row-block height is chosen with values of the reference device, and the first turn pays the shader parsing cost
 
 linear with i4 / i8 storage × f32 compute is taken by the GEMV family for 1 ≤ M ≤ 64 (ADR
 [0082](decisions/0082-linear-gemv-decode.md) addendum 5), which stays a full u32 match with the default
 GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design constraints:
 
 - **The row-block height `rows` is a pure function of (storage, m, n), and the parallelism target of
-  16384 threads is the saturation point of the reference device (RTX 3080 Ti) baked in**. On GPUs whose
+  16384 threads is the saturation point of the reference device (RTX 3080 Ti), held by the default geometry profile (`linearGemv.rowsThreadTarget`) that every embedded table takes**. On GPUs whose
   saturation point is an order of magnitude smaller (integrated GPUs, the Apple M series) it buys too
   many y tiles and re-reads the weights more than is optimal, but the values are correct, and the
   choice does not change per device — choosing by a pure function is the premise of "same key →
@@ -2609,7 +2609,7 @@ The shapes of the gemma4 drafters (`[256,3072]` / `[262144,256]` and so on — i
 `packedStaticQuantize` is an optional setting of [ADR 0105](decisions/0105-packed-static-quantize-activations.md) that packs 4 int8 codes produced by fixed SRQ into one u32 word and passes them to the parallel GEMV.
 QAT E2B's `i4-fast` declares it by default (regular Gemma 4 has no `static_quantize`, so it does not declare it). 4 by-design constraints:
 
-- **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of `PARALLEL_SHAPES` whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
+- **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of the default geometry profile's parallel-GEMV table, `linearGemv.parallelShapes`, whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
 - **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted for the opt-in: [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2 classes `packedStaticQuantize` as E on finite values and states this NaN saturation.
 - **The allocation does not become 1/4**. The output tensor's storage is allocated at the declared shape, and only 1/4 of it is actually written. This is a choice to keep the arena buckets unchanged, not a VRAM saving.
 - **It is accepted only with linear at the level `reorder` and `linearCompute: "f32"`** (it is a form of the parallel GEMV). Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.

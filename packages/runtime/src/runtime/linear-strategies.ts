@@ -30,6 +30,7 @@ import {
   defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
+  type LinearGemvChoices,
   linearGemvPackedEligible,
   type LinearGemvParallelLanes,
   linearGemvParallelLanes,
@@ -141,6 +142,14 @@ export type LinearFacts = {
   readonly groupSize: number | undefined;
   readonly knobs: LinearKnobs;
   /**
+   * The GEMV choices of the Session's geometry profile (`linearGemv` of the profile the Session
+   * resolved — src/kernels/geometry-profile.ts): which sequential variant, how many rows per row
+   * block (unless `knobs.linearGemvRowsThreadTarget` replaces the target) and which shapes take the
+   * parallel GEMV and how. The recipe builder, the fusion pass and the estimate pass the same value
+   * a Session runs with.
+   */
+  readonly linearGemv: LinearGemvChoices;
+  /**
    * The side of the packed-activation pairing the fusion pass declared for this linear, if any
    * (ADR 0105). The fusion pass asks with `{ role: "read" }` before it declares the pairing: "would
    * this linear read packed words?".
@@ -229,13 +238,13 @@ const gemvRows = (m: number): boolean => m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
 /**
  * A member of the GEMV family for this storage (one thread = one output column × row block, no shared
  * tile). Which member: the parallel forms only when the resolved `linearGemvReduce` asks for them
- * (linear at the level `reorder`) and the measured table has lanes for the shape; otherwise M = 1
+ * (linear at the level `reorder`) and the profile's table has lanes for the shape; otherwise M = 1
  * takes the column form and M ≥ 2 the row-block form.
  *
  * MUST: a choice that changes numbers happens only when explicitly requested — at the level `exact`
  * (`linearGemvReduce: "sequential"`) the reference path's kernel and WGSL stay as they are.
  * The staged-activation form (K-90) is bit-identical to the plain parallel one, so it is taken wherever
- * the measured table marks the shape, without an option of its own.
+ * the profile's table marks the shape, without an option of its own.
  */
 const gemvChoice = (
   linear: Derived,
@@ -243,24 +252,24 @@ const gemvChoice = (
   groupSize: number | undefined,
   packed: LinearFacts["packed"],
 ): LinearGemvChoice => {
-  const { m, n, k, knobs } = linear;
+  const { m, n, k, knobs, linearGemv } = linear;
   const subgroup = knobs.linearGemvReduce === "parallel-subgroup32";
   const lanes =
     knobs.linearGemvReduce !== "sequential"
-      ? linearGemvParallelLanes(storage, m, n, k, groupSize)
+      ? linearGemvParallelLanes(linearGemv, storage, m, n, k, groupSize)
       : undefined;
   const rowsVariant =
     m === 1 || lanes !== undefined
       ? undefined
-      : defaultLinearGemvRowsVariant(storage, m, n, knobs.linearGemvRowsThreadTarget);
-  const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
+      : defaultLinearGemvRowsVariant(linearGemv, storage, m, n, knobs.linearGemvRowsThreadTarget);
+  const variant = rowsVariant ?? defaultLinearGemvVariant(linearGemv, { storage, n, k });
   // Only the parallel (non-subgroup) form has a packed-activation kernel; past the refusal above a
   // packed linear always has lanes and no subgroup reduction.
   const staged =
     lanes !== undefined &&
     !subgroup &&
     packed === undefined &&
-    linearGemvStagedEligible(storage, m, n, k, groupSize) !== undefined;
+    linearGemvStagedEligible(linearGemv, storage, m, n, k, groupSize) !== undefined;
   const id: LinearGemvChoice["id"] =
     lanes !== undefined
       ? subgroup
@@ -300,14 +309,15 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   },
   {
     refuse: (linear) => {
-      const { packed, knobs, integer, weightStorage, groupSize, m, n, k, where } = linear;
+      const { packed, knobs, linearGemv, integer, weightStorage, groupSize, m, n, k, where } =
+        linear;
       if (packed === undefined) return undefined;
       const eligible =
         packed.role === "read" &&
         knobs.linearGemvReduce === "parallel" &&
         knobs.linearCompute === "f32" &&
         (integer !== undefined ||
-          linearGemvPackedEligible(weightStorage, m, n, k, groupSize) !== undefined);
+          linearGemvPackedEligible(linearGemv, weightStorage, m, n, k, groupSize) !== undefined);
       return eligible
         ? undefined
         : `${where}: declared as packed activations but lands on neither the parallel GEMV nor the integer GEMV`;

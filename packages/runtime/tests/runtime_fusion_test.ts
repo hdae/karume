@@ -10,6 +10,7 @@
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   ADALN_MODULATION_PACK_KEY,
   ADALN_NORM_KEY,
@@ -80,6 +81,7 @@ const fuse = (
   const plan = planGraph(ir, bindSymbols(ir, inputShapes));
   return planFusions(plan.nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -249,6 +251,7 @@ const fuseWithRules = <Name extends string>(
     limits: TEST_LIMITS,
     ...extra,
     rules,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
   });
 };
 
@@ -481,6 +484,7 @@ test("no rule matches a window containing a node that touches state (an invarian
   const plan = planGraph(ir, bindSymbols(ir, siluInputs()));
   const context = {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -1043,6 +1047,7 @@ test("adaLN's in-window passthroughs do not take away other rules' match positio
   const plan = planGraph(ir, bindSymbols(ir, adalnInputs(graph)));
   const context = {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -1478,6 +1483,7 @@ test("row blocks are split evenly into the fewest blocks that fit the limit, and
   const ir = parse(attentionGraph(shape));
   const plan = planFusions(planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: { maxStorageBufferBindingSize: 512 * 30, maxComputeWorkgroupsPerDimension: 65535 },
@@ -1509,6 +1515,7 @@ test("the attentionRowBlockMaxBytes budget splits decomposed attention by the sm
   const planWith = (budget: number | undefined) =>
     planFusions(nodes, {
       rules: FUSION_RULES,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       // The binding limit is 128 MiB (1 block without a budget). Only the budget moves the block
@@ -2280,6 +2287,7 @@ const fusePrologue = (
   const ir = parse(graph);
   return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2355,6 +2363,7 @@ test("the linear prologue keeps the total-use accounting exact: the producer's i
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row })).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2445,6 +2454,7 @@ test("the linear prologue rejects a producer that is not f32 in and out", () => 
   ] as const) {
     const plan = planFusions([replaced, linear], {
       rules: FUSION_RULES,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,
@@ -2503,6 +2513,7 @@ test("geluMulStaticQuantize and the linear prologue never accept the same gelu_t
   const ir = parse(graph);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row, gate: row, ple: row })).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2700,6 +2711,7 @@ const fuseAttentionPermutes = (
   const ir = parse(graph);
   return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2822,6 +2834,7 @@ test("the absorbed permutes keep the total-use accounting exact: each permute's 
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2939,6 +2952,7 @@ test("nothing around a states-form attention or a non-f32 permute is absorbed", 
   const nodes = planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes;
   const context = {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -3167,6 +3181,7 @@ test("on the online route an absorbable [0, 2, 1, 3] permute right after the att
   const ir = parse(graph);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -3194,6 +3209,7 @@ test("the absorbed output permute keeps the total-use accounting exact: O is nev
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -3263,6 +3279,7 @@ const planRmsNormRope = (graph: DeclarationJson, context: RmsNormRopeContext = {
     nodes,
     context: {
       rules: FUSION_RULES,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,

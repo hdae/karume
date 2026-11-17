@@ -547,6 +547,60 @@ describe("parseGeometryProfileJson: the optional key-axis form of the online att
   });
 });
 
+describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearGemv)", () => {
+  const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+  const withGemv: GeometryProfile = { ...BASE, linearGemv: gemv };
+  /** BASE carrying `linearGemv` with its first parallel row replaced by `row` (any shape). */
+  const withParallelRow = (row: unknown): string =>
+    json({
+      ...BASE,
+      linearGemv: { ...gemv, parallelShapes: [row, ...gemv.parallelShapes.slice(1)] },
+    });
+  const [first] = gemv.parallelShapes;
+
+  it("a table with linearGemv comes back with it (every parallel row in its order, with its flags), and a table without it comes back without the field", () => {
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(withGemv)), withGemv);
+    assertEquals("linearGemv" in parseGeometryProfileJson(geometryProfileJson(BASE)), false);
+  });
+
+  it("rejects an unknown field, a missing or mistyped field and a value the runtime's check refuses, naming the path", () => {
+    rejects(
+      json({ ...BASE, linearGemv: { ...gemv, rows: 4 } }),
+      "linearGemv has unknown fields rows",
+    );
+    rejects(
+      json({ ...BASE, linearGemv: { ...gemv, rowsThreadTarget: undefined } }),
+      "linearGemv is missing fields rowsThreadTarget",
+    );
+    rejects(
+      withParallelRow({ ...first, warps: 2 }),
+      "linearGemv.parallelShapes[0] has unknown fields warps",
+    );
+    rejects(
+      withParallelRow({ ...first, lanes: "4" }),
+      "linearGemv.parallelShapes[0].lanes is not one of",
+    );
+    rejects(
+      withParallelRow({ ...first, packedActivations: 1 }),
+      "linearGemv.parallelShapes[0].packedActivations is not a boolean",
+    );
+    rejects(
+      json({
+        ...BASE,
+        linearGemv: {
+          ...gemv,
+          sequential: { ...gemv.sequential, variant: { cols: 512, unroll: 4 } },
+        },
+      }),
+      "linearGemv.sequential.variant: cols must be an integer in 1..256 (512)",
+    );
+    rejects(
+      withParallelRow({ ...first, storage: "f16" }),
+      "linearGemv.parallelShapes[0].storage must be one of i2 / i4 / i8",
+    );
+  });
+});
+
 describe("parseGeometryProfileJson: the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {
   const withFields: GeometryProfile = {
     ...BASE,

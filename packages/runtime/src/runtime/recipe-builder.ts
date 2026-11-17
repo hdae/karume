@@ -36,7 +36,7 @@
 import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import type { ExpertLinearStorage } from "../kernels/expert-linear.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
-import type { GeometryProfile } from "../kernels/geometry-profile.ts";
+import type { ResolvedGeometryProfile } from "../kernels/geometry-profile.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
@@ -195,7 +195,8 @@ export type RecipeBuilderContext = {
   readonly rmsNormReduce: RmsNormReduce;
   /**
    * The parallelism target of the row-block GEMV (`SessionOptions.linearGemvRowsThreadTarget` — a
-   * static knob fixed at Session creation. `undefined` is the kernel-side default).
+   * static knob fixed at Session creation. `undefined` is the target of the profile's GEMV choices,
+   * `geometryProfile.linearGemv.rowsThreadTarget`).
    */
   readonly linearGemvRowsThreadTarget: number | undefined;
   /**
@@ -225,9 +226,10 @@ export type RecipeBuilderContext = {
   /**
    * The GEMM geometry profile (chosen once at construction by the executor's {@link SessionState} —
    * DECIDED: ADR 0115). Where the derivation of matmul / bmm / linear, fused attention, conv2d and
-   * i8a8 looks up geometry.
+   * i8a8 looks up geometry, and where linear's selection reads its GEMV choices (resolved —
+   * `linearGemv` is always present).
    */
-  readonly geometryProfile: GeometryProfile;
+  readonly geometryProfile: ResolvedGeometryProfile;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
   /**

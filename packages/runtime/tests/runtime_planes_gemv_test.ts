@@ -12,6 +12,7 @@ import { CodegenError, DispatchLimitError } from "../src/codegen/errors.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   defaultLinearGemvRowsVariant,
+  defaultLinearGemvVariant,
   linearGemvKey,
   linearGemvPackedEligible,
   linearGemvParallelEligible,
@@ -44,6 +45,9 @@ import { sessionOptionsViolation } from "../src/runtime/session-options-check.ts
 import { REORDER_STRATEGIES, type SessionOptions } from "../src/runtime/session-types.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
+
+/** The default profile's GEMV choices (the ones every embedded table resolves to). */
+const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 /** The QAT E2B lm_head, the measured shape, and its variant. */
 const LM_HEAD = { n: 262144, k: 1536, variant: { lanes: 8, rows: 4 } } as const;
@@ -296,6 +300,7 @@ const planOf = (options: GraphOptions, context: Partial<Context> = {}): FusionPl
   const layout: FusionWeightLayout = { storage: "i2" };
   return planFusions(planGraph(ir, {}).nodes, {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {
@@ -341,8 +346,8 @@ describe("the fusion pass and a byte-plane linear", () => {
     // So no fusion rule or pairing claims it today, with the option or without: the guards that
     // keep them off a byte-plane linear reject no window and pair nothing they would otherwise.
     for (const m of MS) {
-      assertEquals(linearGemvParallelEligible("i2", m, LM_HEAD.n, LM_HEAD.k), undefined);
-      assertEquals(linearGemvPackedEligible("i2", m, LM_HEAD.n, LM_HEAD.k), undefined);
+      assertEquals(linearGemvParallelEligible(GEMV, "i2", m, LM_HEAD.n, LM_HEAD.k), undefined);
+      assertEquals(linearGemvPackedEligible(GEMV, "i2", m, LM_HEAD.n, LM_HEAD.k), undefined);
       assertEquals(integerGemvVariantFor("i2", undefined, m, LM_HEAD.n, LM_HEAD.k), undefined);
     }
   });
@@ -518,12 +523,12 @@ describe("the linear recipe's route", () => {
 
   it("keeps the sequential GEMV (M = 1) and the row-block variant (M = 8) with the option off", async () => {
     const off1 = await routeOf(lmHead(), false);
-    assertEquals(off1.key, linearGemvKey("i2"));
+    assertEquals(off1.key, linearGemvKey("i2", undefined, defaultLinearGemvVariant(GEMV)));
     assertEquals(off1.key, "linear_gemv:v1:f32:c32u4:wi2");
     const off8 = await routeOf(lmHead({ m: 8 }), false);
     assertEquals(
       off8.key,
-      linearGemvRowsKey("i2", undefined, defaultLinearGemvRowsVariant("i2", 8, LM_HEAD.n)),
+      linearGemvRowsKey("i2", undefined, defaultLinearGemvRowsVariant(GEMV, "i2", 8, LM_HEAD.n)),
     );
     assertNotEquals(off1, await routeOf(lmHead(), true));
   });

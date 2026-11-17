@@ -163,6 +163,7 @@ export const buildLinear = async (
     weightStorage,
     groupSize,
     knobs: face.state,
+    linearGemv: face.state.geometryProfile.linearGemv,
     packed,
     prologue,
   });

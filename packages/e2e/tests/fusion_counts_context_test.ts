@@ -9,6 +9,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { sessionFusionRules } from "../../runtime/src/runtime/fusion.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
 import { countUses, ExecutionError } from "../../runtime/src/runtime/plan.ts";
 import {
   plannedResidentWeights,
@@ -61,6 +62,7 @@ describe("planDistributionFusions", () => {
         planDistributionFusions(graph, { x: SHAPE }, options).context,
         sessionFusionContext({
           rules,
+          linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
           knobs: sessionFusionKnobs(options, rules),
           useCounts: countUses(graph),
           outputNames: new Set(graph.outputs),

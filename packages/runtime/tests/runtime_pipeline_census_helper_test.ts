@@ -17,6 +17,7 @@ import {
 } from "../src/kernels/attention-online-i8a8.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import {
+  defaultLinearGemvVariant,
   linearGemvKey,
   linearGemvParallelKey,
   linearGemvParallelPackedKey,
@@ -68,6 +69,9 @@ import {
   SEAT_SIGNATURES,
   type SeatSignatures,
 } from "./helpers/pipeline-census.ts";
+
+/** The default profile's sequential GEMV variant (the reference path's M = 1 kernel). */
+const SEQUENTIAL = defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv);
 
 const rows = (...entries: readonly (readonly [string, number])[]): readonly CensusRow[] =>
   entries.map(([key, dispatchCount]) => ({ key, dispatchCount }));
@@ -186,10 +190,10 @@ const REFERENCE_KEYS: readonly string[] = [
   linearKey("f32", true),
   linearKey("i8", true, "f32", 1),
   linearKey("i4", false, "f32", undefined, 32),
-  linearGemvKey("i8"),
-  linearGemvKey("i4", 64),
+  linearGemvKey("i8", undefined, SEQUENTIAL),
+  linearGemvKey("i4", 64, SEQUENTIAL),
   // The sequential GEMV the byte-plane GEMV replaces (the QAT lm_head with the option off).
-  linearGemvKey("i2"),
+  linearGemvKey("i2", undefined, SEQUENTIAL),
   attentionQkKey(true),
   attentionQkKey(false, "f32", "f32", true, true, true),
   attentionPvKey(true),
@@ -353,7 +357,7 @@ describe("assertPipelineCensus", () => {
 
 describe("assertSeatsApplied", () => {
   const parallel = linearGemvParallelKey("i4", 32, 4);
-  const sequential = linearGemvKey("i4", 32);
+  const sequential = linearGemvKey("i4", 32, SEQUENTIAL);
 
   it("an option with a non-reference value passes if at least one dispatch of that variant ran", () => {
     assertSeatsApplied(

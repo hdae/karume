@@ -2575,6 +2575,7 @@ export class Session {
         outputNames: this.#state.outputNames,
         limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
         attentionDevice: this.#state.attentionDevice,
+        linearGemv: this.#state.geometryProfile.linearGemv,
         residentWeights: this.#state.residentWeights,
         sharedOrPooledWeights: sharedOrPooledWeights(
           this.#state.residency,

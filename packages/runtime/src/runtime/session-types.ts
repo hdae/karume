@@ -572,8 +572,10 @@ export type SessionOptions = {
   readonly integerGemv?: boolean;
   /**
    * The **parallelism target** of the row-block gemv (the GEMV family of linear, M ≥ 2) (thread
-   * count = output columns n × y tiles). Default 16384 = the saturation point of the reference
-   * device (RTX 3080 Ti).
+   * count = output columns n × y tiles). When given, it replaces the target of the GEMV choices of
+   * the Session's geometry profile (`GeometryProfile.linearGemv.rowsThreadTarget`); omitted, that
+   * target holds — 16384 in the default profile, which every embedded table takes = the saturation
+   * point of the reference device (RTX 3080 Ti).
    *
    * On GPUs with a smaller saturation point (integrated GPUs, Apple M series), lowering it raises
    * `rows` (rows per thread) and reduces weight re-reads (the mechanism is

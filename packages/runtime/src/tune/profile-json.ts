@@ -21,6 +21,12 @@ import {
   type I8a8RowsRule,
 } from "../kernels/geometry-profile.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
+import type {
+  LinearGemvChoices,
+  LinearGemvParallelShape,
+  LinearGemvShapeVariant,
+  LinearGemvVariant,
+} from "../kernels/linear-gemv.ts";
 
 /**
  * The JSON of a saved table cannot be read (the message names the field's path —
@@ -223,6 +229,100 @@ const readAttentionOnline = (
     : fail(child(path, "keyWords"), `is not "tiled" (${show(fields.keyWords)})`);
 };
 
+/** A sequential GEMV variant (its ranges are {@link assertGeometryProfile}'s job). */
+const readGemvVariant = (value: unknown, path: string): LinearGemvVariant => {
+  const fields = readRecord(value, path, ["cols", "unroll"]);
+  return {
+    cols: readInteger(fields.cols, child(path, "cols")),
+    unroll: readInteger(fields.unroll, child(path, "unroll")),
+  };
+};
+
+/** An array field (rejects a non-array with its path). */
+const readArray = (value: unknown, path: string): readonly unknown[] =>
+  Array.isArray(value) ? value : fail(path, `is not an array (${show(value)})`);
+
+/**
+ * A field of a union of literals (fails on any other value). Which members a field allows — the
+ * parallel GEMV takes i2 / i4 / i8 storage only — is {@link assertGeometryProfile}'s job.
+ */
+const readMember = <Member extends string | number>(
+  value: unknown,
+  path: string,
+  members: readonly Member[],
+): Member => {
+  const found = members.find((member) => member === value);
+  return found ?? fail(path, `is not one of ${members.join(" / ")} (${show(value)})`);
+};
+
+const STORAGES = ["f32", "f16", "bf16", "i8", "i4", "i2"] as const;
+const LANES = [2, 4, 8, 16, 32] as const;
+
+/** One per-shape exception of the sequential variant. */
+const readGemvShapeVariant = (value: unknown, path: string): LinearGemvShapeVariant => {
+  const fields = readRecord(value, path, ["storage", "n", "k", "variant"]);
+  return {
+    storage: readMember(fields.storage, child(path, "storage"), STORAGES),
+    n: readInteger(fields.n, child(path, "n")),
+    k: readInteger(fields.k, child(path, "k")),
+    variant: readGemvVariant(fields.variant, child(path, "variant")),
+  };
+};
+
+/** One shape row of the parallel GEMV (`group` and `stagedActivations` optional). */
+const readGemvParallelShape = (value: unknown, path: string): LinearGemvParallelShape => {
+  const fields = readRecord(
+    value,
+    path,
+    ["storage", "n", "k", "lanes", "packedActivations"],
+    ["group", "stagedActivations"],
+  );
+  if (typeof fields.packedActivations !== "boolean") {
+    return fail(
+      child(path, "packedActivations"),
+      `is not a boolean (${show(fields.packedActivations)})`,
+    );
+  }
+  if (fields.stagedActivations !== undefined && fields.stagedActivations !== true) {
+    return fail(
+      child(path, "stagedActivations"),
+      `is not true (${show(fields.stagedActivations)})`,
+    );
+  }
+  return {
+    storage: readMember(fields.storage, child(path, "storage"), STORAGES),
+    n: readInteger(fields.n, child(path, "n")),
+    k: readInteger(fields.k, child(path, "k")),
+    ...(fields.group === undefined
+      ? {}
+      : { group: readInteger(fields.group, child(path, "group")) }),
+    lanes: readMember(fields.lanes, child(path, "lanes"), LANES),
+    packedActivations: fields.packedActivations,
+    ...(fields.stagedActivations === undefined ? {} : { stagedActivations: true }),
+  };
+};
+
+/** `linearGemv` (the GEMV choices of linear — no generated table writes it yet). */
+const readLinearGemv = (value: unknown, path: string): LinearGemvChoices => {
+  const fields = readRecord(value, path, ["sequential", "rowsThreadTarget", "parallelShapes"]);
+  const sequentialPath = child(path, "sequential");
+  const sequential = readRecord(fields.sequential, sequentialPath, ["variant", "shapes"]);
+  const shapesPath = child(sequentialPath, "shapes");
+  const parallelPath = child(path, "parallelShapes");
+  return {
+    sequential: {
+      variant: readGemvVariant(sequential.variant, child(sequentialPath, "variant")),
+      shapes: readArray(sequential.shapes, shapesPath).map((row, index) =>
+        readGemvShapeVariant(row, `${shapesPath}[${index}]`),
+      ),
+    },
+    rowsThreadTarget: readInteger(fields.rowsThreadTarget, child(path, "rowsThreadTarget")),
+    parallelShapes: readArray(fields.parallelShapes, parallelPath).map((row, index) =>
+      readGemvParallelShape(row, `${parallelPath}[${index}]`),
+    ),
+  };
+};
+
 const readProvenance = (value: unknown, path: string): Provenance => {
   const fields = readRecord(value, path, ["adapter", "families"], ["attentionBench"]);
   const adapterPath = child(path, "adapter");
@@ -333,7 +433,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     parsed,
     ROOT,
     ["id", "gemmRows", "attention", "conv2d", "i8a8"],
-    ["match", "attentionOnline", "provenance"],
+    ["match", "attentionOnline", "linearGemv", "provenance"],
   );
   const attention = readRecord(fields.attention, "attention", ["qk", "pv"]);
   const conv2d = readRecord(fields.conv2d, "conv2d", ["rows64", "rows32"]);
@@ -359,6 +459,9 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     ...(fields.attentionOnline === undefined
       ? {}
       : { attentionOnline: readAttentionOnline(fields.attentionOnline, "attentionOnline") }),
+    ...(fields.linearGemv === undefined
+      ? {}
+      : { linearGemv: readLinearGemv(fields.linearGemv, "linearGemv") }),
     ...(fields.provenance === undefined
       ? {}
       : { provenance: readProvenance(fields.provenance, "provenance") }),

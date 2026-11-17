@@ -68,7 +68,9 @@ import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import {
   defaultLinearGemvRowsVariant,
+  defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
+  type LinearGemvChoices,
   linearGemvKey,
   linearGemvRowsForShape,
   linearGemvRowsKey,
@@ -332,14 +334,15 @@ const ranGemv = (keys: readonly string[]): boolean =>
  * generates), M ≥ 2 the row-block variant, and `rows` comes from a pure function of (storage, m, n).
  */
 const expectedGemvKey = (
+  gemv: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   groupSize?: number,
 ): string =>
   m === 1
-    ? linearGemvKey(storage, groupSize)
-    : linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(storage, m, n));
+    ? linearGemvKey(storage, groupSize, defaultLinearGemvVariant(gemv))
+    : linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(gemv, storage, m, n));
 
 /**
  * MUST: list **shapes that drop exactly one condition of the check at a time**. Dropping several at once makes it
@@ -439,7 +442,7 @@ test.skipIf(!GPU_AVAILABLE)(
         if (door.gemv) {
           // For an open shape, also check **on which variant** it opened (mixing up the M=1 variant and the
           // row-block variant is invisible from the family name alone).
-          const key = expectedGemvKey("i4", door.m, n, groupSize);
+          const key = expectedGemvKey(profile.linearGemv, "i4", door.m, n, groupSize);
           assert(
             keys.includes(key),
             `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
@@ -707,7 +710,7 @@ test.skipIf(!GPU_AVAILABLE)(
           `${door.name}: whether the GEMV family ran differs from the expectation (breakdown of what ran: ${shown})`,
         );
         if (door.gemv) {
-          const key = expectedGemvKey("i8", door.m, n);
+          const key = expectedGemvKey(profile.linearGemv, "i8", door.m, n);
           assert(
             keys.includes(key),
             `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
@@ -930,8 +933,14 @@ const checkRowsCase = async (
   bias: FilledTensor,
 ): Promise<void> => {
   const { name, k, n, m, groupSize } = rowsCase;
+  // The GEMV choices Sessions on this device run with
+  const choices = deviceGeometryProfile(gpu).linearGemv;
   // ① The intent of the shape (if the implementation table moves, the case turns red together with its aim)
-  assertEquals(linearGemvRowsForShape(storage, m, n), rowsCase.rows, `${name}: row-block height`);
+  assertEquals(
+    linearGemvRowsForShape(choices, storage, m, n),
+    rowsCase.rows,
+    `${name}: row-block height`,
+  );
   const tiles = Math.ceil(m / rowsCase.rows);
   assertEquals(tiles, rowsCase.tiles, `${name}: number of y tiles`);
   assertEquals(
@@ -993,7 +1002,11 @@ const checkRowsCase = async (
   }
 
   // ④ It ran on the row-block variant key (with only ② and ③ it would stay green on the default path)
-  const key = linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(storage, m, n));
+  const key = linearGemvRowsKey(
+    storage,
+    groupSize,
+    defaultLinearGemvRowsVariant(choices, storage, m, n),
+  );
   assert(
     gemv.keys.includes(key),
     `${name}: did not run on the row-block key ${key} (breakdown: ${gemv.keys.join(" / ")})`,
@@ -1155,7 +1168,9 @@ const checkFloatGemvBits = async (
       const actual = await runFloatLinear(gpu, data);
       // The float gate is M=1 only. M=2 runs the same M16N16 GEMM skeleton, not a family variant.
       const expected = await runFloatLinear(gpu, floatLinearFixture(2, n, k, storage));
-      assertEquals(actual.keys, [linearGemvKey(storage)]);
+      assertEquals(actual.keys, [
+        linearGemvKey(storage, undefined, defaultLinearGemvVariant(profile.linearGemv)),
+      ]);
       assertEquals(expected.keys, [
         linearKey(storage, true, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
       ]);
@@ -1235,7 +1250,7 @@ const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> =>
       const actual = await runFloatLinear(gpu, data);
       assertEquals(actual.keys, [
         c.gemv === true
-          ? linearGemvKey(c.storage)
+          ? linearGemvKey(c.storage, undefined, defaultLinearGemvVariant(profile.linearGemv))
           : linearKey(
               c.storage,
               c.k % 4 === 0 && c.n % 4 === 0,

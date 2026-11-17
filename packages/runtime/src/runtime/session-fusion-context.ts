@@ -11,6 +11,7 @@
  * Pure and device-free: no import here touches the GPU (the estimate imports this module).
  */
 
+import type { LinearGemvChoices } from "../kernels/linear-gemv.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import {
   assertDisabledRulesNamed,
@@ -200,6 +201,12 @@ export type SessionFusionFacts<Name extends string> = {
    * caller without a device; a decision that needs them then fails loudly in the pass.
    */
   readonly attentionDevice?: AttentionDeviceFacts;
+  /**
+   * The GEMV choices of the profile the Session resolved (`SessionState.geometryProfile.linearGemv`;
+   * a caller without a device passes the default profile's — the value every embedded table
+   * resolves to).
+   */
+  readonly linearGemv: LinearGemvChoices;
   readonly residentWeights: ReadonlyMap<string, ResidentWeightStorage>;
   /**
    * The weights whose buffer is not this Session's own copy of the tensor: borrowed from another
@@ -266,6 +273,7 @@ export const sessionFusionContext = <Name extends string>(
     // buildAttention calls on these seats and device facts (perf-ledger F-3 A4).
     attentionScoreStorage: knobs.attentionScoreStorage,
     ...(facts.attentionDevice === undefined ? {} : { attentionDevice: facts.attentionDevice }),
+    linearGemv: facts.linearGemv,
     ...(weightLayouts === undefined ? {} : { weightLayouts }),
     // Every stored form but f32 (i4f16 included), whatever the knobs: only external rules read it.
     weightsNotF32: new Set([...facts.residentWeights.keys(), ...facts.sharedOrPooledWeights]),

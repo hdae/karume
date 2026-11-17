@@ -7,6 +7,7 @@ import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
 import {
   linearGemvPackedEligible,
   linearGemvParallelEligible,
@@ -81,6 +82,8 @@ const planParallelKeys = (
     ]),
   );
   const plan = planGraph(graph, bindSymbols(graph, inputShapes), stateShapes);
+  // The default profile's table (the GEMV choices every embedded table resolves to).
+  const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
   const keys = new Map<string, number>();
   let packed = 0;
   for (const step of plan.nodes) {
@@ -94,7 +97,7 @@ const planParallelKeys = (
     const lanes =
       storage === undefined
         ? undefined
-        : linearGemvParallelEligible(storage, m, weight[0], weight[1], group);
+        : linearGemvParallelEligible(gemv, storage, m, weight[0], weight[1], group);
     const key =
       storage === undefined || lanes === undefined
         ? NOT_PARALLEL
@@ -102,7 +105,7 @@ const planParallelKeys = (
     keys.set(key, (keys.get(key) ?? 0) + 1);
     if (
       storage !== undefined &&
-      linearGemvPackedEligible(storage, m, weight[0], weight[1], group) !== undefined
+      linearGemvPackedEligible(gemv, storage, m, weight[0], weight[1], group) !== undefined
     )
       packed += 1;
   }

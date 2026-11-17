@@ -10,6 +10,7 @@
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { GpuDeviceLostError } from "../src/gpu/context.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import {
@@ -190,6 +191,7 @@ const plan = (
   const nodes = planGraph(graph, bindSymbols(graph, { x: SHAPE, z: SHAPE })).nodes.map(rewrite);
   return planFusions(nodes, {
     rules,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {
@@ -735,6 +737,7 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
     const graph = mergeGraph(PACKED_GRAPH, { w: { codec: "int2-off" } });
     return planFusions(planGraph(graph, {}).nodes, {
       rules,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(graph),
       outputNames: new Set(graph.outputs),
       limits: {
@@ -835,6 +838,7 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
     const planWith = (rules: readonly FusionRule[]): FusionPlan<string> =>
       planFusions(planGraph(graph, {}).nodes, {
         rules,
+        linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
         useCounts: countUses(graph),
         outputNames: new Set(graph.outputs),
         limits: {

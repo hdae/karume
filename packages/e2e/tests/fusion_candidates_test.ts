@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
 import { FUSION_RULES, planFusions } from "../../runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../runtime/src/runtime/plan.ts";
 import { mergeGraph } from "../../runtime/tests/helpers/merged-graph.ts";
@@ -57,6 +58,7 @@ const planOf = (graph: DeclarationJson) => {
   const ir: IrGraph = mergeGraph(graph);
   const context = {
     rules: FUSION_RULES,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {

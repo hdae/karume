@@ -17,6 +17,7 @@
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import type { IrGraph } from "../src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   enumerateUnfusedWindows,
   type ExecStep,
@@ -49,6 +50,7 @@ const plan = (graph: DeclarationJson, inputShapes: Readonly<Record<string, reado
     nodes,
     context: {
       rules: FUSION_RULES,
+      linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,

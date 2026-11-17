@@ -395,6 +395,7 @@ const linearPrologueAt = (
     weightStorage: storage,
     groupSize: layout?.storage === "i4" ? layout.groupSize : undefined,
     knobs: linearKnobsOf(context),
+    linearGemv: context.linearGemv,
     packed: undefined,
     prologue: { op },
   });
@@ -907,6 +908,7 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
     weightStorage: weight.storage,
     groupSize: weight.storage === "i4" ? weight.groupSize : undefined,
     knobs: linearKnobsOf(context),
+    linearGemv: context.linearGemv,
     packed: { role: "read" },
     prologue: undefined,
   });

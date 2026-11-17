@@ -35,7 +35,7 @@ import {
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { copySubmitPolicy, SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
-import type { GeometryProfile } from "../kernels/geometry-profile.ts";
+import type { GeometryProfile, ResolvedGeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
@@ -523,8 +523,9 @@ export type SessionState = {
   readonly rmsNormReduce: RmsNormReduce;
   /**
    * The parallelism target of the row-block GEMV (opt-in —
-   * {@link SessionOptions.linearGemvRowsThreadTarget}). Omitted (`undefined`) is the kernel-side
-   * default = the saturation point of the reference device.
+   * {@link SessionOptions.linearGemvRowsThreadTarget}). Omitted (`undefined`) is the target of the
+   * profile's GEMV choices ({@link geometryProfile} `.linearGemv.rowsThreadTarget` — in the default
+   * profile the saturation point of the reference device).
    */
   readonly linearGemvRowsThreadTarget: number | undefined;
   /**
@@ -573,8 +574,10 @@ export type SessionState = {
    * chosen once from the adapter at construction — DECIDED: ADR 0115).
    * MUST: not re-chosen after construction (that the prepared plans and pipeline keys of one Session
    * correspond to a single table is the basis for looking up the plan cache without the profile).
+   * Resolved once (`sessionGeometryProfile`): the GEMV choices of linear are always present — the
+   * table's own, or the default profile's for a table without them.
    */
-  readonly geometryProfile: GeometryProfile;
+  readonly geometryProfile: ResolvedGeometryProfile;
   /** Passes the activations of fixed SRQ to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize: boolean;
   /**

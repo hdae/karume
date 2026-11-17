@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { UNREAD_ATTENTION_DEVICE } from "../src/runtime/attention-route.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { type EstimateOptions, estimateFusionFacts } from "../src/runtime/estimate.ts";
 import {
   defineExternalRule,
@@ -70,6 +71,7 @@ const sessionFacts = (options: SessionOptions) => {
   const rules = sessionFusionRules(options.fusionRules);
   return {
     rules,
+    linearGemv: DEFAULT_GEOMETRY_PROFILE.linearGemv,
     knobs: sessionFusionKnobs(options, rules),
     attentionDevice: DEVICE,
     residentWeights: plannedResidentWeights(RESIDENCY),

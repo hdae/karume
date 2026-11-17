@@ -1,14 +1,23 @@
 import { type GpuContext, RUNTIME_INTERNAL } from "../../src/gpu/context.ts";
-import { type GeometryProfile, selectGeometryProfile } from "../../src/kernels/geometry-profile.ts";
+import {
+  type GeometryProfile,
+  type ResolvedGeometryProfile,
+  resolveGeometryProfile,
+  selectGeometryProfile,
+} from "../../src/kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../../src/kernels/i8a8-geometry.ts";
 
 /**
  * The geometry profile Sessions on this device run with. Mirrors the selection Session
  * construction makes (the injected table, else the embedded table matched by the adapter — ADR
- * 0115), so expected pipeline keys built from it hold on any machine that matches an embedded table.
+ * 0115 — resolved as construction resolves it, so a table without GEMV choices carries the default
+ * profile's), so expected pipeline keys built from it hold on any machine that matches an embedded
+ * table.
  */
-export const deviceGeometryProfile = (gpu: GpuContext): GeometryProfile =>
-  gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
+export const deviceGeometryProfile = (gpu: GpuContext): ResolvedGeometryProfile =>
+  resolveGeometryProfile(
+    gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo),
+  );
 
 /**
  * The geometry the table's `i8a8.linear` rules give an i8 linear of `rows` rows: the first rule

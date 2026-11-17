@@ -31,9 +31,10 @@
  * One thread holds the reduction of 1 column × `rows` rows, reads the weight word (and the i4 group
  * scale) once and multiply-adds it with each row's x. M is split into `ceil(m / rows)` y tiles (the
  * weights are re-read per tile). `rows` is decided by {@link linearGemvRowsForShape} as **a pure
- * function of (storage, m, n, parallelism target)** (the target is a static knob fixed at Session
- * creation — {@link ROWS_THREAD_TARGET}). The mechanism seen in the sweep (RTX 3080 Ti, the 13 census
- * shapes of gemma4 E2B × M ∈ {1..64} — docs/research/2026-09-07-gemv-rows-k21.md):
+ * function of (storage, m, n, parallelism target)** (the target is static, fixed at Session
+ * creation — {@link LinearGemvChoices.rowsThreadTarget} of the Session's geometry profile). The
+ * mechanism seen in the sweep (RTX 3080 Ti, the 13 census shapes of gemma4 E2B × M ∈ {1..64} —
+ * docs/research/2026-09-07-gemv-rows-k21.md):
  *
  * - **While the thread count (= n × y tiles) is below ≈16K, buying parallelism with y tiles is faster
  *   than folding rows into one thread** (L2 absorbs the weight re-reads within one dispatch). Shapes
@@ -46,7 +47,7 @@
  *   (generated text grows with the row count, and the cost of parsing and validation is
  *   super-linear in the text size — see the constant's doc).
  *
- * The target {@link ROWS_THREAD_TARGET} and one ceiling reproduce both sides; the gap to the best
+ * The default profile's target (16384) and one ceiling reproduce both sides; the gap to the best
  * per shape (oracle) is, census-weighted, 1–5% for M ≤ 32 and ≤ 13% for M ≤ 64. M=1 is not turned
  * into a row block (the same text as the generated M=1 variant — equal or better in measurement too,
  * and the generated decode shaders do not move by a single byte).
@@ -88,10 +89,23 @@
  * This family is a separate kernel that does not share the skeleton, and selection has 2 stages —
  * **family selection** (whether to enter the GEMV family) in one place, `buildLinear`, and **variant
  * selection** (M=1 variant or row block, and the row block's `rows`) in one place,
- * {@link defaultLinearGemvRowsVariant} — both **pure functions of plan-time shapes**. The
- * discriminator is in the pipeline key as the family name `linear_gemv` (for the row block, the
- * variant's `r<rows>`) — both the ban on run-time autotuning and "same key → byte-identical WGSL"
- * are kept.
+ * {@link defaultLinearGemvRowsVariant} — both **pure functions of plan-time shapes** and of the
+ * Session's GEMV choices. The discriminator is in the pipeline key as the family name `linear_gemv`
+ * (for the row block, the variant's `r<rows>`) — both the ban on run-time autotuning and "same key →
+ * byte-identical WGSL" are kept.
+ *
+ * ## Where the choices live (the geometry profile)
+ *
+ * The values the selection reads — the sequential variant and its per-shape exceptions, the
+ * row-block thread target, and the shape rows of the parallel GEMV with their lanes and packed /
+ * staged flags ({@link LinearGemvChoices}) — are data of the geometry profile the Session selects
+ * once (`GeometryProfile.linearGemv`, src/kernels/geometry-profile.ts). The default profile holds the
+ * values measured on the reference device (RTX 3080 Ti); a table without the field takes the default
+ * profile's, resolved where the Session selects its profile. Every function here that answers
+ * "which variant / how many rows / is this shape parallel, packed, staged" takes those choices as an
+ * argument and stays a pure function. What stays in this file is the codegen and the structural
+ * limits: {@link LINEAR_GEMV_MAX_ROWS}, {@link ROWS_ELEMENTS_PER_WORD_CAP}, the M ≤ 8 range of the
+ * parallel family and the storage and divisibility conditions.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -142,8 +156,8 @@ const MAX_THREADS = 256;
 
 /**
  * Generation parameters (the counterpart of the geometry). **{@link defaultLinearGemvVariant} is the
- * only selection point**, and nothing re-chooses at run time (ADR 0022's ban on run-time autotuning
- * applies to this family too).
+ * only selection point** (it reads the Session's {@link LinearGemvChoices}), and nothing re-chooses
+ * at run time (ADR 0022's ban on run-time autotuning applies to this family too).
  */
 export type LinearGemvVariant = {
   /** Output columns one workgroup handles (= threads per workgroup — 1 thread per column). */
@@ -165,23 +179,74 @@ export type LinearGemvRowsVariant = LinearGemvVariant & {
 };
 
 /**
- * The default variant. Census-weighted best in **the sweep of the 12 real shapes + 4 remainder
- * shapes of gemma4 E2B decode on an RTX 3080 Ti** (`c32 u4`, ×8.45 over the default — ADR 0082 /
- * docs/research/2026-08-30-gemma4-decode-wallclock.md §7). When a shape is passed, the
- * large-vocabulary INT8 shape measured at M=1 (addendum 10) selects c16.
- * MUST: a change of the default goes together with re-measuring the bit-identity check
- * (tests/gpu_linear_gemv_test.ts).
+ * One per-shape exception of the sequential variant ({@link LinearGemvChoices.sequential}): the M=1
+ * kernel of a linear with this storage and weight shape `[n, k]` takes `variant` in place of the
+ * general one.
  */
-export const defaultLinearGemvVariant = (shape?: {
+export type LinearGemvShapeVariant = {
   readonly storage: WeightStorage;
   readonly n: number;
   readonly k: number;
-}): LinearGemvVariant => ({
-  // DECIDED: only the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
-  // docs/decisions/0082-linear-gemv-decode.md
-  cols: shape?.storage === "i8" && shape.n === 262144 && shape.k === 1536 ? 16 : 32,
-  unroll: 4,
-});
+  readonly variant: LinearGemvVariant;
+};
+
+/**
+ * The GEMV choices of linear that a machine's measurements decide — a field of the geometry profile
+ * (`GeometryProfile.linearGemv` in src/kernels/geometry-profile.ts; the values measured on the
+ * reference device are the default profile's). Plain data: the selection functions of this file
+ * take it as an argument and stay pure functions of (shape, choices).
+ *
+ * MUST: one Session reads one value (the one its geometry profile resolves to), so its plans, keys
+ * and WGSL correspond to a single set of choices.
+ */
+export type LinearGemvChoices = {
+  /**
+   * The variant of the sequential kernels: `variant` for the M=1 kernel of every shape that no row
+   * of `shapes` names, and the `cols` / `unroll` of every row block (a row block takes no per-shape
+   * exception).
+   */
+  readonly sequential: {
+    readonly variant: LinearGemvVariant;
+    readonly shapes: readonly LinearGemvShapeVariant[];
+  };
+  /**
+   * The parallelism target that decides the row-block height `rows` (thread count = output columns
+   * n × y tiles `ceil(m / rows)`): shapes below it buy parallelism with y tiles, shapes above it
+   * reduce weight re-reads with `rows` (the mechanism in the module doc).
+   * `SessionOptions.linearGemvRowsThreadTarget` replaces it when given (the 5th argument of
+   * {@link linearGemvRowsForShape}).
+   * NOTE: `rows` goes into the key (`r<rows>` of {@link linearGemvRowsKey}), so a different target
+   * changes the chosen `rows` and so the key — "same key → byte-identical WGSL" is kept.
+   */
+  readonly rowsThreadTarget: number;
+  /**
+   * The shapes that take the parallel GEMV (linear at the level `reorder`), each with its lane count
+   * and its packed / staged flags. A shape with no row keeps the sequential GEMV even at `reorder`.
+   * Looked up in order; the first row that matches the storage, n, k and group is the shape's.
+   */
+  readonly parallelShapes: readonly LinearGemvParallelShape[];
+};
+
+/**
+ * The variant of the M=1 kernel from the Session's choices: the variant of the row of
+ * `choices.sequential.shapes` that names the shape, otherwise the general one (also without a
+ * shape — the `cols` / `unroll` a row block inherits).
+ * MUST: a change of a variant in a profile goes together with re-measuring the bit-identity check
+ * (tests/gpu_linear_gemv_test.ts).
+ */
+export const defaultLinearGemvVariant = (
+  choices: LinearGemvChoices,
+  shape?: {
+    readonly storage: WeightStorage;
+    readonly n: number;
+    readonly k: number;
+  },
+): LinearGemvVariant =>
+  (shape === undefined
+    ? undefined
+    : choices.sequential.shapes.find(
+        (row) => row.storage === shape.storage && row.n === shape.n && row.k === shape.k,
+      )?.variant) ?? choices.sequential.variant;
 
 /**
  * The upper bound of M the row-block variant takes = **the guard's upper bound** (the range of row
@@ -190,28 +255,6 @@ export const defaultLinearGemvVariant = (shape?: {
  * (ADR 0082 decision 4, "Eligibility stays inside the measured range").
  */
 export const LINEAR_GEMV_MAX_ROWS = 64;
-
-/**
- * The parallelism target that decides `rows` (thread count = output columns n × y tiles
- * `ceil(m / rows)`). In the RTX 3080 Ti sweep, shapes below this value were faster buying
- * parallelism with y tiles, and shapes above it were faster reducing weight re-reads with `rows`
- * (the mechanism in the module doc).
- * NOTE: **a value baked from the saturation point of the reference device (RTX 3080 Ti, 80 SMs)**,
- * not a portable optimum. On GPUs whose saturation point is an order of magnitude smaller
- * (integrated GPUs, Apple M series) it buys too many y tiles and the weight re-reads exceed the
- * optimum. For other devices the value is replaced with `SessionOptions.linearGemvRowsThreadTarget`
- * (a **static** knob fixed at Session creation = the limit that flows into the 4th argument of
- * {@link linearGemvRowsForShape}; the selection stays a pure function). Nothing chooses it
- * automatically by looking at the device (the ban on run-time autotuning (ADR 0022) —
- * docs/limitations.md).
- * NOTE: even with another target, `rows` goes into the key (`r<rows>` of {@link linearGemvRowsKey}),
- * so "same key → byte-identical WGSL" is kept — a different target changes the chosen `rows` and so
- * the key.
- * MUST: a change goes together with a re-measured sweep (the check in tests/gpu_linear_gemv_test.ts
- * does not pin the value — it only checks that the selection is a pure function of (storage, m, n,
- * target)).
- */
-const ROWS_THREAD_TARGET = 16384;
 
 /**
  * The ceiling of elements one thread holds per weight word (`rows × ` {@link linearGemvUnit}) =
@@ -233,19 +276,20 @@ const ROWS_ELEMENTS_PER_WORD_CAP = 256;
  * does). Shapes with small n always get 1 (= the M=1 kernel laid out M times along y); for n of
  * lm_head size it grows up to the ceiling.
  *
- * `threadTarget` defaults to {@link ROWS_THREAD_TARGET} (the saturation point of the reference
- * device); on other devices the value `SessionOptions.linearGemvRowsThreadTarget` fixed at Session
- * creation arrives here. The range guard lives in one place on the Session side (the same guard is
- * not implemented twice).
+ * `threadTarget` defaults to the Session's {@link LinearGemvChoices.rowsThreadTarget}; when given,
+ * `SessionOptions.linearGemvRowsThreadTarget` (fixed at Session creation) arrives here and replaces
+ * it. The range guard of the option lives in one place on the Session side (the same guard is not
+ * implemented twice).
  *
  * MUST: the return value goes into the key ({@link linearGemvRowsKey}). Being a pure function
  * guarantees both "same key → byte-identical WGSL" and the ban on run-time autotuning.
  */
 export const linearGemvRowsForShape = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
-  threadTarget: number = ROWS_THREAD_TARGET,
+  threadTarget: number = choices.rowsThreadTarget,
 ): number => {
   assertRowsStorage(storage);
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
@@ -262,32 +306,42 @@ export const linearGemvRowsForShape = (
 };
 
 /**
- * The default of the row-block variant (`cols` / `unroll` the same as the M=1 default, `rows` from
- * the storage, the shape and the target). For the meaning and default of `threadTarget`, see
- * {@link linearGemvRowsForShape}.
+ * The row-block variant from the Session's choices (`cols` / `unroll` the general sequential variant
+ * of `choices` — no per-shape exception — and `rows` from the storage, the shape and the target).
+ * For the meaning and default of `threadTarget`, see {@link linearGemvRowsForShape}.
  */
 export const defaultLinearGemvRowsVariant = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   threadTarget?: number,
 ): LinearGemvRowsVariant => ({
-  ...defaultLinearGemvVariant(),
-  rows: linearGemvRowsForShape(storage, m, n, threadTarget),
+  ...defaultLinearGemvVariant(choices),
+  rows: linearGemvRowsForShape(choices, storage, m, n, threadTarget),
 });
 
-const assertVariant = (variant: LinearGemvVariant): void => {
+/**
+ * Guard on a variant's ranges (`cols` within the per-workgroup thread limit WebGPU core
+ * guarantees, `unroll` positive). `where` heads the message: the kernel's name for a codegen call,
+ * the profile field for the geometry profile's guard (src/kernels/geometry-profile.ts), which
+ * rejects a broken table before its first linear is built.
+ */
+export const assertLinearGemvVariant = (
+  variant: LinearGemvVariant,
+  where = "linear_gemv",
+): void => {
   const { cols, unroll } = variant;
   if (!Number.isSafeInteger(cols) || cols < 1 || cols > MAX_THREADS) {
-    throw new CodegenError(`linear_gemv: cols must be an integer in 1..${MAX_THREADS} (${cols})`);
+    throw new CodegenError(`${where}: cols must be an integer in 1..${MAX_THREADS} (${cols})`);
   }
   if (!Number.isSafeInteger(unroll) || unroll < 1) {
-    throw new CodegenError(`linear_gemv: unroll must be a positive integer (${unroll})`);
+    throw new CodegenError(`${where}: unroll must be a positive integer (${unroll})`);
   }
 };
 
 const assertRowsVariant = (variant: LinearGemvRowsVariant): void => {
-  assertVariant(variant);
+  assertLinearGemvVariant(variant);
   const { rows } = variant;
   if (!Number.isSafeInteger(rows) || rows < 1 || rows > LINEAR_GEMV_MAX_ROWS) {
     throw new CodegenError(
@@ -378,10 +432,10 @@ export const linearGemvParams = (
  */
 export const linearGemvKey = (
   storage: WeightStorage,
-  groupSize?: number,
-  variant: LinearGemvVariant = defaultLinearGemvVariant(),
+  groupSize: number | undefined,
+  variant: LinearGemvVariant,
 ): string => {
-  assertVariant(variant);
+  assertLinearGemvVariant(variant);
   gemvGroupShift(storage, groupSize);
   return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}${weightKeyPart(storage)}${i4GroupKeyPart(
     groupSize,
@@ -771,10 +825,10 @@ const scaleSetupWgsl = (
  */
 export const linearGemvWgsl = (
   storage: WeightStorage,
-  groupSize?: number,
-  variant: LinearGemvVariant = defaultLinearGemvVariant(),
+  groupSize: number | undefined,
+  variant: LinearGemvVariant,
 ): string => {
-  assertVariant(variant);
+  assertLinearGemvVariant(variant);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, groupSize);
   const { cols, unroll } = variant;
@@ -909,7 +963,12 @@ ${stores}
 /** Number of lanes sharing K. One workgroup is always 128 threads (512 bytes of shared partial sums). */
 export type LinearGemvParallelLanes = 2 | 4 | 8 | 16 | 32;
 
-type ParallelShape = {
+/**
+ * One shape row of the parallel GEMV ({@link LinearGemvChoices.parallelShapes}): a linear with this
+ * storage, weight shape `[n, k]` and i4 group length (`group` absent for i2 / i8) takes the parallel
+ * GEMV at M = 1..8 with `lanes` lanes sharing K.
+ */
+export type LinearGemvParallelShape = {
   readonly storage: WeightStorage;
   readonly n: number;
   readonly k: number;
@@ -918,7 +977,7 @@ type ParallelShape = {
   /**
    * Whether the shape takes packed int8 activations (ADR 0105). **true only for rows that measured
    * faster**. The E4B rows are the exception: an unmeasured provisional value copied from the E2B row
-   * with the same role (the E4B section of the table).
+   * with the same role (the E4B section of the default profile's table).
    *
    * It pays off only for "long K with lanes 32" = shapes where one thread reads many activations per
    * weight word; for K=1536 with lanes 2 / 4 and for i8, the extra unpack / conversion / multiply eat
@@ -936,237 +995,19 @@ type ParallelShape = {
   readonly stagedActivations?: true;
 };
 
-// DECIDED: only measured shapes are eligible for the parallel GEMV (linear at the level `reorder`).
-// Not an automatic selection by GPU name.
-// docs/decisions/0098-linear-gemv-parallel.md
-const PARALLEL_SHAPES: readonly ParallelShape[] = [
-  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
-  {
-    storage: "i4",
-    n: 1536,
-    k: 2048,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  {
-    storage: "i4",
-    n: 1536,
-    k: 6144,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false },
-  {
-    storage: "i4",
-    n: 1536,
-    k: 4096,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  {
-    storage: "i4",
-    n: 1536,
-    k: 12288,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false },
-  { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32, packedActivations: false },
-  { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32, packedActivations: true },
-  { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32, packedActivations: true },
-  { storage: "i8", n: 256, k: 1536, lanes: 32, packedActivations: false },
-  { storage: "i8", n: 1536, k: 256, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 1536, group: 512, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32, packedActivations: false },
-  { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
-  { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
-  { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
-  // ---- E4B (added 2026-09-26) — **none of the rows below is measured**. lanes / packedActivations
-  // are guesses copied from the E2B row with the same role, to be revisited with E4B's flag-bench
-  // (per-key census and GPU time) (ADR 0098 addendum 2026-09-26). The shapes are the real ones, read
-  // for regular E4B from the upstream config (hidden 2560, intermediate 10240, kv 2, 42 layers, PLE
-  // 256) and for QAT E4B from the container descriptor of the distribution mirror.
-  // E4B regular i4 g32: per_layer_model_projection (42×256) — lanes from E2B 8960×1536 (unmeasured)
-  { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B regular i4 g32: q (sliding) — lanes from E2B 2048×1536 (unmeasured)
-  { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B regular i4 g32: k / v (sliding) — lanes from E2B 256×1536 (unmeasured)
-  { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B regular i4 g32: per_layer_input_gate — lanes from E2B 256×1536 (unmeasured)
-  { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B regular i4 g32: o (sliding) — lanes from E2B 1536×2048 (unmeasured)
-  {
-    storage: "i4",
-    n: 2560,
-    k: 2048,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  // E4B regular i4 g32: gate / up — lanes from E2B 6144×1536 (unmeasured)
-  { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B regular i4 g32: down — lanes from E2B 1536×6144 (unmeasured)
-  {
-    storage: "i4",
-    n: 2560,
-    k: 10240,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  // E4B regular i4 g32: per_layer_projection — lanes from E2B 1536×256 (unmeasured)
-  { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
-  // E4B regular i4 g32: q (full) — lanes from E2B 4096×1536 (unmeasured)
-  { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B regular i4 g32: k / v (full) — lanes from E2B 512×1536 (unmeasured)
-  { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B regular i4 g32: o (full) — lanes from E2B 1536×4096 (unmeasured)
-  {
-    storage: "i4",
-    n: 2560,
-    k: 4096,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  // E4B regular i8: lm_head (tied embedding) — lanes from E2B 262144×1536 (unmeasured)
-  { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
-  // E4B QAT i4 g512: q (sliding) — lanes from E2B QAT 2048×1536 g512 (unmeasured)
-  { storage: "i4", n: 2048, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: k / v (sliding) — lanes from E2B QAT 256×1536 g512 (unmeasured)
-  { storage: "i4", n: 512, k: 2560, group: 512, lanes: 32, packedActivations: false },
-  // E4B QAT i4 g2048: o (sliding) — lanes / packed from E2B QAT 1536×2048 g2048 (unmeasured)
-  { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
-  // E4B QAT i4 g512: gate / up — lanes from E2B QAT 6144×1536 g512 (unmeasured)
-  { storage: "i4", n: 10240, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g2048: down — lanes / packed from E2B QAT 1536×6144 g2048 (unmeasured)
-  { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
-  // E4B QAT i8: per_layer_input_gate — lanes from E2B QAT 256×1536 i8 (unmeasured)
-  { storage: "i8", n: 256, k: 2560, lanes: 32, packedActivations: false },
-  // E4B QAT i8: per_layer_projection — lanes from E2B QAT 1536×256 i8 (unmeasured)
-  { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: q (full) — lanes from E2B QAT 4096×1536 g512 (unmeasured)
-  { storage: "i4", n: 4096, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: k / v (full) — lanes from E2B QAT 512×1536 g512 (unmeasured)
-  { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
-  // E4B QAT i4 g4096: o (full) — lanes / packed from E2B QAT 1536×4096 g4096 (unmeasured)
-  { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
-  // ---- 12B q4_0 QAT (added 2026-11-06) — lanes measured as whole-model decode on the RTX 3080 Ti
-  // (ADR 0098 addendum 2026-11-06): 4 beats 16 and 32 on the rows that widen, staged 32 ties 16 and
-  // beats plain 32 on the rows that narrow, and the output head takes 16 (32 does not build).
-  // gate / up
-  { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  // q (full), q (sliding), k / v (sliding)
-  { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  // k (full)
-  { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false },
-  // o (sliding), o (full), down
-  {
-    storage: "i4",
-    n: 3840,
-    k: 4096,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  {
-    storage: "i4",
-    n: 3840,
-    k: 8192,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  {
-    storage: "i4",
-    n: 3840,
-    k: 15360,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  // lm_head (tied embedding)
-  { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
-  // ---- 26B A4B q4_0 QAT (added 2026-11-10) — the dense linears of the mixture of experts (the
-  // routed experts run on `expert_linear`, which has no parallel form). Lanes measured per kernel
-  // as whole-model decode on the RTX 3080 Ti (ADR 0098 addendum 2026-11-10): on the rows that
-  // widen 4, 16 and 32 tie and 2 and 8 lose, so they take 12B's 4; the router and the full k take
-  // 32; the rows that narrow take staged 32 (staged 16 ties, unstaged 32 and plain 4 lose); and
-  // the output head takes 4, which beats 8 and 16 here (32 does not build).
-  // q (full), q (sliding), k / v (sliding), gate / up
-  { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  // k (full), router
-  { storage: "i4", n: 1024, k: 2816, group: 32, lanes: 32, packedActivations: false },
-  { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
-  // o (sliding), o (full), down
-  {
-    storage: "i4",
-    n: 2816,
-    k: 4096,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  {
-    storage: "i4",
-    n: 2816,
-    k: 8192,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  {
-    storage: "i4",
-    n: 2816,
-    k: 2112,
-    group: 32,
-    lanes: 32,
-    packedActivations: false,
-    stagedActivations: true,
-  },
-  // lm_head (tied embedding)
-  { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
-];
-
-/** Row lookup in the measured table (including the M range, in one place). */
+/**
+ * Row lookup in the Session's table of parallel shapes (including the M range, in one place).
+ */
 const parallelShapeFor = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   k: number,
   group?: number,
-): ParallelShape | undefined => {
+): LinearGemvParallelShape | undefined => {
   if (m < 1 || m > 8) return undefined;
-  return PARALLEL_SHAPES.find(
+  return choices.parallelShapes.find(
     (shape) => shape.storage === storage && shape.n === n && shape.k === k && shape.group === group,
   );
 };
@@ -1176,24 +1017,26 @@ const parallelShapeFor = (
  * block.
  */
 export const linearGemvParallelLanes = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   k: number,
   group?: number,
-): LinearGemvParallelLanes | undefined => parallelShapeFor(storage, m, n, k, group)?.lanes;
+): LinearGemvParallelLanes | undefined => parallelShapeFor(choices, storage, m, n, k, group)?.lanes;
 
 /**
  * The **only pure function** that returns "whether this shape goes to the parallel GEMV (the
  * {@link linearGemvParallelWgsl} family)".
  *
- * {@link linearGemvParallelLanes} (the lookup of measured shapes) overlaid with the conditions under
- * which `buildLinear` in recipe-builders/linear.ts sends a shape to the GEMV family (storage,
+ * {@link linearGemvParallelLanes} (the lookup of the profile's shapes) overlaid with the conditions
+ * under which `buildLinear` in recipe-builders/linear.ts sends a shape to the GEMV family (storage,
  * `k % step`, the i4 group length, the measured range of vec4 output). The pairing of packed
  * activations (ADR 0105) reads {@link linearGemvPackedEligible}, which narrows this further by the
  * per-row adoption.
  */
 export const linearGemvParallelEligible = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
@@ -1206,7 +1049,7 @@ export const linearGemvParallelEligible = (
   if (storage === "i4") {
     if (group === undefined || group % linearGemvUnit("i4") !== 0) return undefined;
   } else if (group !== undefined) return undefined;
-  return linearGemvParallelLanes(storage, m, n, k, group);
+  return linearGemvParallelLanes(choices, storage, m, n, k, group);
 };
 
 /**
@@ -1214,29 +1057,33 @@ export const linearGemvParallelEligible = (
  * (ADR 0105)".
  *
  * {@link linearGemvParallelEligible} (whether it goes to the parallel GEMV) overlaid with the
- * `packedActivations` of the measured table's row. The WGSL and params of the packed variant can be
+ * `packedActivations` of the profile table's row. The WGSL and params of the packed variant can be
  * generated for every shape (tests and snapshots keep every shape), but **the production plan
  * chooses only shapes for which this predicate returns a lane count**.
  *
- * MUST: the pairing (fusion.ts) and the recipe builder's guard read this same single function. Kept
- * separately, when one of them is wider, f32 words would flow into a `vec4<u32>` binding (a silent
- * wrong value with no exception).
+ * MUST: the pairing (fusion.ts) and the recipe builder's guard read this same single function, with
+ * the same choices (the Session's one resolved profile — `FusionContext.linearGemv` and the
+ * recipe's `geometryProfile.linearGemv` are that value). Kept separately, when one of them is
+ * wider, f32 words would flow into a `vec4<u32>` binding (a silent wrong value with no exception).
  */
 export const linearGemvPackedEligible = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   k: number,
   group?: number,
 ): LinearGemvParallelLanes | undefined => {
-  const lanes = linearGemvParallelEligible(storage, m, n, k, group);
+  const lanes = linearGemvParallelEligible(choices, storage, m, n, k, group);
   if (lanes === undefined) return undefined;
-  return parallelShapeFor(storage, m, n, k, group)?.packedActivations === true ? lanes : undefined;
+  return parallelShapeFor(choices, storage, m, n, k, group)?.packedActivations === true
+    ? lanes
+    : undefined;
 };
 
 /**
  * The **only pure function** that returns "whether this shape takes the **staged-activation**
- * parallel GEMV (K-90)": {@link linearGemvParallelEligible} narrowed by the measured table row's
+ * parallel GEMV (K-90)": {@link linearGemvParallelEligible} narrowed by the profile table row's
  * `stagedActivations`. The variant is bit-identical to {@link linearGemvParallelWgsl} (same words per
  * lane in the same order, same `fma` text, same tree), so taking it changes speed only.
  *
@@ -1244,15 +1091,16 @@ export const linearGemvPackedEligible = (
  * it — the packed binding is `vec4<u32>`, which the staged loads do not read.
  */
 export const linearGemvStagedEligible = (
+  choices: LinearGemvChoices,
   storage: WeightStorage,
   m: number,
   n: number,
   k: number,
   group?: number,
 ): LinearGemvParallelLanes | undefined => {
-  const lanes = linearGemvParallelEligible(storage, m, n, k, group);
+  const lanes = linearGemvParallelEligible(choices, storage, m, n, k, group);
   if (lanes === undefined) return undefined;
-  const shape = parallelShapeFor(storage, m, n, k, group);
+  const shape = parallelShapeFor(choices, storage, m, n, k, group);
   return shape?.stagedActivations === true && !shape.packedActivations ? lanes : undefined;
 };
 

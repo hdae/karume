@@ -1,6 +1,7 @@
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
   defaultLinearGemvVariant,
   linearGemvParams,
@@ -17,7 +18,9 @@ test.skipIf(!GPU_AVAILABLE)(
   async () => {
     const gpu = await acquireGpu();
     const device = gpu.device;
-    const selected = defaultLinearGemvVariant({ storage: "i8", n: 262144, k: 1536 });
+    // The kernels are built without a Session: the default profile's variants are the subject.
+    const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+    const selected = defaultLinearGemvVariant(gemv, { storage: "i8", n: 262144, k: 1536 });
     assertEquals(selected.cols, 16);
     try {
       for (const [n, k] of [
@@ -57,7 +60,7 @@ test.skipIf(!GPU_AVAILABLE)(
           ];
           const mapped = make(n * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
           let expected: Uint32Array<ArrayBuffer> | undefined;
-          for (const variant of [defaultLinearGemvVariant(), selected]) {
+          for (const variant of [defaultLinearGemvVariant(gemv), selected]) {
             const pipeline = await device.createComputePipelineAsync({
               layout: "auto",
               compute: {

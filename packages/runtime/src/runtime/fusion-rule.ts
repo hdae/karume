@@ -9,6 +9,7 @@
  */
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
+import type { LinearGemvChoices } from "../kernels/linear-gemv.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { numel, OP_CONTRACTS, outputCountOf, WHERE_OP } from "../ops.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
@@ -362,6 +363,13 @@ export type FusionContext<Name extends string = string> = {
   readonly linearGemvPlanes?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;
   readonly linearCompute?: "f32" | "f16" | "a8";
+  /**
+   * The GEMV choices of the Session's geometry profile (`linearGemv` of the profile the Session
+   * resolved — the executor passes its state's, the estimate the default profile's). The linear→SRQ
+   * rule's parallel shapes and the packed pairing read them through the same functions as the recipe
+   * builder, so the fusions of a plan follow the same table as its kernels.
+   */
+  readonly linearGemv: LinearGemvChoices;
   /**
    * The Session's attention seat (`SessionOptions.attentionCompute` — a session knob, no device
    * facts). Only `"a8"` lets a fused attention absorb the permutes of its q / k / v
