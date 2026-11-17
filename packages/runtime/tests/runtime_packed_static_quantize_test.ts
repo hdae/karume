@@ -43,7 +43,8 @@ type Storage = "i2" | "i4" | "i8";
 const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 /**
- * One row of the measured table (`PARALLEL_SHAPES`) — points to the consumer linear's shape as is.
+ * One row of the measured table (the default profile's `linearGemv.parallelShapes`) — points to the consumer
+ * linear's shape as is.
  */
 type Shape = {
   readonly storage: Storage;
@@ -110,7 +111,7 @@ type Options = {
 const GROUP = 512;
 /**
  * The contraction length of the preceding linear (`afterLinear`) — `i2 12288×1536` is a measured
- * shape in PARALLEL_SHAPES.
+ * shape of the default profile's parallel shapes.
  */
 const PRE_K = 1536;
 
@@ -168,7 +169,7 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
     graph.outputs.push("copy");
   }
   if (o.unparallelConsumer) {
-    // n=260 is a shape not in PARALLEL_SHAPES (= a linear that does not fall back to parallel
+    // n=260 is a shape not in the profile's parallel shapes (= a linear that does not fall back to parallel
     // GEMV).
     graph.initializers.w2 = {};
     graph.initializers.b2 = {};

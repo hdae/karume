@@ -26,7 +26,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * The parallel GEMV measurement table (`PARALLEL_SHAPES`) is an allowlist of shapes; a shape not
+ * The parallel GEMV measurement table (the profile's `linearGemv.parallelShapes`) is an allowlist of shapes; a shape not
  * on it silently falls back to the sequential GEMV even when `parallel` is requested (ADR 0058
  * decision 3). E4B rows were added, so on the distribution mirror's **actual** QAT E4B graph
  * (part 0 = only the graph description and the binding table; the weight blocks are not read)

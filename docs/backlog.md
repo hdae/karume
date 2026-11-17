@@ -189,9 +189,12 @@ maintainer's ruling of 2026-11-06).
      - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
        hosted is the maintainer's decision.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
-     - Per-adapter generation of the hand-written shape tables (`PARALLEL_SHAPES`, the integer and the byte-plane GEMV
-       tables): no sweep measures them today, so it needs a GEMV sweep on synthetic tensors, and the gain is measured
-       first.
+     - Per-adapter generation of the hand-written GEMV shape tables. *(Landed 2026-11-17: the sequential variant,
+       the row-block thread target and the parallel shapes are the geometry profile's `linearGemv`; every table still
+       runs with the default's values.)* Open: the GEMV sweep on synthetic tensors that measures them (the maintainer,
+       2026-11-17: the LLM decode first; the bit-identical and the reordering candidates are both measured, and
+       applied separately), the generator that derives the field, and the integer and byte-plane GEMV tables, which
+       are still in the kernel source.
   7. **Weights from outside the exporter.** `fromSingleFile` on the pipelines, the counterpart of diffusers'
      `from_single_file`: a single file is converted while it loads, against the plan of a preset of a distribution's
      manifest, and keeping the result as a `krm` is optional (the maintainer, 2026-11-17). The format readers are
@@ -296,7 +299,7 @@ maintainer's ruling of 2026-11-06).
     the acceptance tables decision 7 removes (changed only with the maintainer's agreement); whether the old rule "a band's
     derivation table sits in the docstring of the test constant" (ADR 0058 decision 4 ②, not restated by ADR 0147) should be
     restated.
-  - **Stale statements found on 2026-11-09 (report only, not yet fixed)**: the `DECIDED` comment above `PARALLEL_SHAPES`
+  - **Stale statements found on 2026-11-09 (report only, not yet fixed)**: the `DECIDED` comment above the parallel shapes of the default profile (`linearGemv.parallelShapes`, then `PARALLEL_SHAPES`)
     ("only measured shapes are eligible") against its 22 rows marked unmeasured (ADR 0098 decision 4 was re-graded to SHOULD);
     ADR 0111 decision 2's list of tables; the table comments of gemma (`session-options.ts`) and anima (`pipeline.ts`); the
     rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
