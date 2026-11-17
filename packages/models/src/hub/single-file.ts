@@ -16,18 +16,22 @@
  * 3. The placement (`placeTensors`): a key no component takes is refused, and so is a component of
  *    the map this family does not take from a file.
  * 4. Which role comes from where ({@link SingleFileRole}), the tensor lists and the target
- *    containers; the plan checks are handed to the loader ({@link ConvertedComponent.checkPlan}).
+ *    containers ({@link SingleFileFamily}: a float storage is the one of the file's dtype); the
+ *    plan checks are handed to the loader ({@link ConvertedComponent.checkPlan}).
  *
  * SPEC: docs/spec/single-file.md
  */
 
+import type { CodecName } from "@karume/runtime";
 import {
   type ContainerRef,
   fetchAssets,
   type FetchAssetsOptions,
   type LoadedManifest,
+  type ModelEntry,
   openContainerSource,
   prefetchAssets,
+  type Quant,
   type ResolvedSelection,
 } from "@karume/hub";
 import {
@@ -38,6 +42,7 @@ import {
   type PlannedCodec,
   readPlanCodecs,
   type SourceTensor,
+  type TensorDtype,
   type TensorPlacement,
 } from "@karume/convert";
 import { openSafetensors, type SafetensorsFile } from "@karume/safetensors";
@@ -57,6 +62,19 @@ export type SingleFileSource =
     };
 
 /**
+ * A float storage of a role as the family's refusal sees it: the role stored as `label` — the
+ * container of the file's `dtype` — under the selected quant.
+ */
+export type SingleFileCombination = {
+  readonly quantName: string;
+  readonly quant: Quant;
+  /** The dtype of every tensor of the role in the file. */
+  readonly dtype: TensorDtype;
+  /** The weights label of the container the role is converted against. */
+  readonly label: string;
+};
+
+/**
  * How a family takes one component from a single file. A role the table does not list always comes
  * from the distribution.
  */
@@ -68,11 +86,36 @@ export type SingleFileRole = {
    */
   readonly presence: "required" | "optional";
   /**
-   * The container of the selected model the file's tensors are converted against: the selected
-   * quant's (`"quant"`), or the container of this weights label whatever the quant — for a component
-   * no preset quantizes, so that its weights keep the precision of the file.
+   * The container of the selected model the file's tensors are converted against. A preset decides
+   * what is quantized; what it does not quantize keeps the precision of its source:
+   *
+   * - `"quant"`: the selected quant decides. A quant that stores the role quantized (its label is
+   *   not one of {@link SingleFileFamily.floatLabels}) gives its own container, which converts from
+   *   any float dtype; a quant that stores it as a float gives the container of the file's dtype,
+   *   run with the quant's Session options. MUST: that container's graph is the quant's container's
+   *   (checked against the manifest's graph descriptor hashes), since the options were declared for
+   *   it.
+   * - `"file-dtype"`: the container of the file's dtype whatever the quant — for a component no
+   *   preset quantizes.
    */
-  readonly storage: "quant" | { readonly label: string };
+  readonly storage: "quant" | "file-dtype";
+  /**
+   * A combination of a float storage and the selected quant that the family does not run (one the
+   * runtime does not execute, or whose numbers nothing checks): the reason, or `undefined`. Asked
+   * once the container of the file's dtype is settled, before any fetch.
+   */
+  readonly refuse?: (combination: SingleFileCombination) => string | undefined;
+};
+
+/** A family's single-file declaration: its roles and its float storages. */
+export type SingleFileFamily = {
+  readonly roles: readonly SingleFileRole[];
+  /**
+   * The weights label whose container stores each float dtype as it is (a bit copy), for every role
+   * of the table. A dtype with no label has no such container: a role whose storage is chosen by
+   * its dtype is refused for it.
+   */
+  readonly floatLabels: Readonly<Partial<Record<TensorDtype, string>>>;
 };
 
 /** The first bytes the format is told from (the 8-byte header length and the header's first byte). */
@@ -162,58 +205,186 @@ const sourceTensor = (file: SafetensorsFile, key: string): SourceTensor | string
   return { dtype, shape: tensor.shape, read: tensor.read };
 };
 
-/** What to do about a tensor bf16 storage cannot take, for one role. */
-const bf16Advice = (entry: SingleFileRole): string =>
-  entry.presence === "optional"
-    ? `pass components: { ${entry.role}: … } to take the distribution's ${entry.role}`
-    : entry.storage === "quant"
-      ? `choose a quant that stores the ${entry.role} as int8, which takes any float tensor`
-      : `the file's ${entry.role} must hold BF16 tensors`;
+/** Everything the storage of one from-file role is settled from. */
+type RoleSetting = {
+  readonly entry: SingleFileRole;
+  readonly family: SingleFileFamily;
+  readonly modelName: string;
+  readonly model: ModelEntry;
+  /** Initializer name → the file key it was read from. */
+  readonly keys: ReadonlyMap<string, string>;
+  readonly tensors: ReadonlyMap<string, SourceTensor>;
+  /** The role's file keys by dtype, in the order the dtypes first appear. */
+  readonly dtypes: ReadonlyMap<TensorDtype, readonly string[]>;
+};
+
+/** The container a role is converted against, or why there is none. */
+type RoleStorage =
+  | { readonly label: string; readonly container: ContainerRef }
+  | { readonly refusal: string };
+
+/** The role's file keys by dtype, in the order the dtypes first appear. */
+const keysByDtype = (
+  keys: ReadonlyMap<string, string>,
+  tensors: ReadonlyMap<string, SourceTensor>,
+): ReadonlyMap<TensorDtype, readonly string[]> => {
+  const byDtype = new Map<TensorDtype, string[]>();
+  for (const [initializer, tensor] of tensors) {
+    const list = byDtype.get(tensor.dtype) ?? [];
+    list.push(keys.get(initializer) ?? initializer);
+    byDtype.set(tensor.dtype, list);
+  }
+  return byDtype;
+};
+
+const isFloatLabel = (family: SingleFileFamily, label: string): boolean =>
+  Object.values(family.floatLabels).includes(label);
+
+/** The family's float storages, as a message names them (`BF16 → 'bf16', F16 → 'f16'`). */
+const floatStorages = (family: SingleFileFamily): string =>
+  Object.entries(family.floatLabels)
+    .map(([dtype, label]) => `${dtype} → '${label}'`)
+    .join(", ");
+
+/**
+ * What to do when the file's role cannot be stored as it is: take the distribution's (a role that
+ * may come from it), or a quant that stores it quantized (one whose quant decides its storage).
+ */
+const advice = (setting: RoleSetting): string => {
+  const { entry, family, model, modelName } = setting;
+  const { role } = entry;
+  if (entry.presence === "optional") {
+    return `pass components: { ${role}: … } to take the distribution's ${role}`;
+  }
+  if (entry.storage === "quant") {
+    const quantized = model.available.quants.filter(
+      (quant) => !isFloatLabel(family, model.quants[quant].weights[role]),
+    );
+    return quantized.length === 0
+      ? `model '${modelName}' has no quant that stores the ${role} quantized (which converts from any float dtype)`
+      : `choose a quant that stores the ${role} quantized, which converts from any float dtype: ${quantized.join(" / ")}`;
+  }
+  return `the file's ${role} must hold ${Object.keys(family.floatLabels).join(" or ")} tensors`;
+};
+
+/**
+ * The container the role is converted against under `quantName` ({@link SingleFileRole.storage}),
+ * or the refusal: a role stored as a float whose tensors mix dtypes, or whose dtype no container
+ * stores as it is; a model without that container; a container whose graph is not the quant's
+ * own; a combination the family refuses. Manifest data only — nothing is fetched.
+ *
+ * SPEC: docs/spec/single-file.md#which-component-comes-from-where
+ */
+const resolveStorage = (setting: RoleSetting, quantName: string): RoleStorage => {
+  const { entry, family, model, modelName, dtypes } = setting;
+  const { role } = entry;
+  const labels = Object.hasOwn(model.weights, role) ? model.weights[role] : {};
+  const quant = model.quants[quantName];
+  const quantLabel = Object.hasOwn(quant.weights, role) ? quant.weights[role] : undefined;
+  if (entry.storage === "quant") {
+    if (quantLabel === undefined || !Object.hasOwn(labels, quantLabel)) {
+      return { refusal: `the selection ${modelName} / ${quantName} has no ${role}` };
+    }
+    if (!isFloatLabel(family, quantLabel)) {
+      return { label: quantLabel, container: labels[quantLabel].container };
+    }
+  }
+  const asFloat =
+    entry.storage === "quant" ? ` (quant '${quantName}' stores the ${role} as a float)` : "";
+  const [first, ...others] = dtypes.keys();
+  if (others.length > 0) {
+    const mix = [...dtypes]
+      .map(([dtype, keys]) => `${dtype} (${keys.length} tensor(s), e.g. '${keys[0]}')`)
+      .join(", ");
+    return {
+      refusal:
+        `the file's ${role} mixes dtypes: ${mix}; it is stored as the float type of its tensors` +
+        `${asFloat}, so they must all have one; ${advice(setting)}`,
+    };
+  }
+  const dtype = first;
+  const label = family.floatLabels[dtype];
+  if (label === undefined) {
+    return {
+      refusal:
+        `the file's ${role} is ${dtype}${asFloat}, and no container stores ${dtype} as it is` +
+        ` (the float storages: ${floatStorages(family)}); ${advice(setting)}`,
+    };
+  }
+  if (!Object.hasOwn(labels, label)) {
+    return {
+      refusal:
+        `model '${modelName}' has no '${label}' ${role}, which the file's ${role} is stored as` +
+        ` (its tensors are ${dtype}); ${advice(setting)}`,
+    };
+  }
+  const { container } = labels[label];
+  if (entry.storage === "quant" && quantLabel !== undefined && label !== quantLabel) {
+    const own = labels[quantLabel].container.descriptor.graph.sha256;
+    const stored = container.descriptor.graph.sha256;
+    if (stored !== own) {
+      return {
+        refusal:
+          `quant '${quantName}' stores the ${role} as '${quantLabel}', and the file's ${dtype}` +
+          ` ${role} would run the '${label}' container with that quant's Session options, but the` +
+          ` two containers' graphs differ (graph descriptor sha256 ${own} / ${stored}); ${advice(
+            setting,
+          )}`,
+      };
+    }
+  }
+  const refused = entry.refuse?.({ quantName, quant, dtype, label });
+  return refused === undefined ? { label, container } : { refusal: refused };
+};
 
 /** Everything one from-file role needs to check its plan. */
 type RoleContext = {
   readonly where: string;
-  readonly entry: SingleFileRole;
+  readonly setting: RoleSetting;
+  /** The weights label of the container it is converted against. */
+  readonly label: string;
   readonly loaded: LoadedManifest;
   readonly selection: ResolvedSelection;
-  /** Initializer name → the file key it was read from. */
-  readonly keys: ReadonlyMap<string, string>;
-  readonly tensors: ReadonlyMap<string, SourceTensor>;
   readonly options: FetchAssetsOptions;
 };
 
 /**
- * The quants of the selected model whose container for the role stores only codecs
- * `@karume/convert` encodes, in the manifest's order — read from the part 0 of each other
- * container of the role (fetched for this refusal only; no weight part).
+ * The quants of the selected model under which the role's container stores only codecs
+ * `@karume/convert` encodes, in the manifest's order: each quant's container as
+ * {@link resolveStorage} settles it (a quant refused there does not work), read from its part 0
+ * (fetched for this refusal only; no weight part).
  */
-const quantsThatEncode = async (
-  context: RoleContext,
-  failingLabel: string,
-): Promise<readonly string[]> => {
-  const { loaded, selection, entry, options } = context;
-  const model = loaded.manifest.models[selection.model];
+const quantsThatEncode = async (context: RoleContext): Promise<readonly string[]> => {
+  const { loaded, setting, label: failing, options } = context;
   const working = new Map<string, boolean>();
-  const labels = Object.hasOwn(model.weights, entry.role) ? model.weights[entry.role] : {};
-  for (const [label, { container }] of Object.entries(labels)) {
-    if (label === failingLabel) continue;
-    await prefetchAssets(loaded, [container.parts[0]], options);
-    const codecs = await readPlanCodecs(openContainerSource(loaded, container, options));
+  const labelOf = new Map<string, string>();
+  for (const quant of setting.model.available.quants) {
+    const storage = resolveStorage(setting, quant);
+    if ("refusal" in storage) continue;
+    labelOf.set(quant, storage.label);
+    if (storage.label === failing || working.has(storage.label)) continue;
+    await prefetchAssets(loaded, [storage.container.parts[0]], options);
+    const codecs = await readPlanCodecs(openContainerSource(loaded, storage.container, options));
     working.set(
-      label,
+      storage.label,
       codecs.every(({ codec }) => ENCODED_CODECS.includes(codec)),
     );
   }
-  return model.available.quants.filter(
-    (quant) => working.get(model.quants[quant].weights[entry.role]) === true,
-  );
+  return setting.model.available.quants.filter((quant) => {
+    const label = labelOf.get(quant);
+    return label !== undefined && working.get(label) === true;
+  });
 };
+
+/** The source dtype a float codec stores as it is (`undefined`: a codec that converts any). */
+const exactDtype = (codec: CodecName): TensorDtype | undefined =>
+  codec === "f16" ? "F16" : codec === "bf16" ? "BF16" : undefined;
 
 /**
  * The refusals of one from-file role that need its plan: a tensor the plan does not use, a codec
  * `@karume/convert` does not encode (one message per role, with the quants that work), and a
- * tensor that is not BF16 for an initializer the plan stores as bf16 (bf16 storage never rounds,
- * so such a tensor would fail at its first read otherwise).
+ * tensor whose dtype is not the one an initializer's float codec stores as it is (f16 and bf16
+ * storage never round, so such a tensor would fail at its first read otherwise).
  *
  * SPEC: docs/spec/single-file.md#the-refusals
  */
@@ -221,7 +392,8 @@ const checkRolePlan = async (
   context: RoleContext,
   plan: readonly PlannedCodec[],
 ): Promise<void> => {
-  const { where, entry, selection, keys, tensors } = context;
+  const { where, setting, label, selection } = context;
+  const { entry, keys, tensors } = setting;
   const { role } = entry;
   const planned = new Set(plan.map(({ initializer }) => initializer));
   const unused = [...keys].filter(([initializer]) => !planned.has(initializer));
@@ -237,31 +409,24 @@ const checkRolePlan = async (
     (codec) => !ENCODED_CODECS.includes(codec),
   );
   if (unencoded.length > 0) {
-    const codecs = quoted(unencoded);
-    const encoded = ENCODED_CODECS.join(" / ");
-    if (entry.storage === "quant") {
-      const label =
-        context.loaded.manifest.models[selection.model].quants[selection.quant].weights[role];
-      const working = await quantsThatEncode(context, label);
-      throw new Error(
-        `${where}: quant '${selection.quant}' stores the ${role} with codec ${codecs}, which the` +
-          ` conversion of a file does not encode (it encodes ${encoded}); the quants that work:` +
-          ` ${working.length === 0 ? "none" : working.join(" / ")}`,
-      );
-    }
+    const stored =
+      `${where}: the '${label}' ${role} of model '${selection.model}', which the file's ${role} is` +
+      ` converted against under quant '${selection.quant}', stores codec ${quoted(unencoded)},` +
+      ` which the conversion of a file does not encode (it encodes ${ENCODED_CODECS.join(" / ")})`;
+    if (entry.storage === "file-dtype") throw new Error(stored);
+    const working = await quantsThatEncode(context);
     throw new Error(
-      `${where}: the '${entry.storage.label}' ${role} of model '${selection.model}', which the` +
-        ` file's ${role} is converted against, stores codec ${codecs}, which the conversion of a` +
-        ` file does not encode (it encodes ${encoded})`,
+      `${stored}; the quants that work: ${working.length === 0 ? "none" : working.join(" / ")}`,
     );
   }
   for (const { initializer, codec } of plan) {
+    const wanted = exactDtype(codec);
     const tensor = tensors.get(initializer);
-    if (codec !== "bf16" || tensor === undefined || tensor.dtype === "BF16") continue;
+    if (wanted === undefined || tensor === undefined || tensor.dtype === wanted) continue;
     throw new Error(
-      `${where}: the ${role} stores '${initializer}' as bf16, which takes BF16 values as they are` +
-        ` and never rounds, but the file's '${keys.get(initializer)}' is ${tensor.dtype};` +
-        ` ${bf16Advice(entry)}`,
+      `${where}: the ${role} stores '${initializer}' as ${codec}, which takes ${wanted} values as` +
+        ` they are and never rounds, but the file's '${keys.get(initializer)}' is ${tensor.dtype};` +
+        ` ${advice(setting)}`,
     );
   }
 };
@@ -278,10 +443,11 @@ export type SingleFileComponents = {
 
 /**
  * Reads the name map and the file's header, places the file's tensors and decides which role
- * comes from the file (module doc). `replaced` are the roles the caller replaces with
- * `components`: they never come from the file, whatever it holds. `retainEncoded` goes to every
- * component from the file ({@link ConvertedComponent.retainEncoded}). `options` are the hub's
- * options of the load, without progress (the name map is not part of the model's progress stream).
+ * comes from the file and against which container (module doc). `replaced` are the roles the
+ * caller replaces with `components`: they never come from the file, whatever it holds.
+ * `retainEncoded` goes to every component from the file ({@link ConvertedComponent.retainEncoded}).
+ * `options` are the hub's options of the load, without progress (the name map is not part of the
+ * model's progress stream).
  *
  * SPEC: docs/spec/single-file.md#which-component-comes-from-where
  */
@@ -290,7 +456,7 @@ export const prepareSingleFile = async (
   file: SingleFileSource,
   loaded: LoadedManifest,
   selection: ResolvedSelection,
-  roles: readonly SingleFileRole[],
+  family: SingleFileFamily,
   replaced: ReadonlySet<string>,
   retainEncoded: boolean,
   options: FetchAssetsOptions,
@@ -306,6 +472,7 @@ export const prepareSingleFile = async (
         ` layout '${placement.layout}' (nothing of the file is dropped): ${quoted(placement.unplaced)}`,
     );
   }
+  const { roles } = family;
   const taken = new Set(roles.map(({ role }) => role));
   const foreign = [...placement.components].filter(
     ([role, names]) => names.size > 0 && !taken.has(role) && !replaced.has(role),
@@ -345,28 +512,27 @@ export const prepareSingleFile = async (
         `${where}: the ${role} of the file cannot be converted:\n- ${problems.join("\n- ")}`,
       );
     }
-    let container: ContainerRef;
-    if (entry.storage === "quant") {
-      if (!Object.hasOwn(selection.containers, role)) {
-        throw new Error(
-          `${where}: the selection ${selection.model} / ${selection.quant} has no ${role}`,
-        );
-      }
-      container = selection.containers[role];
-    } else {
-      const { label } = entry.storage;
-      const labels = Object.hasOwn(model.weights, role) ? model.weights[role] : {};
-      if (!Object.hasOwn(labels, label)) {
-        throw new Error(
-          `${where}: model '${selection.model}' has no '${label}' ${role}, which the file's ${role} is` +
-            ` stored as; pass components: { ${role}: … } to take the distribution's ${role}`,
-        );
-      }
-      container = labels[label].container;
-    }
-    const context: RoleContext = { where, entry, loaded, selection, keys, tensors, options };
+    const setting: RoleSetting = {
+      entry,
+      family,
+      modelName: selection.model,
+      model,
+      keys,
+      tensors,
+      dtypes: keysByDtype(keys, tensors),
+    };
+    const storage = resolveStorage(setting, selection.quant);
+    if ("refusal" in storage) throw new Error(`${where}: ${storage.refusal}`);
+    const context: RoleContext = {
+      where,
+      setting,
+      label: storage.label,
+      loaded,
+      selection,
+      options,
+    };
     converted[role] = {
-      container,
+      container: storage.container,
       tensors,
       checkPlan: (plan) => checkRolePlan(context, plan),
       ...(retainEncoded ? { retainEncoded: true } : {}),

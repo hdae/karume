@@ -7,7 +7,7 @@
  *
  * - {@link openConvertingSource} builds a `BlockSource` of the runtime over the target preset's
  *   container that encodes each weight block from the tensor list as it is read (`int8-sym`,
- *   `bf16` and `f32`, bit for bit as the exporter writes them) and passes part 0, the const part and
+ *   `f16`, `bf16` and `f32`, bit for bit as the exporter writes them) and passes part 0, the const part and
  *   the asset parts through from the target. `openContainer` of `@karume/runtime` opens it like any
  *   other source. Every check that needs no tensor byte runs when it is built and is reported
  *   together in one {@link ConvertError}.

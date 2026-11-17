@@ -14,7 +14,7 @@ The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md)
 
 | Export | What it is |
 | --- | --- |
-| `openConvertingSource({ target, tensors, tensorName? })` | The converting `BlockSource` (`verified: true`) over the target's container, the tensors the plan does not use, and the parts it builds (`convertedParts`, never read from the target). Encodes `int8-sym`, `bf16` and `f32`, bit for bit as the exporter does; every check that needs no tensor byte runs when it is built and is reported together |
+| `openConvertingSource({ target, tensors, tensorName? })` | The converting `BlockSource` (`verified: true`) over the target's container, the tensors the plan does not use, and the parts it builds (`convertedParts`, never read from the target). Encodes `int8-sym`, `f16`, `bf16` and `f32`, bit for bit as the exporter does (a float is never rounded); every check that needs no tensor byte runs when it is built and is reported together |
 | `writeContainer(source, sink)` | Writes a source's container part by part to `sink.write(part, offset, bytes)` (part 0 last) with the real hashes, and returns each part's length and sha256 and the two descriptors' |
 | `readPlanCodecs(target)` | The codec of every initializer a target's plan stores, read from its part 0 alone — what a caller checks before it gives a tensor list (`ENCODED_CODECS`: the codecs encoded here) |
 | `placeTensors(map, keys)` | Reads a name map against a file's keys: the layout that recognises the file, per component the initializer name → key mapping, and the keys excluded or not placed; refuses an unrecognised file, two keys on one initializer and a key two components route |

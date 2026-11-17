@@ -102,13 +102,16 @@ measurements in `docs/research/`.
 - `@karume/models/anima`: `Pipeline.fromSingleFile(file, ref, options)` builds a pipeline from a single Anima weights
   file — the upstream release or a fine-tune, as a `Blob` / `File` or a ranged reader `{ size, read(offset, length) }`
   (the type `SingleFileSource`) — and a distribution, with no export step. The file must be safetensors; its tensors
-  are placed with the distribution's name map and converted while each Session reads them: the transformer against
-  the selected quant's plan, the text conditioner, when the file holds one, against the model's `bf16` text
-  conditioner whatever the quant; the text encoder and the VAE decoder come from the distribution, and a component
-  named in `components` from its replacement. The converted parts are neither downloaded nor counted in the progress,
-  and everything that needs no tensor byte is refused before a weight part is downloaded — among it a quant whose
-  transformer is stored as f16 (`f16`, `f16-c16`), with the quants that work, and a tensor that is not BF16 for a
-  weight stored as bf16. The pipeline reads the file for as long as it lives. Every Session build of a component from
+  are placed with the distribution's name map and converted while each Session reads them. A preset decides what is
+  quantized, and what it does not quantize keeps the precision of the file: the transformer is converted against an
+  int8 quant's plan from any float dtype, and under a quant that stores it as a float (`f16`, `f16-c16`, `bf16`)
+  against the model's container of the file's dtype (BF16 → `bf16`, F16 → `f16`, a bit copy) with the quant's
+  options; the text conditioner, when the file holds one, against the model's container of the file's dtype whatever
+  the quant; the text encoder and the VAE decoder come from the distribution, and a component named in `components`
+  from its replacement. The converted parts are neither downloaded nor counted in the progress, and everything that
+  needs no tensor byte is refused before a weight part is downloaded — among it a component stored as a float whose
+  tensors mix dtypes or are F32, and a BF16 transformer under f16 linear compute (`f16-c16`, or an explicit
+  `linearCompute: "f16"`), which no distributed preset runs. The pipeline reads the file for as long as it lives. Every Session build of a component from
   the file converts it again (in the default per-stage residency, every generate); the option `retainConverted: true`
   (`FromSingleFileOptions`, which `fromPretrained` does not take) keeps the converted weights in host memory so that
   only the first build reads the file, at their converted size (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as

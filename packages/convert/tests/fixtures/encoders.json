@@ -91,6 +91,94 @@
       "refusedElement": 1
     },
     {
+      "name": "f16-from-f16",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [4, 6],
+      "sourceDtype": "F16",
+      "source": "000000800100ff03ff7b007c00fc37300f3f00b65eb55a3c62bd94317e36efb98d283b322d3b4fb594374ebc46288437",
+      "scale": "",
+      "data": "000000800100ff03ff7b007c00fc37300f3f00b65eb55a3c62bd94317e36efb98d283b322d3b4fb594374ebc46288437",
+      "refusedElement": null
+    },
+    {
+      "name": "f16-from-f32",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [3, 4],
+      "sourceDtype": "F32",
+      "source": "000000000000008000008033000080b500e07f470000807f000080ff000080380000c03f000050c000a0aa3e00208044",
+      "scale": "",
+      "data": "0000008001001080ff7b007c00fc0004003e80c255350164",
+      "refusedElement": null
+    },
+    {
+      "name": "f16-from-bf16",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [2, 3],
+      "sourceDtype": "BF16",
+      "source": "203e80bfc042803840400080",
+      "scale": "",
+      "data": "003100bc0056000400420080",
+      "refusedElement": null
+    },
+    {
+      "name": "f16-inexact",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [2, 2],
+      "sourceDtype": "F32",
+      "source": "0000803f00000040abaaaa3e00004040",
+      "scale": "",
+      "data": "",
+      "refusedElement": 2
+    },
+    {
+      "name": "f16-overflow",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [3],
+      "sourceDtype": "F32",
+      "source": "0000803f00e07f4700f07f47",
+      "scale": "",
+      "data": "",
+      "refusedElement": 2
+    },
+    {
+      "name": "f16-below-grid",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [3],
+      "sourceDtype": "F32",
+      "source": "000080330000003300000000",
+      "scale": "",
+      "data": "",
+      "refusedElement": 1
+    },
+    {
+      "name": "f16-from-bf16-range",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [3],
+      "sourceDtype": "BF16",
+      "source": "803f00c08047",
+      "scale": "",
+      "data": "",
+      "refusedElement": 2
+    },
+    {
+      "name": "f16-nan",
+      "codec": "f16",
+      "rowAxis": 0,
+      "shape": [2],
+      "sourceDtype": "F32",
+      "source": "0000803f0000c07f",
+      "scale": "",
+      "data": "",
+      "refusedElement": 1
+    },
+    {
       "name": "f32-from-bf16",
       "codec": "f32",
       "rowAxis": 0,

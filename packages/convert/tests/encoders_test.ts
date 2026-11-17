@@ -2,8 +2,9 @@
 // what the exporter's Python stores for them (`fixtures/generate_encoders.py`: `fake_quant_int8`
 // and `_convert_for_storage` of `tools/exporter`): int8-sym on both row axes with rows of all
 // zeros, rounding ties, the smallest scale and ±0; bf16 from every source dtype with ±0, f32
-// subnormals and ±inf, and the values the exporter refuses; f32 from every source dtype. No GPU,
-// no local mirror.
+// subnormals and ±inf, and the values the exporter refuses; f16 the same way, with the f16
+// subnormals, the largest value, and the magnitudes past its range or between the points of its
+// grid near zero that the exporter refuses; f32 from every source dtype. No GPU, no local mirror.
 
 import { describe, it } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -36,7 +37,9 @@ const caseNamed = (name: string): (typeof fixtures.cases)[number] => {
 const encodeCase = (name: string): { readonly data: string; readonly scale: string } => {
   const entry = caseNamed(name);
   const encoded = encodeValues(
-    entry.codec === "int8-sym" ? "int8-sym" : entry.codec === "bf16" ? "bf16" : "f32",
+    entry.codec === "int8-sym" || entry.codec === "f16" || entry.codec === "bf16"
+      ? entry.codec
+      : "f32",
     tensorValues(dtypeOf(entry.sourceDtype), hexBytes(entry.source)),
     entry.shape,
     entry.rowAxis === 1 ? 1 : 0,
@@ -81,6 +84,33 @@ describe("bf16", () => {
   }
 
   for (const name of ["bf16-inexact", "bf16-nan"]) {
+    it(`refuses what the exporter refuses, naming the element (${name})`, () => {
+      const entry = caseNamed(name);
+      assertEquals(entry.data, "");
+      assertThrows(() => encodeCase(name), ConvertError, `element ${entry.refusedElement} `);
+    });
+  }
+});
+
+describe("f16", () => {
+  for (const name of ["f16-from-f16", "f16-from-f32", "f16-from-bf16"]) {
+    it(`stores the exporter's bytes (${name}, ±0, f16 subnormals, the largest value and ±inf included)`, () => {
+      assertEquals(encodeCase(name), expectedOf(name));
+    });
+  }
+
+  it("stores an F16 tensor bit for bit", () => {
+    const entry = caseNamed("f16-from-f16");
+    assertEquals(encodeCase("f16-from-f16").data, entry.source);
+  });
+
+  for (const name of [
+    "f16-inexact",
+    "f16-overflow",
+    "f16-below-grid",
+    "f16-from-bf16-range",
+    "f16-nan",
+  ]) {
     it(`refuses what the exporter refuses, naming the element (${name})`, () => {
       const entry = caseNamed(name);
       assertEquals(entry.data, "");

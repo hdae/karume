@@ -7,9 +7,10 @@
  *   in the weight's own memory order and the scale as one f32 per channel). `fl32(a / b)` is
  *   `Math.fround(a / b)`: for two f32 operands the double-precision quotient rounded once more to f32
  *   is the correctly rounded f32 quotient (53 ≥ 2·24 + 2), which is torch's f32 division.
- * - `bf16`: the value itself, or an error — the exporter stores a weight as bf16 only when it is
- *   exactly a bf16 value (`_is_bf16_exact` in `emit.py`, a `torch.equal`, which no NaN passes);
- *   nothing is rounded here.
+ * - `f16` and `bf16`: the value itself, or an error — the exporter stores a weight as f16 or bf16
+ *   only when it is exactly a value of that type (`_is_f16_exact` / `_is_bf16_exact` in `emit.py`,
+ *   a `torch.equal` of the round trip, which no NaN passes and `±inf` does); nothing is rounded
+ *   here.
  * - `f32`: the value itself (every source dtype is exact in f32).
  *
  * Each encoder takes the whole tensor and returns its whole payload; the pieces of a split tensor
@@ -36,6 +37,7 @@ const F32_TINY = 2 ** -126;
  */
 export const ENCODED_CODECS: readonly CodecName[] = /* @__PURE__ */ Object.freeze([
   "int8-sym",
+  "f16",
   "bf16",
   "f32",
 ] as const satisfies readonly CodecName[]);
@@ -47,7 +49,11 @@ export type Encoded = {
 };
 
 const bytesOf = (
-  array: Float32Array<ArrayBuffer> | Int8Array<ArrayBuffer> | Uint16Array<ArrayBuffer>,
+  array:
+    | Float32Array<ArrayBuffer>
+    | Float16Array<ArrayBuffer>
+    | Int8Array<ArrayBuffer>
+    | Uint16Array<ArrayBuffer>,
 ): Uint8Array<ArrayBuffer> => new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
 
 /** `torch.round` (half to even) of an f32 value; `Math.round` rounds a half up. */
@@ -133,6 +139,33 @@ export const encodeBf16 = (
   return bytesOf(out);
 };
 
+/**
+ * `f16`: each value as an f16, when it is one. A value `Math.f16round` moves is not an f16 value (a
+ * finer mantissa, a magnitude past 65504, or one between the points of the f16 grid near zero), and
+ * a NaN is refused like the exporter refuses it; both are errors naming the element. `±0`, the f16
+ * subnormals and `±inf` are stored as they are, so an F16 tensor without a NaN comes out bit for
+ * bit as it went in (its f32 values are exact).
+ */
+export const encodeF16 = (
+  values: Float32Array<ArrayBuffer>,
+  where: string,
+): Uint8Array<ArrayBuffer> => {
+  const out = new Float16Array(values.length);
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i];
+    if (Number.isNaN(value)) {
+      throw new ConvertError(`${where}: element ${i} is NaN, which f16 storage does not take`);
+    }
+    if (Math.f16round(value) !== value) {
+      throw new ConvertError(
+        `${where}: element ${i} (${value}) is not an f16 value (f16 storage takes values as they are and does not round them)`,
+      );
+    }
+    out[i] = value;
+  }
+  return bytesOf(out);
+};
+
 /** Encodes one initializer's values to the target codec (one of {@link ENCODED_CODECS}). */
 export const encodeValues = (
   codec: CodecName,
@@ -144,6 +177,8 @@ export const encodeValues = (
   switch (codec) {
     case "int8-sym":
       return encodeInt8Sym(values, shape, rowAxis, where);
+    case "f16":
+      return { data: encodeF16(values, where) };
     case "bf16":
       return { data: encodeBf16(values, where) };
     case "f32":

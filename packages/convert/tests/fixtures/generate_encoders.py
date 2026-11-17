@@ -2,9 +2,11 @@
 
 Each case is one tensor in a source dtype (F32 / F16 / BF16) and the bytes the exporter stores for
 it in a target codec: `int8-sym` through `fake_quant_int8` (the scale ledger) and
-`_convert_for_storage` (the stored codes), `bf16` through `_convert_for_storage` (which refuses a
-value that is not exactly a bf16 value), and `f32` as the tensor's own f32 bytes (the exporter
-stores an f32 initializer without a conversion). The TypeScript encoders of `@karume/convert` are
+`_convert_for_storage` (the stored codes), `f16` and `bf16` through `_convert_for_storage` (which
+refuses a tensor holding a value that is not exactly a value of the type: a NaN, a finer mantissa,
+and for f16 a magnitude past its range or between the points of its grid near zero; `±inf` passes),
+and `f32` as the tensor's own f32 bytes (the exporter stores an f32 initializer without a
+conversion). The TypeScript encoders of `@karume/convert` are
 tested against these bytes.
 
 Re-run from the exporter's project (it has torch):
@@ -71,11 +73,13 @@ def int8_case(name: str, module: nn.Module, source: torch.Tensor, source_dtype: 
     }
 
 
-def first_refused(values: torch.Tensor) -> int:
-    """The first element `_is_bf16_exact` fails on: a NaN, or a value with a non-zero lower half."""
-    words = values.to(torch.float32).contiguous().view(torch.int32).reshape(-1).tolist()
-    for index, word in enumerate(words):
-        if (word & 0x7FFFFFFF) > 0x7F800000 or (word & 0xFFFF) != 0:
+def first_refused(values: torch.Tensor, codec: str) -> int:
+    """The first element the exactness check of `codec` fails on (`_is_f16_exact` /
+    `_is_bf16_exact`, element by element): a NaN, or a value the round trip through the type moves."""
+    flat = values.to(torch.float32).reshape(-1)
+    back = flat.to(TORCH_DTYPES[codec.upper()]).to(torch.float32)
+    for index in range(flat.numel()):
+        if not torch.equal(flat[index], back[index]):
             return index
     raise AssertionError("no refused element")
 
@@ -96,9 +100,9 @@ def float_case(name: str, codec: str, source: torch.Tensor, source_dtype: str) -
     if codec == "f32":
         return {**case, "data": raw(widened), "refusedElement": None}
     try:
-        stored = _convert_for_storage("weight", widened, _Conversion(dtype="bf16", name=name))
+        stored = _convert_for_storage("weight", widened, _Conversion(dtype=codec, name=name))
     except EmitError:
-        return {**case, "data": "", "refusedElement": first_refused(widened)}
+        return {**case, "data": "", "refusedElement": first_refused(widened, codec)}
     return {**case, "data": raw(stored), "refusedElement": None}
 
 
@@ -117,6 +121,15 @@ def rows_source() -> torch.Tensor:
     row7[0], row7[1], row7[2], row7[3] = 2.0**-140, -(2.0**-140), -0.0, 3.0 * 2.0**-133
     rows[7] = torch.tensor(row7)
     return rows
+
+
+def f16_source() -> torch.Tensor:
+    """[4, 6] F16: seeded values, then ±0, the smallest subnormal, the largest subnormal, the largest
+    finite value and ±inf (every one stored as it is)."""
+    values = seeded([4, 6], 8, 1.0).to(torch.float16)
+    specials = [0.0, -0.0, 2.0**-24, 1023 * 2.0**-24, 65504.0, float("inf"), float("-inf")]
+    values.view(-1)[: len(specials)] = torch.tensor(specials, dtype=torch.float16)
+    return values
 
 
 def main() -> None:
@@ -160,6 +173,37 @@ def main() -> None:
             "bf16-inexact", "bf16", torch.tensor([[1.0, bits(0x3F800001)], [2.0, 3.0]]), "F32"
         ),
         float_case("bf16-nan", "bf16", torch.tensor([1.0, bits(0x7FC00000)]), "F32"),
+        float_case("f16-from-f16", "f16", f16_source(), "F16"),
+        float_case(
+            "f16-from-f32",
+            "f16",
+            torch.tensor(
+                [
+                    [0.0, -0.0, 2.0**-24, -(2.0**-20)],
+                    [65504.0, float("inf"), float("-inf"), 2.0**-14],
+                    [1.5, -3.25, 0.333251953125, 1025.0],
+                ]
+            ),
+            "F32",
+        ),
+        float_case(
+            "f16-from-bf16",
+            "f16",
+            torch.tensor(
+                [[0.15625, -1.0, 96.0], [2.0**-14, 3.0, -0.0]], dtype=torch.bfloat16
+            ),
+            "BF16",
+        ),
+        float_case("f16-inexact", "f16", torch.tensor([[1.0, 2.0], [1.0 / 3.0, 3.0]]), "F32"),
+        float_case("f16-overflow", "f16", torch.tensor([1.0, 65504.0, 65520.0]), "F32"),
+        float_case("f16-below-grid", "f16", torch.tensor([2.0**-24, 2.0**-25, 0.0]), "F32"),
+        float_case(
+            "f16-from-bf16-range",
+            "f16",
+            torch.tensor([1.0, -2.0, 2.0**16], dtype=torch.bfloat16),
+            "BF16",
+        ),
+        float_case("f16-nan", "f16", torch.tensor([1.0, bits(0x7FC00000)]), "F32"),
         float_case("f32-from-bf16", "f32", seeded([5], 6, 1.0).to(torch.bfloat16), "BF16"),
         float_case(
             "f32-from-f16",

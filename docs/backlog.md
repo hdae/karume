@@ -233,8 +233,15 @@ maintainer's ruling of 2026-11-06).
      header, the placement and the shared loader with converting sources, the transformer against the quant's plan
      and the text conditioner against the `bf16` plan; the converted parts are neither fetched nor counted, and every
      refusal that needs no tensor byte comes before a weight part; [spec/single-file.md](spec/single-file.md). The
-     workbench entry `anima-single-file` compares it with `fromPretrained` on a GPU.)* Left from it: keeping the
-     converted container (designed next), `fromSingleFile` on the other families, `f16` and int4 targets, LoRA, the
+     workbench entry `anima-single-file` compares it with `fromPretrained` on a GPU.)* *(Landed 2026-11-17: the `f16`
+     target of `@karume/convert` — a value stored as it is, never rounded, against the exporter's fixtures — and the
+     dtype rule of `fromSingleFile`: a preset decides what is quantized, and a float component from the file is
+     converted against the container of the file's dtype, a bit copy (Anima: BF16 → `bf16`, F16 → `f16`, for the text
+     conditioner always and for the transformer under the float quants; a mix of dtypes and F32 are refused, and so is
+     a BF16 transformer under f16 linear compute, which nothing checks); [spec/single-file.md](spec/single-file.md),
+     [spec/convert.md](spec/convert.md#the-encodings). Not run on a GPU with an F16 file yet: none with the base's 28
+     blocks is at hand.)* Left from it: keeping the
+     converted container (designed next), `fromSingleFile` on the other families, int4 targets, LoRA, the
      runtime's `parseSafetensors` moved into the reader package, and the published-package setup (`@karume/models`
      depends on the private `@karume/convert` and `@karume/safetensors`, which JSR does not have).
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,

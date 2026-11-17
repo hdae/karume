@@ -2,7 +2,7 @@
 // by the runtime's test writer (the mirror of the exporter's layout rules) with the exporter's own
 // encodings of the fixture tensors (`fixtures/encoders.json`), so "the same weights as the
 // distributed preset" holds by construction: a weight tensor split into two pieces, an int8 tensor
-// on row axis 1, payloads with tail padding, bf16 and f32 tensors, a const and a dedicated asset
+// on row axis 1, payloads with tail padding, f16, bf16 and f32 tensors, a const and a dedicated asset
 // part. The source tensors are the fixtures' source values. No GPU, no local mirror.
 
 import { describe, it } from "vite-plus/test";
@@ -76,6 +76,7 @@ const WEIGHTS: readonly Weight[] = [
   { initializer: "blocks.0.s", fixture: "int8-small" },
   { initializer: "blocks.0.n", fixture: "bf16-from-f32" },
   { initializer: "blocks.0.c", fixture: "bf16-from-bf16" },
+  { initializer: "blocks.0.f", fixture: "f16-from-f16" },
   { initializer: "blocks.0.b", fixture: "f32-from-bf16" },
 ];
 
@@ -85,6 +86,7 @@ const ROPE_BASE = Uint8Array.from({ length: 30 }, (_, i) => (i * 11 + 3) & 0xff)
 const encodingOf = (name: string): EncodingInput => {
   const entry = fixture(name);
   if (entry.codec === "bf16") return { codec: "bf16" };
+  if (entry.codec === "f16") return { codec: "f16" };
   if (entry.codec === "f32") return { codec: "f32" };
   const rows = entry.shape[entry.rowAxis];
   return {
@@ -396,11 +398,15 @@ describe("the converting source", () => {
         {
           graph: GRAPH,
           initializer: "blocks.0.h",
-          bytes: new Uint8Array(8),
-          encoding: { codec: "f16" },
+          bytes: new Uint8Array(16),
+          encoding: {
+            codec: "int4-sym-g",
+            groupSize: 16,
+            scale: { bytes: new Uint8Array(new Float32Array([0.5, 0.25]).buffer), dtype: "f32" },
+          },
         },
       ],
-      { "blocks.0.h": [2, 2] },
+      { "blocks.0.h": [2, 16] },
     );
     const target = recordingSource(written.parts, false);
     const { tensors, reads } = sourceTensors();
@@ -412,7 +418,7 @@ describe("the converting source", () => {
     tensors.set("blocks.0.s", { ...s, shape: [3, 6] });
     tensors.set("blocks.0.h", {
       dtype: "F32",
-      shape: [2, 2],
+      shape: [2, 16],
       read: () => Promise.reject(new Error("read")),
     });
     const error = await assertRejects(
@@ -423,7 +429,7 @@ describe("the converting source", () => {
       "graph 'transformer' initializer 'blocks.0.w': the tensor list has no tensor 'blocks.0.w'",
       "initializer 'blocks.0.t': tensor 'blocks.0.t' has shape [5, 3, 4] (60 elements), the plan declares [3, 5, 4] (60 elements)",
       "initializer 'blocks.0.s': tensor 'blocks.0.s' has shape [3, 6] (18 elements), the plan declares [3, 5] (15 elements)",
-      "initializer 'blocks.0.h': codec 'f16' is not one this package encodes",
+      "initializer 'blocks.0.h': codec 'int4-sym-g' is not one this package encodes",
     ]) {
       assertStringIncludes(error.message, line);
     }
@@ -529,15 +535,19 @@ describe("the plan read before a conversion (readPlanCodecs)", () => {
         {
           graph: GRAPH,
           initializer: "blocks.0.h",
-          bytes: new Uint8Array(8),
-          encoding: { codec: "f16" },
+          bytes: new Uint8Array(16),
+          encoding: {
+            codec: "int4-sym-g",
+            groupSize: 16,
+            scale: { bytes: new Uint8Array(new Float32Array([0.5, 0.25]).buffer), dtype: "f32" },
+          },
         },
       ],
-      { "blocks.0.h": [2, 2] },
+      { "blocks.0.h": [2, 16] },
     );
     const target = recordingSource(written.parts, false);
     const codecs = await readPlanCodecs(target.source);
-    // The const (const.rope) is not converted, so it is not listed; the f16 initializer is listed
+    // The const (const.rope) is not converted, so it is not listed; the int4 initializer is listed
     // with its codec although this package does not encode it (the caller decides on it).
     assertEquals(
       codecs
@@ -546,7 +556,8 @@ describe("the plan read before a conversion (readPlanCodecs)", () => {
       [
         [GRAPH, "blocks.0.b", "f32"],
         [GRAPH, "blocks.0.c", "bf16"],
-        [GRAPH, "blocks.0.h", "f16"],
+        [GRAPH, "blocks.0.f", "f16"],
+        [GRAPH, "blocks.0.h", "int4-sym-g"],
         [GRAPH, "blocks.0.n", "bf16"],
         [GRAPH, "blocks.0.s", "int8-sym"],
         [GRAPH, "blocks.0.t", "int8-sym"],
@@ -554,7 +565,7 @@ describe("the plan read before a conversion (readPlanCodecs)", () => {
       ],
     );
     assertEquals([...target.partsRead], [0]);
-    assertEquals(ENCODED_CODECS, ["int8-sym", "bf16", "f32"]);
+    assertEquals(ENCODED_CODECS, ["int8-sym", "f16", "bf16", "f32"]);
   });
 });
 

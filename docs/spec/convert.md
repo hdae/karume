@@ -50,19 +50,31 @@ not keep a NaN's payload). The target codec then decides:
 | Codec | Stored | Refused |
 | --- | --- | --- |
 | `int8-sym` | Per index of `shape[rowAxis]` (row axis 0 or 1), over every other element: `scale = max(fl32(amax / 127), 2^-126)`, `q = clamp(round_half_even(fl32(w / scale)), −127, 127)`; the codes in the weight's memory order, one f32 scale per channel. `fl32(a / b)` is the f32 quotient. The same for a whole tensor and for one split into pieces (a piece is a row range of the payload). | A non-finite value. |
+| `f16` | The value itself, as IEEE binary16 (±0, the subnormals and ±inf included). | A value that is not an f16 value — one `Math.f16round` moves: a finer mantissa, a magnitude past 65504, or one between the points of the f16 grid near zero (below 2⁻²⁴, or not a multiple of it below 2⁻¹⁴) — and a NaN. A float is never rounded. |
 | `bf16` | The value itself: the upper half of its f32 bits. | A value that is not a bf16 value (the lower half of its f32 bits is not zero) and a NaN. A float is never rounded. |
 | `f32` | The value itself. | Nothing. |
 
 These are the exporter's storage conversions bit for bit (`channel_scale`, `quantize_to_int8` in
-`tools/exporter/src/karume/quantize.py`; `_convert_for_storage` in `emit.py`, which refuses what the table refuses).
+`tools/exporter/src/karume/quantize.py`; `_convert_for_storage` in `emit.py`, whose `_is_f16_exact` and `_is_bf16_exact`
+— a `torch.equal` of the round trip through the type — refuse what the table refuses and let ±inf through).
 Any other target codec is refused.
+
+What `f16` guarantees, and what it does not:
+
+- An F16 tensor without a NaN is stored bit for bit (its f32 values are exact, and each is an f16 value). With an F16
+  source, the parts written against an f16 plan equal an f16 export of the same values: the exporter stores the
+  values the recipe rounded to f16, which for F16 values is a no-op, and an initializer the plan stores as `f32` beside
+  them takes the value itself, as the exporter's does.
+- A BF16 or F32 source is stored only when every value of the tensor is an f16 value; otherwise it is refused, not
+  rounded. The exporter's f16 presets of a BF16 upstream round the model to f16 first (the recipe's rounding, before
+  the export), and this conversion does not reproduce that: it never changes a value.
 
 ## The plan before a conversion
 
 `readPlanCodecs(target)` reads the target's part 0 alone — the same reading and the same checks of part 0 as the
 converting source — and gives every initializer the plan stores in its weight parts with its codec (`graph`,
 `initializer`, `codec`), in the order of the graphs and of their binding tables. It is what a caller decides on before
-it gives a tensor list: whether every codec is one encoded here (`ENCODED_CODECS`: `int8-sym`, `bf16`, `f32`), and
+it gives a tensor list: whether every codec is one encoded here (`ENCODED_CODECS`: `int8-sym`, `f16`, `bf16`, `f32`), and
 whether a tensor's dtype can be stored as its initializer's codec. A codec is listed whether it is encoded here or not.
 
 ## The checks when it is built
@@ -72,7 +84,7 @@ the graph and the initializer):
 
 - an initializer of the plan whose tensor the list does not have;
 - a tensor whose shape is not the declared shape (the message gives both element counts);
-- a target codec other than `int8-sym`, `bf16` and `f32`;
+- a target codec other than `int8-sym`, `f16`, `bf16` and `f32`;
 - a part that holds both converted blocks and asset blocks.
 
 Tensors of the list that no initializer uses are not an error; the result lists them (`unusedTensors`).
