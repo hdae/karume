@@ -192,8 +192,14 @@ maintainer's ruling of 2026-11-06).
      - Per-adapter generation of the hand-written shape tables (`PARALLEL_SHAPES`, the integer and the byte-plane GEMV
        tables): no sweep measures them today, so it needs a GEMV sweep on synthetic tensors, and the gain is measured
        first.
-  7. **Weights from outside the exporter.** The safetensors reader and name maps, quantization at load with the block
-     sha256 test, LoRA merged before quantization (Anima, then Wan2.2); example apps per model on request. GGUF is
+  7. **Weights from outside the exporter.** `fromSingleFile` on the pipelines, the counterpart of diffusers'
+     `from_single_file`: a single file is converted while it loads, against the plan of a preset of a distribution's
+     manifest, and keeping the result as a `krm` is optional (the maintainer, 2026-11-17). The format readers are
+     their own packages (`@karume/safetensors`, later `@karume/gguf`) and the shared part is `@karume/convert` (the
+     plan, the encoders with the block sha256 test, name maps); hub and models hold no reader. Once the reader package
+     exists the runtime's `parseSafetensors` moves into it, early, so that one parser reads the header (a breaking
+     change of the runtime's surface). LoRA merged before quantization (Anima, then Wan2.2); example apps per model on
+     request. GGUF is
      deferred ([research 2026-11-16](research/2026-11-16-gguf-and-quantized-kernel-generation.md): what its types
      need from storage and kernels); the ledger's symmetric-only rule (no zero point) is re-evaluated when a format
      that needs a minimum is taken up (the maintainer, 2026-11-16).
