@@ -938,8 +938,9 @@ krg = [header'][graph descriptor (byte copy from krm)][padding][const region (by
   `const.length`. Both are inside the graph descriptor and are **the only means by which a `krg`
   alone can supply `const.*`** (this keeps the `encoding` of a const from becoming unreadable from
   anywhere).
-- The assets a `krg` can carry are only **weight-independent** ones (tables attached to the const
-  region, such as `rope_base`).
+- A `krg` carries **no assets**: `assets` is a field of the model descriptor (§2.2), which a `krg`
+  does not have, and `asset()` on a container opened from a `krg` fails loudly. A table a graph needs
+  besides its weights, such as `rope_base`, is read from the `krm`.
 - A `krg` is defined as "**holds no weight blocks**", not as "weight-independent". QAT graphs bake
   activation scales into the attr of `static_quantize` (ADR 0097 addendum 2), so even a `krg` can hold
   numbers derived from weights.
