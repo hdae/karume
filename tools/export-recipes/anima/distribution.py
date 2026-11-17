@@ -640,10 +640,11 @@ class AnimaModel:
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
     # Official Turbo (the distilled checkpoint itself — the old anima-turbo's LoRA baking is no
     # longer needed). lora_sha256=None is the active "not baked" check and rejects plugging in an
-    # old fused series that carries lora_provenance.json. The text_conditioner measured
-    # bit-identical to base after f16 rounding (2026-09-01), so f16 uses the shared series (in bf16
-    # the upstream bits differ in 60 / 118 tensors — measured 2026-10-17, only near-zero elements up
-    # to 2.98e-8 — so it has its own series: {@link text_conditioner_series}).
+    # old fused series that carries lora_provenance.json. The text_conditioner measured equal in
+    # value to base after f16 rounding (2026-09-01; as bytes, 66 zeros differ in sign — measured
+    # 2026-11-17), so f16 uses the shared series (in bf16 the upstream bits differ in 60 / 118
+    # tensors — measured 2026-10-17, only near-zero elements up to 2.98e-8 — so it has its own
+    # series: {@link text_conditioner_series}).
     # The i4 preset the old fused turbo had is **not carried over** (maintainer ruling of
     # 2026-09-01 — every model is without i4; the lever to bring it back is `anima.eval_dist`, as
     # for the plain model).
@@ -739,10 +740,11 @@ class AnimaSources:
 def text_conditioner_series(model: str, spec: AnimaModel, storage: str) -> str:
     """The text_conditioner's series name (per storage label).
 
-    For f16 it is decided by {@link AnimaModel.own_text_conditioner} (the shared series if
-    bit-identical after f16 rounding). bf16 **keeps the upstream bits**, so every model but base has
-    its own series — turbo-v1.1's llm_adapter is identical to base after f16 rounding, but in bf16
-    60 / 118 tensors differ (measured 2026-10-17, max 2.98e-8, only near-zero elements). The
+    For f16 it is decided by {@link AnimaModel.own_text_conditioner} (the shared series if equal
+    in value after f16 rounding). bf16 **keeps the upstream bits**, so every model but base has its
+    own series — turbo-v1.1's llm_adapter equals base in value after f16 rounding (66 zeros differ
+    in sign), but in bf16 60 / 118 tensors differ (measured 2026-10-17, max 2.98e-8, only near-zero
+    elements). The
     distribution assembly folds only byte-identical components into `shared/`, so the sharing
     optimisation is not lost even though it is not decided here.
     """
