@@ -1,0 +1,14 @@
+{
+  "name": "@karume/convert",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Weights converted while a Session reads them: a tensor list encoded against the plan of a distributed preset, served as a container and optionally written as one.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts"
+  },
+  "dependencies": {
+    "@karume/runtime": "workspace:*"
+  }
+}

@@ -57,6 +57,11 @@ measurements in `docs/research/`.
   a table without the field runs with them, so no Session changes. `acquireGpu({ geometryProfile })` and
   `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field.
   `SessionOptions.linearGemvRowsThreadTarget` still replaces the thread target when given.
+- `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
+  canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
+  `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and
+  of an initializer's supply plan. Reading a container stays `openContainer`. A `BlockSource` that produces its
+  bytes itself declares `verified: true`.
 
 ### Changed
 

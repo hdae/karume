@@ -64,6 +64,9 @@ export type BlockSource = {
    * the fetch layer verified the whole file and compared it with the recorded hash — avoiding the
    * double digest on cold and the digest on warm). A source nobody verified, such as whole bytes / a
    * part list / a local directory, MUST be false — silently claiming true lets tampering through.
+   * A source that produces its bytes itself (a converter that encodes the weights as they are read)
+   * declares true: its bytes have no recorded hash to be compared with, and what it passes through
+   * from another source it verifies itself when that source is unverified.
    */
   readonly verified: boolean;
   partLength(index: number): number;

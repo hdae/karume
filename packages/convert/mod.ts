@@ -1,0 +1,27 @@
+/**
+ * Weights converted while a Session reads them (`@karume/convert`; private for now).
+ *
+ * The input is a weights file read as a tensor list — format-neutral: per tensor name, its element
+ * type (`F32` / `F16` / `BF16`), its shape and a function that reads its bytes — and a distributed
+ * preset whose part 0 is the plan: which initializer is stored how, in which blocks, where.
+ *
+ * - {@link openConvertingSource} builds a `BlockSource` of the runtime over the target preset's
+ *   container that encodes each weight block from the tensor list as it is read (`int8-sym`,
+ *   `bf16` and `f32`, bit for bit as the exporter writes them) and passes part 0, the const part and
+ *   the asset parts through from the target. `openContainer` of `@karume/runtime` opens it like any
+ *   other source. Every check that needs no tensor byte runs when it is built and is reported
+ *   together in one {@link ConvertError}.
+ * - {@link writeContainer} optionally writes what a source serves as a container, part by part, to
+ *   a sink, with the real sha256 of every block and part, and returns what a manifest entry needs.
+ *
+ * Web standard APIs only; no side effects at import.
+ *
+ * @module
+ */
+
+export { ConvertError } from "./src/errors.ts";
+export type { SourceTensor, TensorDtype, TensorList } from "./src/tensors.ts";
+export { INVALID_SHA256, openConvertingSource } from "./src/source.ts";
+export type { ConvertingSource, ConvertingSourceInput } from "./src/source.ts";
+export { writeContainer } from "./src/write.ts";
+export type { ContainerSink, Digest, WrittenContainer } from "./src/write.ts";

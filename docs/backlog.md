@@ -206,6 +206,12 @@ maintainer's ruling of 2026-11-06).
      deferred ([research 2026-11-16](research/2026-11-16-gguf-and-quantized-kernel-generation.md): what its types
      need from storage and kernels); the ledger's symmetric-only rule (no zero point) is re-evaluated when a format
      that needs a minimum is taken up (the maintainer, 2026-11-16).
+     *(Landed 2026-11-17, stage 1: the private package `@karume/convert` — the tensor list, the plan read from a
+     target preset's part 0, the `int8-sym` / `bf16` / `f32` encoders against fixtures from the exporter's Python, the
+     converting `BlockSource` and the optional writer — and the runtime's subpath `@karume/runtime/container`;
+     [spec/convert.md](spec/convert.md). The Anima transformer's `bf16` tensors written against the `i8` plan give
+     the 11 `i8` files byte for byte.)* Left from it: the safetensors reader and the name maps, the pipelines'
+     `fromSingleFile`, `f16` and int4 targets, LoRA, the published-package setup.
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.

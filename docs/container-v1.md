@@ -851,7 +851,11 @@ decision 7):
 | unverified source (`openContainer({ kind: "bytes" })`, a local directory) | **a single digest per block** (at most 32 MiB, so it falls on the fast side of §4.1)                   |
 
 A `BlockSource` declares whether it is "verified", and `readBlock` digests only for sources that do
-not. Not running digests on warm inherits the current discipline (the NOTE at `BYTE_BUDGET` in
+not. A source that produces its bytes itself declares `verified: true`: the converting source of
+`@karume/convert` encodes the weight blocks as they are read, so they have no recorded hash to be
+compared with (its part 0 states 64 `0` characters for them — [spec/convert.md](spec/convert.md)), and
+what it passes through from an unverified source it checks block by block itself. Not running
+digests on warm inherits the current discipline (the NOTE at `BYTE_BUDGET` in
 `packages/hub/src/fetch.ts` — no GB-scale digest on a cache hit). **"0" refers to weight blocks and
 asset payloads**; step 3 above (checking the 2 documents against the expected values before parsing)
 applies on every open, cold or warm (the descriptor is at most 32 MiB, a few hundred KB in real

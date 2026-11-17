@@ -422,6 +422,12 @@ importers:
         specifier: workspace:*
         version: link:../runtime
 
+  packages/convert:
+    dependencies:
+      '@karume/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   packages/e2e:
     devDependencies:
       '@hdae/yomi':

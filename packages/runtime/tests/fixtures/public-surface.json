@@ -463,6 +463,48 @@
         "kind": "function"
       }
     ],
+    "./container": [
+      {
+        "name": "DataBlockRecord",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "InitializerSupply",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ModelDescriptor",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sha256Hex",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SupplyBlock",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "asSha256Hex",
+        "kind": "function"
+      },
+      {
+        "name": "decodeBf16",
+        "kind": "function"
+      },
+      {
+        "name": "decodeF16",
+        "kind": "function"
+      },
+      {
+        "name": "serializeModelDescriptor",
+        "kind": "function"
+      },
+      {
+        "name": "sha256Hex",
+        "kind": "function"
+      }
+    ],
     "./kernel": [
       {
         "name": "CodegenError",

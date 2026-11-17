@@ -50,6 +50,9 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
 - `packages/local-distributions/` (private) — the local mirrors under `models/` as the two apps read them: the dev-server
   plugin, the mount table, the page side and the Node side
+- `packages/convert/` (private for now) — weights converted while a Session reads them: a tensor list encoded against
+  the plan of a distributed preset (its part 0) and served as that preset's container, optionally written as a `krm`
+  ([docs/spec/convert.md](docs/spec/convert.md)); depends on `@karume/runtime` and its `./container` subpath only
 - `packages/gemma4-app-support/` (private) — the Gemma 4 helpers the playground's chat page and the workbench's Gemma
   entries share: the mounts and their entry points, the expert cache's text forms, the stop record and the turn timing;
   only those two apps import it

@@ -7,13 +7,15 @@
     "mod.ts",
     "tune.ts",
     "kernel.ts",
+    "container.ts",
     "src"
   ],
   "type": "module",
   "exports": {
     ".": "./mod.ts",
     "./tune": "./tune.ts",
-    "./kernel": "./kernel.ts"
+    "./kernel": "./kernel.ts",
+    "./container": "./container.ts"
   },
   "scripts": {
     "test": "vp test"

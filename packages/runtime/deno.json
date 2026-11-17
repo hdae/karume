@@ -5,7 +5,8 @@
   "exports": {
     ".": "./mod.ts",
     "./tune": "./tune.ts",
-    "./kernel": "./kernel.ts"
+    "./kernel": "./kernel.ts",
+    "./container": "./container.ts"
   },
   "publish": {
     "exclude": ["tests/"]
