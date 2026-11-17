@@ -20,12 +20,17 @@ const ALIGNMENT = 8;
 
 /**
  * The element types that can be written (one to one with the semantic dtypes — bool is not used, so
- * it is absent).
+ * it is absent). `F16` and `BF16` take their 16-bit patterns as they are.
  */
 export type DumpTensor =
   | { readonly dtype: "F32"; readonly shape: readonly number[]; readonly data: Float32Array }
   | { readonly dtype: "I32"; readonly shape: readonly number[]; readonly data: Int32Array }
-  | { readonly dtype: "I8"; readonly shape: readonly number[]; readonly data: Int8Array };
+  | { readonly dtype: "I8"; readonly shape: readonly number[]; readonly data: Int8Array }
+  | {
+      readonly dtype: "F16" | "BF16";
+      readonly shape: readonly number[];
+      readonly data: Uint16Array;
+    };
 
 const elementCount = (shape: readonly number[]): number =>
   shape.reduce((product, dim) => product * dim, 1);

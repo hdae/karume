@@ -5,7 +5,14 @@
  * with what differs between the hosts passed in as a {@link RunHost}.
  */
 
-import type { Entry, GpuOptions, OpenDistribution, ParameterValues, RunContext } from "./entry.ts";
+import type {
+  Entry,
+  GpuOptions,
+  OpenDistribution,
+  OpenInput,
+  ParameterValues,
+  RunContext,
+} from "./entry.ts";
 import {
   buildRecord,
   type Checkout,
@@ -56,6 +63,7 @@ export type RunHost<Saved> = {
   readonly readCheckout: () => Promise<Checkout>;
   readonly gpuOptions: GpuOptions;
   readonly openDistribution: OpenDistribution;
+  readonly openInput: OpenInput;
   /** Saves a record's text; a host that cannot save says so in `Saved` or throws. */
   readonly save: (record: WorkbenchRecord, text: string) => Promise<Saved>;
 };
@@ -91,6 +99,7 @@ export const runEntry = async <Saved>(
       signal: run.signal,
       progress: run.progress,
       openDistribution: host.openDistribution,
+      openInput: host.openInput,
     },
     environment,
     checkout,

@@ -1,9 +1,10 @@
 // The name map's interpreter on small synthetic maps: each rule kind, the order of the rules, the
-// routing between components, and each refusal. The Anima map itself is exercised on the upstream
+// routing between components, and each refusal; and the reader of a map that arrives as unchecked
+// JSON (`parseNameMap`), each kind of problem. The Anima map itself is exercised on the upstream
 // files in `packages/e2e/tests/e2e_anima_single_file_test.ts`.
 
 import { describe, it } from "vite-plus/test";
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   ConvertError,
   NAME_MAP_FORMAT,
@@ -11,9 +12,11 @@ import {
   type NameMapComponent,
   type NameMapLayout,
   type NameMapRule,
+  parseNameMap,
   placeTensors,
   type TensorPlacement,
 } from "../mod.ts";
+import animaNameMap from "../../../tools/export-recipes/anima/name-map.json" with { type: "json" };
 
 const component = (
   role: string,
@@ -248,5 +251,111 @@ describe("what the interpreter refuses", () => {
       refusal({ format: "karume-name-map/0", layouts: [] }, ["a"]),
       `the name map's format is "karume-name-map/0"`,
     );
+  });
+});
+
+describe("reading a name map that arrives as unchecked JSON (parseNameMap)", () => {
+  /** A valid document of every rule kind, as a distribution's file would hold it. */
+  const document = (): Record<string, unknown> => ({
+    format: NAME_MAP_FORMAT,
+    layouts: [
+      {
+        name: "single-file",
+        source: "the test",
+        stripPrefix: ["net."],
+        markers: ["blocks.0.w"],
+        components: [
+          {
+            role: "transformer",
+            source: "the test",
+            route: "",
+            rules: [
+              { stripPrefix: "x." },
+              { replace: "blocks.", with: "layers." },
+              { exclude: "_extra_state" },
+            ],
+            initializerPrefix: "model.",
+          },
+        ],
+      },
+    ],
+  });
+
+  const problemsOf = (value: unknown): string =>
+    assertThrows(() => parseNameMap(value), ConvertError).message;
+
+  it("gives a valid document back as a map that places tensors like the same map written by hand, sharing no object with the input", () => {
+    const input = document();
+    const parsed = parseNameMap(input);
+    assertEquals(parsed, input);
+    const layouts = input["layouts"];
+    assert(Array.isArray(layouts));
+    assert(parsed.layouts[0] !== layouts[0], "the parsed layout is the input's object");
+    assertEquals(plain(placeTensors(parsed, ["net.blocks.0.w", "net.blocks.0._extra_state"])), {
+      layout: "single-file",
+      components: { transformer: [["model.layers.0.w", "net.blocks.0.w"]] },
+      excluded: ["net.blocks.0._extra_state"],
+      unplaced: [],
+    });
+  });
+
+  it("reads the Anima map of the recipe (the file the distributions carry) as itself", () => {
+    assertEquals(parseNameMap(animaNameMap), animaNameMap);
+  });
+
+  it("refuses a document of another format without reading the rest of it", () => {
+    // Fault: the format tag of a later format, with a field this format does not name.
+    const message = problemsOf({ ...document(), format: "karume-name-map/2", extra: true });
+    assertStringIncludes(message, `the name map's format is "karume-name-map/2"`);
+    assertEquals(message.includes("extra"), false);
+  });
+
+  it("reports every problem together: an unknown key at each level, a missing field, a wrong type, an empty replace and a rule of no kind", () => {
+    // Faults, one per level: an unknown top-level key, a layout without `markers` and with a
+    // number for `name`, a component with an unknown key and a non-array `rules`, and in another
+    // component a `replace` rule with an empty `replace`, an `exclude` with an unknown key, a rule
+    // of no kind and a prefix that is not a string.
+    const message = problemsOf({
+      format: NAME_MAP_FORMAT,
+      notes: "x",
+      layouts: [
+        {
+          name: 3,
+          source: "s",
+          stripPrefix: ["net.", 4],
+          components: [
+            { role: "t", source: "s", route: "", rules: "none", initializerPrefix: "", alias: 1 },
+            {
+              role: "u",
+              source: "s",
+              route: "u.",
+              rules: [{ replace: "", with: "y" }, { exclude: "z", also: 1 }, { rename: "a" }],
+              initializerPrefix: "",
+            },
+          ],
+        },
+      ],
+    });
+    for (const line of [
+      "the name map has a key the format does not name: 'notes'",
+      "the name map.layouts[0] has no 'markers'",
+      "the name map.layouts[0].name is not a non-empty string",
+      "the name map.layouts[0].stripPrefix[1] is not a string",
+      "the name map.layouts[0].components[0] has a key the format does not name: 'alias'",
+      "the name map.layouts[0].components[0].rules is not an array",
+      "the name map.layouts[0].components[1].rules[0].replace is not a non-empty string",
+      "the name map.layouts[0].components[1].rules[1] has a key the format does not name: 'also'",
+      "the name map.layouts[0].components[1].rules[2] is none of { stripPrefix }, { replace, with } and { exclude }",
+    ]) {
+      assertStringIncludes(message, line);
+    }
+  });
+
+  it("refuses what is not an object, and an object without a format or layouts", () => {
+    // Faults: JSON that is an array, and an empty object.
+    assertStringIncludes(problemsOf([]), "the name map is not an object");
+    const empty = problemsOf({});
+    assertStringIncludes(empty, "the name map has no 'format'");
+    assertStringIncludes(empty, "the name map has no 'layouts'");
   });
 });

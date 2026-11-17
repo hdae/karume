@@ -3,7 +3,9 @@
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
  * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained} /
- * {@link Pipeline.fromAssets}) / generate (`generate`) / subscribe to generation progress
+ * {@link Pipeline.fromAssets}, or {@link Pipeline.fromSingleFile} from a single weights file — its
+ * file type is {@link SingleFileSource}, its options {@link FromSingleFileOptions}) / generate
+ * (`generate`) / subscribe to generation progress
  * (`onEvent` — {@link GenerateEvent}) / **approximate a preview from an intermediate latent**
  * ({@link approximatePreview}) / release (`dispose`) / handle the spelling of resolutions
  * ({@link parseResolution} / {@link formatResolution}) / build Sessions of the VAE decoder graph
@@ -17,6 +19,7 @@ export { Pipeline } from "./src/anima/pipeline.ts";
 export type {
   Assets,
   FromPretrainedOptions,
+  FromSingleFileOptions,
   GenerateEvent,
   GenerateRequest,
   LatentSnapshot,
@@ -24,6 +27,13 @@ export type {
   RunComponent,
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
+
+/**
+ * The weights file {@link Pipeline.fromSingleFile} reads: a `Blob` (a browser `File`) or a ranged
+ * reader `{ size, read(offset, length) }`. A type of its own so that a caller can write a reader
+ * over its storage without restating the shape.
+ */
+export type { SingleFileSource } from "./src/hub/single-file.ts";
 
 /**
  * The vocabulary of denoise update rules (the values `GenerateRequest.sampler` accepts). When

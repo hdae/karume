@@ -249,6 +249,7 @@ describe("the gemma4-session-ab entry", () => {
           signal: SIGNAL,
           progress: () => undefined,
           openDistribution: memoryDistributions({ "gemma4-qat": QAT }, opened),
+          openInput: () => Promise.reject(new Error("the entry reads no input file")),
         }),
       ).rejects.toThrow("Parameter depth: needs expertCacheSlots");
       expect(opened).toEqual(["gemma4-qat:cached"]);

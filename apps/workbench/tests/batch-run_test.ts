@@ -80,6 +80,7 @@ const hostOf = (failReadAt?: number): Host => {
     readCheckout: () => Promise.resolve(CHECKOUT),
     gpuOptions: {},
     openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+    openInput: () => Promise.reject(new Error("the entry reads no input file")),
     save: (record) => {
       saved.push(record);
       return Promise.resolve(`outputs/workbench/node-rtx/${record.entry.id}_${saved.length}.json`);

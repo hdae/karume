@@ -15,7 +15,12 @@
  *   a sink, with the real sha256 of every block and part, and returns what a manifest entry needs.
  * - {@link placeTensors} reads a name map — JSON that says, per layout of a model's upstream files,
  *   which key of a file is which initializer of which component — against a file's keys, and gives
- *   per component the initializer name → key mapping the tensor list is built from.
+ *   per component the initializer name → key mapping the tensor list is built from;
+ *   {@link parseNameMap} checks a map that arrives as unchecked JSON (a distribution's file).
+ * - {@link readPlanCodecs} reads, from a target's part 0 alone, the codec of every initializer it
+ *   stores — what a caller checks before it gives a tensor list ({@link ENCODED_CODECS} are the
+ *   codecs encoded here). A converting source says which parts it builds (`convertedParts`), so a
+ *   caller fetches only the others.
  *
  * Web standard APIs only; no side effects at import.
  *
@@ -23,7 +28,10 @@
  */
 
 export { ConvertError } from "./src/errors.ts";
-export { NAME_MAP_FORMAT, placeTensors } from "./src/name-map.ts";
+export { ENCODED_CODECS } from "./src/encode.ts";
+export { NAME_MAP_FORMAT, parseNameMap, placeTensors } from "./src/name-map.ts";
+export { readPlanCodecs } from "./src/plan.ts";
+export type { PlannedCodec } from "./src/plan.ts";
 export type {
   NameMap,
   NameMapComponent,

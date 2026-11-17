@@ -70,10 +70,13 @@ import {
   type DistributionSource,
   type GpuFeaturesSpec,
   type HubRepoRef,
+  type LoadedManifest,
   loadManifest,
+  type LoadManifestOptions,
   type Manifest,
   type ModelEntry,
   type Quant,
+  type ResolvedSelection,
   resolveSelection,
 } from "@karume/hub";
 
@@ -137,10 +140,16 @@ import {
 import {
   assetComponentOpener,
   type ComponentOpener,
+  type ConvertedComponent,
   type GraphOwner,
   loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
+import {
+  prepareSingleFile,
+  type SingleFileRole,
+  type SingleFileSource,
+} from "../hub/single-file.ts";
 import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
 import {
   type Residency,
@@ -173,6 +182,20 @@ const ROPE_BASE = "rope_base";
 
 /** This family's weight components (also the role names component replacement accepts). */
 const COMPONENT_KEYS = [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER] as const;
+
+/**
+ * The components {@link Pipeline.fromSingleFile} takes from a file (the text encoder and the VAE
+ * decoder always come from the distribution). The transformer is stored as the selected quant's;
+ * the text conditioner as the model's `bf16` container whatever the quant: no preset quantizes it,
+ * and where a preset does not ask for quantization a weight keeps the precision of its source (the
+ * upstream files are BF16).
+ *
+ * SPEC: docs/spec/single-file.md#which-component-comes-from-where
+ */
+const ANIMA_SINGLE_FILE_ROLES: readonly SingleFileRole[] = [
+  { role: TRANSFORMER, presence: "required", storage: "quant" },
+  { role: TEXT_CONDITIONER, presence: "optional", storage: { label: "bf16" } },
+];
 
 /** Generation result. `data` is 8-bit RGBA (4 bytes per pixel, row-major). */
 export type GeneratedImage = {
@@ -480,6 +503,31 @@ export type PipelineOptions = {
 export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
+
+/**
+ * Options of {@link Pipeline.fromSingleFile}: those of {@link Pipeline.fromPretrained}, with the
+ * same meaning, and one of its own.
+ */
+export type FromSingleFileOptions = FromPretrainedOptions & {
+  /**
+   * Keep the converted weights of every component that comes from the file in host memory once a
+   * Session has read them (default `false`). Without it, every Session build of such a component
+   * reads its tensors from the file and converts them again — the text conditioner's at every
+   * generate and the transformer's at every generate in the default per-stage residency (for the
+   * Anima transformer about 1.8 GiB of output as int8 per build). With it, only the first build
+   * reads and converts; the later ones are served from memory and the file is not read again.
+   *
+   * It costs host memory (not GPU memory) of the converted size of those components, held until
+   * the pipeline is released (by garbage collection after {@link Pipeline.dispose}): for Anima's
+   * transformer about 1.8 GiB stored as int8 (the default quant) and 3.6 GiB as bf16, plus the text
+   * conditioner's when it comes from the file. `residency: "transformer"` is the other way to avoid
+   * the transformer's rebuild: it keeps the built Session on the GPU instead, at GPU memory.
+   * A value that is not a boolean gives `ModelInputError` before anything is fetched.
+   *
+   * SPEC: docs/spec/single-file.md#keeping-the-converted-weights
+   */
+  readonly retainConverted?: boolean;
+};
 
 /**
  * Input for building directly from fetched assets (pass the return value of the hub's `fetchAssets`
@@ -933,7 +981,8 @@ type AnimaAdmission = {
 /**
  * Anima's text → image pipeline.
  *
- * Construction has only two entries: {@link Pipeline.fromPretrained} (fetch from HF) or
+ * Construction has only three entries: {@link Pipeline.fromPretrained} (fetch from HF),
+ * {@link Pipeline.fromSingleFile} (a single weights file with a distribution) or
  * {@link Pipeline.fromAssets} (already fetched bytes) — the constructor is private so that no
  * half-built state can bypass the manifest checks and the asset comparison (the same style as
  * `createSession` / `acquireGpu` — ADR 0008).
@@ -996,11 +1045,88 @@ export class Pipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: FromPretrainedOptions = {},
   ): Promise<Pipeline> {
-    const source = toManifestSource(
-      ref,
-      "anima.Pipeline.fromPretrained",
-      'SOURCES["anima"] (@karume/models/anima)',
-    );
+    return await Pipeline.#load("anima.Pipeline.fromPretrained", ref, options, () => ({}));
+  }
+
+  /**
+   * Builds from a single weights file of an Anima model — the upstream release or a fine-tune — and
+   * a distribution, with no export step (the counterpart of diffusers' `from_single_file`). The
+   * file's weights are converted while each Session reads them, against the plans of the
+   * distribution's containers (`@karume/convert`); the rest is {@link Pipeline.fromPretrained}.
+   *
+   * - `file`: a `Blob` (a browser `File`) or a ranged reader `{ size, read(offset, length) }`. Its
+   *   format is told from its first bytes; only safetensors is read. **The pipeline reads `file` for
+   *   as long as it lives**: the Session of a component from the file reads its weights from it when
+   *   it is built — the text conditioner's at every generate, the transformer's at every generate in
+   *   the default per-stage residency and, in `"transformer"` residency, whenever the resident
+   *   transformer is built or rebuilt — so the file must stay readable until {@link Pipeline.dispose}.
+   * - `ref`: the distribution the file derives from (required, as for `fromPretrained`). It must
+   *   carry a name map (`nameMap` of its manifest), which places the file's tensors.
+   * - `options`: those of `fromPretrained`, with the same meaning. `model` is the model the file
+   *   derives from — the graphs, the plans and `pipelineConfig` come from it — and `quant` the
+   *   preset. One more, `retainConverted` ({@link FromSingleFileOptions.retainConverted}), keeps
+   *   the converted weights in host memory so that only the first Session build reads the file.
+   *
+   * Which component comes from where: the `transformer` from the file (required), stored as the
+   * selected quant's transformer; the `text_conditioner` from the file when the file holds one —
+   * stored as the model's `bf16` text conditioner whatever the quant (no preset quantizes it, so
+   * it keeps the file's precision) — else from the distribution; the `text_encoder` and the
+   * `vae_decoder` from the distribution. A role named in `components` comes from that replacement,
+   * never from the file.
+   *
+   * Everything that needs no tensor byte is refused before a weight part is fetched: a file that is
+   * not safetensors or that no layout of the name map recognises, a key no component takes, a
+   * tensor the plan does not use, a file with no transformer, a preset whose transformer is stored
+   * in a codec that is not converted (`f16` and `f16-c16` — the message names the quants that
+   * work), and a tensor that is not BF16 for a weight stored as bf16 (which never rounds).
+   *
+   * SPEC: docs/spec/single-file.md
+   */
+  static async fromSingleFile(
+    file: SingleFileSource,
+    ref: string | HubRepoRef | DistributionSource,
+    options: FromSingleFileOptions = {},
+  ): Promise<Pipeline> {
+    const where = "anima.Pipeline.fromSingleFile";
+    const retainConverted: unknown = options.retainConverted;
+    if (retainConverted !== undefined && typeof retainConverted !== "boolean") {
+      throw new ModelInputError(
+        `${where}: retainConverted ${JSON.stringify(retainConverted)} is not a boolean`,
+      );
+    }
+    return await Pipeline.#load(where, ref, options, async (loaded, selection, hubOptions) => {
+      const { converted } = await prepareSingleFile(
+        where,
+        file,
+        loaded,
+        selection,
+        ANIMA_SINGLE_FILE_ROLES,
+        new Set(Object.keys(options.components ?? {})),
+        retainConverted === true,
+        hubOptions,
+      );
+      return converted;
+    });
+  }
+
+  /**
+   * The load shared by {@link Pipeline.fromPretrained} and {@link Pipeline.fromSingleFile}: the
+   * manifest and the selection, the components `converted` gives (none for `fromPretrained`), the
+   * shared loader with the family admission, then {@link Pipeline.#build}.
+   */
+  static async #load(
+    where: string,
+    ref: string | HubRepoRef | DistributionSource,
+    options: FromPretrainedOptions,
+    converted: (
+      loaded: LoadedManifest,
+      selection: ResolvedSelection,
+      hubOptions: LoadManifestOptions,
+    ) =>
+      | Readonly<Record<string, ConvertedComponent>>
+      | Promise<Readonly<Record<string, ConvertedComponent>>>,
+  ): Promise<Pipeline> {
+    const source = toManifestSource(ref, where, 'SOURCES["anima"] (@karume/models/anima)');
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {
@@ -1008,6 +1134,7 @@ export class Pipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
+    const fromFile = await converted(loaded, selection, hubOptions);
     // The signal goes to **both** the fetch layer and the build (no window where aborting stops
     // working the moment the download ends).
     const buildOptions: PipelineOptions = {
@@ -1030,7 +1157,7 @@ export class Pipeline {
     // The family checks run in the admission hook (before the weight parts are fetched —
     // `src/hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
-      "anima.Pipeline.fromPretrained",
+      where,
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -1050,6 +1177,7 @@ export class Pipeline {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
         ...(options.components === undefined ? {} : { components: options.components }),
+        ...(Object.keys(fromFile).length === 0 ? {} : { converted: fromFile }),
       },
     );
     return await Pipeline.#build(admitted, assets, open, buildOptions);

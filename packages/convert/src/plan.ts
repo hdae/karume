@@ -5,7 +5,12 @@
  * plan, read with the runtime's own reader.
  */
 
-import { type BlockSource, type OpenedContainer, openContainer } from "@karume/runtime";
+import {
+  type BlockSource,
+  type CodecName,
+  type OpenedContainer,
+  openContainer,
+} from "@karume/runtime";
 import {
   type InitializerSupply,
   type ModelDescriptor,
@@ -85,3 +90,26 @@ export const readPlan = async (target: BlockSource): Promise<Plan> => {
   }
   return { part0, opened, model, initializers };
 };
+
+/** How the plan stores one initializer: what a caller decides on before it converts. */
+export type PlannedCodec = {
+  readonly graph: string;
+  readonly initializer: string;
+  readonly codec: CodecName;
+};
+
+/**
+ * The codec of every initializer the target's plan stores in its weight parts, in the order of its
+ * graphs and of their binding tables — what the converting source would encode, read from part 0 alone (the same
+ * reading and the same checks of part 0). A caller decides with it before it gives a tensor list:
+ * whether every codec is one this package encodes (`ENCODED_CODECS`), whether a tensor's dtype can
+ * be stored as its initializer's codec.
+ *
+ * SPEC: docs/spec/convert.md#the-plan-before-a-conversion
+ */
+export const readPlanCodecs = async (target: BlockSource): Promise<readonly PlannedCodec[]> =>
+  (await readPlan(target)).initializers.map(({ graph, initializer, supply }) => ({
+    graph,
+    initializer,
+    codec: supply.encoding.codec,
+  }));

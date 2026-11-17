@@ -40,6 +40,16 @@ export type ConvertingSourceInput = {
   readonly tensors: TensorList;
   /** Initializer name → tensor name (the identity when omitted). */
   readonly tensorName?: (initializer: string) => string;
+  /**
+   * Keep the encoded payloads of every initializer once they are encoded, for as long as the source
+   * is reachable: a block of an initializer encoded before is served from memory, its tensor not
+   * read or encoded again. The memory held grows to the converted size of what was read (every
+   * payload, without the tail padding and gaps). Default `false`: the payloads of the last tensor
+   * asked for only.
+   *
+   * SPEC: docs/spec/convert.md#what-is-served
+   */
+  readonly retainEncoded?: boolean;
 };
 
 export type ConvertingSource = {
@@ -47,6 +57,13 @@ export type ConvertingSource = {
   readonly source: BlockSource;
   /** The tensors of the list no initializer of the plan uses, in the list's order. */
   readonly unusedTensors: readonly string[];
+  /**
+   * The parts this source builds from the tensor list (every part that holds a converted block), in
+   * index order. The target is never read for them, so a caller that fetches the target's parts
+   * ahead of the reads leaves these out; every other part (part 0, the const part, the asset parts)
+   * is read from the target.
+   */
+  readonly convertedParts: readonly number[];
 };
 
 /** One initializer this source encodes. */
@@ -180,9 +197,12 @@ export const openConvertingSource = async (
     part0.byteLength - plan.opened.header.modelDescriptorLength,
   );
 
-  // The payloads of the last tensor asked for (its data and its scale are separate blocks, read one
-  // after the other); nothing older is kept.
-  let cached: { readonly conversion: Conversion; readonly encoded: Promise<Encoded> } | undefined;
+  // The encoded payloads kept. By default those of the last tensor asked for (its data and its scale
+  // are separate blocks, read one after the other), nothing older; with `retainEncoded`, every
+  // initializer's once encoded. Nothing outside this closure holds them, so they go when the source
+  // does.
+  const retain = input.retainEncoded === true;
+  const kept = new Map<Conversion, Promise<Encoded>>();
   const encode = async ({ planned, tensor, where }: Conversion): Promise<Encoded> => {
     const source = tensors.get(tensor);
     if (source === undefined) throw new ConvertError(`${where}: the tensor list has no tensor`);
@@ -217,13 +237,14 @@ export const openConvertingSource = async (
     return encoded;
   };
   const encodedOf = (conversion: Conversion): Promise<Encoded> => {
-    if (cached?.conversion === conversion) return cached.encoded;
+    const found = kept.get(conversion);
+    if (found !== undefined) return found;
     const encoded = encode(conversion);
-    const entry = { conversion, encoded };
-    cached = entry;
+    if (!retain) kept.clear();
+    kept.set(conversion, encoded);
     // A failure is not kept: a later read tries again (and fails again when the input is at fault).
     encoded.catch(() => {
-      if (cached === entry) cached = undefined;
+      if (kept.get(conversion) === encoded) kept.delete(conversion);
     });
     return encoded;
   };
@@ -311,5 +332,6 @@ export const openConvertingSource = async (
   return {
     source,
     unusedTensors: [...tensors.keys()].filter((name) => !used.has(name)),
+    convertedParts: [...converted.keys()].sort((a, b) => a - b),
   };
 };

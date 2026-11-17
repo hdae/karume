@@ -177,6 +177,7 @@ describe("the session-ab entry", () => {
           signal: new AbortController().signal,
           progress: () => undefined,
           openDistribution: memoryDistributions({ wan22: WAN_MANIFEST }, opened),
+          openInput: () => Promise.reject(new Error("the entry reads no input file")),
         }),
       ).rejects.toThrow(ParameterError);
       expect(opened).toEqual(["wan22:direct"]);

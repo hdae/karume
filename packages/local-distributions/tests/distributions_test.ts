@@ -158,6 +158,42 @@ describe("handleDistributionRequest", () => {
     });
   });
 
+  describe("the inputs route", () => {
+    const input = (url: string, inputs: string | undefined, headers: Record<string, string> = {}) =>
+      handleDistributionRequest({ method: "GET", url, headers }, mounts, inputs);
+
+    it("serves a file of the inputs directory by ranges, as a mount's file", async () => {
+      const response = responded(
+        await input("/inputs/sub/blob.krm", join(dir, "dist-a"), { range: "bytes=4-11" }),
+      );
+      expect(response.status).toBe(206);
+      expect(response.headers["Content-Range"]).toBe("bytes 4-11/64");
+      expect(await bodyBytes(response)).toEqual(BYTES.slice(4, 12));
+    });
+
+    it("answers 404 for a path that leaves the directory, a symlink out of it and a missing directory", async () => {
+      const inputs = join(dir, "dist-a");
+      for (const url of ["/inputs/../secret.txt", "/inputs/sub/%2e%2e/../secret.txt"]) {
+        expect(responded(await input(url, inputs)).status).toBe(404);
+      }
+      expect(responded(await input("/inputs/escape.txt", inputs)).status).toBe(404);
+      expect(responded(await input("/inputs/karume.json", join(dir, "nope"))).body).toEqual({
+        kind: "text",
+        text: "The inputs directory is missing",
+      });
+    });
+
+    it("refuses writes, and passes /inputs/ to Vite when no inputs directory is served", async () => {
+      const write = await handleDistributionRequest(
+        { method: "PUT", url: "/inputs/sub/blob.krm", headers: {} },
+        mounts,
+        join(dir, "dist-a"),
+      );
+      expect(responded(write).status).toBe(405);
+      expect((await input("/inputs/sub/blob.krm", undefined)).kind).toBe("pass");
+    });
+  });
+
   describe("the page and everything else", () => {
     it.each(["/", "/wan22", "/src/main.tsx"])("passes %s to Vite with COOP / COEP", async (url) => {
       const response = await get(url);

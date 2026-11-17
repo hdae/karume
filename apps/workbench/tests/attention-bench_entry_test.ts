@@ -97,6 +97,7 @@ describe("the attention-bench entry", () => {
       signal: new AbortController().signal,
       progress: () => undefined,
       openDistribution: () => Promise.reject(new Error("the entry reads no distribution")),
+      openInput: () => Promise.reject(new Error("the entry reads no input file")),
     });
     await expect(run).rejects.toThrow(ParameterError);
   });

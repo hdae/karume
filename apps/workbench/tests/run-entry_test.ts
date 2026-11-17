@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { Entry, GpuOptions, OpenDistribution, RunContext } from "../src/entry.ts";
+import type { Entry, GpuOptions, OpenDistribution, OpenInput, RunContext } from "../src/entry.ts";
 import { type RunHost, runEntry } from "../src/execute.ts";
 import {
   type Checkout,
@@ -26,6 +26,8 @@ const GPU_OPTIONS: GpuOptions = {};
 const OPEN_DISTRIBUTION: OpenDistribution = () =>
   Promise.reject(new Error("the entry reads no distribution"));
 
+const OPEN_INPUT: OpenInput = () => Promise.reject(new Error("the entry reads no input file"));
+
 const entryOf = (run: Entry["run"]): Entry => ({
   id: "probe",
   title: "Probe",
@@ -39,11 +41,12 @@ const hostOf = (save: RunHost<string>["save"]): RunHost<string> => ({
   readCheckout: () => Promise.resolve(CHECKOUT),
   gpuOptions: GPU_OPTIONS,
   openDistribution: OPEN_DISTRIBUTION,
+  openInput: OPEN_INPUT,
   save,
 });
 
 describe("runEntry", () => {
-  it("runs the entry with the host's GPU options, distributions and backend, and saves the record's text", async () => {
+  it("runs the entry with the host's GPU options, distributions, input files and backend, and saves the record's text", async () => {
     const contexts: RunContext[] = [];
     const saves: { record: WorkbenchRecord; text: string }[] = [];
     const progress: string[] = [];
@@ -67,6 +70,7 @@ describe("runEntry", () => {
     expect(contexts[0]).toMatchObject({ parameters: { rounds: 4 }, backend: "vulkan" });
     expect(contexts[0]?.gpuOptions).toBe(GPU_OPTIONS);
     expect(contexts[0]?.openDistribution).toBe(OPEN_DISTRIBUTION);
+    expect(contexts[0]?.openInput).toBe(OPEN_INPUT);
     expect(progress).toEqual(["half way"]);
     expect(run.record).toMatchObject({
       outcome: "done",

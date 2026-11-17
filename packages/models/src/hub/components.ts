@@ -33,6 +33,18 @@
  * alone), (3) the family check. Both shortage and excess are rejected with a full listing
  * (diffusers' `strict=False` is not adopted).
  *
+ * ## Converted components ({@link LoadContainerOptions.converted} — a single file's weights)
+ *
+ * A role can take its weights from a tensor list instead (a user's weights file read with
+ * `@karume/safetensors`), converted against a container of the distribution while a Session reads
+ * them (`@karume/convert`). That container's part 0, const part and asset parts are fetched and
+ * counted like any other; the parts the converting source builds are neither fetched nor counted.
+ * The container's two documents are checked against the manifest, the caller's plan checks run and
+ * the converting source is built in step 1, so every refusal that needs no tensor byte comes
+ * before a weight part is fetched; admission then runs on the same opener.
+ *
+ * SPEC: docs/spec/single-file.md#what-is-fetched-and-what-is-converted-when
+ *
  * ## Whole-bytes surface (`from*Assets`)
  *
  * The entries that build from already-fetched bytes fold into the same shape
@@ -72,6 +84,12 @@ import {
   type ResolvedSelection,
   resolveSelection,
 } from "@karume/hub";
+import {
+  openConvertingSource,
+  type PlannedCodec,
+  readPlanCodecs,
+  type TensorList,
+} from "@karume/convert";
 import { toManifestSource } from "./repo-ref.ts";
 
 /**
@@ -168,6 +186,38 @@ export type ContainerComponents<Admitted> = {
   readonly admitted: Admitted;
 };
 
+/**
+ * A component whose weights come from a tensor list, converted against a container of the
+ * distribution while a Session reads them (module doc, "Converted components").
+ */
+export type ConvertedComponent = {
+  /**
+   * The container whose plan the tensors are converted against (a container of the loaded
+   * manifest). Its part 0, const part and asset parts are fetched; the parts the converting source
+   * builds are not.
+   */
+  readonly container: ContainerRef;
+  /** Initializer name → tensor. */
+  readonly tensors: TensorList;
+  /**
+   * The caller's refusals that need the plan — the codec of every initializer it stores — run once
+   * the container's descriptor is fetched and checked against the manifest, before the converting
+   * source is built and before any weight part is fetched.
+   *
+   * MUST: refuse every tensor of `tensors` the plan does not use, and anything else the caller does
+   * not accept: the converting source reads only the tensors the plan uses and refuses only a
+   * missing tensor, a shape that differs and a codec it does not encode.
+   */
+  readonly checkPlan: (plan: readonly PlannedCodec[]) => void | Promise<void>;
+  /**
+   * Passed to the converting source as `retainEncoded`: every initializer's encoded payloads are
+   * kept once encoded, so only the first Session build reads and converts the tensors. They are held
+   * by the converting source, which the component holds, and are released with it by garbage
+   * collection. Default `false`.
+   */
+  readonly retainEncoded?: boolean;
+};
+
 /** Extra options of {@link loadContainerComponents} (the fetch layer's options pass through as is). */
 export type LoadContainerOptions = FetchAssetsOptions & {
   /**
@@ -176,6 +226,11 @@ export type LoadContainerOptions = FetchAssetsOptions & {
    * "replace nothing").
    */
   readonly components?: Readonly<Record<string, ComponentSource>>;
+  /**
+   * Role → the component converted from a tensor list (module doc, "Converted components"). The
+   * roles MUST be a subset of `componentKeys` and MUST NOT be replaced by `components` as well.
+   */
+  readonly converted?: Readonly<Record<string, ConvertedComponent>>;
 };
 
 /** The largest byte length of a weight part (part 1 onward — {@link ModelComponent.maxPartBytes}). */
@@ -323,24 +378,39 @@ export const assetComponentOpener = async (
  * `AssetProgress.path`) — cross-repo references and the replacement option put the same path from
  * different repos into one load, so folding by path alone counts two files as one and makes `total`
  * smaller than what is actually fetched.
+ *
+ * Which parts of a converted component are fetched is known only once its descriptor is read: its
+ * part 0 is counted from the start, and its kept parts (the const part and the asset parts) are
+ * added with `count` when its plan has been read — before any of them is fetched, so the total
+ * grows once, by those parts, between the descriptors and the weight parts.
  */
 const aggregateProgress = (
   sources: readonly { readonly loaded: LoadedManifest; readonly refs: readonly FileRef[] }[],
   onProgress: ((progress: AssetProgress) => void) | undefined,
-): ((progress: AssetProgress) => void) | undefined => {
-  if (onProgress === undefined) return undefined;
+): {
+  readonly count: (loaded: LoadedManifest, refs: readonly FileRef[]) => void;
+  readonly onProgress: ((progress: AssetProgress) => void) | undefined;
+} => {
   const sizes = new Map<string, number>();
-  for (const { loaded, refs } of sources) {
+  const count = (loaded: LoadedManifest, refs: readonly FileRef[]): void => {
     for (const ref of refs) sizes.set(progressKeyOf(loaded, ref), ref.size);
-  }
-  let total = 0;
-  for (const size of sizes.values()) total += size;
+  };
+  for (const { loaded, refs } of sources) count(loaded, refs);
+  if (onProgress === undefined) return { count, onProgress: undefined };
   const received = new Map<string, number>();
-  return (progress) => {
-    received.set(progressKey(progress.repo, progress.revision, progress.path), progress.fileLoaded);
-    let loaded = 0;
-    for (const bytes of received.values()) loaded += bytes;
-    onProgress({ ...progress, loaded, total });
+  return {
+    count,
+    onProgress: (progress) => {
+      received.set(
+        progressKey(progress.repo, progress.revision, progress.path),
+        progress.fileLoaded,
+      );
+      let loaded = 0;
+      for (const bytes of received.values()) loaded += bytes;
+      let total = 0;
+      for (const size of sizes.values()) total += size;
+      onProgress({ ...progress, loaded, total });
+    },
   };
 };
 
@@ -365,11 +435,15 @@ const progressKeyOf = (loaded: LoadedManifest, ref: FileRef): string =>
     ? progressKey(ref.repo, ref.revision, ref.path)
     : progressKey(loaded.repo, loaded.revisionSha, ref.path);
 
-/** The source of one component (for the replacement option, another repo's manifest). */
+/**
+ * The source of one component (for the replacement option, another repo's manifest; for a
+ * converted component, the container its tensors are converted against).
+ */
 type Seat = {
   readonly key: string;
   readonly loaded: LoadedManifest;
   readonly container: ContainerRef;
+  readonly converted?: ConvertedComponent;
 };
 
 /** Parts with content (a zero-length part is not fetched — hub does not fetch it either). */
@@ -430,12 +504,20 @@ export const loadContainerComponents = async <Admitted>(
   admit: FamilyAdmission<Admitted>,
   options: LoadContainerOptions = {},
 ): Promise<ContainerComponents<Admitted>> => {
-  const { components: replacements = {}, ...streamOptions } = options;
+  const { components: replacements = {}, converted = {}, ...streamOptions } = options;
   for (const key of Object.keys(replacements)) {
     if (!componentKeys.includes(key)) {
       throw new Error(
         `${where}: '${key}' in components is not a component of this family` +
           ` (replaceable roles: ${componentKeys.join(" / ")})`,
+      );
+    }
+  }
+  for (const key of Object.keys(converted)) {
+    if (!componentKeys.includes(key) || Object.hasOwn(replacements, key)) {
+      throw new Error(
+        `${where}: component '${key}' cannot be converted from a tensor list` +
+          ` (${Object.hasOwn(replacements, key) ? "it is replaced by components" : "not a component of this family"})`,
       );
     }
   }
@@ -456,6 +538,11 @@ export const loadContainerComponents = async <Admitted>(
             selection.containers,
           ).join(" / ")})`,
       );
+    }
+    const conversion = Object.hasOwn(converted, key) ? converted[key] : undefined;
+    if (conversion !== undefined) {
+      seats.push({ key, loaded, container: conversion.container, converted: conversion });
+      continue;
     }
     const replacement = Object.hasOwn(replacements, key) ? replacements[key] : undefined;
     if (replacement === undefined) {
@@ -491,16 +578,22 @@ export const loadContainerComponents = async <Admitted>(
     seats.push({ key, loaded: other, container });
   }
 
-  const aggregated = aggregateProgress(
+  // A converted component counts its part 0 now and its kept parts once its plan is read.
+  const progress = aggregateProgress(
     [
-      ...seats.map((seat) => ({ loaded: seat.loaded, refs: nonEmptyParts(seat.container.parts) })),
+      ...seats.map((seat) => ({
+        loaded: seat.loaded,
+        refs: nonEmptyParts(
+          seat.converted === undefined ? seat.container.parts : seat.container.parts.slice(0, 1),
+        ),
+      })),
       { loaded, refs: Object.values(selection.assets) },
     ],
     streamOptions.onProgress,
   );
   const hubOptions: FetchAssetsOptions = {
     ...streamOptions,
-    ...(aggregated === undefined ? {} : { onProgress: aggregated }),
+    ...(progress.onProgress === undefined ? {} : { onProgress: progress.onProgress }),
   };
   // Reads during Session construction are range reads of cached parts, so **no progress is
   // streamed** (streaming would emit `complete` again after the load finished and double-count the
@@ -514,16 +607,40 @@ export const loadContainerComponents = async <Admitted>(
   const { onProgress: _loadProgress, signal: _loadSignal, ...sessionOptions } = hubOptions;
 
   // 1. Warm and open only the descriptors (part 0). The merge (zero shortage / excess) and the
-  //    capability check fail here.
+  //    capability check fail here; so do a converted component's refusals (its caller's plan
+  //    checks and the converting source's own).
   await prefetchSeats(seats, (seat) => [seat.container.parts[0]], hubOptions);
   const components = new Map<string, ModelComponent>();
+  // Per seat, the weight parts (part 1 on) step 3 fetches.
+  const weightParts = new Map<Seat, readonly FileRef[]>();
   for (const seat of seats) {
     hubOptions.signal?.throwIfAborted();
     const source = openContainerSource(seat.loaded, seat.container, sessionOptions);
     const opened = await openContainer({ kind: "source", source }, seat.container.descriptor);
-    // Graph name = role name (the writer's convention — container-v1 §2.1; when it is missing,
-    // prepareContainer fails listing the graphs that exist).
-    components.set(seat.key, containerComponent(opened, prepareContainer(opened, seat.key)));
+    if (seat.converted === undefined) {
+      // Graph name = role name (the writer's convention — container-v1 §2.1; when it is missing,
+      // prepareContainer fails listing the graphs that exist).
+      components.set(seat.key, containerComponent(opened, prepareContainer(opened, seat.key)));
+      weightParts.set(seat, nonEmptyParts(seat.container.parts.slice(1)));
+      continue;
+    }
+    // The target's two documents were checked against the manifest just above; the converting
+    // source reads its plan from the same part 0, so the container it serves (whose part 0 states
+    // no hash for what it converts) is opened without expected values.
+    await seat.converted.checkPlan(await readPlanCodecs(source));
+    const conversion = await openConvertingSource({
+      target: source,
+      tensors: seat.converted.tensors,
+      ...(seat.converted.retainEncoded === true ? { retainEncoded: true } : {}),
+    });
+    const served = await openContainer({ kind: "source", source: conversion.source });
+    components.set(seat.key, containerComponent(served, prepareContainer(served, seat.key)));
+    const built = new Set(conversion.convertedParts);
+    const kept = nonEmptyParts(
+      seat.container.parts.filter((_, index) => index > 0 && !built.has(index)),
+    );
+    progress.count(seat.loaded, kept);
+    weightParts.set(seat, kept);
   }
   const open = openerOf(where, components);
 
@@ -535,7 +652,7 @@ export const loadContainerComponents = async <Admitted>(
   // 3. Download the weight parts (for every component, once per source — removes the shape where
   // a family that builds its Sessions lazily "delays the weight download until the first run, and
   // it never shows in the load progress").
-  await prefetchSeats(seats, (seat) => nonEmptyParts(seat.container.parts.slice(1)), hubOptions);
+  await prefetchSeats(seats, (seat) => weightParts.get(seat) ?? [], hubOptions);
 
   // 4. The remaining assets (tokenizer etc.) are still fetched as whole bytes.
   const assets =

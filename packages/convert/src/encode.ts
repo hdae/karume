@@ -30,8 +30,15 @@ const INT8_MAX = 127;
  */
 const F32_TINY = 2 ** -126;
 
-/** The target codecs this package encodes; a plan that asks for another is refused. */
-export const ENCODED_CODECS: readonly CodecName[] = ["int8-sym", "bf16", "f32"];
+/**
+ * The target codecs this package encodes; a plan that asks for another is refused. Frozen: it is
+ * exported, and a caller that names the codecs in a message reads it.
+ */
+export const ENCODED_CODECS: readonly CodecName[] = /* @__PURE__ */ Object.freeze([
+  "int8-sym",
+  "bf16",
+  "f32",
+] as const satisfies readonly CodecName[]);
 
 /** The payload of one initializer, and of its scale when it is quantized. */
 export type Encoded = {

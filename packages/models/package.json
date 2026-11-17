@@ -28,8 +28,10 @@
   },
   "dependencies": {
     "@hdae/yomi": "catalog:",
+    "@karume/convert": "workspace:*",
     "@karume/hub": "workspace:*",
-    "@karume/runtime": "workspace:*"
+    "@karume/runtime": "workspace:*",
+    "@karume/safetensors": "workspace:*"
   },
   "devDependencies": {
     "@karume/candidate-rules": "workspace:*",

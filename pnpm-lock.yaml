@@ -381,6 +381,9 @@ importers:
       '@karume/candidate-rules':
         specifier: workspace:*
         version: link:../../packages/candidate-rules
+      '@karume/convert':
+        specifier: workspace:*
+        version: link:../../packages/convert
       '@karume/gemma4-app-support':
         specifier: workspace:*
         version: link:../../packages/gemma4-app-support
@@ -399,6 +402,9 @@ importers:
       '@karume/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      '@karume/safetensors':
+        specifier: workspace:*
+        version: link:../../packages/safetensors
     devDependencies:
       '@karume/test-support':
         specifier: workspace:*
@@ -492,12 +498,18 @@ importers:
       '@hdae/yomi':
         specifier: 'catalog:'
         version: '@jsr/hdae__yomi@0.4.2'
+      '@karume/convert':
+        specifier: workspace:*
+        version: link:../convert
       '@karume/hub':
         specifier: workspace:*
         version: link:../hub
       '@karume/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@karume/safetensors':
+        specifier: workspace:*
+        version: link:../safetensors
     devDependencies:
       '@karume/candidate-rules':
         specifier: workspace:*
@@ -517,6 +529,8 @@ importers:
       '@karume/test-support':
         specifier: workspace:*
         version: link:../test-support
+
+  packages/safetensors: {}
 
   packages/test-support:
     dependencies:

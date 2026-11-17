@@ -23,6 +23,7 @@
     "vite-plugin-results.ts",
     "run.ts",
     "node-run.ts",
-    "node-distributions.ts"
+    "node-distributions.ts",
+    "node-inputs.ts"
   ]
 }

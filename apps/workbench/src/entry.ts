@@ -111,6 +111,40 @@ export type OpenDistribution = (
   source: SourceKind,
 ) => Promise<OpenedDistribution>;
 
+/** A file read by ranges (what `@karume/models`' `fromSingleFile` takes). */
+export type RangedFile = {
+  readonly size: number;
+  /** Bytes `[offset, offset + length)` of the file. */
+  read(offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
+};
+
+/**
+ * How a run read an input file: `direct` (ranged requests to the dev server's `/inputs/` route,
+ * in a browser) or `directory` (the file itself, under Node).
+ */
+export type InputRead = "direct" | "directory";
+
+/** What a record carries about an input file a run read. */
+export type InputFacts = {
+  /** Relative to the repository root (`inputs/anima/…`). */
+  readonly path: string;
+  readonly size: number;
+  readonly read: InputRead;
+};
+
+export type OpenedInput = {
+  readonly file: RangedFile;
+  readonly facts: InputFacts;
+};
+
+/**
+ * Opens a file under the repository's `inputs/` (outside git): `path` is relative to `inputs/`,
+ * `/`-separated, without `.` or `..` segments. Under Node the file is read from disk; in a
+ * browser by ranged requests to the dev server's `/inputs/` route. Throws naming the path when the
+ * file cannot be opened.
+ */
+export type OpenInput = (path: string) => Promise<OpenedInput>;
+
 export type RunContext = {
   readonly parameters: ParameterValues;
   /** Spread into `acquireGpu`. The entry acquires and releases its own GPU context. */
@@ -124,6 +158,8 @@ export type RunContext = {
   readonly progress: (text: string) => void;
   /** For an entry that reads a local distribution (a file under `src/entries/local/`). */
   readonly openDistribution: OpenDistribution;
+  /** For a local entry that reads a file under `inputs/` (a user's weights file). */
+  readonly openInput: OpenInput;
   /**
    * The backend's name as the host knows it — what the record's `environment.backend` holds — for
    * an entry whose own record names the backend. Absent when a browser run declared none.

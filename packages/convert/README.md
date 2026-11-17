@@ -14,11 +14,14 @@ The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md)
 
 | Export | What it is |
 | --- | --- |
-| `openConvertingSource({ target, tensors, tensorName? })` | The converting `BlockSource` (`verified: true`) over the target's container, and the tensors the plan does not use. Encodes `int8-sym`, `bf16` and `f32`, bit for bit as the exporter does; every check that needs no tensor byte runs when it is built and is reported together |
+| `openConvertingSource({ target, tensors, tensorName? })` | The converting `BlockSource` (`verified: true`) over the target's container, the tensors the plan does not use, and the parts it builds (`convertedParts`, never read from the target). Encodes `int8-sym`, `bf16` and `f32`, bit for bit as the exporter does; every check that needs no tensor byte runs when it is built and is reported together |
 | `writeContainer(source, sink)` | Writes a source's container part by part to `sink.write(part, offset, bytes)` (part 0 last) with the real hashes, and returns each part's length and sha256 and the two descriptors' |
+| `readPlanCodecs(target)` | The codec of every initializer a target's plan stores, read from its part 0 alone — what a caller checks before it gives a tensor list (`ENCODED_CODECS`: the codecs encoded here) |
 | `placeTensors(map, keys)` | Reads a name map against a file's keys: the layout that recognises the file, per component the initializer name → key mapping, and the keys excluded or not placed; refuses an unrecognised file, two keys on one initializer and a key two components route |
+| `parseNameMap(value)` | Reads a name map that arrives as unchecked JSON (a distribution's `name-map.json`): every field checked by hand, every problem reported together, a key the format does not name refused |
 | `NameMap`, `NameMapLayout`, `NameMapComponent`, `NameMapRule`, `TensorPlacement`, `NAME_MAP_FORMAT` | The name map's format (`karume-name-map/1`) and the placement |
 | `SourceTensor`, `TensorDtype`, `TensorList` | The tensor list |
+| `PlannedCodec`, `ENCODED_CODECS` | One initializer of a plan with its codec; the codecs encoded here |
 | `ConvertingSourceInput`, `ConvertingSource`, `ContainerSink`, `Digest`, `WrittenContainer` | The inputs and results above |
 | `INVALID_SHA256` | The 64 `0` characters the served part 0 states for converted blocks and their parts |
 | `ConvertError` | Every refusal: a tensor missing or of another shape, a codec not encoded here, a value the codec cannot store as given, a file a name map cannot place |
@@ -31,7 +34,7 @@ The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md)
 - `tests/converting_source_test.ts` — the converting source and the writer on a synthetic container written by the
   runtime's test writer (`packages/runtime/tests/helpers/container-write.ts`).
 - `tests/name_map_test.ts` — the name map's interpreter on small synthetic maps: each rule kind, the rule order, the
-  routing and each refusal.
+  routing and each refusal; `parseNameMap` on each kind of problem and on the Anima map of the recipe.
 - `packages/e2e/tests/e2e_anima_convert_test.ts` (lane `models:anima`, needs `models/karume-anima/`) — the Anima
   transformer's `bf16` tensors written against the `i8` plan give the `i8` files, byte for byte.
 - `packages/e2e/tests/e2e_anima_single_file_test.ts` (lane `models:anima`, also needs the upstream files under

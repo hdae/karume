@@ -17,8 +17,10 @@ import { sha256Hex } from "@karume/runtime/container";
 import {
   type ContainerSink,
   ConvertError,
+  ENCODED_CODECS,
   INVALID_SHA256,
   openConvertingSource,
+  readPlanCodecs,
   type SourceTensor,
   type TensorDtype,
   writeContainer,
@@ -276,6 +278,91 @@ describe("the converting source", () => {
     assertEquals(reads.get("blocks.0.s"), 1);
   });
 
+  describe("retainEncoded", () => {
+    /** Every block of one initializer: its data blocks (pieces), then its scale (or the scale's pieces). */
+    const blocksOf = (
+      view: Awaited<ReturnType<typeof openContainer>>,
+      name: string,
+    ): { readonly part: number; readonly offset: number; readonly length: number }[] => {
+      const supply = view.graphs[GRAPH].supplies.get(name);
+      if (supply === undefined) throw new Error(`no supply ${name}`);
+      const scale = supply.scale === undefined ? [] : (supply.scale.pieces ?? [supply.scale]);
+      return [...supply.blocks, ...scale];
+    };
+
+    /**
+     * Reads every block of every weight, initializer by initializer, twice over (in the second pass
+     * every initializer but the last is read after a later one), each block twice in a row, and
+     * checks the bytes against the target's; returns how often each tensor was read.
+     */
+    const readTwice = async (retainEncoded: boolean | undefined) => {
+      const written = await writeTarget();
+      const target = recordingSource(written.parts, false);
+      const { tensors, reads } = sourceTensors();
+      const converting = await openConvertingSource({
+        target: target.source,
+        tensors,
+        ...(retainEncoded === undefined ? {} : { retainEncoded }),
+      });
+      const view = await openContainer({ kind: "source", source: converting.source });
+      for (let pass = 0; pass < 2; pass += 1) {
+        for (const weight of WEIGHTS) {
+          for (const block of blocksOf(view, weight.initializer)) {
+            for (let again = 0; again < 2; again += 1) {
+              assertEquals(
+                await converting.source.read(block.part, block.offset, block.length),
+                written.parts[block.part].slice(block.offset, block.offset + block.length),
+              );
+            }
+          }
+        }
+      }
+      return Object.fromEntries(
+        WEIGHTS.map(({ initializer }) => [initializer, reads.get(initializer)]),
+      );
+    };
+
+    it("on: reads each tensor once — a block read again, and a block of an earlier initializer read after a later one, come from memory", async () => {
+      assertEquals(
+        await readTwice(true),
+        Object.fromEntries(WEIGHTS.map(({ initializer }) => [initializer, 1])),
+      );
+    });
+
+    it("off (the default, and false): reads an earlier initializer's tensor again after a later one, once per pass", async () => {
+      const twice = Object.fromEntries(WEIGHTS.map(({ initializer }) => [initializer, 2]));
+      assertEquals(await readTwice(undefined), twice);
+      assertEquals(await readTwice(false), twice);
+    });
+
+    it("on: a failed encoding is not kept, so a later read tries again", async () => {
+      const written = await writeTarget();
+      const target = recordingSource(written.parts, false);
+      const { tensors, reads } = sourceTensors();
+      const n = tensors.get("blocks.0.n");
+      assert(n !== undefined);
+      // Fault: the first read of the tensor fails, the next ones succeed.
+      let failures = 1;
+      tensors.set("blocks.0.n", {
+        ...n,
+        read: () => (failures-- > 0 ? Promise.reject(new Error("transient")) : n.read()),
+      });
+      const converting = await openConvertingSource({
+        target: target.source,
+        tensors,
+        retainEncoded: true,
+      });
+      const view = await openContainer({ kind: "source", source: converting.source });
+      const [block] = blocksOf(view, "blocks.0.n");
+      const read = () => converting.source.read(block.part, block.offset, block.length);
+      await assertRejects(read, Error, "transient");
+      const expected = written.parts[block.part].slice(block.offset, block.offset + block.length);
+      assertEquals(await read(), expected);
+      assertEquals(await read(), expected);
+      assertEquals(reads.get("blocks.0.n"), 1);
+    });
+  });
+
   it("serves part 0 with the invalid sha256 for converted blocks and their parts, and the true one for the rest", async () => {
     const written = await writeTarget();
     const { converting } = await opened(written);
@@ -415,6 +502,12 @@ describe("the converting source", () => {
     );
   });
 
+  it("names the parts it builds: the weight parts, not part 0, the const part or the asset part", async () => {
+    const written = await writeTarget();
+    const { converting } = await opened(written);
+    assertEquals(converting.convertedParts, [2, 3]);
+  });
+
   it("checks what it passes through from an unverified target against the declared sha256", async () => {
     const written = await writeTarget();
     const tampered = written.parts.map((part) => part.slice());
@@ -426,6 +519,42 @@ describe("the converting source", () => {
     assertStringIncludes(error.message, "part 1: the target's block at 0 has sha256");
     // The asset part is checked the same way and passes.
     assertEquals(await converting.source.read(4, 0, 32), written.parts[4]);
+  });
+});
+
+describe("the plan read before a conversion (readPlanCodecs)", () => {
+  it("gives every initializer the plan stores in its weight parts with its codec, from part 0 alone", async () => {
+    const written = await writeTarget(
+      [
+        {
+          graph: GRAPH,
+          initializer: "blocks.0.h",
+          bytes: new Uint8Array(8),
+          encoding: { codec: "f16" },
+        },
+      ],
+      { "blocks.0.h": [2, 2] },
+    );
+    const target = recordingSource(written.parts, false);
+    const codecs = await readPlanCodecs(target.source);
+    // The const (const.rope) is not converted, so it is not listed; the f16 initializer is listed
+    // with its codec although this package does not encode it (the caller decides on it).
+    assertEquals(
+      codecs
+        .map(({ graph, initializer, codec }) => [graph, initializer, codec])
+        .sort(([, left = ""], [, right = ""]) => left.localeCompare(right)),
+      [
+        [GRAPH, "blocks.0.b", "f32"],
+        [GRAPH, "blocks.0.c", "bf16"],
+        [GRAPH, "blocks.0.h", "f16"],
+        [GRAPH, "blocks.0.n", "bf16"],
+        [GRAPH, "blocks.0.s", "int8-sym"],
+        [GRAPH, "blocks.0.t", "int8-sym"],
+        [GRAPH, "blocks.0.w", "int8-sym"],
+      ],
+    );
+    assertEquals([...target.partsRead], [0]);
+    assertEquals(ENCODED_CODECS, ["int8-sym", "bf16", "f32"]);
   });
 });
 

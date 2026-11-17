@@ -23,8 +23,8 @@ The workbench is private (not published) and is not part of the lanes: its tests
   `--name=value` on the command line, the form — and one function turns them into typed values. A missing name takes
   its default; a name the entry does not declare and a value that does not fit are errors that name the parameter.
 - `run` receives the typed parameters, the GPU options of the host (`{}` in a browser, Dawn's `GPU` under Node), an
-  abort signal, a function that reports one status line, a function that opens a local distribution and the
-  backend's name as the host knows it (what the record's `environment.backend` holds, absent when a browser run
+  abort signal, a function that reports one status line, a function that opens a local distribution, a function that
+  opens a [file under `inputs/`](#input-files) and the backend's name as the host knows it (what the record's `environment.backend` holds, absent when a browser run
   declared none). An entry acquires and releases its own GPU context.
 - `run` resolves to an optional `verdict`, a `summary` (the lines a person reads first) and `data` (the entry's own
   record body). A check concludes `pass` or `fail`; `incomplete` says the run did not cover what was asked (a check
@@ -49,6 +49,18 @@ The workbench is private (not published) and is not part of the lanes: its tests
   name the mount.
 - The cache of `cached` belongs to the page's origin: the workbench does not see what the Playground cached.
 
+### Input files
+
+- A local entry may read a file under the repository's `inputs/` (outside git — a user's weights file) through the
+  function the host gives it, naming the file by its path relative to `inputs/`: `/`-separated, with no empty, `.` or
+  `..` segment, no backslash and no NUL (refused naming the path before anything is read).
+- What it gets back is the file as a ranged reader (`size`, `read(offset, length)`) and the facts a record carries:
+  its repository path (`inputs/…`), its size and how it was read.
+- Under Node the file is read from disk (`directory`), one positional read per range, the file opened for each read;
+  its real path must stay inside `inputs/`, which may itself be a link. In a browser it is read by ranged requests to the
+  dev server's `/inputs/` route (`direct`): its size from a `HEAD`, each range a `GET` that must answer `206` with
+  exactly the bytes asked for. A production build serves no input file.
+
 ### The entries
 
 | Entry | What it runs | Inputs |
@@ -59,6 +71,7 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
+| `anima-single-file` (local) | A single Anima weights file through `anima.Pipeline.fromSingleFile` ([single-file](single-file.md)) against the `anima` mount: the pipeline is built and makes two images of one request (512², the model's default guidance and negative prompt), then, when `compare` is on, `fromPretrained` of the same model and quant does the same; each pipeline is disposed before the next. Parameters: `file` (a path under `inputs/`; default the upstream `anima-base-v1.0` single file), `model` (`anima-v1.0`), `quant` (empty: the model's default), `textConditioner` (`file`: the file's when it holds one; `distribution`: `components: { text_conditioner }` of the mount), `retainConverted` (off: `retainConverted` of `fromSingleFile`, which keeps the converted weights in memory — [single-file](single-file.md#keeping-the-converted-weights)), `compare` (on), `steps` (4), `seed` (42), `source`. No verdict; `data` is a `karume-anima-single-file/1` record ([below](#the-anima-single-file-record)). | The `anima` mount and a file under `inputs/` |
 | `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch or off × the integer GEMV × the PLE on the GPU × the decode run-ahead depth — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token. Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
 
 ### How the GEMV sweep times a row count
@@ -103,6 +116,25 @@ of `karume-gemv-sweep/1`, whose rounds were taken kernel after kernel:
 | `summaries` | Per case and row count: the default profile's choice at `exact` and at `reorder` (by candidate name), the wall time, and how steady the device was over the rounds: the baseline's largest round ÷ its smallest (`baselineSpread`; rounds clamped to 0 left out, 1 with one round), absent when the baseline's row failed |
 | `rows` | One per measured kernel: the case, the row count `m`, the candidate's name, its class, whether it is the baseline, its choice (the member of the GEMV family, lanes, column and row form), the pipeline keys, the workgroups, the time per dispatch (`perDispatch`) with its `rounds` (in round order, so round i of two rows was taken in the same round) and wall-clock rounds, the speed against the baseline; for the identical class whether every word equals the baseline's and how many differ; for the reorder class — and for the baseline at a row count with reorder rows — the largest absolute error against the host's f64 oracle, its use of the band, whether it is inside and the non-finite outputs; an `error` when it failed |
 | `deviceLost` | The loss that ended the sweep, or `null` |
+
+### The anima-single-file record
+
+`karume-anima-single-file/1`, the `data` of an `anima-single-file` run:
+
+| Field | Content |
+| --- | --- |
+| `format` | `karume-anima-single-file/1` |
+| `request` | `model`, `quant` (the one the run used, the default resolved), `textConditioner`, `retainConverted`, `compare`, the prompt, the resolution, `steps`, `seed` |
+| `file` | The input file's facts (path, size, how it was read), the name map's layout that recognised it and the keys it placed per component |
+| `distribution` | The mount's facts (directory, the sha256 of its manifest, how it was read) |
+| `fromFile` | The components that came from the file: the transformer, and the text conditioner when the run takes it from the file and the file holds one (read from the file's placement) |
+| `arms` | `fromSingleFile`, then `fromPretrained` when compared: per arm the seconds of building the pipeline and, per generation (two), its seconds and the sha256 of the image's RGB8 pixels (what the Anima e2e hashes) |
+| `equal` | `all`: every image of the run has the same pixels; `arms`: the first images of the two arms do (`null` without a comparison) |
+
+- The second generation of a pipeline shows what one costs once the first has run: in the default per-stage residency
+  every generate builds its Sessions again, so a component from the file is read and converted again — unless
+  `retainConverted` is on, when it is served from memory. Two runs that differ only in `retainConverted` compare the
+  second generation's time with and without; the first line of the summary says when it was on.
 
 ## The record
 
@@ -149,7 +181,9 @@ Every run leaves one record, format `karume-workbench/1`:
 ## The dev server
 
 `vp dev` in `apps/workbench` listens on `127.0.0.1:8791` only. Besides the endpoints below it serves the local
-distributions as the Playground's dev server does (`/models/index.json`, `/models/<mount>/…` and `/hf/…`, read only).
+distributions as the Playground's dev server does (`/models/index.json`, `/models/<mount>/…` and `/hf/…`, read only),
+and the files under the repository's `inputs/` at `/inputs/<path>` (GET and HEAD with `Range`, read only, nothing
+outside `inputs/`, no listing — the Playground's dev server does not serve it).
 
 | Request | Answer |
 | --- | --- |
@@ -159,7 +193,8 @@ distributions as the Playground's dev server does (`/models/index.json`, `/model
 
 - Nothing the client sends becomes part of a path except through the two rules above (the kebab-case entry id and the
   adapter directory); the request for the batches names no path.
-- The preview server and a production build have none of these endpoints. The preview server serves the distributions.
+- The preview server and a production build have none of these endpoints. The preview server serves the distributions
+  and `/inputs/`.
 - Every response of the dev and preview servers carries `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated.
 
@@ -286,6 +321,6 @@ run in order on one click or one command.
 ## What it does not do
 
 - It collects nobody else's results: a record stays where it was written.
-- It downloads no model: an entry reads a local mirror or nothing.
+- It downloads no model: an entry reads a local mirror, a file under `inputs/`, or nothing.
 - It keeps no history and compares no two records.
 - A batch decides nothing from a result: it is a list of runs, and it leaves no record of its own.

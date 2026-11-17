@@ -1,7 +1,7 @@
 /**
  * The browser's host of a run, shared by the entry panel and the batch panel: the environment from
  * an adapter of `navigator.gpu` (with the backend the person declared), the checkout of the dev
- * server (or the build), the distributions of the dev server, and the save through
+ * server (or the build), the distributions and the input files of the dev server, and the save through
  * `POST /workbench/results`.
  *
  * SPEC: docs/spec/workbench.md#the-shell
@@ -12,6 +12,7 @@ import type { RunHost } from "../execute.ts";
 import type { WorkbenchRecord } from "../record.ts";
 import { currentCheckout } from "./checkout.ts";
 import { browserDistributions } from "./distributions.ts";
+import { browserInputs } from "./inputs.ts";
 import { type SaveResult, saveRecord } from "./save.ts";
 
 /**
@@ -33,6 +34,7 @@ export const browserHost = (
   readCheckout: currentCheckout,
   gpuOptions: {},
   openDistribution: browserDistributions(document.baseURI),
+  openInput: browserInputs(document.baseURI),
   // A record the dev server does not take is "not saved" with a reason; the page carries on.
   save: (record, text) => {
     onEnded(record);

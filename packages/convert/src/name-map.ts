@@ -84,6 +84,137 @@ export type TensorPlacement = {
 const quoted = (values: readonly string[]): string =>
   values.map((value) => `'${value}'`).join(", ");
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Reads one field's value: the typed value, or `undefined` once its problem is recorded. */
+type Reader<T> = (value: unknown, where: string) => T | undefined;
+
+/**
+ * Reads a name map that arrives as unchecked JSON (a distribution's `name-map.json`): every field
+ * of the format checked by hand, every problem reported together in one {@link ConvertError}, and
+ * a key the format does not name refused at every level. A document of another `format` is not
+ * read further (its other fields would be read against the wrong format). The result is built from
+ * the checked values; it shares no object with `value`.
+ *
+ * A `replace` rule whose `replace` is empty and an `exclude` rule whose `exclude` is empty are
+ * refused: Python's `str.replace` puts the replacement between every two characters, which this
+ * interpreter does not, and an empty `exclude` would take out every key.
+ *
+ * SPEC: docs/spec/convert.md#reading-a-name-map
+ */
+export const parseNameMap = (value: unknown): NameMap => {
+  if (isRecord(value) && Object.hasOwn(value, "format") && value["format"] !== NAME_MAP_FORMAT) {
+    throw new ConvertError(
+      `the name map's format is ${JSON.stringify(value["format"])}, not ${JSON.stringify(NAME_MAP_FORMAT)}`,
+    );
+  }
+  const problems: string[] = [];
+  const fail = (where: string, text: string): undefined => {
+    problems.push(`${where} ${text}`);
+    return undefined;
+  };
+  const text: Reader<string> = (field, where) =>
+    typeof field === "string" ? field : fail(where, "is not a string");
+  const nonEmpty: Reader<string> = (field, where) =>
+    typeof field === "string" && field !== "" ? field : fail(where, "is not a non-empty string");
+  const listOf =
+    <T>(item: Reader<T>): Reader<readonly T[]> =>
+    (field, where) => {
+      if (!Array.isArray(field)) return fail(where, "is not an array");
+      const entries: readonly unknown[] = field;
+      const read = entries.map((entry, index) => item(entry, `${where}[${index}]`));
+      return read.every((entry): entry is T => entry !== undefined) ? read : undefined;
+    };
+  /** The object's own fields, once every key it holds and every key it lacks is checked. */
+  const fields = (
+    field: unknown,
+    where: string,
+    names: readonly string[],
+  ): Record<string, unknown> | undefined => {
+    if (!isRecord(field)) return fail(where, "is not an object");
+    for (const key of Object.keys(field)) {
+      if (!names.includes(key)) fail(where, `has a key the format does not name: '${key}'`);
+    }
+    for (const name of names) {
+      if (!Object.hasOwn(field, name)) fail(where, `has no '${name}'`);
+    }
+    return field;
+  };
+  /** One field of a checked object (`undefined` when it is missing — already recorded). */
+  const read = <T>(
+    entry: Record<string, unknown>,
+    name: string,
+    where: string,
+    reader: Reader<T>,
+  ): T | undefined =>
+    Object.hasOwn(entry, name) ? reader(entry[name], `${where}.${name}`) : undefined;
+
+  const rule: Reader<NameMapRule> = (field, where) => {
+    if (!isRecord(field)) return fail(where, "is not an object");
+    if (Object.hasOwn(field, "stripPrefix")) {
+      const entry = fields(field, where, ["stripPrefix"]);
+      const stripPrefix = entry && read(entry, "stripPrefix", where, text);
+      return stripPrefix === undefined ? undefined : { stripPrefix };
+    }
+    if (Object.hasOwn(field, "replace")) {
+      const entry = fields(field, where, ["replace", "with"]);
+      const replace = entry && read(entry, "replace", where, nonEmpty);
+      const replacement = entry && read(entry, "with", where, text);
+      return replace === undefined || replacement === undefined
+        ? undefined
+        : { replace, with: replacement };
+    }
+    if (Object.hasOwn(field, "exclude")) {
+      const entry = fields(field, where, ["exclude"]);
+      const exclude = entry && read(entry, "exclude", where, nonEmpty);
+      return exclude === undefined ? undefined : { exclude };
+    }
+    return fail(where, "is none of { stripPrefix }, { replace, with } and { exclude }");
+  };
+  const component: Reader<NameMapComponent> = (field, where) => {
+    const entry = fields(field, where, ["role", "source", "route", "rules", "initializerPrefix"]);
+    if (entry === undefined) return undefined;
+    const role = read(entry, "role", where, nonEmpty);
+    const source = read(entry, "source", where, text);
+    const route = read(entry, "route", where, text);
+    const rules = read(entry, "rules", where, listOf(rule));
+    const initializerPrefix = read(entry, "initializerPrefix", where, text);
+    return role === undefined ||
+      source === undefined ||
+      route === undefined ||
+      rules === undefined ||
+      initializerPrefix === undefined
+      ? undefined
+      : { role, source, route, rules, initializerPrefix };
+  };
+  const layout: Reader<NameMapLayout> = (field, where) => {
+    const entry = fields(field, where, ["name", "source", "stripPrefix", "markers", "components"]);
+    if (entry === undefined) return undefined;
+    const name = read(entry, "name", where, nonEmpty);
+    const source = read(entry, "source", where, text);
+    const stripPrefix = read(entry, "stripPrefix", where, listOf(text));
+    const markers = read(entry, "markers", where, listOf(text));
+    const components = read(entry, "components", where, listOf(component));
+    return name === undefined ||
+      source === undefined ||
+      stripPrefix === undefined ||
+      markers === undefined ||
+      components === undefined
+      ? undefined
+      : { name, source, stripPrefix, markers, components };
+  };
+
+  const entry = fields(value, "the name map", ["format", "layouts"]);
+  const layouts = entry && read(entry, "layouts", "the name map", listOf(layout));
+  if (problems.length > 0 || layouts === undefined) {
+    throw new ConvertError(
+      `the name map is not a ${NAME_MAP_FORMAT} document:\n- ${problems.join("\n- ")}`,
+    );
+  }
+  return { format: NAME_MAP_FORMAT, layouts };
+};
+
 /** The file's keys with the layout's prefix removed, or why the layout does not recognise them. */
 const recognise = (
   layout: NameMapLayout,

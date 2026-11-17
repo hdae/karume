@@ -31,8 +31,16 @@ the container format is [container-v1](../container-v1.md).
   and assets are not converted. A part that holds both converted blocks and asset blocks is refused.
 - Part 0 never states a hash its bytes do not have: the 64 `0` characters are not the digest of any bytes. A reader of
   this source does not compare block hashes because it is verified; the real hashes are written by the writer.
-- The encoded payloads of one initializer (its data and its scale) are kept until a block of another initializer is
-  asked for; nothing older is kept. Reading an earlier initializer's block again reads and encodes its tensor again.
+- The source names the parts it builds (`convertedParts`, in index order): every part that holds a converted block.
+  The target is never read for them, so a caller that fetches the target's parts ahead of the reads leaves them out.
+- By default the encoded payloads of one initializer (its data and its scale) are kept until a block of another
+  initializer is asked for; nothing older is kept. Reading an earlier initializer's block again reads and encodes its
+  tensor again.
+- With `retainEncoded: true` the encoded payloads of every initializer are kept once they are encoded: a block of an
+  initializer encoded before is served from memory, and its tensor is not read or encoded again. What is held grows to
+  the converted size of what was read (the payloads, without tail padding and gaps), and is held for as long as the
+  source is reachable; the source has no call that drops it — it is released when the source is, by garbage
+  collection. An encoding that fails is not kept, with or without the option: a later read tries again.
 
 ## The encodings
 
@@ -48,6 +56,14 @@ not keep a NaN's payload). The target codec then decides:
 These are the exporter's storage conversions bit for bit (`channel_scale`, `quantize_to_int8` in
 `tools/exporter/src/karume/quantize.py`; `_convert_for_storage` in `emit.py`, which refuses what the table refuses).
 Any other target codec is refused.
+
+## The plan before a conversion
+
+`readPlanCodecs(target)` reads the target's part 0 alone — the same reading and the same checks of part 0 as the
+converting source — and gives every initializer the plan stores in its weight parts with its codec (`graph`,
+`initializer`, `codec`), in the order of the graphs and of their binding tables. It is what a caller decides on before
+it gives a tensor list: whether every codec is one encoded here (`ENCODED_CODECS`: `int8-sym`, `bf16`, `f32`), and
+whether a tensor's dtype can be stored as its initializer's codec. A codec is listed whether it is encoded here or not.
 
 ## The checks when it is built
 
@@ -91,7 +107,8 @@ A distribution carries its family's map: the recipe declares the file (`Pipeline
 assembly checks that it is JSON with the format tag below, copies it to `name-map.json` at the repository root and
 references it from the manifest as `nameMap` (`karume/6` — ADR [0153](../decisions/0153-manifest-v6-name-map.md)), a
 reference the hub checks like every file reference. Anima's two repositories, `karume-anima` and `karume-anima-extra`,
-carry the map above. Nothing reads the map from a distribution yet: `placeTensors` takes the map as a value.
+carry the map above. `fromSingleFile` of `@karume/models` reads it from the distribution ([single-file](single-file.md)):
+fetched through the hub and checked with `parseNameMap` (below); `placeTensors` takes a map as a value.
 
 | Field | What it is |
 | --- | --- |
@@ -114,6 +131,21 @@ component's `rules` apply in order, each to the key as the rules before it left 
 | `{ "exclude": s }` | Takes the key out when it contains `s`: the graph does not use that tensor |
 
 The initializer name is `initializerPrefix` followed by what the rules leave.
+
+### Reading a name map
+
+`parseNameMap(value)` reads a map that arrives as unchecked JSON (a distribution's file) and gives a `NameMap` built from
+the checked values (it shares no object with `value`). The checks are written by hand (no dependency):
+
+- An object whose `format` is present and is not `karume-name-map/1` is refused for that alone: its other fields are not
+  read against this format.
+- Otherwise every problem is reported together in one `ConvertError`, one line each, naming where it is (`the name
+  map.layouts[0].components[1].rules[2]`): a value that is not an object, a string or an array where the table above
+  says so; a field missing; a key the format does not name, at every level; a `role` or a layout `name` that is empty;
+  a rule that is none of the three kinds, or holds a key of another kind.
+- A `replace` rule whose `replace` is empty, and an `exclude` rule whose `exclude` is empty, are refused: Python's
+  `str.replace` puts the replacement between every two characters, which this interpreter does not, and an empty
+  exclusion would take out every key.
 
 ### Placing a file's tensors
 

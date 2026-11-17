@@ -16,6 +16,10 @@
  * 404 for that prefix, and `/models/index.json` reports it as unavailable so the page can show a
  * disabled state that names the directory.
  *
+ * An app may also serve one directory of the repository read-only under `/inputs/` (the
+ * workbench serves `inputs/`: a user's weights file a local entry reads by ranges). The same file
+ * rules apply — GET and HEAD with `Range`, nothing outside the directory, no listing.
+ *
  * ## The HF-compatible route (`/hf/`)
  *
  * A mount with an `hfRepo` is also served under `/hf/` in the two shapes the HF source of
@@ -129,6 +133,8 @@ const RESOURCE_HEADERS: Readonly<Record<string, string>> = {
 
 const PREFIX = "/models/";
 export const INDEX_PATH = "/models/index.json";
+/** `/inputs/<path>` → a file under the served inputs directory ({@link DistributionsPluginOptions.inputs}). */
+export const INPUTS_PREFIX = "/inputs/";
 export const HF_PREFIX = "/hf/";
 /** `{hubUrl}/api/models/{repo}/revision/{ref}` (`resolveHfRevision`). */
 const HF_REVISION_ROUTE = /^\/hf\/api\/models\/(.+)\/revision\/([^/]+)$/;
@@ -497,21 +503,48 @@ const distributionIndex = async (
 };
 
 /**
+ * `/inputs/<path>`: a file below `inputs` (an absolute directory, possibly a symlink), served as a
+ * mount's file is. A missing directory answers 404 naming it.
+ */
+const handleInputRequest = async (
+  path: string,
+  request: DistributionRequest,
+  inputs: string,
+): Promise<DistributionResponse> => {
+  const segments = safeSegments(path.slice(INPUTS_PREFIX.length));
+  if (segments === undefined) return notFound("Invalid input path");
+  let root: string;
+  try {
+    root = await realpath(inputs);
+  } catch (error) {
+    if (isMissing(error)) return notFound("The inputs directory is missing");
+    throw error;
+  }
+  return await serveFile(root, segments, request, "no-cache");
+};
+
+/**
  * The whole request policy. `/models/index.json` lists the mounts; `/models/<name>/<path>` serves a
  * file of that mount (GET / HEAD, with `Range`); `/hf/…` is the HF-compatible route
- * ({@link handleHfRequest}); everything else passes to Vite with the isolation headers.
+ * ({@link handleHfRequest}); `/inputs/<path>` serves a file of `inputs` when it is given
+ * ({@link handleInputRequest}); everything else passes to Vite with the isolation headers.
  */
 export const handleDistributionRequest = async (
   request: DistributionRequest,
   mounts: readonly DistributionMount[],
+  inputs?: string,
 ): Promise<DistributionResponse> => {
   const path = request.url.split(/[?#]/, 1)[0] ?? "";
   const hf = path.startsWith(HF_PREFIX);
-  if (!hf && !path.startsWith(PREFIX)) return { kind: "pass", headers: ISOLATION_HEADERS };
+  const input = inputs !== undefined && path.startsWith(INPUTS_PREFIX);
+  if (!hf && !input && !path.startsWith(PREFIX)) {
+    return { kind: "pass", headers: ISOLATION_HEADERS };
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     return respond(405, { Allow: "GET, HEAD" });
   }
   if (hf) return await handleHfRequest(path, request, mounts);
+  if (input) return await handleInputRequest(path, request, inputs);
 
   if (path === INDEX_PATH) {
     const text = JSON.stringify(await distributionIndex(mounts));
@@ -567,6 +600,11 @@ export type DistributionsPluginOptions = {
         }
     >
   >;
+  /**
+   * A directory relative to the repository root served read-only under `/inputs/` (module doc).
+   * Absent: no `/inputs/` route.
+   */
+  readonly inputs?: string;
 };
 
 /** The mounts of `distributions`, their directories resolved against `repositoryRoot`. */
@@ -590,6 +628,7 @@ export const distributionMounts = (
 /** Serves {@link DistributionsPluginOptions.distributions} on the dev and preview servers. */
 export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin => {
   let mounts: readonly DistributionMount[] = [];
+  let inputs: string | undefined;
 
   const middleware = (
     req: IncomingMessage,
@@ -603,6 +642,7 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
     handleDistributionRequest(
       { method: req.method ?? "GET", url: req.url ?? "/", headers },
       mounts,
+      inputs,
     ).then(
       (response) => {
         for (const [key, value] of Object.entries(response.headers)) res.setHeader(key, value);
@@ -630,7 +670,9 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
     log: (message: string) => void,
     info: (message: string) => void,
   ): Promise<void> => {
-    mounts = distributionMounts(await findRepoRoot(appRoot), options.distributions);
+    const repositoryRoot = await findRepoRoot(appRoot);
+    mounts = distributionMounts(repositoryRoot, options.distributions);
+    inputs = options.inputs === undefined ? undefined : resolve(repositoryRoot, options.inputs);
     for (const mount of mounts) {
       if ((await realRoot(mount)) === undefined) {
         log(

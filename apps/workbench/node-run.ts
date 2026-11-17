@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dawnFlags, installDawn } from "@karume/test-support/dawn";
 
 import { nodeDistributions } from "./node-distributions.ts";
+import { nodeInputs } from "./node-inputs.ts";
 import { type ResolvedBatch, resolveBatch } from "./src/batch.ts";
 import { batchSummary, runBatch, type StepState } from "./src/batch-run.ts";
 import { readCheckout } from "./src/checkout.ts";
@@ -154,6 +155,7 @@ const openSession = (): NodeSession => {
       readCheckout: () => readCheckout(REPOSITORY_ROOT),
       gpuOptions: { gpu },
       openDistribution: nodeDistributions(REPOSITORY_ROOT),
+      openInput: nodeInputs(REPOSITORY_ROOT),
       // A record that cannot be written fails the command.
       save: (record, text) =>
         writeRecord(

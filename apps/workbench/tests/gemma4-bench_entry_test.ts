@@ -120,6 +120,7 @@ describe("the gemma4-bench entry", () => {
         signal: SIGNAL,
         progress: () => undefined,
         openDistribution: memoryDistributions({ gemma4: REGULAR }, opened),
+        openInput: () => Promise.reject(new Error("the entry reads no input file")),
       });
 
     it("refuses an arm that does not fit the form before it reads a distribution or a GPU", async () => {

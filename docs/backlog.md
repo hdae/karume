@@ -228,9 +228,15 @@ maintainer's ruling of 2026-11-06).
      map (`name-map.json` at the root), checked like every file reference; the hub reads `karume/6` only; a recipe
      declares its map (`Pipeline.name_map`) and the assembly copies and references it — Anima's two repositories;
      `karume upgrade` rewrites a `karume/5` repository in place. Every repository's manifest is re-uploaded at the next
-     release — [release-runbook](release-runbook.md) §0.)* Left from it: the runtime's `parseSafetensors` moved into
-     the reader package, the pipelines' `fromSingleFile` (reading the distribution's map), `f16` and int4 targets,
-     LoRA, the published-package setup.
+     release — [release-runbook](release-runbook.md) §0.)* *(Landed 2026-11-17, stage 3, for loading:
+     `anima.Pipeline.fromSingleFile` — the distribution's name map read through the hub (`parseNameMap`), the file's
+     header, the placement and the shared loader with converting sources, the transformer against the quant's plan
+     and the text conditioner against the `bf16` plan; the converted parts are neither fetched nor counted, and every
+     refusal that needs no tensor byte comes before a weight part; [spec/single-file.md](spec/single-file.md). The
+     workbench entry `anima-single-file` compares it with `fromPretrained` on a GPU.)* Left from it: keeping the
+     converted container (designed next), `fromSingleFile` on the other families, `f16` and int4 targets, LoRA, the
+     runtime's `parseSafetensors` moved into the reader package, and the published-package setup (`@karume/models`
+     depends on the private `@karume/convert` and `@karume/safetensors`, which JSR does not have).
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.

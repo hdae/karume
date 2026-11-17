@@ -6,9 +6,10 @@ import { resultsPlugin } from "./vite-plugin-results.ts";
 
 export default defineConfig(({ command }) => ({
   plugins: [
-    // `/models/` and `/hf/` from the mount table the playground also serves, and COOP / COEP on
+    // `/models/` and `/hf/` from the mount table the playground also serves, `/inputs/` (the
+    // files a local entry reads by ranges — the playground does not serve it), and COOP / COEP on
     // every dev and preview response (first, so the results plugin's answers carry them too).
-    distributionsPlugin({ distributions: MOUNTS }),
+    distributionsPlugin({ distributions: MOUNTS, inputs: "inputs" }),
     // The write-back and the checkout endpoint (dev server only), the baked-in checkout
     // (production build).
     resultsPlugin(),

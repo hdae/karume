@@ -161,13 +161,17 @@ export const serveContainer = async (
  * The bytes of the distribution form (`karume.json`) (shared by the fake HF repository and the
  * in-memory directory).
  */
-export const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
+export const manifestBytes = (
+  models: unknown,
+  members: Readonly<Record<string, unknown>> = {},
+): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(
     JSON.stringify({
       format: "karume/6",
       generator: "karume-test/0",
       defaultModel: "test",
       models,
+      ...members,
     }),
   );
 
@@ -176,6 +180,8 @@ export type RepoSpec = {
   readonly repo: string;
   readonly models: unknown;
   readonly files: Iterable<readonly [string, Uint8Array<ArrayBuffer>]>;
+  /** Further top-level members of the manifest (`nameMap`). */
+  readonly members?: Readonly<Record<string, unknown>>;
 };
 
 /** Folds {@link RepoSpec}s into the fake HF's table (each repository has its own `karume.json`). */
@@ -185,7 +191,7 @@ export const serveRepos = (specs: readonly RepoSpec[]): MockFetch =>
       specs.map((spec) => [
         spec.repo,
         new Map<string, Uint8Array<ArrayBuffer>>([
-          [MANIFEST_PATH, manifestBytes(spec.models)],
+          [MANIFEST_PATH, manifestBytes(spec.models, spec.members)],
           ...spec.files,
         ]),
       ]),

@@ -109,6 +109,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "FromSingleFileOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerateEvent",
         "kind": "typeAlias"
       },
@@ -166,6 +170,10 @@
       },
       {
         "name": "SamplerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SingleFileSource",
         "kind": "typeAlias"
       },
       {
