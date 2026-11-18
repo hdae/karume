@@ -145,7 +145,9 @@ measures nothing and changes no default value.
 - **The identical class** writes the sequential variant's per-shape exceptions (`sequential.shapes`) from M = 1. Its
   key has no group length: the cases that share a key must reach the same decision, or the key keeps the default. An
   adopted variant replaces the key's exception or adds one; when it is the general variant, the key's exception goes.
-  It changes no number of any Session.
+  It changes no number of any Session. A float-stored shape has a sequential key like any other: from records of the
+  bf16 cases a derived table may carry `sequential.shapes` rows for bf16, and an `exact` Session on that adapter then
+  runs another sequential variant (columns per workgroup, words read ahead) that gives the same words.
 - **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
   staged candidates at M = 1. A parallel row serves M = 1 to 8, so at each other row count of that range the case
   table has (M = 4 and 8: the `full` set) groups of at least two records must be evidence for the candidate, and it
