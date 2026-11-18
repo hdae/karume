@@ -1,11 +1,13 @@
 /**
  * The Gemma 4 decode bench: a decode A/B of arms — a model of regular Gemma 4, its q4_0 QAT line
  * (`gemma.Pipeline`) or the mobile QAT distribution (`gemma4QatMobile.Pipeline`) × a preset × the
- * GPU tap on, split per dispatch or off × linear at the level `reorder` × the integer GEMV × the PLE
- * on the host or the GPU × the decode run-ahead depth — visited in A B B A rounds over a fixed prompt set, `chats` fresh chats per
+ * GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the
+ * integer GEMV × the PLE on the host or the GPU × the decode run-ahead depth × with or without a
+ * signal × the bench's sampler or the distribution's — visited in A B B A rounds over a fixed prompt set, `chats` fresh chats per
  * prompt and visit (chat 0 is the cold one and is left out of the summary). It reports wall-clock
  * decode figures and, through the GPU tap (`src/gemma4-bench/tap.ts`), the GPU time and the
- * dispatches, passes and submits per token.
+ * dispatches, passes and submits per token, or — in the tap's host mode — the host's segments of a
+ * decode token.
  *
  * The device is acquired through the tap, so karume's timing mode stays off and the product's own
  * pass structure is what is timed. One pipeline is resident at a time: each visit builds its arm's
@@ -42,7 +44,7 @@ const entry: Entry = {
   id: "gemma4-bench",
   title: "Gemma 4 decode bench",
   description:
-    "Decode A/B of Gemma 4 arms (model × preset × GPU tap on, split per dispatch or off × linear at reorder × integer GEMV × PLE on the GPU × decode run-ahead depth) in A B B A rounds over a fixed prompt set, one pipeline resident at a time: decode tokens/s and ms/token, and through the GPU tap the GPU time and dispatches, passes and submits per token.",
+    "Decode A/B of Gemma 4 arms (model × preset × GPU tap on, split per dispatch, in its host mode or off × linear at reorder × integer GEMV × PLE on the GPU × decode run-ahead depth × signal × sampler) in A B B A rounds over a fixed prompt set, one pipeline resident at a time: decode tokens/s and ms/token, through the GPU tap the GPU time and dispatches, passes and submits per token, and in the tap's host mode the host's segments of a decode token.",
   // The minima are the bench's own (a warm chat besides the cold one, a decode token after the
   // prefill's, one round); the maxima only bound a typo.
   parameters: [
@@ -50,7 +52,7 @@ const entry: Entry = {
       kind: "text",
       name: "arms",
       label:
-        "Arms, comma-separated, arm 1 the one the others are compared with; an arm is <mount>/<model>[@<preset>][:<switch>]… with a mount of gemma4, gemma4-qat, gemma4-qat-mobile, no preset for the manifest's default, and the switches tap-off (the tap is on otherwise), split (one timed pass per dispatch), linear-reorder (linear at the level reorder on a preset that does not declare it), integer (integer GEMV), ple-gpu (PLE on the GPU), ahead2 / ahead4 / ahead8 (decode run-ahead depth; needs ple-gpu except on 12b) — e.g. gemma4/e2b,gemma4-qat/e2b@i4-fast:integer (empty: one arm per mount whose mirror is present, its default model and preset, regular Gemma 4 first)",
+        "Arms, comma-separated, arm 1 the one the others are compared with; an arm is <mount>/<model>[@<preset>][:<switch>]… with a mount of gemma4, gemma4-qat, gemma4-qat-mobile, no preset for the manifest's default, and the switches tap-off (the tap is on otherwise), split (one timed pass per dispatch), host (wall-clock marks at the WebGPU calls instead of pass timing: the host's segments of a token), linear-reorder (linear at the level reorder on a preset that does not declare it), integer (integer GEMV), ple-gpu (PLE on the GPU), ahead2 / ahead4 / ahead8 (decode run-ahead depth; needs ple-gpu except on 12b), no-signal (chats sent without an AbortSignal) and sampled (the distribution's sampler with seed 0 for this arm) — e.g. gemma4/e2b,gemma4-qat/e2b@i4-fast:integer (empty: one arm per mount whose mirror is present, its default model and preset, regular Gemma 4 first)",
       default: "",
     },
     {
@@ -80,7 +82,8 @@ const entry: Entry = {
     {
       kind: "choice",
       name: "sampler",
-      label: "Sampler: greedy (the same tokens in every round) or the distribution's with seed 0",
+      label:
+        "Sampler of the arms without the switch sampled: greedy (the same tokens in every round) or the distribution's with seed 0",
       options: SAMPLER_KINDS,
       default: "greedy",
     },
@@ -105,7 +108,7 @@ const entry: Entry = {
     );
     const arms: readonly RunArm[] = openedArms.map((arm) => ({
       ...arm,
-      sampler: samplerOf(settings.sampler, arm.declaredSampler),
+      sampler: samplerOf(arm.samplerKind ?? settings.sampler, arm.declaredSampler),
     }));
     const host: GPU | undefined = gpuOptions.gpu ?? navigator.gpu;
     if (host === undefined) throw new Error("This host has no WebGPU (navigator.gpu)");

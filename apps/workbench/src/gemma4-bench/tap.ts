@@ -20,9 +20,15 @@
  * Each device gets its own probe ({@link GpuTap.probe}, keyed by the device): a GPU acquired through
  * the tap again (after a device loss) gets a new one while an older acquisition is still settling.
  *
- * A disabled probe passes everything straight through (one flag check per command encoder and per
- * submit), so a tap-off arm measures the wall clock of the same device without the tap's per-pass
- * and per-dispatch work.
+ * The host mode ({@link TapMode} `"host"`) is the view of the other side: it leaves the passes alone
+ * (no timestamps, no counting per dispatch) and records the wall clock at the WebGPU calls that
+ * bound the host's work on a run — a queue write, a new command encoder, a submit and its return, a
+ * read-back buffer's `mapAsync` and its settlement, `getMappedRange` and `unmap`
+ * ({@link HostMark}). The bench cuts a token's interval into segments at them.
+ *
+ * A disabled probe passes everything straight through (one flag check per command encoder, per
+ * submit, per queue write and per buffer created), so a tap-off arm measures the wall clock of the
+ * same device without the tap's per-pass and per-dispatch work.
  *
  * Plain TypeScript over the WebGPU API (no runtime import), so `vp test` drives it with a fake GPU.
  */
@@ -50,9 +56,35 @@ export const TIMED_PASS_SLOTS = 262_144;
 
 /**
  * What the probe records: `"passes"` = the product's own compute passes (the A/B view);
- * `"dispatches"` = one timed pass per dispatch, labelled with its pipeline (the attribution view).
+ * `"dispatches"` = one timed pass per dispatch, labelled with its pipeline (the attribution view);
+ * `"host"` = wall-clock marks at the WebGPU calls, the passes untouched (the host view).
  */
-export type TapMode = "passes" | "dispatches";
+export type TapMode = "passes" | "dispatches" | "host";
+
+/**
+ * The WebGPU calls the host mode marks: `write` = `queue.writeBuffer`, `encoder` =
+ * `createCommandEncoder`, `submit` / `submitted` = `queue.submit` called / returned, `map` /
+ * `mapped` = `mapAsync` of a `MAP_READ` buffer called / settled, `range` = its `getMappedRange`,
+ * `unmap` = its `unmap`.
+ */
+export type HostMarkKind =
+  | "write"
+  | "encoder"
+  | "submit"
+  | "submitted"
+  | "map"
+  | "mapped"
+  | "range"
+  | "unmap";
+
+/** One call the host mode saw. */
+export type HostMark = {
+  readonly kind: HostMarkKind;
+  /** The tap's clock (`performance.now()`) at the call. */
+  readonly at: number;
+  /** `range` only: the bytes of the range the host asked for. */
+  readonly bytes?: number;
+};
 
 /** One compute pass the product encoded (split: one dispatch) while the probe was enabled. */
 export type TapPass = {
@@ -72,12 +104,17 @@ export type DeviceProbe = {
   readonly timestamps: boolean;
   /** On = record and time; off = pass through. Applies to command encoders created from now on. */
   enabled: boolean;
-  /** `"passes"` (the default) or `"dispatches"`. Applies to command encoders created from now on. */
+  /**
+   * `"passes"` (the default), `"dispatches"` or `"host"`. Applies to command encoders and buffers
+   * created from now on.
+   */
   mode: TapMode;
-  /** The passes recorded since the last {@link DeviceProbe.reset}, in encode order. */
+  /** The passes recorded since the last {@link DeviceProbe.reset}, in encode order (none in the host mode). */
   readonly passes: () => readonly TapPass[];
   /** Submits recorded since the last reset. */
   readonly submits: () => number;
+  /** The calls the host mode marked since the last reset, in call order (none in the other modes). */
+  readonly marks: () => readonly HostMark[];
   /**
    * Copies every pending timestamp pair back and fills the passes' `beginNs` / `endNs`. Call it after
    * the measured work (it submits a copy of its own, which is not recorded).
@@ -126,7 +163,7 @@ const hideTimestampFeature = (device: GPUDevice): void => {
  * encoder still holds unresolved is left untimed. This assumes command buffers are submitted in the
  * order their encoders finish (the runtime encodes and submits one at a time).
  */
-const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
+const instrument = (device: GPUDevice, timestamps: boolean, now: () => number): DeviceProbe => {
   const querySet = timestamps
     ? device.createQuerySet({ type: "timestamp", count: QUERY_COUNT })
     : undefined;
@@ -144,14 +181,54 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
     : undefined;
   let passes: TapPass[] = [];
   let submits = 0;
+  let marks: HostMark[] = [];
   let nextSlot = 0;
   let generation = 0;
   /** The non-empty runs of encoders that have not finished. */
   const pendingRuns = new Set<PendingRun>();
 
   const createEncoder = device.createCommandEncoder.bind(device);
+  const createBuffer = device.createBuffer.bind(device);
   const queue = device.queue;
   const submit = queue.submit.bind(queue);
+  const writeBuffer = queue.writeBuffer.bind(queue);
+
+  /** Whether the host mode is recording (read at every call it marks). */
+  const hostView = (): boolean => probe.enabled && probe.mode === "host";
+
+  /**
+   * Marks a read-back buffer's map cycle. The buffer keeps the wrappers for its lifetime; they
+   * record only while the host mode is on (a buffer created in it can outlive the chat).
+   */
+  const markReadback = (buffer: GPUBuffer): void => {
+    const mapAsync = buffer.mapAsync.bind(buffer);
+    const getMappedRange = buffer.getMappedRange.bind(buffer);
+    const unmap = buffer.unmap.bind(buffer);
+    buffer.mapAsync = (mode, offset, size) => {
+      if (!hostView()) return mapAsync(mode, offset, size);
+      marks.push({ kind: "map", at: now() });
+      const mapped = mapAsync(mode, offset, size);
+      // Registered before the product's own continuation, so it runs first when the map settles.
+      // A failed map is the product's to report: the mark's branch swallows its own copy only.
+      mapped.then(
+        () => {
+          if (hostView()) marks.push({ kind: "mapped", at: now() });
+        },
+        () => {},
+      );
+      return mapped;
+    };
+    buffer.getMappedRange = (offset, size) => {
+      const range = getMappedRange(offset, size);
+      if (hostView()) marks.push({ kind: "range", at: now(), bytes: range.byteLength });
+      return range;
+    };
+    buffer.unmap = () => {
+      const result = unmap();
+      if (hostView()) marks.push({ kind: "unmap", at: now() });
+      return result;
+    };
+  };
 
   /** Encodes the run's resolve (outside a pass) and empties the run. */
   const flush = (run: PendingRun, encoder: GPUCommandEncoder): void => {
@@ -329,6 +406,7 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
     mode: "passes",
     passes: () => passes,
     submits: () => submits,
+    marks: () => marks,
     readTimes: async () => {
       if (results === undefined) return;
       const pending = passes.filter((pass) => pass.slot >= 0 && pass.beginNs === undefined);
@@ -363,6 +441,7 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
     reset: () => {
       passes = [];
       submits = 0;
+      marks = [];
       nextSlot = 0;
       generation += 1;
       pendingRuns.clear();
@@ -370,13 +449,33 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
   };
 
   queue.submit = (buffers) => {
-    if (probe.enabled) submits += 1;
-    return submit(buffers);
+    if (!probe.enabled) return submit(buffers);
+    submits += 1;
+    if (probe.mode !== "host") return submit(buffers);
+    marks.push({ kind: "submit", at: now() });
+    const result = submit(buffers);
+    marks.push({ kind: "submitted", at: now() });
+    return result;
+  };
+
+  queue.writeBuffer = (buffer, bufferOffset, data, dataOffset, size): undefined => {
+    if (hostView()) marks.push({ kind: "write", at: now() });
+    writeBuffer(buffer, bufferOffset, data, dataOffset, size);
+  };
+
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    if (hostView() && (descriptor.usage & BUFFER_MAP_READ) !== 0) markReadback(buffer);
+    return buffer;
   };
 
   device.createCommandEncoder = (descriptor) => {
     const encoder = createEncoder(descriptor);
     if (!probe.enabled) return encoder;
+    if (probe.mode === "host") {
+      marks.push({ kind: "encoder", at: now() });
+      return encoder;
+    }
     const split = probe.mode === "dispatches";
     const run: PendingRun = { start: 0, end: 0, generation };
     const begin: BeginPass = encoder.beginComputePass.bind(encoder);
@@ -401,9 +500,10 @@ const instrument = (device: GPUDevice, timestamps: boolean): DeviceProbe => {
 
 /**
  * Wraps `inner` (the host's GPU: `navigator.gpu` in a browser, Dawn's under Node). Nothing is touched until `acquireGpu` requests an
- * adapter and a device through the wrapper; `inner` itself is never modified.
+ * adapter and a device through the wrapper; `inner` itself is never modified. `now` is the clock of
+ * the host mode's marks (the bench marks its tokens with the same one).
  */
-export const createGpuTap = (inner: GPU): GpuTap => {
+export const createGpuTap = (inner: GPU, now: () => number = () => performance.now()): GpuTap => {
   const probes = new WeakMap<GPUDevice, DeviceProbe>();
 
   const wrapAdapter = (adapter: GPUAdapter): GPUAdapter => {
@@ -413,7 +513,7 @@ export const createGpuTap = (inner: GPU): GpuTap => {
       const features = [...(descriptor?.requiredFeatures ?? [])];
       if (timestamps && !features.includes(TIMESTAMP_QUERY)) features.push(TIMESTAMP_QUERY);
       const device = await requestDevice({ ...descriptor, requiredFeatures: features });
-      probes.set(device, instrument(device, timestamps));
+      probes.set(device, instrument(device, timestamps, now));
       hideTimestampFeature(device);
       return device;
     };

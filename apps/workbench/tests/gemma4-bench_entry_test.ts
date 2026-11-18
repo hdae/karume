@@ -223,6 +223,8 @@ describe("the gemma4-bench entry", () => {
           preset: { quant: "bf16", label: "bf16 label", isDefault: true },
           tap: true,
           split: false,
+          hostMarks: false,
+          signal: true,
           integerGemv: false,
           sessionOptions: {},
           pipelineOptions: {},
@@ -256,6 +258,30 @@ describe("the gemma4-bench entry", () => {
         "     0.250 100.0%      1.0  linear",
         `     0.250 100.0%      1.0  linear  ${SPLIT_LABEL}`,
       ]);
+    });
+
+    it("ends with the host's segments of an arm in the tap's host mode, and gives that arm no GPU time", async () => {
+      const { result } = await benchOf([{ ...REGULAR_ARM, hostMarks: true }]);
+      const { summary, data } = result();
+      expect(summary.slice(0, 3)).toEqual([
+        "1 of 1 visits, 2 chats (cold ones included)",
+        "arm 1 Gemma 4 e2b bf16 (host) · Story request · decode 100.0 tok/s (max 100.0) · 10.000 ms/token · outputs identical",
+        "arm 1 Gemma 4 e2b bf16 (host) · Story request · 1 warm chats · host segments, ms per decode token",
+      ]);
+      expect(summary).toHaveLength(8);
+      expect(data.arms[0]).toMatchObject({
+        tap: true,
+        split: false,
+        hostMarks: true,
+        signal: true,
+      });
+      expect(data.chats[1].measurement.host?.intervals).toBe(3);
+    });
+
+    it("records an arm sent without a signal as such", async () => {
+      const { result } = await benchOf([{ ...REGULAR_ARM, noSignal: true }]);
+      expect(result().data.arms[0]).toMatchObject({ signal: false, hostMarks: false });
+      expect(result().summary[1]).toContain("arm 1 Gemma 4 e2b bf16 (no signal) · ");
     });
 
     it("keeps what finished with the verdict incomplete when a failure stopped the bench after a chat", async () => {

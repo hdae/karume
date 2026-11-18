@@ -40,19 +40,25 @@ const ARM_FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 
 /**
  * The switches of an arm, after its model and preset: `tap-off` (a wall-clock control; the tap is on
- * otherwise), `split` (one timed pass per dispatch), `linear-reorder` (linear at the level `reorder`
- * on a preset that does not declare it), `integer` (the integer GEMV), `ple-gpu` (the PLE on the
- * GPU) and `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise).
+ * otherwise), `split` (one timed pass per dispatch), `host` (the tap's host mode: wall-clock marks at
+ * the WebGPU calls instead of pass timing), `linear-reorder` (linear at the level `reorder` on a
+ * preset that does not declare it), `integer` (the integer GEMV), `ple-gpu` (the PLE on the GPU),
+ * `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise),
+ * `no-signal` (the chats are sent without an `AbortSignal`) and `sampled` (the distribution's sampler
+ * with seed 0, whatever the bench's `sampler` is).
  */
 const ARM_SWITCHES = [
   "tap-off",
   "split",
+  "host",
   "linear-reorder",
   "integer",
   "ple-gpu",
   "ahead2",
   "ahead4",
   "ahead8",
+  "no-signal",
+  "sampled",
 ] as const;
 type ArmSwitch = (typeof ARM_SWITCHES)[number];
 
@@ -93,6 +99,9 @@ const parseArm = (text: string, position: number): NamedArm => {
   let tap = true;
   let split = false;
   let linearReorder = false;
+  let hostMarks = false;
+  let noSignal = false;
+  let sampled = false;
   let integerGemv = false;
   let pleOnGpu = false;
   let decodeAhead: DecodeAhead | undefined;
@@ -117,6 +126,15 @@ const parseArm = (text: string, position: number): NamedArm => {
       case "linear-reorder":
         linearReorder = true;
         break;
+      case "host":
+        hostMarks = true;
+        break;
+      case "no-signal":
+        noSignal = true;
+        break;
+      case "sampled":
+        sampled = true;
+        break;
       case "integer":
         integerGemv = true;
         break;
@@ -139,6 +157,22 @@ const parseArm = (text: string, position: number): NamedArm => {
       "split times every dispatch through the tap, so it cannot go with tap-off",
     );
   }
+  // The host mode is a mode of the tap, and one that leaves the passes alone: neither without the
+  // tap nor together with the split.
+  if (hostMarks && !tap) {
+    throw armError(
+      position,
+      text,
+      "host marks the WebGPU calls through the tap, so it cannot go with tap-off",
+    );
+  }
+  if (hostMarks && split) {
+    throw armError(
+      position,
+      text,
+      "host leaves the passes as the product encodes them, so it cannot go with split",
+    );
+  }
   return {
     text,
     draft: {
@@ -147,6 +181,9 @@ const parseArm = (text: string, position: number): NamedArm => {
       tap,
       ...(split ? { split: true } : {}),
       ...(linearReorder ? { linearReorder: true } : {}),
+      ...(hostMarks ? { hostMarks: true } : {}),
+      ...(noSignal ? { noSignal: true } : {}),
+      ...(sampled ? { sampled: true } : {}),
       ...(integerGemv ? { integerGemv: true } : {}),
       ...(pleOnGpu ? { pleOnGpu: true } : {}),
       ...(decodeAhead === undefined ? {} : { decodeAhead }),

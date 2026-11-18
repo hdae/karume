@@ -73,7 +73,44 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
 | `anima-single-file` (local) | A single Anima weights file through `anima.Pipeline.fromSingleFile` ([single-file](single-file.md)) against the `anima` mount: the pipeline is built and makes two images of one request (512², the model's default guidance and negative prompt), then, when `compare` is on, `fromPretrained` of the same model and quant does the same; each pipeline is disposed before the next. Parameters: `file` (a path under `inputs/`; default the upstream `anima-base-v1.0` single file), `model` (`anima-v1.0`), `quant` (empty: the model's default), `textConditioner` (`file`: the file's when it holds one; `distribution`: `components: { text_conditioner }` of the mount), `retainConverted` (off: `retainConverted` of `fromSingleFile`, which keeps the converted weights in memory — [single-file](single-file.md#keeping-the-converted-weights)), `compare` (on), `steps` (4), `seed` (42), `source`. No verdict; `data` is a `karume-anima-single-file/1` record ([below](#the-anima-single-file-record)). | The `anima` mount and a file under `inputs/` |
-| `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch or off × linear at the level `reorder` × the integer GEMV × the PLE on the GPU × the decode run-ahead depth — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token. Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `linear-reorder` (the Session option `numerics: { ops: { linear: "reorder" } }` on a preset that does not declare linear at `reorder`; refused on one that does), `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
+| `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the integer GEMV × the PLE on the GPU × the decode run-ahead depth × a signal passed or not × the bench's sampler or the distribution's — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token, or in the tap's host mode [the host's segments of a decode token](#the-decode-benchs-host-segments). Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `host`, `linear-reorder` (the Session option `numerics: { ops: { linear: "reorder" } }` on a preset that does not declare linear at `reorder`; refused on one that does), `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`, `no-signal`, `sampled`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
+
+### The decode bench's host segments
+
+An arm of `gemma4-bench` with the switch `host` runs the tap in its host mode: the tap leaves the
+compute passes as the pipeline encodes them (no timestamps, no count per dispatch) and records the
+wall clock at the WebGPU calls that bound the host's work on a run — `queue.writeBuffer`,
+`createCommandEncoder`, `queue.submit` and its return, and for a buffer created with `MAP_READ` its
+`mapAsync`, the settlement of that map, `getMappedRange` and `unmap`. The chats of such an arm are
+sent with a signal of their own that follows the run's and records when it is checked: the generation
+loop checks its signal after its yield to the event loop and again right before it issues a run. The
+switch does not go with `tap-off` or `split`.
+
+Each decode token's interval — from the previous token's `onToken` to its own, and from the last
+delivered token to the end of the chat when a run drew a stop token — is cut into seven segments that
+add up to it:
+
+| Segment | From → to | What the host does in it |
+| --- | --- | --- |
+| `between` | the previous token → the signal's first check | the previous token's way to the consumer, and the loop's yield to the event loop |
+| `derive` | → the signal's last check before the first WebGPU call | the inputs the pipeline derives on the host (the per-layer-embedding rows) |
+| `start` | → the return of the interval's first submit | preparing the run, the queue writes, encoding and submitting the first chunk of passes; the GPU has no work of this token until it ends |
+| `encode` | → the return of the interval's last submit | encoding and submitting the remaining chunks while the GPU runs the ones before them |
+| `wait` | → the settlement of the last read-back map | nothing: the GPU finishes the run |
+| `read` | → the last `unmap` | the mapped ranges copied to the host |
+| `draw` | → the token's `onToken` | the selection or sampling of the token, and its way to the consumer |
+
+A chat sent without a signal (`no-signal`) has no check and no yield: `between` runs to the first
+WebGPU call and `derive` is 0. An interval without a submit — a token handed out of a run-ahead batch
+that was already read back — is all `between`. The time after the last delivered token of a chat that
+ended at its token limit is in no interval.
+
+A chat's measurement keeps, per segment, the mean over its decode tokens and the median over them, and
+per decode token the submits, queue writes, maps and mapped bytes (`measurement.host`; it has no
+`measurement.tap`). The summary spreads both over the warm chats (`summary[].host`) and ends with a
+table per arm and prompt: the median and the minimum over the chats of the chat's mean, and the median
+over the chats of the chat's per-token median. `wait` holds the GPU's time for the token; the GPU time
+itself is what a tapped arm of the same run reports.
 
 ### How the GEMV sweep times a row count
 

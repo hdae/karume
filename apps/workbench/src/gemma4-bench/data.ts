@@ -37,6 +37,10 @@ export type ArmRecord = {
   readonly tap: boolean;
   /** Whether the tap ran split (one timed pass per dispatch; the chats carry `tap.perKey`). */
   readonly split: boolean;
+  /** Whether the tap ran in its host mode (the chats carry `host` and no `tap`). */
+  readonly hostMarks: boolean;
+  /** Whether the chats were sent with an `AbortSignal`. */
+  readonly signal: boolean;
   /** Whether the arm ran the integer GEMV (`integerGemv: true` passed explicitly). */
   readonly integerGemv: boolean;
   /**
@@ -107,6 +111,8 @@ export const buildBenchData = (input: {
       preset: { quant: arm.quant, label: arm.quantLabel, isDefault: arm.isDefaultQuant },
       tap: arm.tap,
       split: arm.split === true,
+      hostMarks: arm.hostMarks === true,
+      signal: arm.noSignal !== true,
       integerGemv: arm.session?.integerGemv === true,
       sessionOptions: arm.session ?? {},
       pipelineOptions: arm.pipeline ?? {},

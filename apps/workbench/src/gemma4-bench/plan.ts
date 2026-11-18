@@ -1,9 +1,10 @@
 /**
  * What the decode bench runs: the prompt set, the arms (a model of one of the three Gemma 4
- * distributions × a preset × the tap on, on and split per dispatch, or off × linear at the level
- * `reorder` or as the preset declares × the integer GEMV on or off × the PLE on the host or the GPU ×
- * the decode run-ahead depth), the workload (chats, new tokens, rounds, sampler) and the order the
- * arms are visited in. Pure, so `vp test` covers it.
+ * distributions × a preset × the tap on, on and split per dispatch, in the host mode, or off × linear
+ * at the level `reorder` or as the preset declares × the integer GEMV on or off × the PLE on the host
+ * or the GPU × the decode run-ahead depth × a signal passed or not × the bench's sampler or the
+ * distribution's), the workload (chats, new tokens, rounds, sampler) and the order the arms are
+ * visited in. Pure, so `vp test` covers it.
  */
 
 import {
@@ -91,6 +92,12 @@ export type ArmDraft = {
    * that does not declare it: the arm against the same preset at `exact`.
    */
   readonly linearReorder?: boolean;
+  /** Run the tap in its host mode: wall-clock marks at the WebGPU calls, the passes untouched. */
+  readonly hostMarks?: boolean;
+  /** Send the chats without an `AbortSignal` (absent = with the run's signal). */
+  readonly noSignal?: boolean;
+  /** Send the chats with the distribution's sampler, whatever the bench's `sampler` is. */
+  readonly sampled?: boolean;
   /** Run the eligible decode linears on the integer GEMV (the Session option `integerGemv`). */
   readonly integerGemv?: boolean;
   /** Keep the PLE on the GPU and gather it there (the pipeline option `pleResidency: "gpu"`). */
@@ -163,6 +170,20 @@ export type BenchArm = {
    * {@link session} alone does not tell the two switches apart.
    */
   readonly linearReorder?: true;
+  /**
+   * Whether the tap runs in its host mode — wall-clock marks at the WebGPU calls and at the checks
+   * of the chat's signal, no pass timing — for the host's segments of a decode token (only with the
+   * tap on and not split).
+   */
+  readonly hostMarks?: boolean;
+  /**
+   * Whether the chats are sent without an `AbortSignal`: the generation loop then does not yield to
+   * the event loop before a run, and a cancel takes effect between two chats (absent = the run's
+   * signal is passed).
+   */
+  readonly noSignal?: boolean;
+  /** The sampler kind of this arm alone (absent = the bench's `sampler`). */
+  readonly samplerKind?: SamplerKind;
   /** The Session options passed explicitly (absent = none: the preset's declaration alone). */
   readonly session?: ArmSessionOptions;
   /** The pipeline options passed explicitly (absent = none — {@link ArmPipelineOptions}). */
@@ -180,7 +201,17 @@ export const MOUNT_SHORT_LABELS: Readonly<Record<GemmaMount, string>> = {
 export const armLabel = (
   arm: Pick<
     BenchArm,
-    "mount" | "model" | "quant" | "tap" | "split" | "linearReorder" | "session" | "pipeline"
+    | "mount"
+    | "model"
+    | "quant"
+    | "tap"
+    | "split"
+    | "hostMarks"
+    | "noSignal"
+    | "samplerKind"
+    | "linearReorder"
+    | "session"
+    | "pipeline"
   >,
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
@@ -188,7 +219,15 @@ export const armLabel = (
   }${arm.session?.integerGemv === true ? " (integer)" : ""}${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
-    arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"
+    arm.samplerKind === "distribution" ? " (sampled)" : ""
+  }${arm.noSignal === true ? " (no signal)" : ""}${
+    arm.tap
+      ? arm.split === true
+        ? " (split)"
+        : arm.hostMarks === true
+          ? " (host)"
+          : ""
+      : " (tap off)"
   }`;
 
 /**
@@ -276,9 +315,13 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       quantLabel: preset.declaration.label ?? preset.name,
       isDefaultQuant: preset.isDefault,
       tap: draft.tap,
-      // The arms parser refuses split without the tap (`parseArmsText`): it owns that rule.
+      // The arms parser refuses split and host without the tap, and the two together
+      // (`parseArmsText`): it owns those rules.
       ...(draft.split === true ? { split: true } : {}),
       ...(draft.linearReorder === true ? { linearReorder: true } : {}),
+      ...(draft.hostMarks === true ? { hostMarks: true } : {}),
+      ...(draft.noSignal === true ? { noSignal: true } : {}),
+      ...(draft.sampled === true ? { samplerKind: "distribution" as const } : {}),
       ...(Object.keys(session).length === 0 ? {} : { session }),
       ...(Object.keys(pipeline).length === 0 ? {} : { pipeline }),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),

@@ -1,5 +1,6 @@
 import type { ChatOptions, ChatStop, ChatStream } from "@karume/models/gemma";
 
+import type { HostCall } from "../../src/gemma4-bench/measure.ts";
 import type { BenchDependencies, BenchPipeline, BenchProbe } from "../../src/gemma4-bench/run.ts";
 
 /** The label a pass gets in the split mode. */
@@ -32,15 +33,20 @@ export type BenchWorld = {
  * Fake dependencies: a clock that ticks 1 ms per reading, a `sha-<bytes>` hash, and pipelines
  * whose prompt is its text's char codes and whose `chat` streams `newTokens − 1` tokens then a
  * stop token. The probe records one pass of one dispatch per token step while enabled (labelled
- * {@link SPLIT_LABEL} in the split mode), and `readTimes` times every pass at 0.25 ms.
+ * {@link SPLIT_LABEL} in the split mode), and `readTimes` times every pass at 0.25 ms. In the host
+ * mode it records no pass: a token step is one submit and one map cycle of 8 bytes, each call
+ * marked with a reading of the clock, after two checks of the chat's signal when it has one.
  */
 export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
   let passes: { dispatches: number; label?: string; beginNs?: bigint; endNs?: bigint }[] = [];
+  let marks: HostCall[] = [];
+  let clock = 0;
   const probe: BenchProbe = {
     enabled: false,
     mode: "passes",
     passes: () => passes,
     submits: () => passes.length,
+    marks: () => marks,
     readTimes: () => {
       passes = passes.map((pass, index) => ({
         ...pass,
@@ -51,15 +57,29 @@ export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
     },
     reset: () => {
       passes = [];
+      marks = [];
     },
   };
   const record = () => {
-    if (probe.enabled) {
-      passes.push({
-        dispatches: 1,
-        ...(probe.mode === "dispatches" ? { label: SPLIT_LABEL } : {}),
-      });
+    if (!probe.enabled) return;
+    if (probe.mode === "host") {
+      for (const kind of [
+        "encoder",
+        "submit",
+        "submitted",
+        "map",
+        "mapped",
+        "range",
+        "unmap",
+      ] as const) {
+        marks.push({ kind, at: (clock += 1), ...(kind === "range" ? { bytes: 8 } : {}) });
+      }
+      return;
     }
+    passes.push({
+      dispatches: 1,
+      ...(probe.mode === "dispatches" ? { label: SPLIT_LABEL } : {}),
+    });
   };
   const resident = new Set<string>();
   let maxResident = 0;
@@ -69,7 +89,6 @@ export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
     sentOptions: [],
     enabledAtChat: [],
   };
-  let clock = 0;
   let chats = 0;
   const dependencies: BenchDependencies = {
     probe,
@@ -120,10 +139,14 @@ export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
               const maxNewTokens = chatOptions.maxNewTokens;
               if (maxNewTokens === undefined) throw new Error("the runner sets maxNewTokens");
               for (let token = 0; token < maxNewTokens - 1; token += 1) {
+                // As the generation loop: after its yield, and right before it issues the run.
+                chatOptions.signal?.throwIfAborted();
                 chatOptions.signal?.throwIfAborted();
                 record();
                 chatOptions.onToken?.(100 + token);
               }
+              chatOptions.signal?.throwIfAborted();
+              chatOptions.signal?.throwIfAborted();
               record();
               settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
               return "text";

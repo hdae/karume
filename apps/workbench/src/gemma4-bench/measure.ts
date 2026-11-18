@@ -11,6 +11,9 @@
  *
  * With the tap split (one timed pass per dispatch, labelled with its pipeline key), the decode window
  * is also broken down per key ({@link KeyPerToken}).
+ *
+ * With the tap in the host mode (wall-clock marks at the WebGPU calls), every decode token's
+ * interval is cut into the host's segments instead ({@link HostFigures}).
  */
 
 import { type TurnTiming, turnTiming } from "@karume/gemma4-app-support/turn-timing";
@@ -101,6 +104,82 @@ export type TapFigures = {
   readonly perKey?: readonly KeyPerToken[];
 };
 
+/** One WebGPU call the tap's host mode marked (`HostMark` of `tap.ts`, on the marks' clock). */
+export type HostCall = {
+  readonly kind:
+    | "write"
+    | "encoder"
+    | "submit"
+    | "submitted"
+    | "map"
+    | "mapped"
+    | "range"
+    | "unmap";
+  readonly at: number;
+  /** `range` only: the bytes of the mapped range. */
+  readonly bytes?: number;
+};
+
+/** What the host mode recorded over one chat. */
+export type HostCapture = {
+  /** In call order. */
+  readonly calls: readonly HostCall[];
+  /**
+   * When the chat's signal was checked (`throwIfAborted`), in order; empty for a chat sent without a
+   * signal. The generation loop checks it after its yield to the event loop and again right before
+   * it issues a run, so the first and the last check before a token's first GPU call bound the
+   * yield and the derived inputs.
+   */
+  readonly signalChecks: readonly number[];
+};
+
+/**
+ * The segments of a decode token's interval (from the previous token's `onToken` to its own), in
+ * order; they add up to the interval.
+ *
+ * - `between`: to the signal's first check — the previous token's delivery to the consumer and the
+ *   generation loop's yield to the event loop. Without a signal there is no check and no yield, and
+ *   it runs to the first GPU call: the delivery and the derived inputs.
+ * - `derive`: from the signal's first check to its last before the first GPU call — the inputs the
+ *   pipeline derives on the host (the PLE rows). 0 without a signal (it is in `between`).
+ * - `start`: to the return of the interval's first submit — preparing the run, the queue writes and
+ *   the first chunk of passes. The GPU has no work of this token until it ends.
+ * - `encode`: to the return of the interval's last submit — the remaining chunks, encoded while the
+ *   GPU runs the ones before them.
+ * - `wait`: to the settlement of the last read-back map — the GPU finishing the run.
+ * - `read`: to the last `unmap` — the mapped ranges copied to the host.
+ * - `draw`: to `onToken` — the selection or sampling of the token and its way to the consumer.
+ *
+ * An interval without a submit (a token handed out of a run-ahead batch already read back) is all
+ * `between`.
+ */
+export const HOST_SEGMENTS = [
+  "between",
+  "derive",
+  "start",
+  "encode",
+  "wait",
+  "read",
+  "draw",
+] as const;
+export type HostSegment = (typeof HOST_SEGMENTS)[number];
+
+/** The host's figures per decode token. */
+export type HostFigures = {
+  /** Decode intervals cut (the decode tokens; absent figures when 0). */
+  readonly intervals: number;
+  /** Mean ms per decode token of every segment; they add up to the decode ms per token. */
+  readonly meanMs: Readonly<Record<HostSegment, number>>;
+  /** The median over the intervals of every segment (robust to one slow token). */
+  readonly medianMs: Readonly<Record<HostSegment, number>>;
+  /** Calls per decode token. */
+  readonly submits: number;
+  readonly queueWrites: number;
+  readonly maps: number;
+  /** Bytes of the mapped ranges the host asked for, per decode token. */
+  readonly mappedBytes: number;
+};
+
 export type ChatMeasurement = {
   /** `turnTiming`'s statistics (seconds at ms precision, rates at 0.1 tokens/s). */
   readonly timing: TurnTiming;
@@ -110,8 +189,10 @@ export type ChatMeasurement = {
   readonly decodeTokensPerSecond?: number;
   readonly ttftMs?: number;
   readonly prefillTokensPerSecond?: number;
-  /** Absent with the tap off. */
+  /** Absent with the tap off and in the host mode. */
   readonly tap?: TapFigures;
+  /** The host's segments (the tap's host mode only; absent without decode tokens). */
+  readonly host?: HostFigures;
 };
 
 /** Four decimals: the records stay readable and diff-friendly. */
@@ -229,15 +310,134 @@ const tapFigures = (
   };
 };
 
+const zeroSegments = (): Record<HostSegment, number> => ({
+  between: 0,
+  derive: 0,
+  start: 0,
+  encode: 0,
+  wait: 0,
+  read: 0,
+  draw: 0,
+});
+
+/** The last element of `values` that `accept` takes, scanning from the end. */
+const lastWhere = <Value>(
+  values: readonly Value[],
+  accept: (value: Value) => boolean,
+): Value | undefined => {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (accept(values[index])) return values[index];
+  }
+  return undefined;
+};
+
+/** One interval `(from, to]` cut into its segments ({@link HOST_SEGMENTS}). */
+const cutInterval = (
+  from: number,
+  to: number,
+  calls: readonly HostCall[],
+  checks: readonly number[],
+): Record<HostSegment, number> => {
+  const segments = zeroSegments();
+  const submitted = lastWhere(calls, ({ kind }) => kind === "submitted");
+  const first = calls.find(
+    ({ kind }) => kind === "write" || kind === "encoder" || kind === "submit",
+  );
+  if (submitted === undefined || first === undefined) {
+    segments.between = to - from;
+    return segments;
+  }
+  const before = checks.filter((at) => at <= first.at);
+  const firstCheck = before.at(0);
+  const lastCheck = before.at(-1);
+  const issueFrom = lastCheck ?? first.at;
+  segments.between = (firstCheck ?? first.at) - from;
+  segments.derive = firstCheck === undefined ? 0 : issueFrom - firstCheck;
+  // The first submit's return is at or after `first` (a submit is one of the calls `first` is the
+  // earliest of) and at or before the last one's.
+  const started = calls.find(({ kind }) => kind === "submitted") ?? submitted;
+  segments.start = started.at - issueFrom;
+  segments.encode = submitted.at - started.at;
+  // Each later mark is looked for after the one before it, so the segments stay in order.
+  const mapped = lastWhere(calls, ({ kind, at }) => kind === "mapped" && at >= submitted.at);
+  const waitEnd = mapped?.at ?? submitted.at;
+  segments.wait = waitEnd - submitted.at;
+  const unmapped = lastWhere(calls, ({ kind, at }) => kind === "unmap" && at >= waitEnd);
+  const readEnd = unmapped?.at ?? waitEnd;
+  segments.read = readEnd - waitEnd;
+  segments.draw = to - readEnd;
+  return segments;
+};
+
+/**
+ * The host's figures of the decode window: one interval per decode token — between consecutive
+ * tokens, and from the last token to the end of the chat when a run drew a token that was not
+ * delivered (a stop token). The time after the last delivered token of a chat that ended at its
+ * token limit (the stream closing) is in no interval. `undefined` without decode tokens.
+ */
+export const hostFigures = (
+  host: HostCapture,
+  marks: ChatMarks,
+  decodeTokens: number,
+): HostFigures | undefined => {
+  const bounds = marks.tokens.map(({ at }) => at);
+  if (bounds.length - 1 < decodeTokens) bounds.push(marks.endAt);
+  const intervals = bounds.length - 1;
+  if (decodeTokens === 0 || intervals < 1) return undefined;
+  const perInterval: Record<HostSegment, number>[] = [];
+  let call = 0;
+  let check = 0;
+  const { calls, signalChecks } = host;
+  // The prefill's calls and checks come before the first token.
+  while (call < calls.length && calls[call].at <= bounds[0]) call += 1;
+  while (check < signalChecks.length && signalChecks[check] <= bounds[0]) check += 1;
+  const windowFrom = call;
+  for (let index = 1; index < bounds.length; index += 1) {
+    const callFrom = call;
+    const checkFrom = check;
+    while (call < calls.length && calls[call].at <= bounds[index]) call += 1;
+    while (check < signalChecks.length && signalChecks[check] <= bounds[index]) check += 1;
+    perInterval.push(
+      cutInterval(
+        bounds[index - 1],
+        bounds[index],
+        calls.slice(callFrom, call),
+        signalChecks.slice(checkFrom, check),
+      ),
+    );
+  }
+  const meanMs = zeroSegments();
+  const medianMs = zeroSegments();
+  for (const segment of HOST_SEGMENTS) {
+    const values = perInterval.map((segments) => segments[segment]);
+    meanMs[segment] = round4(values.reduce((sum, value) => sum + value, 0) / intervals);
+    medianMs[segment] = round4(median(values) ?? 0);
+  }
+  const windowCalls = calls.slice(windowFrom, call);
+  const count = (kind: HostCall["kind"]): number =>
+    round4(windowCalls.filter((item) => item.kind === kind).length / intervals);
+  return {
+    intervals,
+    meanMs,
+    medianMs,
+    submits: count("submit"),
+    queueWrites: count("write"),
+    maps: count("map"),
+    mappedBytes: round4(windowCalls.reduce((sum, item) => sum + (item.bytes ?? 0), 0) / intervals),
+  };
+};
+
 /**
  * The figures of one chat. `tokens` is the stop's `tokens` (generated tokens, a stop token counted
- * as one); `promptTokens` is the rendered prompt's length; `tap` is absent with the tap off.
+ * as one); `promptTokens` is the rendered prompt's length; `tap` is absent with the tap off and in
+ * the host mode, `host` present only in the host mode.
  */
 export const measureChat = (input: {
   readonly marks: ChatMarks;
   readonly promptTokens: number;
   readonly tokens: number;
   readonly tap?: TapCapture;
+  readonly host?: HostCapture;
 }): ChatMeasurement => {
   const { marks, promptTokens, tokens, tap } = input;
   const firstTokenAt = marks.tokens[0]?.at;
@@ -258,6 +458,7 @@ export const measureChat = (input: {
       : decodeMs / decodeTokens;
   const prefillEnd = marks.prefillAt.at(-1) ?? firstTokenAt;
   const prefillMs = prefillEnd === undefined ? undefined : prefillEnd - marks.sentAt;
+  const host = input.host === undefined ? undefined : hostFigures(input.host, marks, decodeTokens);
   return {
     timing,
     decodeTokens,
@@ -272,5 +473,6 @@ export const measureChat = (input: {
       ? {}
       : { prefillTokensPerSecond: round4((promptTokens * 1000) / prefillMs) }),
     ...(tap === undefined ? {} : { tap: tapFigures(tap, marks, decodeTokens, decodeMsPerToken) }),
+    ...(host === undefined ? {} : { host }),
   };
 };

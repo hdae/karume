@@ -5,12 +5,21 @@
  * all. Pure, so `vp test` covers it.
  *
  * For a split arm (one timed pass per dispatch) the summary also breaks the decode GPU time down per
- * op family and pipeline key ({@link SplitSummary}).
+ * op family and pipeline key ({@link SplitSummary}); for an arm in the tap's host mode it has the
+ * host's segments of a decode token ({@link HostSummary}).
  */
 
 import { familyOfKey, OP_FAMILY_LABELS, type OpFamily } from "./family.ts";
-import { type ChatMeasurement, type KeyPerToken, median, round4 } from "./measure.ts";
-import { armLabel, type BenchArm, type BenchPromptId, benchPrompt } from "./plan.ts";
+import {
+  type ChatMeasurement,
+  HOST_SEGMENTS,
+  type HostFigures,
+  type HostSegment,
+  type KeyPerToken,
+  median,
+  round4,
+} from "./measure.ts";
+import { armLabel, type BenchPromptId, benchPrompt } from "./plan.ts";
 
 /**
  * min / median / max of a non-empty list (the median of an even count is the mean of the middle
@@ -78,6 +87,25 @@ export type ArmPromptSummary = {
   readonly decodeVsFirstArm?: number;
   /** The decode window per op family and pipeline key (present when a warm chat ran split). */
   readonly split?: SplitSummary;
+  /** The host's segments of a decode token (present when a warm chat ran in the tap's host mode). */
+  readonly host?: HostSummary;
+};
+
+/**
+ * The host's segments of one arm × prompt over the warm chats that have them, in ms per decode
+ * token. `meanMs` spreads each chat's mean over its tokens (the segments' medians add up to about
+ * the median decode ms per token); `medianMs` spreads each chat's median over its tokens (what a
+ * token usually pays, without the slow ones).
+ */
+export type HostSummary = {
+  readonly chats: number;
+  readonly meanMs: Readonly<Record<HostSegment, Spread>>;
+  readonly medianMs: Readonly<Record<HostSegment, Spread>>;
+  /** Medians over the chats, per decode token. */
+  readonly submits: number;
+  readonly queueWrites: number;
+  readonly maps: number;
+  readonly mappedBytes: number;
 };
 
 /** One row of the split breakdown: medians over the warm chats, per decode token. */
@@ -192,6 +220,31 @@ export const summarizeSplit = (
   };
 };
 
+/** The host's segments over the warm chats' figures (`undefined` for none). */
+export const summarizeHost = (chats: readonly HostFigures[]): HostSummary | undefined => {
+  if (chats.length === 0) return undefined;
+  const spreads = (read: (figures: HostFigures) => Readonly<Record<HostSegment, number>>) => {
+    const entries = HOST_SEGMENTS.map((segment): [HostSegment, Spread] => {
+      const spread = spreadOf(chats.map((figures) => read(figures)[segment]));
+      if (spread === undefined) throw new Error("No chat to spread");
+      return [segment, spread];
+    });
+    // Every segment has an entry (the list is the union's).
+    return Object.fromEntries(entries) as Record<HostSegment, Spread>;
+  };
+  const middle = (read: (figures: HostFigures) => number): number =>
+    round4(median(chats.map(read)) ?? 0);
+  return {
+    chats: chats.length,
+    meanMs: spreads((figures) => figures.meanMs),
+    medianMs: spreads((figures) => figures.medianMs),
+    submits: middle((figures) => figures.submits),
+    queueWrites: middle((figures) => figures.queueWrites),
+    maps: middle((figures) => figures.maps),
+    mappedBytes: middle((figures) => figures.mappedBytes),
+  };
+};
+
 /**
  * One entry per arm × prompt, arms in order and prompts in `prompts` order (pairs without a warm
  * chat yet are left out, so a running bench summarizes what it has).
@@ -220,6 +273,11 @@ export const summarizeRuns = (
           return perKey === undefined ? [] : [perKey];
         }),
       );
+      const host = summarizeHost(
+        warm.flatMap(({ measurement }) =>
+          measurement.host === undefined ? [] : [measurement.host],
+        ),
+      );
       entries.push({
         arm,
         prompt,
@@ -227,6 +285,7 @@ export const summarizeRuns = (
         spreads,
         distinctOutputs: new Set(warm.map(({ tokenIdsSha256 }) => tokenIdsSha256)).size,
         ...(split === undefined ? {} : { split }),
+        ...(host === undefined ? {} : { host }),
       });
     }
   }
@@ -256,7 +315,7 @@ export const shareText = (value: number | undefined, total: number | undefined):
  */
 export const splitSummaryText = (
   summary: readonly ArmPromptSummary[],
-  arms: readonly Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split">[],
+  arms: readonly Parameters<typeof armLabel>[0][],
 ): readonly string[] => {
   const lines: string[] = [];
   for (const entry of summary) {
@@ -273,6 +332,39 @@ export const splitSummaryText = (
         row(family.gpuMs, family.dispatches, OP_FAMILY_LABELS[family.family]),
       ),
       ...split.keys.map((key) => row(key.gpuMs, key.dispatches, `${key.family}  ${key.key}`)),
+    );
+  }
+  return lines;
+};
+
+type LabelledArm = Parameters<typeof armLabel>[0];
+
+/**
+ * The host's segments of the summary as plain lines (the entry's summary ends with them): per arm ×
+ * prompt a header, the segments' names, three rows — the median and the minimum over the warm chats
+ * of the chat's mean per decode token, and the median over the chats of the chat's median over its
+ * tokens — and the WebGPU calls per token, with an empty line between two arms.
+ */
+export const hostSummaryText = (
+  summary: readonly ArmPromptSummary[],
+  arms: readonly LabelledArm[],
+): readonly string[] => {
+  const lines: string[] = [];
+  for (const entry of summary) {
+    const { host } = entry;
+    if (host === undefined) continue;
+    const row = (name: string, read: (segment: HostSegment) => number): string =>
+      `  ${name.padEnd(18)}${HOST_SEGMENTS.map((segment) => msText(read(segment)).padStart(9)).join("")}${msText(
+        HOST_SEGMENTS.reduce((sum, segment) => sum + read(segment), 0),
+      ).padStart(9)}`;
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      `arm ${entry.arm + 1} ${armLabel(arms[entry.arm])} · ${benchPrompt(entry.prompt).label} · ${host.chats} warm chats · host segments, ms per decode token`,
+      `  ${"".padEnd(18)}${[...HOST_SEGMENTS, "sum"].map((name) => name.padStart(9)).join("")}`,
+      row("mean (median)", (segment) => host.meanMs[segment].median),
+      row("mean (min)", (segment) => host.meanMs[segment].min),
+      row("per-token median", (segment) => host.medianMs[segment].median),
+      `  ${host.submits.toFixed(1)} submits · ${host.queueWrites.toFixed(1)} queue writes · ${host.maps.toFixed(1)} maps · ${Math.round(host.mappedBytes).toLocaleString("en-US")} B mapped per token`,
     );
   }
   return lines;

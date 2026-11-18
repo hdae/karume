@@ -1,6 +1,7 @@
 /**
  * The `gemma4-bench` entry's result: the data body of what finished, and the summary — how far the
- * run got, one line per arm and prompt over the warm chats, then the split arms' breakdown. A bench
+ * run got, one line per arm and prompt over the warm chats, then the split arms' breakdown and the
+ * host arms' segments. A bench
  * that finished has no verdict (it only measures); one that a failure stopped after a chat keeps
  * what finished with the verdict `incomplete`; a cancelled one keeps what finished (the record says
  * cancelled); one that failed before any chat rethrows. Pure, so `vp test` covers it.
@@ -11,7 +12,7 @@ import { messageText } from "../record.ts";
 import { buildBenchData, type DecodeBenchData } from "./data.ts";
 import { armLabel, type BenchArm, type BenchSettings, benchPrompt } from "./plan.ts";
 import type { BenchOutcome, BenchStop, RunArm } from "./run.ts";
-import { type ArmPromptSummary, splitSummaryText } from "./summary.ts";
+import { type ArmPromptSummary, hostSummaryText, splitSummaryText } from "./summary.ts";
 
 const fixed = (value: number | undefined, digits: number): string =>
   value === undefined ? "—" : value.toFixed(digits);
@@ -22,10 +23,7 @@ const fixed = (value: number | undefined, digits: number): string =>
  * tapped arm, and whether its warm chats generated the same tokens. Rates at 0.1, times and ratios
  * at 0.001.
  */
-const armPromptLine = (
-  entry: ArmPromptSummary,
-  arm: Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split" | "session" | "pipeline">,
-): string => {
+const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
   const { spreads } = entry;
   const rate = spreads.decodeTokensPerSecond;
   return [
@@ -36,7 +34,9 @@ const armPromptLine = (
     ...(entry.decodeVsFirstArm === undefined
       ? []
       : [`×${entry.decodeVsFirstArm.toFixed(3)} vs arm 1`]),
-    ...(arm.tap ? [`GPU ${fixed(spreads.gpuBusyMsPerToken?.median, 3)} ms/token`] : []),
+    ...(arm.tap && arm.hostMarks !== true
+      ? [`GPU ${fixed(spreads.gpuBusyMsPerToken?.median, 3)} ms/token`]
+      : []),
     entry.distinctOutputs === 1 ? "outputs identical" : `outputs ${entry.distinctOutputs} distinct`,
   ].join(" · ");
 };
@@ -80,6 +80,7 @@ export const decodeBenchResult = (input: {
       `${outcome.visits.length} of ${arms.length * settings.rounds} visits, ${outcome.chats.length} chats (cold ones included)${stopped === undefined ? "" : ` · ${stopped}`}`,
       ...data.summary.map((entry) => armPromptLine(entry, arms[entry.arm])),
       ...splitSummaryText(data.summary, arms),
+      ...hostSummaryText(data.summary, arms),
     ],
     data,
   };

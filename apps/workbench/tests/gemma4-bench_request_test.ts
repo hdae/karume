@@ -11,7 +11,8 @@ const SIGNAL = new AbortController().signal;
 
 const FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 const MOUNTS = "gemma4, gemma4-qat, gemma4-qat-mobile";
-const SWITCHES = "tap-off, split, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8";
+const SWITCHES =
+  "tap-off, split, host, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled";
 
 /** The drafts of `text` (the grammar alone; no distribution is read). */
 const draftsOf = (text: string) => parseArmsText(text).map(({ draft }) => draft);
@@ -33,6 +34,9 @@ describe("the arms text", () => {
     ["tap-off", { tap: false }],
     ["split", { tap: true, split: true }],
     ["linear-reorder", { tap: true, linearReorder: true }],
+    ["host", { tap: true, hostMarks: true }],
+    ["no-signal", { tap: true, noSignal: true }],
+    ["sampled", { tap: true, sampled: true }],
     ["integer", { tap: true, integerGemv: true }],
     ["ple-gpu", { tap: true, pleOnGpu: true }],
     ["ahead2", { tap: true, decodeAhead: "2" }],
@@ -93,6 +97,14 @@ describe("the arms text", () => {
     [
       "gemma4/e2b:tap-off:split",
       `arm 1 "gemma4/e2b:tap-off:split": split times every dispatch through the tap, so it cannot go with tap-off`,
+    ],
+    [
+      "gemma4/e2b:tap-off:host",
+      `arm 1 "gemma4/e2b:tap-off:host": host marks the WebGPU calls through the tap, so it cannot go with tap-off`,
+    ],
+    [
+      "gemma4/e2b:split:host",
+      `arm 1 "gemma4/e2b:split:host": host leaves the passes as the product encodes them, so it cannot go with split`,
     ],
   ])("refuses %s, naming the arm", (text, reason) => {
     expect(() => parseArmsText(text)).toThrow(new ParameterError("arms", reason));

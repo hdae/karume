@@ -8,6 +8,11 @@
  * fakes. Every chat is a fresh `chat` call (one sequence per chat), sent with the arm's sampler
  * explicitly. The runner never asks for Session diagnostics: a pipeline built without
  * `onRunDiagnostics` keeps its on-GPU greedy selection, which is the decode path measured.
+ *
+ * A chat is sent with the run's signal unless its arm says otherwise (`noSignal`). An arm in the
+ * tap's host mode gets a signal of its own that follows the run's and notes when it is checked
+ * ({@link markedSignal}): the generation loop checks its signal after its yield to the event loop
+ * and again right before it issues a run, which is where the host's segments are cut.
  */
 
 import { type StopRecord, stopRecordOf } from "@karume/gemma4-app-support/stop-record";
@@ -16,7 +21,13 @@ import type { ChatMessage, ChatOptions, ChatStream, SamplerSpec } from "@karume/
 import type { OpenedDistribution } from "../entry.ts";
 import { nextTask } from "../next-task.ts";
 import { seconds } from "../record.ts";
-import { type ChatMeasurement, type ChatMarks, measureChat, type TokenMark } from "./measure.ts";
+import {
+  type ChatMeasurement,
+  type ChatMarks,
+  type HostCall,
+  measureChat,
+  type TokenMark,
+} from "./measure.ts";
 import {
   type BenchArm,
   type BenchPromptId,
@@ -38,8 +49,8 @@ export type BenchPipeline = {
 /** What the loop needs of the tap's probe (`DeviceProbe`). */
 export type BenchProbe = {
   enabled: boolean;
-  /** `TapMode`: set per chat from the arm (a probe without the split mode leaves it out). */
-  mode?: "passes" | "dispatches";
+  /** `TapMode`: set per chat from the arm (a probe without the other modes leaves it out). */
+  mode?: "passes" | "dispatches" | "host";
   readonly passes: () => readonly {
     readonly dispatches: number;
     readonly label?: string;
@@ -47,6 +58,8 @@ export type BenchProbe = {
     endNs?: bigint;
   }[];
   readonly submits: () => number;
+  /** The WebGPU calls the host mode marked (a probe without the host mode leaves it out). */
+  readonly marks?: () => readonly HostCall[];
   readonly readTimes: () => Promise<void>;
   readonly reset: () => void;
 };
@@ -99,6 +112,20 @@ export type BenchDependencies = {
   readonly pause?: () => Promise<void>;
 };
 
+/**
+ * A signal that aborts with `signal` (same reason) and calls `onCheck` at every
+ * `throwIfAborted`. It is a signal of its own, so the run's signal is left as it is.
+ */
+export const markedSignal = (signal: AbortSignal, onCheck: () => void): AbortSignal => {
+  const marked = AbortSignal.any([signal]);
+  const throwIfAborted = marked.throwIfAborted.bind(marked);
+  marked.throwIfAborted = () => {
+    onCheck();
+    throwIfAborted();
+  };
+  return marked;
+};
+
 const idBytes = (ids: readonly number[]): Uint8Array<ArrayBuffer> => {
   const words = Uint32Array.from(ids);
   return new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
@@ -121,12 +148,22 @@ const runChat = async (input: {
   const prefillAt: number[] = [];
   const tokens: TokenMark[] = [];
   const ids: number[] = [];
+  const hostMarks = arm.tap && arm.hostMarks === true;
+  const signalChecks: number[] = [];
+  const chatSignal =
+    arm.noSignal === true
+      ? undefined
+      : hostMarks
+        ? markedSignal(signal, () => {
+            signalChecks.push(now());
+          })
+        : signal;
   const drain = async () => {
     const sentAt = now();
     const stream = pipeline.chat(messages, {
       maxNewTokens: settings.newTokens,
       sampler: arm.sampler,
-      signal,
+      ...(chatSignal === undefined ? {} : { signal: chatSignal }),
       // The same callback work in both tap states (the probe reads 0 when off).
       onPrefill: () => {
         prefillAt.push(now());
@@ -141,12 +178,12 @@ const runChat = async (input: {
     return { sentAt, endAt, stop: await stream.done };
   };
   probe.reset();
-  probe.mode = arm.split === true ? "dispatches" : "passes";
+  probe.mode = hostMarks ? "host" : arm.split === true ? "dispatches" : "passes";
   probe.enabled = arm.tap;
   const { sentAt, endAt, stop } = await drain().finally(() => {
     probe.enabled = false;
   });
-  if (arm.tap) await probe.readTimes();
+  if (arm.tap && !hostMarks) await probe.readTimes();
   const marks: ChatMarks = { sentAt, prefillAt, tokens, endAt };
   return {
     promptTokens: promptIds.length,
@@ -158,7 +195,7 @@ const runChat = async (input: {
       marks,
       promptTokens: promptIds.length,
       tokens: stop.tokens,
-      ...(arm.tap
+      ...(arm.tap && !hostMarks
         ? {
             tap: {
               passes: probe.passes(),
@@ -167,6 +204,7 @@ const runChat = async (input: {
             },
           }
         : {}),
+      ...(hostMarks ? { host: { calls: probe.marks?.() ?? [], signalChecks } } : {}),
     }),
   };
 };

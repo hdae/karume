@@ -158,6 +158,23 @@ describe("the arms", () => {
       }
     });
 
+    it("carries the host mode, the missing signal and the arm's own sampler kind of its switches, each absent without its switch", () => {
+      const plain = armOf(resolveArm(draft(), MANIFESTS));
+      expect([plain.hostMarks, plain.noSignal, plain.samplerKind]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      const switched = armOf(
+        resolveArm(draft({ hostMarks: true, noSignal: true, sampled: true }), MANIFESTS),
+      );
+      expect([switched.hostMarks, switched.noSignal, switched.samplerKind]).toEqual([
+        true,
+        true,
+        "distribution",
+      ]);
+    });
+
     it("refuses an arm it cannot run, saying why and naming what the manifest has", () => {
       for (const [given, error] of [
         [
@@ -251,6 +268,15 @@ describe("the arms", () => {
       [
         { ...mobile, quant: "i4", tap: false, session: integer, pipeline: { pleResidency: "gpu" } },
         "mobile QAT e2b i4 (integer) (PLE GPU) (tap off)",
+      ],
+      [{ ...mobile, quant: "i4", tap: true, hostMarks: true }, "mobile QAT e2b i4 (host)"],
+      [
+        { ...mobile, quant: "i4", tap: true, hostMarks: true, noSignal: true },
+        "mobile QAT e2b i4 (no signal) (host)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: false, samplerKind: "distribution", noSignal: true },
+        "mobile QAT e2b i4 (sampled) (no signal) (tap off)",
       ],
     ] as const) {
       expect(armLabel(arm)).toBe(label);

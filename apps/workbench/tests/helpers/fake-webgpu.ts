@@ -7,11 +7,13 @@ export type RealPass = {
   readonly calls: PassCall[];
 };
 
-/** A device the fake handed out: the features it was asked for and the submits it took. */
+/** A device the fake handed out: the features it was asked for and the submits and writes it took. */
 export type FakeDevice = {
   readonly requested: readonly string[];
   /** The command buffer count of each submit, in order. */
   readonly submitted: number[];
+  /** The buffer offset of each `queue.writeBuffer`, in order. */
+  readonly written: number[];
 };
 
 export type FakeWebGpuOptions = {
@@ -138,14 +140,20 @@ export const fakeWebGpu = ({
   const requestDevice = (descriptor?: GPUDeviceDescriptor) => {
     const requested = [...(descriptor?.requiredFeatures ?? [])];
     const submitted: number[] = [];
+    const written: number[] = [];
     const device = {
       features: new Set<string>(requested),
-      queue: { submit: (buffers: Iterable<unknown>) => submitted.push([...buffers].length) },
+      queue: {
+        submit: (buffers: Iterable<unknown>) => submitted.push([...buffers].length),
+        writeBuffer: (_buffer: unknown, offset: number) => {
+          written.push(offset);
+        },
+      },
       createBuffer,
       createQuerySet,
       createCommandEncoder,
     };
-    devices.push({ requested, submitted });
+    devices.push({ requested, submitted, written });
     return Promise.resolve(device);
   };
   const gpu = {
