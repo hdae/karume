@@ -314,9 +314,10 @@ ANIMA_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": "transformer"}
 #: not duplicated once per quant).
 #:
 #: `label` / `description` are display fields for the selection UI (ADR 0075 decision 1 — English,
-#: 64 / 200 character limits). They are written from what the preset actually is (storage, knobs,
-#: benefit): the id serves the machine, and people read these 2 fields. Being the default is not
-#: mentioned (`defaultQuant` already points at it — ADR 0075 decision 3).
+#: 64 / 200 character limits). They state what the preset does — storage, quantization, compute —
+#: and no speed or image-quality claim, none being measured on the bf16 text stack yet: the id
+#: serves the machine, and people read these 2 fields. Being the default is not mentioned
+#: (`defaultQuant` already points at it — ADR 0075 decision 3).
 ANIMA_QUANTS: Mapping[str, Any] = {
     # The original-weights preset (ADR 0131 decision 3 — the upstream checkpoint has all 4
     # components in BF16, so bf16 storage is upstream's bits as is). The preset appears only for
@@ -331,23 +332,23 @@ ANIMA_QUANTS: Mapping[str, Any] = {
     "bf16+dit8": {
         "weights": {"transformer": "i8"},
         "session": {},
-        "label": "Half size (int8 transformer)",
-        "description": "Transformer stored as int8 and computed in f32: roughly half its bf16"
-        " download, with the execution path left unchanged.",
+        "label": "int8 transformer",
+        "description": "Transformer stored as int8 (half its bf16 size) and computed in f32; the"
+        " text encoder, text conditioner and VAE decoder stay bf16.",
     },
     "bf16+dit8-a8": {
         "weights": {"transformer": "i8"},
         "session": {"linearCompute": "a8"},
-        "label": "Half size, int8 linear",
+        "label": "int8 transformer, int8 linear",
         "description": "The int8 transformer with per-token int8 activations in its linear"
-        " layers — faster on GPUs with dp4a, same download.",
+        " layers, multiplied as integers (dp4a where the GPU has it); the same files as bf16+dit8.",
     },
     "bf16+dit8-a8-attn8": {
         "weights": {"transformer": "i8"},
         "session": {"linearCompute": "a8", "attentionCompute": "a8"},
-        "label": "Half size, int8 linear and attention",
-        "description": "Adds int8 activations inside attention on top of the int8 linear path;"
-        " same weights, one more integer stage per step.",
+        "label": "int8 transformer, int8 linear and attention",
+        "description": "As bf16+dit8-a8, with int8 activations inside attention too; the same files"
+        " as bf16+dit8.",
     },
     "bf16+dit8-a8-attn8-s16": {
         "weights": {"transformer": "i8"},
@@ -356,9 +357,9 @@ ANIMA_QUANTS: Mapping[str, Any] = {
             "attentionCompute": "a8",
             "attentionScoreStorage": "f16",
         },
-        "label": "Balanced (int8)",
-        "description": "The int8 linear and attention path with attention scores held in f16 —"
-        " the fastest of the int8 seats here, at image quality close to the original weights.",
+        "label": "int8 transformer, int8 linear and attention, f16 scores",
+        "description": "As bf16+dit8-a8-attn8, with the attention scores held in f16; the same"
+        " files as bf16+dit8.",
     },
     # The 2 presets with resident i4 (run J-4a — the low-VRAM presets).
     #
@@ -376,16 +377,16 @@ ANIMA_QUANTS: Mapping[str, Any] = {
     "bf16+dit4": {
         "weights": {"transformer": "i4"},
         "session": {},
-        "label": "Smallest (int4 transformer)",
-        "description": "Transformer weights in GPTQ-calibrated int4 (group-32) with f32 compute —"
-        " the smallest download and the least resident memory.",
+        "label": "int4 transformer",
+        "description": "Transformer stored as GPTQ-calibrated int4 (group-32) and computed in f32;"
+        " the other components stay bf16 — the smallest download and the least resident memory.",
     },
     "bf16+dit4-attn8-s16": {
         "weights": {"transformer": "i4"},
         "session": {"attentionCompute": "a8", "attentionScoreStorage": "f16"},
-        "label": "Smallest, int8 attention",
-        "description": "The int4 transformer with int8 activations and f16 scores in attention:"
-        " the low-memory seat, without slowing down as much as plain int4.",
+        "label": "int4 transformer, int8 attention, f16 scores",
+        "description": "The int4 transformer with int8 activations inside attention and the"
+        " attention scores held in f16; the same files as bf16+dit4.",
     },
     # The original weights computed in f16 (the `-c16` knob reaches the transformer only — the
     # session knobs apply to the DiT). The weights are the `bf16` preset's own; only the compute
@@ -394,9 +395,10 @@ ANIMA_QUANTS: Mapping[str, Any] = {
         "weights": {"transformer": "bf16"},
         "session": {"linearCompute": "f16", "attentionCompute": "f16"},
         "gpuFeatures": {"shaderF16": True},
-        "label": "Original weights, f16 compute",
-        "description": "bf16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
-        " and trades numerical headroom for speed.",
+        "label": "Original weights, f16 transformer compute",
+        "description": "The bf16 preset's files, with the transformer's linear layers and attention"
+        " computed in f16; the text encoder, text conditioner and VAE decoder compute in f32. Needs"
+        " the shader-f16 GPU feature.",
     },
 }
 
