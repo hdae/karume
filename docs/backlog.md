@@ -275,6 +275,23 @@ maintainer's ruling of 2026-11-06).
     the affected lanes, the model cards and the Hugging Face repositories (each on the maintainer's go-ahead), and
     whether the `:wbf16` kernels have their geometry per adapter.
 
+- **Export again the f16 containers made under the earlier rounding rule (filed 2026-11-18; the maintainer's ruling: with
+  the next release, in one pass)**. `round_weights_to_f16` now rounds only what the checkpoint carries, so a
+  non-persistent buffer computed at init (RoPE's `inv_freq`, T5Gemma2's `embed_scale`) keeps its f32 value; the
+  distributed f16 containers below were exported while it rounded those buffers too, and they keep the earlier constants
+  until they are exported again. On the small Irodori model the maintainer heard no difference between the two
+  (2026-11-18).
+  - Irodori v4-Small, v4.1-Small and v4.1-Small-MF: the f16 container of the text backbone (measured on v4-Small: the
+    new graph is the one the f32 and i8 series already carry). Their sha256 rows are of the `f32` preset and do not move.
+  - Irodori v4-Large: the f16 container of the T5Gemma2 text backbone — expected, not measured. Its three sha256 rows are
+    of the `f16` preset and move with it.
+  - Anima: the f16 containers of the text encoder and the text conditioner (measured on the text conditioner: the new
+    graph is the bf16 one). Every preset but `bf16` loads them, so every sha256 row of the lane but the `bf16` ones
+    moves. The item above replaces these two containers with bf16 ones; when it is taken first, nothing of Anima is
+    left here.
+  - What it touches: the export, the local mirrors, the sha256 rows named above and the Hugging Face repositories (each
+    on the maintainer's go-ahead).
+
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
   accepted; code items 1 and 2 are built, the rest is not; the order among them and against the other items is the maintainer's)**. Each code item is its
   own commit with its behaviour tests and states its blast radius:
