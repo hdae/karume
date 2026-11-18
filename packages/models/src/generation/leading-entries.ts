@@ -147,3 +147,40 @@ export const leadingEntries = (
   }
   return { values: outValues, indices: outIndices };
 };
+
+/** The smallest positive normal f32 (2⁻¹²⁶): a value below it in magnitude is a zero or a subnormal. */
+const F32_MIN_NORMAL = 2 ** -126;
+
+/**
+ * `entries` as a draw may use them when the parts were ranked from **a copy of the row made with f32
+ * loads and stores** — or `undefined` when one of them is a zero or a subnormal.
+ *
+ * WGSL lets an implementation flush a subnormal to zero where it loads or stores an f32, so such a
+ * copy may hold a zero where the row holds a subnormal. Every other value it holds as the row does
+ * (a NaN stays a NaN). The zeros and the subnormals are one block of the ranking — below every
+ * positive normal number, above every negative one — and a flush moves a value inside that block
+ * only. So:
+ *
+ * - entries with no zero and no subnormal among them lie above the block, or the row has no such
+ *   value at all: they are the row's leading entries, in the row's order, with the row's bits,
+ *   whether or not the device flushes;
+ * - an entry inside the block may stand where another id of the row belongs (a flushed subnormal
+ *   ties with a zero and with other subnormals, and the tie goes to the smaller id), and its bits
+ *   may not be the row's → `undefined`. A zero counts as well as a subnormal: the copy's zero may be
+ *   a flushed subnormal of the row.
+ *
+ * A selection that ranks the row itself, or a copy that moves the bits as integers, has no need of
+ * this.
+ *
+ * MUST: it never throws (the contract of {@link leadingEntries}, whose result it takes).
+ */
+export const leadingOfFloatCopy = (
+  entries: LeadingEntries | undefined,
+): LeadingEntries | undefined => {
+  if (entries === undefined) return undefined;
+  for (const value of entries.values) {
+    // A NaN compares false and stays: the draw deals with it.
+    if (Math.abs(value) < F32_MIN_NORMAL) return undefined;
+  }
+  return entries;
+};

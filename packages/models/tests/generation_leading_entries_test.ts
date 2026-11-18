@@ -9,7 +9,11 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { leadingEntries, type PartSelections } from "../src/generation/leading-entries.ts";
+import {
+  leadingEntries,
+  leadingOfFloatCopy,
+  type PartSelections,
+} from "../src/generation/leading-entries.ts";
 
 /** "left ranks above right" in the ranking, written as a rank per id: NaN, then the number, then the id. */
 const ranksAbove = (row: Float32Array<ArrayBuffer>, left: number, right: number): boolean => {
@@ -266,5 +270,91 @@ describe("the leading entries of a row from per-part selections", () => {
       // The selections it was derived from do merge.
       assertEquals([...(leadingEntries(good, 4)?.indices ?? [])], [16, 3, 40, 41]);
     });
+  });
+});
+
+describe("the leading entries of selections ranked from a float copy of the row", () => {
+  /** The largest subnormal f32 and a smaller one. */
+  const TINY = 1e-39;
+  const TINIER = 5e-40;
+  /** The copy a device that flushes makes of `row`: every subnormal a zero of its sign. */
+  const flushed = (row: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
+    row.map((value) => (value !== 0 && Math.abs(value) < 2 ** -126 ? (value < 0 ? -0 : 0) : value));
+  /** The merged entries of `row`'s copy, as the selection hands them to a draw. */
+  const fromCopy = (row: Float32Array<ArrayBuffer>, count: number) =>
+    leadingOfFloatCopy(leadingEntries(selectParts(row, 4, 8), count));
+  const idsOf = (entries: ReturnType<typeof fromCopy>): number[] | undefined =>
+    entries === undefined ? undefined : [...entries.indices];
+
+  it("are the row's own while no zero and no subnormal is among them, whether or not the copy flushed", () => {
+    // Three normal numbers lead; the subnormals and the zero rank below them, the bulk below those.
+    const row = rowOf(64, -5, [
+      [40, 9],
+      [12, 7],
+      [33, 2 ** -126],
+      [20, TINIER],
+      [5, TINY],
+      [61, 0],
+    ]);
+    assertEquals(
+      new Float32Array([TINY, TINIER]).every((value) => value > 0 && value < 2 ** -126),
+      true,
+    );
+    for (const copy of [row, flushed(row)]) {
+      const entries = fromCopy(copy, 3);
+      assertEquals(idsOf(entries), [40, 12, 33]);
+      assertEquals([...(entries?.values ?? [])], [9, 7, 2 ** -126]);
+    }
+  });
+
+  it("are not known once a subnormal is among them: a copy that flushed it ranks it as a zero, by its id", () => {
+    // Id 20 holds the larger subnormal, id 5 the smaller one.
+    const row = rowOf(64, -5, [
+      [40, 9],
+      [20, TINY],
+      [5, TINIER],
+    ]);
+    // The row's second entry is id 20. A device that flushes sees two zeros there and takes id 5.
+    assertEquals(ranked(row, allIds(row)).slice(0, 2), [40, 20]);
+    assertEquals(idsOf(leadingEntries(selectParts(flushed(row), 4, 8), 2)), [40, 5]);
+    // So the entries are not answered from, on a device that flushes or on one that does not;
+    // above the subnormals they are.
+    for (const copy of [row, flushed(row)]) {
+      assertEquals(fromCopy(copy, 2), undefined);
+      assertEquals(idsOf(fromCopy(copy, 1)), [40]);
+    }
+  });
+
+  it("are not known once a zero is among them: the copy's zero may be the row's subnormal", () => {
+    const row = rowOf(64, -5, [
+      [40, 9],
+      [33, 0],
+      [7, -0],
+    ]);
+    assertEquals(fromCopy(row, 2), undefined);
+    assertEquals(fromCopy(row, 3), undefined);
+    assertEquals(idsOf(fromCopy(row, 1)), [40]);
+    // A negative subnormal and a negative zero are in the block as well.
+    assertEquals(
+      fromCopy(
+        rowOf(64, -5, [
+          [40, 9],
+          [33, -TINY],
+        ]),
+        2,
+      ),
+      undefined,
+    );
+  });
+
+  it("leave a NaN and an infinity to the draw, and pass on a merge that did not answer", () => {
+    const row = rowOf(64, -5, [
+      [40, Number.NaN],
+      [12, Number.POSITIVE_INFINITY],
+      [3, 7],
+    ]);
+    assertEquals(idsOf(fromCopy(row, 3)), [40, 12, 3]);
+    assertEquals(idsOf(fromCopy(rowOf(64, Number.NEGATIVE_INFINITY, [[3, 7]]), 3)), [3, 0, 1]);
+    assertEquals(leadingOfFloatCopy(undefined), undefined);
   });
 });

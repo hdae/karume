@@ -76,6 +76,9 @@ logits.
 - Each part returns its first 8 entries in the ranking `topk` defines: value descending, the smaller id first on a tie,
   +0 and −0 equal, NaN above every number. The readback is 16 KiB (2,048 logits and their places) in place of 1 MiB.
 - The suppressed tokens of a distribution are not masked on the GPU. The host's draw masks them.
+- The `permute` is a copy that loads and stores f32, and WGSL lets an implementation flush a subnormal to zero there.
+  The `topk` keeps the bits it reads, but it reads that copy: a value the row holds as a subnormal may be ranked, and
+  returned, as a zero.
 
 ### The merge and the draw on the host
 
@@ -84,6 +87,10 @@ logits.
 - The merge **does not decide** when a part's whole list was taken before the last of the `n` entries: that part may
   hold an entry that ranks above the ones merged after it. A part whose last returned entry is the `n`-th hides
   nothing.
+- The step **does not decide** when one of the `n` entries is a zero or a subnormal (`leadingOfFloatCopy`). Zeros and
+  subnormals are one block of the ranking, and a flush moves a value inside that block only: entries without such a
+  value are the row's own, in the row's order, on a device that flushes and on one that does not; entries with one
+  may be another set in another order.
 - The sampler builds its draw target from the `n` entries (`Sampler.topCandidates`): it leaves out the suppressed ids,
   applies the temperature as the whole-row path does, orders the candidates by processed value and id, takes the first
   `topK`, and computes the weights, their sums and the top-p cut with the function the whole-row path uses.

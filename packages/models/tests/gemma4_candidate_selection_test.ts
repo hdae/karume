@@ -1,18 +1,23 @@
 /**
  * The candidate selection on a real GPU: the per-part `topk` at the real vocabulary, merged on the
  * host, gives the sampler **the draw target the whole row gives** — the same tokens in the same
- * order with the same probabilities — for ordinary rows, ties inside a part and across parts, ±0,
- * suppressed ids at the top, and a run of consecutive ids at the top; and it gives up, instead of
- * answering, for a NaN, for −∞ among the candidates and for a row whose leading entries crowd into
- * one part (one residue of the id modulo 256). The host half alone is `generation_leading_entries_test`
- * and `generation_sampler_candidates_test`; what only a GPU shows is that the kernel's own order is
- * the one they assume.
+ * order with the same probabilities — for ordinary rows, ties inside a part and across parts,
+ * suppressed ids at the top, a run of consecutive ids at the top, and zeros and subnormals below the
+ * leading entries; and it gives up, instead of answering, for a NaN, for −∞ among the candidates,
+ * for a row whose leading entries crowd into one part (one residue of the id modulo 256), and for a
+ * zero or a subnormal among the leading entries (the selection ranks a copy of the row made with
+ * f32 loads and stores, which a device may flush). The host half alone is
+ * `generation_leading_entries_test` and `generation_sampler_candidates_test`; what only a GPU shows
+ * is that the kernel's own order is the one they assume.
  */
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext, type Session } from "@karume/runtime";
-import { gemmaCandidateLayout, gemmaCandidateSelectionModel } from "../src/gemma/greedy-output.ts";
-import { leadingEntries } from "../src/generation/leading-entries.ts";
+import {
+  gemmaCandidateLayout,
+  gemmaCandidateSelectionModel,
+  gemmaLeadingEntries,
+} from "../src/gemma/greedy-output.ts";
 import {
   candidateDistribution,
   samplerDistribution,
@@ -59,6 +64,9 @@ const rowWith = (
   return row;
 };
 
+/** A subnormal f32 (below 2⁻¹²⁶), and half of it another. */
+const SUBNORMAL = 1e-39;
+
 /** 70 distinct logits at ids spread over the vocabulary (no two in one part), highest first. */
 const spread = (step: number): [number, number][] =>
   Array.from({ length: 70 }, (_unused, at) => [(at * step + 11) % VOCABULARY, 20 - at * 0.125]);
@@ -94,14 +102,17 @@ const DECIDED: readonly Case[] = [
     ]),
   },
   {
-    name: "+0 and −0 at the top",
-    row: rowWith(-1, [
-      [70_000, 0],
-      [9, -0],
+    // 70 normal numbers lead and 65 are asked for: the copy's treatment of what ranks below them
+    // — subnormals of both signs and zeros, above the bulk — cannot reach the entries.
+    name: "subnormals and zeros below the leading entries",
+    row: rowWith(-5, [
+      ...spread(4099),
+      [70_000, SUBNORMAL],
+      [9, SUBNORMAL / 2],
       [140_000, 0],
       [3, -0],
+      [200_003, -SUBNORMAL],
     ]),
-    spec: { temperature: 1, topK: 3 },
   },
   {
     name: "the suppressed ids above every candidate",
@@ -148,6 +159,25 @@ const UNDECIDED: readonly Case[] = [
     name: "fewer than top-k logits above −∞",
     row: rowWith(Number.NEGATIVE_INFINITY, spread(4099).slice(0, 20)),
   },
+  {
+    name: "+0 and −0 among the leading entries (a zero of the copy may be a subnormal of the row)",
+    row: rowWith(-1, [
+      [70_000, 0],
+      [9, -0],
+      [140_000, 0],
+      [3, -0],
+    ]),
+    spec: { temperature: 1, topK: 3 },
+  },
+  {
+    // The larger subnormal sits at the larger id: a device that flushes both ranks them by id.
+    name: "subnormals among the leading entries",
+    row: rowWith(-5, [...spread(4099).slice(0, 40), [70_000, SUBNORMAL], [9, SUBNORMAL / 2]]),
+  },
+  {
+    name: "a subnormal as the last entry asked for, one past the top-k",
+    row: rowWith(-5, [...spread(4099).slice(0, 64), [123_456, SUBNORMAL]]),
+  },
 ];
 
 describe.skipIf(!GPU_AVAILABLE)("the candidate selection (real GPU)", () => {
@@ -176,7 +206,7 @@ describe.skipIf(!GPU_AVAILABLE)("the candidate selection (real GPU)", () => {
     const indices = out.part_index;
     assert(values.dtype === "f32" && indices.dtype === "i32");
     const topK = spec.topK ?? 0;
-    const entries = leadingEntries(
+    const entries = gemmaLeadingEntries(
       { values: values.data, indices: indices.data, ...layout },
       topK + suppressed.length + 1,
     );

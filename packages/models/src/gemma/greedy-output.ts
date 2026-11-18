@@ -16,7 +16,12 @@ import {
   type Session,
 } from "@karume/runtime";
 import { createOperationChain } from "../concurrency/serial.ts";
-import { leadingEntries } from "../generation/leading-entries.ts";
+import {
+  type LeadingEntries,
+  leadingEntries,
+  leadingOfFloatCopy,
+  type PartSelections,
+} from "../generation/leading-entries.ts";
 import type {
   GenerationCandidateSelection,
   GenerationGreedyAhead,
@@ -196,6 +201,10 @@ const candidateMaxCount = (layout: GemmaCandidateLayout): number =>
  * which masks them as the whole-row draw does (a mask on the GPU would turn a NaN at a suppressed
  * id into a NaN the host cannot tell from one that counts).
  *
+ * MUST: what is merged from its exits goes through {@link gemmaLeadingEntries}. The permute is a
+ * strided copy that loads and stores f32, which an implementation may flush from a subnormal to
+ * zero; the `topk` after it keeps the bits it reads, but it reads the copy.
+ *
  * MUST / MUST NOT: the two rules of {@link gemmaSelectionModel} on `parseIrDeclarationValue` and
  * on `states` hold here for the same reasons.
  *
@@ -234,6 +243,18 @@ export const gemmaCandidateSelectionModel = (
     CANDIDATES_GRAPH,
   );
 };
+
+/**
+ * The leading entries a candidate step hands the draw: the merge of the parts' selections
+ * (`leadingEntries`), refused when one of them is a zero or a subnormal — values the permute's
+ * copy of the row may not hold as the row does (`leadingOfFloatCopy`).
+ *
+ * NOTE: `export` is for the GPU test of the selection, which merges through the same function.
+ */
+export const gemmaLeadingEntries = (
+  selections: PartSelections,
+  count: number,
+): LeadingEntries | undefined => leadingOfFloatCopy(leadingEntries(selections, count));
 
 /** The candidate selection's Session and the residents its two exits are copied to. */
 type CandidateResources = {
@@ -586,7 +607,7 @@ export const createGemmaGreedyOutput = (
               // Still inside the chained operation: the resident holds this run's logits until the
               // draw settles (`GenerationCandidateSelection`'s MUST).
               return await draw({
-                leading: (count) => leadingEntries(selections, count),
+                leading: (count) => gemmaLeadingEntries(selections, count),
                 whole: async () => new Float32Array(await r.logits.read()),
               });
             });

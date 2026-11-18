@@ -194,6 +194,22 @@ test("greedy output: a candidate step hands the draw the leading entries and the
       });
       assertEquals(drawn, 700 + step);
     }
+    // A zero among the entries asked for is not answered from: the selection ranks a copy of the
+    // row that a device may have flushed a subnormal to zero in. Above the zero it answers.
+    const withZero = Float32Array.from({ length: WIDE }, (_unused, id) => -1 - id);
+    withZero[9] = 3;
+    withZero[7] = 0;
+    await candidates.run(
+      { x: { dtype: "f32", shape: [1, 1, WIDE], data: withZero.map((value) => -value) } },
+      { context, queryLength: 1 },
+      async (row) => {
+        assertEquals([...(row.leading(1)?.indices ?? [])], [9]);
+        assertEquals(row.leading(2), undefined);
+        assertEquals(row.leading(3), undefined);
+        assertEquals((await row.whole())[7], 0);
+        return 0;
+      },
+    );
     // A draw that throws rejects the step with what it threw; the run still went through.
     const failure = new Error("the draw failed");
     await assertRejects(
@@ -201,7 +217,7 @@ test("greedy output: a candidate step hands the draw the leading entries and the
       Error,
       "the draw failed",
     );
-    assertEquals(context.pastLength, 3);
+    assertEquals(context.pastLength, 4);
     await h.dispose();
     // The logits resident, the greedy selector's two exits and the candidate selection's two.
     assertEquals(made.length, 5);
