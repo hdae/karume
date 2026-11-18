@@ -645,8 +645,9 @@ const activationQuad = (
  * contract itself, so both paths round the same way (ADR 0105 addendum 4). subgroup32 is a variant
  * that computes the same sum as parallel through subgroup value exchange, so its multiply-add
  * spelling is also identical to parallel's (ADR 0101 decision 3, addendum 2026-09-25). The
- * sequential GEMV and the row block keep the existing spelling so as not to move the numerics of the
- * reference path.
+ * sequential GEMV and its row block ({@link linearGemvRowsWgsl}) keep the existing spelling so as
+ * not to move the numerics of the reference path; the row-blocked parallel GEMV
+ * ({@link linearGemvParallelRowsWgsl}) is of the parallel family and uses `fma`.
  */
 const mac = (fma: boolean, x: string, d: string): string =>
   fma ? `    acc = fma(${x}, ${d}, acc);` : `    acc = acc + ${x} * ${d};`;
@@ -1108,8 +1109,10 @@ const parallelShapeFor = (
 };
 
 /**
- * M=1/4/8 of the same shape have the same addition order. Prefill with M>8 keeps the existing row
- * block.
+ * Every M of 1..8 of the same shape takes the same lanes, so the same addition order, whichever
+ * kernel of the parallel family runs it (the kernel of M = 1, or the row-blocked one where the row
+ * carries a row block — {@link linearGemvParallelRowBlock}). Prefill with M > 8 keeps the
+ * sequential row block ({@link linearGemvRowsWgsl}).
  */
 export const linearGemvParallelLanes = (
   choices: LinearGemvChoices,
@@ -1251,8 +1254,10 @@ export const linearGemvParallelKey = (
  * of codes, f16 / bf16 / f32 words of elements). The decode and the order of the multiply-adds within
  * a word are shared with the sequential version (spelled with `fma` — {@link mac}), but the addition
  * order across words differs. It completes with a tree reduction inside 128 threads
- * and requires no extra feature. M is not baked into the shader, so decode and speculative
- * verification of a few rows use the same key and the same arithmetic.
+ * and requires no extra feature. M is not baked into the shader: on a row without a row block,
+ * decode and the speculative verification of a few rows run this one key. On a row that carries one
+ * M = 2..8 run {@link linearGemvParallelRowsWgsl} — another key, the same arithmetic and the same
+ * words.
  * DECIDED: docs/decisions/0098-linear-gemv-parallel.md
  */
 export const linearGemvParallelWgsl = (

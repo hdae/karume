@@ -398,9 +398,11 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
     { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
     { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
-    // ---- E4B (added 2026-09-26) — **none of the rows below is measured**. lanes / packedActivations
-    // are guesses copied from the E2B row with the same role, to be revisited with E4B's flag-bench
-    // (per-key census and GPU time) (ADR 0098 addendum 2026-09-26). The shapes are the real ones, read
+    // ---- E4B (added 2026-09-26) — **the lanes and packedActivations of the rows below are not
+    // measured**: they are guesses copied from the E2B row with the same role, to be revisited with
+    // E4B's flag-bench (per-key census and GPU time) (ADR 0098 addendum 2026-09-26). A `rowBlock`
+    // on one of them is measured at the row's own shape, against the same row without one (the
+    // comment above `parallelShapes`). The shapes are the real ones, read
     // for regular E4B from the upstream config (hidden 2560, intermediate 10240, kv 2, 42 layers, PLE
     // 256) and for QAT E4B from the container descriptor of the distribution mirror.
     // E4B regular i4 g32: per_layer_model_projection (42×256) — lanes from E2B 8960×1536 (unmeasured)
