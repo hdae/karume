@@ -336,23 +336,27 @@ maintainer's ruling of 2026-11-06).
     nothing is re-exported. Both distributions were built from the mirrors into
     `outputs/local-distributions/bf16-migration/`: every weight file is byte-identical to the mirror's of the same path,
     and no f16 file is present or referenced.)*
-  - Left, in order (each step on the maintainer's go-ahead where it publishes or writes reference rows):
-    1. The TypeScript side: the Anima pipeline of `@karume/models` (its preset checks and messages, and
-       `fromSingleFile` deriving the f16 plan of an F16 single file from the distributed bf16 container), `@karume/convert`,
-       the single-file and convert specs, and the preset names in the e2e tests, the playground and the comments.
-    2. The GPU checks: the `models:anima` lane, `bf16-c16` (the numerics check of bf16 storage computed in f16 is in
-       `packages/runtime/tests/gpu_f16_compute_test.ts`),
-       the A/B bands, the fusion counts and the extra repository's cross-repository reads.
-    3. The sha256 rows: 11 of the 13 rows of Anima's reference file move (all but the two `bf16` rows). The new case IDs
-       are written with `KARUME_REFERENCE=write`, and the rows of the old IDs are removed by hand.
-    4. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
-       decision 3 (2)) and of the new notice text of both repositories.
-    5. The local mirrors `models/karume-anima` / `models/karume-anima-extra` replaced by the staged builds.
-    6. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
+  - *(Landed 2026-11-18 on the TypeScript side and locally: `fromSingleFile` converts a float component against the
+    plan of the model's `bf16` container with its 16-bit weights stored as the file's dtype, and runs a BF16 transformer
+    under f16 linear compute as the preset does; the numerics check of bf16 storage computed in f16 is in
+    `packages/runtime/tests/gpu_f16_compute_test.ts` (identical words on the RTX 3080 Ti; not run on D3D12 or Metal);
+    the preset names in the e2e tests, the playground and the comments follow; the local mirrors
+    `models/karume-anima` / `models/karume-anima-extra` are the new builds (a rebuild from them is byte-identical).
+    The `models:anima` lane is green except for the reference rows below; the A/B bands and the fusion counts hold
+    unchanged.)*
+  - Left, in order (each step on the maintainer's go-ahead):
+    1. The sha256 rows of Anima's reference file on the RTX 3080 Ti: of its 16 rows the two of the `bf16` preset match;
+       seven with unchanged case IDs take new values (the default preset's text stack is bf16 now), three case IDs that
+       hold the preset's name are new, and the four rows of the old IDs are removed by hand.
+    2. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
+       decision 3 (2)) and of the new notice text and preset descriptions of both repositories. Before and after are not
+       near-identical images: the text stack's small differences grow over the denoise steps into other details of the
+       same composition.
+    3. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
        `karume-anima-extra` rebuilt with `--resolve-refs hf` against the new main and uploaded with its f16 files deleted
        (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
        that republishes every manifest as `karume/6`.
-    7. The unpublished 2.9B Anima distribution takes the new names before its first publication.
+    4. The unpublished 2.9B Anima distribution takes the new names before its first publication.
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
