@@ -166,7 +166,9 @@ measurements in `docs/research/`.
   drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`
   presets of `karume-gemma4-qat` is faster (on an RTX 3080 Ti its GPU time falls by 28 % on 12B and 8 % on E2B). The
   drafts can differ inside the band of `linear`; the decoded tokens are those of plain decode either way. Sessions at
-  `exact` do not change.
+  `exact` do not change. A row applies to every linear of its shape: `1024 × 4096` is also the shape of the int4
+  FFN-down linears of the SBV2 text encoder, which take it only in a Session created directly with linear at
+  `reorder` and at most 8 rows (the sbv2 pipeline does not accept `numerics`).
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
   dropped the field before.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the

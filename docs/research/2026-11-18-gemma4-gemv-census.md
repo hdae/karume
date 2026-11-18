@@ -285,6 +285,12 @@ The two shapes with a large gain and no row (`256 × 2048`, `256 × 5120`) are t
 spread between ×1.3 and ×2.1 over the five rounds in nearly every record, at one row count each, so the rule had no
 second steady record to read. More records, or a look at why that baseline is unsteady, would settle them.
 
+A row is matched by shape, not by model. Of the five, int4 g32 `1024 × 4096` also occurs outside the drafters: the 22
+FFN-down linears of the SBV2 text encoder's int4 graph (`karume-sbv2-jvnv`) have it. The sbv2 pipeline does not accept
+`numerics`, so they take the row only in a Session created directly with linear at `reorder` and at most 8 rows; nothing
+was measured in that model. The other four shapes occur in no other int4 g32 graph of the mirrors under `models/`
+(a scan of every mirror's containers, weight shape and storage only).
+
 Once the rows are in the default profile, the groups of those five cases in these eight records are no longer current
 (the default's choice at `reorder` moved): 54 groups. Every other group stays current.
 

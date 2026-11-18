@@ -511,6 +511,10 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       stagedActivations: true,
     },
     // o (sliding) — staged 32 (×4.8 and ×10.3 in two records)
+    // NOTE: a row is matched by shape, and this one is not the drafter's alone: the 22 FFN-down
+    // linears of the SBV2 text encoder's int4 graph are int4 g32 1024×4096 too. The sbv2 pipeline
+    // does not take `numerics`, so they reach this row only in a Session created directly with
+    // linear at `reorder` and at most 8 rows; the row was not measured in that model.
     {
       storage: "i4",
       n: 1024,
