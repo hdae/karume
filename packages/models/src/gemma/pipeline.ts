@@ -120,6 +120,7 @@ import {
 import {
   assertGenerationRequestValues,
   createGenerationSequence,
+  type GenerationCandidateSelection,
   type GenerationRequest,
   type GenerationSequence,
   type GenerationSoftBlock,
@@ -447,6 +448,8 @@ export type PipelineOptions = {
    * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
+  /** Test only ({@link WHOLE_ROW_SAMPLING}): sampled decode steps read the whole logits row back. */
+  readonly [WHOLE_ROW_SAMPLING]?: true;
   /**
    * The numeric requirement of the language-model Sessions: how far each kind of op may stand from
    * its reference kernel (`exact` or `reorder`, for the whole model and per op kind — the runtime's
@@ -815,6 +818,22 @@ export type ChatOptions = {
  * The internal state of {@link Pipeline} (not exposed on the public surface — exported only for the
  * mobile QAT subclass in `./qat-pipeline.ts`).
  */
+/**
+ * A test-only key of {@link PipelineOptions} (a symbol, so no distribution, saved setting or
+ * untyped caller can carry it): the pipeline is built **without the candidate selection**, so a
+ * decode step that samples from the top-k reads the whole logits row back and draws from it on the
+ * host, as every such step did before the selection existed.
+ *
+ * The selection's draws are the whole row's (`Sampler.topCandidates`), so it runs wherever it
+ * applies and has no option. This key gives the other side of that claim: a pipeline with it and
+ * one without it, given the same request, must generate the same token ids, and their decode times
+ * are what the selection is worth. The GPU selection of the maximum (temperature 0) is unaffected.
+ *
+ * NOTE: not exported from the subpath surface (`gemma.ts`): tests and measurement scripts import it
+ * from here.
+ */
+export const WHOLE_ROW_SAMPLING: unique symbol = Symbol("karume.gemma.wholeRowSampling");
+
 export type Gemma4State = {
   /**
    * The name of the entry point used for construction ({@link gemmaEntryName}). The prefix of
@@ -824,6 +843,12 @@ export type Gemma4State = {
    */
   readonly entry: string;
   readonly greedyOutput?: GemmaGreedyOutput;
+  /**
+   * The candidate selection the sequences are given ({@link GemmaGreedyOutput.candidates}; absent
+   * without a greedy output, without a layout for the vocabulary, and under
+   * {@link WHOLE_ROW_SAMPLING}).
+   */
+  readonly candidateSelection?: GenerationCandidateSelection<GenerationContext>;
   /**
    * The re-run face of the target Session (only with {@link PipelineOptions.expertCache}) — the
    * session every conversation runs through; there is no {@link Gemma4State.greedyOutput} then.
@@ -2011,6 +2036,9 @@ export class GemmaPipeline {
           ? {}
           : { fullStateStorage: sessionOptions.fullStateStorage }),
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
+        ...(greedyOutput?.candidates === undefined || options[WHOLE_ROW_SAMPLING] === true
+          ? {}
+          : { candidateSelection: greedyOutput.candidates }),
         graph: model.graph,
         wiring,
         program: generationProgramFace(wiring),
@@ -2230,6 +2258,9 @@ export class GemmaPipeline {
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
+          ...(state.candidateSelection === undefined
+            ? {}
+            : { candidateSelection: state.candidateSelection }),
           ...(state.expertCache?.speculation === undefined
             ? {}
             : { selfSpeculation: state.expertCache.speculation }),
@@ -2357,6 +2388,9 @@ export class GemmaPipeline {
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
+          ...(state.candidateSelection === undefined
+            ? {}
+            : { candidateSelection: state.candidateSelection }),
           ...(state.expertCache?.speculation === undefined
             ? {}
             : { selfSpeculation: state.expertCache.speculation }),

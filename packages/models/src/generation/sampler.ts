@@ -10,6 +10,14 @@
  * The stored graph's exit and the contract of general sampling do not change (ADR 0083 addendum on
  * temperature-0 decode).
  *
+ * A spec that narrows to top-k and processes nothing that depends on the history also returns an
+ * internal capability that draws from **the leading entries of the raw logits' ranking**, selected
+ * on the GPU, instead of the whole row ({@link SamplerCandidates}). It picks the token
+ * {@link Sampler.next} picks from the whole row and consumes the RNG as it does, or says that the
+ * entries do not decide the draw — the caller then reads the whole row and calls `next`.
+ *
+ * SPEC: docs/spec/generation.md#the-merge-and-the-draw-on-the-host
+ *
  * ## MUST: token-sequence parity with HF is not attainable
  *
  * The RNG is splitmix64 (`random.ts`), not torch's Philox — **the same seed does not give the same
@@ -156,6 +164,46 @@ export type Sampler = {
     history: readonly number[],
     ahead: number,
   ): { readonly token: number; readonly draws: 0 | 1 };
+  /**
+   * The capability of drawing from the leading entries of the raw logits' ranking
+   * ({@link SamplerCandidates}), for a row of `vocabSize` logits and a selection that returns at
+   * most `maxCount` entries.
+   *
+   * `undefined` when the spec does not qualify — temperature 0 (the GPU selection of the maximum
+   * covers it), no `topK` (the candidates are the whole vocabulary), a repetition penalty or a
+   * logit bias (either moves entries by something the ranking of the raw logits does not carry) —
+   * or when it needs more entries than `maxCount` or than the row has.
+   */
+  topCandidates(vocabSize: number, maxCount: number): SamplerCandidates | undefined;
+};
+
+/**
+ * Drawing from the leading entries of the raw logits' ranking ({@link Sampler.topCandidates}).
+ *
+ * The ranking is the GPU `topk`'s: value descending, the smaller id first on a tie, +0 and −0
+ * equal, NaN above every number. Its first {@link SamplerCandidates.count} entries hold everything
+ * the draw reads whenever {@link SamplerCandidates.next} returns a token — the proof is at
+ * {@link candidateDistribution}.
+ */
+export type SamplerCandidates = {
+  /**
+   * How many leading entries the selection must return: `min(topK, vocabulary)` plus one per
+   * suppressed token (each can take a place among them without being a candidate) plus one (the
+   * entry that shows the candidate set is complete).
+   */
+  readonly count: number;
+  /**
+   * The token {@link Sampler.next} would pick from the row whose `count` leading entries these are
+   * (`values[i]` the raw logit of token `indices[i]`), with the RNG advanced as `next` advances
+   * it — or `undefined`, with the RNG untouched, when the entries do not decide the draw: a NaN
+   * among them, a non-finite maximum, a tie that reaches past the last entry, or entries that are
+   * not a ranking at all. The caller then calls `next` with the whole row, which draws or throws
+   * as it always did.
+   *
+   * MUST: it never throws. It runs where a run has already gone through, and its caller relies on
+   * the failures of a draw coming from `next` alone.
+   */
+  next(values: Float32Array<ArrayBuffer>, indices: Int32Array<ArrayBuffer>): number | undefined;
 };
 
 const assertFiniteAtLeast = (value: number, minimum: number, where: string): void => {
@@ -633,6 +681,34 @@ export const samplerDistribution = (
     else candidates = Array.from({ length: processed.length }, (_unused, token) => token);
   }
 
+  const distribution = distributionOver(processed, candidates, topP);
+  if (typeof distribution === "number") {
+    // Classify the origin by the same rule as the temperature-0 path (finite before processing =
+    // the bias removed the candidates).
+    throw nonFiniteMaximum(
+      `The maximum candidate logit is non-finite (${distribution}) — every token is banned`,
+      logits,
+      suppressTokens,
+    );
+  }
+  return distribution;
+};
+
+/**
+ * The draw target over `candidates` (indices into `processed`, in the order the draw walks them):
+ * softmax within the set, then top-p — or the candidates' maximum when it is not finite (no
+ * distribution exists; the caller decides what that means).
+ *
+ * MUST: the one place the weights, their sums and the top-p cut are computed. The whole-row path
+ * and the path over the GPU's leading entries ({@link candidateDistribution}) both end here, so the
+ * same candidates with the same values give the same f64 results in the same order — which is what
+ * makes the two paths pick the same token for the same uniform value.
+ */
+const distributionOver = (
+  processed: Float32Array<ArrayBuffer>,
+  candidates: readonly number[] | Int32Array<ArrayBuffer>,
+  topP: number | undefined,
+): SamplerDistribution | number => {
   // Softmax normalizes within the candidate set only (the mass dropped by top-k leaves the
   // denominator — equivalent to HF setting the dropped entries to −inf and passing them to
   // `softmax`).
@@ -640,15 +716,7 @@ export const samplerDistribution = (
   for (const token of candidates) {
     if (processed[token] > peak) peak = processed[token];
   }
-  if (!Number.isFinite(peak)) {
-    // Classify the origin by the same rule as the temperature-0 path (finite before processing =
-    // the bias removed the candidates).
-    throw nonFiniteMaximum(
-      `The maximum candidate logit is non-finite (${peak}) — every token is banned`,
-      logits,
-      suppressTokens,
-    );
-  }
+  if (!Number.isFinite(peak)) return peak;
   const weights = new Float64Array(candidates.length);
   let total = 0;
   for (let index = 0; index < candidates.length; index += 1) {
@@ -738,6 +806,107 @@ const drawFrom = (
 };
 
 /**
+ * The draw target of {@link samplerDistribution} for the whole row, from the row's leading entries
+ * alone — or `undefined` when they do not decide it ({@link SamplerCandidates.next}).
+ *
+ * `values[i]` is the raw logit of token `indices[i]`, and the entries are the first `n` of the
+ * row's ranking R₀: value descending, the smaller id first on a tie, +0 = −0, NaN above every
+ * number (the GPU `topk`'s order). `n = topK + |suppressed| + 1` ({@link SamplerCandidates.count}).
+ * The whole-row path ranks the **processed** logits — a suppressed id at −∞, every other logit
+ * `x` at `f(x)`, the identity at temperature 1 and the f32 nearest `x / temperature` otherwise —
+ * by the same rule (ranking R₁), takes its first `topK` entries and normalizes them. Why the
+ * entries at hand give the same `topK`, in the same order, with the same values:
+ *
+ * 1. **NaN.** A NaN at an id that is not suppressed makes the whole-row path throw for the smallest
+ *    such id. Every NaN outranks every number in R₀ and NaNs rank by id, so that id is preceded only
+ *    by suppressed NaNs — at most `|suppressed|` of them — and is among the entries. So: such a NaN
+ *    among the entries → `undefined` (the whole row throws), none among them → none in the row.
+ * 2. **The candidates.** Let U be the entries that are not suppressed, in R₀'s order; at least
+ *    `topK + 1` of them. `f` never reverses an order (a division by a positive number rounded to
+ *    nearest is monotone), so a token outside the entries — below every entry in R₀ — has a
+ *    processed value at most that of U's last entry, `m`. Sort U by R₁. An entry of U whose value is
+ *    above `m` therefore outranks, in R₁, every token outside the entries and every suppressed
+ *    token; so when U's `topK`-th value is above `m`, the first `topK` of U are the whole row's
+ *    first `topK` in R₁.
+ * 3. **A tie with `m`.** When U's `topK`-th value equals `m`, a token outside the entries can hold
+ *    the same value. At temperature 1 it cannot matter unless that value is −∞: `f` is the identity,
+ *    R₁ is R₀ on everything not suppressed, and such a token ranks below every entry by id. A
+ *    suppressed token (at −∞) outranks an entry at −∞ by its id at any temperature, and with a
+ *    temperature other than 1 two different logits can round to one value, where a smaller id
+ *    outside the entries would rank first. Both → `undefined`.
+ * 4. **The values.** The processed value of a candidate is computed here as the whole-row path
+ *    computes it (`processLogits`: an f32 store of the f64 quotient), and the weights, sums and the
+ *    top-p cut are {@link distributionOver}'s for both. A maximum that is not finite has no
+ *    distribution; the whole row classifies and throws it → `undefined`.
+ *
+ * Entries that are not what the selection promises — an id outside the vocabulary, an order R₀
+ * does not allow, a wrong count — are no basis for any of this → `undefined` as well: the whole
+ * row gives the token, and the count of such steps is what shows the selection is broken.
+ *
+ * `topK` is the spec's, clamped to the vocabulary; the spec is one {@link Sampler.topCandidates}
+ * accepts (not checked again here).
+ *
+ * NOTE: exported so the tests compare the distribution itself, bit for bit, with
+ * {@link samplerDistribution}'s (a token alone would hide a last-bit difference in a probability
+ * until a uniform value lands on it). Not on the `mod.ts` / subpath surface (ADR 0008).
+ */
+export const candidateDistribution = (
+  values: Float32Array<ArrayBuffer>,
+  indices: Int32Array<ArrayBuffer>,
+  spec: SamplerSpec,
+  suppressed: readonly number[],
+  vocabSize: number,
+  topK: number,
+): SamplerDistribution | undefined => {
+  const count = topK + suppressed.length + 1;
+  if (values.length !== count || indices.length !== count) return undefined;
+  const temperature = spec.temperature ?? 0;
+  const scaled = temperature !== 1;
+  // U: the entries that are not suppressed, in R₀'s order, with their processed values.
+  const ids = new Int32Array(count);
+  const processed = new Float32Array(count);
+  let kept = 0;
+  for (let at = 0; at < count; at += 1) {
+    const id = indices[at];
+    const value = values[at];
+    if (id < 0 || id >= vocabSize) return undefined;
+    if (at > 0) {
+      // R₀ between neighbours: NaN first, then value descending, then id ascending.
+      const before = values[at - 1];
+      const ordered =
+        before !== before
+          ? value === value || indices[at - 1] < id
+          : value === value && (before > value || (before === value && indices[at - 1] < id));
+      if (!ordered) return undefined;
+    }
+    if (suppressed.includes(id)) continue;
+    if (value !== value) return undefined;
+    ids[kept] = id;
+    processed[kept] = scaled ? value / temperature : value;
+    kept += 1;
+  }
+  // Duplicate ids in the suppressed set could leave fewer than the proof needs.
+  if (kept < topK + 1) return undefined;
+  const floor = processed[kept - 1];
+  // U by R₁: processed value descending, the smaller id first on a tie.
+  const order = Array.from({ length: kept }, (_unused, at) => at).sort((left, right) =>
+    processed[left] > processed[right] ||
+    (processed[left] === processed[right] && ids[left] < ids[right])
+      ? -1
+      : 1,
+  );
+  const last = processed[order[topK - 1]];
+  if (last === Number.NEGATIVE_INFINITY || (scaled && last === floor)) return undefined;
+  const distribution = distributionOver(processed, order.slice(0, topK), spec.topP);
+  if (typeof distribution === "number") return undefined;
+  // `distributionOver` names its candidates by their place in `processed`: back to token ids.
+  return {
+    tokens: distribution.tokens.map((at) => ids[at]),
+    probabilities: distribution.probabilities,
+  };
+};
+
+/**
  * Builds a sampler (it holds RNG state, so one generation **reuses the same object**).
  *
  * Omitting the specification gives greedy (temperature 0) — this expresses that this layer owns no
@@ -788,6 +957,30 @@ export const createSampler = (
       // The same rule as `next`: one candidate consumes no uniform value.
       if (tokens.length === 1) return { token: tokens[0], draws: 0 };
       return { token: drawFrom(tokens, probabilities, random.peek(ahead)), draws: 1 };
+    },
+    topCandidates(vocabSize: number, maxCount: number): SamplerCandidates | undefined {
+      if (
+        (frozen.temperature ?? 0) === 0 ||
+        frozen.topK === undefined ||
+        (frozen.repetitionPenalty ?? 1) !== 1 ||
+        (frozen.logitBias?.length ?? 0) !== 0
+      ) {
+        return undefined;
+      }
+      // The clamp of `samplerDistribution` (HF's `min(top_k, vocab)`).
+      const topK = Math.min(frozen.topK, vocabSize);
+      const count = topK + suppressed.length + 1;
+      if (count > maxCount || count > vocabSize) return undefined;
+      return {
+        count,
+        next: (values, indices) => {
+          const drawn = candidateDistribution(values, indices, frozen, suppressed, vocabSize, topK);
+          if (drawn === undefined) return undefined;
+          // The rule of `next`: one candidate makes the draw trivial and consumes no uniform value.
+          if (drawn.tokens.length === 1) return drawn.tokens[0];
+          return drawFrom(drawn.tokens, drawn.probabilities, random.uniform());
+        },
+      };
     },
   };
 };

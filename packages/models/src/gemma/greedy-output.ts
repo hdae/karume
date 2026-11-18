@@ -1,6 +1,7 @@
 /**
- * Internal execution surface that picks the last row's maximum on the GPU and cuts a conversation's
- * output transfer to 8 B.
+ * Internal execution surface that selects from the last row's logits on the GPU, so a decode step
+ * transfers the selection instead of the row: the maximum (8 B) for a greedy step, the leading
+ * entries of every part of the row (16 KiB of 1 MiB) for a step that samples from the top-k.
  */
 import {
   type BatchScope,
@@ -15,7 +16,9 @@ import {
   type Session,
 } from "@karume/runtime";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { leadingEntries } from "../generation/leading-entries.ts";
 import type {
+  GenerationCandidateSelection,
   GenerationGreedyAhead,
   GenerationGreedyRun,
   GenerationSession,
@@ -132,6 +135,148 @@ export const gemmaSelectionModel = (
   );
 };
 
+/** The name of the candidate selection graph (no weight: only its declaration, as {@link SELECT_GRAPH}). */
+const CANDIDATES_GRAPH = "candidates";
+/** The row as `[width, parts]` (a reshape of the logits, no dispatch): row `j` holds the ids `j · parts …`. */
+const ROW_BY_ID = "row_by_id";
+/** The row cut into parts by residue (`[parts, width]` — the permute of {@link ROW_BY_ID}). */
+const ROW_PARTS = "row_parts";
+/** The candidate selection's two exits: every part's leading logits and their places within the part. */
+const PART_VALUE = "part_value";
+const PART_INDEX = "part_index";
+
+/**
+ * How the candidate selection cuts a row: `parts` parts by residue of `width` ids each, the first
+ * `perPart` entries of each selected (`PartSelections` of `generation/leading-entries.ts`).
+ */
+export type GemmaCandidateLayout = {
+  readonly parts: number;
+  readonly perPart: number;
+  readonly width: number;
+};
+
+/** The parts a row is cut into, and the entries selected per part. */
+const CANDIDATE_PARTS = 256;
+const CANDIDATES_PER_PART = 8;
+
+/**
+ * The layout for a vocabulary, or `undefined` when it does not cut into {@link CANDIDATE_PARTS}
+ * equal parts that each hold more than {@link CANDIDATES_PER_PART} ids (the selection is then not
+ * built, and sampled steps read the whole row).
+ *
+ * 256 parts of 8 entries, measured on the RTX 3080 Ti (perf-ledger H-32): the `topk` kernel's time
+ * grows steeply with the entries it keeps per part and falls with the number of parts, and 8 per
+ * part over 256 parts is where the selection costs a small fraction of the readback and the host's
+ * scan it replaces; 32 per part over 64 parts costs more than both. The per-part `topk` is within
+ * what every WebGPU device admits (k ≤ 63 at the default workgroup storage), one dispatch covers
+ * the row with one workgroup per part, and the selection is 16 KiB. The row's first 65 entries —
+ * the distributions' sampler, top-k 64 — are missing from it only when 8 of them share a residue
+ * modulo 256; that step reads the whole row instead.
+ */
+export const gemmaCandidateLayout = (vocabSize: number): GemmaCandidateLayout | undefined => {
+  const width = vocabSize / CANDIDATE_PARTS;
+  return Number.isSafeInteger(width) && width > CANDIDATES_PER_PART
+    ? { parts: CANDIDATE_PARTS, perPart: CANDIDATES_PER_PART, width }
+    : undefined;
+};
+
+/**
+ * The most leading entries a sampler may ask of the selection: an eighth of what it holds. A count
+ * near the selection's size would have most steps find a part exhausted (with the entries spread
+ * evenly a part holds `count / parts` of them, and it returns `perPart`), and every such step pays
+ * for the selection and for the whole row.
+ */
+const candidateMaxCount = (layout: GemmaCandidateLayout): number =>
+  Math.floor((layout.parts * layout.perPart) / 8);
+
+/**
+ * The candidate selection as a separate small IR, like {@link gemmaSelectionModel}: the row
+ * rearranged into its parts by residue (a reshape to `[width, parts]` and a permute) and one
+ * `topk` over them. It reads the raw logits — the suppressed tokens are left to the host's draw,
+ * which masks them as the whole-row draw does (a mask on the GPU would turn a NaN at a suppressed
+ * id into a NaN the host cannot tell from one that counts).
+ *
+ * MUST / MUST NOT: the two rules of {@link gemmaSelectionModel} on `parseIrDeclarationValue` and
+ * on `states` hold here for the same reasons.
+ *
+ * NOTE: `export` is for the GPU test of the selection (not exposed on `mod.ts` / the subpath
+ * surface — ADR 0008).
+ *
+ * SPEC: docs/spec/generation.md#the-selection-on-the-gpu
+ */
+export const gemmaCandidateSelectionModel = (
+  vocabSize: number,
+  layout: GemmaCandidateLayout,
+): PreparedModel => {
+  const { parts, perPart, width } = layout;
+  const graph = parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["permute", "reshape", "topk"] },
+    symbols: [],
+    initializers: {},
+    inputs: [{ name: "logits", dtype: "f32", shape: [1, 1, vocabSize] }],
+    outputs: [PART_VALUE, PART_INDEX],
+    values: {
+      [ROW_BY_ID]: { dtype: "f32", shape: [width, parts] },
+      [ROW_PARTS]: { dtype: "f32", shape: [parts, width] },
+      [PART_VALUE]: { dtype: "f32", shape: [parts, perPart] },
+      [PART_INDEX]: { dtype: "i32", shape: [parts, perPart] },
+    },
+    nodes: [
+      { op: "reshape", ins: ["logits"], outs: [ROW_BY_ID], attrs: {} },
+      { op: "permute", ins: [ROW_BY_ID], outs: [ROW_PARTS], attrs: { dims: [1, 0] } },
+      { op: "topk", ins: [ROW_PARTS], outs: [PART_VALUE, PART_INDEX], attrs: { k: perPart } },
+    ],
+  });
+  return prepareContainer(
+    openMemoryContainer({ graphs: { [CANDIDATES_GRAPH]: graph }, tensors: {} }),
+    CANDIDATES_GRAPH,
+  );
+};
+
+/** The candidate selection's Session and the residents its two exits are copied to. */
+type CandidateResources = {
+  readonly selector: Session;
+  readonly values: ResidentTensor;
+  readonly indices: ResidentTensor;
+};
+
+const disposeCandidates = (resources: CandidateResources): Promise<void> =>
+  disposeSteps([
+    () => resources.selector.dispose(),
+    () => resources.values.dispose(),
+    () => resources.indices.dispose(),
+  ]);
+
+const prepareCandidates = async (
+  gpu: GpuContext,
+  model: PreparedModel,
+  layout: GemmaCandidateLayout,
+): Promise<CandidateResources> => {
+  let selector: Session | undefined;
+  const residents: ResidentTensor[] = [];
+  try {
+    selector = await model.createContainerSession(gpu, { planBackingBudgetBytes: 0 });
+    const bytes = layout.parts * layout.perPart * 4;
+    const values = await gpu.createResident(bytes, "candidate-values");
+    residents.push(values);
+    const indices = await gpu.createResident(bytes, "candidate-indices");
+    residents.push(indices);
+    return { selector, values, indices };
+  } catch (error) {
+    try {
+      await disposeSteps([() => selector?.dispose(), ...residents.map((r) => () => r.dispose())]);
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        "Allocating the candidate selection and the clean-up both failed",
+      );
+    }
+    throw error;
+  }
+};
+
 type Resources = {
   readonly selector: Session;
   readonly logits: ResidentTensor;
@@ -222,6 +367,11 @@ const prepareAhead = async (gpu: GpuContext, depth: number): Promise<AheadResour
 export type GemmaGreedyOutput = {
   readonly session: GenerationSession;
   readonly greedy: GenerationGreedyRun<GenerationContext>;
+  /**
+   * The candidate selection for steps that sample from the top-k (absent when the vocabulary has
+   * no layout — {@link gemmaCandidateLayout}).
+   */
+  readonly candidates?: GenerationCandidateSelection<GenerationContext>;
   /** The decode run-ahead (present only when built with a depth ≥ 2 — `decodeAhead`). */
   readonly ahead?: GenerationGreedyAhead<GenerationContext>;
   readonly extraBytes: number;
@@ -263,6 +413,11 @@ const withPleInput = async (
  *
  * `selection.suppressTokens` is the distribution's suppressed set; the selection masks it, so the
  * caller's sequence declares `greedyMasksSuppressed`.
+ *
+ * {@link GemmaGreedyOutput.candidates} runs a decode step as `greedy` does — the target and a
+ * selector in one batch, one fence — with the candidate selection in the selector's place, and
+ * hands the sampler's draw the leading entries merged from it. A draw the entries do not decide
+ * reads the logits resident back in the same chained operation, so no other run has written it.
  */
 export const createGemmaGreedyOutput = (
   gpu: GpuContext,
@@ -293,15 +448,24 @@ export const createGemmaGreedyOutput = (
   const suppressTokens = selection.suppressTokens ?? [];
   const model = gemmaSelectionModel(vocabSize, depth !== undefined, suppressTokens),
     chain = createOperationChain();
+  const layout = gemmaCandidateLayout(vocabSize);
+  const candidateModel =
+    layout === undefined ? undefined : gemmaCandidateSelectionModel(vocabSize, layout);
   // The selector's input is resident, so this estimate, which includes the host-input share, is a
-  // conservative upper bound. The run-ahead adds one value + index pair per step.
+  // conservative upper bound. The run-ahead adds one value + index pair per step, the candidate
+  // selection its two exits and its selector (the same conservative estimate).
   const extraBytes =
     vocabSize * 4 +
     8 +
     model.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes +
-    (depth ?? 0) * 8;
+    (depth ?? 0) * 8 +
+    (layout === undefined || candidateModel === undefined
+      ? 0
+      : layout.parts * layout.perPart * 8 +
+        candidateModel.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes);
   let ready: Promise<Resources> | undefined;
   let aheadReady: Promise<AheadResources> | undefined;
+  let candidatesReady: Promise<CandidateResources> | undefined;
   let disposal: Promise<void> | undefined;
   const assertAlive = (): void => {
     if (disposal !== undefined) throw new Error("The greedy output is disposed");
@@ -384,9 +548,54 @@ export const createGemmaGreedyOutput = (
             });
           },
         };
+  const candidates: GenerationCandidateSelection<GenerationContext> | undefined =
+    layout === undefined || candidateModel === undefined
+      ? undefined
+      : {
+          maxCount: candidateMaxCount(layout),
+          run: (inputs, generation, draw) => {
+            assertAlive();
+            return chain(async () => {
+              const r = await resources();
+              candidatesReady ??= prepareCandidates(gpu, candidateModel, layout).catch((cause) => {
+                candidatesReady = undefined;
+                throw cause;
+              });
+              const c = await candidatesReady;
+              const batch = await gpu.beginBatch();
+              let read: Readonly<Record<"values" | "indices", ArrayBuffer>>;
+              try {
+                await target.enqueue(await withPleInput(ple, batch, inputs), {
+                  batch,
+                  generation,
+                  copyOutputs: { [logitsName]: r.logits },
+                });
+                await c.selector.enqueue(
+                  { logits: r.logits },
+                  { batch, copyOutputs: { [PART_VALUE]: c.values, [PART_INDEX]: c.indices } },
+                );
+                read = await batch.finishAndRead({ values: c.values, indices: c.indices });
+              } finally {
+                await batch.finish();
+              }
+              const selections = {
+                values: new Float32Array(read.values),
+                indices: new Int32Array(read.indices),
+                ...layout,
+              };
+              // Still inside the chained operation: the resident holds this run's logits until the
+              // draw settles (`GenerationCandidateSelection`'s MUST).
+              return await draw({
+                leading: (count) => leadingEntries(selections, count),
+                whole: async () => new Float32Array(await r.logits.read()),
+              });
+            });
+          },
+        };
   return {
     extraBytes,
     ...(ahead === undefined ? {} : { ahead }),
+    ...(candidates === undefined ? {} : { candidates }),
     session: {
       createGenerationContext: (spec) => target.createGenerationContext(spec),
       run: (inputs, bindings, generation) => {
@@ -458,6 +667,9 @@ export const createGemmaGreedyOutput = (
           },
           async () => {
             if (aheadReady !== undefined) await disposeAhead(await aheadReady);
+          },
+          async () => {
+            if (candidatesReady !== undefined) await disposeCandidates(await candidatesReady);
           },
         ]);
       });

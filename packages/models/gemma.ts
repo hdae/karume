@@ -248,6 +248,13 @@ export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
+  /**
+   * The candidate selection counters (`GenerationStop.candidateSelection` — the leading logits a
+   * sampled decode step read back in place of the whole row, the steps drawn from them and the
+   * steps that read the whole row after all. Present on turns of a pipeline that has the selection;
+   * `count` 0 = the turn did not use it).
+   */
+  GenerationCandidateCounts,
   GenerationCapacityConstraint,
   GenerationCapacityDetail,
   /**

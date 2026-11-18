@@ -79,6 +79,8 @@
  * next run instead of before it (one more token delivered); an abort whose task ran, or one the
  * consumer made synchronously, is seen at that boundary.
  *
+ * SPEC: docs/spec/generation.md#abort-checks
+ *
  * ## The speculative path (ADR 0096 stage 3 — when `options.speculative` is given, at any temperature)
  *
  * 1 cycle = draft (a borrower run, `k' = min(k, remaining budget − 1)` drafts) → verify (the
@@ -138,6 +140,19 @@
  * abort boundary is the batch; a token of a batch already run is checked synchronously before it is
  * handed out. A failed batch commits nothing (the frontier stays `pendingToken`, as for a failed
  * per-step run).
+ *
+ * ## The candidate selection (`options.candidateSelection` — where a sampled decode step would read the row)
+ *
+ * A decode step of a sampler narrowed by top-k reads back the leading entries of the logits row's
+ * ranking, selected on the GPU, instead of the whole row, and draws from them
+ * (`Sampler.topCandidates`). The draw is the whole row's — the same token for the same seed, the
+ * RNG consumed alike — or the entries say they do not decide it, and that step reads the whole row
+ * back and draws from it as before. Which of the two a step took is counted
+ * ({@link GenerationStop.candidateSelection}). It runs where the plain per-step decode reads the
+ * logits: not on a speculative sequence, under the expert cache or with an observation hook, and
+ * not for the token the prefill's logits give.
+ *
+ * SPEC: docs/spec/generation.md#candidate-selection
  *
  * ## Self-speculation over the expert cache (`options.selfSpeculation` — ADR 0146 decision 8)
  *
@@ -334,6 +349,11 @@ export type GenerationStop = {
    * absent altogether otherwise).
    */
   readonly decodeAhead?: GenerationDecodeAhead;
+  /**
+   * Candidate selection counters (present only on turns of a sequence with
+   * `options.candidateSelection` — absent altogether otherwise).
+   */
+  readonly candidateSelection?: GenerationCandidateCounts;
 } & (
   | { readonly reason: "eos"; readonly token: number }
   | { readonly reason: "stop-token"; readonly token: number }
@@ -342,6 +362,29 @@ export type GenerationStop = {
   | { readonly reason: "aborted" }
   | { readonly reason: "closed" }
 );
+
+/**
+ * Candidate selection counters ({@link GenerationStop.candidateSelection}) — where the turn's decode
+ * steps drew their tokens from. Like the run-ahead's, they are the only place the path shows: the
+ * tokens are the same either way.
+ */
+export type GenerationCandidateCounts = {
+  /**
+   * The leading entries a step asked the selection for (`Sampler.topCandidates`). `0` = the turn
+   * did not use the selection: its sampler does not qualify (temperature 0, no top-k, a repetition
+   * penalty or a logit bias, or more entries than the selection offers), or the decode ran on
+   * another path (a drafter, the expert cache, an observation hook). Its decode steps then read the
+   * whole row, or the GPU's maximum at temperature 0, as without the selection.
+   */
+  readonly count: number;
+  /** Decode steps whose token was drawn from the selected entries. */
+  readonly steps: number;
+  /**
+   * Decode steps whose entries did not decide the draw: the whole row was read back for them and
+   * the host drew from it. A turn where these are most of the steps is paying for both paths.
+   */
+  readonly fallbacks: number;
+};
 
 /**
  * Decode run-ahead counters ({@link GenerationStop.decodeAhead}) — which decode path the turn took.
@@ -920,7 +963,59 @@ export type GenerationSelfSpeculation<C extends GenerationContextFace> = {
   cycle(request: GenerationSelfSpeculationRequest<C>): Promise<GenerationSelfSpeculationCycle>;
 };
 
+/** One decode step's logits row as the candidate selection hands it to the draw. */
+export type GenerationSelectedRow = {
+  /**
+   * The first `count` entries of the row's ranking — value descending, the smaller id first on a
+   * tie, +0 and −0 equal, NaN above every number (`values[i]` the raw logit of token
+   * `indices[i]`) — or `undefined` when the selection does not hold them all. Synchronous, and it
+   * never throws.
+   */
+  leading(count: number):
+    | {
+        readonly values: Float32Array<ArrayBuffer>;
+        readonly indices: Int32Array<ArrayBuffer>;
+      }
+    | undefined;
+  /** The whole row of the same run, read back from the GPU (one more readback of the row's size). */
+  whole(): Promise<Float32Array<ArrayBuffer>>;
+};
+
+/**
+ * The candidate selection (internal capability — {@link GenerationSequenceOptions.candidateSelection}):
+ * one decode step whose logits row stays on the GPU, where the leading entries of its ranking are
+ * selected and read back in its place.
+ *
+ * MUST: `run` calls `draw` exactly once, **after the run has gone through** (the context advanced
+ * by the step's row), and resolves with what it returned; a failed run rejects without calling it,
+ * and a `draw` that throws rejects with what it threw. The sequence tells the two apart by whether
+ * `draw` was entered: only then is the frontier in the KV.
+ * MUST: `draw` runs **inside the capability's serialized section** — no other run of the Session
+ * starts before it settles — so `row.whole()` reads this run's logits even when the Session is
+ * shared with other sequences.
+ */
+export type GenerationCandidateSelection<C extends GenerationContextFace> = {
+  /**
+   * The most leading entries a step may ask for. A sampler that needs more does not use the
+   * selection (asking for more than it holds would turn every step into a fallback).
+   */
+  readonly maxCount: number;
+  run(
+    inputs: RunInputs,
+    generation: { readonly context: C; readonly queryLength: number },
+    draw: (row: GenerationSelectedRow) => Promise<number>,
+  ): Promise<number>;
+};
+
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
+  /**
+   * The candidate selection (internal capability — the module doc section). It replaces the
+   * readback of the whole logits row in the plain per-step decode of a sampler that qualifies
+   * (`Sampler.topCandidates`), and the token ids are **identical** to the whole-row draw's. A turn
+   * that does not meet the conditions decodes as before ({@link GenerationStop.candidateSelection}
+   * tells which path ran).
+   */
+  readonly candidateSelection?: GenerationCandidateSelection<C>;
   /**
    * Internal capability that returns the maximum of the logits. Used only for decode at
    * temperature 0, without processing, non-speculative, without observation, and with an empty
@@ -1699,6 +1794,24 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     /** This turn's run-ahead counters (only on a sequence built with `greedyAhead`). */
     const aheadTally =
       ahead === undefined ? undefined : { depth: ahead.depth, batches: 0, steps: 0 };
+    /**
+     * The candidate selection takes the decode where the plain per-step loop would read the whole
+     * row for a draw (the same three conditions as the greedy selection, for the samplers the
+     * greedy selection does not cover — {@link GenerationSequenceOptions.candidateSelection}).
+     */
+    const selection = options.candidateSelection;
+    const candidates =
+      selection !== undefined &&
+      face === undefined &&
+      self === undefined &&
+      options.onRun === undefined
+        ? sampler.topCandidates(program.vocabSize, selection.maxCount)
+        : undefined;
+    /** This turn's candidate counters (only on a sequence built with `candidateSelection`). */
+    const candidateTally =
+      selection === undefined
+        ? undefined
+        : { count: candidates?.count ?? 0, steps: 0, fallbacks: 0 };
     const pickGreedy = (result: GreedyRunResult): number => {
       if (
         !Number.isSafeInteger(result.index) ||
@@ -1745,11 +1858,15 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
                 : { plainSteps, switches: gate.switches - switchesAtStart }),
             },
           };
-    /** The turn's stop with every counter the sequence keeps (speculation, run-ahead). */
-    const withCounters = (stopped: GenerationStop): GenerationStop =>
-      aheadTally === undefined
-        ? withSpeculation(stopped)
-        : { ...withSpeculation(stopped), decodeAhead: { ...aheadTally } };
+    /**
+     * The turn's stop with every counter the sequence keeps (speculation, run-ahead, candidate
+     * selection).
+     */
+    const withCounters = (stopped: GenerationStop): GenerationStop => ({
+      ...withSpeculation(stopped),
+      ...(aheadTally === undefined ? {} : { decodeAhead: { ...aheadTally } }),
+      ...(candidateTally === undefined ? {} : { candidateSelection: { ...candidateTally } }),
+    });
     /** Confirms the pending verify up to the frontier (does nothing if nothing is pending). */
     const settleCommit = (): void => {
       if (context.pendingCommit === undefined) return;
@@ -2285,15 +2402,44 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           // Prefill keeps the normal run, avoiding the cost of allocating a large backing from the
           // first turn.
           const result =
-            greedy === undefined
+            greedy !== undefined
               ? {
-                  kind: "logits" as const,
-                  outputs: await session.run(inputs, undefined, { context, queryLength: 1 }),
-                }
-              : {
                   kind: "greedy" as const,
                   selected: await greedy(inputs, { context, queryLength: 1 }),
-                };
+                }
+              : selection !== undefined && candidates !== undefined && candidateTally !== undefined
+                ? {
+                    kind: "drawn" as const,
+                    token: await selection.run(inputs, { context, queryLength: 1 }, async (row) => {
+                      // MUST: the run has gone through, so the frontier is in the KV — cleared
+                      // **before** the draw for the reason given below (a draw that throws must
+                      // not leave it to be fed again).
+                      pendingToken = undefined;
+                      const entries = row.leading(candidates.count);
+                      const drawn =
+                        entries === undefined
+                          ? undefined
+                          : candidates.next(entries.values, entries.indices);
+                      if (drawn !== undefined) {
+                        candidateTally.steps += 1;
+                        return drawn;
+                      }
+                      // The entries do not decide the draw: the whole row does, as without the
+                      // selection (the RNG is where it was — `SamplerCandidates.next`).
+                      candidateTally.fallbacks += 1;
+                      const whole = await row.whole();
+                      if (whole.length !== program.vocabSize) {
+                        throw new Error(
+                          `decode@${step}: the whole logits row has ${whole.length} values, not ${program.vocabSize}`,
+                        );
+                      }
+                      return sampler.next(whole, history);
+                    }),
+                  }
+                : {
+                    kind: "logits" as const,
+                    outputs: await session.run(inputs, undefined, { context, queryLength: 1 }),
+                  };
           // MUST: once the run has gone through, the frontier is in the KV (= it must not be
           // prepended again) — for the same reason as `index === 0` on the prefill side, clear it
           // **before** the draw. Placed after the draw, a throw from `sampler.next` (NaN logits,
@@ -2303,10 +2449,12 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           token =
             result.kind === "greedy"
               ? pickGreedy(result.selected)
-              : sampler.next(
-                  readLogits(result.outputs, program, `decode@${step}`, 1).row(0),
-                  history,
-                );
+              : result.kind === "drawn"
+                ? result.token
+                : sampler.next(
+                    readLogits(result.outputs, program, `decode@${step}`, 1).row(0),
+                    history,
+                  );
           onRun?.({ kind: "decode", step: step + 1, wallMs: now() - startedAt });
           generated += 1;
           history.push(token);

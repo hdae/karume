@@ -702,6 +702,23 @@ describe("chat stop strings: even with the stop reason replaced, the inner count
     const plain = stopStringOf("END", { reason: "max-tokens", tokens: 8 });
     assertEquals(Object.hasOwn(plain, "decodeAhead"), false);
   });
+
+  it("a turn with the candidate selection: its counters are copied as they are", () => {
+    const candidateSelection = { count: 65, steps: 6, fallbacks: 1 };
+    const stop = stopStringOf("END", { reason: "max-tokens", tokens: 8, candidateSelection });
+    assertEquals(stop, {
+      reason: "stop-string",
+      stopString: "END",
+      tokens: 8,
+      candidateSelection,
+    });
+    assert(
+      stop.candidateSelection === candidateSelection,
+      "the counters were rebuilt instead of copied",
+    );
+    const plain = stopStringOf("END", { reason: "max-tokens", tokens: 8 });
+    assertEquals(Object.hasOwn(plain, "candidateSelection"), false);
+  });
 });
 
 test("speculative switch (speculativeSetup): passing true to a pipeline without a drafter fails loudly", () => {

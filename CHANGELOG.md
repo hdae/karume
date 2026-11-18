@@ -72,6 +72,16 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/models/gemma`: a decode step that samples from the top-k reads back the leading logits of the row,
+  selected on the GPU, instead of the whole row (16 KiB in place of 1 MiB), and the sampler draws from them. The token
+  ids are the ones the whole row gives for the same seed: the sampler ranks, normalizes and draws on the host as
+  before, and a step whose selected logits cannot settle the draw (a tie that reaches past them, a NaN, a part of the
+  vocabulary that holds too many of them) reads the whole row. It applies to samplers with a temperature above 0 and
+  a `topK`, without a repetition penalty or a logit bias — the distributions' own sampler among them — on the
+  pipelines that select the maximum on the GPU at temperature 0 (not under the expert cache, with a drafter or with
+  `onRunDiagnostics`); it has no option. The stop of a turn of such a pipeline carries `candidateSelection`
+  (`GenerationCandidateCounts`, a new exported type): the leading logits asked per step (0 = the turn did not use the
+  selection), the decode steps drawn from them and the steps that read the whole row.
 - `@karume/runtime/tune`: `runGemvSweep`, the GEMV sweep. On a dedicated device it measures the GEMV choices of
   `linear` at the shapes of its case table — the default profile's GEMV rows and the other integer-storage linears a
   decode token or a draft step of the Gemma 4 distributions runs at one row (the int2 and int4 output heads, the MTP

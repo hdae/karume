@@ -411,6 +411,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GenerationCandidateCounts",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerationCapacityConstraint",
         "kind": "typeAlias"
       },
