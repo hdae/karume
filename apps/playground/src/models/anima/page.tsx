@@ -97,7 +97,7 @@ import { type DiagnosticsSink, useAnimaPipeline } from "./use-anima-pipeline";
 
 /**
  * Module constants (useGpu needs stable options). `shaderF16` only while a preset that computes in
- * f16 (`f16-c16`) is chosen: a feature can be requested only when the device is created, and the
+ * f16 (`bf16-c16`) is chosen: a feature can be requested only when the device is created, and the
  * runtime treats it as an explicit opt-in (it runs an f16 check at acquisition), so a failing f16
  * path never takes the other presets down with it.
  */
@@ -680,7 +680,7 @@ export const AnimaPage = () => {
                 ? "—"
                 : gpu.shaderF16Enabled
                   ? "enabled (requested for this preset)"
-                  : "not requested (only f16-c16 needs it)",
+                  : "not requested (only bf16-c16 needs it)",
             ],
             [
               "Pipeline",

@@ -36,8 +36,8 @@ const ANIMA = manifestText({
   pipeline: "anima/1",
   models: ["anima-turbo-v1.1"],
   component: "vae_decoder",
-  presets: { f16: { convCompute: "a8" } },
-  defaultPreset: "f16",
+  presets: { bf16: { convCompute: "a8" } },
+  defaultPreset: "bf16",
 });
 
 const DISTRIBUTION = {
@@ -120,7 +120,7 @@ describe("the session-ab entry", () => {
             mount: "anima",
             component: "vae_decoder",
             model: "anima-turbo-v1.1",
-            quant: "f16",
+            quant: "bf16",
             sessionOptions: {},
           },
         ],

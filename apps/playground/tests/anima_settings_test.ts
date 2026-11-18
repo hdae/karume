@@ -64,18 +64,17 @@ const animaLikeManifest = (
               },
             },
             weights: {
-              transformer: { f16: container(`${name}/transformer`, false) },
-              text_encoder: { f16: container("shared/text_encoder", options.crossRepo) },
+              transformer: { bf16: container(`${name}/transformer`, false) },
+              text_encoder: { bf16: container("shared/text_encoder", options.crossRepo) },
             },
             quants: {
-              f16: { weights: { transformer: "f16", text_encoder: "f16" }, session: {} },
               bf16: {
-                weights: { transformer: "f16", text_encoder: "f16" },
+                weights: { transformer: "bf16", text_encoder: "bf16" },
                 session: {},
                 label: "Original weights (bf16)",
               },
             },
-            defaultQuant: "f16",
+            defaultQuant: "bf16",
             pipelineConfig: {
               scheduler: { type: "euler", shift: 3, numTrainTimesteps: 1000 },
               defaults: {
@@ -153,7 +152,7 @@ describe("defaultModelRef", () => {
 
 describe("crossRepoMounts", () => {
   it("maps the repository a fine-tune references to the mount that holds it", () => {
-    expect(crossRepoMounts(extra, "wai", "f16", { [OFFICIAL]: "anima" })).toEqual({
+    expect(crossRepoMounts(extra, "wai", "bf16", { [OFFICIAL]: "anima" })).toEqual({
       [OFFICIAL]: "anima",
     });
   });
@@ -163,7 +162,7 @@ describe("crossRepoMounts", () => {
   });
 
   it("fails loudly for a referenced repository no mount holds", () => {
-    expect(() => crossRepoMounts(extra, "wai", "f16", {})).toThrow(
+    expect(() => crossRepoMounts(extra, "wai", "bf16", {})).toThrow(
       /references hdae\/karume-anima, which no mount/,
     );
   });

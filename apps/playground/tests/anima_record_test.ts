@@ -56,7 +56,7 @@ const observation = (patch: Partial<RunObservation> = {}): RunObservation => ({
   defaultModel: "anima-turbo-v1.1",
   quant: "bf16",
   quantLabel: "Original weights (bf16)",
-  defaultQuant: "f16+dit8-a8-attn8-s16",
+  defaultQuant: "bf16+dit8-a8-attn8-s16",
   request: { prompt: "1girl", seed: 42, residency: "per-stage" },
   effective: {
     steps: 8,

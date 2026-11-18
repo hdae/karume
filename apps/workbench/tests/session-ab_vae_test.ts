@@ -160,7 +160,7 @@ describe("the session A/B's VAE targets", () => {
       });
       const anima = sessionAbVaeRequest(
         "anima-vae-decode",
-        { model: "anima-turbo-v1.1", quant: "f16", session: {}, storage: "f16" },
+        { model: "anima-turbo-v1.1", quant: "bf16", session: {}, storage: "bf16" },
         SETTINGS,
       );
       expect([anima.mount, anima.component, anima.sessionOptions]).toEqual([

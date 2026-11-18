@@ -273,10 +273,10 @@ the manifest references to the mount that holds it (`hdae/karume-anima` → `ani
 when that mount is missing.
 
 **When the GPU and the pipeline are set up.** The page acquires its GPU without optional features.
-While a preset that computes in f16 is chosen (`f16-c16`, the manifest's `gpuFeatures.shaderF16`),
+While a preset that computes in f16 is chosen (`bf16-c16`, the manifest's `gpuFeatures.shaderF16`),
 it acquires the GPU with `shaderF16: true` instead. A feature can be requested only when the device
 is created, and the runtime runs an f16 check at acquisition. A device that fails that check
-therefore only blocks `f16-c16`, never the other presets. Switching to or from `f16-c16` acquires
+therefore only blocks `bf16-c16`, never the other presets. Switching to or from `bf16-c16` acquires
 the GPU again: the open pipeline (and a resident DiT) is disposed through `track` in the same
 commit, so the old device is destroyed only after that dispose. Run is disabled until the new GPU is
 ready. The pipeline is **opened on Run**, not when a select changes: on the cached route, opening
@@ -288,7 +288,7 @@ left. One generation runs at a time.
 | Control | What it does |
 | --- | --- |
 | Model | Every model of both manifests ("Official · …" / "Fine-tune · …"), each mount's `defaultModel` marked "(default)". The official default (`anima-turbo-v1.1`) is preselected; without the official distribution, the fine-tunes' default. |
-| Preset | The model's `quants`, `defaultQuant` preselected and marked, the manifest's description as the hint: f16, the int8 presets, `f16-c16` (computes in f16: choosing it acquires the GPU with shader-f16, and a hint says so, or shows that the acquisition failed) and `bf16` (the upstream weights bit for bit, same size as f16). |
+| Preset | The model's `quants`, `defaultQuant` preselected and marked, the manifest's description as the hint: `bf16` (the upstream weights bit for bit), the int8 presets (the transformer in int8, the other components bf16) and `bf16-c16` (the `bf16` weights computed in f16: choosing it acquires the GPU with shader-f16, and a hint says so, or shows that the acquisition failed). |
 | Source | **Cached** (default, the HF-compatible route through the hub's CacheStorage) or **Direct** (`localDirectory` over plain fetch, nothing cached). |
 | Prompt | Free text (Danbooru-style tags work best), with four sample prompts. |
 | Negative prompt | Empty = the manifest's default. Disabled and not sent when the guidance in use is 1: the pipeline never computes the uncond side there and refuses a negative prompt. |
@@ -355,7 +355,7 @@ without it.
 - When the pipeline re-runs a stage after evicting a resident DiT on an out-of-memory, it emits no
   second `stage` start. That stage's seconds, and its first step (or tile) interval, therefore also
   hold the failed attempt and the eviction.
-- If the f16 check fails at acquisition, `f16-c16` cannot run on that machine (the error is shown);
+- If the f16 check fails at acquisition, `bf16-c16` cannot run on that machine (the error is shown);
   choosing any other preset acquires the GPU without the feature.
 
 ## The MOSS-Image page
