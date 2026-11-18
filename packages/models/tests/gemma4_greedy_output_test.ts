@@ -128,3 +128,90 @@ test("greedy output: dispose after an un-awaited generation waits for completion
     gpu.destroy();
   }
 });
+
+/** A vocabulary the candidate selection has a layout for: 256 parts of 16 ids. */
+const WIDE = 4096;
+const wideModel = (): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  symbols: [],
+  requires: { ops: ["neg", "reshape", "state_append"] },
+  initializers: {},
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 1, WIDE] }],
+  outputs: ["y"],
+  values: {
+    y: { dtype: "f32", shape: [1, 1, WIDE] },
+    z: { dtype: "f32", shape: [1, 1, 1, WIDE] },
+  },
+  states: { slot: { dtype: "f32", shape: [1, 1, 4, WIDE] } },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["y"], attrs: {} },
+    { op: "reshape", ins: ["x"], outs: ["z"], attrs: {} },
+    { op: "state_append", ins: ["z"], outs: [], attrs: {}, states: { slot: "slot" } },
+  ],
+});
+test("greedy output: a candidate step hands the draw the leading entries and the whole row of its own run, and dispose returns every resident", async () => {
+  const gpu = await acquireGpu(),
+    target = await createSessionFromContainer(
+      gpu,
+      await openModelBytes(wideModel(), []),
+      GRAPH_NAME,
+    );
+  const h = createGemmaGreedyOutput(gpu, target, "y", WIDE),
+    context = await h.session.createGenerationContext({ chunkLength: 1 });
+  const create = gpu.createResident.bind(gpu),
+    made: ResidentTensor[] = [];
+  gpu.createResident = async (...args) => {
+    const r = await create(...args);
+    made.push(r);
+    return r;
+  };
+  try {
+    const candidates = h.candidates;
+    assert(candidates !== undefined, "a vocabulary of 4,096 has a layout");
+    assertEquals(candidates.maxCount, 256);
+    // The target negates its input: logit i is (i × 37) mod 4096, every value once.
+    const logits = Float32Array.from({ length: WIDE }, (_unused, id) => (id * 37) % WIDE);
+    const x: Record<string, Tensor> = {
+      x: { dtype: "f32", shape: [1, 1, WIDE], data: logits.map((value) => -value) },
+    };
+    const expected = Array.from({ length: WIDE }, (_unused, id) => id)
+      .sort((left, right) => logits[right] - logits[left])
+      .slice(0, 5);
+    for (let step = 0; step < 2; step += 1) {
+      const drawn = await candidates.run(x, { context, queryLength: 1 }, async (row) => {
+        // The run has gone through when the draw is called.
+        assertEquals(context.pastLength, step + 1);
+        const entries = row.leading(5);
+        assertEquals([...(entries?.indices ?? [])], expected);
+        assertEquals(
+          [...(entries?.values ?? [])],
+          expected.map((id) => logits[id]),
+        );
+        assertEquals(row.leading(candidates.maxCount * 8 + 1), undefined);
+        assertEquals(await row.whole(), logits);
+        return 700 + step;
+      });
+      assertEquals(drawn, 700 + step);
+    }
+    // A draw that throws rejects the step with what it threw; the run still went through.
+    const failure = new Error("the draw failed");
+    await assertRejects(
+      () => candidates.run(x, { context, queryLength: 1 }, () => Promise.reject(failure)),
+      Error,
+      "the draw failed",
+    );
+    assertEquals(context.pastLength, 3);
+    await h.dispose();
+    // The logits resident, the greedy selector's two exits and the candidate selection's two.
+    assertEquals(made.length, 5);
+    assert(made.every((r) => r.disposed));
+    assertThrows(() => candidates.run(x, { context, queryLength: 1 }, () => Promise.resolve(0)));
+  } finally {
+    gpu.createResident = create;
+    await context.dispose();
+    await h.dispose();
+    await target.dispose();
+    gpu.destroy();
+  }
+});

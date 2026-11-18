@@ -662,14 +662,17 @@ export const createGemmaGreedyOutput = (
     dispose: () => {
       disposal ??= chain(async () => {
         await disposeSteps([
+          // MUST: before the logits resident (borrower → lender): the candidate selector's bind
+          // groups hold the resident it reads, and a resident a Session still holds cannot be
+          // disposed.
+          async () => {
+            if (candidatesReady !== undefined) await disposeCandidates(await candidatesReady);
+          },
           async () => {
             if (ready !== undefined) await disposeResources(await ready);
           },
           async () => {
             if (aheadReady !== undefined) await disposeAhead(await aheadReady);
-          },
-          async () => {
-            if (candidatesReady !== undefined) await disposeCandidates(await candidatesReady);
           },
         ]);
       });
