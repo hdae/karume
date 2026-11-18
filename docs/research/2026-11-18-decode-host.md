@@ -61,12 +61,15 @@ unchanged.
   change that cannot be switched inside one process (H-31) is compared as each build's difference from an arm that
   does not have the item at all (no signal), measured in the same run as itself.
 - Code under measurement: frozen copies of single commits of the branch (the files of the commit, outside the
-  repository), so a queued run measured the commit it was queued for. `base` is commit `78259a27`: main `7834560b`
+  repository), so a queued run measured the commit it was queued for. `base` is commit `8417ae1e`: main `7834560b`
   plus the bench's host mode, no product change.
+- The commits this record names are the branch's as it stands on main `1ceaaf66`. The measurements were taken on
+  the same changes before the branch was moved there, on main `7834560b`; nothing was measured again after the
+  move.
 
 ## 4. The breakdown before any change
 
-Commit `78259a27`. E2B: 3 rounds, 6 warm chats per arm and prompt. E4B: 2 rounds, 4 warm chats. 12B: 2 rounds, one
+Commit `8417ae1e`. E2B: 3 rounds, 6 warm chats per arm and prompt. E4B: 2 rounds, 4 warm chats. 12B: 2 rounds, one
 prompt (`many-ids`), 4 warm chats.
 
 Wall clock and GPU time, ms per decode token (median of the warm chats; the least in parentheses):
@@ -126,7 +129,7 @@ How to read it:
 
 A generation with a signal waited for a `setTimeout(0)` before every decode run. The decode loops now arm that timer
 at one boundary and, at the next, check at once when it was delivered while the run was awaited
-([spec](../spec/generation.md#abort-checks)); commit `2cf2e28d`.
+([spec](../spec/generation.md#abort-checks)); commit `f96328cb`.
 
 The same six arms as section 4's E2B greedy run, on that commit (3 rounds, 6 warm chats per arm and prompt), ms per
 decode token:
@@ -250,26 +253,45 @@ on:
   the frontier and a failed draw drops it, as the whole-row loop does.
 
 The first real-weights run failed in the pipeline's dispose, not in a token: the candidate selector was released
-after the logits resident it reads (fixed in `3852a3a6`; the surface's GPU test has the case, and fails on the commit
+after the logits resident it reads (fixed in `a721cfbf`; the surface's GPU test has the case, and fails on the commit
 before).
 
 Two existing real-weight tests reacted to the selection, neither in a token:
 
 - `e2e_gemma4_chat_test` compares a greedy chat's stop with its pinned value. The sequence reported the selection's
   counters on every turn, a greedy one included (a count of 0); they are now kept for turns that sample only
-  (`2d28531c`), and the test is unchanged.
+  (`8bcc7713`), and the test is unchanged.
 - `e2e_gemma4_ple_gpu_test` counts the queue waits (`onSubmittedWorkDone`) of a sampled chat with the per-layer
   embeddings on the host and on the GPU, and expected the two counts to be equal. They were equal because each path
   paid one wait the other did not: the GPU path the gather batch of the prefill chunk, the host path the wait for
   released memory that a run building a slot backing starts with. With the selection the host path issues its decode
   through `enqueue`, as the greedy path does, and no longer pays that wait. Counted on one sampled chat of the mobile
   QAT E2B (16 tokens, the same ids in all four): whole row 4 waits on the host and 4 on the GPU, selection 3 and 4;
-  the wait that went is the one at the slot backing. The test now expects the GPU path to pay one more than the host
-  path, which is the gather batch its title names.
+  the wait that went is the one at the slot backing. The test now has both paths: the same sampler through pipelines
+  built with the whole-row key runs as a normal run and keeps the equal counts, and the candidate step is expected
+  to pay one more on the GPU path — the gather batch.
+
+What the review of the branch added to this evidence:
+
+- **A float copy on the way.** The selection ranks the row after a `permute`, a copy that loads and stores f32, and
+  WGSL lets an implementation flush a subnormal to zero there; the `topk` keeps the bits it reads, but it reads the
+  copy. A flushed subnormal ties with zeros and other subnormals and takes its place by its id, so with such a value
+  among the leading entries the candidates could be another set in another order. Zeros and subnormals are one block
+  of the ranking and a flush moves a value inside it only, so a step whose entries hold neither is the row's own on
+  any device; a step whose entries hold one reads the whole row (`leadingOfFloatCopy`). On this GPU the rows with
+  subnormals and zeros below the entries are answered bit for bit and the rows with one among them, or as the last
+  entry asked for, are not answered. Whether this device flushes was not measured: the rule does not depend on it.
+- **The logits of the two paths** (`e2e_gemma4_candidate_selection_test` ③). A candidate step issues the target
+  through `enqueue` and copies the logits to a resident; a normal run goes through `run` (the per-layer embeddings on
+  the host) or `enqueueRead` (on the GPU). One sampled turn of the mobile QAT E2B generated both ways gives the same
+  logits at every decode step, compared as bits, with the embeddings on the host and on the GPU.
+- **The merge** gave up whenever a part's whole list had been taken; it now does so only when the list ran out before
+  the last entry asked for, which is the case that can hide an entry. The fallbacks counted in section 11 (0 of 762)
+  were taken under the former, stricter rule.
 
 ### 6.4 What it gives
 
-The arms `yield` and `after` of section 11's run differ in the selection only: both pass a signal on commit `3852a3a6`,
+The arms `yield` and `after` of section 11's run differ in the selection only: both pass a signal on commit `a721cfbf`,
 and `yield` is built with `WHOLE_ROW_SAMPLING`. QAT E2B `i4-fast`, the distribution's sampler, 6 warm chats per arm and
 prompt, ms per decode token, median over the chats (the least in parentheses):
 
@@ -295,9 +317,9 @@ prompt, ms per decode token, median over the chats (the least in parentheses):
 
 Section 4's `start` is the stretch in which the GPU has none of a token's work while the host encodes the first chunk
 of 128 dispatches. The candidate was a field of the submit policy that makes a run's first chunk small and doubles
-each later one up to the policy's limit, so the GPU starts after 16 or 32 dispatches. It was built (`e965b42a`,
-`7bea21c2`), measured as two arms of section 11's run — the selection and a signal as in `after`, the Gemma policy's
-128 with a first chunk of 16 or of 32 — and reverted (`52edd717`, `f5d72b3b`).
+each later one up to the policy's limit, so the GPU starts after 16 or 32 dispatches. It was built (`a624b6a4`,
+`0f0d87fb`), measured as two arms of section 11's run — the selection and a signal as in `after`, the Gemma policy's
+128 with a first chunk of 16 or of 32 — and reverted (`d47bf453`, `684ba534`).
 
 ms per decode token, 6 warm chats per arm and prompt: the median over the chats of a chat's median interval between
 two tokens (the least in parentheses), and the fastest chat's mean.
@@ -319,7 +341,7 @@ two tokens (the least in parentheses), and the fastest chat's mean.
 
 ## 8. The opt-ins on this machine (H-27, H-28)
 
-QAT E2B `i4-fast`, greedy, no signal, tap off, commit `78259a27`, 3 rounds, 6 warm chats per arm and prompt. ms per
+QAT E2B `i4-fast`, greedy, no signal, tap off, commit `8417ae1e`, 3 rounds, 6 warm chats per arm and prompt. ms per
 decode token, median of the warm chats (the least in parentheses); the token ids of every arm are equal.
 
 | Arm | `few-ids` | `many-ids` |
@@ -376,7 +398,7 @@ machine).
 
 ## 11. End to end
 
-One process, one locked run of 317 s on commit `3852a3a6` (the script
+One process, one locked run of 317 s on commit `a721cfbf` (the script
 `outputs/diag/decode-optimization-2026-11-18/decode-host/final-ab.ts`): QAT E2B `i4-fast`, the distribution's sampler
 (temperature 1, top-k 64, top-p 0.95) with seed 0, 128 new tokens, two prompts. Three rounds visit the arms in order,
 then in reverse, then in order; a visit builds its pipeline and runs three chats per prompt, of which the first is left
@@ -384,7 +406,7 @@ out: 6 warm chats per arm and prompt.
 
 - `before`: the whole logits row read back at every step, and a `setTimeout(0)` awaited by the consumer after every
   token. The old loop is not in this build, so its serial yield is put back from outside, between the same two runs. As
-  a cross-check, the loop itself on commit `78259a27` measured 8.77 and 8.67 ms per token in another run (section 4).
+  a cross-check, the loop itself on commit `8417ae1e` measured 8.77 and 8.67 ms per token in another run (section 4).
 - `yield`: the whole row, a signal passed — the abort check as it is now (H-31 alone).
 - `after`: the candidate selection, a signal passed — the branch as it is (H-31 and H-32).
 
