@@ -23,10 +23,19 @@
  * 12B has suppressed tokens (`<image|>` / `<audio|>`), which the draw masks on the host from two
  * more leading entries.
  *
+ * ③ **the logits themselves** — what ① and ② rest on is that a candidate step computes the logits
+ *    a normal run computes: the step issues the target through `enqueue` and copies the logits to a
+ *    resident, a normal run issues it through `run` (the per-layer embeddings on the host) or
+ *    `enqueueRead` (on the GPU). The case generates the same sampled turn both ways on one pipeline
+ *    and compares every decode step's logits **byte for byte**, on the mobile QAT E2B with the
+ *    per-layer embeddings on the host and on the GPU. Equal token ids would not show a logit that
+ *    differs in a low bit.
+ *
  * ## Assets
  *
- * The QAT distribution mirror `models/karume-gemma4-qat/` (outside git; assemble it with dist.py in
- * tools/export-recipes). Without the mirror or a GPU every case SKIPs explicitly (ADR 0005).
+ * The QAT distribution mirror `models/karume-gemma4-qat/` and, for ③, the mobile QAT mirror
+ * `models/karume-gemma4-qat-mobile/` (outside git; assemble them with dist.py in
+ * tools/export-recipes). Without its mirror or a GPU a case SKIPs explicitly (ADR 0005).
  */
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -38,7 +47,17 @@ import {
   Pipeline,
   type SamplerSpec,
 } from "../../models/gemma.ts";
-import { WHOLE_ROW_SAMPLING } from "../../models/src/gemma/pipeline.ts";
+import {
+  type FromPretrainedOptions,
+  type Gemma4State,
+  GemmaPipeline,
+  WHOLE_ROW_SAMPLING,
+} from "../../models/src/gemma/pipeline.ts";
+import {
+  createGenerationSequence,
+  type GenerationRequest,
+  type GenerationSequence,
+} from "../../models/src/generation/sequence.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
@@ -48,6 +67,15 @@ if (!QAT_PRESENT) {
   console.warn(
     "[karume] models/karume-gemma4-qat/ is absent (or not karume/6), so the candidate selection " +
       "cases SKIP (assemble it with dist.py in tools/export-recipes)",
+  );
+}
+
+const MOBILE_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
+const MOBILE_PRESENT = mirrorAvailable(MOBILE_ROOT);
+if (!MOBILE_PRESENT) {
+  console.warn(
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/6), so the logits " +
+      "comparison of the candidate step SKIPs (assemble it with dist.py in tools/export-recipes)",
   );
 }
 
@@ -202,6 +230,119 @@ for (const [model, count] of [
         new Set(selected.chats[0].ids).size > 8,
         "the open request's tokens barely vary, so the comparison says little",
       );
+    },
+  );
+}
+
+/** A mobile QAT pipeline with its internal state in reach (the generation surface and the wiring). */
+class StatePipeline extends GemmaPipeline {
+  static async open(
+    options: FromPretrainedOptions,
+  ): Promise<{ readonly pipeline: StatePipeline; readonly state: Gemma4State }> {
+    const state = await super.loadPretrained("gemma4-qat", nodeDirectory(MOBILE_ROOT), options);
+    return { pipeline: new StatePipeline(state), state };
+  }
+}
+
+/** The token ids of one turn. */
+const turnIds = async (sequence: GenerationSequence, request: GenerationRequest) => {
+  const ids: number[] = [];
+  const stream = sequence.generate(request);
+  for await (const event of stream) if (event.kind === "token") ids.push(event.id);
+  await stream.done;
+  return ids;
+};
+
+/** The first word at which two rows differ (`-1` = none), compared as bits. */
+const firstDifference = (left: Float32Array<ArrayBuffer>, right: Float32Array<ArrayBuffer>) => {
+  const a = new Uint32Array(left.buffer, left.byteOffset, left.length);
+  const b = new Uint32Array(right.buffer, right.byteOffset, right.length);
+  if (a.length !== b.length) return 0;
+  return a.findIndex((word, at) => word !== b[at]);
+};
+
+for (const pleResidency of ["host", "gpu"] as const) {
+  test.skipIf(!MOBILE_PRESENT || !GPU_AVAILABLE)(
+    `the candidate selection: a candidate step's logits are a normal run's, byte for byte (per-layer embeddings on the ${pleResidency}, real GPU)`,
+    async () => {
+      const { pipeline, state } = await StatePipeline.open({ model: "e2b", pleResidency });
+      try {
+        const surface = state.greedyOutput;
+        const selection = state.candidateSelection;
+        assert(surface !== undefined && selection !== undefined, "the pipeline has no selection");
+        const request: GenerationRequest = {
+          prompt: chatPrompt(state.tokenizer, [
+            { role: "user", content: "Name three rivers and the seas they reach." },
+          ]),
+          maxNewTokens: 9,
+          sampler: { temperature: 0.8, topK: 40, seed: 7 },
+        };
+
+        // A normal run: the surface's `run` (the target's `run` with the embeddings on the host,
+        // `enqueueRead` with them on the GPU). Every run's logits are kept; the decode steps are
+        // the last of them.
+        const runRows: Float32Array<ArrayBuffer>[] = [];
+        const recording: typeof surface.session = {
+          ...surface.session,
+          run: async (inputs, bindings, generation) => {
+            const outputs = await surface.session.run(inputs, bindings, generation);
+            const logits = outputs[state.wiring.logits];
+            assert(logits?.dtype === "f32", "the run has no f32 logits");
+            runRows.push(logits.data.slice());
+            return outputs;
+          },
+        };
+        const runSequence = await createGenerationSequence({
+          session: recording,
+          program: state.wiring,
+        });
+        let runIds: number[];
+        try {
+          runIds = await turnIds(runSequence, request);
+        } finally {
+          await runSequence.dispose();
+        }
+
+        // A candidate step: the logits it copied to the resident, read whole before the draw.
+        const stepRows: Float32Array<ArrayBuffer>[] = [];
+        const stepSequence = await createGenerationSequence({
+          session: surface.session,
+          program: state.wiring,
+          candidateSelection: {
+            maxCount: selection.maxCount,
+            run: (inputs, generation, draw) =>
+              selection.run(inputs, generation, async (row) => {
+                stepRows.push((await row.whole()).slice());
+                return await draw(row);
+              }),
+          },
+        });
+        let stepIds: number[];
+        try {
+          stepIds = await turnIds(stepSequence, request);
+        } finally {
+          await stepSequence.dispose();
+        }
+
+        assertEquals(stepIds, runIds, "the two paths' token ids");
+        assert(stepRows.length >= 4, `only ${stepRows.length} decode steps to compare`);
+        assert(
+          runRows.length > stepRows.length,
+          "the normal runs have no prefill before the decode",
+        );
+        const decodeRows = runRows.slice(-stepRows.length);
+        for (const [step, row] of stepRows.entries()) {
+          assertEquals(row.length, state.wiring.vocabSize, `step ${step}: the row's length`);
+          const at = firstDifference(row, decodeRows[step]);
+          assertEquals(
+            at,
+            -1,
+            `decode step ${step}: logit ${at} is ${row[at]} in the candidate step and ${decodeRows[step][at]} in the normal run`,
+          );
+        }
+      } finally {
+        await pipeline.dispose();
+      }
     },
   );
 }
