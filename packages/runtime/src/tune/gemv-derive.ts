@@ -1350,6 +1350,12 @@ const parallelDecision = (
   if (outcome.kind === "kept") {
     // M = 1 keeps the default's row: its lanes stay, so another row block may still replace its own
     // — one that is the threshold faster than the default's choice at every other row count
+    const others =
+      defaultRow === undefined
+        ? []
+        : rowBlockOptions(gemvCase.storage, defaultRow.lanes).filter(
+            (rowBlock) => rowBlock !== defaultRow.rowBlock,
+          );
     const other =
       defaultRow === undefined
         ? undefined
@@ -1358,9 +1364,7 @@ const parallelDecision = (
             judgement,
             defaultChoice,
             defaultRow.lanes,
-            rowBlockOptions(gemvCase.storage, defaultRow.lanes).filter(
-              (rowBlock) => rowBlock !== defaultRow.rowBlock,
-            ),
+            others,
             GEMV_MIN_SPEEDUP,
           );
     if (defaultRow !== undefined && other !== undefined) {
@@ -1377,9 +1381,36 @@ const parallelDecision = (
         row: { ...bare, ...(other.rowBlock === undefined ? {} : { rowBlock: other.rowBlock }) },
       };
     }
+    // Why no other row block replaced the default's, where one reached the threshold in some group
+    // (a row whose row blocks are nowhere near it needs no line)
+    const tried =
+      defaultRow === undefined
+        ? []
+        : others.map((rowBlock) => ({
+            rowBlock,
+            reading: readOthers(
+              records,
+              judgement,
+              (m) => rowKernelAt(defaultChoice, defaultRow.lanes, rowBlock, m),
+              GEMV_MIN_SPEEDUP,
+            ),
+          }));
+    const rowBlockNote = tried.some(({ reading }) =>
+      reading.gains.some(({ gain }) => gain >= GEMV_MIN_SPEEDUP),
+    )
+      ? [
+          `no other row block replaces the default's: ${tried
+            .map(
+              ({ rowBlock, reading }) =>
+                `${rowBlock === undefined ? "none" : `${rowBlock} rows`} — ${reading.failure ?? "?"}`,
+            )
+            .join("; ")}`,
+        ]
+      : [];
     return {
       decision: {
         ...head,
+        notes: [...notes, ...rowBlockNote],
         derivedChoice: defaultChoice,
         outcome: "kept",
         reason: outcome.reason,

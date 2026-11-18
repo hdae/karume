@@ -448,8 +448,21 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
         },
       ],
     );
-    assertEquals(decisionOf(below, "parallelShapes", Q_G512).outcome, "kept");
+    const kept = decisionOf(below, "parallelShapes", Q_G512);
+    assertEquals(kept.outcome, "kept");
     assertEquals(below.linearGemv, undefined);
+    // The decision says why each other row block did not replace the default's
+    const note = kept.notes.find((line) => line.startsWith("no other row block replaces"));
+    assertStringIncludes(note ?? "", "2 rows — ×1.090 < ×1.100 in [2] at M=8");
+    assertStringIncludes(note ?? "", "4 rows — ×1.090 < ×1.100 in [2] at M=8");
+    // A row whose row blocks reach the threshold in no group says nothing about them
+    const unmeasured = derive([{ caseId: Q_G512, rows: PARALLEL_ROWS }]);
+    assertEquals(
+      decisionOf(unmeasured, "parallelShapes", Q_G512).notes.filter((line) =>
+        line.startsWith("no other row block"),
+      ),
+      [],
+    );
     // Fault: a record without M = 8 gives a row block no evidence there
     const partial = derive(
       [{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }],
