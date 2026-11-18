@@ -98,8 +98,10 @@ logits.
   suppressed, a maximum that is not finite, a `topK`-th candidate at −∞, or — at a temperature other than 1 — a
   `topK`-th candidate whose processed value equals that of the last entry (a token outside the entries could tie with
   it and rank first by its id).
-- Entries that are not a ranking — an id outside the vocabulary, an order the ranking does not allow, a wrong count —
-  do not decide either.
+- Entries that are not a ranking — an id outside the vocabulary, an order the ranking does not allow between two
+  neighbours, a wrong count — do not decide either. This is a check of the order: an id repeated at places that are
+  not neighbours, or entries in order that are not the row's, pass it. The steps that read the whole row
+  (`fallbacks`) therefore show a selection whose order is broken, not every wrong selection.
 - A step that does not decide reads the whole row back from the resident, inside the same serialized operation as the
   run, and the sampler draws from it as without the selection — or throws what the whole row makes it throw. The
   random number generator is untouched until then, so the draw is the one the whole-row path makes.

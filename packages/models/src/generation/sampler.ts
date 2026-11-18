@@ -845,8 +845,15 @@ const drawFrom = (
  *    distribution; the whole row classifies and throws it → `undefined`.
  *
  * Entries that are not what the selection promises — an id outside the vocabulary, an order R₀
- * does not allow, a wrong count — are no basis for any of this → `undefined` as well: the whole
- * row gives the token, and the count of such steps is what shows the selection is broken.
+ * does not allow between two neighbours, a wrong count, too few entries left once the suppressed
+ * ids are out — are no basis for any of this → `undefined` as well: the whole row gives the token,
+ * and the count of such steps is what shows such a selection is broken.
+ *
+ * NOTE: this is a check of the order, not of the entries. An id that comes twice at places that are
+ * not neighbours, with values that keep R₀'s order, passes it (two neighbours with one id do not),
+ * and so would entries that are in order and are not the row's. The count of steps that read the
+ * whole row shows a selection whose **order** is broken; that the entries are the row's own is
+ * what the selection's tests pin.
  *
  * `topK` is the spec's, clamped to the vocabulary; the spec is one {@link Sampler.topCandidates}
  * accepts (not checked again here).
@@ -890,7 +897,9 @@ export const candidateDistribution = (
     processed[kept] = scaled ? value / temperature : value;
     kept += 1;
   }
-  // Duplicate ids in the suppressed set could leave fewer than the proof needs.
+  // Entries of distinct ids leave at least `topK + 1` here: at most `|suppressed|` of them are
+  // suppressed. Fewer means a suppressed id came at more than one place — not what the selection
+  // promises, and too few for the proof.
   if (kept < topK + 1) return undefined;
   const floor = processed[kept - 1];
   // U by R₁: processed value descending, the smaller id first on a tie.

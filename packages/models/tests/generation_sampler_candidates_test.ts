@@ -390,6 +390,39 @@ describe("the draw from the leading entries of the raw logits", () => {
       assertEquals(undecided(row).drawn, undefined);
     });
 
+    it("says so for a top-k-th candidate at −∞ because a suppressed token is at −∞ too, and the whole row ranks it first by its id", () => {
+      // Id 0 is suppressed (its raw logit is the row's highest); ids 7 and 9 are the only logits
+      // above −∞. The entries hold id 0, then 7 and 9, then ids 1 and 2 at −∞: without id 0 the
+      // third candidate is id 1.
+      const row = rowOf(64, Number.NEGATIVE_INFINITY, [
+        [0, 5],
+        [7, 3],
+        [9, 2],
+      ]);
+      const entries = leading(row, 3 + 1 + 1);
+      assertEquals([...entries.indices], [0, 7, 9, 1, 2]);
+      // The whole row puts the suppressed id at −∞, where it ties with every other −∞ and wins
+      // the tie as the smallest id: its third candidate is id 0, not id 1.
+      assertEquals([...samplerDistribution(row, spec, [], [0]).tokens], [7, 9, 0]);
+      assertEquals(
+        candidateDistribution(entries.values, entries.indices, spec, [0], 64, 3),
+        undefined,
+      );
+      // With one more logit above −∞ the top-k does not reach it, and the entries decide.
+      const enough = rowOf(64, Number.NEGATIVE_INFINITY, [
+        [0, 5],
+        [7, 3],
+        [9, 2],
+        [30, 1],
+      ]);
+      const decided = fromCandidates(enough, spec, [0]);
+      assertEquals([...(decided?.tokens ?? [])], [7, 9, 30]);
+      assertEquals(
+        [...(decided?.tokens ?? [])],
+        [...samplerDistribution(enough, spec, [], [0]).tokens],
+      );
+    });
+
     it("leaves the RNG where it was, so the whole-row draw that follows is the one an untouched sampler makes", () => {
       const flat = decodeRow(64, stream(9)).map((value) => value / 16);
       const row = rowOf(64, -5, [
