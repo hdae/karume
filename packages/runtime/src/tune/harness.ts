@@ -1025,6 +1025,11 @@ export const resourceWordStream = (fill: Exclude<Fill, "none">, index: number): 
 export type SweepContext = {
   readonly gpu: GpuContext;
   readonly unit: TimingUnit;
+  /**
+   * The wall clock in milliseconds: `performance.now` unless the caller gave another (a test's, so
+   * that a pass takes the time the test states and no timer's lateness enters a calibration).
+   */
+  readonly now: () => number;
   readonly dp4a: boolean;
   /** Output readback (in {@link DIGEST_CHUNK_BYTES} chunks). */
   readonly staging: GPUBuffer;
@@ -1057,11 +1062,11 @@ const scoped = <T>(gpu: GpuContext, label: string, body: () => T): Promise<T> =>
 
 /**
  * Submits one command buffer, waits for completion and returns the submit-to-completion wall clock
- * (ns). The errorScope pop is issued in the same synchronous section as the submit and awaited
+ * (ns, on the context's clock). The errorScope pop is issued in the same synchronous section as the submit and awaited
  * alongside the completion wait (the pop's round trip is not added serially to the wall clock).
  */
 const submitAndWait = (
-  gpu: GpuContext,
+  { gpu, now }: Pick<SweepContext, "gpu" | "now">,
   label: string,
   encode: (encoder: GPUCommandEncoder) => void,
 ): Promise<number> =>
@@ -1073,7 +1078,7 @@ const submitAndWait = (
       const encoder = device.createCommandEncoder({ label });
       encode(encoder);
       const commands = encoder.finish();
-      started = performance.now();
+      started = now();
       device.queue.submit([commands]);
     } catch (cause) {
       await discardFailureScopes(device);
@@ -1081,7 +1086,7 @@ const submitAndWait = (
     }
     const failure = popFailureScopes(device, label);
     const finished = gpu[RUNTIME_INTERNAL].raceDeviceLost(
-      device.queue.onSubmittedWorkDone().then(() => performance.now()),
+      device.queue.onSubmittedWorkDone().then(now),
       label,
     );
     const [error, doneAt] = await Promise.all([failure, finished]);
@@ -1091,11 +1096,13 @@ const submitAndWait = (
 
 /**
  * Creates the sweep context (one timestamp query set and one readback staging buffer). The unit is
- * `timestampUnit` when timestamp-query is enabled, `wall` otherwise.
+ * `timestampUnit` when timestamp-query is enabled, `wall` otherwise. `now` is the wall clock in
+ * milliseconds (`performance.now` by default).
  */
 export const createSweepContext = async (
   gpu: GpuContext,
   timestampUnit: SweepSettings["timestampUnit"],
+  now: () => number = () => performance.now(),
 ): Promise<SweepContext> => {
   const { device } = gpu;
   const unit: TimingUnit = gpu.gpuTimingEnabled ? timestampUnit : "wall";
@@ -1125,6 +1132,7 @@ export const createSweepContext = async (
   return {
     gpu,
     unit,
+    now,
     // The variants of i8a8's integer dot product have identical numerics (kernels/linear-i8a8.ts) —
     // the choice is the same as production linear's, "the list of WGSL language features"
     // (src/runtime/session-build.ts:610 / :1047). Production attention chooses by a canary
@@ -1257,7 +1265,7 @@ const runPass = async (
 ): Promise<PassSample> => {
   const timestamps = timed ? context.timestamps : undefined;
   const [x, y, z] = ready.launch.workgroups;
-  const wallNs = await submitAndWait(context.gpu, ready.launch.key, (encoder) => {
+  const wallNs = await submitAndWait(context, ready.launch.key, (encoder) => {
     if (clear !== undefined) encoder.clearBuffer(clear);
     const pass = encoder.beginComputePass(
       timestamps === undefined
@@ -1306,7 +1314,7 @@ export const outputDigest = async (context: SweepContext, buffer: GPUBuffer): Pr
   const chunks: ArrayBuffer[] = [];
   for (let offset = 0; offset < buffer.size; offset += staging.size) {
     const length = Math.min(staging.size, buffer.size - offset);
-    await submitAndWait(gpu, "output readback", (encoder) => {
+    await submitAndWait(context, "output readback", (encoder) => {
       encoder.copyBufferToBuffer(buffer, offset, staging, 0, length);
     });
     await gpu[RUNTIME_INTERNAL].raceDeviceLost(
@@ -1747,7 +1755,7 @@ const readChunk = async (
   bytes: number,
 ): Promise<Uint32Array<ArrayBuffer>> => {
   const { gpu, staging } = context;
-  await submitAndWait(gpu, "buffer readback", (encoder) => {
+  await submitAndWait(context, "buffer readback", (encoder) => {
     encoder.copyBufferToBuffer(buffer, offset, staging, 0, bytes);
   });
   await gpu[RUNTIME_INTERNAL].raceDeviceLost(

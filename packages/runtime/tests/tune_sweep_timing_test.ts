@@ -13,9 +13,10 @@
 // follow the group's shuffled order.
 //
 // The fake device's passes take the time the test gives them: a timed pass's timestamp difference
-// (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the real wall clock a pass
-// takes to complete (`wallMs` — the probe reads only that). GpuContext is the real one; only the
-// device is replaced (as in tune_harness_callbacks_test.ts).
+// (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the wall clock a pass takes to
+// complete (`wallMs` — the probe reads only that), on the fake device's own clock, which the sweep
+// context is given: no real timer runs, so a run under load reads the same times. GpuContext is the
+// real one; only the device is replaced (as in tune_harness_callbacks_test.ts).
 //
 // Faults injected, one per rule: a dispatch that speeds up over its first passes (the warm start must
 // wait until its passes agree), passes that agree from the start (it must still spend its floor),
@@ -84,7 +85,7 @@ type LoggedPass = FakePass & { readonly gpuNs?: number };
 type FakeTiming = {
   /** A timed pass's timestamp difference (ns). */
   readonly gpuNs: (pass: FakePass) => number;
-  /** The real time a pass takes to complete (ms; absent: at once). */
+  /** The time a pass takes to complete on the fake device's clock (ms; absent: none). */
   readonly wallMs?: (pass: FakePass) => number;
 };
 
@@ -115,8 +116,14 @@ const LIMITS: RequiredLimits = {
  */
 const fakeTimingDevice = (
   timing: FakeTiming,
-): { readonly device: GPUDevice; readonly passes: readonly LoggedPass[] } => {
+): {
+  readonly device: GPUDevice;
+  readonly passes: readonly LoggedPass[];
+  /** The fake device's clock (ms): it moves only by the `wallMs` of the passes that completed. */
+  readonly now: () => number;
+} => {
   const passes: LoggedPass[] = [];
+  let clockMs = 0;
   const counts = new Map<string, { readonly all: number; readonly timed: number }>();
   let lastTimed: LoggedPass | undefined;
   let lastSubmitted: LoggedPass | undefined;
@@ -189,14 +196,14 @@ const fakeTimingDevice = (
       submit,
       writeBuffer: (): void => undefined,
       onSubmittedWorkDone: (): Promise<void> => {
-        const ms = lastSubmitted === undefined ? 0 : (timing.wallMs?.(lastSubmitted) ?? 0);
-        return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+        clockMs += lastSubmitted === undefined ? 0 : (timing.wallMs?.(lastSubmitted) ?? 0);
+        return Promise.resolve();
       },
     },
   };
   // Test-only boundary: the whole DOM GPUDevice type is not reproduced (only the surface the sweeps
   // touch)
-  return { device: device as unknown as GPUDevice, passes };
+  return { device: device as unknown as GPUDevice, passes, now: () => clockMs };
 };
 
 /** Runs `body` with a sweep context (unit `ns`) on a fake device of `timing`. */
@@ -204,9 +211,9 @@ const withContext = async <T>(
   timing: FakeTiming,
   body: (context: SweepContext, passes: readonly LoggedPass[]) => Promise<T>,
 ): Promise<T> => {
-  const { device, passes } = fakeTimingDevice(timing);
+  const { device, passes, now } = fakeTimingDevice(timing);
   const gpu = new GpuContext(device, readAdapterInfo({}), LIMITS, new Set());
-  const context = await createSweepContext(gpu, "ns");
+  const context = await createSweepContext(gpu, "ns", now);
   try {
     return await body(context, passes);
   } finally {
