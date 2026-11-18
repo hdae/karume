@@ -72,7 +72,8 @@
 //    drafts confirmed and verifies that missed, and every verify run's census shows the forms ran:
 //    every dense linear on the parallel GEMV (none on the sequential one), the RMS→add fusion, the
 //    attention on its parallel or parallel-fused keys, and `expert_linear` on its pooled keys — a
-//    run of several rows takes the grouped form for gate_up and the one-row form for down (the
+//    verify of several rows takes the grouped form for every gate_up and the one-row form for every
+//    down, a verify with no draft (one row, the decode shape) the one-row form for both (the
 //    routed experts keep their sequential order under every option). Nothing is compared with the
 //    reference-order tokens: the parallel forms change the rounding
 //
@@ -1321,9 +1322,9 @@ const SEQUENTIAL_GEMV_FAMILY = keyFamily(
 );
 const GEMM_FAMILY = keyFamily(linearKey("f32", true));
 /**
- * The pooled `expert_linear` keys of the cache (i4 codes, f16 steps, group 32 — ADR 0145) in a run
- * of several rows, which a verify is: the grouped form for gate_up's long weight rows, the one-row
- * form for down's short ones.
+ * The pooled `expert_linear` keys of the cache (i4 codes, f16 steps, group 32 — ADR 0145): the
+ * one-row form, and the grouped form a run of several rows takes for gate_up's long weight rows
+ * (down's short rows keep the one-row form at every row count).
  */
 const POOLED_EXPERT_KEY = expertLinearKey("i4f16", 32, true);
 const POOLED_GROUPED_EXPERT_KEY = expertLinearKey("i4f16", 32, true, true);
@@ -1335,14 +1336,22 @@ const STATE_ATTENTION_PREFIX = "attention_state";
  * graph, one dispatch each) on the parallel GEMV and none on the sequential GEMV or the GEMM, an
  * RMS→add pair fused, every attention node's ①QK on a parallel key and its ②+③ on the fused key or
  * on the row statistics plus a parallel ③PV (no sequential states-form kernel), and every
- * `expert_linear` (`experts` of the graph) on its pooled key of a run of several rows, half of them
- * (gate_up) grouped and half (down) one-row — the routed experts keep their sequential order under
- * every option.
+ * `expert_linear` on its pooled key — the routed experts keep their sequential order under every
+ * option. In a run of several rows (`verifyRows` ≥ 2: the verify's fixed shape of depth + 1 rows)
+ * as many dispatches are grouped as the graph has gate_up projections and as many one-row as it has
+ * down projections; a verify with no draft runs one row in the decode shape, where every
+ * `expert_linear` is one-row.
  */
 const parallelFormFailures = (
   where: string,
   rows: readonly CensusRow[],
-  graph: { readonly linears: number; readonly attentions: number; readonly experts: number },
+  graph: {
+    readonly linears: number;
+    readonly attentions: number;
+    readonly gateUps: number;
+    readonly downs: number;
+  },
+  verifyRows: number,
 ): string[] => {
   const failures: string[] = [];
   const keys = rows.map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
@@ -1377,9 +1386,17 @@ const parallelFormFailures = (
   const experts = count((key) => keyFamily(key) === keyFamily(POOLED_EXPERT_KEY));
   const oneRow = count((key) => key === POOLED_EXPERT_KEY);
   const grouped = count((key) => key === POOLED_GROUPED_EXPERT_KEY);
-  if (experts !== graph.experts || grouped * 2 !== experts || oneRow * 2 !== experts) {
+  const expected =
+    verifyRows >= 2
+      ? { grouped: graph.gateUps, oneRow: graph.downs }
+      : { grouped: 0, oneRow: graph.gateUps + graph.downs };
+  if (
+    experts !== graph.gateUps + graph.downs ||
+    grouped !== expected.grouped ||
+    oneRow !== expected.oneRow
+  ) {
     fail(
-      `${grouped} pooled grouped and ${oneRow} pooled one-row of ${experts} expert_linear dispatches for ${graph.experts} nodes (half each)`,
+      `${grouped} pooled grouped and ${oneRow} pooled one-row of ${experts} expert_linear dispatches in a verify of ${verifyRows} rows, for ${graph.gateUps} gate_up and ${graph.downs} down projections (expected ${expected.grouped} grouped, ${expected.oneRow} one-row)`,
     );
   }
   return failures;
@@ -2167,13 +2184,28 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         tokenizer: await readFile(TOKENIZER),
       };
       // The graph's node counts the census is held to (one dispatch per node).
-      const nodes = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH).graph.nodes;
+      const model = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH);
+      const nodes = model.graph.nodes;
       const opCount = (op: string): number => nodes.filter((node) => node.op === op).length;
+      // The two projections by the width their weight rows read: gate_up reads the hidden state
+      // (2816: 88 words of i4, the long rows the grouped form takes), down the expert's
+      // intermediate (704: 22 words).
+      const projections = (width: number): number =>
+        nodes.filter(
+          (node) =>
+            node.op === "expert_linear" && model.graph.values[node.ins[2]]?.shape[2] === width,
+        ).length;
       const graph = {
         linears: opCount("linear"),
         attentions: opCount("attention"),
-        experts: opCount("expert_linear"),
+        gateUps: projections(HIDDEN),
+        downs: projections(MOE_INTERMEDIATE),
       };
+      assertEquals(
+        [graph.gateUps, graph.downs],
+        [opCount("expert_linear") / 2, opCount("expert_linear") / 2],
+        "expert_linear nodes by projection (one gate_up and one down per layer)",
+      );
       /** Each golden prompt's tokens (a stop token included) and stop reason, and the decode tokens. */
       const generate = async (
         pipeline: Pipeline,
@@ -2223,16 +2255,25 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
       const lines: string[] = [];
       const failures: string[] = [];
-      /** Each verify run's census (the run the cycle committed, after any re-run). */
-      const verifies: (readonly CensusRow[] | undefined)[] = [];
+      /**
+       * Each verify run's census (the run the cycle committed, after any re-run) and its real rows
+       * (the frontier and the drafts: 1 = no draft, the decode shape of one row).
+       */
+      const verifies: {
+        readonly rows: number;
+        readonly census: readonly CensusRow[] | undefined;
+      }[] = [];
       const cached = await Pipeline.fromAssets(assets, {
         gpu,
         ...PARALLEL_FORMS,
         expertCache: { slots, depth, hostBytes: Number.MAX_SAFE_INTEGER },
         onRunDiagnostics: (diagnostics, phase) => {
           if (phase.kind !== "verify") return;
-          const rows = diagnostics.lastRunPipelines;
-          verifies.push(rows === undefined ? undefined : [...rows]);
+          const census = diagnostics.lastRunPipelines;
+          verifies.push({
+            rows: phase.rows,
+            census: census === undefined ? undefined : [...census],
+          });
         },
       });
       try {
@@ -2303,20 +2344,27 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         if (verifies.length !== cycles) {
           failures.push(`${run}: ${verifies.length} verify observations for ${cycles} cycles`);
         }
-        verifies.forEach((rows, index) => {
+        verifies.forEach(({ rows, census }, index) => {
           failures.push(
             ...parallelFormFailures(
               `${run} verify ${index + 1}`,
-              requireCensus(rows, `${run} verify ${index + 1}`),
+              requireCensus(census, `${run} verify ${index + 1}`),
               graph,
+              rows,
             ),
           );
         });
-        const first = verifies[0];
-        if (first !== undefined) {
+        // A case whose verifies all had one shape decides nothing about the other's census.
+        const several = verifies.filter(({ rows }) => rows >= 2).length;
+        if (several === 0) failures.push(`${run}: no verify of several rows`);
+        lines.push(
+          `${run}: ${several} verifies of several rows, ${verifies.length - several} of one row (no draft)`,
+        );
+        const first = verifies.find(({ rows }) => rows >= 2);
+        if (first?.census !== undefined) {
           lines.push(
-            `${run} verify 1 census (graph: ${graph.linears} linear, ${graph.attentions} attention, ${graph.experts} expert_linear): ` +
-              first.map((row) => `${row.key}×${row.dispatchCount}`).join(" / "),
+            `${run} first verify of several rows, census (graph: ${graph.linears} linear, ${graph.attentions} attention, ${graph.gateUps} gate_up and ${graph.downs} down expert_linear): ` +
+              first.census.map((row) => `${row.key}×${row.dispatchCount}`).join(" / "),
           );
         }
       } finally {
