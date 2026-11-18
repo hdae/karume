@@ -119,6 +119,18 @@ measurements in `docs/research/`.
   `LinearGemvStaleGroup` and `PlanGemvMeasurementsOptions`. The generator of the embedded tables
   (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for a registered table, and with
   `--gemv-plan` writes the workbench batch that measures, twice, what they lack; no embedded table changes.
+- `@karume/runtime`: the parallel GEMV takes float-stored weights. A row of a geometry profile's
+  `linearGemv.parallelShapes` may name a `bf16`, `f16` or `f32` shape (no group, no packed activations; plain or
+  staged). A Session with linear at `"reorder"` then runs the parallel GEMV for 1 to 8 rows of that shape, inside the
+  band of `linear`; at `"exact"` it keeps the sequential GEMV at one row and the GEMM above, bit for bit. A
+  float-stored linear is never paired with packed activations or fused with a following `static_quantize`, and has
+  no subgroup form. No embedded table and not the default profile names a float shape yet, so no Session changes.
+- `@karume/runtime/tune`: the GEMV sweep measures float-stored shapes. Its case table gains the 25 linears of
+  regular Gemma 4 E2B and E4B in bf16, at 1, 4 and 8 rows; past one row their baseline is the GEMM (candidate
+  `gemm`), which is what an `exact` Session runs there, and `deriveLinearGemvChoices` reads a parallel row of such a
+  shape against it. `GemvSweepChoice` is now a union: a member of the GEMV family, or
+  `{ id: "gemm-f32", storage, v4 }` for that baseline. Records taken before lack the bf16 cases; none of their
+  groups becomes stale.
 - `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
   canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
   `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and
