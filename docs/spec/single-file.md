@@ -135,7 +135,11 @@ Everything that needs no tensor byte is refused before a weight part is fetched,
 
 - What to do, in every refusal that says it: `components` to take the distribution's, for a component that may come
   from the distribution (Anima's text conditioner); a quant that stores it quantized, which converts from any float
-  dtype, with those quants named, for a component its quant decides (Anima's transformer: the int8 quants).
+  dtype, with those quants named, for a component its quant decides (Anima's transformer: the int8 quants). The quants
+  named are those whose label for the component is not the family's float label (manifest data only); in the dtype
+  refusal of step 5, the quants whose label is the refusing container's are left out, as they would refuse the file
+  the same way. A quant of another label whose container stores f16 or bf16 weights is named, although it takes one
+  dtype only.
 - f16 and bf16 storage never round (the conversion stores a value of the type as it is and refuses another), so an
   initializer stored as one takes tensors of that dtype only; without the last plan refusal such a file would fail at
   the first read of a Session. For a float storage it holds by construction (the plan's 16-bit float weights are

@@ -976,6 +976,8 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
   it("a tensor whose dtype is not the one a quantized container's float weight takes, naming the role, the tensor, its dtype and what to do", async () => {
     // Fault: the model's `i8` transformer label holds a bf16 plan. A quant that stores the
     // transformer quantized is converted against as it is, so an F16 file lands on a bf16 weight.
+    // `i8` is the model's one quantized storage, and it is the container that refuses: no quant is
+    // left to name.
     const entry = modelEntry();
     const { mock, ref, options } = await serve({
       entry: {
@@ -990,15 +992,17 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
     await refused(
       () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "i8" }),
       mock.paths,
-      "the transformer stores 'model.layers.0.w' as bf16, which takes BF16 values as they are and never rounds, but the file's 'net.blocks.0.w' is F16; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
+      "the transformer stores 'model.layers.0.w' as bf16, which takes BF16 values as they are and never rounds, but the file's 'net.blocks.0.w' is F16; model 'test' has no quant that stores the transformer quantized in another container than its 'i8' one (which converts from any float dtype)",
     );
   });
 
-  it("a BF16 file under a quant whose transformer label is f16, not the float label: refused by the dtype check of that quant's f16 container", async () => {
+  it("a BF16 file under a quant whose transformer label is f16, not the float label: refused by the dtype check of that quant's f16 container, naming the quants of another container", async () => {
     // Fault: quant `f16` of a distribution that carries f16 containers. Its transformer label is a
     // quantized storage, so its f16 plan is the plan as it is, and an f16 weight takes F16 only.
+    // The quants whose transformer is that f16 container would refuse the file the same way, so
+    // the advice leaves them out.
     const { mock, ref, options } = await serve({ entry: withF16Containers() });
-    await refused(
+    const message = await refused(
       () =>
         Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
           ...options,
@@ -1006,6 +1010,12 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
         }),
       mock.paths,
       "the transformer stores 'model.layers.0.w' as f16, which takes F16 values as they are and never rounds, but the file's 'net.blocks.0.w' is BF16; ",
+    );
+    assert(
+      message.endsWith(
+        "; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
+      ),
+      message,
     );
   });
 

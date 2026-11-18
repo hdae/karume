@@ -267,19 +267,24 @@ const floatStorages = (family: SingleFileFamily): string =>
 /**
  * What to do when the file's role cannot be stored as it is: take the distribution's (a role that
  * may come from it), or a quant that stores it quantized (one whose quant decides its storage).
+ * `refusedLabel` is the label of the container that refused the file's tensors: the quants of that
+ * label would refuse them the same way, so they are not named.
  */
-const advice = (setting: RoleSetting): string => {
+const advice = (setting: RoleSetting, refusedLabel?: string): string => {
   const { entry, family, model, modelName } = setting;
   const { role } = entry;
   if (entry.presence === "optional") {
     return `pass components: { ${role}: … } to take the distribution's ${role}`;
   }
   if (entry.storage === "quant") {
-    const quantized = model.available.quants.filter(
-      (quant) => !isFloatLabel(family, model.quants[quant].weights[role]),
-    );
+    const quantized = model.available.quants.filter((quant) => {
+      const label = model.quants[quant].weights[role];
+      return !isFloatLabel(family, label) && label !== refusedLabel;
+    });
+    const other =
+      refusedLabel === undefined ? "" : ` in another container than its '${refusedLabel}' one`;
     return quantized.length === 0
-      ? `model '${modelName}' has no quant that stores the ${role} quantized (which converts from any float dtype)`
+      ? `model '${modelName}' has no quant that stores the ${role} quantized${other} (which converts from any float dtype)`
       : `choose a quant that stores the ${role} quantized, which converts from any float dtype: ${quantized.join(" / ")}`;
   }
   return `the file's ${role} must hold ${Object.keys(family.floatCodecs).join(" or ")} tensors`;
@@ -438,7 +443,7 @@ const checkRolePlan = async (
     throw new Error(
       `${where}: the ${role} stores '${initializer}' as ${codec}, which takes ${wanted} values as` +
         ` they are and never rounds, but the file's '${keys.get(initializer)}' is ${tensor.dtype};` +
-        ` ${advice(setting)}`,
+        ` ${advice(setting, label)}`,
     );
   }
 };
