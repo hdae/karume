@@ -31,7 +31,7 @@ and it **does not touch a single byte of the distribution path**:
     uv run python -m anima.eval_dist --model anima-v1.0
 
 MUST: do not upload the resulting distribution to HF and do not move it into `models/`. The quant
-preset name stays `f16+dit4` as in the distribution (ADR 0074's grammar), and **only the bytes
+preset name stays `bf16+dit4` as in the distribution (ADR 0074's grammar), and **only the bytes
 inside differ** — it cannot be told apart by name, so keeping it in a separate place is the only
 distinction.
 """
@@ -86,9 +86,9 @@ EVAL_PIPELINE = "anima-i4-adaln8-eval"
 EVAL_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the f16 one.",
-        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
-        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
+        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
+        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
+        "  unchanged (no rounding or quantization).",
         "- A GPTQ-calibrated int4-quantized series of the transformer was added for local",
         "  evaluation; its adaLN linears and the linears outside the blocks stay int8.",
     )

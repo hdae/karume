@@ -91,7 +91,7 @@ def _calib_record(method: str, model: str) -> bytes:
 
 
 def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> Path:
-    """Build the series of one base model (the f16 / i8 / bf16 shipping series + **the variant's
+    """Build the series of one base model (the i8 / bf16 shipping series + **the variant's
     i4 series**) from fake assets.
 
     The weights slots are **valid containers** (the build opens its inputs and checks them against
@@ -100,8 +100,7 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
     into the same container.
     """
     sources = anima_sources(series_dir, MODEL)
-    # One text stack per storage label the base model declares (f16 + the bf16 of the faithful
-    # preset).
+    # One text stack per storage label the base model declares (bf16).
     for storage, base in sources.base.items():
         write_component(
             base / "text_encoder" / "model.krm",
@@ -144,8 +143,8 @@ class TestEvalPlan:
         plan = eval_dist.eval_plan(tmp_path / "series", MODEL)
 
         assert "i4" not in anima_model(MODEL).storages, "the distribution's accepted set moved"
-        assert set(plan.weights["transformer"]) == {"f16", "i8", "bf16", "i4"}
-        assert "f16+dit4" in plan.quants
+        assert set(plan.weights["transformer"]) == {"i8", "bf16", "i4"}
+        assert "bf16+dit4" in plan.quants
 
     def test_the_i4_seat_reads_the_variant_series(self, tmp_path):
         """MUST: it does not read `*-i4-dyn` baked under the shipping conditions (no other rounding
@@ -188,7 +187,7 @@ class TestEvalPlan:
         old fused turbo is not carried over either), so no real model reaches this branch — a
         spec with an injected i4 slot guards the mechanism.
         """
-        spec = replace(anima_model(ANIMA_TURBO_MODEL_NAME), storages=("f16", "i8", "i4"))
+        spec = replace(anima_model(ANIMA_TURBO_MODEL_NAME), storages=("i8", "bf16", "i4"))
         monkeypatch.setattr(eval_dist, "anima_model", lambda name: spec)
         with pytest.raises(DistError, match="already has an i4 preset in the distribution"):
             eval_dist.eval_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
@@ -225,8 +224,8 @@ class TestEndToEnd:
         manifest = json.loads((out_dir / "karume.json").read_text(encoding="utf-8"))
         assert manifest["defaultModel"] == MODEL
         quants = manifest["models"][MODEL]["quants"]
-        assert "f16+dit4" in quants
-        assert quants["f16+dit4"]["weights"]["transformer"] == "i4"
+        assert "bf16+dit4" in quants
+        assert quants["bf16+dit4"]["weights"]["transformer"] == "i4"
         # The visual-evaluation entry (`--source` of `examples/anima/main.ts`) needs just the
         # manifest.
         assert (out_dir / "README.md").is_file()
@@ -241,7 +240,10 @@ class TestEndToEnd:
 
         notice = " ".join((out_dir / "NOTICE.md").read_text(encoding="utf-8").split())
         assert "An int8-quantized series of the transformer was added" in notice
-        assert "A bf16 series was added alongside the f16 one." in notice
+        assert (
+            "The bf16 series of every component keeps the values of the upstream BF16 weights"
+            " unchanged" in notice
+        )
         assert "int4-quantized series of the transformer was added" in notice
         assert "adaLN linears and the linears outside the blocks stay int8" in notice
 

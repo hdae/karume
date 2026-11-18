@@ -71,8 +71,8 @@ ANIMA_TURBO_MODEL_NAME = "anima-turbo-v1.1"
 ANIMA_BASE_MODEL_NAME = "anima-v1.0"
 
 #: Model name of the official Aesthetic variant (the official fine-tune of base toward a
-#: high-quality style — upstream's naming as is). It carries its own text_conditioner, because 64
-#: tensors still differ from base after f16 rounding (measured 2026-09-01).
+#: high-quality style — upstream's naming as is). It carries its own text_conditioner (its
+#: llm_adapter differs from base — {@link text_conditioner_series}).
 ANIMA_AESTHETIC_MODEL_NAME = "anima-aesthetic-v1.1"
 
 #: Pipeline contract (ADR 0041 §2 — per model).
@@ -80,30 +80,26 @@ ANIMA_PIPELINE = "anima/1"
 
 #: Series that do not depend on the model name (base's text path / VAE, and the output of the
 #: script that writes the tokenizers).
-#: MUST: `anima-f16` is a series baked **without baking in a LoRA** (the absence of
-#: `lora_provenance.json` is the record of that). turbo's text_conditioner component measured
-#: lora_B all zeros = a no-op (the same NOTE in `anima/pipeline_ref.py`), so the turbo slot may
-#: share this too.
-ANIMA_BASE_SERIES = "anima-f16"
+#: MUST: `anima-bf16` is a series baked **without baking in a LoRA** (the absence of
+#: `lora_provenance.json` is the record of that — {@link assert_lora_provenance}).
+ANIMA_BASE_SERIES = "anima-bf16"
 ANIMA_TOKENIZER_SERIES = "anima-demo"
 
 #: Storage label → shared series of the text stack (text_encoder / text_conditioner / vae_decoder —
-#: the 3 roles that do not depend on the DiT's storage). Every model reads f16; bf16 is read only by
-#: the models that have the original-weights preset `bf16` (all 4 roles bf16 — ADR 0131 decision 3)
-#: in {@link AnimaModel.storages}. The bf16 series is also baked without baking in a LoRA (the same
-#: MUST and the same safety net as {@link ANIMA_BASE_SERIES} — {@link assert_lora_provenance}).
-ANIMA_TEXT_STACK_SERIES: Mapping[str, str] = {"f16": ANIMA_BASE_SERIES, "bf16": "anima-bf16"}
+#: the 3 roles that do not depend on the DiT's storage). The text stack is stored in bf16 only —
+#: every upstream component is BF16, so bf16 storage keeps the upstream values (ADR 0154; the f16
+#: series left the distribution).
+ANIMA_TEXT_STACK_SERIES: Mapping[str, str] = {"bf16": ANIMA_BASE_SERIES}
 
 
 def text_stack_role(component: str, storage: str) -> str:
-    """The role name of a text-stack placement (a key of {@link OUTPUT_PATHS}).
+    """The role name of a text-stack placement (a key of {@link OUTPUT_PATHS}):
+    `<component>_<storage>`, the same form as the transformer's `transformer_<storage>`.
 
-    f16 keeps the **bare component name** (`text_encoder` and the like), so adding a storage does
-    not rename an existing role; the other storages are `<component>_<storage>` (the same form as
-    the transformer's `transformer_<storage>`). The extra repository's cross-repository references
-    are derived through this function ({@link ANIMA_EXTRA_SHARED_ROLES}).
+    The extra repository's cross-repository references are derived through this function
+    ({@link ANIMA_EXTRA_SHARED_ROLES}).
     """
-    return component if storage == "f16" else f"{component}_{storage}"
+    return f"{component}_{storage}"
 
 
 #: File that keeps the attribution of a baked-in LoRA (directly under the series target). The
@@ -251,15 +247,16 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
 #: the int4 line itself; the LoRA baking line of the old turbo notice also went away with the move
 #: to the official checkpoint).
 #: The bf16 line (ADR 0131 decision 3 — the original-weights preset of every model) was added on
-#: 2026-10-29; until then the notice named only the f16 and int8 series. bf16 keeps the upstream
-#: BF16 values unchanged (no rounding, no quantization), so the line does not call it a quantized
-#: series and says that the f16 series is the rounded one.
+#: 2026-10-29; until then the notice named only the f16 and int8 series. Since ADR 0154 bf16 is the
+#: only float series (the f16 one left the distribution), so no line names an f16 series any more:
+#: bf16 keeps the upstream BF16 values unchanged (no rounding, no quantization), and the int8
+#: series is the only one whose values differ from upstream.
 OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the f16 one.",
-        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
-        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
+        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
+        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
+        "  unchanged (no rounding or quantization).",
     )
 )
 
@@ -268,9 +265,9 @@ OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
 EXTRA_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the f16 one.",
-        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
-        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
+        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
+        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
+        "  unchanged (no rounding or quantization).",
         "- Every model in this repository is a community fine-tune of the CircleStone",
         "  Anima base model; its origin, author and license terms are stated in README.md.",
     )
@@ -280,16 +277,12 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
 #: manifest share. They are looked up by role name only, so the spelling cannot move independently
 #: in two places.
 #:
-#: MUST: do not move the paths of the f16 text stack (`text_encoder/model.krm` and the like) — the
-#: extra repository (karume-anima-extra) references these paths across repositories. The bf16 text
-#: stack sits next to it as separate files named `.bf16` ({@link text_stack_role}).
+#: MUST: do not move the paths of the bf16 text stack (`text_encoder/model.bf16.krm` and the like)
+#: — they are the published paths, and the extra repository (karume-anima-extra) references them
+#: across repositories ({@link text_stack_role}).
 OUTPUT_PATHS: Mapping[str, str] = {
-    "text_encoder": "text_encoder/model.krm",
-    "text_conditioner": "text_conditioner/model.krm",
-    "transformer_f16": "transformer/model.f16.krm",
     "transformer_i8": "transformer/model.i8.krm",
     "transformer_i4": "transformer/model.i4.krm",
-    "vae_decoder": "vae_decoder/model.krm",
     "tokenizer": "tokenizer/qwen2-tokenizer.json",
     "tokenizer_2": "tokenizer_2/t5-tokenizer.json",
     "text_encoder_bf16": "text_encoder/model.bf16.krm",
@@ -300,51 +293,54 @@ OUTPUT_PATHS: Mapping[str, str] = {
 
 #: Component-override token of a preset name → its weights name (ADR 0074 decision 4 — **the
 #: recipe owns the abbreviations, and the quant table of the generated model card always shows the
-#: mapping**). Anima's base storage is `f16` (only the original-weights preset uses `bf16` for all 4
-#: roles) and only the transformer is compressed, so the preset names are `f16+dit<bits>`.
+#: mapping**). Anima's base storage is `bf16` (every upstream component is BF16 — ADR 0154) and
+#: only the transformer is compressed, so the preset names are `bf16+dit<bits>`.
 ANIMA_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": "transformer"}
 
 #: The quant table (`presets` in v1 — renamed in ADR 0041 §3). The manifest owns the vocabulary of
 #: `session`. Preset names follow ADR 0074's grammar `<storage>[+<component><bits>]…[-<knob>]…`,
-#: where `<storage>` is **the base storage shared by every role** (f16 for Anima; bf16 only for the
-#: original-weights preset). **Weights the table does not name are not written** —
-#: {@link anima_quants} fills them with the `<storage>` of the preset name
-#: ({@link seat_base_storage} — a value that can simply be copied is not duplicated once per quant).
+#: where `<storage>` is **the base storage shared by every role** (bf16 for Anima — ADR 0154).
+#: **Weights the table does not name are not written** — {@link anima_quants} fills them with the
+#: `<storage>` of the preset name ({@link seat_base_storage} — a value that can simply be copied is
+#: not duplicated once per quant).
 #:
 #: `label` / `description` are display fields for the selection UI (ADR 0075 decision 1 — English,
 #: 64 / 200 character limits). They are written from what the preset actually is (storage, knobs,
 #: benefit): the id serves the machine, and people read these 2 fields. Being the default is not
 #: mentioned (`defaultQuant` already points at it — ADR 0075 decision 3).
 ANIMA_QUANTS: Mapping[str, Any] = {
-    "f16": {
-        "weights": {"transformer": "f16"},
+    # The original-weights preset (ADR 0131 decision 3 — the upstream checkpoint has all 4
+    # components in BF16, so bf16 storage is upstream's bits as is). The preset appears only for
+    # models that have `bf16` in {@link AnimaModel.storages} (derived by {@link anima_quants}).
+    "bf16": {
+        "weights": {"transformer": "bf16"},
         "session": {},
-        "label": "Full quality (f16)",
-        "description": "Transformer in f16 storage with f32 compute — the largest download,"
-        " and the reference the other quants here are judged against.",
+        "label": "Original weights (bf16)",
+        "description": "All four components stored as bf16 with f32 compute — the upstream"
+        " checkpoint's own values, bit for bit, and the largest download.",
     },
-    "f16+dit8": {
+    "bf16+dit8": {
         "weights": {"transformer": "i8"},
         "session": {},
         "label": "Half size (int8 transformer)",
-        "description": "Transformer stored as int8 and computed in f32: roughly half its f16"
+        "description": "Transformer stored as int8 and computed in f32: roughly half its bf16"
         " download, with the execution path left unchanged.",
     },
-    "f16+dit8-a8": {
+    "bf16+dit8-a8": {
         "weights": {"transformer": "i8"},
         "session": {"linearCompute": "a8"},
         "label": "Half size, int8 linear",
         "description": "The int8 transformer with per-token int8 activations in its linear"
         " layers — faster on GPUs with dp4a, same download.",
     },
-    "f16+dit8-a8-attn8": {
+    "bf16+dit8-a8-attn8": {
         "weights": {"transformer": "i8"},
         "session": {"linearCompute": "a8", "attentionCompute": "a8"},
         "label": "Half size, int8 linear and attention",
         "description": "Adds int8 activations inside attention on top of the int8 linear path;"
         " same weights, one more integer stage per step.",
     },
-    "f16+dit8-a8-attn8-s16": {
+    "bf16+dit8-a8-attn8-s16": {
         "weights": {"transformer": "i8"},
         "session": {
             "linearCompute": "a8",
@@ -353,7 +349,7 @@ ANIMA_QUANTS: Mapping[str, Any] = {
         },
         "label": "Balanced (int8)",
         "description": "The int8 linear and attention path with attention scores held in f16 —"
-        " the fastest of the int8 seats here, at f16-level image quality.",
+        " the fastest of the int8 seats here, at image quality close to the original weights.",
     },
     # The 2 presets with resident i4 (run J-4a — the low-VRAM presets).
     #
@@ -365,49 +361,37 @@ ANIMA_QUANTS: Mapping[str, Any] = {
     # details, rough lines" (2026-08-21, research record
     # `docs/research/2026-08-21-anima-i4-seat-speed.md` §6). Speed recovers a lot, 1,640 → 955
     # ms/step, but the reason these presets exist is **size and VRAM**, not speed (if speed is
-    # needed, the default `f16+dit8-a8-attn8-s16` is faster at 823 ms/step). The 2 attention knobs
+    # needed, the default `bf16+dit8-a8-attn8-s16` is faster at 823 ms/step). The 2 attention knobs
     # do not look at the weight slots, so they work as is with resident i4, and no degradation was
     # seen visually, so they are declared.
-    "f16+dit4": {
+    "bf16+dit4": {
         "weights": {"transformer": "i4"},
         "session": {},
         "label": "Smallest (int4 transformer)",
         "description": "Transformer weights in GPTQ-calibrated int4 (group-32) with f32 compute —"
         " the smallest download and the least resident memory.",
     },
-    "f16+dit4-attn8-s16": {
+    "bf16+dit4-attn8-s16": {
         "weights": {"transformer": "i4"},
         "session": {"attentionCompute": "a8", "attentionScoreStorage": "f16"},
         "label": "Smallest, int8 attention",
         "description": "The int4 transformer with int8 activations and f16 scores in attention:"
         " the low-memory seat, without slowing down as much as plain int4.",
     },
-    "f16-c16": {
-        "weights": {"transformer": "f16"},
+    # The original weights computed in f16 (the `-c16` knob reaches the transformer only — the
+    # session knobs apply to the DiT). The weights are the `bf16` preset's own; only the compute
+    # path differs.
+    "bf16-c16": {
+        "weights": {"transformer": "bf16"},
         "session": {"linearCompute": "f16", "attentionCompute": "f16"},
         "gpuFeatures": {"shaderF16": True},
-        "label": "Full quality, f16 compute",
-        "description": "f16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
+        "label": "Original weights, f16 compute",
+        "description": "bf16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
         " and trades numerical headroom for speed.",
-    },
-    # The original-weights preset (ADR 0131 decision 3 — the upstream checkpoint has all 4
-    # components in BF16, so bf16 storage is upstream's bits as is). The preset appears only for
-    # models that have `bf16` in {@link AnimaModel.storages} (derived by {@link anima_quants}).
-    "bf16": {
-        "weights": {
-            "text_encoder": "bf16",
-            "text_conditioner": "bf16",
-            "transformer": "bf16",
-            "vae_decoder": "bf16",
-        },
-        "session": {},
-        "label": "Original weights (bf16)",
-        "description": "All four components stored as bf16 with f32 compute — the upstream"
-        " checkpoint's own values, bit for bit. Same size as f16.",
     },
 }
 
-ANIMA_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
+ANIMA_DEFAULT_QUANT = "bf16+dit8-a8-attn8-s16"
 
 #: Pipeline-owned settings (the hub passes them through — ADR 0041 §2). The values match the
 #: implementation constants of the migration source: `shift` / `numTrainTimesteps` are the
@@ -492,19 +476,15 @@ ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: incident is the reason: plain f32 assets, meant as an f16 series but built without `--dtype`,
 #: passed assembly, loading and execution and **were not caught until the PNG reference
 #: comparison**. The binding table, not the series directory name, is authoritative for the
-#: storage form. In an f16 series only the fake-quant targets become f16 (norm / bias and the like
-#: stay f32), so "contains f16" is required. The tokenizers (JSON) are not listed here.
+#: storage form. In a bf16 series only the eligible weights become bf16 (norm / bias and the like
+#: stay f32), so "contains bf16" is required. The tokenizers (JSON) are not listed here.
 #: An i4 series is **mixed** (f32 + i8 + i4 together), so **i4 is required** — {@link
 #: assert_storage} checks "the required vocabulary is in the binding table", so requiring i8 would
 #: let an i8 series pass into the i4 slot and the mix-up would stay silent (the same discipline as
 #: sbv2's i4 preset).
 STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    "text_encoder": "f16",
-    "text_conditioner": "f16",
-    "transformer_f16": "f16",
     "transformer_i8": "i8",
     "transformer_i4": "i4",
-    "vae_decoder": "f16",
     "text_encoder_bf16": "bf16",
     "text_conditioner_bf16": "bf16",
     "transformer_bf16": "bf16",
@@ -516,25 +496,21 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: an i4 series is mixed and its default storage is i8 (`BASE_WEIGHT_DTYPES` in `anima/export.py`),
 #: so it **always contains i8**. Plugging an i4 series into `transformer_i8` by mistake therefore
 #: satisfies "contains i8" and passes assembly, verify_dist and loading. The real damage shows up
-#: in the default quant `f16+dit8-a8-attn8-s16`: since `c285f97` the predicate of the declared
+#: in the default quant `bf16+dit8-a8-attn8-s16`: since `c285f97` the predicate of the declared
 #: `linearCompute: "a8"` accepts resident i4 too (ADR 0076), so with resident i4 it does not fail
 #: loudly and runs on **the numeric contract of w4a8** (partial group reductions) — the
 #: configuration ADR 0076 decision 6 decided "not to put in a preset because the images degrade"
 #: ships silently in the default preset while the preset name still says int8.
 #: MUST: hold the prohibitions **as a set per role** (with only one, the day a 4th series appears
-#: the one not named passes silently — the same discipline as irodori). The f16 slot is closed
-#: twice, by the absence of i8 and of i4.
-#: MUST: mix-ups between the bf16 series (ADR 0131) and the other series fail in both directions
-#: too — a bf16 series is bf16 + f32 and an f16 series f16 + f32, so neither satisfies the other's
-#: requirement, but relying on the requirement alone goes silent the day "a mix containing both"
-#: appears. The bf16 roles forbid f16 / i8 / i4, and the other roles forbid bf16.
+#: the one not named passes silently — the same discipline as irodori).
+#: MUST: every role forbids f16. No slot takes an f16 series any more (ADR 0154), but the exporter
+#: still writes them (`--dtype f16`) and old ones stay on disk — an f16 series is f16 + f32, so it
+#: already fails every requirement, yet relying on the requirement alone goes silent the day "a mix
+#: containing both" appears. The bf16 roles forbid f16 / i8 / i4, and the compressed roles forbid
+#: f16 / bf16 (and i8 forbids i4 — above).
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    "text_encoder": ("bf16",),
-    "text_conditioner": ("bf16",),
-    "vae_decoder": ("bf16",),
-    "transformer_f16": ("bf16", "i8", "i4"),
-    "transformer_i8": ("bf16", "i4"),
-    "transformer_i4": ("bf16",),
+    "transformer_i8": ("f16", "bf16", "i4"),
+    "transformer_i4": ("f16", "bf16"),
     "text_encoder_bf16": ("f16", "i8", "i4"),
     "text_conditioner_bf16": ("f16", "i8", "i4"),
     "transformer_bf16": ("f16", "i8", "i4"),
@@ -560,24 +536,14 @@ ANIMA_VAE_DECODER_ROLE = "vae_decoder"
 #: `i4` is a label for **a mixed series**: "i4-eligible weights in i4 group32, the rest i8"
 #: (`anima/export.py`).
 ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    ANIMA_TEXT_ENCODER_ROLE: {
-        "f16": WeightFiles("text_encoder"),
-        "bf16": WeightFiles("text_encoder_bf16"),
-    },
-    ANIMA_TEXT_CONDITIONER_ROLE: {
-        "f16": WeightFiles("text_conditioner"),
-        "bf16": WeightFiles("text_conditioner_bf16"),
-    },
+    ANIMA_TEXT_ENCODER_ROLE: {"bf16": WeightFiles("text_encoder_bf16")},
+    ANIMA_TEXT_CONDITIONER_ROLE: {"bf16": WeightFiles("text_conditioner_bf16")},
     ANIMA_TRANSFORMER_ROLE: {
-        "f16": WeightFiles("transformer_f16"),
         "i8": WeightFiles("transformer_i8"),
         "i4": WeightFiles("transformer_i4"),
         "bf16": WeightFiles("transformer_bf16"),
     },
-    ANIMA_VAE_DECODER_ROLE: {
-        "f16": WeightFiles("vae_decoder"),
-        "bf16": WeightFiles("vae_decoder_bf16"),
-    },
+    ANIMA_VAE_DECODER_ROLE: {"bf16": WeightFiles("vae_decoder_bf16")},
 }
 
 #: Declaration of the assets (unconditional files that do not depend on the quant choice — ADR
@@ -602,16 +568,9 @@ class AnimaModel:
     #: derived from {@link pipeline_config} (`anima.calib.calib_conditions`), so the i4 preset is no
     #: longer turbo-only). The text stack's storage labels (keys of
     #: {@link ANIMA_TEXT_STACK_SERIES}) are read from here too — a model with `bf16` also requires
-    #: and declares the bf16 series of the 3 text-stack roles (the original-weights preset is bf16
-    #: for all 4 roles).
+    #: and declares the bf16 series of the 3 text-stack roles (every preset stores the text stack
+    #: in bf16).
     storages: tuple[str, ...]
-    #: Whether the model has its own text_conditioner (for f16 — bf16 is decided by
-    #: {@link text_conditioner_series}).
-    #: `False` = the plain shared series ({@link ANIMA_BASE_SERIES}).
-    #: Third-party fine-tunes retrain not only the DiT but also the llm_adapter (=
-    #: text_conditioner), so sharing would run with **another model's text conditioning** (only the
-    #: images silently drift).
-    own_text_conditioner: bool
     #: The manifest's `pipelineConfig` (steps / guidance differ per model). **The i4 calibration
     #: conditions are derived from it too** (`anima.calib.calib_conditions`) — so that the sigma
     #: sequence and the CFG branches the calibration sees are exactly the distribution's runtime
@@ -640,62 +599,52 @@ class AnimaModel:
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
     # Official Turbo (the distilled checkpoint itself — the old anima-turbo's LoRA baking is no
     # longer needed). lora_sha256=None is the active "not baked" check and rejects plugging in an
-    # old fused series that carries lora_provenance.json. The text_conditioner measured equal in
-    # value to base after f16 rounding (2026-09-01; as bytes, 66 zeros differ in sign — measured
-    # 2026-11-17), so f16 uses the shared series (in bf16 the upstream bits differ in 60 / 118
-    # tensors — measured 2026-10-17, only near-zero elements up to 2.98e-8 — so it has its own
-    # series: {@link text_conditioner_series}).
+    # old fused series that carries lora_provenance.json. Its text_conditioner differs from base
+    # in the upstream bits (60 / 118 tensors — measured 2026-10-17, only near-zero elements up to
+    # 2.98e-8), so it has its own series ({@link text_conditioner_series}).
     # The i4 preset the old fused turbo had is **not carried over** (maintainer ruling of
     # 2026-09-01 — every model is without i4; the lever to bring it back is `anima.eval_dist`, as
     # for the plain model).
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=False,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
-    # Every model has the original-weights preset `bf16` (ADR 0131 decision 3, addendum
-    # 2026-10-17).
+    # Every model stores all 4 components in bf16, the upstream checkpoints' own dtype (ADR 0131
+    # decision 3, addendum 2026-10-17; ADR 0154), and the transformer in i8 besides.
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=False,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     # Official Aesthetic. No i4 preset, on the same ruling as the plain model (the NOTE above — no
     # model has i4).
     ANIMA_AESTHETIC_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=True,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
     # The 2 official variants of the v1.0 generation are distributed alongside (maintainer ruling
     # of 2026-09-01 — preferences between versions differ for this family, so a way back to the old
-    # version is kept = exactly the motivation of ADR 0077). Both have their own conditioner,
-    # measured to differ from base in 64/118 tensors after f16 rounding (2026-09-01).
+    # version is kept = exactly the motivation of ADR 0077).
     "anima-turbo-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=True,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
     "anima-aesthetic-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=True,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
     "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=True,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-copycat-20260610": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "bf16"),
-        own_text_conditioner=True,
+        storages=("i8", "bf16"),
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
 }
@@ -722,8 +671,8 @@ class AnimaSources:
     """The series directories that are the inputs of the assembly.
 
     The text path and the VAE do not depend on the DiT's storage dtype, so one series is shared per
-    text-stack storage label (ADR 0019 — f16 for every model, bf16 only for the models with the
-    original-weights preset). The transformer splits into f16 / i8 / i4 / bf16 series.
+    text-stack storage label (ADR 0019 — bf16, {@link ANIMA_TEXT_STACK_SERIES}). The transformer
+    splits into bf16 / i8 / i4 series.
     """
 
     #: Storage dtype label → transformer series (in the order of {@link AnimaModel.storages}).
@@ -737,31 +686,28 @@ class AnimaSources:
     tokenizers: Path
 
 
-def text_conditioner_series(model: str, spec: AnimaModel, storage: str) -> str:
+def text_conditioner_series(model: str, storage: str) -> str:
     """The text_conditioner's series name (per storage label).
 
-    For f16 it is decided by {@link AnimaModel.own_text_conditioner} (the shared series if equal
-    in value after f16 rounding). bf16 **keeps the upstream bits**, so every model but base has its
-    own series — turbo-v1.1's llm_adapter equals base in value after f16 rounding (66 zeros differ
-    in sign), but in bf16 60 / 118 tensors differ (measured 2026-10-17, max 2.98e-8, only near-zero
-    elements). The
-    distribution assembly folds only byte-identical components into `shared/`, so the sharing
-    optimisation is not lost even though it is not decided here.
+    bf16 **keeps the upstream bits**, so every model but base has its own series — turbo-v1.1's
+    llm_adapter differs from base in 60 / 118 tensors (measured 2026-10-17, max 2.98e-8, only
+    near-zero elements), and third-party fine-tunes retrain it (sharing would run with **another
+    model's text conditioning**, and only the images would silently drift). The distribution
+    assembly folds only byte-identical components into `shared/`, so the sharing optimisation is
+    not lost even though it is not decided here.
     """
-    if storage == "bf16":
-        if model == ANIMA_BASE_MODEL_NAME:
-            return ANIMA_TEXT_STACK_SERIES[storage]
-        return f"{model}-bf16"
-    return f"{model}-{storage}" if spec.own_text_conditioner else ANIMA_TEXT_STACK_SERIES[storage]
+    if model == ANIMA_BASE_MODEL_NAME:
+        return ANIMA_TEXT_STACK_SERIES[storage]
+    return f"{model}-{storage}"
 
 
 def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> AnimaSources:
     """Picks one model's series from the series parent directory (`outputs/series/`).
 
-    The model name applies only to the transformer series and to the series of models with their own
-    text_conditioner ({@link text_conditioner_series} — in bf16 every model but base has its own).
-    text_encoder / VAE / tokenizers are parts upstream fine-tunes do not touch, so for every model
-    they come from the one shared series per storage label.
+    The model name applies only to the transformer series and to the text_conditioner series
+    ({@link text_conditioner_series} — every model but base has its own). text_encoder / VAE /
+    tokenizers are parts upstream fine-tunes do not touch, so for every model they come from the
+    one shared series per storage label.
     """
     spec = anima_model(model)
     text_storages = [storage for storage in spec.storages if storage in ANIMA_TEXT_STACK_SERIES]
@@ -769,7 +715,7 @@ def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> Anima
         transformer={storage: series_dir / f"{model}-{storage}-dyn" for storage in spec.storages},
         base={storage: series_dir / ANIMA_TEXT_STACK_SERIES[storage] for storage in text_storages},
         text_conditioner={
-            storage: series_dir / text_conditioner_series(model, spec, storage)
+            storage: series_dir / text_conditioner_series(model, storage)
             for storage in text_storages
         },
         tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",
@@ -800,7 +746,7 @@ def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
 def assert_shared_rope_base(sources: AnimaSources) -> None:
     """Checks that the raw rope tables of every transformer series are byte-identical.
 
-    MUST: the raw table goes into each of the f16 / i8 / i4 series as the container's **asset**
+    MUST: the raw table goes into each of the bf16 / i8 / i4 series as the container's **asset**
     `rope_base` (ADR 0109 decision 4). Byte identity across all of them is checked with sha256 —
     shipping them mismatched would make one of the quants "run with rope tables of a different
     geometry", passing loading and execution while only the images silently break. In `karume/4`
@@ -853,9 +799,10 @@ def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
 
     MUST: the writer bakes into and records for the 2 targets of `LORA_PREFIXES` (transformer /
     text_conditioner), so the records of the text_conditioner series (the shared {@link
-    ANIMA_BASE_SERIES} and a model's own `<model>-f16`) are checked against the same expected value.
-    If the net covered only the transformer, plugging a conditioner series with a baked LoRA into a
-    distribution slot would pass, and nobody would check the "no LoRA" MUST of `anima-f16`.
+    ANIMA_BASE_SERIES} and a model's own `<model>-bf16`) are checked against the same expected
+    value. If the net covered only the transformer, plugging a conditioner series with a baked LoRA
+    into a distribution slot would pass, and nobody would check the "no LoRA" MUST of
+    {@link ANIMA_BASE_SERIES}.
     """
     records = [
         series / "transformer" / LORA_PROVENANCE_FILE for series in transformer_series(sources)
@@ -972,8 +919,8 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
 def anima_weights(spec: AnimaModel) -> Mapping[str, Mapping[str, WeightFiles]]:
     """The weights declaration narrowed to the model's storage forms (no labels without a preset).
 
-    One rule narrows every role — the text stack's `f16` is in every model's storages and stays,
-    and `bf16` stays only for the models with the original-weights preset.
+    One rule narrows every role — the text stack's `bf16` is in every model's storages and stays,
+    and the transformer keeps only the storages the model declares.
     """
     return {
         role: {label: files for label, files in labels.items() if label in spec.storages}
@@ -999,10 +946,11 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
     added the presets do not grow / the day one is removed the presets remain.
 
     MUST: a role that is not named is filled with **the `<storage>` of the preset name** ({@link
-    seat_base_storage}) — for a model whose text stack has the 2 labels f16 / bf16, core's {@link
-    complete_quant_weights} fails with "several exist but none is specified" (it does not pick a
-    default on its own), so the basis for the choice is the grammar of the preset name. If the
-    filled label does not exist for the role, core fails with "no such dtype".
+    seat_base_storage}) — for a role with several labels, core's {@link complete_quant_weights}
+    fails with "several exist but none is specified" (it does not pick a default on its own), so
+    the basis for the choice is the grammar of the preset name, not the count of labels a role
+    happens to have. If the filled label does not exist for the role, core fails with "no such
+    dtype".
     """
     weights = anima_weights(spec)
     return {

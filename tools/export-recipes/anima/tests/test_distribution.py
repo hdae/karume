@@ -131,25 +131,19 @@ def _weights_container(
 
 
 #: The contents of the fake assets (different bytes per role — a mix-up shows in the hashes).
-#: The 5 model roles carry in their binding tables the storage vocabulary that
+#: The model roles carry in their binding tables the storage vocabulary that
 #: `STORAGE_REQUIREMENTS` requires. The 3 transformer roles bundle the rope base table as an
 #: asset, so they have one more part ({@link _TRANSFORMER_PARTS}).
 _PAYLOADS = {
-    "text_encoder": _weights_container("text-encoder", "f16", named="text_encoder"),
-    "text_conditioner": _weights_container("text-conditioner", "f16", named="text_conditioner"),
-    "transformer_f16": _weights_container(
-        "transformer-f16", "f16", named="transformer", rope=_ROPE_BASE
-    ),
     "transformer_i8": _weights_container(
         "transformer-i8", "i8", named="transformer", rope=_ROPE_BASE
     ),
     "transformer_i4": _weights_container(
         "transformer-i4", "i4", named="transformer", rope=_ROPE_BASE
     ),
-    "vae_decoder": _weights_container("vae-decoder", "f16", named="vae_decoder"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
-    # The 4 roles of the faithful preset `bf16` (ADR 0131 — only the base model has them).
+    # The bf16 roles — every component is stored in bf16 (ADR 0154).
     "text_encoder_bf16": _weights_container("text-encoder-bf16", "bf16", named="text_encoder"),
     "text_conditioner_bf16": _weights_container(
         "text-conditioner-bf16", "bf16", named="text_conditioner"
@@ -161,11 +155,11 @@ _PAYLOADS = {
 }
 
 #: The part count of a transformer slot (the asset `rope_base` adds one dedicated part).
-_TRANSFORMER_PARTS = len(_PAYLOADS["transformer_f16"])
+_TRANSFORMER_PARTS = len(_PAYLOADS["transformer_bf16"])
 
 #: Role name → part count (overrides for {@link placed_paths} / {@link part_paths}).
 _PART_TOTALS: Mapping[str, int] = {
-    f"transformer_{storage}": _TRANSFORMER_PARTS for storage in ("f16", "i8", "i4", "bf16")
+    f"transformer_{storage}": _TRANSFORMER_PARTS for storage in ("i8", "i4", "bf16")
 }
 
 #: The 3 components of the text stack ({@link text_stack_role} turns them into role names per
@@ -245,10 +239,10 @@ def _build_series(
 
     `mark` is a difference mixed into the transformer series only — the axis for building
     "weights that differ per model" and "base assets identical across models" in a family
-    assembly. `i8_rope` / `i4_rope` / `bf16_rope` are axes that move the rope base table away
-    from the f16 series (each series can be varied independently — to check that the net covers
-    every series). The text stack is written **once per storage label the model declares** (the
-    base model has f16 + bf16). `calib_method` is the axis that changes the i4 series' rounding
+    assembly. `i8_rope` / `i4_rope` / `bf16_rope` are axes that move one series' rope base table
+    away from the others' (each series can be varied independently — to check that the net covers
+    every series). The text stack is written **once per storage label the model declares** (bf16
+    — `ANIMA_TEXT_STACK_SERIES`). `calib_method` is the axis that changes the i4 series' rounding
     method (the default is the shippable `gptq`). `calib_model` is the axis that moves **only
     the calibration conditions** to another model's (a series baked with the wrong `--model` —
     weights and storage form correct, only the conditions differ).
@@ -283,7 +277,6 @@ def _build_series(
         _write(base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
         _write(base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
     ropes = {
-        "f16": _ROPE_BASE,
         "i8": i8_rope or _ROPE_BASE,
         "i4": i4_rope or _ROPE_BASE,
         "bf16": bf16_rope or _ROPE_BASE,
@@ -303,7 +296,7 @@ def _build_series(
         )
         write_component(series / "transformer" / "model.krm", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
-    # Only the i4 series has calibration conditions (f16 / i8 are not calibrated).
+    # Only the i4 series has calibration conditions (bf16 / i8 are not calibrated).
     if "i4" in sources.transformer:
         _write(
             sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE,
@@ -425,7 +418,7 @@ class TestLayout:
     def test_it_renames_the_two_transformer_series_into_dtype_files(self, assembled) -> None:
         out_dir, _ = assembled
         subtree = out_dir / ANIMA_TURBO_MODEL_NAME / "transformer"
-        assert read_component(subtree / "model.f16.krm") == _PAYLOADS["transformer_f16"]
+        assert read_component(subtree / "model.bf16.krm") == _PAYLOADS["transformer_bf16"]
         assert read_component(subtree / "model.i8.krm") == _PAYLOADS["transformer_i8"]
 
     def test_no_shipped_model_places_an_i4_file(self, assembled) -> None:
@@ -436,7 +429,7 @@ class TestLayout:
         assert not any("i4" in name for name in _present(out_dir))
 
     def test_an_injected_i4_seat_gets_its_own_dtype_file(self, assembled_with_i4) -> None:
-        """i4 is the 3rd storage slot next to f16 / i8 (putting it on the same path would lose a
+        """i4 is the 3rd storage slot next to bf16 / i8 (putting it on the same path would lose a
         slot).
 
         The slot itself left the distribution, but the **mechanism** that puts the 3rd one on
@@ -482,8 +475,8 @@ class TestPlacementStrategy:
         """The distribution holds no hard links (a self-contained snapshot independent of the
         series)."""
         out_dir, _ = assembled
-        placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert read_component(placed) == _PAYLOADS["text_encoder"]
+        placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder_bf16"]
+        assert read_component(placed) == _PAYLOADS["text_encoder_bf16"]
         # Being an independent copy applies to each part (no slot slips through by being
         # split).
         assert [part.stat().st_nlink for part in container_parts(placed)] == [1, 1, 1]
@@ -499,15 +492,15 @@ class TestPlacementStrategy:
         _assemble_anima(sources, out_dir)
         # What is rewritten is the series' **part 0** (a re-export truncates and overwrites
         # each part).
-        source = container_parts(sources.base["f16"] / "text_encoder" / "model.krm")[0]
+        source = container_parts(sources.base["bf16"] / "text_encoder" / "model.krm")[0]
         with source.open("wb") as handle:
             handle.write(b"rewritten-after-assembly")
-        placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert read_component(placed) == _PAYLOADS["text_encoder"]
+        placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder_bf16"]
+        assert read_component(placed) == _PAYLOADS["text_encoder_bf16"]
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        for part in container_parts(sources.base["f16"] / "vae_decoder" / "model.krm"):
+        for part in container_parts(sources.base["bf16"] / "vae_decoder" / "model.krm"):
             part.unlink()
         with pytest.raises(DistError, match="Assembly input is missing"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
@@ -520,7 +513,7 @@ class TestRopeBase:
         out_dir, _ = assembled
         placed = [
             out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS[f"transformer_{storage}"]
-            for storage in ("f16", "i8")
+            for storage in ("bf16", "i8")
         ]
         assert [read_asset(path, ROPE_BASE_ASSET) for path in placed] == [_ROPE_BASE] * 2
 
@@ -591,7 +584,7 @@ class TestLoraProvenance:
         """The mix-up of plugging a series of the old `anima-turbo` (LoRA baked in) into the
         official Turbo's slot."""
         sources = _build_series(tmp_path / "series")
-        _bake_lora_record(sources.transformer["f16"])
+        _bake_lora_record(sources.transformer["bf16"])
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
 
         with pytest.raises(DistError, match="received a series that carries a"):
@@ -606,7 +599,7 @@ class TestLoraProvenance:
         """The same single implementation applies to the base model's slot too (the net covers
         series, not models)."""
         sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
-        _bake_lora_record(sources.transformer["f16"])
+        _bake_lora_record(sources.transformer["bf16"])
         out_dir = tmp_path / "models" / ANIMA_BASE_MODEL_NAME
 
         with pytest.raises(DistError, match="received a series that carries a"):
@@ -615,11 +608,11 @@ class TestLoraProvenance:
         assert not out_dir.exists()
 
     def test_the_check_reaches_every_transformer_series(self, tmp_path: Path) -> None:
-        """If the net stayed on the one f16 series, a record mixed into another storage slot would
-        slip through.
+        """If the net stayed on one series, a record mixed into another storage slot would slip
+        through.
 
         The old fused series come as 3 (f16 / i8 / i4), so swapping just one of them into the
-        distribution's storage slots (now 2: f16 / i8) is a mix-up that can really happen. The
+        distribution's storage slots (now 2: bf16 / i8) is a mix-up that can really happen. The
         enumeration is tied to the declarations so that the net widens automatically the day a
         slot is added.
         """
@@ -632,8 +625,8 @@ class TestLoraProvenance:
 
     @pytest.mark.parametrize(
         "model",
-        [ANIMA_TURBO_MODEL_NAME, ANIMA_AESTHETIC_MODEL_NAME],
-        ids=["shared-anima-f16", "own-text-conditioner"],
+        [ANIMA_BASE_MODEL_NAME, ANIMA_TURBO_MODEL_NAME],
+        ids=["shared-anima-bf16", "own-text-conditioner"],
     )
     def test_the_check_reaches_the_text_conditioner_series_too(
         self, tmp_path: Path, model: str
@@ -643,11 +636,11 @@ class TestLoraProvenance:
 
         With the net on transformer series only, plugging a baked conditioner series into a
         distribution slot would slip through, and nobody would check the MUST "no LoRA baked
-        in" of `anima-f16` (shared). Checks that the same check applies to the slots of both the
-        shared series and the model's own `<model>-f16`.
+        in" of `anima-bf16` (shared). Checks that the same check applies to the slots of both the
+        shared series (the base model's) and a model's own `<model>-bf16`.
         """
         sources = _build_series(tmp_path / "series", model=model)
-        _bake_lora_record(sources.text_conditioner["f16"], component="text_conditioner")
+        _bake_lora_record(sources.text_conditioner["bf16"], component="text_conditioner")
         out_dir = tmp_path / "models" / model
 
         with pytest.raises(DistError, match="received a series that carries a"):
@@ -689,22 +682,21 @@ class TestModelVariants:
         manifest = _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
 
         entry = manifest["models"][ANIMA_BASE_MODEL_NAME]
-        # bf16 is the faithful preset (ADR 0131 decision 3 — every model since the addendum of
-        # 2026-10-17).
-        assert sorted(entry["weights"]["transformer"]) == ["bf16", "f16", "i8"]
-        assert "f16+dit4" not in entry["quants"]
-        assert "f16+dit4-attn8-s16" not in entry["quants"]
+        # bf16 is the original weights (ADR 0131 decision 3; the only float storage — ADR 0154).
+        assert sorted(entry["weights"]["transformer"]) == ["bf16", "i8"]
+        assert "bf16+dit4" not in entry["quants"]
+        assert "bf16+dit4-attn8-s16" not in entry["quants"]
         assert not (out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
 
-    def test_the_official_aesthetic_carries_the_same_three_storages(self, tmp_path: Path) -> None:
-        """Aesthetic also has the 3 slots f16 / i8 / bf16 (its default is the visual ruling's 30
-        steps / CFG 4)."""
+    def test_the_official_aesthetic_carries_the_same_storages(self, tmp_path: Path) -> None:
+        """Aesthetic also has the 2 slots bf16 / i8 (its default is the visual ruling's 30 steps /
+        CFG 4)."""
         sources = _build_series(tmp_path / "series", model=ANIMA_AESTHETIC_MODEL_NAME)
         out_dir = tmp_path / "models" / ANIMA_AESTHETIC_MODEL_NAME
         manifest = _assemble_anima(sources, out_dir, ANIMA_AESTHETIC_MODEL_NAME)
 
         entry = manifest["models"][ANIMA_AESTHETIC_MODEL_NAME]
-        assert sorted(entry["weights"]["transformer"]) == ["bf16", "f16", "i8"]
+        assert sorted(entry["weights"]["transformer"]) == ["bf16", "i8"]
         defaults = entry["pipelineConfig"]["defaults"]
         assert (defaults["steps"], defaults["guidanceScale"]) == (30, 4)
 
@@ -720,28 +712,24 @@ class TestModelVariants:
         """
         assert [name for name, spec in ANIMA_MODELS.items() if "i4" in spec.storages] == []
         for name, spec in ANIMA_MODELS.items():
-            # The faithful preset `bf16` is on every model (ADR 0131 decision 3, addendum
-            # 2026-10-17).
-            assert spec.storages == ("f16", "i8", "bf16"), name
+            # Every model stores bf16 (the original weights — ADR 0131 decision 3) and the i8
+            # transformer; f16 left the distribution (ADR 0154).
+            assert spec.storages == ("i8", "bf16"), name
 
     def test_the_official_variants_split_on_the_text_conditioner(self, tmp_path: Path) -> None:
-        """Only the f16 of the variants measured bit-identical shares the text_conditioner
-        (2026-09-01).
+        """Every official variant but base reads its own text_conditioner series.
 
-        Turbo is bit-identical to base after f16 rounding, so its f16 reads the shared series;
-        Aesthetic was measured to keep differences in 64 tensors, so it has its own — mixing them
-        up would run with **another model's text conditioning**, pass loading and execution, and
-        only the images would drift, silently. bf16 keeps upstream's bits, so turbo has its own
-        too (60 / 118 tensors differ from base — measured 2026-10-17).
+        bf16 keeps upstream's bits, so even Turbo, whose conditioner rounded to f16 equals base,
+        has its own (60 / 118 tensors differ from base — measured 2026-10-17); Aesthetic differs
+        more. Mixing them up would run with **another model's text conditioning**, pass loading
+        and execution, and only the images would drift, silently.
         """
         turbo = anima_sources(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
         aesthetic = anima_sources(tmp_path / "series", ANIMA_AESTHETIC_MODEL_NAME)
 
-        assert turbo.text_conditioner["f16"] == turbo.base["f16"]
         assert turbo.text_conditioner["bf16"] != turbo.base["bf16"]
         assert turbo.text_conditioner["bf16"].name == f"{ANIMA_TURBO_MODEL_NAME}-bf16"
         assert aesthetic.text_conditioner != aesthetic.base
-        assert aesthetic.text_conditioner["f16"].name == f"{ANIMA_AESTHETIC_MODEL_NAME}-f16"
         assert aesthetic.text_conditioner["bf16"].name == f"{ANIMA_AESTHETIC_MODEL_NAME}-bf16"
 
     def test_a_fine_tune_reads_its_own_text_conditioner(self, tmp_path: Path) -> None:
@@ -752,7 +740,6 @@ class TestModelVariants:
 
         assert base.text_conditioner == base.base
         assert wai.text_conditioner != wai.base
-        assert wai.text_conditioner["f16"].name == "anima-wai-v1.0-f16"
         assert wai.text_conditioner["bf16"].name == "anima-wai-v1.0-bf16"
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
@@ -852,22 +839,24 @@ class TestPipelineMembership:
         assert not any("i4" in spec.storages for spec in ANIMA_MODELS.values())
 
     def test_both_notices_state_the_bf16_series_every_model_ships(self) -> None:
-        """Every model ships the original-weights preset `bf16` (ADR 0131 decision 3), so both
-        repositories carry a bf16 series and both notices must say so (§3(d)(i)).
+        """Every model stores every component in bf16 (ADR 0131 decision 3, ADR 0154), so both
+        notices must say that the bf16 series keeps the upstream values (§3(d)(i)) — and, with no
+        f16 series left, neither may name one.
 
         The notice is fixed on the Pipeline and cannot read the manifest, so the storages and the
         text move independently — the same cross-check as the int4 case above, in the other
         direction. The line must not call the series quantized: bf16 keeps the upstream values.
         """
         assert all("bf16" in spec.storages for spec in ANIMA_MODELS.values())
+        assert not any("f16" in spec.storages for spec in ANIMA_MODELS.values())
         for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
             flat = " ".join(notice.split())
-            assert "A bf16 series was added alongside the f16 one." in flat
             assert (
-                "It keeps the values of the upstream BF16 weights unchanged"
-                " (no rounding or quantization)" in flat
+                "The bf16 series of every component keeps the values of the upstream BF16 weights"
+                " unchanged (no rounding or quantization)." in flat
             )
             assert "bf16-quantized" not in flat
+            assert "f16" not in flat.replace("bf16", "")
 
     def test_an_unknown_model_name_is_refused_with_the_choices(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="Unknown Anima model name"):
@@ -954,7 +943,7 @@ class TestCalibProvenance:
 
         manifest = self._assemble(sources, out_dir)
 
-        assert "f16+dit4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
+        assert "bf16+dit4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
 
     def test_it_stops_when_the_calibration_ran_on_a_smaller_budget(self, tmp_path: Path) -> None:
         """`--calib-prompts 1` leaves `method` as `gptq` — it passes unless the budget field is
@@ -1022,14 +1011,14 @@ class TestStorageGate:
     """The storage checks (based on a real accident — a raw f32 from a forgotten `--dtype` stayed
     silent until the PNG check)."""
 
-    def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
+    def test_it_stops_when_a_bf16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(
-            sources.base["f16"] / "text_encoder" / "model.krm",
+            sources.base["bf16"] / "text_encoder" / "model.krm",
             _weights_container("text-encoder", "f32", named="text_encoder"),
         )
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
-        with pytest.raises(DistError, match=r"text_encoder: .* has no f16"):
+        with pytest.raises(DistError, match=r"text_encoder_bf16: .* has no bf16"):
             _assemble_anima(sources, out_dir)
         # The check runs before placement — not a single file of a partial distribution is left
         # (the same discipline as the rope mismatch).
@@ -1064,7 +1053,7 @@ class TestStorageGate:
         it through**.
 
         An i4 series is a mix whose default storage is i8, so it always contains i8 and
-        satisfies "contains i8". If the default quant `f16+dit8-a8-attn8-s16` picked up a
+        satisfies "contains i8". If the default quant `bf16+dit8-a8-attn8-s16` picked up a
         resident i4, the `a8` predicate since `c285f97` accepts i4 too
         (ADR 0076), so instead of failing loudly it would run under the w4a8 numeric contract —
         a configuration that ADR 0076 decision 6 decided not to offer would come out silently
@@ -1080,7 +1069,7 @@ class TestStorageGate:
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
-        """**Every** mix-up of 4 slots × the other 3 series fails through either a requirement or a
+        """**Every** mix-up of 3 slots × the other series fails through either a requirement or a
         prohibition.
 
         If only one of the tables were updated the day a slot is added, the combinations that
@@ -1090,7 +1079,6 @@ class TestStorageGate:
         #: Series → the storage vocabulary its binding table **always contains** (i4 is a mix
         #: whose default storage is i8, so it contains i8 too).
         headers = {
-            "transformer_f16": {"f32", "f16"},
             "transformer_i8": {"f32", "i8"},
             "transformer_i4": {"f32", "i8", "i4"},
             "transformer_bf16": {"f32", "bf16"},
@@ -1102,13 +1090,24 @@ class TestStorageGate:
         assert set(headers) == {
             role for role in STORAGE_REQUIREMENTS if role.startswith("transformer")
         }
+        # An f16 series has no slot any more, but the exporter still writes them and old ones
+        # stay on disk — it is an intruder every slot refuses.
+        intruders = {**headers, "transformer_f16": {"f32", "f16"}}
 
         for seat in headers:
-            for series, found in headers.items():
+            for series, found in intruders.items():
                 caught = STORAGE_REQUIREMENTS[seat] not in found or any(
                     dtype in found for dtype in ANIMA_STORAGE_FORBIDDEN.get(seat, ())
                 )
                 assert caught is (series != seat), f"{series} → {seat} slot"
+
+    def test_every_seat_forbids_f16_storage(self) -> None:
+        """MUST: no role takes f16 storage (ADR 0154) — an f16 series fails every requirement
+        anyway, so the prohibition is what still catches a mix that holds f16 next to the required
+        storage."""
+        assert set(ANIMA_STORAGE_FORBIDDEN) == set(STORAGE_REQUIREMENTS)
+        for role, forbidden in ANIMA_STORAGE_FORBIDDEN.items():
+            assert "f16" in forbidden, role
 
     def test_every_series_seat_mix_up_is_refused_by_the_real_gates(self, tmp_path: Path) -> None:
         """Runs the 3×3 through **the real gates** (`assert_storage` / `assert_storage_absent`), not
@@ -1121,8 +1120,8 @@ class TestStorageGate:
         slots ({@link _i4_seat} — the tables still have 3 slots).
         """
         # What is plugged in is **a valid container** (the diagonal goes through the whole
-        # assembly, so it has to be real). The storage vocabulary is the series' own: f16 =
-        # {f32, f16} / i8 = {f32, i8} / i4 = {f32, i8, i4}.
+        # assembly, so it has to be real). The storage vocabulary is the series' own: bf16 =
+        # {f32, bf16} / i8 = {f32, i8} / i4 = {f32, i8, i4}.
         seats = [f"transformer_{storage}" for storage in I4_SEAT_STORAGES]
         for seat in seats:
             for series in seats:
@@ -1150,23 +1149,24 @@ class TestStorageGate:
     def test_the_bf16_seats_refuse_every_other_series_through_the_real_gates(
         self, tmp_path: Path
     ) -> None:
-        """Runs the mix-ups between the 4 roles of the faithful preset (ADR 0131) and the same
-        components of the other storages through **the real gates**.
+        """Runs the mix-ups between the 4 bf16 roles (ADR 0131) and the same components in the
+        other storages through **the real gates**.
 
-        The base model has 3 slots for the transformer (f16 / i8 / bf16) and 2 slots for each of
-        the 3 text-stack components (f16 / bf16). Plugging a bf16 series into an f16 slot (or
-        the reverse) keeps both the shapes and the part count, so the storage checks are the
-        only detector — checks that only the diagonal passes and every off-diagonal fails.
+        The base model has 2 slots for the transformer (i8 / bf16) and 1 slot for each of the 3
+        text-stack components (bf16). An f16 series of the same component — the exporter still
+        writes them (`--dtype f16`), and the old shipping ones stay on disk — keeps both the
+        shapes and the part count, so the storage checks are the only detector: checks that only
+        the diagonal passes and every off-diagonal fails.
         """
         model = ANIMA_BASE_MODEL_NAME
         seats = [
             (component, storage, other)
             for component, storages in (
-                ("transformer", ("f16", "i8", "bf16")),
-                *((component, ("f16", "bf16")) for component in _TEXT_STACK_COMPONENTS),
+                ("transformer", ("i8", "bf16")),
+                *((component, ("bf16",)) for component in _TEXT_STACK_COMPONENTS),
             )
             for storage in storages
-            for other in storages
+            for other in (*storages, "f16")
         ]
         for component, storage, series in seats:
             sources = _build_series(
@@ -1197,7 +1197,7 @@ class TestStorageGate:
 
     def test_it_stops_when_the_component_is_not_a_container(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        replace_component(sources.base["f16"] / "vae_decoder" / "model.krm", b"not-a-container")
+        replace_component(sources.base["bf16"] / "vae_decoder" / "model.krm", b"not-a-container")
         with pytest.raises(DistError, match="cannot be read as a container"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
@@ -1267,11 +1267,11 @@ class TestManifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, assembled) -> None:
         out_dir, manifest = assembled
-        parts = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["f16"][
+        parts = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["bf16"][
             "container"
         ]["parts"]
         # The triple applies to each part (no single entry of the list can be stale).
-        for ref, payload in zip(parts, _PAYLOADS["text_encoder"], strict=True):
+        for ref, payload in zip(parts, _PAYLOADS["text_encoder_bf16"], strict=True):
             assert ref["size"] == len(payload)
             assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
             assert (out_dir / ref["path"]).read_bytes() == payload
@@ -1312,16 +1312,16 @@ class TestQuantNaming:
     the presentation fields (ADR 0075)."""
 
     def test_every_seat_starts_from_the_shared_base_storage(self) -> None:
-        """Anima's base storage is `f16` (only the faithful preset is `bf16`) — compression is
-        spelled with `+dit…`.
+        """Anima's base storage is `bf16` for every entry (ADR 0154) — compression is spelled with
+        `+dit…`.
 
         If the rule that takes `<storage>` literally as the base shared by all roles (ADR 0074
         decisions 1 and 6) broke, entry names would revert to the old spelling that names "only
-        the transformer's storage". The base is one of the text stack's storage labels (f16 /
-        bf16), and when the table names the text stack, it matches that base.
+        the transformer's storage". The base is the text stack's storage label, and when the table
+        names the text stack, it matches that base.
         """
         bases = {name: seat_base_storage(name) for name in ANIMA_QUANTS}
-        assert bases == {name: "bf16" if name == "bf16" else "f16" for name in ANIMA_QUANTS}
+        assert bases == dict.fromkeys(ANIMA_QUANTS, "bf16")
         for name, quant in ANIMA_QUANTS.items():
             for role, label in quant["weights"].items():
                 if role != "transformer":
@@ -1334,7 +1334,7 @@ class TestQuantNaming:
         assert set(ANIMA_QUANT_ABBREVIATIONS.values()) <= set(ANIMA_WEIGHTS)
 
     def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
-        """The presentation fields are optional, but Anima fills them for all 9 entries (a family
+        """The presentation fields are optional, but Anima fills them for every entry (a family
         shown in the selection UI)."""
         for name, quant in ANIMA_QUANTS.items():
             assert quant["label"] and quant["description"], name
@@ -1347,34 +1347,33 @@ class TestQuantNaming:
             assert "default" not in quant["description"].lower(), name
 
 
-#: The complete mappings of the entries that existed before the faithful preset was added
-#: (ADR 0131) (the 3 text-stack roles fixed at f16). Switching the rule that fills the roles a
-#: table does not name to "the entry name's `<storage>`" moves none of the existing mappings —
-#: that fact is pinned as literals (building the expected values from the derivation would copy
-#: a mistake in the rule straight into them and make the test vacuous).
-_PRE_BF16_MAPPINGS: Mapping[str, Mapping[str, str]] = {
+#: The complete mapping of every entry (ADR 0154 — the 3 text-stack roles in bf16, the upstream
+#: dtype). The table names only the transformer and the rule fills the rest from the entry name's
+#: `<storage>`, so the result is pinned as literals (building the expected values from the
+#: derivation would copy a mistake in the rule straight into them and make the test vacuous).
+_PRESET_MAPPINGS: Mapping[str, Mapping[str, str]] = {
     name: {
-        "text_encoder": "f16",
-        "text_conditioner": "f16",
+        "text_encoder": "bf16",
+        "text_conditioner": "bf16",
         "transformer": transformer,
-        "vae_decoder": "f16",
+        "vae_decoder": "bf16",
     }
     for name, transformer in {
-        "f16": "f16",
-        "f16+dit8": "i8",
-        "f16+dit8-a8": "i8",
-        "f16+dit8-a8-attn8": "i8",
-        "f16+dit8-a8-attn8-s16": "i8",
-        "f16+dit4": "i4",
-        "f16+dit4-attn8-s16": "i4",
-        "f16-c16": "f16",
+        "bf16": "bf16",
+        "bf16+dit8": "i8",
+        "bf16+dit8-a8": "i8",
+        "bf16+dit8-a8-attn8": "i8",
+        "bf16+dit8-a8-attn8-s16": "i8",
+        "bf16+dit4": "i4",
+        "bf16+dit4-attn8-s16": "i4",
+        "bf16-c16": "bf16",
     }.items()
 }
 
 
 class TestFaithfulPreset:
-    """The faithful preset `bf16` (ADR 0131 decision 3 — bf16 for all 4 roles; every model since
-    the addendum of 2026-10-17)."""
+    """The original-weights preset `bf16` (ADR 0131 decision 3 — bf16 for all 4 roles; every model
+    since the addendum of 2026-10-17) and the bf16 text stack every entry shares (ADR 0154)."""
 
     @pytest.fixture
     def base_assembled(self, tmp_path: Path) -> tuple[Path, dict]:
@@ -1385,22 +1384,21 @@ class TestFaithfulPreset:
     def test_the_seat_name_yields_its_base_storage(self) -> None:
         """`<storage>` is what comes before the first `+` / `-` (the grammar of ADR 0074)."""
         assert seat_base_storage("bf16") == "bf16"
-        assert seat_base_storage("f16") == "f16"
-        assert seat_base_storage("f16+dit8-a8-attn8-s16") == "f16"
-        assert seat_base_storage("f16-c16") == "f16"
+        assert seat_base_storage("bf16+dit8-a8-attn8-s16") == "bf16"
+        assert seat_base_storage("bf16-c16") == "bf16"
+        # The name is read, not the table: a name with another base yields that base.
+        assert seat_base_storage("f16+dit8") == "f16"
 
     @pytest.mark.parametrize("model", list(ANIMA_MODELS))
-    def test_the_existing_seats_keep_their_mapping_on_every_model(self, model: str) -> None:
-        """The complete mappings of the existing entries do not change when the filling rule changes
-        (the i4 entries are checked with an injected spec)."""
+    def test_every_seat_keeps_its_literal_mapping_on_every_model(self, model: str) -> None:
+        """The complete mapping of every entry, on every model (the i4 entries are checked with an
+        injected spec)."""
         spec = anima_model(model)
         spec = replace(spec, storages=(*spec.storages, "i4"))
         weights = anima_weights(spec)
         completed = complete_quant_weights(weights, anima_quants(spec))
 
-        assert {
-            name: quant["weights"] for name, quant in completed.items() if name != "bf16"
-        } == _PRE_BF16_MAPPINGS
+        assert {name: quant["weights"] for name, quant in completed.items()} == _PRESET_MAPPINGS
 
     def test_every_model_declares_the_seat(self) -> None:
         """Entries and files are derived from storages — every model has bf16 for all 4 roles
@@ -1423,22 +1421,17 @@ class TestFaithfulPreset:
         }
         assert entry["quants"]["bf16"]["label"] == "Original weights (bf16)"
         assert entry["quants"]["bf16"]["session"] == {}
-        # The existing entries keep the f16 text stack (the entry name's `<storage>` fills
-        # it).
-        for name, mapping in _PRE_BF16_MAPPINGS.items():
-            if name in entry["quants"]:
-                assert entry["quants"][name]["weights"] == mapping, name
+        # Every entry the model has maps the text stack to bf16 (the entry name's `<storage>`
+        # fills it).
+        for name, quant in entry["quants"].items():
+            assert quant["weights"] == _PRESET_MAPPINGS[name], name
         assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
 
-    def test_the_bf16_files_sit_next_to_the_unchanged_f16_ones(self, base_assembled) -> None:
-        """bf16 lives in separate files named `.bf16` — not one path of the f16 text stack moves
-        (the fine-tune repository refers to those paths across repositories)."""
+    def test_the_bf16_files_keep_their_published_paths(self, base_assembled) -> None:
+        """bf16 lives in the files named `.bf16` — the published paths, which the fine-tune
+        repository refers to across repositories — and no f16 role is left to place."""
         out_dir, _ = base_assembled
-        assert {role: OUTPUT_PATHS[role] for role in _TEXT_STACK_COMPONENTS} == {
-            "text_encoder": "text_encoder/model.krm",
-            "text_conditioner": "text_conditioner/model.krm",
-            "vae_decoder": "vae_decoder/model.krm",
-        }
+        assert not set(OUTPUT_PATHS) & {*_TEXT_STACK_COMPONENTS, "transformer_f16"}
         for component in (*_TEXT_STACK_COMPONENTS, "transformer"):
             role = f"{component}_bf16"
             assert OUTPUT_PATHS[role] == f"{component}/model.bf16.krm"
@@ -1452,10 +1445,7 @@ class TestFaithfulPreset:
         `<model>-bf16-dyn`."""
         sources = anima_sources(tmp_path / "series", ANIMA_BASE_MODEL_NAME)
 
-        assert sources.base == {
-            "f16": tmp_path / "series" / "anima-f16",
-            "bf16": tmp_path / "series" / "anima-bf16",
-        }
+        assert sources.base == {"bf16": tmp_path / "series" / "anima-bf16"}
         assert sources.text_conditioner == sources.base
         assert sources.transformer["bf16"] == tmp_path / "series" / "anima-v1.0-bf16-dyn"
 
@@ -1507,7 +1497,7 @@ class TestFaithfulPreset:
 
 
 class TestI4Quants:
-    """The 2 entries with resident i4 (`f16+dit4` = storage only / `f16+dit4-attn8-s16` = **the
+    """The 2 entries with resident i4 (`bf16+dit4` = storage only / `bf16+dit4-attn8-s16` = **the
     low-VRAM entry**).
 
     Since the ruling of 2026-09-01 **no shipped model has these 2 entries** (i4 left `storages`,
@@ -1526,14 +1516,14 @@ class TestI4Quants:
         }
 
     def test_it_declares_exactly_the_two_i4_seats(self) -> None:
-        assert sorted(self._i4_seats()) == ["f16+dit4", "f16+dit4-attn8-s16"]
+        assert sorted(self._i4_seats()) == ["bf16+dit4", "bf16+dit4-attn8-s16"]
 
     def test_the_plain_seat_leaves_the_session_untouched(self) -> None:
-        """`f16+dit4` is an entry that changes only the storage (the compute path stays f32)."""
-        assert ANIMA_QUANTS["f16+dit4"]["session"] == {}
+        """`bf16+dit4` is an entry that changes only the storage (the compute path stays f32)."""
+        assert ANIMA_QUANTS["bf16+dit4"]["session"] == {}
 
     def test_the_attention_seat_declares_only_the_attention_knobs(self) -> None:
-        assert ANIMA_QUANTS["f16+dit4-attn8-s16"]["session"] == {
+        assert ANIMA_QUANTS["bf16+dit4-attn8-s16"]["session"] == {
             "attentionCompute": "a8",
             "attentionScoreStorage": "f16",
         }
@@ -1544,7 +1534,7 @@ class TestI4Quants:
         no effect" / new: it does take effect with w4a8 (ADR 0076), but the visual ruling is that
         **applying it roughens the image's fine detail** (research 2026-08-21 §6). Speed comes
         back (1,640 → 955 ms/step), but this entry exists for size and VRAM; if speed is needed,
-        the default `f16+dit8-a8-attn8-s16` is better.
+        the default `bf16+dit8-a8-attn8-s16` is better.
         """
         for name, quant in self._i4_seats().items():
             assert "linearCompute" not in quant["session"], name
@@ -1552,7 +1542,7 @@ class TestI4Quants:
     def test_the_default_quant_stays_on_the_i8_seat(self) -> None:
         """Adding entries does not move the default (changing the default is a separate decision
         that needs a quality ruling)."""
-        assert ANIMA_DEFAULT_QUANT == "f16+dit8-a8-attn8-s16"
+        assert ANIMA_DEFAULT_QUANT == "bf16+dit8-a8-attn8-s16"
 
     def test_no_shipped_model_carries_an_i4_seat(self, assembled) -> None:
         """MUST: not a single i4 entry appears in the distribution's quant table (ruling of
@@ -1596,7 +1586,9 @@ class TestVerifyDist:
     def test_it_catches_a_file_that_no_longer_matches_its_declared_size(self, assembled) -> None:
         out_dir, _ = assembled
         # A split role fails on damage to one part (every part in the list is compared).
-        target = container_parts(out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"])[1]
+        target = container_parts(
+            out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder_bf16"]
+        )[1]
         target.unlink()  # unlink the hard link before writing (do not damage the source series)
         target.write_bytes(b"shorter")
         with pytest.raises(DistError, match="size differs from the manifest"):
@@ -1672,7 +1664,7 @@ class TestVerifyDistStructure:
         out_dir, _ = assembled
 
         def unmap(manifest: dict) -> None:
-            del manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]["f16"]["weights"][
+            del manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]["bf16"]["weights"][
                 "vae_decoder"
             ]
 
@@ -1684,7 +1676,7 @@ class TestVerifyDistStructure:
         out_dir, _ = assembled
 
         def retype(manifest: dict) -> None:
-            manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]["f16"]["weights"][
+            manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]["bf16"]["weights"][
                 "vae_decoder"
             ] = "i8"
 
@@ -1738,15 +1730,17 @@ class TestFamilyAssembly:
         out_dir, manifest = family
         # What gets folded is **the whole component** (the shard list moves under shared/ as
         # is).
-        shared = [f"{SHARED_DIRNAME}/{rel}" for rel in part_paths(OUTPUT_PATHS["text_encoder"])]
+        shared = [
+            f"{SHARED_DIRNAME}/{rel}" for rel in part_paths(OUTPUT_PATHS["text_encoder_bf16"])
+        ]
         for name in manifest["models"]:
-            refs = manifest["models"][name]["weights"]["text_encoder"]["f16"]["container"]["parts"]
+            refs = manifest["models"][name]["weights"]["text_encoder"]["bf16"]["container"]["parts"]
             assert [ref["path"] for ref in refs] == shared
-        for rel, payload in zip(shared, _PAYLOADS["text_encoder"], strict=True):
+        for rel, payload in zip(shared, _PAYLOADS["text_encoder_bf16"], strict=True):
             assert (out_dir / rel).read_bytes() == payload
         # Nothing remains in each model's subtree (placed once = no duplicates shipped).
         for name in manifest["models"]:
-            for rel in part_paths(OUTPUT_PATHS["text_encoder"]):
+            for rel in part_paths(OUTPUT_PATHS["text_encoder_bf16"]):
                 assert not (out_dir / name / rel).exists()
 
     def test_it_keeps_the_files_that_differ_inside_each_model_subtree(self, family) -> None:
@@ -1779,14 +1773,11 @@ class TestFamilyAssembly:
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
         out_dir, _ = family
         # The rope base table is inside the transformer's container, so the folding unit stays
-        # the whole component. Every model also has the bf16 text stack (2026-10-17), so it is
-        # folded — the fake assets make the conditioner's contents equal across models, so even
-        # when read from the model's own series it folds into `shared/` (in the real ones
-        # upstream's llm_adapter differs, so it stays in each model's subtree).
+        # the whole component. Every model has the bf16 text stack, so it is folded — the fake
+        # assets make the conditioner's contents equal across models, so even when read from the
+        # model's own series it folds into `shared/` (in the real ones upstream's llm_adapter
+        # differs, so it stays in each model's subtree).
         shared_roles = (
-            "text_encoder",
-            "text_conditioner",
-            "vae_decoder",
             "text_encoder_bf16",
             "text_conditioner_bf16",
             "vae_decoder_bf16",
@@ -1801,9 +1792,9 @@ class TestFamilyAssembly:
             )
         ]
         # The weight parts are per model; only the last asset part (the rope base table) is
-        # folded across models. A storage held by only one model (the base model's faithful
-        # preset bf16) has nothing to fold with, so both its text stack and its rope part stay
-        # whole in that model's subtree (ADR 0041 §5).
+        # folded across models. A storage held by only one model would have nothing to fold
+        # with, so both its text stack and its rope part would stay whole in that model's
+        # subtree (ADR 0041 §5).
         common = set.intersection(*(set(anima_model(model).storages) for model in FAMILY_MODELS))
         for model in FAMILY_MODELS:
             for storage in anima_model(model).storages:
@@ -1811,7 +1802,7 @@ class TestFamilyAssembly:
                 expected += [f"{model}/{rel}" for rel in numbered[:-1]]
                 tail = SHARED_DIRNAME if storage in common else model
                 expected.append(f"{tail}/{numbered[-1]}")
-                if storage != "f16" and storage not in common:
+                if storage not in common:
                     private_text = {
                         text_stack_role(component, storage): OUTPUT_PATHS[
                             text_stack_role(component, storage)
@@ -2305,8 +2296,13 @@ class TestLegalTexts:
             "a `.krm` part sequence whose first part carries the graph and model descriptors"
             in flat
         )
-        assert "An int8-quantized series of the transformer was added alongside the f16 one" in flat
-        assert "A bf16 series was added alongside the f16 one." in flat
+        assert (
+            "An int8-quantized series of the transformer was added alongside the bf16 one" in flat
+        )
+        assert (
+            "The bf16 series of every component keeps the values of the upstream BF16 weights"
+            " unchanged (no rounding or quantization)." in flat
+        )
 
     def test_the_notice_disclaims_any_official_standing(self, tmp_path: Path) -> None:
         """§3(d)(iii) — must not be mistaken for an official or endorsed product."""
@@ -2377,18 +2373,16 @@ class TestPipelineEntry:
         assert {EXTRA_PIPELINE.repo_name(model) for model in EXTRA_MODELS} == {"karume-anima-extra"}
 
     def test_the_extra_repository_references_the_official_text_stack(self) -> None:
-        """The six roles the release runbook used to pass as options (ADR 0038 §7 addendum
-        2026-10-28); the official repository is self-contained."""
+        """The bf16 text encoder and VAE decoder and both tokenizers (ADR 0038 §7 addendum
+        2026-10-28; ADR 0154); the official repository is self-contained."""
         for model in EXTRA_MODELS:
             (reference,) = EXTRA_PIPELINE.references(model)
             assert reference.repo == "hdae/karume-anima"
             assert reference.model == ANIMA_BASE_MODEL_NAME
             assert sorted(reference.roles) == [
-                "text_encoder",
                 "text_encoder_bf16",
                 "tokenizer",
                 "tokenizer_2",
-                "vae_decoder",
                 "vae_decoder_bf16",
             ]
         for model in OFFICIAL_MODELS:

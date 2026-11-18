@@ -54,7 +54,7 @@ is the umT5 and Wan2.2 items of "First publication of a family" below. For the a
    **extra holds 2 models, so the one repository is built in one run** (`--model` repeated = family assembly; the first one is
    `defaultModel`). The borrowed roles are the table's (the role name is the artifact key, and the bf16 text stack is a separate role — bf16
    was extended to every model on 2026-10-17. `text_conditioner` is not referenced across repositories because both extra models have
-   their own — `own_text_conditioner=True` in `distribution.py`; every model has its own bf16).
+   their own — every model but the base reads its own series, `text_conditioner_series` in `distribution.py`).
    **0.15.0**: the published main of `karume-anima` (the `anima.SOURCES["anima"]` pin) has no bf16 text stack, so
    `--resolve-refs hf` refuses extra until `karume-anima` has been uploaded again (10 of the 22 borrowed files are not in that commit —
    checked 2026-10-28). **Build extra with `--resolve-refs hf`, never with `--ref-revision`**: an explicit SHA is not checked against

@@ -46,12 +46,12 @@ uv run --group anima python -m anima.export --target transformer \
   --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
 
 # S form (one symbol for the token length), an additional series — transformer only; the default out gets -dyn
-uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --verify transformer
+uv run --group anima python -m anima.export --dtype bf16 --dit-graph dyn --verify transformer
 
 # the plain (no LoRA) shipping series — just drop --lora. --out is spelled out because the model
 # name carries the upstream version (ADR 0077), and the series name is derived from the model name
-uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
-  --out ../../outputs/series/anima-v1.0-f16-dyn
+uv run --group anima python -m anima.export --dtype bf16 --dit-graph dyn \
+  --out ../../outputs/series/anima-v1.0-bf16-dyn
 uv run --group anima python -m anima.export --dtype i8 --dit-graph dyn \
   --out ../../outputs/series/anima-v1.0-i8-dyn
 # the i4 series needs --model as well: the calibration conditions come from that model's shipped
@@ -81,9 +81,9 @@ uv run --group anima python -m anima.single_file \
   --checkpoint ../../inputs/anima/waiANIMA_v10Base10.safetensors \
   --out ../../outputs/misc/anima-diffusers/anima-wai-v1.0
 uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
-  --target text_conditioner --dtype f16 --out ../../outputs/series/anima-wai-v1.0-f16
+  --target text_conditioner --dtype bf16 --out ../../outputs/series/anima-wai-v1.0-bf16
 uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
-  --dtype f16 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-f16-dyn
+  --dtype bf16 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-bf16-dyn
 uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --dtype i8 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-i8-dyn
 uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
@@ -93,10 +93,10 @@ uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diff
 # the official variants (anima-aesthetic-v1.1 / anima-turbo-v1.1 — ADR 0087) are shipped by
 # CircleStone as the same kind of single ComfyUI-style file (HF circlestone-labs/Anima,
 # split_files/diffusion_models/, mirrored under inputs/anima/upstream-2458426/), so they go
-# through the same single_file → export chain. Turbo shares the base text_conditioner (measured
-# bit-identical after f16 rounding, 2026-09-01) so it skips the --target text_conditioner step;
-# Aesthetic does not (64 tensors differ) and exports its own like wai above. No model ships an
-# i4 series (the old fused turbo's i4 seat was not carried over — 2026-09-01 ruling).
+# through the same single_file → export chain. Every variant but the base exports its own
+# text_conditioner like wai above: bf16 keeps the upstream bits, and even Turbo's differs from
+# the base's (the bf16 section below). No model ships an i4 series (the old fused turbo's i4 seat
+# was not carried over — 2026-09-01 ruling).
 ```
 
 - **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace
@@ -225,7 +225,9 @@ rounding (1.19e-7) growing into the 9e-6 class is consistent.
 `--dtype f16` takes the references and goldens **after rounding the weights to f16-representable
 values** (fake-quant) and stores **only the eligible weight slots** in f16. The output goes to
 `outputs/series/anima-f16/`, separate from the f32 series (the default for an omitted `--out` switches with
-`--dtype`).
+`--dtype`). No distributed series is f16 any more: every upstream component is BF16, so the
+distribution stores bf16 (ADR [0154](../../../docs/decisions/0154-anima-bf16-preset-names.md)); the mode stays for
+measurements and comparisons.
 
 ```sh
 uv run --group anima python -m anima.export --dtype f16                    # all 4 at once
@@ -328,7 +330,7 @@ treat this gate as redundant and remove it.
 slots whose `f32 → bf16 → f32` round trip is bit-exact in bf16 (the rest stay f32). Upstream ships
 all four components in BF16, so for the parameters the rounding is a no-op and the asset holds the
 upstream bits. All four targets of the base model go to `outputs/series/anima-bf16/`; the shipping
-DiT is the S-form series, with `--out` spelled out like the f16 one. Every other model exports its
+DiT is the S-form series, with `--out` spelled out. Every other model exports its
 DiT and its own `text_conditioner` from the converted repo (text encoder and VAE are shared with the
 base — the fine-tunes do not touch them):
 
@@ -345,14 +347,14 @@ uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diff
   --target transformer --dtype bf16 --dit-graph dyn --out ../../outputs/series/anima-turbo-v1.1-bf16-dyn
 ```
 
-The faithful preset `bf16` is declared by every model (`AnimaModel.storages`): the assembly takes
-`text_encoder` / `vae_decoder` from `anima-bf16/`, the `text_conditioner` from the model's own
-`<model>-bf16/` (the base from `anima-bf16/` — `text_conditioner_series`) and the DiT from
-`<model>-bf16-dyn/`, and places them next to the f16 files as `<component>/model.bf16.krm`. The
-conditioner is never shared under bf16, not even for `anima-turbo-v1.1` whose f16 conditioner is
-shared with the base: its upstream BF16 `llm_adapter` differs from the base's in 60 of 118 tensors
-(near-zero elements only, at most 2.98e-8 — erased by f16 rounding, kept by bf16; measured
-2026-10-17).
+Every model stores all four components in bf16 (`AnimaModel.storages` — every preset, ADR
+[0154](../../../docs/decisions/0154-anima-bf16-preset-names.md)): the assembly takes `text_encoder` /
+`vae_decoder` from `anima-bf16/`, the `text_conditioner` from the model's own `<model>-bf16/` (the
+base from `anima-bf16/` — `text_conditioner_series`) and the DiT from `<model>-bf16-dyn/`, and
+places them as `<component>/model.bf16.krm`. The conditioner is never shared, not even for
+`anima-turbo-v1.1`, whose conditioner rounded to f16 equals the base's: its upstream BF16
+`llm_adapter` differs from the base's in 60 of 118 tensors (near-zero elements only, at most
+2.98e-8 — erased by f16 rounding, kept by bf16; measured 2026-10-17).
 
 Measured (2026-10-17): the goldens of all four targets (and the S-form DiT) are byte-identical to
 f32 references taken with the same code (`--dtype f32`). One condition behind that:
@@ -363,8 +365,8 @@ output) while no parameter moved. `round_weights_to_f16` follows the same rule, 
 of the text encoder or the text conditioner folds the same RoPE tables as the bf16 one, and the two
 have the same graph descriptor (measured 2026-11-17 on the base text conditioner: f16 and bf16
 exports give the same graph sha256, which is the distributed bf16 one). The f16 files distributed
-before then were exported when the f16 rounding still rounded `inv_freq`; their RoPE tables move on
-their next export.
+before then were exported when the f16 rounding still rounded `inv_freq`; they left the
+distribution with ADR 0154 and are not exported again.
 
 The export of `text_encoder` needs `disable_packed_sequence_detection` (applied by
 `build_text_encoder`): without an `attention_mask`, `Qwen3Model` looks for packed sequences in
@@ -387,7 +389,7 @@ uv run --group anima python -m anima.pipeline_ref --dtype i8            # fixtur
 when spelled out with `--target` / `--verify`). Two reasons:
 
 1. **Series design** (ADR 0019): the DiT's −1.87GiB is the dominant term, while text / cond / VAE
-   share `outputs/series/anima-f16/`. Prototype measurements put i8 for the VAE two orders lower.
+   share `outputs/series/anima-bf16/`. Prototype measurements put i8 for the VAE two orders lower.
 2. **The VAE cannot satisfy the rounding order constraint**: `anima.patch` replaces the CausalConv3d
    weights with **the last slice along the time axis**, which happens when the patches are applied
    (= after the reference capture). f16's element-wise rounding commutes with slicing and is
