@@ -522,8 +522,8 @@ describe("GEMV parallel-sum selection and code generation", () => {
     assertEquals(keys.size, 60);
   });
   it("rejects unsupported storage and an invalid group before code generation", () => {
-    assertThrows(() => linearGemvParallelWgsl("f16", undefined, 4));
-    assertThrows(() => linearGemvParallelWgsl("f32", undefined, 4));
+    // The parallel form takes float storage (linear_gemv_parallel_float_test.ts); the subgroup form
+    // does not
     assertThrows(() => linearGemvParallelWgsl("i4", 16, 4));
     assertThrows(() => linearGemvParallelWgsl("i8", 32, 4));
     assertThrows(() => linearGemvSubgroupWgsl("f16", undefined, 4));

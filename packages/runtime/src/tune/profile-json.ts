@@ -243,8 +243,9 @@ const readArray = (value: unknown, path: string): readonly unknown[] =>
   Array.isArray(value) ? value : fail(path, `is not an array (${show(value)})`);
 
 /**
- * A field of a union of literals (fails on any other value). Which members a field allows — the
- * parallel GEMV takes i2 / i4 / i8 storage only — is {@link assertGeometryProfile}'s job.
+ * A field of a union of literals (fails on any other value). Which members a field allows, and
+ * which go together — a parallel row of a float storage takes no group and no packed activations —,
+ * is {@link assertGeometryProfile}'s job.
  */
 const readMember = <Member extends string | number>(
   value: unknown,

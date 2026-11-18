@@ -43,9 +43,23 @@ The selection is one derivation, shared by Session construction and the memory e
 
 | Op kind | At `exact` | At `reorder` |
 | --- | --- | --- |
-| `linear` | The reference GEMM, and the GEMV kernels checked to give its bits. | With `linearCompute: "f32"`: the parallel GEMV on the shapes of its eligibility table; other shapes keep the `exact` kernels. With `linearCompute: "a8"` or `"f16"`: that approximation's kernels, unchanged. |
+| `linear` | The reference GEMM, and the GEMV kernels checked to give its bits. | With `linearCompute: "f32"`: the parallel GEMV on the shapes of its eligibility table, at 1 to 8 rows; other shapes and row counts keep the `exact` kernels. With `linearCompute: "a8"` or `"f16"`: that approximation's kernels, unchanged. |
 | `attention` | The sequential reductions of the states form. | The parallel reductions of the states form, with the row statistics folded into PV where the shape admits the fold. The other form of attention has no `reorder` strategy. |
 | `rms_norm` | The workgroup reduction. | The workgroup reduction (no `reorder` strategy is selected). |
+
+The eligibility table of the parallel GEMV is the Session's geometry profile's (`linearGemv.parallelShapes` —
+[geometry-profiles.md](geometry-profiles.md#the-gemv-choices-of-linear)). A row names a weight storage, a weight shape
+and, for int4, the group length:
+
+- Every storage the GEMV kernels read can have a row: int2, int4, int8, bf16, f16 and f32.
+- A row serves 1 to 8 rows of the activation with one kernel and one summation order, so a decode step and the
+  verification of a few rows give the same words for the same row.
+- A float-stored weight (bf16, f16, f32) has no sequential GEMV past one row. At `exact` its 2 to 8 rows run the
+  GEMM; at `reorder`, on a shape with a row, they run the parallel GEMV.
+- A float-stored weight takes the parallel GEMV's plain form or its staged-activation form, as its row says. The
+  packed-activation form, the linear→static_quantize fusion and the subgroup form exist for the integer storages
+  only: a float-stored linear is never paired with packed activations, is not fused with a following
+  static_quantize, and under the subgroup strategy runs the plain or staged form, which sums in the same order.
 
 Each strategy's level and the kind of evidence it carries are stated in the strategy tables
 (`packages/runtime/src/runtime/linear-strategies.ts`, `state-attention-strategies.ts`).

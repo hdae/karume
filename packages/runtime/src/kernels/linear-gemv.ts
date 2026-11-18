@@ -1,6 +1,6 @@
 /**
- * The **GEMV family** of linear (weights stored as i2 / i4 / i8, and f16 / f32 storage at M=1 —
- * ADR 0082 / 0097). The second kernel family of `linear`: output, bindings and uniform stay the same
+ * The **GEMV family** of linear (weights stored as i2 / i4 / i8, and f16 / bf16 / f32 storage at
+ * M=1, or up to M=8 on the parallel GEMV — ADR 0082 / 0097). The second kernel family of `linear`: output, bindings and uniform stay the same
  * as on the default path (linear in src/kernels/gemm.ts), and **only the work assignment** changes to
  * "1 thread = 1 output column". It has 2 forms: the M=1 (decode) variant and the **row-block
  * variant** for small M (2–{@link LINEAR_GEMV_MAX_ROWS}, short prefill / speculative verification)
@@ -82,6 +82,17 @@
  * reduction order, so it is not put into this family. The separate kernel
  * `linearGemvParallelWgsl` (linear at the level `reorder`) follows ADR 0098.
  *
+ * ## The parallel GEMV and the storages
+ *
+ * The parallel GEMV spreads the weight words of one output over lanes, so it is defined by "one word
+ * = 16 B" and not by what a word holds: it takes every storage of this family. For i2 / i4 / i8 it
+ * has the packed-activation, static-quantize and subgroup variants as well; for f16 / bf16 / f32 it
+ * has the plain and the staged-activation variants ({@link parallelWgsl} refuses the others). A
+ * float-stored weight has no row-block form, so the parallel GEMV is the only member of the family
+ * its 2 to 8 rows can take — at `reorder`, on a shape the profile names; otherwise those rows stay on
+ * the GEMM.
+ * SPEC: docs/spec/numerics.md#what-a-level-selects
+ *
  * ## Relation to the geometry (the reach of gemm-geometry's "only selection point" MUST)
  *
  * gemm-geometry says "the selection point of the work assignment is the one place
@@ -150,6 +161,10 @@ const assertRowsStorage = (storage: WeightStorage): void => {
     );
   }
 };
+
+/** f16 / bf16 / f32: one weight word is the elements themselves, with no scale buffer. */
+const isFloatStorage = (storage: WeightStorage): storage is "f16" | "bf16" | "f32" =>
+  storage === "f16" || storage === "bf16" || storage === "f32";
 
 /** The per-workgroup thread limit WebGPU core guarantees (upper bound of `cols`). */
 const MAX_THREADS = 256;
@@ -422,6 +437,40 @@ export const linearGemvParams = (
 };
 
 /**
+ * The largest row count the parallel GEMV takes: a shape row of the profile serves M = 1 to this
+ * (decode and the speculative verification of a few rows share one kernel and one summation order).
+ */
+export const LINEAR_GEMV_PARALLEL_MAX_ROWS = 8;
+
+/**
+ * The uniform of the parallel GEMV's plain, staged and subgroup forms: the same three words as
+ * {@link linearGemvParams}, for the row counts the parallel family takes
+ * (1..{@link LINEAR_GEMV_PARALLEL_MAX_ROWS}).
+ *
+ * For i2 / i4 / i8 it is {@link linearGemvParams} itself. f16 / bf16 / f32 storage has no row-block
+ * form, so {@link linearGemvParams} holds it to m = 1; the parallel kernel takes its rows along the
+ * grid's y axis whatever the storage, and this is where a float-storage weight gets its rows.
+ * MUST: k is a multiple of {@link linearGemvUnit} (the WGSL `units = dims.k / <step>u` truncates).
+ */
+export const linearGemvParallelParams = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  groupSize?: number,
+): Uint32Array<ArrayBuffer> => {
+  if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_PARALLEL_MAX_ROWS) {
+    throw new CodegenError(
+      `linear_gemv_parallel params: m must be an integer in 1..${LINEAR_GEMV_PARALLEL_MAX_ROWS} (${m})`,
+    );
+  }
+  if (!isFloatStorage(storage)) return linearGemvParams(storage, m, n, k, groupSize);
+  // The checks of the M = 1 kernel's params (the group pairing, k), then the same three words.
+  linearGemvParams(storage, 1, n, k, groupSize);
+  return gemmParams("linear", m, n, k);
+};
+
+/**
  * Pipeline key (M=1 variant). The family name `linear_gemv` discriminates it from the default path
  * (`linear`); variant, storage and group length are all baked into the WGSL, so they go into the key
  * (codegen determinism: same key → byte-identical WGSL).
@@ -656,17 +705,19 @@ ${macs}`;
  * f16, 8 elements per word. unpack2x16float is the same decode as the default GEMM, with no scale.
  * MUST: multiply-add in the order word x→w, then low→high within each pair. The activation's
  * component indices are unrolled statically.
+ * MUST: with `fma` and `staged` off (the sequential kernel) the text does not move by a byte; the
+ * parallel family passes `fma` ({@link mac}) and its staged form reads the quad from workgroup memory.
  */
-const unitMacsF16 = (slot: string): string => {
+const unitMacsF16 = (slot: string, fma = false, staged = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes
     .map((component, pair) => {
       const weights = `h${slot}_${pair}`;
       const activation = `x${slot}_${pair}`;
       return `    let ${weights} = unpack2x16float(pw${slot}.${component});
-    let ${activation} = x[xq${slot} + ${Math.floor(pair / 2)}u];
-    acc = acc + ${activation}.${lanes[(pair * 2) % 4]} * ${weights}.x;
-    acc = acc + ${activation}.${lanes[(pair * 2 + 1) % 4]} * ${weights}.y;`;
+${activationQuad(false, slot, activation, Math.floor(pair / 2), staged)}
+${mac(fma, `${activation}.${lanes[(pair * 2) % 4]}`, `${weights}.x`)}
+${mac(fma, `${activation}.${lanes[(pair * 2 + 1) % 4]}`, `${weights}.y`)}`;
     })
     .join("\n");
 };
@@ -674,31 +725,32 @@ const unitMacsF16 = (slot: string): string => {
 /**
  * bf16, 8 elements per word. The packing and the ascending-K multiply-add are the same text as the
  * f16 version; only the decode is a bitcast (low half of the word = `<< 16u`, high half =
- * `& 0xFFFF0000u` — ADR 0131).
+ * `& 0xFFFF0000u` — ADR 0131). `fma` and `staged` as in {@link unitMacsF16}.
  */
-const unitMacsBf16 = (slot: string): string => {
+const unitMacsBf16 = (slot: string, fma = false, staged = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes
     .map((component, pair) => {
       const word = `b${slot}_${pair}`;
       const activation = `x${slot}_${pair}`;
       return `    let ${word} = pw${slot}.${component};
-    let ${activation} = x[xq${slot} + ${Math.floor(pair / 2)}u];
-    acc = acc + ${activation}.${lanes[(pair * 2) % 4]} * bitcast<f32>(${word} << 16u);
-    acc = acc + ${activation}.${lanes[(pair * 2 + 1) % 4]} * bitcast<f32>(${word} & 0xFFFF0000u);`;
+${activationQuad(false, slot, activation, Math.floor(pair / 2), staged)}
+${mac(fma, `${activation}.${lanes[(pair * 2) % 4]}`, `bitcast<f32>(${word} << 16u)`)}
+${mac(fma, `${activation}.${lanes[(pair * 2 + 1) % 4]}`, `bitcast<f32>(${word} & 0xFFFF0000u)`)}`;
     })
     .join("\n");
 };
 
 /**
  * f32, 4 elements per word. Unrolls the same ascending-K multiply-add as the regular GEMM with
- * static components.
+ * static components. `fma` and `staged` as in {@link unitMacsF16}; the sequential kernel's read of
+ * its one quad keeps its own spelling (`x[xq]`, no `+ 0u`).
  */
-const unitMacsF32 = (slot: string): string => {
+const unitMacsF32 = (slot: string, fma = false, staged = false): string => {
   const macs = ["x", "y", "z", "w"]
-    .map((lane) => `    acc = acc + xf${slot}.${lane} * pw${slot}.${lane};`)
+    .map((lane) => mac(fma, `xf${slot}.${lane}`, `pw${slot}.${lane}`))
     .join("\n");
-  return `    let xf${slot} = x[xq${slot}];
+  return `${staged ? activationQuad(false, slot, `xf${slot}`, 0, true) : `    let xf${slot} = x[xq${slot}];`}
 ${macs}`;
 };
 
@@ -758,11 +810,11 @@ export const unitMacs = (
   staged = false,
 ): string =>
   storage === "f32"
-    ? unitMacsF32(slot)
+    ? unitMacsF32(slot, fma, staged)
     : storage === "f16"
-      ? unitMacsF16(slot)
+      ? unitMacsF16(slot, fma, staged)
       : storage === "bf16"
-        ? unitMacsBf16(slot)
+        ? unitMacsBf16(slot, fma, staged)
         : storage === "i4"
           ? unitMacsI4(slot, packed, fma, staged)
           : storage === "i2"
@@ -965,8 +1017,8 @@ export type LinearGemvParallelLanes = 2 | 4 | 8 | 16 | 32;
 
 /**
  * One shape row of the parallel GEMV ({@link LinearGemvChoices.parallelShapes}): a linear with this
- * storage, weight shape `[n, k]` and i4 group length (`group` absent for i2 / i8) takes the parallel
- * GEMV at M = 1..8 with `lanes` lanes sharing K.
+ * storage, weight shape `[n, k]` and i4 group length (`group` absent for every other storage) takes
+ * the parallel GEMV at M = 1..{@link LINEAR_GEMV_PARALLEL_MAX_ROWS} with `lanes` lanes sharing K.
  */
 export type LinearGemvParallelShape = {
   readonly storage: WeightStorage;
@@ -990,7 +1042,9 @@ export type LinearGemvParallelShape = {
    * re-reading x from storage. **true only for rows that measured faster** (RTX 3080 Ti, 2026-10-25:
    * the lanes-32 rows with K ≥ 2048 at ×1.37–1.63; K = 1536 and the lanes-4 rows were ×0.86–1.06).
    * The E4B rows copy the E2B row with the same role, as for `packedActivations`. Never set together
-   * with `packedActivations` (packed words already cut the activation loads).
+   * with `packedActivations` (packed words already cut the activation loads). A row of a float
+   * storage takes it by its own measurement (one word holds 8 or 4 elements, so a column reads two
+   * activation quads or one per word, where an i4 word reads eight).
    */
   readonly stagedActivations?: true;
 };
@@ -1006,7 +1060,7 @@ const parallelShapeFor = (
   k: number,
   group?: number,
 ): LinearGemvParallelShape | undefined => {
-  if (m < 1 || m > 8) return undefined;
+  if (m < 1 || m > LINEAR_GEMV_PARALLEL_MAX_ROWS) return undefined;
   return choices.parallelShapes.find(
     (shape) => shape.storage === storage && shape.n === n && shape.k === k && shape.group === group,
   );
@@ -1030,10 +1084,11 @@ export const linearGemvParallelLanes = (
  * {@link linearGemvParallelWgsl} family)".
  *
  * {@link linearGemvParallelLanes} (the lookup of the profile's shapes) overlaid with the conditions
- * under which `buildLinear` in recipe-builders/linear.ts sends a shape to the GEMV family (storage,
- * `k % step`, the i4 group length, the measured range of vec4 output). The pairing of packed
- * activations (ADR 0105) reads {@link linearGemvPackedEligible}, which narrows this further by the
- * per-row adoption.
+ * under which the selection (src/runtime/linear-strategies.ts) sends a shape to the GEMV family
+ * (`k % step`, the i4 group length — none for any other storage —, the measured range of vec4
+ * output). Every storage of the family can have a row. The pairing of packed activations (ADR 0105)
+ * reads {@link linearGemvPackedEligible}, which narrows this further by the per-row adoption and to
+ * the integer storages.
  */
 export const linearGemvParallelEligible = (
   choices: LinearGemvChoices,
@@ -1043,7 +1098,6 @@ export const linearGemvParallelEligible = (
   k: number,
   group?: number,
 ): LinearGemvParallelLanes | undefined => {
-  if (storage !== "i2" && storage !== "i4" && storage !== "i8") return undefined;
   if (!gemmUsesVec4(k, n)) return undefined;
   if (k <= 0 || k % linearGemvUnit(storage) !== 0) return undefined;
   if (storage === "i4") {
@@ -1074,6 +1128,9 @@ export const linearGemvPackedEligible = (
   k: number,
   group?: number,
 ): LinearGemvParallelLanes | undefined => {
+  // The packed kernels restore int8 codes against an integer-stored weight; none exists for f16 /
+  // bf16 / f32 storage, whatever a table's row says.
+  if (isFloatStorage(storage)) return undefined;
   const lanes = linearGemvParallelEligible(choices, storage, m, n, k, group);
   if (lanes === undefined) return undefined;
   return parallelShapeFor(choices, storage, m, n, k, group)?.packedActivations === true
@@ -1111,9 +1168,10 @@ export const linearGemvParallelKey = (
 ): string => `linear_gemv_parallel${weightKeyPart(storage)}${i4GroupKeyPart(group)}:l${lanes}`;
 
 /**
- * The `reorder` version that distributes compressed words over K lanes round-robin.
- * Dequantisation and the multiply-adds within a word are shared with the sequential version, but
- * the addition order across words differs. It completes with a tree reduction inside 128 threads
+ * The `reorder` version that distributes weight words over K lanes round-robin (i2 / i4 / i8 words
+ * of codes, f16 / bf16 / f32 words of elements). The decode and the order of the multiply-adds within
+ * a word are shared with the sequential version (spelled with `fma` — {@link mac}), but the addition
+ * order across words differs. It completes with a tree reduction inside 128 threads
  * and requires no extra feature. M is not baked into the shader, so decode and speculative
  * verification of a few rows use the same key and the same arithmetic.
  * DECIDED: docs/decisions/0098-linear-gemv-parallel.md
@@ -1383,7 +1441,11 @@ const parallelWgsl = (
       "linear_gemv_parallel: staged activations exist for the plain variant only",
     );
   }
-  assertRowsStorage(storage);
+  if (isFloatStorage(storage) && (packed || quantize)) {
+    throw new CodegenError(
+      `linear_gemv_parallel: ${storage} storage has the plain and the staged-activation variants only`,
+    );
+  }
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
   // MUST: `x_scale` is the **last member** of Dims (the packed variant's params add one word at

@@ -12,8 +12,8 @@
  * from the top: an entry either refuses the linear (the combination is not implemented — a loud
  * failure, never a silent fall to another path) or names a strategy when the linear is its case. The
  * order is part of the meaning: a linear whose activation arrives packed must be taken by the integer
- * GEMV before the i8a8 path is considered, the float-storage M = 1 GEMV comes before the byte-plane
- * GEMV, and the default GEMM is last.
+ * GEMV before the i8a8 path is considered, the float-storage GEMV comes before the byte-plane GEMV,
+ * and the default GEMM is last.
  *
  * {@link LINEAR_STRATEGIES} states, per strategy, how far its numbers may stand from the reference
  * kernel and what kind of evidence it carries (the vocabulary of src/runtime/strategy-level.ts) — the
@@ -32,6 +32,7 @@ import {
   LINEAR_GEMV_MAX_ROWS,
   type LinearGemvChoices,
   linearGemvPackedEligible,
+  linearGemvParallelEligible,
   type LinearGemvParallelLanes,
   linearGemvParallelLanes,
   type LinearGemvRowsVariant,
@@ -186,12 +187,15 @@ export type LinearChoice =
   | { readonly id: "planes-gemv"; readonly variant: PlanesGemvVariant }
   | { readonly id: "gemm-splitk"; readonly slices: LinearSplitKSlices }
   | LinearGemvChoice
-  | {
-      readonly id: "gemm-f32" | "gemm-f16";
-      readonly compute: GemmCompute;
-      readonly v4: boolean;
-      readonly groupSize: number | undefined;
-    };
+  | LinearGemmChoice;
+
+/** The default GEMM skeleton: its compute, its output form and the i4 group length of the weight. */
+export type LinearGemmChoice = {
+  readonly id: "gemm-f32" | "gemm-f16";
+  readonly compute: GemmCompute;
+  readonly v4: boolean;
+  readonly groupSize: number | undefined;
+};
 
 /** A member of the GEMV family: which thread owns which output, and how the K reduction is split. */
 export type LinearGemvChoice = {
@@ -245,6 +249,8 @@ const gemvRows = (m: number): boolean => m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
  * (`linearGemvReduce: "sequential"`) the reference path's kernel and WGSL stay as they are.
  * The staged-activation form (K-90) is bit-identical to the plain parallel one, so it is taken wherever
  * the profile's table marks the shape, without an option of its own.
+ * The subgroup form exists for i2 / i4 / i8 storage: a float-stored weight under
+ * `"parallel-subgroup32"` takes the plain or staged parallel form, which sums in the same order.
  */
 const gemvChoice = (
   linear: Derived,
@@ -253,7 +259,8 @@ const gemvChoice = (
   packed: LinearFacts["packed"],
 ): LinearGemvChoice => {
   const { m, n, k, knobs, linearGemv } = linear;
-  const subgroup = knobs.linearGemvReduce === "parallel-subgroup32";
+  const float = storage === "f16" || storage === "bf16" || storage === "f32";
+  const subgroup = knobs.linearGemvReduce === "parallel-subgroup32" && !float;
   const lanes =
     knobs.linearGemvReduce !== "sequential"
       ? linearGemvParallelLanes(linearGemv, storage, m, n, k, groupSize)
@@ -364,19 +371,26 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   // multiply-add and the order of adding bias of the default path, so they are bit-identical to it
   // (the numeric contract of src/kernels/linear-gemv.ts; the check is tests/gpu_linear_gemv_test.ts).
   //
-  // f16 / bf16 / f32 storage: M = 1 only (ADR 0082 addenda 6 and 7; bf16 is ADR 0131), f32 compute, one
-  // weight word = 8 elements for f16 / bf16 and 4 for f32. `v4` is not a GEMV requirement (the output
-  // is written as scalars), but every swept shape was v4, so the eligibility stays inside the measured
-  // range.
+  // f16 / bf16 / f32 storage: f32 compute, one weight word = 8 elements for f16 / bf16 and 4 for f32.
+  // The sequential member is the M = 1 kernel alone (ADR 0082 addenda 6 and 7; bf16 is ADR 0131) —
+  // there is no row block for these storages, so more rows keep the GEMM. Where linear is at `reorder`
+  // and the profile's table names the shape, 1 to 8 rows take the parallel GEMV, as for an integer
+  // storage: decode and the verification of a few rows share one kernel and one summation order.
+  // `v4` is not a GEMV requirement (the output is written as scalars), but every swept shape was v4,
+  // so the eligibility stays inside the measured range.
   {
     choose: (linear) => {
-      const { m, weightStorage, compute, v4, k } = linear;
-      return m === 1 &&
-        (weightStorage === "f16" || weightStorage === "bf16" || weightStorage === "f32") &&
-        compute === "f32" &&
-        v4 &&
-        k > 0 &&
-        k % linearGemvUnit(weightStorage) === 0
+      const { m, n, weightStorage, compute, v4, k, knobs, linearGemv } = linear;
+      if (weightStorage !== "f16" && weightStorage !== "bf16" && weightStorage !== "f32") {
+        return undefined;
+      }
+      if (compute !== "f32" || !v4 || k <= 0 || k % linearGemvUnit(weightStorage) !== 0) {
+        return undefined;
+      }
+      const parallel =
+        knobs.linearGemvReduce !== "sequential" &&
+        linearGemvParallelEligible(linearGemv, weightStorage, m, n, k) !== undefined;
+      return m === 1 || parallel
         ? gemvChoice(linear, weightStorage, undefined, undefined)
         : undefined;
     },

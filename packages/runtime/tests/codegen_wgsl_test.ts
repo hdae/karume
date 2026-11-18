@@ -705,6 +705,17 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["linear_gemv_parallel_staged_g32_l32.wgsl", linearGemvParallelStagedWgsl("i4", 32, 32)],
     ["linear_gemv_parallel_staged_wi8_l32.wgsl", linearGemvParallelStagedWgsl("i8", undefined, 32)],
     ["linear_gemv_parallel_staged_wi2_l4.wgsl", linearGemvParallelStagedWgsl("i2", undefined, 4)],
+    // The parallel GEMV on float-stored weights: a word is 8 elements (bf16 / f16) or 4 (f32), and
+    // there is no scale binding.
+    ["linear_gemv_parallel_wbf16_l16.wgsl", linearGemvParallelWgsl("bf16", undefined, 16)],
+    ["linear_gemv_parallel_wf16_l4.wgsl", linearGemvParallelWgsl("f16", undefined, 4)],
+    ["linear_gemv_parallel_f32_l8.wgsl", linearGemvParallelWgsl("f32", undefined, 8)],
+    [
+      "linear_gemv_parallel_staged_wbf16_l32.wgsl",
+      linearGemvParallelStagedWgsl("bf16", undefined, 32),
+    ],
+    ["linear_gemv_parallel_staged_wf16_l8.wgsl", linearGemvParallelStagedWgsl("f16", undefined, 8)],
+    ["linear_gemv_parallel_staged_f32_l2.wgsl", linearGemvParallelStagedWgsl("f32", undefined, 2)],
     [
       "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
       linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),

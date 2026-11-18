@@ -594,9 +594,10 @@ describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearG
       }),
       "linearGemv.sequential.variant: cols must be an integer in 1..256 (512)",
     );
+    // The first row is an i4 row with its group: the runtime's check refuses a float row with one
     rejects(
       withParallelRow({ ...first, storage: "f16" }),
-      "linearGemv.parallelShapes[0].storage must be one of i2 / i4 / i8",
+      "linearGemv.parallelShapes[0]: a row of f16 storage takes no group and no packedActivations",
     );
   });
 });

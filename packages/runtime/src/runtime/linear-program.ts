@@ -35,6 +35,7 @@ import {
   linearGemvParallelPackedKey,
   linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
+  linearGemvParallelParams,
   linearGemvParallelStagedKey,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
@@ -309,8 +310,9 @@ const linearGemmProgram = (
 };
 
 /**
- * linear's **GEMV family** (1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × i2 / i4 / i8 weights, and M=1 ×
- * f16 / bf16 / f32 weights — ADR 0082 (f16 / f32 in addenda 6 and 7); i2 is ADR 0097).
+ * linear's **GEMV family** (1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × i2 / i4 / i8 weights, and f16 / bf16 /
+ * f32 weights at M=1 — ADR 0082 (f16 / f32 in addenda 6 and 7); i2 is ADR 0097 — or, on the parallel
+ * GEMV, at up to 8 rows).
  *
  * Bindings, uniform and output storage are the same as the default path; only "which thread owns
  * which output" changes (one thread = one output column (× row block for M ≥ 2), no shared tile
@@ -376,9 +378,11 @@ const linearGemvProgram = (
         // divisibility check lives in one place on the family side. Only the packed variant appends
         // one word, the activation scale, to Dims.
         params:
-          packedScale === undefined
-            ? linearGemvParams(storage, m, n, k, groupSize)
-            : linearGemvParallelPackedParams(storage, m, n, k, packedScale, groupSize),
+          packedScale !== undefined
+            ? linearGemvParallelPackedParams(storage, m, n, k, packedScale, groupSize)
+            : lanes !== undefined
+              ? linearGemvParallelParams(storage, m, n, k, groupSize)
+              : linearGemvParams(storage, m, n, k, groupSize),
         bindings: LINEAR_BINDINGS,
         grid: {
           kind: "tiled",

@@ -778,8 +778,14 @@ describe("assertGeometryProfile checks the GEMV choices", () => {
       ],
       [
         ["linearGemv", "parallelShapes", 0, "storage"],
+        "i3",
+        "linearGemv.parallelShapes[0].storage must be one of i2 / i4 / i8 / bf16 / f16 / f32",
+      ],
+      // Row 0 is an i4 row with its group: a float storage takes none
+      [
+        ["linearGemv", "parallelShapes", 0, "storage"],
         "f32",
-        "linearGemv.parallelShapes[0].storage must be one of i2 / i4 / i8",
+        "linearGemv.parallelShapes[0]: a row of f32 storage takes no group and no packedActivations",
       ],
       [
         ["linearGemv", "parallelShapes", 0, "n"],

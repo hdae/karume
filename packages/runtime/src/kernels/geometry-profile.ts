@@ -218,8 +218,8 @@ export type GeometryProfile = {
    */
   readonly attentionOnline?: { readonly keyWords: "tiled" };
   /**
-   * The GEMV choices of linear (1 ≤ M ≤ 64 over i2 / i4 / i8 weights, M = 1 over f16 / bf16 /
-   * f32 — src/kernels/linear-gemv.ts): the sequential variant and its per-shape exceptions, the
+   * The GEMV choices of linear (1 ≤ M ≤ 64 over i2 / i4 / i8 weights; over f16 / bf16 / f32
+   * weights M = 1, and M ≤ 8 on the parallel GEMV — src/kernels/linear-gemv.ts): the sequential variant and its per-shape exceptions, the
    * row-block thread target and the shape rows of the parallel GEMV with their lanes and packed /
    * staged flags. Kernel-variant choices rather than geometries, like {@link attentionOnline}. GEMV
    * sweep records decide them (`deriveLinearGemvChoices` of `@karume/runtime/tune`).
@@ -874,7 +874,10 @@ const assertAttentionOnlineShape = (value: unknown, where: string): void => {
 const SEQUENTIAL_GEMV_STORAGES: readonly WeightStorage[] = ["f32", "f16", "bf16", "i8", "i4", "i2"];
 
 /** The storages of the parallel GEMV. */
-const PARALLEL_GEMV_STORAGES: readonly WeightStorage[] = ["i2", "i4", "i8"];
+const PARALLEL_GEMV_STORAGES: readonly WeightStorage[] = ["i2", "i4", "i8", "bf16", "f16", "f32"];
+
+/** The storages of the parallel GEMV without a scale: no i4 group, no packed-activation kernel. */
+const FLOAT_GEMV_STORAGES: readonly unknown[] = ["bf16", "f16", "f32"];
 
 /** The lane counts the parallel GEMV generates. */
 const PARALLEL_GEMV_LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
@@ -938,6 +941,13 @@ const assertGemvParallelShapeShape = (value: unknown, where: string, path: strin
       `${where}: ${path}.stagedActivations must be true or absent (${JSON.stringify(
         stagedActivations,
       )})`,
+    );
+  }
+  // A float-storage row that named a group would match no linear (the lookup compares the group),
+  // and one marked packed would name a kernel that does not exist: both are a broken table.
+  if (FLOAT_GEMV_STORAGES.includes(storage) && (group !== undefined || packedActivations)) {
+    throw new CodegenError(
+      `${where}: ${path}: a row of ${String(storage)} storage takes no group and no packedActivations`,
     );
   }
 };
