@@ -185,14 +185,18 @@ describe("deriveLinearGemvChoices: the identical class (sequential.shapes)", () 
   });
 
   it("replaces a key's exception row, and removes it when the general variant wins", () => {
+    // The default's exceptions of the other keys, which these records hold no case of, stay in place
+    const [head, ...others] = DEFAULTS.sequential.shapes;
+    assertEquals(head, { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } });
     const replaced = derive([{ caseId: HEAD_I8, times: at1({ c16u8: faster(1.2) }) }]);
     assertEquals(replaced.linearGemv?.sequential.shapes, [
       { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 8 } },
+      ...others,
     ]);
     const removed = derive([{ caseId: HEAD_I8, times: at1({ c32u4: faster(1.2) }) }]);
     const decision = decisionOf(removed, "sequential.shapes", HEAD_I8);
     assertEquals([decision.defaultChoice, decision.derivedChoice], ["c16u4", "c32u4"]);
-    assertEquals(removed.linearGemv?.sequential.shapes, []);
+    assertEquals(removed.linearGemv?.sequential.shapes, others);
   });
 
   it("adopts on a key whose cases agree, and keeps the default when they disagree (fault: g32 c64u8, g512 c16u8)", () => {

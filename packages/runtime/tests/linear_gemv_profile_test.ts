@@ -24,6 +24,7 @@ import {
   type LinearGemvChoices,
   type LinearGemvParallelLanes,
   type LinearGemvParallelShape,
+  type LinearGemvShapeVariant,
   linearGemvPackedEligible,
   linearGemvParallelEligible,
   linearGemvParallelLanes,
@@ -58,10 +59,13 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // its thread target, and the functions below are its lookups, reading the literals. A change of a
 // value edits the default profile (re-measuring as its comments require) and this copy with it, so
 // the table is the kernel module's 66 rows plus the rows added since: the five MTP drafter rows of
-// 2026-11-18 (two after the E4B rows, three after the 12B rows). The sequential variant and the
-// thread target are still the kernel module's. The `rowBlock` of a row is another change since
-// (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do not
-// read it.
+// 2026-11-18 (two after the E4B rows, three after the 12B rows). The general sequential variant
+// and the thread target are still the kernel module's. The `rowBlock` of a row is another change
+// since (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do
+// not read it. The per-shape exceptions of the sequential variant are the kernel module's one (the
+// i8 output head, in `oldDefaultVariant`) plus the 25 rows added since
+// (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-101 and K-112: the int4 output heads of the
+// q4_0 QAT E2B / E4B models and the bf16 linears of regular E2B / E4B).
 // ---------------------------------------------------------------------------
 
 const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
@@ -281,6 +285,41 @@ const oldDefaultVariant = (shape?: Shape): LinearGemvVariant => ({
   unroll: 4,
 });
 
+/** The sequential exceptions added since the kernel module's one (the default profile's order). */
+const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
+  { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
+  { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
+  { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 1536, k: 2048, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 6144, k: 1536, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 1536, k: 6144, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 1536, k: 256, variant: { cols: 32, unroll: 16 } },
+  { storage: "bf16", n: 4096, k: 1536, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 512, k: 1536, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 1536, k: 4096, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 12288, k: 1536, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 1536, k: 12288, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 10752, k: 2560, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 2048, k: 2560, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 512, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 2560, k: 2048, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 2560, k: 10240, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 4096, k: 2560, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 1024, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "bf16", n: 2560, k: 4096, variant: { cols: 16, unroll: 8 } },
+];
+
+/** The pinned sequential variant of a shape: a row added since, otherwise the kernel module's lookup. */
+const pinnedDefaultVariant = (shape: Shape): LinearGemvVariant =>
+  ADDED_SEQUENTIAL_SHAPES.find(
+    (row) => row.storage === shape.storage && row.n === shape.n && row.k === shape.k,
+  )?.variant ?? oldDefaultVariant(shape);
+
 /** The old row-block height (the ceiling of 256 elements per word stayed in the kernel). */
 const oldRowsForShape = (
   storage: WeightStorage,
@@ -382,7 +421,10 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
     assertEquals(GEMV.rowsThreadTarget, OLD_ROWS_THREAD_TARGET);
     assertEquals(GEMV.sequential, {
       variant: { cols: 32, unroll: 4 },
-      shapes: [{ storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } }],
+      shapes: [
+        { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
+        ...ADDED_SEQUENTIAL_SHAPES,
+      ],
     });
   });
 
@@ -419,23 +461,30 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
     assertEquals(compared, 2520);
   });
 
-  it("chooses the old sequential variant and the old row-block height", () => {
+  it("chooses the old sequential variant, the variant of a row added since on that row's shape alone, and the old row-block height", () => {
     assertEquals(defaultLinearGemvVariant(GEMV), oldDefaultVariant());
+    let added = 0;
     for (const storage of STORAGES) {
       for (const [n, k] of [
         [262144, 1536],
         [262144, 2560],
         [262140, 1536],
         [6144, 1536],
+        [1536, 256],
         [64, 64],
       ]) {
+        const pinned = pinnedDefaultVariant({ storage, n, k });
         assertEquals(
           defaultLinearGemvVariant(GEMV, { storage, n, k }),
-          oldDefaultVariant({ storage, n, k }),
+          pinned,
           `${storage} ${n}×${k}`,
         );
+        const old = oldDefaultVariant({ storage, n, k });
+        if (pinned.cols !== old.cols || pinned.unroll !== old.unroll) added += 1;
       }
     }
+    // The two int4 output heads, and bf16 6144 × 1536 and 1536 × 256: the grid meets rows added since.
+    assertEquals(added, 4);
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const n of [1, 256, 2048, 4096, 12288, 262144]) {
         for (let m = 1; m <= 64; m += 1) {

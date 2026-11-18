@@ -57,6 +57,8 @@ const caseOf = (id: string): GemvCase => {
 
 /** Regular E2B's down of the 12288-wide MLP layers, in bf16. */
 const DOWN = caseOf("bf16-n1536-k12288");
+/** The default profile's sequential variant of {@link DOWN}'s shape (a per-shape exception). */
+const DOWN_SEQUENTIAL = "c16u16";
 /** Regular E2B's output head in bf16: 262144 columns. */
 const HEAD = caseOf("bf16-n262144-k1536");
 
@@ -93,7 +95,7 @@ describe("the float-stored cases of the case table", () => {
 describe("the baseline of a float-stored case", () => {
   it("is the sequential GEMV at one row and the GEMM past it, both of the reference order", () => {
     const one = gemvBaseline(DOWN, 1);
-    assertEquals([one.name, one.class, one.choice.id], ["c32u4", "identical", "gemv-m1"]);
+    assertEquals([one.name, one.class, one.choice.id], [DOWN_SEQUENTIAL, "identical", "gemv-m1"]);
     for (const m of [4, 8]) {
       const baseline = gemvBaseline(DOWN, m);
       assertEquals([baseline.name, baseline.class], ["gemm", "identical"]);
@@ -107,7 +109,7 @@ describe("the baseline of a float-stored case", () => {
     }
   });
 
-  it("is what the default profile chooses at reorder too: the default profile names no float shape", () => {
+  it("is what the default profile chooses at reorder too: the default profile has no parallel row of a float shape", () => {
     assertEquals(
       DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.filter(({ storage }) =>
         isFloatStorage(storage),
@@ -197,7 +199,7 @@ describe("the candidates of a float-stored case", () => {
 
   it("name the GEMM as both references of a row count past one when the profile has no row", () => {
     for (const plan of gemvMeasurementPlans(DOWN, "full", GATES)) {
-      assertEquals(plan.profile.exact, plan.m === 1 ? "c32u4" : "gemm", `M=${plan.m}`);
+      assertEquals(plan.profile.exact, plan.m === 1 ? DOWN_SEQUENTIAL : "gemm", `M=${plan.m}`);
       assert(!names(plan.candidates).includes(plan.baseline.name));
     }
   });
@@ -227,7 +229,7 @@ describe("the candidates of a float-stored case carried from M = 1 on to M = 4 a
     assertEquals(
       plans.map(({ m, profile }) => [m, profile.exact, profile.reorder]),
       [
-        [1, "c32u4", "c32u4"],
+        [1, DOWN_SEQUENTIAL, DOWN_SEQUENTIAL],
         [4, "gemm", "gemm"],
         [8, "gemm", "gemm"],
       ],

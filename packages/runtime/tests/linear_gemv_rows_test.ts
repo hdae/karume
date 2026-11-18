@@ -431,9 +431,36 @@ describe("M=1 GEMV shape selection", () => {
     );
   });
 
+  it("selects 16 columns and 2 words ahead for the measured int4 output heads, and 8 or 16 words ahead for the measured bf16 shapes, each under its own key", () => {
+    for (const k of [1536, 2560]) {
+      const head = defaultLinearGemvVariant(GEMV, { storage: "i4", n: 262144, k });
+      assertEquals(head, { cols: 16, unroll: 2 });
+      assertEquals(linearGemvKey("i4", 32, head), "linear_gemv:v1:f32:c16u2:wi4g32");
+    }
+    const wide = defaultLinearGemvVariant(GEMV, { storage: "bf16", n: 12288, k: 1536 });
+    assertEquals(wide, { cols: 16, unroll: 8 });
+    assertEquals(linearGemvKey("bf16", undefined, wide), "linear_gemv:v1:f32:c16u8:wbf16");
+    const long = defaultLinearGemvVariant(GEMV, { storage: "bf16", n: 1536, k: 12288 });
+    assertEquals(long, { cols: 16, unroll: 16 });
+    assertEquals(linearGemvKey("bf16", undefined, long), "linear_gemv:v1:f32:c16u16:wbf16");
+    // A row is its storage and shape: the bf16 output heads, the 12B head and another float storage
+    // keep the general variant, and so does a row block of a head
+    for (const shape of [
+      { storage: "bf16", n: 262144, k: 1536 },
+      { storage: "bf16", n: 262144, k: 2560 },
+      { storage: "i4", n: 262144, k: 3840 },
+      { storage: "f16", n: 12288, k: 1536 },
+    ] as const) {
+      assertEquals(defaultLinearGemvVariant(GEMV, shape), { cols: 32, unroll: 4 });
+    }
+    const block = defaultLinearGemvRowsVariant(GEMV, "i4", 4, 262144);
+    assertEquals([block.cols, block.unroll], [32, 4]);
+  });
+
   it("keeps the former variant for a different storage type or matrix shape and for generation without a shape", () => {
     assertEquals(defaultLinearGemvVariant(GEMV), { cols: 32, unroll: 4 });
-    const storageTypes: readonly WeightStorage[] = ["i2", "i4", "f16", "f32"];
+    // i4 of this shape is the q4_0 QAT E2B output head, which has a row of its own (the case above)
+    const storageTypes: readonly WeightStorage[] = ["i2", "f16", "f32"];
     for (const storage of storageTypes) {
       assertEquals(defaultLinearGemvVariant(GEMV, { storage, n: 262144, k: 1536 }), {
         cols: 32,

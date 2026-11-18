@@ -83,23 +83,35 @@ const HEAD_12B = caseOf("i4g32-n262144-k3840");
 const names = (candidates: readonly GemvCandidate[]): string[] =>
   candidates.map(({ name }) => name);
 
-/** The profile rows (parallel shapes and sequential exceptions) the case table has no case of. */
+/**
+ * The profile rows (parallel shapes and sequential exceptions) the case table has no case of. A
+ * sequential exception has no group length, so a case of its storage and shape at any group is its
+ * case (`group`: `"any"`).
+ */
 const uncovered = (choices: LinearGemvChoices, cases: readonly GemvCase[]): string[] =>
   [
     ...choices.parallelShapes.map(({ storage, group, n, k }) => ({ storage, group, n, k })),
-    ...choices.sequential.shapes.map(({ storage, n, k }) => ({ storage, group: undefined, n, k })),
+    ...choices.sequential.shapes.map(({ storage, n, k }) => ({
+      storage,
+      group: "any" as const,
+      n,
+      k,
+    })),
   ]
     .filter(
       (row) =>
         !cases.some(
           (gemvCase) =>
             gemvCase.storage === row.storage &&
-            gemvCase.group === row.group &&
+            (row.group === "any" || gemvCase.group === row.group) &&
             gemvCase.n === row.n &&
             gemvCase.k === row.k,
         ),
     )
-    .map(({ storage, group, n, k }) => `${storage} g${group ?? "-"} ${n}×${k}`);
+    .map(
+      ({ storage, group, n, k }) =>
+        `${storage} g${group === "any" ? "*" : (group ?? "-")} ${n}×${k}`,
+    );
 
 describe("the case table", () => {
   it("has a case for every GEMV row of the default profile, parallel and sequential", () => {
@@ -115,6 +127,19 @@ describe("the case table", () => {
       ],
     };
     assertEquals(uncovered(choices, GEMV_CASES), ["i4 g64 4096×4096"]);
+    // A sequential exception is covered by a case of its storage and shape at any group, and by no other
+    const { sequential } = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+    const exceptions: LinearGemvChoices = {
+      ...DEFAULT_GEOMETRY_PROFILE.linearGemv,
+      sequential: {
+        ...sequential,
+        shapes: [
+          ...sequential.shapes,
+          { storage: "bf16", n: 8960, k: 2560, variant: { cols: 16, unroll: 8 } },
+        ],
+      },
+    };
+    assertEquals(uncovered(exceptions, GEMV_CASES), ["bf16 g* 8960×2560"]);
   });
 
   it("gives every case a unique id spelled from its shape, a source and the sweep's row counts", () => {

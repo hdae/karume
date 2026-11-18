@@ -296,9 +296,51 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
      * (tests/gpu_linear_gemv_test.ts).
      */
     variant: { cols: 32, unroll: 4 },
-    // DECIDED: only the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
+    // DECIDED: the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
     // docs/decisions/0082-linear-gemv-decode.md
-    shapes: [{ storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } }],
+    //
+    // The rows after it are the exceptions the derivation adopts from GEMV sweep records of the RTX
+    // 3080 Ti (2026-11-18). The rule (docs/spec/geometry-profiles.md, "Deriving the GEMV choices"):
+    // every word the general variant's, and at least ×1.10 over it at M = 1 in every steady group,
+    // from two records or more.
+    // - The int4 output heads of the Gemma 4 q4_0 QAT E2B / E4B models: 16 columns per workgroup,
+    //   ×1.68 to ×2.52 per dispatch in three records (perf-ledger K-101).
+    // - The bf16 linears of regular Gemma 4 E2B / E4B: a bf16 word holds 8 elements where an int4
+    //   word holds 32, so the general read-ahead of 4 words keeps a quarter of the bytes in flight;
+    //   8 or 16 words ahead is ×1.17 to ×1.89 per dispatch in three to five records (perf-ledger
+    //   K-112). The two bf16 output heads have no row: no variant gained in every record.
+    // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
+    // the general variant.
+    // MUST: a row added or changed goes together with tests/gpu_linear_gemv_variant_test.ts, which
+    // compares every row's words with the general variant's on the row's own shape.
+    shapes: [
+      { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
+      { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
+      { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
+      { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 1536, k: 2048, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 6144, k: 1536, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 1536, k: 6144, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 1536, k: 256, variant: { cols: 32, unroll: 16 } },
+      { storage: "bf16", n: 4096, k: 1536, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 512, k: 1536, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 1536, k: 4096, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 12288, k: 1536, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 1536, k: 12288, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 10752, k: 2560, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 2048, k: 2560, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 512, k: 2560, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 2560, k: 2048, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 2560, k: 10240, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 4096, k: 2560, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 1024, k: 2560, variant: { cols: 16, unroll: 16 } },
+      { storage: "bf16", n: 2560, k: 4096, variant: { cols: 16, unroll: 8 } },
+    ],
   },
   /**
    * In the RTX 3080 Ti sweep, shapes below this value were faster buying parallelism with y tiles,
