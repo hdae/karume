@@ -374,7 +374,10 @@ const identicalChoices = (
   });
 };
 
-/** The reorder class at `m` rows (M ≤ 8): every lane count, plain, staged and — when gated in — subgroup. */
+/**
+ * The reorder class at `m` rows (M ≤ 8): every lane count, plain, staged and — when gated in, and for
+ * an integer storage, the only ones with that form — subgroup.
+ */
 const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): LinearGemvChoice[] => {
   if (m > LINEAR_GEMV_PARALLEL_MAX_ROWS) return [];
   const { storage, group, n, k } = gemvCase;

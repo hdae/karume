@@ -139,8 +139,9 @@ import {
  * It is also the divisibility unit the eligibility check (`buildLinear` in
  * src/runtime/recipe-builders/linear.ts) imposes on k and the group length, so the check and the
  * kernel read the same single derivation point per storage.
- * f16 / bf16 carry 8 elements per word and f32 4, all M=1 only (ADR 0082 addenda 6 and 7; bf16 is
- * ADR 0131).
+ * f16 / bf16 carry 8 elements per word and f32 4; their sequential kernel is M=1 only (ADR 0082
+ * addenda 6 and 7; bf16 is ADR 0131), and the parallel GEMV takes them at up to
+ * {@link LINEAR_GEMV_PARALLEL_MAX_ROWS} rows.
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i2") return 64;

@@ -372,7 +372,7 @@ export type ComputePrecision = "f32" | "f16" | "a8";
 export type StateAttentionReduce = "sequential" | "parallel" | "parallel-fused";
 
 /**
- * The K summation order of the quantized GEMV a Session runs (ADR 0098): `sequential` at `exact`,
+ * The K summation order of the GEMV a Session runs (ADR 0098): `sequential` at `exact`,
  * `parallel` at `reorder`, its subgroup form through the private `REORDER_STRATEGIES`.
  */
 export type LinearGemvReduce = "sequential" | "parallel" | "parallel-subgroup32";
@@ -399,8 +399,9 @@ export type SessionOptions = {
    * shows in the diagnostic pipeline keys; an op kind with no such kernel for its shape runs the
    * reference kernel. A `reorder` result stays inside the op's band against an f64 evaluation and
    * is bit-identical between two runs on one device, but the generated sequence may differ from
-   * `exact`. Today `reorder` runs the parallel GEMV on quantized linears at their measured shapes
-   * with 1 to 8 rows, and on states-form attention the parallel reductions of QK and PV with the
+   * `exact`. Today `reorder` runs the parallel GEMV on the linears whose weight storage and shape
+   * the geometry profile's table names (int2 / int4 / int8 weights in the default profile; a table
+   * may name bf16 / f16 / f32 shapes too), with 1 to 8 rows, and on states-form attention the parallel reductions of QK and PV with the
    * row statistics folded into PV (decode and verification plans; a prefill plan keeps kernels
    * that give the reference bits).
    *

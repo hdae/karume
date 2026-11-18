@@ -6,7 +6,8 @@
  * The shapes are those of the default geometry profile's GEMV choices (`DEFAULT_GEOMETRY_PROFILE`
  * `.linearGemv` in src/kernels/geometry-profile.ts): every parallel row and every per-shape
  * exception of the sequential variant has a case here (a test pins it). The table is its own data
- * rather than a reading of the profile, so that a shape can be measured before it has a row. The
+ * rather than a reading of the profile, so that a shape can be measured before it has a row — as the
+ * bf16 linears of regular Gemma 4 are, which no profile names yet. The
  * sources repeat the comments of the profile's rows; the Gemma 4 E2B rows have none, so their roles
  * are those the E4B rows name when they copy "the E2B row with the same role", and the census of
  * docs/research/2026-09-07-gemv-rows-k21.md (the 12288-wide MLP layers).

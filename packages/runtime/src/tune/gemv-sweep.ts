@@ -230,7 +230,8 @@ const OPERAND_RESOURCES = { x: "x", weight: "w", bias: "bias", weightScale: "wsc
 /**
  * The launch of a program whose one dispatch writes `output`: its key, WGSL, params and grid as the
  * program states them, its bindings mapped to the case's resources by position. The sweep times
- * programs of one dispatch without temporaries (every GEMV program is one). A program names the
+ * programs of one dispatch without temporaries (every GEMV program is one, and so is the GEMM that
+ * is a float-stored case's baseline past one row). A program names the
  * weight's scale among its bindings whatever the storage; it is bound only where the case has one
  * (`weightScale` — false for a float storage, whose WGSL declares no such binding), as the recipe
  * builder binds it.
