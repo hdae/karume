@@ -426,9 +426,9 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
       gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: gemm }],
       conv2d: { rows64: conv, rows32: conv },
     });
-    // Three tables on one tile: without a field, with a form, with another form (and the decode)
+    // Two tables on one tile, neither with the plain tile: the tile's own row (the reference of
+    // every comparison) and each variant must still be there, once
     const tables = [
-      table("plain", TILE, CONV_TILE),
       table("form", { ...TILE, form: "tb-un" }, { ...CONV_TILE, form: "tb-un" }),
       table(
         "both",
