@@ -11,7 +11,7 @@ const SIGNAL = new AbortController().signal;
 
 const FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 const MOUNTS = "gemma4, gemma4-qat, gemma4-qat-mobile";
-const SWITCHES = "tap-off, split, integer, ple-gpu, ahead2, ahead4, ahead8";
+const SWITCHES = "tap-off, split, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8";
 
 /** The drafts of `text` (the grammar alone; no distribution is read). */
 const draftsOf = (text: string) => parseArmsText(text).map(({ draft }) => draft);
@@ -32,6 +32,7 @@ describe("the arms text", () => {
   it.each([
     ["tap-off", { tap: false }],
     ["split", { tap: true, split: true }],
+    ["linear-reorder", { tap: true, linearReorder: true }],
     ["integer", { tap: true, integerGemv: true }],
     ["ple-gpu", { tap: true, pleOnGpu: true }],
     ["ahead2", { tap: true, decodeAhead: "2" }],

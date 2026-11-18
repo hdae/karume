@@ -108,6 +108,26 @@ describe("the arms", () => {
           undefined,
         ],
         ["integer off", draft({ integerGemv: false }), undefined, undefined, undefined],
+        // `i4` declares no level: the switch passes linear at reorder, and nothing else.
+        [
+          "linear reorder on i4",
+          draft({ quant: "i4", linearReorder: true }),
+          { numerics: { ops: { linear: "reorder" } } },
+          undefined,
+          undefined,
+        ],
+        [
+          "linear reorder and integer on i4",
+          draft({ quant: "i4", linearReorder: true, integerGemv: true }),
+          {
+            integerGemv: true,
+            packedStaticQuantize: true,
+            numerics: { ops: { linear: "reorder" } },
+          },
+          undefined,
+          undefined,
+        ],
+        ["linear reorder off", draft({ linearReorder: false }), undefined, undefined, undefined],
         [
           "PLE on GPU, ahead 4",
           draft({ pleOnGpu: true, decodeAhead: "4" }),
@@ -158,13 +178,22 @@ describe("the arms", () => {
           "Decode ahead needs PLE on GPU (each step's token stays on the GPU, so its PLE gather must run there).",
         ],
         [twelve({ pleOnGpu: true }), "12B has no PLE to place on the GPU."],
+        // The arm would run what its base runs, under a label that says otherwise
+        [
+          draft({ linearReorder: true }),
+          "The preset 'i4-fast' declares linear at the level reorder already.",
+        ],
+        [
+          draft({ quant: "i4-gemvpar", linearReorder: true }),
+          "The preset 'i4-gemvpar' declares linear at the level reorder already.",
+        ],
       ] as const) {
         expect(resolveArm(given, MANIFESTS)).toEqual({ ok: false, error });
       }
     });
   });
 
-  it("labels an arm by distribution, model and preset, then its integer GEMV, PLE placement and depth, then the tap's own mark", () => {
+  it("labels an arm by distribution, model and preset, then its integer GEMV or linear at reorder, PLE placement and depth, then the tap's own mark", () => {
     const mobile = { mount: "gemma4-qat-mobile", model: "e2b" } as const;
     const integer = { integerGemv: true } as const;
     for (const [arm, label] of [
@@ -186,6 +215,26 @@ describe("the arms", () => {
       [
         { ...mobile, quant: "i4", tap: true, pipeline: { pleResidency: "gpu", decodeAhead: 8 } },
         "mobile QAT e2b i4 (PLE GPU) (ahead 8)",
+      ],
+      [
+        {
+          mount: "gemma4",
+          model: "e2b",
+          quant: "bf16",
+          tap: true,
+          session: { numerics: { ops: { linear: "reorder" } } },
+        },
+        "Gemma 4 e2b bf16 (linear reorder)",
+      ],
+      // The integer GEMV's options hold linear at reorder too: its own mark says it
+      [
+        {
+          ...mobile,
+          quant: "i4",
+          tap: true,
+          session: { ...integer, numerics: { ops: { linear: "reorder" } } },
+        },
+        "mobile QAT e2b i4 (integer)",
       ],
       [
         { ...mobile, quant: "i4", tap: false, session: integer, pipeline: { pleResidency: "gpu" } },

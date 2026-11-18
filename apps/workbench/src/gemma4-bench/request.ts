@@ -40,13 +40,14 @@ const ARM_FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 
 /**
  * The switches of an arm, after its model and preset: `tap-off` (a wall-clock control; the tap is on
- * otherwise), `split` (one timed pass per dispatch), `integer` (the integer GEMV), `ple-gpu` (the PLE
- * on the GPU) and `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch
- * otherwise).
+ * otherwise), `split` (one timed pass per dispatch), `linear-reorder` (linear at the level `reorder`
+ * on a preset that does not declare it), `integer` (the integer GEMV), `ple-gpu` (the PLE on the
+ * GPU) and `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise).
  */
 const ARM_SWITCHES = [
   "tap-off",
   "split",
+  "linear-reorder",
   "integer",
   "ple-gpu",
   "ahead2",
@@ -91,6 +92,7 @@ const parseArm = (text: string, position: number): NamedArm => {
   }
   let tap = true;
   let split = false;
+  let linearReorder = false;
   let integerGemv = false;
   let pleOnGpu = false;
   let decodeAhead: DecodeAhead | undefined;
@@ -111,6 +113,9 @@ const parseArm = (text: string, position: number): NamedArm => {
         break;
       case "split":
         split = true;
+        break;
+      case "linear-reorder":
+        linearReorder = true;
         break;
       case "integer":
         integerGemv = true;
@@ -141,6 +146,7 @@ const parseArm = (text: string, position: number): NamedArm => {
       ...(quant === undefined ? {} : { quant }),
       tap,
       ...(split ? { split: true } : {}),
+      ...(linearReorder ? { linearReorder: true } : {}),
       ...(integerGemv ? { integerGemv: true } : {}),
       ...(pleOnGpu ? { pleOnGpu: true } : {}),
       ...(decodeAhead === undefined ? {} : { decodeAhead }),

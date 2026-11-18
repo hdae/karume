@@ -1,8 +1,9 @@
 /**
  * What the decode bench runs: the prompt set, the arms (a model of one of the three Gemma 4
- * distributions × a preset × the tap on, on and split per dispatch, or off × the integer GEMV on or
- * off × the PLE on the host or the GPU × the decode run-ahead depth), the workload (chats, new
- * tokens, rounds, sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
+ * distributions × a preset × the tap on, on and split per dispatch, or off × linear at the level
+ * `reorder` or as the preset declares × the integer GEMV on or off × the PLE on the host or the GPU ×
+ * the decode run-ahead depth), the workload (chats, new tokens, rounds, sampler) and the order the
+ * arms are visited in. Pure, so `vp test` covers it.
  */
 
 import {
@@ -85,6 +86,11 @@ export type ArmDraft = {
   readonly tap: boolean;
   /** Split the tap per dispatch (applies only with the tap on). */
   readonly split?: boolean;
+  /**
+   * Run linear at the level `reorder` (the Session option `numerics` with `ops.linear`) on a preset
+   * that does not declare it: the arm against the same preset at `exact`.
+   */
+  readonly linearReorder?: boolean;
   /** Run the eligible decode linears on the integer GEMV (the Session option `integerGemv`). */
   readonly integerGemv?: boolean;
   /** Keep the PLE on the GPU and gather it there (the pipeline option `pleResidency: "gpu"`). */
@@ -117,12 +123,24 @@ export type ArmSessionOptions = Omit<GemmaSessionOptions, "fusionRules">;
  * field, so the levels the preset declares for the other op kinds stay.
  */
 export const integerGemvSession = (declared: SessionSpec): ArmSessionOptions => {
-  const linearLevel = declared.numerics?.ops?.linear ?? declared.numerics?.level;
+  const linearLevel = declaredLinearLevel(declared);
   return {
     integerGemv: true,
     ...(declared.packedStaticQuantize === true ? {} : { packedStaticQuantize: true }),
     ...(linearLevel === "reorder" ? {} : { numerics: { ops: { linear: "reorder" } } }),
   };
+};
+
+/** The level a preset's declaration gives linear (absent: `exact`). */
+const declaredLinearLevel = (declared: SessionSpec): "exact" | "reorder" | undefined =>
+  declared.numerics?.ops?.linear ?? declared.numerics?.level;
+
+/**
+ * The explicit options of the linear-reorder switch: linear at the level `reorder`, the other op
+ * kinds as the preset declares them (the pipeline composes `numerics` per field).
+ */
+export const LINEAR_REORDER_SESSION: ArmSessionOptions = {
+  numerics: { ops: { linear: "reorder" } },
 };
 
 /** One arm, checked against the manifests. */
@@ -157,7 +175,11 @@ export const armLabel = (
   arm: Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split" | "session" | "pipeline">,
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
-    arm.session?.integerGemv === true ? " (integer)" : ""
+    arm.session?.integerGemv === true
+      ? " (integer)"
+      : arm.session?.numerics?.ops?.linear === "reorder"
+        ? " (linear reorder)"
+        : ""
   }${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
@@ -182,9 +204,10 @@ export type ArmResolution =
 
 /**
  * A draft → its arm, or why it cannot run (a missing manifest, a model or a preset the manifest does
- * not have — named with the ones it has —, a QAT model the entry point refuses, or a run-ahead depth
- * without the PLE on the GPU — the pipeline refuses that pair too, but only after the arm was
- * started).
+ * not have — named with the ones it has —, a QAT model the entry point refuses, linear at `reorder`
+ * asked of a preset that declares it — the arm would be its base under another label —, or a
+ * run-ahead depth without the PLE on the GPU — the pipeline refuses that pair too, but only after the
+ * arm was started).
  */
 export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResolution => {
   const { mount, model } = draft.key;
@@ -224,8 +247,21 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
     ...(draft.pleOnGpu === true ? { pleResidency: "gpu" } : {}),
     ...(decodeAhead >= 2 ? { decodeAhead } : {}),
   };
-  const session: ArmSessionOptions =
-    draft.integerGemv === true ? integerGemvSession(preset.declaration.session) : {};
+  if (
+    draft.linearReorder === true &&
+    declaredLinearLevel(preset.declaration.session) === "reorder"
+  ) {
+    return {
+      ok: false,
+      error: `The preset '${preset.name}' declares linear at the level reorder already.`,
+    };
+  }
+  // The integer GEMV's options hold linear at `reorder` where the preset does not: either switch
+  // alone, or both, gives one `numerics`.
+  const session: ArmSessionOptions = {
+    ...(draft.linearReorder === true ? LINEAR_REORDER_SESSION : {}),
+    ...(draft.integerGemv === true ? integerGemvSession(preset.declaration.session) : {}),
+  };
   return {
     ok: true,
     arm: {
