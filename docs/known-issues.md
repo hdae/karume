@@ -502,11 +502,25 @@ checked its outputs, checked, before the lines appeared.
 - **Impact**: none known on results. A harness that exits without destroying its device can print the lines and, as
   in two of the seven sightings, end with a segmentation fault, which turns its exit status non-zero after its
   results are complete.
-- **To reproduce at scale** (not run: it needs the GPU alone for about an hour): the harnesses of sightings 4 and 5
-  showed the lines in one of two processes each, so port `attn-compliant/run-bench.ts` to the current checkout (it
-  imports a worktree that no longer exists), and run its `factor` and `hog` sets 20 times per arm with the two exit
-  paths of the A/B above, counting the lines and the non-zero statuses per arm. Lines only in the arm that exits at
-  once attribute the message to the exit path; lines in both arms make it a property of those kernels' compile.
+- **How the A/B is run**: from the repository root, with nothing else on the GPU,
+  `flock /tmp/karume-gpu.lock zsh outputs/diag/decode-optimization-2026-11-18/gemm-forms/nvvm/run-nvvm.zsh <label> <rounds> cold [<load seconds>]`.
+  One round is one process per arm, the arms' order rotated per round. `nvvm-ab.ts` beside it starts the processes
+  (`nvvm-process.ts`, or `nvvm-process-load.ts` when the load seconds are given) and writes one JSON line per process
+  to `<label>.jsonl`: the arm, the exit status or signal, the count of each of the two lines on stderr, and the files
+  the driver left in the process's cache directory; the last lines of `<label>.stdout.txt` are the counts per arm.
+  The run above was `cold-1 16 cold` (64 processes, 4 minutes 45 seconds).
+- **Not run** (the GPU was shared by six pieces of work that day; each needs it alone):
+  1. The same A/B nearer the sightings' harnesses: a device with `timestamp-query`, the sweep's shapes
+     `linear-m1024-n2048-k2048`, `matmul-m512-n2048-k1024` and `conv2d-c192-256x256`, every pipeline kept alive and
+     all of them run in turn for the load seconds before the process ends —
+     `… run-nvvm.zsh cold-load-1 7 cold 10` (28 processes, about 8 minutes), then more rounds if it shows a line.
+  2. The harnesses that showed the lines most often: sightings 4 and 5 had them in one of two processes each. Port
+     `perf-recon-2026-10-24/attn-compliant/run-bench.ts` to the current checkout (it imports a worktree that no
+     longer exists), and run its `factor` and `hog` sets 20 times per arm with the two exit paths (about an hour).
+  Reading either: lines only in the arms that exit at once attribute the message to the exit path, and a harness that
+  destroys its device before it exits is then free of it; lines in the arms that destroy the device first make it a
+  property of the kernels compiled, and then the arms with and without the K-88 fields say whether those kernels
+  matter.
 
 ## The decode bench's split mode fails intermittently (filed 2026-11-03; the `gemma4-bench` entry's split arms only)
 
