@@ -253,6 +253,20 @@ The first real-weights run failed in the pipeline's dispose, not in a token: the
 after the logits resident it reads (fixed in `3852a3a6`; the surface's GPU test has the case, and fails on the commit
 before).
 
+Two existing real-weight tests reacted to the selection, neither in a token:
+
+- `e2e_gemma4_chat_test` compares a greedy chat's stop with its pinned value. The sequence reported the selection's
+  counters on every turn, a greedy one included (a count of 0); they are now kept for turns that sample only
+  (`2d28531c`), and the test is unchanged.
+- `e2e_gemma4_ple_gpu_test` counts the queue waits (`onSubmittedWorkDone`) of a sampled chat with the per-layer
+  embeddings on the host and on the GPU, and expected the two counts to be equal. They were equal because each path
+  paid one wait the other did not: the GPU path the gather batch of the prefill chunk, the host path the wait for
+  released memory that a run building a slot backing starts with. With the selection the host path issues its decode
+  through `enqueue`, as the greedy path does, and no longer pays that wait. Counted on one sampled chat of the mobile
+  QAT E2B (16 tokens, the same ids in all four): whole row 4 waits on the host and 4 on the GPU, selection 3 and 4;
+  the wait that went is the one at the slot backing. The test now expects the GPU path to pay one more than the host
+  path, which is the gather batch its title names.
+
 ### 6.4 What it gives
 
 The arms `yield` and `after` of section 11's run differ in the selection only: both pass a signal on commit `3852a3a6`,
