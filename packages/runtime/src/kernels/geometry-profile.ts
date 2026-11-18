@@ -310,7 +310,8 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // A row a measured device is slower with is not added to the default; it lives in the table of
     // the device that gains from it (`nvidia-ampere` carries the int4 output heads of the q4_0 QAT
     // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95;
-    // `nvidia-blackwell` carries 42 int4 and int8 rows of its own). The INT8 row above predates
+    // `nvidia-blackwell` carries 42 int4 and int8 rows of its own, and another variant on two of
+    // the bf16 rows, at least ×1.12 and ×1.20 faster in its records). The INT8 row above predates
     // this: the RTX 5070 Ti reads the general variant ×1.04 faster on its shape.
     // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
     // the general variant.

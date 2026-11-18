@@ -886,16 +886,34 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     });
   });
 
-  it("nvidia-blackwell's are the default's with what its own records adopt in place: 42 more sequential exceptions, and 56 parallel rows changed or added", () => {
+  it("nvidia-blackwell's are the default's with what its own records adopt in place: two of the default's exceptions with another variant, 42 more sequential exceptions, and 78 parallel rows changed or added", () => {
     const blackwell = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-blackwell");
     assert(blackwell?.linearGemv !== undefined);
     const own = blackwell.linearGemv;
     // What the derivation never writes is the default's of today
     assertEquals(own.sequential.variant, GEMV.sequential.variant);
     assertEquals(own.rowsThreadTarget, GEMV.rowsThreadTarget);
-    // The default's exceptions are inherited as they are, the table's own follow
+    // Every exception of the default is there, in the default's order, two of them with the variant
+    // the device's own records adopt over the default's; the table's own follow
+    const ownVariant = new Map([
+      ["bf16 1536 256", { cols: 16, unroll: 8 }],
+      ["bf16 4096 2560", { cols: 16, unroll: 16 }],
+    ]);
+    const shapeKey = ({ storage, n, k }: { storage: string; n: number; k: number }): string =>
+      [storage, n, k].join(" ");
+    const replaced = GEMV.sequential.shapes.filter((row) => ownVariant.has(shapeKey(row)));
+    assertEquals(replaced.length, ownVariant.size);
+    for (const row of replaced) {
+      assert(JSON.stringify(row.variant) !== JSON.stringify(ownVariant.get(shapeKey(row))));
+    }
     const inherited = GEMV.sequential.shapes.length;
-    assertEquals(own.sequential.shapes.slice(0, inherited), GEMV.sequential.shapes);
+    assertEquals(
+      own.sequential.shapes.slice(0, inherited),
+      GEMV.sequential.shapes.map((row) => {
+        const variant = ownVariant.get(shapeKey(row));
+        return variant === undefined ? row : { ...row, variant };
+      }),
+    );
     assertEquals(own.sequential.shapes.length - inherited, 42);
     // Every parallel row of the default is there, in the default's order, with the rows added after
     const key = (row: LinearGemvParallelShape): string =>
@@ -908,7 +926,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       (row, index) => JSON.stringify(row) !== JSON.stringify(own.parallelShapes[index]),
     ).length;
     const added = own.parallelShapes.length - GEMV.parallelShapes.length;
-    assertEquals([changed, added], [40, 16]);
+    assertEquals([changed, added], [41, 37]);
   });
 
   it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {
