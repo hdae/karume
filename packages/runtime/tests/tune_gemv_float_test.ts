@@ -22,8 +22,11 @@ import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/g
 import {
   type GemvCandidate,
   type GemvGates,
+  type GemvM1Group,
+  type GemvM1Row,
   gemvBaseline,
   gemvCandidates,
+  gemvCarriedFromM1,
   gemvMeasurementPlans,
   gemvProfileChoice,
   gemvProgram,
@@ -104,17 +107,20 @@ describe("the baseline of a float-stored case", () => {
     }
   });
 
-  it("is what the default profile chooses at reorder too, unless the profile has a row of the shape", () => {
+  it("is what the default profile chooses at reorder too: the default profile names no float shape", () => {
+    assertEquals(
+      DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.filter(({ storage }) =>
+        isFloatStorage(storage),
+      ),
+      [],
+    );
     for (const gemvCase of [DOWN, HEAD]) {
-      const row = DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.find(
-        ({ storage, n, k }) => storage === "bf16" && n === gemvCase.n && k === gemvCase.k,
-      );
       for (const m of gemvCase.rows) {
-        const expected =
-          row === undefined
-            ? gemvBaseline(gemvCase, m).name
-            : `${row.stagedActivations === true ? "staged" : "parallel"}-l${row.lanes}`;
-        assertEquals(gemvProfileChoice(gemvCase, m, "reorder").name, expected, `M=${m}`);
+        assertEquals(
+          gemvProfileChoice(gemvCase, m, "reorder").name,
+          gemvBaseline(gemvCase, m).name,
+          `${gemvCase.id} M=${m}`,
+        );
       }
     }
   });
@@ -193,6 +199,65 @@ describe("the candidates of a float-stored case", () => {
     for (const plan of gemvMeasurementPlans(DOWN, "full", GATES)) {
       assertEquals(plan.profile.exact, plan.m === 1 ? "c32u4" : "gemm", `M=${plan.m}`);
       assert(!names(plan.candidates).includes(plan.baseline.name));
+    }
+  });
+});
+
+describe("the candidates of a float-stored case carried from M = 1 on to M = 4 and 8", () => {
+  /** At M = 4 and 8 both references are the GEMM, which the M = 1 group has no row of. */
+  const REFERENCES = { exact: "gemm", reorder: "gemm" } as const;
+  const SEQUENTIAL = 1000;
+  /** The M = 1 group: the default's choice at reorder is the sequential GEMV, timed at 1000. */
+  const groupOf = (rows: readonly GemvM1Row[], spread = 1.01): GemvM1Group => ({
+    baselineSpread: spread,
+    profile: { reorder: "c32u4" },
+    rows: [{ candidate: "c32u4", perDispatch: SEQUENTIAL }, ...rows],
+  });
+  const held = (candidate: string, gain: number): GemvM1Row => ({
+    candidate,
+    perDispatch: SEQUENTIAL / gain,
+    withinBand: true,
+    nonFiniteOutputs: 0,
+  });
+  const carried = (group: GemvM1Group | undefined, candidate: string, m: number): boolean =>
+    gemvCarriedFromM1(m, { name: candidate, class: "reorder" }, REFERENCES, group);
+
+  it("names the GEMM as both references past one row, and the sequential GEMV as the default's choice at reorder at one row", () => {
+    const plans = gemvMeasurementPlans(DOWN, "full", GATES);
+    assertEquals(
+      plans.map(({ m, profile }) => [m, profile.exact, profile.reorder]),
+      [
+        [1, "c32u4", "c32u4"],
+        [4, "gemm", "gemm"],
+        [8, "gemm", "gemm"],
+      ],
+    );
+  });
+
+  it("carries a parallel form ×1.10 or more faster than the sequential GEMV at one row, to be read against the GEMM (fault: ×1.09 is skipped)", () => {
+    for (const m of [4, 8]) {
+      assertEquals(carried(groupOf([held("parallel-l32", 5.2)]), "parallel-l32", m), true);
+      assertEquals(carried(groupOf([held("parallel-l32", 1.1)]), "parallel-l32", m), true);
+      assertEquals(carried(groupOf([held("parallel-l2", 1.09)]), "parallel-l2", m), false);
+    }
+  });
+
+  it("skips a form the quick look screened or that left the band at one row, and carries every held form from an unsteady group", () => {
+    const screened: GemvM1Row = { candidate: "staged-l2", screened: true };
+    assertEquals(carried(groupOf([screened]), "staged-l2", 4), false);
+    const outside: GemvM1Row = { ...held("parallel-l4", 3), withinBand: false };
+    assertEquals(carried(groupOf([outside]), "parallel-l4", 4), false);
+    // The sequential baseline's two timing modes: the times of an unsteady group rule nothing out
+    assertEquals(carried(groupOf([held("parallel-l2", 0.5)], 2.46), "parallel-l2", 8), true);
+  });
+
+  it("always measures the GEMM past one row: it is the reference, and the M = 1 group has no row of it", () => {
+    const group = groupOf([held("parallel-l32", 5.2)]);
+    for (const m of [4, 8]) {
+      assertEquals(
+        gemvCarriedFromM1(m, { name: "gemm", class: "identical" }, REFERENCES, group),
+        true,
+      );
     }
   });
 });
@@ -343,14 +408,10 @@ const input = (
   sha256: `sha-${path}`,
 });
 
-/** A staged candidate of the case that is not the default profile's choice at reorder. */
-const candidateOf = (gemvCase: GemvCase): { readonly name: string; readonly lanes: 8 | 16 } => {
-  const lanes = gemvProfileChoice(gemvCase, 1, "reorder").name === "staged-l8" ? 16 : 8;
-  return { name: `staged-l${lanes}`, lanes };
-};
-
 describe("deriveLinearGemvChoices on a float-stored case", () => {
-  const { name, lanes } = candidateOf(DOWN);
+  /** A staged candidate: the default profile has no row of the shape, so any lane count is one. */
+  const name = "staged-l8";
+  const lanes = 8;
   const fast = { [name]: BASE_TIME / 2 };
   const measured = (times: GemvCaseSpec["times"]): readonly GemvCaseSpec[] => [
     { caseId: DOWN.id, rows: [1, 4, 8], times },
@@ -534,10 +595,10 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
         (entry) => entry.caseId === DOWN.id && entry.m === m,
       )?.candidates;
       assert(missing !== undefined, `M=${m}`);
-      const reference = gemvProfileChoice(DOWN, m, "reorder").name;
+      // The reference at reorder (the sequential GEMV, the GEMM) is no parallel form
       assertEquals(
         missing.filter((candidate) => !candidate.startsWith("c")).toSorted(),
-        PARALLEL_NAMES.filter((candidate) => candidate !== reference).toSorted(),
+        PARALLEL_NAMES.toSorted(),
         `M=${m}`,
       );
     }

@@ -563,6 +563,28 @@ describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearG
     assertEquals("linearGemv" in parseGeometryProfileJson(geometryProfileJson(BASE)), false);
   });
 
+  it("reads parallel rows of the float storages: bf16, f16 staged and f32, without a group", () => {
+    const floatRows = [
+      { storage: "bf16", n: 1536, k: 2048, lanes: 32, packedActivations: false },
+      {
+        storage: "f16",
+        n: 256,
+        k: 4096,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "f32", n: 8960, k: 1536, lanes: 4, packedActivations: false },
+    ] as const;
+    const withFloat: GeometryProfile = {
+      ...BASE,
+      linearGemv: { ...gemv, parallelShapes: [...gemv.parallelShapes, ...floatRows] },
+    };
+    const parsed = parseGeometryProfileJson(geometryProfileJson(withFloat));
+    assertEquals(parsed, withFloat);
+    assertEquals(parsed.linearGemv?.parallelShapes.slice(-3), [...floatRows]);
+  });
+
   it("rejects an unknown field, a missing or mistyped field and a value the runtime's check refuses, naming the path", () => {
     rejects(
       json({ ...BASE, linearGemv: { ...gemv, rows: 4 } }),
