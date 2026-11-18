@@ -144,6 +144,30 @@ describe("k88Summary", () => {
     expect(summary.cases[3]?.bestBoth?.geometry).toBe("r4x4w16x16:tas-tb-un:dec");
   });
 
+  it("reads a table whose rules carry the fields by its tile: the same summary as for the table without them", () => {
+    const carrying = PROFILES.map((profile) =>
+      profile.id === "test-table"
+        ? {
+            ...profile,
+            gemmRows: profile.gemmRows.map((rule) =>
+              rule.maxRows === Number.POSITIVE_INFINITY
+                ? { ...rule, geometry: { ...LINEAR_TABLE, form: "tb-un" as const } }
+                : rule,
+            ),
+            conv2d: {
+              ...profile.conv2d,
+              rows64: { ...CONV_TABLE, form: "tas-tb-un" as const, decode: "counter" as const },
+            },
+          }
+        : profile,
+    );
+    expect(k88Summary({ geometryProfile: "test-table", rows: ROWS }, CASES, carrying)).toEqual(
+      summary,
+    );
+    // The reference of every ratio is the tile's own row, not the row of the table's choice
+    expect(summary.cases[0]?.table?.geometry).toBe("r4x4w16x16");
+  });
+
   it("sums each unit over its cases with a count (the guard in none), in the record's unit", () => {
     expect(summary.sums).toEqual([
       {

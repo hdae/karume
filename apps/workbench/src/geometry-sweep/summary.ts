@@ -94,7 +94,7 @@ const k88Lines = (summary: K88Summary, unit: GeometrySweepTimingUnit): string[] 
       ? undefined
       : `${label} ${formatPerDispatch(value, unit)}${table === undefined ? "" : ` (${ratioText(table / value)})`}`;
   return [
-    `K-88 against this adapter's table geometry (${summary.tableId}); a ratio is the table's time ÷ the variant's (above ×1 the variant is faster)`,
+    `K-88 against the tile of this adapter's table geometry (${summary.tableId}, without the fields); a ratio is the tile's time ÷ the variant's (above ×1 the variant is faster)`,
     ...summary.sums.map((entry) =>
       entry.measured < entry.planned
         ? `${entry.unit}: ${entry.measured} / ${entry.planned} cases, no sum`

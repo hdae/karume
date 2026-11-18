@@ -203,7 +203,7 @@ describe("geometrySweepResult", () => {
         "1 of 1 planned cases finished · 2 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the default",
       );
       expect(summary[1]).toBe(
-        "K-88 against this adapter's table geometry (default); a ratio is the table's time ÷ the variant's (above ×1 the variant is faster)",
+        "K-88 against the tile of this adapter's table geometry (default, without the fields); a ratio is the tile's time ÷ the variant's (above ×1 the variant is faster)",
       );
       expect(summary.at(-1)).toBe(
         `${k88Case.id} (×${k88Case.censusCount}): table r8x8w16x16 10.000 ms · best form ÷ table ×1.250 · identical yes · 0 mismatches · 0 errors`,

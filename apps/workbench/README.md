@@ -70,9 +70,9 @@ flock /tmp/karume-gpu.lock node apps/workbench/run.ts geometry-sweep --candidate
 ```
 
 **K-88** — every case of the `k88` table (linear, matmul, conv2d), 5 rounds, 90 s idle: per case
-this adapter's table geometry against the same geometry with its fastest skeleton form, with the
-conv2d counter decode and with both, and the census-weighted sums per unit. No table is derived from
-this record.
+the tile of this adapter's table geometry (without the fields, also where the table's rule carries
+them) against the same tile with its fastest skeleton form, with the conv2d counter decode and with
+both, and the census-weighted sums per unit. No table is derived from this record.
 
 ```text
 http://127.0.0.1:8791/?entry=geometry-sweep&candidateSet=k88&ops=linear,matmul,conv2d&rounds=5&idleSeconds=90

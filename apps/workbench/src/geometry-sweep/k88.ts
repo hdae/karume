@@ -11,7 +11,9 @@
  * Session on that adapter selects): its `gemmRows` rule of the case's M (read from the row's shape
  * `M{m} …`, the spelling derive.ts reads too) or its conv2d field of the case's class (the tile edge
  * of the sweep's default row, 64 or 32 rows). A record without the field, or naming the default
- * table, is read against the sweep's default row.
+ * table, is read against the sweep's default row. A table's rule may itself carry a form or the
+ * decode: the summary reads its tile, so "the table geometry" below is always that tile without the
+ * fields, and the table's own choice is one of the variants it is compared with.
  *
  * It is the one K-88 summary: the `geometry-sweep` entry gives it for a run of the `k88` set, in a
  * browser and under Node alike (`node apps/workbench/run.ts geometry-sweep --candidateSet=k88 …`).
