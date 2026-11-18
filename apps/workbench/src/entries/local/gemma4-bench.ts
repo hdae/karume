@@ -3,11 +3,11 @@
  * (`gemma.Pipeline`) or the mobile QAT distribution (`gemma4QatMobile.Pipeline`) × a preset × the
  * GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the
  * integer GEMV × the PLE on the host or the GPU × the decode run-ahead depth × with or without a
- * signal × the bench's sampler or the distribution's — visited in A B B A rounds over a fixed prompt set, `chats` fresh chats per
- * prompt and visit (chat 0 is the cold one and is left out of the summary). It reports wall-clock
- * decode figures and, through the GPU tap (`src/gemma4-bench/tap.ts`), the GPU time and the
- * dispatches, passes and submits per token, or — in the tap's host mode — the host's segments of a
- * decode token.
+ * signal × the bench's sampler or the distribution's — visited in A B B A rounds over a fixed
+ * prompt set, `chats` fresh chats per prompt and visit (chat 0 is the cold one and is left out of
+ * the summary). It reports wall-clock decode figures and, through the GPU tap
+ * (`src/gemma4-bench/tap.ts`), the GPU time and the dispatches, passes and submits per token, or —
+ * in the tap's host mode — the host's segments of a decode token.
  *
  * The device is acquired through the tap, so karume's timing mode stays off and the product's own
  * pass structure is what is timed. One pipeline is resident at a time: each visit builds its arm's

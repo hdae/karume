@@ -11,8 +11,9 @@
  *
  * A chat is sent with the run's signal unless its arm says otherwise (`noSignal`). An arm in the
  * tap's host mode gets a signal of its own that follows the run's and notes when it is checked
- * ({@link markedSignal}): the generation loop checks its signal after its yield to the event loop
- * and again right before it issues a run, which is where the host's segments are cut.
+ * ({@link markedSignal}): the generation loop checks its signal at the boundary before a run (after
+ * a yield to the event loop only when the run before it did not let the event loop turn) and again
+ * right before it issues the run, which is where the host's segments are cut.
  */
 
 import { type StopRecord, stopRecordOf } from "@karume/gemma4-app-support/stop-record";

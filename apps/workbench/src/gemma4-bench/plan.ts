@@ -177,9 +177,9 @@ export type BenchArm = {
    */
   readonly hostMarks?: boolean;
   /**
-   * Whether the chats are sent without an `AbortSignal`: the generation loop then does not yield to
-   * the event loop before a run, and a cancel takes effect between two chats (absent = the run's
-   * signal is passed).
+   * Whether the chats are sent without an `AbortSignal`: the generation loop then makes no abort
+   * check before a run, and a cancel takes effect between two chats (absent = the run's signal is
+   * passed).
    */
   readonly noSignal?: boolean;
   /** The sampler kind of this arm alone (absent = the bench's `sampler`). */

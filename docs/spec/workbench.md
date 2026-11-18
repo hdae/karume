@@ -83,8 +83,10 @@ wall clock at the WebGPU calls that bound the host's work on a run — `queue.wr
 `createCommandEncoder`, `queue.submit` and its return, and for a buffer created with `MAP_READ` its
 `mapAsync`, the settlement of that map, `getMappedRange` and `unmap`. The chats of such an arm are
 sent with a signal of their own that follows the run's and records when it is checked: the generation
-loop checks its signal after its yield to the event loop and again right before it issues a run. The
-switch does not go with `tap-off` or `split`.
+loop checks its signal at the boundary before a run — at once when the event loop turned while the run
+before it was awaited, after a yield to the event loop otherwise
+([generation](generation.md#abort-checks)) — and again right before it issues the run. The switch does
+not go with `tap-off` or `split`.
 
 Each decode token's interval — from the previous token's `onToken` to its own, and from the last
 delivered token to the end of the chat when a run drew a stop token — is cut into seven segments that
@@ -92,7 +94,7 @@ add up to it:
 
 | Segment | From → to | What the host does in it |
 | --- | --- | --- |
-| `between` | the previous token → the signal's first check | the previous token's way to the consumer, and the loop's yield to the event loop |
+| `between` | the previous token → the signal's first check | the previous token's way to the consumer, and the loop's yield to the event loop where the boundary takes one (the run before it did not let the event loop turn) |
 | `derive` | → the signal's last check before the first WebGPU call | the inputs the pipeline derives on the host (the per-layer-embedding rows) |
 | `start` | → the return of the interval's first submit | preparing the run, the queue writes, encoding and submitting the first chunk of passes; the GPU has no work of this token until it ends |
 | `encode` | → the return of the interval's last submit | encoding and submitting the remaining chunks while the GPU runs the ones before them |

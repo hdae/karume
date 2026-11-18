@@ -126,9 +126,10 @@ export type HostCapture = {
   readonly calls: readonly HostCall[];
   /**
    * When the chat's signal was checked (`throwIfAborted`), in order; empty for a chat sent without a
-   * signal. The generation loop checks it after its yield to the event loop and again right before
-   * it issues a run, so the first and the last check before a token's first GPU call bound the
-   * yield and the derived inputs.
+   * signal. The generation loop checks it at the boundary before a run — after a yield to the
+   * event loop only when the run before it did not let the event loop turn — and again right
+   * before it issues the run, so the first and the last check before a token's first GPU call
+   * bound the boundary's check and the derived inputs.
    */
   readonly signalChecks: readonly number[];
 };
@@ -138,8 +139,9 @@ export type HostCapture = {
  * order; they add up to the interval.
  *
  * - `between`: to the signal's first check — the previous token's delivery to the consumer and the
- *   generation loop's yield to the event loop. Without a signal there is no check and no yield, and
- *   it runs to the first GPU call: the delivery and the derived inputs.
+ *   generation loop's yield to the event loop where its boundary takes one. Without a signal there
+ *   is no check and no yield, and it runs to the first GPU call: the delivery and the derived
+ *   inputs.
  * - `derive`: from the signal's first check to its last before the first GPU call — the inputs the
  *   pipeline derives on the host (the PLE rows). 0 without a signal (it is in `between`).
  * - `start`: to the return of the interval's first submit — preparing the run, the queue writes and
