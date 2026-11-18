@@ -5,8 +5,10 @@
  * heights, whose words must be the baseline's) and the reorder class (the parallel GEMV at each lane
  * count, plain, staged and subgroup, held to the band of `linear` against an f64 oracle on the host),
  * each row count after a quick look that times in full only the references and the kernels near
- * enough to matter. One call per case with idle time before every case but the first, the per-case
- * records merged into one `karume-gemv-sweep/3` record — what `deriveLinearGemvChoices` reads.
+ * enough to matter; at M = 4 and 8 the reorder candidates that the case's M = 1 group of the same run
+ * leaves unadoptable are skipped. One call per case with idle time before every case but the first,
+ * the per-case records merged into one `karume-gemv-sweep/4` record — what
+ * `deriveLinearGemvChoices` reads.
  *
  * The run concludes a verdict from its rows (`gemvSweepVerdict` of `../gemv-sweep/summary.ts`): an
  * identical candidate whose words differ, a reorder candidate outside the band, or a row that errored
@@ -33,7 +35,7 @@ const entry: Entry = {
   id: "gemv-sweep",
   title: "GEMV sweep",
   description:
-    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing), merged into one karume-gemv-sweep/3 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
+    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing, M = 4 and 8 only for the reorder candidates M = 1 leaves adoptable), merged into one karume-gemv-sweep/4 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
   parameters: [
     {
       kind: "choice",

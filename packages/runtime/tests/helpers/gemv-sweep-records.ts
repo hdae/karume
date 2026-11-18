@@ -1,4 +1,4 @@
-// Synthetic GEMV sweep records (`karume-gemv-sweep/3`) for the tests of the GEMV derivation
+// Synthetic GEMV sweep records (`karume-gemv-sweep/4`) for the tests of the GEMV derivation
 // (src/tune/gemv-derive.ts) and of the generator that uses it (tools/geometry-profiles — tools may
 // reach into tests/helpers: ADR 0008 addendum 2026-09-05). The rows are the sweep's own measurement
 // plans (`gemvMeasurementPlans`, the full set or the row-blocks set by row count) of the current
@@ -45,7 +45,7 @@ export type GemvCaseSpec = {
   /**
    * Fields laid over a row by row count and candidate name (a failed check, an error, an old
    * kernel fingerprint). A row given `screened: true` loses its time and its checks, as the sweep
-   * writes it.
+   * writes it; a row given `skipped: true` loses its quick time too.
    */
   readonly fields?: Readonly<Record<number, Readonly<Record<string, Partial<GemvSweepRow>>>>>;
   /** The baseline spread of every row count (default 1.01), or per row count. */
@@ -59,8 +59,8 @@ export type GemvRecordOptions = {
   readonly candidateSet?: "quick" | "full" | "row-blocks";
 };
 
-/** A row the quick look screened out: its identity, launch fields and quick time only. */
-const screenedRow = (row: GemvSweepRow): GemvSweepRow => {
+/** A row without its measurement: its identity and launch fields, and its time as `quick`. */
+const unmeasured = (row: GemvSweepRow): { rest: GemvSweepRow; quick?: number } => {
   const {
     reps: _reps,
     rounds: _rounds,
@@ -75,8 +75,17 @@ const screenedRow = (row: GemvSweepRow): GemvSweepRow => {
     nonFiniteOutputs: _nonFinite,
     ...rest
   } = row;
-  return { ...rest, ...(perDispatch === undefined ? {} : { quickPerDispatch: perDispatch }) };
+  return { rest, ...(perDispatch === undefined ? {} : { quick: perDispatch }) };
 };
+
+/** A row the quick look screened out: its identity, launch fields and quick time only. */
+const screenedRow = (row: GemvSweepRow): GemvSweepRow => {
+  const { rest, quick } = unmeasured(row);
+  return { ...rest, ...(quick === undefined ? {} : { quickPerDispatch: quick }) };
+};
+
+/** A row the M = 1 group left out: its identity and launch fields only. */
+const skippedRow = (row: GemvSweepRow): GemvSweepRow => unmeasured(row).rest;
 
 /** A record of the cases, its rows the plans of the sets at each case's row counts. */
 export const gemvRecord = (
@@ -99,6 +108,7 @@ export const gemvRecord = (
       const time = (name: string): number => spec.times?.[plan.m]?.[name] ?? BASE_TIME;
       const baseline = time(plan.baseline.name);
       let screened = 0;
+      let skipped = 0;
       for (const [index, candidate] of [plan.baseline, ...plan.candidates].entries()) {
         const isBaseline = index === 0;
         const perDispatch = time(candidate.name);
@@ -123,7 +133,10 @@ export const gemvRecord = (
           ...spec.fields?.[plan.m]?.[candidate.name],
         };
         if (row.screened === true) screened += 1;
-        rows.push(row.screened === true ? screenedRow(row) : row);
+        if (row.skipped === true) skipped += 1;
+        rows.push(
+          row.screened === true ? screenedRow(row) : row.skipped === true ? skippedRow(row) : row,
+        );
       }
       const spread =
         typeof spec.spread === "number" ? spec.spread : (spec.spread?.[plan.m] ?? 1.01);
@@ -134,6 +147,7 @@ export const gemvRecord = (
         profile: plan.profile,
         baselineSpread: spread,
         screened,
+        skipped,
         ...spec.summaries?.[plan.m],
       });
     }

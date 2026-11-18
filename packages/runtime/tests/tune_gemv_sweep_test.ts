@@ -217,7 +217,7 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
   it("returns the record of the public entry point over one case of the table", async () => {
     const caseId = "i8-n1536-k256";
     const record = await runGemvSweep({ candidateSet: "quick", cases: [caseId], rounds: 1 });
-    assertEquals(record.format, "karume-gemv-sweep/3");
+    assertEquals(record.format, "karume-gemv-sweep/4");
     assertEquals(record.deviceLost, null);
     assertEquals(record.aborted, false);
     assertEquals(record.settings.cases, [caseId]);

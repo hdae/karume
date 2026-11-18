@@ -62,9 +62,11 @@ adapter's match and measures nothing at run time.
   profile's GEMV rows; per case and row count it measures the baseline (what a Session at the level `exact` runs with
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
   and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`, after a
-  quick look that times in full only the references and the kernels near enough to matter. Its record is
-  `karume-gemv-sweep/3` ([workbench.md](workbench.md#the-gemv-sweeps-record)): each row carries the fingerprint of its
-  kernel and each case its own.
+  quick look that times in full only the references and the kernels near enough to matter; at M = 4 and 8 it skips the
+  reorder candidates that the case's M = 1 group of the same run leaves unadoptable by the rule below
+  ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)). Its record is `karume-gemv-sweep/4`
+  ([workbench.md](workbench.md#the-gemv-sweeps-record)): each row carries the fingerprint of its kernel and each case
+  its own.
 - No registered table carries them. A table without them runs with the default profile's, the values measured on the
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
@@ -80,9 +82,9 @@ adapter's match and measures nothing at run time.
 `deriveLinearGemvChoices` of `@karume/runtime/tune` derives `linearGemv` for a table from GEMV sweep records. It
 measures nothing and changes no default value.
 
-- **Inputs**: any number of `karume-gemv-sweep/3` records of one adapter — the table's match selects it and, when the
+- **Inputs**: any number of `karume-gemv-sweep/4` records of one adapter — the table's match selects it and, when the
   table has provenance, its four adapter fields are the table's —, with GPU timestamps (`ns` or `deno-raw-tick`)
-  that are not quantised. A record of an older format (`karume-gemv-sweep/2`, `/1`) is refused with a message that
+  that are not quantised. A record of an older format (`karume-gemv-sweep/3`, `/2`, `/1`) is refused with a message that
   names the format, and nothing converts it; so are a wall-clock or quantised record, a record of another adapter, the
   same record twice and no record at all.
 - **The unit of evidence is a group**: one record's measurement of one case at one row count. A row is *current* when
@@ -91,7 +93,9 @@ measures nothing and changes no default value.
   the row count in the case table), the default profile's choices its summary names at `exact` and `reorder` are the
   current ones, and the rows of those choices — the baseline, and the choice at `reorder` where the sweep measures it
   — are current and timed. A group is evidence for a candidate when it is current, steady, and the candidate's row is
-  current and timed (a row the quick look screened out is never evidence). So a change to one kernel, or a case
+  current and timed (a row the quick look screened out, or one the sweep skipped because the same record's M = 1 group
+  left the candidate unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is
+  refused). So a change to one kernel, or a case
   added, leaves the other rows' evidence standing, and records that each hold part of the cases add up.
 - **Adoption**: a candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at least
   two different records are evidence for it, it is at least ×1.10 faster than that choice in every one, and its check
@@ -131,7 +135,8 @@ for the derivation to be complete under the current runtime: per case and row co
 candidates the derivation reads there — at M = 1 every candidate, at M = 4 and 8 the reorder class, on the records'
 gates (subgroups, grid limit; records whose gates differ are refused) — that fewer than two records hold a current,
 steady group with a current row of. A row the quick look screened out counts as looked at (measured again, it would be
-screened again); a row that failed does not. The default's choice at `reorder` is no candidate of the list: every
+screened again), and so does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would
+skip it again); a row that failed does not. The default's choice at `reorder` is no candidate of the list: every
 measurement of a group takes it.
 
 The generator writes the plan as a workbench batch ([workbench.md](workbench.md#batches)),
@@ -176,7 +181,7 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
 - The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
   the profile, and a profile with other choices changes the selection and the pipeline key (core lane).
 - The GEMV derivation on hand-built records: the adoption rule, the steadiness bound, the kept cases, groups as the
-  unit of evidence (a stale or screened row is no evidence while its record's other groups are; records that each hold
+  unit of evidence (a stale, screened or skipped row is no evidence while its record's other groups are; records that each hold
   half of the cases derive what a complete pair derives; groups that are not current are reported) and the refusals
   (core lane); the generator's dry run, its write path and the carry-over of an existing `linearGemv`.
 - The plan of GEMV measurements: exactly the missing candidates, and a batch the workbench's own batch reader accepts

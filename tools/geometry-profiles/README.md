@@ -99,7 +99,7 @@ node tools/geometry-profiles/generate.ts intel-xe2 --vendor=intel --architecture
   repository-relative, with the sha256 of the file's bytes as stored (for a workbench record, of the envelope file).
 
 Whether a record is usable — its format version (only `karume-geometry-sweep/4`, `karume-attention-bench/2` and
-`karume-gemv-sweep/3` are accepted), its adapter, its case sets, its fingerprints, a sweep that covers a family only in
+`karume-gemv-sweep/4` are accepted), its adapter, its case sets, its fingerprints, a sweep that covers a family only in
 part while a base exists — is the derivation's decision; its errors are printed as they are. Of a GEMV record, the
 groups that are not of the current runtime are reported, not refused.
 

@@ -81,11 +81,15 @@ measurements in `docs/research/`.
   case at a row count are measured together: a warm start on the baseline, a quick look at every kernel (only the
   baseline, the default profile's choice at `reorder` and the kernels within `quickLookMargin` of their class's bar
   go on; the others are `screened` rows), the kernels that go on calibrated and checked, then rounds that each time
-  every one of them once in a rotating order, so a drift of the device lands on every kernel alike. The options
-  narrow it by case, row count (`rows`) and candidate (`candidates`; the references are measured either way). It
-  returns a `karume-gemv-sweep/3` record (`GemvSweepReport`): each row carries the fingerprint of its kernel and its
-  quick time, each case its own fingerprint, each case and row count the spread of the baseline's rounds
-  (`baselineSpread`) and the count of kernels screened; it changes no choice. Also `gemvSweepCases` (the case
+  every one of them once in a rotating order, so a drift of the device lands on every kernel alike. A case's row
+  counts go up from M = 1, and at M = 4 and 8 a reorder candidate that is not a reference is measured only when its
+  row in the same run's M = 1 group is timed, held its check and — in a steady group with the default's choice timed —
+  is at least ×1.10 faster than that choice; the others are `skipped` rows (their kernel and launch, nothing
+  measured), since the derivation reads M = 4 and 8 only for a candidate M = 1 would adopt. The options narrow it by
+  case, row count (`rows`; a run without M = 1 skips nothing) and candidate (`candidates`; the references are measured
+  either way). It returns a `karume-gemv-sweep/4` record (`GemvSweepReport`): each row carries the fingerprint of its
+  kernel and its quick time, each case its own fingerprint, each case and row count the spread of the baseline's
+  rounds (`baselineSpread`) and the counts of kernels screened and skipped; it changes no choice. Also `gemvSweepCases` (the case
   table), `gemvSweepCandidateNames` (every candidate name), `QUICK_LOOK_MARGIN` (the quick look's default margin of
   both sweeps), and the types `GemvSweepOptions`, `GemvSweepProgress`, `GemvSweepCandidateSet`, `GemvSweepCase`,
   `GemvSweepCaseEntry`, `GemvSweepCaseSummary`, `GemvSweepChoice`, `GemvSweepGates` and `GemvSweepRow`.
@@ -110,7 +114,7 @@ measurements in `docs/research/`.
   lines that state them and the records used with how much of each is current, and refuses another format, adapter,
   wall-clock or quantized timing, the same record twice and no record. `planGemvMeasurements` reads the same records
   and lists, per case and row count, the candidates the derivation reads that fewer than two records hold a current
-  group of. Also the types `DeriveLinearGemvOptions`, `GemvMeasurementPlanning`, `GemvMissingMeasurement`,
+  group of (a screened or skipped row counts as looked at). Also the types `DeriveLinearGemvOptions`, `GemvMeasurementPlanning`, `GemvMissingMeasurement`,
   `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation`, `LinearGemvGain`, `LinearGemvRecordGroups`,
   `LinearGemvStaleGroup` and `PlanGemvMeasurementsOptions`. The generator of the embedded tables
   (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for a registered table, and with

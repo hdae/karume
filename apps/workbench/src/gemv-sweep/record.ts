@@ -1,6 +1,6 @@
 /**
  * The GEMV sweep entry's record: the per-case records of `runGemvSweep` (one call per case, idle
- * time between them) merged into one `karume-gemv-sweep/3` record in the shape one call over the
+ * time between them) merged into one `karume-gemv-sweep/4` record in the shape one call over the
  * planned cases writes. Pure: every fingerprint is a row's or a case's own, so nothing is
  * recomputed.
  */

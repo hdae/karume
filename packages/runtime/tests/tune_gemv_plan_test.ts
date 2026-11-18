@@ -1,9 +1,13 @@
 // The GEMV sweep without a GPU (src/tune/gemv-*.ts): the case table and its pin to the default
 // profile's GEMV rows, the baseline and the candidates of each set and class, the narrowing by row
-// count and candidate, the roles the derivation reads a group for, the launch a program becomes, the
-// host oracle and the band reading, the fingerprints and the record's shape.
+// count and candidate, the roles the derivation reads a group for, the reorder candidates a run
+// carries from its M = 1 group on to M = 4 and 8, the launch a program becomes, the host oracle and
+// the band reading, the fingerprints and the record's shape.
 //
-// Faults injected: a profile row without a case (the pin reports it); a kernel whose WGSL gains a
+// Faults injected: a profile row without a case (the pin reports it); an M = 1 row screened, failed,
+// outside the band or ×1.09 the default's choice (each skips the candidate at M = 4), the same in an
+// unsteady group or with the default untimed (only the check decides), a reference ruled out at
+// M = 1 (still measured); a kernel whose WGSL gains a
 // token, and a case whose n changes (each fingerprint moves); an output off the oracle by more than
 // the band, a band of zero width and a NaN output (each reads outside the band).
 
@@ -15,10 +19,15 @@ import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import {
+  GEMV_MIN_SPEEDUP,
+  GEMV_STEADY_SPREAD,
   type GemvCandidate,
   type GemvGates,
+  type GemvM1Group,
+  type GemvM1Row,
   gemvBaseline,
   gemvCandidates,
+  gemvCarriedFromM1,
   gemvGroupRole,
   gemvKernelsAt,
   gemvMeasurementPlans,
@@ -333,6 +342,156 @@ describe("the candidates", () => {
       }
     }
   });
+
+  it("have a candidate of the same name at M = 1 for every reorder candidate at M = 4 and 8", () => {
+    for (const gates of [GATES, NO_SUBGROUPS]) {
+      for (const gemvCase of GEMV_CASES) {
+        const first = names(gemvCandidates(gemvCase, 1, "full", gates));
+        for (const m of [4, 8]) {
+          for (const candidate of gemvCandidates(gemvCase, m, "full", gates)) {
+            if (candidate.class !== "reorder") continue;
+            assert(first.includes(candidate.name), `${gemvCase.id} M=${m}: ${candidate.name}`);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1)", () => {
+  /** The default's choice at reorder at M = 1 and at M = 4 (PLE's parallel row). */
+  const DEFAULT_REORDER = "parallel-l4";
+  /** The references at M = 4: PLE's baseline there and the default's choice at reorder. */
+  const REFERENCES = { exact: "c32u4r2", reorder: DEFAULT_REORDER } as const;
+  const REFERENCE_TIME = 1000;
+
+  /** A timed M = 1 row that held its check. */
+  const held = (candidate: string, perDispatch: number, fields: Partial<GemvM1Row> = {}) => ({
+    candidate,
+    perDispatch,
+    withinBand: true,
+    nonFiniteOutputs: 0,
+    ...fields,
+  });
+
+  /**
+   * An M = 1 group: the default's choice at reorder timed at {@link REFERENCE_TIME}, then `rows`; a
+   * baseline spread of 1.01 unless `"none"` leaves it out.
+   */
+  const groupOf = (rows: readonly GemvM1Row[], spread: number | "none" = 1.01): GemvM1Group => ({
+    ...(spread === "none" ? {} : { baselineSpread: spread }),
+    profile: { reorder: DEFAULT_REORDER },
+    rows: [held(DEFAULT_REORDER, REFERENCE_TIME), ...rows],
+  });
+
+  const carried = (
+    group: GemvM1Group | undefined,
+    name = "staged-l8",
+    m = 4,
+    candidateClass: GemvCandidate["class"] = "reorder",
+  ): boolean => gemvCarriedFromM1(m, { name, class: candidateClass }, REFERENCES, group);
+
+  /** The time at M = 1 that makes a candidate `gain` times faster than the default's choice. */
+  const at = (gain: number): number => REFERENCE_TIME / gain;
+
+  it("carries a candidate that held its check and is ×1.10 or more faster than the default's choice in a steady M = 1 group, at M = 4 and 8", () => {
+    assertEquals(GEMV_MIN_SPEEDUP, 1.1);
+    for (const m of [4, 8]) {
+      assertEquals(carried(groupOf([held("staged-l8", at(1.3))]), "staged-l8", m), true);
+    }
+    // At the threshold itself it is adoptable
+    assertEquals(carried(groupOf([held("staged-l8", REFERENCE_TIME / GEMV_MIN_SPEEDUP)])), true);
+  });
+
+  it("skips a candidate the quick look screened at M = 1 (condition 1)", () => {
+    const screened: GemvM1Row = { candidate: "staged-l8", screened: true };
+    assertEquals(carried(groupOf([screened])), false);
+  });
+
+  it("skips a candidate that failed at M = 1, or has no time there (condition 1)", () => {
+    assertEquals(carried(groupOf([{ candidate: "staged-l8", error: "Error: lost" }])), false);
+    // A timing whose every round was negative: a failure row without a time
+    assertEquals(
+      carried(groupOf([{ candidate: "staged-l8", withinBand: true, error: "negative" }])),
+      false,
+    );
+  });
+
+  it("skips a candidate outside the band, with a non-finite output, or without a check at M = 1 (condition 2)", () => {
+    for (const row of [
+      held("staged-l8", at(1.3), { withinBand: false }),
+      held("staged-l8", at(1.3), { withinBand: false, nonFiniteOutputs: 3 }),
+      held("staged-l8", at(1.3), { nonFiniteOutputs: 1 }),
+      { candidate: "staged-l8", perDispatch: at(1.3) },
+    ]) {
+      assertEquals(carried(groupOf([row])), false, JSON.stringify(row));
+    }
+  });
+
+  it("skips a candidate less than ×1.10 faster than the default's choice in a steady M = 1 group (condition 3; fault: ×1.09)", () => {
+    assertEquals(carried(groupOf([held("staged-l8", at(1.09))])), false);
+    assertEquals(carried(groupOf([held("staged-l8", at(0.5))])), false);
+    // Steady up to the bound itself
+    assertEquals(carried(groupOf([held("staged-l8", at(1.09))], GEMV_STEADY_SPREAD)), false);
+  });
+
+  it("lets an unsteady M = 1 group rule out nothing by its times: only conditions 1 and 2 decide (fault: a spread of ×1.26, and none)", () => {
+    for (const spread of [GEMV_STEADY_SPREAD + 0.01, "none"] as const) {
+      assertEquals(carried(groupOf([held("staged-l8", at(0.5))], spread)), true, `${spread}`);
+      assertEquals(
+        carried(groupOf([{ candidate: "staged-l8", screened: true }], spread)),
+        false,
+        `${spread}`,
+      );
+      assertEquals(
+        carried(groupOf([held("staged-l8", at(1.3), { withinBand: false })], spread)),
+        false,
+        `${spread}`,
+      );
+    }
+  });
+
+  it("carries every candidate that held its check when the gain is unknown: the default's choice has no time at M = 1", () => {
+    const failedReference: GemvM1Group = {
+      baselineSpread: 1.01,
+      profile: { reorder: DEFAULT_REORDER },
+      rows: [{ candidate: DEFAULT_REORDER, error: "Error: lost" }, held("staged-l8", at(0.5))],
+    };
+    assertEquals(carried(failedReference), true);
+    const noReferenceRow: GemvM1Group = { ...failedReference, rows: [held("staged-l8", at(0.5))] };
+    assertEquals(carried(noReferenceRow), true);
+    // Conditions 1 and 2 still hold sway
+    assertEquals(
+      carried({ ...failedReference, rows: [{ candidate: "staged-l8", screened: true }] }),
+      false,
+    );
+  });
+
+  it("always measures the references at the row count: the baseline and the default's choice at reorder (fault: their M = 1 rows rule them out)", () => {
+    assertEquals(REFERENCES, {
+      exact: gemvBaseline(PLE, 4).name,
+      reorder: gemvProfileChoice(PLE, 4, "reorder").name,
+    });
+    assertEquals(gemvProfileChoice(PLE, 1, "reorder").name, DEFAULT_REORDER);
+    // The default's choice is its own reference at M = 1: a gain of 1
+    assertEquals(carried(groupOf([]), DEFAULT_REORDER), true);
+    assertEquals(
+      carried(groupOf([{ candidate: REFERENCES.exact, screened: true }]), REFERENCES.exact),
+      true,
+    );
+    // Any other candidate at a gain of 1 is skipped
+    assertEquals(carried(groupOf([held("staged-l8", REFERENCE_TIME)])), false);
+  });
+
+  it("skips nothing without the run's M = 1 group, for a candidate the M = 1 group has no row of, for the identical class, or at a row count not read for a regression", () => {
+    const ruledOut = groupOf([{ candidate: "staged-l8", screened: true }]);
+    assertEquals(carried(undefined), true);
+    assertEquals(carried(ruledOut, "parallel-l16"), true);
+    assertEquals(carried(ruledOut, "staged-l8", 4, "identical"), true);
+    for (const m of [1, 16, 64]) assertEquals(carried(ruledOut, "staged-l8", m), true, `M=${m}`);
+    // The control: the same group skips it at M = 4
+    assertEquals(carried(ruledOut), false);
+  });
 });
 
 describe("the launch of a candidate's program", () => {
@@ -579,13 +738,14 @@ describe("the record", () => {
         profile: plan.profile,
         baselineSpread: 1.004,
         screened: 0,
+        skipped: 0,
       },
     ],
     rows,
   });
 
-  it("is a karume-gemv-sweep/3 record whose cases and rows carry the fingerprints of this runtime", () => {
-    assertEquals(report.format, "karume-gemv-sweep/3");
+  it("is a karume-gemv-sweep/4 record whose cases and rows carry the fingerprints of this runtime", () => {
+    assertEquals(report.format, "karume-gemv-sweep/4");
     assertEquals(
       report.cases.map(({ fingerprint }) => fingerprint),
       [gemvCaseFingerprint(PLE)],

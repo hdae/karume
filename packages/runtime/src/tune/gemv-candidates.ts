@@ -15,7 +15,9 @@
  * params or grid. The baseline and what the default profile chooses at each level come from the
  * selection itself (`resolveLinearStrategy`), asked with the knobs a Session at that level resolves
  * (`executionKnobDefaults`). The packed-activation form is not measured: it reads the codes of the
- * quantizing producer, which the sweep does not run.
+ * quantizing producer, which the sweep does not run. What the derivation reads each group for
+ * ({@link gemvGroupRole}) also decides which reorder candidates a run carries from its M = 1 group on
+ * to M = 4 and 8 ({@link gemvCarriedFromM1}), with the derivation's threshold and steadiness bound.
  *
  * NOTE: device-free. The device enters only through {@link GemvGates}.
  */
@@ -186,7 +188,8 @@ export const gemvRowCountsIn = (gemvCase: GemvCase, set: GemvCandidateSet): read
 
 /**
  * What the derivation (`deriveLinearGemvChoices`) reads the kernels of a class at a row count for —
- * one statement that the derivation, the sweep's quick look and the plan of what is missing share:
+ * one statement that the derivation, the sweep's quick look, the sweep's skipping at M = 4 and 8
+ * ({@link gemvCarriedFromM1}) and the plan of what is missing share:
  * - `winner`: M = 1. The derivation picks, among the candidates that clear the threshold over the
  *   class's reference (the baseline; the default's choice at `reorder`), the one with the largest
  *   gain.
@@ -204,6 +207,84 @@ export const gemvGroupRole = (m: number, candidateClass: GemvCandidateClass): Ge
     : candidateClass === "reorder" && m <= PARALLEL_MAX_ROWS
       ? "no-regression"
       : "unread";
+
+/**
+ * The adoption threshold of the GEMV choices (the maintainer, 2026-11-17): a candidate replaces the
+ * default profile's choice for a shape only when it is at least this much faster than that choice in
+ * every group that is evidence. It is not the tile geometry's `minSpeedup`.
+ */
+export const GEMV_MIN_SPEEDUP = 1.1;
+
+/**
+ * The steadiness bound: a group whose baseline rounds spread (`baselineSpread`, the baseline's
+ * largest round ÷ its smallest) beyond this is unsteady, and no evidence.
+ *
+ * Source: the two `karume-gemv-sweep/2` records of the `quick` set on the RTX 3080 Ti under Node
+ * (2026-11-17T11-51-15 and T12-29-00), grouped by the worse spread of a case over the two records: a
+ * candidate's gain over the table's choice agrees between the records within ±10 % for 95.6 % of the
+ * rows below 1.05, 96.1 % in [1.05, 1.10), 97.2 % in [1.10, 1.25) and 90.3 % from 1.25 up (12 of 66
+ * cases). Below 1.25 the spread does not predict a less repeatable gain: the device slows as a case
+ * goes on (the last round is the slowest in 39 % of the rows), every kernel of a round sees it alike,
+ * and the minimum reads the early rounds.
+ */
+export const GEMV_STEADY_SPREAD = 1.25;
+
+/** A row of a case's M = 1 group as {@link gemvCarriedFromM1} reads it (a record's row has these fields). */
+export type GemvM1Row = {
+  readonly candidate: string;
+  readonly perDispatch?: number;
+  readonly withinBand?: boolean;
+  readonly nonFiniteOutputs?: number;
+  readonly screened?: true;
+  readonly error?: string;
+};
+
+/**
+ * A case's M = 1 group as the same run measured it: its summary's baseline spread and default
+ * choice at `reorder`, and its rows (a record's summary and rows have these fields).
+ */
+export type GemvM1Group = {
+  readonly baselineSpread?: number;
+  readonly profile: { readonly reorder: string };
+  readonly rows: readonly GemvM1Row[];
+};
+
+/**
+ * Whether the sweep measures a candidate of a case at `m` rows, given the case's M = 1 group of the
+ * same run (`undefined` when the run has no M = 1 group to read: narrowed by row count, stopped
+ * before it, or its baseline was not timed). A row count of the `no-regression` role is read only for a candidate that M = 1 would adopt
+ * (`deriveLinearGemvChoices` asks there only that such a candidate is not slower than the default's
+ * choice), so a reorder candidate whose own M = 1 row already leaves it unadoptable is skipped
+ * there. Its M = 1 row leaves it unadoptable when it
+ * 1. has no time (screened by the quick look, or failed), or
+ * 2. did not hold its check (outside the band, or a non-finite output), or
+ * 3. is less than {@link GEMV_MIN_SPEEDUP} faster than the default's choice at `reorder` in a steady
+ *    group (baseline spread at most {@link GEMV_STEADY_SPREAD}). An unsteady group is no evidence,
+ *    so its times rule nothing out; without the default's time at M = 1 the gain is unknown.
+ *
+ * Measured whatever M = 1 says: the references at `m` (`references` — the baseline and the default's
+ * choice at `reorder`, which every gain is read against), the identical class, every role but
+ * `no-regression`, and a candidate the M = 1 group has no row of.
+ */
+export const gemvCarriedFromM1 = (
+  m: number,
+  candidate: Pick<GemvCandidate, "name" | "class">,
+  references: { readonly exact: string; readonly reorder: string },
+  first: GemvM1Group | undefined,
+): boolean => {
+  if (first === undefined || gemvGroupRole(m, candidate.class) !== "no-regression") return true;
+  if (candidate.name === references.exact || candidate.name === references.reorder) return true;
+  const row = first.rows.find((one) => one.candidate === candidate.name);
+  if (row === undefined) return true;
+  if (row.perDispatch === undefined || row.screened === true || row.error !== undefined) {
+    return false;
+  }
+  if (row.withinBand !== true || (row.nonFiniteOutputs ?? 0) !== 0) return false;
+  const steady = first.baselineSpread !== undefined && first.baselineSpread <= GEMV_STEADY_SPREAD;
+  if (!steady) return true;
+  const reference = first.rows.find((one) => one.candidate === first.profile.reorder)?.perDispatch;
+  return reference === undefined || reference / row.perDispatch >= GEMV_MIN_SPEEDUP;
+};
 
 /** The value of `grid` next below and next above `value`, and `value` itself. */
 const around = (grid: readonly number[], value: number): number[] => {

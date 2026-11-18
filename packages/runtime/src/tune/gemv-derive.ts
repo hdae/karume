@@ -1,6 +1,6 @@
 /**
  * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from GEMV sweep records
- * (`karume-gemv-sweep/3` — gemv-report.ts): {@link deriveLinearGemvChoices} of
+ * (`karume-gemv-sweep/4` — gemv-report.ts): {@link deriveLinearGemvChoices} of
  * `@karume/runtime/tune`; and says what the records lack for that derivation to be complete under
  * the current runtime ({@link planGemvMeasurements}). Pure functions of the records and the current
  * runtime (its case table, its kernels and the default profile's choices); they measure nothing.
@@ -19,7 +19,8 @@
  *   the sweep measures it — are current and timed. It is steady when its baseline spread is at most
  *   {@link GEMV_STEADY_SPREAD}.
  * - A group is evidence for a candidate when it is current and steady and the candidate's row is
- *   current and timed (not screened out by the quick look) with its check held. A row that failed or
+ *   current and timed (not screened out by the quick look, not skipped because the same record's
+ *   M = 1 group already left it unadoptable) with its check held. A row that failed or
  *   whose check failed in a current group, steady or not, rules the candidate out: correctness does
  *   not depend on heat.
  *
@@ -73,6 +74,8 @@ import type {
 } from "../kernels/linear-gemv.ts";
 import { formatRatio } from "./derive.ts";
 import {
+  GEMV_MIN_SPEEDUP,
+  GEMV_STEADY_SPREAD,
   type GemvCandidateClass,
   type GemvCandidateSet,
   gemvBaseline,
@@ -87,27 +90,6 @@ import {
 import { GEMV_CASES, type GemvCase, gemvCaseOf, type GemvSweepStorage } from "./gemv-cases.ts";
 import { gemvCaseFingerprint, gemvCaseTableId, gemvKernelId } from "./gemv-fingerprint.ts";
 import { GEMV_SWEEP_FORMAT, type GemvSweepChoice } from "./gemv-report.ts";
-
-/**
- * The adoption threshold of the GEMV choices (the maintainer, 2026-11-17): a candidate replaces the
- * default profile's choice for a shape only when it is at least this much faster than that choice in
- * every group that is evidence. It is not the tile geometry's `minSpeedup`.
- */
-export const GEMV_MIN_SPEEDUP = 1.1;
-
-/**
- * The steadiness bound: a group whose baseline rounds spread (`baselineSpread`, the baseline's
- * largest round ÷ its smallest) beyond this is unsteady, and no evidence.
- *
- * Source: the two `karume-gemv-sweep/2` records of the `quick` set on the RTX 3080 Ti under Node
- * (2026-11-17T11-51-15 and T12-29-00), grouped by the worse spread of a case over the two records: a
- * candidate's gain over the table's choice agrees between the records within ±10 % for 95.6 % of the
- * rows below 1.05, 96.1 % in [1.05, 1.10), 97.2 % in [1.10, 1.25) and 90.3 % from 1.25 up (12 of 66
- * cases). Below 1.25 the spread does not predict a less repeatable gain: the device slows as a case
- * goes on (the last round is the slowest in 39 % of the rows), every kernel of a round sees it alike,
- * and the minimum reads the early rounds.
- */
-export const GEMV_STEADY_SPREAD = 1.25;
 
 /** The fewest different records whose groups must be evidence: one record is not evidence. */
 const MIN_RECORDS = 2;
@@ -151,6 +133,7 @@ type RowObservation = {
   readonly identicalToBaseline?: boolean;
   readonly withinBand?: boolean;
   readonly screened?: true;
+  readonly skipped?: true;
   readonly error?: string;
 };
 
@@ -292,9 +275,13 @@ const parseRow = (value: unknown, where: string): RowObservation => {
   const identicalToBaseline = optionalAt(row, "identicalToBaseline", isBoolean, where);
   const withinBand = optionalAt(row, "withinBand", isBoolean, where);
   const screened = optionalAt(row, "screened", isTrue, where);
+  const skipped = optionalAt(row, "skipped", isTrue, where);
   const error = optionalAt(row, "error", isString, where);
   if (screened === true && (isBaseline || perDispatch !== undefined)) {
     throw new Error(`${where}: a screened row is no baseline and has no time`);
+  }
+  if (skipped === true && (isBaseline || perDispatch !== undefined || screened === true)) {
+    throw new Error(`${where}: a skipped row is no baseline, has no time and is not screened`);
   }
   return {
     caseId: stringAt(row, "caseId", where),
@@ -308,6 +295,7 @@ const parseRow = (value: unknown, where: string): RowObservation => {
     ...(identicalToBaseline === undefined ? {} : { identicalToBaseline }),
     ...(withinBand === undefined ? {} : { withinBand }),
     ...(screened === undefined ? {} : { screened }),
+    ...(skipped === undefined ? {} : { skipped }),
     ...(error === undefined ? {} : { error }),
   };
 };
@@ -595,6 +583,12 @@ const readGroup = (
   }
   if (row.screened === true) {
     return { kind: "none", reason: `screened out by the quick look in ${label} at M=${m}` };
+  }
+  if (row.skipped === true) {
+    return {
+      kind: "none",
+      reason: `skipped in ${label} at M=${m} (its M=1 group there left it unadoptable)`,
+    };
   }
   // The group is current, so the reference has a time
   const time = state.group.rows.get(reference)?.perDispatch;
@@ -1430,9 +1424,11 @@ export type PlanGemvMeasurementsOptions = {
  * What the records lack for {@link deriveLinearGemvChoices} to be complete under the current
  * runtime: per case and row count of the `full` set, the candidates the derivation reads there (the
  * `winner` and `no-regression` roles of gemv-candidates.ts's `gemvGroupRole`, on the records' gates)
- * that fewer than two records hold a current, steady group with a current row of — timed, or screened
+ * that fewer than two records hold a current, steady group with a current row of — timed, screened
  * out by the quick look (a screened row is a current look that the candidate did not come near
- * enough to matter; measuring it again would screen it again). A row that failed is missing. A case
+ * enough to matter; measuring it again would screen it again), or skipped because the record's M = 1
+ * group of the case already left it unadoptable (gemv-candidates.ts's `gemvCarriedFromM1`; a run
+ * that measures M = 1 again would skip it again). A row that failed is missing. A case
  * and row count no record has a current, steady group of misses every candidate. Measures nothing.
  * At least one record; with none there is nothing to plan from — measure everything.
  */

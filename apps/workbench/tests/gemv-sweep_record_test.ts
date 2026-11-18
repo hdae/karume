@@ -141,7 +141,7 @@ describe("the summary", () => {
       line(CASE_A),
       line(CASE_B),
     ]);
-    expect(result.data?.format).toBe("karume-gemv-sweep/3");
+    expect(result.data?.format).toBe("karume-gemv-sweep/4");
   });
 
   it("shows no spread for a row count without one (its baseline failed)", () => {
@@ -191,6 +191,35 @@ describe("the summary", () => {
     expect(result.verdict).toBe("pass");
     const off = gemvSweepResult({ ...PLAN, caseIds: [CASE_A], quickLookMargin: 0 }, outcome);
     expect(off.summary[0]).toContain("3 rows · quick look off ·");
+  });
+
+  it("counts the kernels skipped as not adoptable from M = 1, per case and in the totals; a skipped row is never wrong", () => {
+    const {
+      perDispatch: _time,
+      reps: _reps,
+      rounds: _rounds,
+      speedupVsBaseline: _speed,
+      maxAbsError: _error,
+      bandUse: _use,
+      withinBand: _within,
+      nonFiniteOutputs: _nonFinite,
+      ...reorder
+    } = gemvRow(CASE_A, "reorder", { m: 4 });
+    const rows = [
+      gemvRow(CASE_A, "baseline", { m: 4 }),
+      { ...reorder, candidate: "staged-l32", skipped: true as const },
+      gemvRow(CASE_A, "reorder", { m: 4 }),
+    ];
+    const report = gemvPerCase(CASE_A, { rows, summary: { m: 4 } });
+    const result = gemvSweepResult(
+      { ...PLAN, caseIds: [CASE_A] },
+      { reports: [report], stop: COMPLETED },
+    );
+    expect(result.summary[0]).toContain(
+      "0 screened by the quick look (margin ×1.25) · 1 skipped (not adoptable from M = 1) · 0 with an error",
+    );
+    expect(result.summary[1]).toMatch(/· 1 skipped \(not adoptable from M = 1\)$/);
+    expect(result.verdict).toBe("pass");
   });
 
   it("says why the run stopped, and rethrows the error of a run that measured nothing", () => {

@@ -3,8 +3,9 @@
  * line per case and row count — the baseline's time and the spread of its rounds (how steady the
  * device was), the fastest identical candidate and the fastest reorder candidate with their speed
  * against the baseline, what the default profile chooses at each level with its share of the
- * fastest of its class's speed, and how many kernels the quick look screened out. Pure, over the
- * per-case records the record body is merged from.
+ * fastest of its class's speed, how many kernels the quick look screened out, and how many were
+ * skipped because the run's M = 1 group of the case left them unadoptable. Pure, over the per-case
+ * records the record body is merged from.
  */
 
 import type {
@@ -101,6 +102,9 @@ const choiceText = (
     : `${level} ${name} ${ratioText(share)} of the fastest ${row.class}`;
 };
 
+/** Why a kernel was skipped, as the lines say it. */
+const SKIPPED_REASON = "not adoptable from M = 1";
+
 /** The line of one case at one row count. */
 const caseLine = (
   summary: GemvSweepCaseSummary,
@@ -123,6 +127,7 @@ const caseLine = (
     choiceText("exact", summary.profile.exact, rows, baseline),
     choiceText("reorder", summary.profile.reorder, rows, baseline),
     summary.screened === 0 ? undefined : `${summary.screened} screened`,
+    summary.skipped === 0 ? undefined : `${summary.skipped} skipped (${SKIPPED_REASON})`,
   ])}`;
 };
 
@@ -138,8 +143,9 @@ export const gemvCaseLines = (report: GemvSweepReport): string[] =>
 
 /**
  * Cases planned and finished, the cases cut short (Cancel or a device loss stopped them midway),
- * rows, the rows the quick look screened out (with its margin), failed rows, identical-class rows
- * whose words differ, reorder rows outside the band, and why the run stopped.
+ * rows, the rows the quick look screened out (with its margin), the rows skipped as not adoptable
+ * from M = 1 (when there are any), failed rows, identical-class rows whose words differ, reorder rows
+ * outside the band, and why the run stopped.
  */
 const totalsLine = (
   plan: GemvSweepPlan,
@@ -147,6 +153,7 @@ const totalsLine = (
   rows: readonly GemvSweepRow[],
 ): string => {
   const short = outcome.reports.filter(cutShort).length;
+  const skipped = rows.filter((row) => row.skipped === true).length;
   return joined([
     `${outcome.reports.length - short} of ${plan.caseIds.length} planned cases finished`,
     short === 0 ? undefined : `${short} cut short`,
@@ -154,6 +161,7 @@ const totalsLine = (
     plan.quickLookMargin === 0
       ? "quick look off"
       : `${rows.filter((row) => row.screened === true).length} screened by the quick look (margin ×${plan.quickLookMargin})`,
+    skipped === 0 ? undefined : `${skipped} skipped (${SKIPPED_REASON})`,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.class === "identical" && row.identicalToBaseline === false).length} not identical to the baseline`,
     `${rows.filter((row) => row.class === "reorder" && row.withinBand === false).length} outside the band`,
@@ -178,7 +186,7 @@ export const gemvSweepVerdict = (
 export type GemvSweepResult = EntryResult & { readonly data: GemvSweepReport | undefined };
 
 /**
- * The result of a run's outcome: the per-case records merged into one `karume-gemv-sweep/3` record
+ * The result of a run's outcome: the per-case records merged into one `karume-gemv-sweep/4` record
  * (the cases that finished before a cancel, a device loss or an error included), the totals line and
  * one line per case and row count, with the verdict of {@link gemvSweepVerdict}. A run that measured
  * nothing because a sweep threw rethrows that error; a merge that fails throws.

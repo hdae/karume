@@ -2,12 +2,15 @@
  * The GEMV sweep (`runGemvSweep` of `@karume/runtime/tune`): measures the GEMV choices of `linear` —
  * which sequential variant, how many rows per row block, which lane count of the parallel GEMV,
  * staged or not, subgroup or not — on a dedicated device, case by case, and returns the record
- * (`karume-gemv-sweep/3`). It derives no table and changes no choice.
+ * (`karume-gemv-sweep/4`). It derives no table and changes no choice.
  *
  * Per case and row count it measures the baseline (what a Session at the level `exact` runs with
  * the default profile), the default profile's choice at `reorder` and the candidates of the set
  * (gemv-candidates.ts — all, or those the caller names) together, through harness.ts's primitives
- * (its measurement protocol):
+ * (its measurement protocol). A case's row counts are measured in ascending order, so at M = 4 and 8
+ * the run has the case's M = 1 group (when it measured it): a reorder candidate whose row there
+ * leaves it unadoptable is skipped (gemv-candidates.ts's `gemvCarriedFromM1`) — its program and
+ * fingerprint are built, it takes none of the steps below, and its row says `skipped`.
  * 1. the pipelines of every kernel are made first, so no compile leaves the device idle later;
  * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady;
  * 3. the quick look (harness.ts's protocol rule 4 — skipped at a margin of 0): every kernel's
@@ -49,8 +52,10 @@ import {
   type GemvCandidate,
   type GemvCandidateSet,
   type GemvGates,
+  type GemvM1Group,
   type GemvMeasurementPlan,
   GEMV_CANDIDATE_SETS,
+  gemvCarriedFromM1,
   gemvGroupRole,
   gemvKernelsAt,
   gemvMeasurementPlans,
@@ -311,6 +316,14 @@ const screenedRow = (
   screened: true,
 });
 
+/** The row of a kernel the M = 1 group of the same run left out: its launch only. */
+const skippedRow = (head: GemvSweepRow, launch: Launch): GemvSweepRow => ({
+  ...head,
+  keys: [launch.key],
+  workgroups: launch.workgroups,
+  skipped: true,
+});
+
 /** The timing fields of a row. */
 const timedRow = (
   head: GemvSweepRow,
@@ -383,6 +396,8 @@ type KernelState =
       readonly quick?: QuickLook;
     }
   | { readonly kind: "screened"; readonly launch: Launch; readonly quick?: QuickLook }
+  /** Left out by the M = 1 group of the same run: its launch for the row, nothing measured. */
+  | { readonly kind: "skipped"; readonly launch: Launch }
   | {
       readonly kind: "calibrated";
       readonly launch: Launch;
@@ -438,7 +453,8 @@ const spreadOf = (samples: readonly PassSample[]): Pick<GemvSweepCaseSummary, "b
  * module doc's steps 1–4), their rows coming at the end of the plan, the baseline's first. A failure
  * of the buffers makes every row a failure row; a kernel that fails to be prepared, warmed on,
  * calibrated, checked or timed makes its own failure row and leaves the rounds; a lost device makes
- * every kernel without all its rounds a failure row, in this plan and the rest; an abort makes no
+ * every kernel without all its rounds a failure row, in this plan and the rest (a skipped kernel
+ * keeps its skipped row: it was never to be measured); an abort makes no
  * row for the plan it stops in or the rest. The user's callbacks run outside the measurement's
  * `try`, so an exception they throw is the caller's, never a failure row.
  */
@@ -520,6 +536,7 @@ export const sweepGemvCase = async (
    */
   const measurePlan = async (
     plan: GemvMeasurementPlan,
+    m1Group: GemvM1Group | undefined,
   ): Promise<{ rows: GemvSweepRow[]; summary: GemvSweepCaseSummary } | undefined> => {
     const started = performance.now();
     const { m } = plan;
@@ -531,13 +548,28 @@ export const sweepGemvCase = async (
       state: { kind: "planned" },
     }));
     const [baseline] = kernels;
+    // The kernels M = 1 leaves out: their row keeps the kernel and its launch, which take no GPU work
+    for (const kernel of kernels.slice(1)) {
+      if (gemvCarriedFromM1(m, kernel.candidate, plan.profile, m1Group)) continue;
+      try {
+        const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
+        kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
+        kernel.state = { kind: "skipped", launch: gemvLaunch(program, kernel.output, limit) };
+      } catch (cause) {
+        kernel.state = { kind: "failed", cause };
+      }
+    }
+    const skipped = kernels.filter((kernel) => kernel.state.kind === "skipped").length;
     const prepared: ReadyLaunch[] = [];
     try {
       // 1. Every pipeline first (compiling idles the device)
-      hooks.onProgress?.(`${label}: preparing ${kernels.length} kernels`);
+      hooks.onProgress?.(
+        `${label}: preparing ${kernels.length - skipped} kernels${skipped === 0 ? "" : ` (${skipped} skipped: not adoptable from M = 1)`}`,
+      );
       for (const kernel of kernels) {
         if (abortRequested()) return undefined;
         if (gpu.lost !== undefined) break;
+        if (kernel.state.kind !== "planned") continue;
         try {
           const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
           kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
@@ -652,6 +684,8 @@ export const sweepGemvCase = async (
       if (state.kind === "screened") {
         return { row: screenedRow(kernel.head, state.launch, state.quick), checks: {} };
       }
+      if (state.kind === "skipped")
+        return { row: skippedRow(kernel.head, state.launch), checks: {} };
       if (state.kind !== "calibrated" || state.samples.length < settings.rounds) {
         // Only a lost device stops a kernel short of its rounds without a failure of its own
         const lost = new Error(`device lost: ${gpu.lost?.message ?? "no loss reported"}`);
@@ -673,8 +707,13 @@ export const sweepGemvCase = async (
     const candidateRows = kernels.slice(1).map((kernel) => {
       const { row, checks } = measuredOf(kernel);
       // Without the baseline's time there is no ratio, and no words or band are compared with it;
-      // a screened row has neither
-      if (row.error !== undefined || row.screened === true || baselineRow.error !== undefined) {
+      // a screened or skipped row has neither
+      if (
+        row.error !== undefined ||
+        row.screened === true ||
+        row.skipped === true ||
+        baselineRow.error !== undefined
+      ) {
         return row;
       }
       return { ...row, ...speedFields(baselineRow, row), ...checks };
@@ -690,6 +729,7 @@ export const sweepGemvCase = async (
           ? spreadOf(baseline.state.samples)
           : {}),
         screened: candidateRows.filter((row) => row.screened === true).length,
+        skipped: candidateRows.filter((row) => row.skipped === true).length,
       },
     };
   };
@@ -708,14 +748,22 @@ export const sweepGemvCase = async (
         oracle = cause instanceof Error ? cause : new Error(String(cause));
       }
     }
+    // The case's M = 1 group of this run, once measured (the plans go up in row count). A group
+    // whose baseline has no time reads nothing (the candidates' checks need the baseline, and a lost
+    // device leaves every row a failure), so it leaves no candidate out of the later row counts.
+    let m1Group: GemvM1Group | undefined;
     for (const plan of plans) {
-      const measured = abortRequested() ? undefined : await measurePlan(plan);
+      const measured = abortRequested() ? undefined : await measurePlan(plan, m1Group);
       if (measured === undefined) {
         aborted = true;
         break;
       }
       for (const row of measured.rows) emit(row);
       summaries.push(measured.summary);
+      const baselineTimed = measured.rows.some(
+        (row) => row.isBaseline && row.perDispatch !== undefined,
+      );
+      if (plan.m === 1 && baselineTimed) m1Group = { ...measured.summary, rows: measured.rows };
     }
   } finally {
     for (const resource of resources.values()) resource.destroy();
@@ -907,7 +955,7 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
 /**
  * Acquires a dedicated device (with the subgroup features where the device runs them, and
  * `timestamp-query` where the adapter lists it), sweeps the chosen cases and returns the record
- * (`karume-gemv-sweep/3`). The device is destroyed when done (also on abort or failure). Per-row
+ * (`karume-gemv-sweep/4`). The device is destroyed when done (also on abort or failure). Per-row
  * failures stay rows of the record and the sweep goes on; option errors throw before the GPU is
  * touched. A lost device ends the sweep after the case it was lost in.
  */

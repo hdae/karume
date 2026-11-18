@@ -7,7 +7,7 @@
 // groups of two records or more, the one with the largest smallest gain among several; ② an unsteady
 // group, a failed check in one record, the packed rows, a shared sequential key whose cases disagree,
 // a row count of the parallel range a record did not measure and a regression at one keep the
-// default; ③ groups as the unit of evidence — a stale row or a screened row is no evidence while the
+// default; ③ groups as the unit of evidence — a stale, screened or skipped row is no evidence while the
 // record's other groups are, records that each hold half of the cases derive what a complete pair
 // derives, and groups that are not current are reported by cause instead of refused; ④ the refusals —
 // none and the same record twice, an older format, another adapter, wall-clock or quantized timing
@@ -21,10 +21,12 @@
 // of one sequential key adopting different variants; a parallel candidate ×0.95 at M = 4; record 2
 // without M = 8, and records of M = 1 alone, for a parallel row; a row's kernel fingerprint replaced
 // (no evidence there, the record's other cases adopt; the plan lists that candidate alone); the
-// winner screened out in one record; a case's fingerprint replaced, the reorder choice of a summary
-// renamed and the baseline's kernel fingerprint replaced (each a stale group of its cause); the
-// formats /2 and /1, the unit, the quantized flag and the adapter changed; a failed row and an
-// unsteady group (missing in the plan), a screened row (not missing).
+// winner screened out in one record; the parallel winner skipped at M = 4 in one record; a skipped
+// row that is a baseline, has a time or is screened (refused); a case's fingerprint replaced, the
+// reorder choice of a summary renamed and the baseline's kernel fingerprint replaced (each a stale
+// group of its cause); the formats /3, /2 and /1, the unit, the quantized flag and the adapter
+// changed; a failed row and an unsteady group (missing in the plan), a screened or skipped row (not
+// missing).
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -484,6 +486,64 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
     assertEquals(both.linearGemv, undefined);
   });
 
+  it("never counts a skipped row as evidence and names why (fault: the winner of the parallel row skipped at M = 4 in record 2)", () => {
+    const adopted: GemvCaseSpec = {
+      caseId: PLE,
+      rows: PARALLEL_ROWS,
+      times: at1({ "staged-l8": faster(1.3) }),
+    };
+    const skipped = derive(
+      [adopted],
+      [{ ...adopted, fields: { 4: { "staged-l8": { skipped: true } } } }],
+    );
+    const decision = decisionOf(skipped, "parallelShapes", PLE);
+    assertEquals([decision.outcome, decision.candidate], ["kept", "staged-l8"]);
+    assertStringIncludes(
+      decision.reason ?? "",
+      "skipped in [2] at M=4 (its M=1 group there left it unadoptable)",
+    );
+    assertStringIncludes(decision.reason ?? "", "evidence at M=4 from fewer than 2 records");
+    // The control: measured at M = 4 in both records, it is adopted
+    assertEquals(decisionOf(derive([adopted]), "parallelShapes", PLE).outcome, "adopted");
+  });
+
+  it("refuses a skipped row that is a baseline, has a time or is also screened", () => {
+    const specs: GemvCaseSpec[] = [{ caseId: PLE, rows: PARALLEL_ROWS }];
+    const mark =
+      (pick: (row: GemvSweepReport["rows"][number]) => boolean, timed: boolean) =>
+      (record: GemvSweepReport) => ({
+        ...record,
+        rows: record.rows.map((row) => {
+          if (!pick(row)) return row;
+          const { perDispatch, ...rest } = row;
+          return { ...rest, ...(timed ? { perDispatch } : {}), skipped: true };
+        }),
+      });
+    const message = "a skipped row is no baseline, has no time and is not screened";
+    for (const change of [
+      mark((row) => row.m === 4 && row.isBaseline, false),
+      mark((row) => row.m === 4 && row.candidate === "staged-l8", true),
+    ]) {
+      assertThrows(
+        () =>
+          deriveLinearGemvChoices([input("a.json", specs), input("bb.json", specs, change)], {
+            table: TABLE,
+          }),
+        Error,
+        message,
+      );
+    }
+    const both: GemvCaseSpec[] = [
+      { ...specs[0], fields: { 4: { "staged-l8": { screened: true, skipped: true } } } },
+    ];
+    assertThrows(
+      () =>
+        deriveLinearGemvChoices([input("a.json", specs), input("bb.json", both)], { table: TABLE }),
+      Error,
+      message,
+    );
+  });
+
   it("adopts from a third record when one of three has the candidate's group unsteady", () => {
     const derivation = deriveLinearGemvChoices(
       [
@@ -574,11 +634,11 @@ describe("deriveLinearGemvChoices: the refusals", () => {
     refused([], "No GEMV sweep record is given");
   });
 
-  it("refuses the older formats, naming the format (faults: karume-gemv-sweep/2 and /1)", () => {
-    for (const format of ["karume-gemv-sweep/2", "karume-gemv-sweep/1"]) {
+  it("refuses the older formats, naming the format (faults: karume-gemv-sweep/3, /2 and /1)", () => {
+    for (const format of ["karume-gemv-sweep/3", "karume-gemv-sweep/2", "karume-gemv-sweep/1"]) {
       refused(
         [input("a.json", specs), input("bb.json", specs, (record) => ({ ...record, format }))],
-        `bb.json: format "${format}" is not karume-gemv-sweep/3 — a record of an older format is not read`,
+        `bb.json: format "${format}" is not karume-gemv-sweep/4 — a record of an older format is not read`,
       );
     }
   });
@@ -662,6 +722,22 @@ describe("planGemvMeasurements: what the records lack", () => {
     assertEquals(missingAt(planning, PLE, 1), undefined);
     assertEquals(missingAt(planning, PLE, 4), ["staged-l8"]);
     assertEquals(missingAt(planning, PLE, 8), undefined);
+  });
+
+  it("counts a skipped row as looked at: the plan does not ask for it again (fault: staged-l8 skipped at M = 4 in record 2)", () => {
+    const skipped = plan([
+      input("a.json", complete),
+      input("bb.json", [{ ...complete[0], fields: { 4: { "staged-l8": { skipped: true } } } }]),
+    ]);
+    assertEquals(missingAt(skipped, PLE, 4), undefined);
+    // The control: without its row in record 2, it is missing there
+    const absent = plan([
+      input("a.json", complete),
+      input("bb.json", [
+        { ...complete[0], fields: { 4: { "staged-l8": { error: "Error: lost" } } } },
+      ]),
+    ]);
+    assertEquals(missingAt(absent, PLE, 4), ["staged-l8"]);
   });
 
   it("counts a screened row as looked at, a failed row and an unsteady group as missing (faults: an error, a spread of ×1.3)", () => {

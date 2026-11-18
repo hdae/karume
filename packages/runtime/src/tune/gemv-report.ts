@@ -1,5 +1,5 @@
 /**
- * The GEMV sweep's record (`karume-gemv-sweep/3`) and the pure pieces it is assembled from. Its own
+ * The GEMV sweep's record (`karume-gemv-sweep/4`) and the pure pieces it is assembled from. Its own
  * format: its rows are kernels of the GEMV family at a case and a row count, not geometries of one
  * kernel, so they share no row shape with the geometry sweep's record.
  *
@@ -10,7 +10,9 @@
  * when the evidence became per row: a row carries the fingerprint of its own kernel and a case its
  * own (the record-wide `caseTable` and `kernels` are gone), and the quick look adds a row's quick
  * time and its `screened` mark, a summary's count of screened kernels and the settings' margin,
- * candidates and row counts.
+ * candidates and row counts. `/4` replaced `/3` when a row gained a state: a reorder candidate that
+ * the same run's M = 1 group of the case leaves unadoptable is not measured at M = 4 and 8, and its
+ * row there carries the `skipped` mark, its summary a count of skipped kernels.
  */
 
 import type { LinearGemvParallelLanes } from "../kernels/linear-gemv.ts";
@@ -19,7 +21,7 @@ import type { GemvCandidateClass, GemvCandidateSet } from "./gemv-candidates.ts"
 import type { GemvCase, GemvSweepStorage } from "./gemv-cases.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 
-export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/3";
+export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/4";
 
 /**
  * A candidate's choice as the record writes it (a `LinearGemvChoice` without its unset fields): the
@@ -64,6 +66,14 @@ export type GemvSweepRow = {
    * bar): the row has no rounds and no check, and no derivation reads it as evidence.
    */
   readonly screened?: true;
+  /**
+   * The kernel was not measured: a reorder candidate at a row count the derivation reads only for a
+   * regression (M = 4 and 8) whose row in the same run's M = 1 group of the case leaves it
+   * unadoptable (gemv-candidates.ts's `gemvCarriedFromM1`). The row has its kernel, its keys and its
+   * workgroups, and no quick time, no rounds and no check; it is never a baseline, and no derivation
+   * reads it as evidence.
+   */
+  readonly skipped?: true;
   /** Dispatches stacked in one pass. */
   readonly reps?: number;
   /**
@@ -123,6 +133,11 @@ export type GemvSweepCaseSummary = {
   readonly baselineSpread?: number;
   /** How many kernels of the row count the quick look screened out (0 with the quick look off). */
   readonly screened: number;
+  /**
+   * How many kernels of the row count were skipped because the same run's M = 1 group of the case
+   * leaves them unadoptable (0 at M = 1, and when the run did not measure M = 1).
+   */
+  readonly skipped: number;
 };
 
 /** A planned case as the record lists it. */
@@ -154,7 +169,7 @@ export const GEMV_SWEEP_NOT_MEASURED =
   "The packed-activation form of the parallel GEMV is not measured: it reads the int8 codes of the " +
   "quantizing producer (static_quantize), which the sweep does not run.";
 
-/** The sweep record (`karume-gemv-sweep/3`). */
+/** The sweep record (`karume-gemv-sweep/4`). */
 export type GemvSweepReport = {
   readonly format: typeof GEMV_SWEEP_FORMAT;
   /** When the record was assembled (ISO 8601 — the sweep's end). */

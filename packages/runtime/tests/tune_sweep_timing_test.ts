@@ -12,6 +12,10 @@
 // look's probe (fault: a calibration that probes again would add untimed passes); the quick looks
 // follow the group's shuffled order.
 //
+// The GEMV sweep's skipping at M = 4 and 8: a reorder candidate its M = 1 group leaves unadoptable is
+// not measured there (faults: a candidate ×1.05 the default's choice at M = 1, one screened at M = 1);
+// a run narrowed to M = 4 skips nothing.
+//
 // The fake device's passes take the time the test gives them: a timed pass's timestamp difference
 // (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the wall clock a pass takes to
 // complete (`wallMs` — the probe reads only that), on the fake device's own clock, which the sweep
@@ -42,6 +46,7 @@ import {
   gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
+import { gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
 import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
 import { gemvLaunch, sweepGemvCase } from "../src/tune/gemv-sweep.ts";
 import {
@@ -87,6 +92,8 @@ type FakeTiming = {
   readonly gpuNs: (pass: FakePass) => number;
   /** The time a pass takes to complete on the fake device's clock (ms; absent: none). */
   readonly wallMs?: (pass: FakePass) => number;
+  /** The pipeline keys whose pipeline cannot be made (absent: none). */
+  readonly failingPipelines?: ReadonlySet<string>;
 };
 
 /** A compute pass while it is encoded. */
@@ -189,7 +196,9 @@ const fakeTimingDevice = (
       getCompilationInfo: () => Promise.resolve({ messages: [] }),
     }),
     createComputePipelineAsync: (descriptor: GPUComputePipelineDescriptor) =>
-      Promise.resolve({ label: descriptor.label ?? "", getBindGroupLayout: () => ({}) }),
+      timing.failingPipelines?.has(descriptor.label ?? "") === true
+        ? Promise.reject(new Error(`no pipeline for ${descriptor.label}`))
+        : Promise.resolve({ label: descriptor.label ?? "", getBindGroupLayout: () => ({}) }),
     createBindGroup: () => ({}),
     createCommandEncoder,
     queue: {
@@ -691,6 +700,156 @@ describe("the GEMV sweep's quick look", () => {
       expected.some((key, index) => key !== kernels.map(keyOf)[index]),
       "the shuffle kept the plan's order",
     );
+  });
+});
+
+describe("the GEMV sweep's skipping at M = 4 and 8", () => {
+  /** A band so wide that the fake device's zero outputs hold it: every check passes, times decide. */
+  const WIDE = { atol: 1e30, rtol: 0 };
+  /** The default's choice at reorder (both row counts), and three candidates of the class. */
+  const REORDER = ["parallel-l4", "parallel-l8", "staged-l32", "staged-l2"];
+  const identical = gemvCandidates(PLE_CASE, 4, "full", GATES).find(
+    (candidate) => candidate.class === "identical",
+  );
+  if (identical === undefined) throw new Error(`${PLE_CASE.id} M=4: no identical candidate`);
+  const planAt = (m: number): GemvMeasurementPlan =>
+    namedPlan(PLE_CASE, m, m === 4 ? [identical.name, ...REORDER] : REORDER);
+  const keyOfName = (m: number, name: string): string => {
+    const candidate = planAt(m).candidates.find((one) => one.name === name);
+    if (candidate === undefined) throw new Error(`M=${m}: no candidate ${name}`);
+    return keyAt(PLE_CASE, m, candidate);
+  };
+  // A parallel kernel's key does not hold M, so these are its times at both row counts: at M = 1
+  // parallel-l8 is ×1.25 the default's choice, staged-l32 ×1.05, and staged-l2 is screened (×2.5 the
+  // fastest of its class)
+  const times = new Map([
+    [keyOfName(1, "parallel-l4"), 10_000],
+    [keyOfName(1, "parallel-l8"), 8_000],
+    [keyOfName(1, "staged-l32"), 9_500],
+    [keyOfName(1, "staged-l2"), 20_000],
+  ]);
+  const sweep = (
+    plans: readonly GemvMeasurementPlan[],
+    failingPipelines: ReadonlySet<string> = new Set(),
+  ) => {
+    const progress: string[] = [];
+    return withContext({ gpuNs: byKey(times), failingPipelines }, async (context, passes) => ({
+      result: await sweepGemvCase(
+        context,
+        PLE_CASE,
+        plans,
+        { rounds: 2, tolerance: WIDE, quickLookMargin: QUICK_LOOK_MARGIN },
+        { onProgress: (message) => progress.push(message) },
+      ),
+      passes,
+      progress,
+    }));
+  };
+  const rowAt = (rows: readonly GemvSweepRow[], m: number, name: string): GemvSweepRow => {
+    const found = rows.find((row) => row.m === m && row.candidate === name);
+    if (found === undefined) throw new Error(`no row ${name} at M=${m}`);
+    return found;
+  };
+
+  it("measures at M = 4 only the reorder candidates its M = 1 group leaves adoptable: the others get a skipped row with their kernel and launch, and no pass", async () => {
+    const { result, passes, progress } = await sweep([planAt(1), planAt(4)]);
+    assertEquals(
+      ["parallel-l8", "staged-l32"].map((name) => rowAt(result.rows, 1, name).withinBand),
+      [true, true],
+    );
+    assertEquals(rowAt(result.rows, 1, "staged-l2").screened, true);
+    for (const name of ["staged-l32", "staged-l2"]) {
+      const row = rowAt(result.rows, 4, name);
+      const candidate = planAt(4).candidates.find((one) => one.name === name);
+      assert(candidate !== undefined);
+      assertEquals(row.skipped, true, name);
+      assertEquals(row.kernel, gemvKernelId(PLE_CASE, 4, candidate.choice), name);
+      assertEquals(row.keys, [keyOfName(4, name)], name);
+      assert(row.workgroups !== undefined, name);
+      assertEquals(
+        [
+          row.isBaseline,
+          row.screened,
+          row.quickPerDispatch,
+          row.reps,
+          row.rounds,
+          row.perDispatch,
+          row.withinBand,
+          row.speedupVsBaseline,
+          row.error,
+        ],
+        [
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+        ],
+        name,
+      );
+    }
+    for (const name of [planAt(4).baseline.name, identical.name, "parallel-l4", "parallel-l8"]) {
+      const row = rowAt(result.rows, 4, name);
+      assertEquals([row.skipped, row.rounds?.length], [undefined, 2], name);
+    }
+    assertEquals(
+      result.summaries.map(({ m, screened, skipped }) => [m, screened, skipped]),
+      [
+        [1, 1, 0],
+        [4, 0, 2],
+      ],
+    );
+    // No pipeline is prepared for them at M = 4, and from its warm start on none of their passes runs
+    assert(
+      progress.includes(
+        `${PLE_CASE.id} M=4: preparing 4 kernels (2 skipped: not adoptable from M = 1)`,
+      ),
+      progress.join("\n"),
+    );
+    const fourStarts = passes.findIndex(
+      (pass) => pass.key === keyAt(PLE_CASE, 4, planAt(4).baseline),
+    );
+    assert(fourStarts > 0, "M = 4 never started");
+    const atFour = passes.slice(fourStarts).map((pass) => pass.key);
+    for (const name of ["staged-l32", "staged-l2"]) {
+      assert(!atFour.includes(keyOfName(4, name)), name);
+    }
+    assert(atFour.includes(keyOfName(4, "parallel-l8")), "parallel-l8 did not run at M = 4");
+  });
+
+  it("skips nothing in a run narrowed to M = 4: without its M = 1 group the quick look alone decides", async () => {
+    const { result } = await sweep([planAt(4)]);
+    assert(
+      result.rows.every((row) => row.skipped === undefined),
+      "a row was skipped",
+    );
+    assertEquals(
+      result.summaries.map(({ m, skipped }) => [m, skipped]),
+      [[4, 0]],
+    );
+    assertEquals(rowAt(result.rows, 4, "staged-l32").rounds?.length, 2);
+    // staged-l2 at ×2 the default's choice: screened by this group's quick look, not skipped
+    assertEquals(rowAt(result.rows, 4, "staged-l2").screened, true);
+  });
+
+  it("skips nothing at M = 4 when its M = 1 baseline was not timed: that group reads nothing (fault: the baseline's pipeline cannot be made at M = 1)", async () => {
+    const baselineKey = keyAt(PLE_CASE, 1, planAt(1).baseline);
+    const { result } = await sweep([planAt(1), planAt(4)], new Set([baselineKey]));
+    const baseline = result.rows.find((row) => row.m === 1 && row.isBaseline);
+    assert(baseline?.error !== undefined, "the M = 1 baseline did not fail");
+    assertEquals(
+      result.summaries.map(({ m, skipped }) => [m, skipped]),
+      [
+        [1, 0],
+        [4, 0],
+      ],
+    );
+    // staged-l32 (×1.05 at M = 1) is timed at M = 4: M = 1 ruled nothing out
+    assertEquals(rowAt(result.rows, 4, "staged-l32").rounds?.length, 2);
   });
 });
 
