@@ -16,7 +16,6 @@ import {
 } from "@karume/gemma4-app-support/settings";
 import type { Manifest, SessionSpec } from "@karume/hub";
 import type { DefaultSampler, SamplerSpec } from "@karume/models/gemma";
-import { DEFAULT_SUBMIT_POLICY } from "@karume/runtime";
 
 import { modelRefusal } from "../gemma4/open.ts";
 import type { GemmaPipelineOptions, GemmaSessionOptions } from "../gemma4/pipeline.ts";
@@ -105,34 +104,7 @@ export type ArmDraft = {
   readonly pleOnGpu?: boolean;
   /** Greedy decode steps per GPU batch (the pipeline option `decodeAhead`; absent = 1). */
   readonly decodeAhead?: DecodeAhead;
-  /**
-   * The first chunk of a run's submits (the Session option `submitPolicy` with that
-   * `firstChunkSize`, or without one for `"off"`; absent = the pipeline's own policy).
-   */
-  readonly firstChunk?: FirstChunk;
 };
-
-/** The first-chunk sizes the bench offers, and `"off"` for a policy without the ramp. */
-export type FirstChunk = "8" | "16" | "32" | "64" | "off";
-
-/**
- * The dispatch cap per submit of the arms that set their own first chunk: the cap of the Gemma
- * pipelines' own policy (perf-ledger H-40), so such an arm differs from the pipeline's policy in
- * the first chunk alone.
- */
-export const FIRST_CHUNK_MAX_CHUNK_SIZE = 128;
-
-/**
- * The submit policy of an arm that sets its first chunk: the runtime default with the Gemma cap,
- * and a first chunk of that size (`"off"`: none — every chunk at the cap).
- */
-export const firstChunkPolicy = (
-  firstChunk: FirstChunk,
-): NonNullable<ArmSessionOptions["submitPolicy"]> => ({
-  ...DEFAULT_SUBMIT_POLICY,
-  maxChunkSize: FIRST_CHUNK_MAX_CHUNK_SIZE,
-  ...(firstChunk === "off" ? {} : { firstChunkSize: Number(firstChunk) }),
-});
 
 /** The run-ahead depths the bench offers (1 = off — one step per batch). */
 export type DecodeAhead = "1" | "2" | "4" | "8";
@@ -247,10 +219,8 @@ export const armLabel = (
   }${arm.session?.integerGemv === true ? " (integer)" : ""}${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
-    arm.session?.submitPolicy === undefined
-      ? ""
-      : ` (first chunk ${arm.session.submitPolicy.firstChunkSize ?? "off"})`
-  }${arm.samplerKind === "distribution" ? " (sampled)" : ""}${arm.noSignal === true ? " (no signal)" : ""}${
+    arm.samplerKind === "distribution" ? " (sampled)" : ""
+  }${arm.noSignal === true ? " (no signal)" : ""}${
     arm.tap
       ? arm.split === true
         ? " (split)"
@@ -335,7 +305,6 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
   const session: ArmSessionOptions = {
     ...(draft.linearReorder === true ? LINEAR_REORDER_SESSION : {}),
     ...(draft.integerGemv === true ? integerGemvSession(preset.declaration.session) : {}),
-    ...(draft.firstChunk === undefined ? {} : { submitPolicy: firstChunkPolicy(draft.firstChunk) }),
   };
   return {
     ok: true,

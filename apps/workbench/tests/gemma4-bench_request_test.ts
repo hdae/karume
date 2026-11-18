@@ -12,7 +12,7 @@ const SIGNAL = new AbortController().signal;
 const FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 const MOUNTS = "gemma4, gemma4-qat, gemma4-qat-mobile";
 const SWITCHES =
-  "tap-off, split, host, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled, first8, first16, first32, first64, first-off";
+  "tap-off, split, host, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled";
 
 /** The drafts of `text` (the grammar alone; no distribution is read). */
 const draftsOf = (text: string) => parseArmsText(text).map(({ draft }) => draft);
@@ -42,11 +42,6 @@ describe("the arms text", () => {
     ["ahead2", { tap: true, decodeAhead: "2" }],
     ["ahead4", { tap: true, decodeAhead: "4" }],
     ["ahead8", { tap: true, decodeAhead: "8" }],
-    ["first8", { tap: true, firstChunk: "8" }],
-    ["first16", { tap: true, firstChunk: "16" }],
-    ["first32", { tap: true, firstChunk: "32" }],
-    ["first64", { tap: true, firstChunk: "64" }],
-    ["first-off", { tap: true, firstChunk: "off" }],
   ] as const)("reads the switch %s", (name, switches) => {
     expect(draftsOf(`gemma4/e2b:${name}`)).toEqual([
       { key: { mount: "gemma4", model: "e2b" }, ...switches },
@@ -98,10 +93,6 @@ describe("the arms text", () => {
     [
       "gemma4/e2b:ple-gpu:ahead2:ahead4",
       `arm 1 "gemma4/e2b:ple-gpu:ahead2:ahead4": names more than one decode run-ahead depth`,
-    ],
-    [
-      "gemma4/e2b:first16:first-off",
-      `arm 1 "gemma4/e2b:first16:first-off": names more than one first chunk`,
     ],
     [
       "gemma4/e2b:tap-off:split",
