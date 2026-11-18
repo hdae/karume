@@ -64,7 +64,7 @@ import {
   type GemvSelection,
   isGemvCandidateSet,
 } from "./gemv-candidates.ts";
-import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
+import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "./gemv-cases.ts";
 import { gemvCaseFingerprint, gemvProgramKernelId } from "./gemv-fingerprint.ts";
 import { bandAgainstOracle, gemvOracle } from "./gemv-oracle.ts";
 import {
@@ -185,13 +185,26 @@ export type GemvSweepOptions = {
 /** The resources of a case, in fill order (the index of an entry seeds its stream). */
 const caseResources = (gemvCase: GemvCase, rows: number): ResourceSpec[] => {
   const { storage, group, n, k } = gemvCase;
+  const x: ResourceSpec = { name: "x", bytes: rows * k * 4, fill: "f32" };
+  const bias: ResourceSpec = { name: "bias", bytes: n * 4, fill: "f32" };
+  if (isFloatGemvStorage(storage)) {
+    // A float storage has no scale buffer: its words are the elements (k is a multiple of the
+    // elements of a 16 B word, so the byte length is whole words).
+    return [
+      x,
+      { name: "w", bytes: n * k * (storage === "f32" ? 4 : 2), fill: storage },
+      bias,
+      { name: "out", bytes: rows * n * 4, fill: "none" },
+      { name: "reference", bytes: rows * n * 4, fill: "none" },
+    ];
+  }
   const bits = storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
   const scales = storage === "i4" && group !== undefined ? n * (k / group) : n;
   return [
-    { name: "x", bytes: rows * k * 4, fill: "f32" },
+    x,
     // Every bit pattern is a valid i2 / i4 code; i8 takes the fill's [-127, 127].
     { name: "w", bytes: (n * k * bits) / 8, fill: "i8" },
-    { name: "bias", bytes: n * 4, fill: "f32" },
+    bias,
     { name: "wscale", bytes: scales * 4, fill: "scale" },
     { name: "out", bytes: rows * n * 4, fill: "none" },
     // The baseline writes here, so the candidates' outputs can be compared with it.
@@ -213,12 +226,16 @@ const OPERAND_RESOURCES = { x: "x", weight: "w", bias: "bias", weightScale: "wsc
 /**
  * The launch of a program whose one dispatch writes `output`: its key, WGSL, params and grid as the
  * program states them, its bindings mapped to the case's resources by position. The sweep times
- * programs of one dispatch without temporaries (every GEMV program is one).
+ * programs of one dispatch without temporaries (every GEMV program is one). A program names the
+ * weight's scale among its bindings whatever the storage; it is bound only where the case has one
+ * (`weightScale` — false for a float storage, whose WGSL declares no such binding), as the recipe
+ * builder binds it.
  */
 export const gemvLaunch = (
   program: LinearProgram,
   output: "out" | "reference",
   limit: number,
+  weightScale = true,
 ): Launch => {
   const [dispatch] = program.dispatches;
   if (dispatch === undefined || program.dispatches.length !== 1 || program.temps.length > 0) {
@@ -226,13 +243,15 @@ export const gemvLaunch = (
       `${program.where}: the GEMV sweep times a program of one dispatch without temporaries`,
     );
   }
-  const bindings = dispatch.bindings.map(({ binding, operand }, index) => {
-    if (binding !== index + 1) {
-      throw new Error(`${program.where}: binding ${binding} is at position ${index + 1}`);
-    }
-    if (typeof operand !== "string") throw new Error(`${program.where}: binds a temporary`);
-    return operand === "out" ? output : OPERAND_RESOURCES[operand];
-  });
+  const bindings = dispatch.bindings
+    .filter(({ operand }) => weightScale || operand !== "weightScale")
+    .map(({ binding, operand }, index) => {
+      if (binding !== index + 1) {
+        throw new Error(`${program.where}: binding ${binding} is at position ${index + 1}`);
+      }
+      if (typeof operand !== "string") throw new Error(`${program.where}: binds a temporary`);
+      return operand === "out" ? output : OPERAND_RESOURCES[operand];
+    });
   const { grid } = dispatch;
   return {
     key: dispatch.key,
@@ -467,6 +486,7 @@ export const sweepGemvCase = async (
 ): Promise<GemvCaseResult> => {
   const { gpu } = context;
   const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
+  const weightScale = !isFloatGemvStorage(gemvCase.storage);
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
   const emit = (row: GemvSweepRow): void => {
@@ -554,7 +574,10 @@ export const sweepGemvCase = async (
       try {
         const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
         kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
-        kernel.state = { kind: "skipped", launch: gemvLaunch(program, kernel.output, limit) };
+        kernel.state = {
+          kind: "skipped",
+          launch: gemvLaunch(program, kernel.output, limit, weightScale),
+        };
       } catch (cause) {
         kernel.state = { kind: "failed", cause };
       }
@@ -573,7 +596,7 @@ export const sweepGemvCase = async (
         try {
           const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
           kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
-          const launch = gemvLaunch(program, kernel.output, limit);
+          const launch = gemvLaunch(program, kernel.output, limit, weightScale);
           const ready = await prepareLaunch(context, launch, resources);
           prepared.push(ready);
           kernel.state = { kind: "prepared", launch, ready };
@@ -742,7 +765,8 @@ export const sweepGemvCase = async (
           x: streamOf(specs, "x"),
           weight: streamOf(specs, "w"),
           bias: streamOf(specs, "bias"),
-          scale: streamOf(specs, "wscale"),
+          // A float storage has no scale, and the oracle reads none for it
+          scale: weightScale ? streamOf(specs, "wscale") : () => 0,
         });
       } catch (cause) {
         oracle = cause instanceof Error ? cause : new Error(String(cause));

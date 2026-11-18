@@ -34,7 +34,13 @@ import {
   gemvProfileChoice,
   gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
-import { GEMV_CASES, GEMV_SWEEP_ROW_COUNTS, type GemvCase } from "../src/tune/gemv-cases.ts";
+import {
+  GEMV_CASES,
+  GEMV_SWEEP_FLOAT_ROW_COUNTS,
+  GEMV_SWEEP_ROW_COUNTS,
+  type GemvCase,
+  isFloatGemvStorage,
+} from "../src/tune/gemv-cases.ts";
 import {
   gemvCaseFingerprint,
   gemvCaseTableId,
@@ -112,16 +118,25 @@ describe("the case table", () => {
       const group = gemvCase.group === undefined ? "" : `g${gemvCase.group}`;
       assertEquals(gemvCase.id, `${gemvCase.storage}${group}-n${gemvCase.n}-k${gemvCase.k}`);
       assert(gemvCase.source.length > 0, gemvCase.id);
-      assertEquals(gemvCase.rows, GEMV_SWEEP_ROW_COUNTS);
+      // A float storage has no row block: its cases stop at the parallel GEMV's range
+      assertEquals(
+        gemvCase.rows,
+        isFloatGemvStorage(gemvCase.storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
+      );
     }
     assertEquals(GEMV_SWEEP_ROW_COUNTS, [1, 4, 8, 16, 64]);
+    assertEquals(GEMV_SWEEP_FLOAT_ROW_COUNTS, [1, 4, 8]);
   });
 
-  it("holds only shapes the GEMV family takes at every row count (the selection at exact)", () => {
+  it("holds only shapes the GEMV family takes at every row count (the selection at exact), but for a float storage past one row, which the GEMM takes", () => {
     for (const gemvCase of GEMV_CASES) {
       for (const m of gemvCase.rows) {
         const { choice } = gemvBaseline(gemvCase, m);
-        assertEquals(choice.id, m === 1 ? "gemv-m1" : "gemv-rows", `${gemvCase.id} M=${m}`);
+        assertEquals(
+          choice.id,
+          m === 1 ? "gemv-m1" : isFloatGemvStorage(gemvCase.storage) ? "gemm-f32" : "gemv-rows",
+          `${gemvCase.id} M=${m}`,
+        );
       }
     }
   });

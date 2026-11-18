@@ -12,11 +12,20 @@
  * docs/research/2026-09-07-gemv-rows-k21.md (the 12288-wide MLP layers).
  *
  * The row counts are the parallel family's range M = 1, 4, 8 and the row-block form's 16 and 64
- * ({@link GEMV_SWEEP_ROW_COUNTS}).
+ * ({@link GEMV_SWEEP_ROW_COUNTS}). A float-stored weight (bf16 / f16 / f32) has no row-block form —
+ * past one row its reference kernel is the GEMM — so its cases stop at the parallel family's range
+ * ({@link GEMV_SWEEP_FLOAT_ROW_COUNTS}).
  */
 
-/** The weight storages the GEMV sweep measures (the storages of the profile's GEMV rows). */
-export type GemvSweepStorage = "i2" | "i4" | "i8";
+/**
+ * The weight storages the GEMV sweep measures: the storages of the profile's GEMV rows, and bf16,
+ * the storage regular Gemma 4 ships in.
+ */
+export type GemvSweepStorage = "i2" | "i4" | "i8" | "bf16" | "f16" | "f32";
+
+/** The storages whose weight words are the elements themselves, with no scale buffer. */
+export const isFloatGemvStorage = (storage: GemvSweepStorage): storage is "bf16" | "f16" | "f32" =>
+  storage === "bf16" || storage === "f16" || storage === "f32";
 
 /** One shape of the GEMV sweep. */
 export type GemvCase = {
@@ -42,6 +51,12 @@ export type GemvCase = {
  */
 export const GEMV_SWEEP_ROW_COUNTS: readonly number[] = [1, 4, 8, 16, 64];
 
+/**
+ * The row counts a case of a float storage measures: 1, 4 and 8, the parallel GEMV's range. Beyond
+ * it such a weight runs the GEMM under every level, which the geometry sweep measures.
+ */
+export const GEMV_SWEEP_FLOAT_ROW_COUNTS: readonly number[] = [1, 4, 8];
+
 /** A case of the table, its id derived from its shape. */
 const shape = (
   storage: GemvSweepStorage,
@@ -55,7 +70,7 @@ const shape = (
   ...(group === undefined ? {} : { group }),
   n,
   k,
-  rows: GEMV_SWEEP_ROW_COUNTS,
+  rows: isFloatGemvStorage(storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
   source,
 });
 
@@ -63,6 +78,8 @@ const E2B = "Gemma 4 E2B, i4 g32";
 const E2B_QAT = "Gemma 4 E2B QAT";
 const E4B = "Gemma 4 E4B, i4 g32";
 const E4B_QAT = "Gemma 4 E4B QAT";
+const E2B_BF16 = "Gemma 4 E2B, bf16";
+const E4B_BF16 = "Gemma 4 E4B, bf16";
 const G12B = "Gemma 4 12B q4_0 QAT, i4 g32";
 const G26B = "Gemma 4 26B A4B q4_0 QAT, i4 g32";
 
@@ -146,6 +163,40 @@ export const GEMV_CASES: readonly GemvCase[] = [
   shape("i4", 32, 2816, 8192, `${G26B}: o (full)`),
   shape("i4", 32, 2816, 2112, `${G26B}: down`),
   shape("i4", 32, 262144, 2816, `${G26B}: lm_head (tied embedding)`),
+  // Gemma 4 E2B (regular) as it ships: every linear in bf16 (ADR 0128). The shapes are the i4 g32
+  // cases' and the output head's.
+  shape("bf16", undefined, 8960, 1536, `${E2B_BF16}: per_layer_model_projection (35 layers × 256)`),
+  shape("bf16", undefined, 2048, 1536, `${E2B_BF16}: q (sliding)`),
+  shape("bf16", undefined, 256, 1536, `${E2B_BF16}: k / v (sliding), per_layer_input_gate`),
+  shape("bf16", undefined, 1536, 2048, `${E2B_BF16}: o (sliding)`),
+  shape("bf16", undefined, 6144, 1536, `${E2B_BF16}: gate / up`),
+  shape("bf16", undefined, 1536, 6144, `${E2B_BF16}: down`),
+  shape("bf16", undefined, 1536, 256, `${E2B_BF16}: per_layer_projection`),
+  shape("bf16", undefined, 4096, 1536, `${E2B_BF16}: q (full)`),
+  shape("bf16", undefined, 512, 1536, `${E2B_BF16}: k / v (full)`),
+  shape("bf16", undefined, 1536, 4096, `${E2B_BF16}: o (full)`),
+  shape("bf16", undefined, 12288, 1536, `${E2B_BF16}: gate / up of the 12288-wide MLP layers`),
+  shape("bf16", undefined, 1536, 12288, `${E2B_BF16}: down of the 12288-wide MLP layers`),
+  shape("bf16", undefined, 262144, 1536, `${E2B_BF16}: lm_head (tied embedding)`),
+  // Gemma 4 E4B (regular), bf16.
+  shape(
+    "bf16",
+    undefined,
+    10752,
+    2560,
+    `${E4B_BF16}: per_layer_model_projection (42 layers × 256)`,
+  ),
+  shape("bf16", undefined, 2048, 2560, `${E4B_BF16}: q (sliding)`),
+  shape("bf16", undefined, 512, 2560, `${E4B_BF16}: k / v (sliding)`),
+  shape("bf16", undefined, 256, 2560, `${E4B_BF16}: per_layer_input_gate`),
+  shape("bf16", undefined, 2560, 2048, `${E4B_BF16}: o (sliding)`),
+  shape("bf16", undefined, 10240, 2560, `${E4B_BF16}: gate / up`),
+  shape("bf16", undefined, 2560, 10240, `${E4B_BF16}: down`),
+  shape("bf16", undefined, 2560, 256, `${E4B_BF16}: per_layer_projection`),
+  shape("bf16", undefined, 4096, 2560, `${E4B_BF16}: q (full)`),
+  shape("bf16", undefined, 1024, 2560, `${E4B_BF16}: k / v (full)`),
+  shape("bf16", undefined, 2560, 4096, `${E4B_BF16}: o (full)`),
+  shape("bf16", undefined, 262144, 2560, `${E4B_BF16}: lm_head (tied embedding)`),
 ];
 
 /** The case of an id, or `undefined`. */

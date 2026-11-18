@@ -83,7 +83,8 @@ adapter's match and measures nothing at run time.
   parallel GEMV with their lane count and their packed and staged flags.
 - What measures them on a host's GPU is the GEMV sweep: `runGemvSweep` of `@karume/runtime/tune`, run by the
   workbench's `gemv-sweep` entry ([workbench.md](workbench.md#the-entries)). Its cases are the shapes of the default
-  profile's GEMV rows; per case and row count it measures the baseline (what a Session at the level `exact` runs with
+  profile's GEMV rows and the linears of regular Gemma 4 E2B and E4B in bf16; per case and row count it measures the
+  baseline (what a Session at the level `exact` runs with
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
   and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`, after a
   quick look that times in full only the references and the kernels near enough to matter; at M = 4 and 8 it skips the
@@ -91,6 +92,10 @@ adapter's match and measures nothing at run time.
   ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)). Its record is `karume-gemv-sweep/4`
   ([workbench.md](workbench.md#the-gemv-sweeps-record)): each row carries the fingerprint of its kernel and each case
   its own.
+- A case of a float storage (bf16, f16, f32) is measured at 1, 4 and 8 rows. Such a weight has no row-block form, so
+  past one row its baseline is the GEMM under f32 compute with the default profile's geometry (the candidate `gemm`),
+  it has no identical-class candidate there, and its reorder candidates are the parallel GEMV's plain and staged
+  forms (it has no subgroup form). Its buffers hold no scale.
 - No registered table carries them. A table without them runs with the default profile's, the values measured on the
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
@@ -137,7 +142,8 @@ measures nothing and changes no default value.
 - **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
   staged candidates at M = 1. A parallel row serves M = 1 to 8, so at each other row count of that range the case
   table has (M = 4 and 8: the `full` set) groups of at least two records must be evidence for the candidate, and it
-  may be slower than the default's choice in none of them. The adopted row replaces the shape's row in place. A row
+  may be slower than the default's choice in none of them — for a float-stored shape without a row that choice is
+  the GEMM. The adopted row replaces the shape's row in place, or is added when the shape had none. A row
   whose default takes packed activations stays: the packed kernels are not measured. A subgroup candidate that meets
   the rule is named in the decision's notes and writes nothing: the subgroup form is a Session option, not a row. It
   changes the numbers of Sessions at `reorder`, inside the band.

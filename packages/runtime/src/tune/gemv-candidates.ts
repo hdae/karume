@@ -1,7 +1,9 @@
 /**
  * What the GEMV sweep measures for one case and row count: the **baseline** (what a Session at the
  * level `exact` runs for the shape with the default profile), the **candidates** in two classes, and
- * each one's program.
+ * each one's program. The baseline is a kernel of the GEMV family, except for a float-stored weight
+ * (bf16 / f16 / f32) at M ≥ 2: that storage has no row-block form, so its Session runs the GEMM
+ * there, and the GEMM is what the parallel GEMV is read against.
  *
  * - *identical* — the baseline's summation order, so the output words must be the baseline's: the
  *   sequential M = 1 kernel's variants (columns per workgroup × words read ahead) and, for M ≥ 2, the
@@ -10,7 +12,8 @@
  *   lane count, plain and with staged activations, for M = 1..8, and its subgroup form where the
  *   device has the features the kernel needs.
  *
- * A candidate is a `LinearGemvChoice` (src/runtime/linear-strategies.ts), and its dispatches are
+ * A candidate is a `LinearGemvChoice` (src/runtime/linear-strategies.ts; a baseline may be the
+ * GEMM's choice — {@link GemvKernelChoice}), and its dispatches are
  * `linearProgramFor`'s (src/runtime/linear-program.ts): nothing here restates a kernel's bindings,
  * params or grid. The baseline and what the default profile chooses at each level come from the
  * selection itself (`resolveLinearStrategy`), asked with the knobs a Session at that level resolves
@@ -36,6 +39,7 @@ import { LINEAR_OP } from "../ops.ts";
 import { OP_CONTRACTS } from "../ops/contracts.ts";
 import { type LinearProgram, linearProgramFor } from "../runtime/linear-program.ts";
 import {
+  type LinearGemmChoice,
   type LinearGemvChoice,
   linearKnobsOf,
   resolveLinearStrategy,
@@ -43,7 +47,7 @@ import {
 import type { NumericLevel } from "../runtime/numerics.ts";
 import type { NodePlan } from "../runtime/plan.ts";
 import { executionKnobDefaults } from "../runtime/session-options-check.ts";
-import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
+import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "./gemv-cases.ts";
 
 /**
  * The candidate sets: `quick` (M = 1, a small identical grid), `full` (every row count a derivation
@@ -60,12 +64,21 @@ export const isGemvCandidateSet = (value: string): value is GemvCandidateSet =>
 /** The summation-order class of a candidate. */
 export type GemvCandidateClass = "identical" | "reorder";
 
+/**
+ * The choice of a kernel the sweep measures: a member of the GEMV family, or — only as the reference
+ * of a float-stored weight at M ≥ 2 — the GEMM under f32 compute.
+ */
+export type GemvKernelChoice = LinearGemvChoice | LinearGemmChoice;
+
 /** One kernel the sweep measures for a case and row count. */
 export type GemvCandidate = {
-  /** Unique within a case and row count: `c32u4`, `c32u4r8`, `parallel-l4`, `staged-l32`, `subgroup32-l8`. */
+  /**
+   * Unique within a case and row count: `c32u4`, `c32u4r8`, `parallel-l4`, `staged-l32`,
+   * `subgroup32-l8`, and `gemm` for the GEMM as a reference.
+   */
   readonly name: string;
   readonly class: GemvCandidateClass;
-  readonly choice: LinearGemvChoice;
+  readonly choice: GemvKernelChoice;
 };
 
 /** What the device decides about the candidates: the subgroup form, and the grids it can dispatch. */
@@ -91,8 +104,14 @@ export const PARALLEL_MAX_ROWS = 8;
 /** The profile the baseline and the profile's choices are read from. */
 const PROFILE: ResolvedGeometryProfile = DEFAULT_GEOMETRY_PROFILE;
 
+/** Whether a kernel's choice is the GEMM's (the reference of a float-stored weight at M ≥ 2). */
+export const isGemmChoice = (choice: GemvKernelChoice): choice is LinearGemmChoice =>
+  choice.id === "gemm-f32" || choice.id === "gemm-f16";
+
 /** The candidate's name (the class and the shape are the row's own fields). */
-const gemvChoiceName = (choice: LinearGemvChoice): string => {
+const gemvChoiceName = (choice: GemvKernelChoice): string => {
+  // One name whatever the tile geometry: the kernel's fingerprint tells two GEMMs apart
+  if (isGemmChoice(choice)) return "gemm";
   const { cols, unroll } = choice.variant;
   switch (choice.id) {
     case "gemv-m1":
@@ -110,11 +129,13 @@ const gemvChoiceName = (choice: LinearGemvChoice): string => {
   }
 };
 
-/** The class a choice's summation order puts it in. */
-const gemvChoiceClass = (choice: LinearGemvChoice): GemvCandidateClass =>
-  choice.id === "gemv-m1" || choice.id === "gemv-rows" ? "identical" : "reorder";
+/** The class a choice's summation order puts it in (the GEMM sums in the reference order). */
+const gemvChoiceClass = (choice: GemvKernelChoice): GemvCandidateClass =>
+  choice.id === "gemv-m1" || choice.id === "gemv-rows" || isGemmChoice(choice)
+    ? "identical"
+    : "reorder";
 
-const candidateOf = (choice: LinearGemvChoice): GemvCandidate => ({
+const candidateOf = (choice: GemvKernelChoice): GemvCandidate => ({
   name: gemvChoiceName(choice),
   class: gemvChoiceClass(choice),
   choice,
@@ -139,8 +160,9 @@ const linearNodePlan = (gemvCase: GemvCase, m: number): NodePlan => {
 
 /**
  * What a Session with linear at `level` runs for the case at `m` rows with the default profile: the
- * selection's choice, with the knobs the level resolves to. Throws when the selection does not take
- * the GEMV family (a case outside the family's range).
+ * selection's choice, with the knobs the level resolves to. Throws when the selection takes neither
+ * the GEMV family nor — for a float-stored weight at M ≥ 2, which has no sequential GEMV — the GEMM
+ * under f32 compute (a case outside the family's range).
  */
 export const gemvProfileChoice = (
   gemvCase: GemvCase,
@@ -158,6 +180,9 @@ export const gemvProfileChoice = (
   });
   if ("refusal" in resolution) throw new Error(`Case ${gemvCase.id}: ${resolution.refusal}`);
   const { choice } = resolution;
+  if (choice.id === "gemm-f32" && isFloatGemvStorage(gemvCase.storage) && m > 1) {
+    return candidateOf(choice);
+  }
   if (
     choice.id !== "gemv-m1" &&
     choice.id !== "gemv-rows" &&
@@ -303,15 +328,17 @@ const m1Variants = (baseline: LinearGemvVariant, set: GemvCandidateSet): LinearG
 /**
  * The identical class at `m` rows: at M = 1 the column form's variants, at M ≥ 2 the row-block heights
  * (powers of two up to the tallest the selection can choose for the shape — `linearGemvRowsForShape`
- * with a target it always meets), with the profile's columns and read-ahead.
+ * with a target it always meets), with the profile's columns and read-ahead. A float-stored weight
+ * has no row-block form, so its identical class at M ≥ 2 is its baseline alone (the GEMM).
  */
 const identicalChoices = (
   gemvCase: GemvCase,
   m: number,
   set: GemvCandidateSet,
-  baseline: LinearGemvChoice,
+  baseline: GemvKernelChoice,
 ): LinearGemvChoice[] => {
   const { storage, group, n } = gemvCase;
+  if (isGemmChoice(baseline)) return [];
   if (m === 1) {
     return m1Variants(baseline.variant, set).map((variant): LinearGemvChoice => ({
       id: "gemv-m1",
@@ -346,7 +373,8 @@ const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): Linear
   const { storage, group, n, k } = gemvCase;
   const variant = defaultLinearGemvVariant(PROFILE.linearGemv, { storage, n, k });
   const ids: LinearGemvChoice["id"][] = ["gemv-parallel", "gemv-parallel-staged"];
-  if (gates.subgroups) ids.push("gemv-parallel-subgroup32");
+  // The subgroup form exists for the integer storages only
+  if (gates.subgroups && !isFloatGemvStorage(storage)) ids.push("gemv-parallel-subgroup32");
   return ids.flatMap((id) =>
     GEMV_LANES.map((lanes): LinearGemvChoice => ({
       id,
@@ -372,7 +400,8 @@ const programFacts = (gemvCase: GemvCase, m: number) =>
     // No packed pairing and no folded producer: the sweep measures the f32-activation forms.
     packedScale: undefined,
     prologue: undefined,
-    // Read by the GEMM and i8a8 programs only; a GEMV program takes neither.
+    // Read by the GEMM and i8a8 programs only: the GEMM a float-stored weight's reference at M ≥ 2
+    // runs takes the default profile's geometry, as the baseline takes the default profile's choices.
     geometryProfile: PROFILE,
     linearI8a8Dot: "emu",
   }) as const;
@@ -381,7 +410,7 @@ const programFacts = (gemvCase: GemvCase, m: number) =>
 export const gemvProgram = (
   gemvCase: GemvCase,
   m: number,
-  choice: LinearGemvChoice,
+  choice: GemvKernelChoice,
 ): LinearProgram => linearProgramFor(choice, programFacts(gemvCase, m));
 
 /** The workgroup count of each axis of a program's dispatch (`ceil(items / tile)`, no limit). */
@@ -402,7 +431,7 @@ export const programWorkgroups = (
 const dispatchable = (
   gemvCase: GemvCase,
   m: number,
-  choice: LinearGemvChoice,
+  choice: GemvKernelChoice,
   limit: number,
 ): boolean =>
   limit === Number.POSITIVE_INFINITY ||

@@ -89,7 +89,11 @@ import {
 } from "./gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, gemvCaseOf, type GemvSweepStorage } from "./gemv-cases.ts";
 import { gemvCaseFingerprint, gemvCaseTableId, gemvKernelId } from "./gemv-fingerprint.ts";
-import { GEMV_SWEEP_FORMAT, type GemvSweepChoice } from "./gemv-report.ts";
+import {
+  GEMV_SWEEP_FORMAT,
+  type GemvSweepChoice,
+  type GemvSweepFamilyChoice,
+} from "./gemv-report.ts";
 
 /** The fewest different records whose groups must be evidence: one record is not evidence. */
 const MIN_RECORDS = 2;
@@ -207,12 +211,19 @@ const CHOICE_IDS = [
   "gemv-parallel-packed",
   "gemv-parallel-staged",
   "gemv-parallel-subgroup32",
-] as const satisfies readonly GemvSweepChoice["id"][];
+] as const satisfies readonly GemvSweepFamilyChoice["id"][];
 
-const isChoiceId = (value: unknown): value is GemvSweepChoice["id"] =>
+const isChoiceId = (value: unknown): value is GemvSweepFamilyChoice["id"] =>
   CHOICE_IDS.some((id) => id === value);
 
-const STORAGES = ["i2", "i4", "i8"] as const satisfies readonly GemvSweepStorage[];
+const STORAGES = [
+  "i2",
+  "i4",
+  "i8",
+  "bf16",
+  "f16",
+  "f32",
+] as const satisfies readonly GemvSweepStorage[];
 
 const isStorage = (value: unknown): value is GemvSweepStorage =>
   STORAGES.some((storage) => storage === value);
@@ -238,15 +249,26 @@ const variantAt = (value: unknown, where: string): LinearGemvVariant => {
 const parseChoice = (value: unknown, where: string): GemvSweepChoice => {
   const choice = objectAt(value, `${where} choice`);
   const { id, storage } = choice;
-  if (!isChoiceId(id)) throw new Error(`${where}: choice.id ${JSON.stringify(id)} is no GEMV form`);
   if (!isStorage(storage)) {
-    throw new Error(`${where}: choice.storage ${JSON.stringify(storage)} is not i2, i4 or i8`);
+    throw new Error(
+      `${where}: choice.storage ${JSON.stringify(storage)} is none of ${STORAGES.join(", ")}`,
+    );
+  }
+  // The GEMM as the baseline of a float-stored weight at M ≥ 2
+  if (id === "gemm-f32") {
+    if (!isBoolean(choice.v4)) throw new Error(`${where}: choice.v4 is not a boolean`);
+    return { id, storage, v4: choice.v4 };
+  }
+  if (!isChoiceId(id)) {
+    throw new Error(
+      `${where}: choice.id ${JSON.stringify(id)} is neither a GEMV form nor gemm-f32`,
+    );
   }
   const groupSize = optionalAt(choice, "groupSize", isPositiveInteger, `${where} choice`);
   const lanes = optionalAt(choice, "lanes", isLanes, `${where} choice`);
   const variant = variantAt(choice.variant, `${where} choice.variant`);
   const rowsAt = choice.rowsVariant;
-  let rowsVariant: GemvSweepChoice["rowsVariant"];
+  let rowsVariant: GemvSweepFamilyChoice["rowsVariant"];
   if (rowsAt !== undefined) {
     const rows = objectAt(rowsAt, `${where} choice.rowsVariant`).rows;
     if (!isPositiveInteger(rows)) {
@@ -782,6 +804,17 @@ type Evaluation = {
   readonly failure?: string;
 };
 
+/**
+ * The GEMV-family choice of an evaluated candidate. The judgements take the column forms and the
+ * parallel forms only, so the GEMM (a reference of a float-stored weight at M ≥ 2) is never one.
+ */
+const familyChoiceOf = (evaluation: Evaluation): GemvSweepFamilyChoice => {
+  if (evaluation.choice.id === "gemm-f32") {
+    throw new Error(`${evaluation.name} is the GEMM, which no judgement takes as a candidate`);
+  }
+  return evaluation.choice;
+};
+
 /** The smallest of an evaluation's gains (0 without any — never the largest). */
 const smallestGain = (evaluation: Evaluation): number =>
   evaluation.gains.length === 0 ? 0 : Math.min(...evaluation.gains.map(({ gain }) => gain));
@@ -1025,7 +1058,7 @@ const sequentialDecision = (
         candidate: chosen.name,
         gains: adopted.flatMap(({ gains }) => gains),
       },
-      variant: chosen.choice.variant,
+      variant: familyChoiceOf(chosen).variant,
     };
   }
   const nearest = outcomes.flatMap(({ outcome }) =>
@@ -1118,7 +1151,7 @@ const parallelDecision = (
     };
   }
   const { evaluation } = outcome;
-  const { lanes } = evaluation.choice;
+  const { lanes, id } = familyChoiceOf(evaluation);
   if (lanes === undefined) throw new Error(`${evaluation.name} of ${gemvCase.id} has no lanes`);
   const row: LinearGemvParallelShape = {
     storage: gemvCase.storage,
@@ -1127,7 +1160,7 @@ const parallelDecision = (
     ...(gemvCase.group === undefined ? {} : { group: gemvCase.group }),
     lanes,
     packedActivations: false,
-    ...(evaluation.choice.id === "gemv-parallel-staged" ? { stagedActivations: true } : {}),
+    ...(id === "gemv-parallel-staged" ? { stagedActivations: true } : {}),
   };
   return {
     decision: {

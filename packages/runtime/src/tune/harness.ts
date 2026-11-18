@@ -273,7 +273,7 @@ export type SweepHooks = {
  * The contents of one input (deterministic pseudo-random — the seed is fixed by the resource
  * order).
  */
-export type Fill = "f32" | "f16" | "i8" | "scale" | "none";
+export type Fill = "f32" | "f16" | "bf16" | "i8" | "scale" | "none";
 
 /**
  * One resource. The name is its identifier within the resource table (the same name across kernels
@@ -1020,6 +1020,15 @@ const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): (() => num
       const half = (): number => {
         const r = next();
         return (((r >>> 12) & 1) << 15) | ((11 + (r & 3)) << 10) | ((r >>> 2) & 0x3ff);
+      };
+      return () => (half() | (half() << 16)) >>> 0;
+    }
+    case "bf16": {
+      // Packs two bf16 normal numbers (the high halves of f32 values with |v| ∈ [2^-4, 1), random
+      // sign; low half = even index — the GEMV kernel's `bitcast<f32>(word << 16u)`)
+      const half = (): number => {
+        const r = next();
+        return (((r >>> 12) & 1) << 15) | ((123 + (r & 3)) << 7) | ((r >>> 2) & 0x7f);
       };
       return () => (half() | (half() << 16)) >>> 0;
     }

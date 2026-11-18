@@ -17,7 +17,12 @@
 
 import type { LinearGemvParallelLanes } from "../kernels/linear-gemv.ts";
 import type { LinearGemvChoice } from "../runtime/linear-strategies.ts";
-import type { GemvCandidateClass, GemvCandidateSet } from "./gemv-candidates.ts";
+import {
+  type GemvCandidateClass,
+  type GemvCandidateSet,
+  type GemvKernelChoice,
+  isGemmChoice,
+} from "./gemv-candidates.ts";
 import type { GemvCase, GemvSweepStorage } from "./gemv-cases.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 
@@ -27,7 +32,7 @@ export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/4";
  * A candidate's choice as the record writes it (a `LinearGemvChoice` without its unset fields): the
  * member of the GEMV family, the lane count of the parallel forms, the column form and the row form.
  */
-export type GemvSweepChoice = {
+export type GemvSweepFamilyChoice = {
   readonly id: LinearGemvChoice["id"];
   readonly storage: GemvSweepStorage;
   readonly groupSize?: number;
@@ -36,12 +41,30 @@ export type GemvSweepChoice = {
   readonly rowsVariant?: { readonly cols: number; readonly unroll: number; readonly rows: number };
 };
 
+/**
+ * The GEMM under f32 compute as the record writes it: the baseline of a float-stored weight at
+ * M ≥ 2, where no sequential GEMV exists. Its tile geometry is not written — the row's `keys` name it
+ * and its `kernel` fingerprint covers it.
+ */
+export type GemvSweepGemmChoice = {
+  readonly id: "gemm-f32";
+  readonly storage: GemvSweepStorage;
+  /** Whether the kernel writes `vec4` outputs. */
+  readonly v4: boolean;
+};
+
+/** The choice of a row: a member of the GEMV family, or the GEMM as a reference. */
+export type GemvSweepChoice = GemvSweepFamilyChoice | GemvSweepGemmChoice;
+
 /** One measured kernel: a candidate, or the baseline, of a case at a row count. */
 export type GemvSweepRow = {
   readonly caseId: string;
   /** The row count M. */
   readonly m: number;
-  /** The candidate's name (`c32u4`, `c32u4r8`, `parallel-l4`, `staged-l32`, `subgroup32-l8`). */
+  /**
+   * The candidate's name (`c32u4`, `c32u4r8`, `parallel-l4`, `staged-l32`, `subgroup32-l8`; `gemm`
+   * for the GEMM as the baseline of a float-stored weight at M ≥ 2).
+   */
   readonly candidate: string;
   readonly class: GemvCandidateClass;
   /** Whether this is the baseline: what a Session at the level `exact` runs with the default profile. */
@@ -53,7 +76,7 @@ export type GemvSweepRow = {
    * for the candidate. Absent when the program could not be built.
    */
   readonly kernel?: string;
-  /** The pipeline keys of the program's dispatches (one for every GEMV program). */
+  /** The pipeline keys of the program's dispatches (one for every program the sweep measures). */
   readonly keys?: readonly string[];
   readonly workgroups?: readonly [number, number, number];
   /**
@@ -242,31 +265,42 @@ export type GemvSweepReport = {
 
 /** A choice as the record writes it (unset fields left out); {@link choiceOfRecord} reads it back. */
 export const choiceRecord = (
-  choice: LinearGemvChoice,
+  choice: GemvKernelChoice,
   storage: GemvSweepStorage,
-): GemvSweepChoice => ({
-  id: choice.id,
-  storage,
-  ...(choice.groupSize === undefined ? {} : { groupSize: choice.groupSize }),
-  ...(choice.lanes === undefined ? {} : { lanes: choice.lanes }),
-  variant: { cols: choice.variant.cols, unroll: choice.variant.unroll },
-  ...(choice.rowsVariant === undefined
-    ? {}
-    : {
-        rowsVariant: {
-          cols: choice.rowsVariant.cols,
-          unroll: choice.rowsVariant.unroll,
-          rows: choice.rowsVariant.rows,
-        },
-      }),
-});
+): GemvSweepChoice => {
+  if (isGemmChoice(choice)) {
+    if (choice.id !== "gemm-f32") {
+      throw new Error(`The GEMV sweep measures the GEMM under f32 compute only (${choice.id})`);
+    }
+    return { id: choice.id, storage, v4: choice.v4 };
+  }
+  return {
+    id: choice.id,
+    storage,
+    ...(choice.groupSize === undefined ? {} : { groupSize: choice.groupSize }),
+    ...(choice.lanes === undefined ? {} : { lanes: choice.lanes }),
+    variant: { cols: choice.variant.cols, unroll: choice.variant.unroll },
+    ...(choice.rowsVariant === undefined
+      ? {}
+      : {
+          rowsVariant: {
+            cols: choice.rowsVariant.cols,
+            unroll: choice.rowsVariant.unroll,
+            rows: choice.rowsVariant.rows,
+          },
+        }),
+  };
+};
 
-/** The `LinearGemvChoice` a record's choice stands for. */
-export const choiceOfRecord = (choice: GemvSweepChoice): LinearGemvChoice => ({
-  id: choice.id,
-  storage: choice.storage,
-  groupSize: choice.groupSize,
-  lanes: choice.lanes,
-  variant: choice.variant,
-  rowsVariant: choice.rowsVariant,
-});
+/** The choice a record's choice stands for. */
+export const choiceOfRecord = (choice: GemvSweepChoice): GemvKernelChoice =>
+  choice.id === "gemm-f32"
+    ? { id: choice.id, compute: "f32", v4: choice.v4, groupSize: undefined }
+    : {
+        id: choice.id,
+        storage: choice.storage,
+        groupSize: choice.groupSize,
+        lanes: choice.lanes,
+        variant: choice.variant,
+        rowsVariant: choice.rowsVariant,
+      };

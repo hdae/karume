@@ -1,6 +1,7 @@
 // The GEMV sweep on a real GPU (src/tune/gemv-sweep.ts): one small shape per storage with every
 // candidate kind — the column variants, a row-block height, the parallel GEMV plain and staged, and
-// the subgroup form where the device has it — measured through the sweep's own path, the public
+// the subgroup form where the device has it; for the float storages the column variants and the
+// parallel GEMV against the GEMM past one row — measured through the sweep's own path, the public
 // entry point over one case of the table, and the calibration of a case's first kernel after the
 // workbench entry's idle time. The GPU sections are SKIPped explicitly without an adapter.
 //
@@ -52,6 +53,16 @@ const SMALL: readonly GemvCase[] = [
   { id: "test-i2-n100-k1024", storage: "i2", n: 100, k: 1024, rows: [], source: "test" },
 ];
 
+/** A small shape per float storage: no scale buffer, no row block, the GEMM past one row. */
+const SMALL_FLOAT: readonly GemvCase[] = (["bf16", "f16", "f32"] as const).map((storage) => ({
+  id: `test-${storage}-n100-k1024`,
+  storage,
+  n: 100,
+  k: 1024,
+  rows: [],
+  source: "test",
+}));
+
 /** The candidates of `names` among the full set's (each must exist). */
 const pick = (
   gemvCase: GemvCase,
@@ -93,6 +104,12 @@ const everyKind = (gemvCase: GemvCase, gates: GemvGates): GemvMeasurementPlan[] 
   ),
   planOf(gemvCase, 4, pick(gemvCase, 4, gates, ["c32u4r2", "parallel-l8"])),
   planOf(gemvCase, 16, pick(gemvCase, 16, gates, ["c32u4r4"])),
+];
+
+/** Every candidate kind of a float storage: M = 1 a column variant and the reorder forms, M = 4 two lane counts against the GEMM. */
+const everyFloatKind = (gemvCase: GemvCase, gates: GemvGates): GemvMeasurementPlan[] => [
+  planOf(gemvCase, 1, pick(gemvCase, 1, gates, ["c64u8", "parallel-l4", "staged-l32"])),
+  planOf(gemvCase, 4, pick(gemvCase, 4, gates, ["parallel-l8", "staged-l2"])),
 ];
 
 /** Measures plans of one case on a fresh device with the sweep's per-case path. */
@@ -165,6 +182,41 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
       );
       // One round: the baseline's largest round is its smallest.
       for (const summary of result.summaries) assertEquals(summary.baselineSpread, 1);
+    });
+  }
+
+  for (const gemvCase of SMALL_FLOAT) {
+    it(`measures every candidate kind of ${gemvCase.id}: the column variant's words equal the sequential GEMV's, the parallel GEMV stays in the band at one row and against the GEMM at four`, async () => {
+      const result = await sweepWith(gemvCase, (gates) => everyFloatKind(gemvCase, gates));
+      assertEquals(result.aborted, false);
+      assertEquals(
+        result.rows.map((row) => [row.m, row.candidate, row.class, row.isBaseline]),
+        [
+          [1, "c32u4", "identical", true],
+          [1, "c64u8", "identical", false],
+          [1, "parallel-l4", "reorder", false],
+          [1, "staged-l32", "reorder", false],
+          [4, "gemm", "identical", true],
+          [4, "parallel-l8", "reorder", false],
+          [4, "staged-l2", "reorder", false],
+        ],
+      );
+      for (const row of result.rows) {
+        assertEquals(row.error, undefined, rowLabel(row));
+        assert(row.perDispatch !== undefined && row.perDispatch > 0, rowLabel(row));
+        assertEquals(row.keys?.length, 1, rowLabel(row));
+        // The baselines' own distance from the oracle: the sequential GEMV, and the GEMM
+        if (row.isBaseline || row.class === "reorder") {
+          assertEquals(row.withinBand, true, rowLabel(row));
+          assertEquals(row.nonFiniteOutputs, 0, rowLabel(row));
+          assert(row.maxAbsError !== undefined && row.maxAbsError > 0, rowLabel(row));
+        } else {
+          assertEquals(row.identicalToBaseline, true, rowLabel(row));
+        }
+      }
+      const gemm = result.rows.find((row) => row.candidate === "gemm");
+      assertEquals(gemm?.choice, { id: "gemm-f32", storage: gemvCase.storage, v4: true });
+      assert(gemm?.keys?.[0]?.startsWith("linear:"), gemm?.keys?.[0]);
     });
   }
 

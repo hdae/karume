@@ -11,7 +11,7 @@
  */
 
 import type { Tolerance } from "../reference/allclose.ts";
-import type { GemvSweepStorage } from "./gemv-cases.ts";
+import { type GemvSweepStorage, isFloatGemvStorage } from "./gemv-cases.ts";
 
 /** The shape the oracle evaluates. */
 export type GemvOracleShape = {
@@ -29,24 +29,49 @@ export type GemvInputStreams = {
   readonly weight: () => number;
   /** `bias[n]` as f32 bits. */
   readonly bias: () => number;
-  /** The scales as f32 bits: `[n][k / group]` for i4, `[n]` for i2 / i8. */
+  /** The scales as f32 bits: `[n][k / group]` for i4, `[n]` for i2 / i8; never read for a float storage. */
   readonly scale: () => number;
 };
 
-/** Elements per u32 weight word. */
-const elementsPerWord = (storage: GemvSweepStorage): number =>
-  storage === "i2" ? 16 : storage === "i4" ? 8 : 4;
-
 /** The bits of one element. */
 const bitsOf = (storage: GemvSweepStorage): number =>
-  storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
+  storage === "i2" ? 2 : storage === "i4" ? 4 : storage === "i8" ? 8 : storage === "f32" ? 32 : 16;
 
-/** The integer value of element `lane` of a weight word. */
-const decode = (storage: GemvSweepStorage, word: number, lane: number): number => {
+/** Elements per u32 weight word. */
+const elementsPerWord = (storage: GemvSweepStorage): number => 32 / bitsOf(storage);
+
+/** The integer value of element `lane` of a weight word (i2 / i4 / i8). */
+const decode = (storage: "i2" | "i4" | "i8", word: number, lane: number): number => {
   const bits = bitsOf(storage);
   const code = (word >>> (lane * bits)) & ((1 << bits) - 1);
   if (storage === "i8") return (code << 24) >> 24;
   return code - (1 << (bits - 1));
+};
+
+/** The value of an IEEE 754 binary16 bit pattern (exact in f64). */
+const f16Of = (half: number): number => {
+  const sign = half & 0x8000 ? -1 : 1;
+  const exponent = (half >>> 10) & 0x1f;
+  const fraction = half & 0x3ff;
+  if (exponent === 0) return sign * fraction * 2 ** -24;
+  if (exponent === 0x1f) return fraction === 0 ? sign * Infinity : Number.NaN;
+  return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
+};
+
+/**
+ * The value of element `lane` of a float-storage weight word, as the kernels restore it: f32 the word
+ * itself; bf16 the half as the high 16 bits of an f32, the low half first; f16 the half-float, the
+ * low half first. Each is exact in f32, so no rounding enters.
+ */
+const floatElement = (
+  storage: "bf16" | "f16" | "f32",
+  word: number,
+  lane: number,
+  f32: (bits: number) => number,
+): number => {
+  if (storage === "f32") return f32(word);
+  const half = (word >>> (lane * 16)) & 0xffff;
+  return storage === "bf16" ? f32((half << 16) >>> 0) : f16Of(half);
 };
 
 /** Reads one f32 from its u32 bits. */
@@ -68,7 +93,8 @@ const SLICE_ELEMENTS = 1 << 24;
 /**
  * The oracle's outputs `[rows][n]` (f64): `Σ_k x[r,k] · w[c,k] + bias[c]`, the weight restored in f32
  * as the kernels restore it. The streams are consumed: `x` for `rows · k` words, the weight, the
- * scale and the bias for the whole of `[n, k]`. `pause` is awaited between slices of columns.
+ * scale (an integer storage's only) and the bias for the whole of `[n, k]`. `pause` is awaited
+ * between slices of columns.
  */
 export const gemvOracle = async (
   shape: GemvOracleShape,
@@ -93,12 +119,14 @@ export const gemvOracle = async (
     if (column > 0 && column % columnsPerSlice === 0) await pause();
     sums.fill(0);
     for (let groupIndex = 0; groupIndex < groupsPerRow; groupIndex += 1) {
-      const scale = f32(streams.scale());
+      const scale = isFloatGemvStorage(storage) ? 1 : f32(streams.scale());
       const start = groupIndex * group;
       for (let element = start; element < start + group; element += perWord) {
         const word = streams.weight();
         for (let lane = 0; lane < perWord; lane += 1) {
-          const weight = Math.fround(decode(storage, word, lane) * scale);
+          const weight = isFloatGemvStorage(storage)
+            ? floatElement(storage, word, lane, f32)
+            : Math.fround(decode(storage, word, lane) * scale);
           const at = element + lane;
           for (let row = 0; row < rows; row += 1) sums[row] += x[row * k + at] * weight;
         }

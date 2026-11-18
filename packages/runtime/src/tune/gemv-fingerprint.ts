@@ -19,8 +19,7 @@
  */
 
 import type { LinearProgram } from "../runtime/linear-program.ts";
-import type { LinearGemvChoice } from "../runtime/linear-strategies.ts";
-import { gemvProgram, programWorkgroups } from "./gemv-candidates.ts";
+import { type GemvKernelChoice, gemvProgram, programWorkgroups } from "./gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
 import { canonicalJson, fnv1a64Hex, wgslTokenText } from "./fingerprint.ts";
 
@@ -41,7 +40,7 @@ export const gemvCaseTableId = (cases: readonly GemvCase[] = GEMV_CASES): string
 export type GemvProgramBuilder = (
   gemvCase: GemvCase,
   m: number,
-  choice: LinearGemvChoice,
+  choice: GemvKernelChoice,
 ) => LinearProgram;
 
 /**
@@ -68,6 +67,6 @@ export const gemvProgramKernelId = (program: LinearProgram): string => {
 export const gemvKernelId = (
   gemvCase: GemvCase,
   m: number,
-  choice: LinearGemvChoice,
+  choice: GemvKernelChoice,
   programFor: GemvProgramBuilder = gemvProgram,
 ): string => gemvProgramKernelId(programFor(gemvCase, m, choice));
