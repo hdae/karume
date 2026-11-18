@@ -112,7 +112,7 @@ const requiredFeatures = (features: GpuFeaturesSpec | undefined): ReadonlySet<st
  * of the practical preset's — there must be exactly one).
  *
  * A subset, so that a practical preset needing a feature the partner does not (shader-f16 of
- * `f16-c16`) still pairs (refutation verify/A2 §4-3 — with "equal", `f16-c16 ↔ f16` has zero
+ * `bf16-c16`) still pairs (refutation verify/A2 §4-3 — with "equal", `bf16-c16 ↔ bf16` has zero
  * candidates). The reverse (only the partner needs a feature) is not paired, because the partner
  * cannot be built on the device the practical preset gets.
  *

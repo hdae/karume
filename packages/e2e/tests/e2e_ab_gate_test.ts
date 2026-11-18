@@ -24,8 +24,8 @@ import {
   relRms,
 } from "./helpers/ab-gate.ts";
 
-const I8_DIT = { text_encoder: "f16", transformer: "i8", vae_decoder: "f16" };
-const F16_DIT = { text_encoder: "f16", transformer: "f16", vae_decoder: "f16" };
+const I8_DIT = { text_encoder: "bf16", transformer: "i8", vae_decoder: "bf16" };
+const BF16_DIT = { text_encoder: "bf16", transformer: "bf16", vae_decoder: "bf16" };
 
 /**
  * The presets laid out as in the anima distribution (a reference partner, practical presets and
@@ -35,15 +35,15 @@ const ANIMA_LIKE: QuantTable = {
   models: {
     turbo: {
       quants: {
-        f16: { weights: F16_DIT, session: {} },
-        "f16+dit8": { weights: I8_DIT, session: {} },
-        "f16+dit8-a8": { weights: I8_DIT, session: { linearCompute: "a8" } },
-        "f16+dit8-a8-attn8-s16": {
+        bf16: { weights: BF16_DIT, session: {} },
+        "bf16+dit8": { weights: I8_DIT, session: {} },
+        "bf16+dit8-a8": { weights: I8_DIT, session: { linearCompute: "a8" } },
+        "bf16+dit8-a8-attn8-s16": {
           weights: I8_DIT,
           session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
         },
-        "f16-c16": {
-          weights: F16_DIT,
+        "bf16-c16": {
+          weights: BF16_DIT,
           session: { linearCompute: "f16", attentionCompute: "f16" },
           gpuFeatures: { shaderF16: true },
         },
@@ -56,12 +56,12 @@ const BAND: AbBand = { floor: 1e-3, ceiling: 0.1 };
 
 describe("referencePartnerOf: derives a practical preset's reference partner from the manifest", () => {
   it("returns the one preset with the same weights and an empty session when there is exactly one", () => {
-    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "f16+dit8-a8-attn8-s16"), "f16+dit8");
-    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "f16+dit8-a8"), "f16+dit8");
+    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "bf16+dit8-a8-attn8-s16"), "bf16+dit8");
+    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "bf16+dit8-a8"), "bf16+dit8");
   });
 
-  it("pairs a reference partner whose gpuFeatures are a subset of the practical preset's (f16-c16 ↔ f16)", () => {
-    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "f16-c16"), "f16");
+  it("pairs a reference partner whose gpuFeatures are a subset of the practical preset's (bf16-c16 ↔ bf16)", () => {
+    assertEquals(referencePartnerOf(ANIMA_LIKE, "turbo", "bf16-c16"), "bf16");
   });
 
   it("does not pair when only the reference partner needs a feature (zero candidates, throws)", () => {
@@ -83,7 +83,7 @@ describe("referencePartnerOf: derives a practical preset's reference partner fro
       models: {
         m: {
           quants: {
-            f16: { weights: F16_DIT, session: {} },
+            bf16: { weights: BF16_DIT, session: {} },
             "i8-a8": { weights: I8_DIT, session: { linearCompute: "a8" } },
           },
         },
@@ -109,14 +109,18 @@ describe("referencePartnerOf: derives a practical preset's reference partner fro
 
   it("throws when a preset with an empty session is passed as the practical preset", () => {
     assertThrows(
-      () => referencePartnerOf(ANIMA_LIKE, "turbo", "f16+dit8"),
+      () => referencePartnerOf(ANIMA_LIKE, "turbo", "bf16+dit8"),
       Error,
       "has an empty session",
     );
   });
 
   it("throws on an unknown model / quant", () => {
-    assertThrows(() => referencePartnerOf(ANIMA_LIKE, "base", "f16"), Error, "has no model 'base'");
+    assertThrows(
+      () => referencePartnerOf(ANIMA_LIKE, "base", "bf16"),
+      Error,
+      "has no model 'base'",
+    );
     assertThrows(() => referencePartnerOf(ANIMA_LIKE, "turbo", "i4"), Error, "has no quant 'i4'");
   });
 });

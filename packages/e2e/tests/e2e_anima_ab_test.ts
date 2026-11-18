@@ -1,9 +1,9 @@
 /**
  * Anima's **self A/B check** (real GPU, ADR 0110 decision 5). It compares the default preset
- * `f16+dit8-a8-attn8-s16` (practical tier — a preset whose `session` bundles linear a8, attention
+ * `bf16+dit8-a8-attn8-s16` (practical tier — a preset whose `session` bundles linear a8, attention
  * a8 and f16 storage of S) with the reference partner whose `session` is empty, **on the same
  * machine with the same weights** (derived from the manifest — {@link referencePartnerOf};
- * `f16+dit8` in the current distribution). The comparison partner is the reference tier on the same
+ * `bf16+dit8` in the current distribution). The comparison partner is the reference tier on the same
  * machine; no torch golden is used.
  *
  * The steps of one case (= one resolution):
@@ -85,7 +85,7 @@ const results = openResults("anima-ab");
  */
 const MODEL = "anima-turbo-v1.1";
 /** The practical preset under test (the default preset). */
-const PRACTICAL = "f16+dit8-a8-attn8-s16";
+const PRACTICAL = "bf16+dit8-a8-attn8-s16";
 /** The name of the observation point (`comparisons[].output`). */
 const OBSERVATION = "step1-latent";
 
@@ -120,7 +120,10 @@ const SEED = 42;
  *   coefficient range of 0.35 to 0.67). If that cannot be shown, `floor: 0`, and the per-knob
  *   fallback is left to the census (decision 5-1).
  *
- * Derivation table (2026-09-26, Intel Arc B570 / Deno, reference partner `f16+dit8`):
+ * Derivation table (2026-09-26, Intel Arc B570 / Deno, reference partner `f16+dit8`). It was
+ * measured while the distribution stored the text encoder, the text conditioner and the VAE decoder
+ * in f16, under the preset names of then; it has not been measured again with the bf16 text stack
+ * of `bf16+dit8`:
  *
  * | Case | Measured relRMS | Measured maxAbs | relRMS of ③ (attn removed) | floor | ceiling | Taken on        |
  * | ---- | --------------- | --------------- | -------------------------- | ----- | ------- | --------------- |

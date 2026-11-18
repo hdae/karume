@@ -20,8 +20,9 @@
  * tolerance is forbidden**; the check stops red and prints what differs (PNG byte length / pixel
  * statistics / the PNG artifact). Loosening it would erase the meaning of "the port is done".
  *
- * NOTE: most cases (`f16+dit8-a8-attn8-s16` = the default preset) are **practical-preset rows**
- * baked on an opt-in preset; the only reference-path row is the one case `f16-1024` (ADR 0110
+ * NOTE: most cases (`bf16+dit8-a8-attn8-s16` = the default preset) are **practical-preset rows**
+ * baked on an opt-in preset; the reference-path rows are the two cases of the preset `bf16`
+ * (`bf16-1024` / `base-cfg-bf16`) (ADR 0110
  * decision 7 / ADR 0106 addendum 2026-09-26 — a row's class is derived from whether the quant
  * preset's `session` is empty). When the practical-tier kernels are changed on purpose, the
  * practical-preset rows are `rewrite`n in the same commit. The reference-path rows are frozen; if
@@ -135,9 +136,8 @@ const SEED = 42;
  * part of the check as the twin check.
  */
 const REFERENCE = [
-  { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 1024, height: 1024 } },
-  { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 512, height: 512 } },
-  { quant: "f16", resolution: { width: 1024, height: 1024 } },
+  { quant: "bf16+dit8-a8-attn8-s16", resolution: { width: 1024, height: 1024 } },
+  { quant: "bf16+dit8-a8-attn8-s16", resolution: { width: 512, height: 512 } },
   // The faithful preset (all 4 roles are upstream's bf16 bit patterns — ADR 0131 decision 3,
   // extended to every model on 2026-10-17). Only one turbo case holds a row (the bf16 of the other
   // models is covered by the byte comparison with the upstream checkpoint at export time).
@@ -591,7 +591,7 @@ test.skipIf(!RUNNABLE || references.lacksReference(TURBO_DPMPP_CASE))(
 
 /** The conditions of the CFG check (the RTX 3080 Ti rows are the 2026-08-22 measurement). */
 const BASE_REFERENCE = {
-  quant: "f16+dit8-a8-attn8-s16",
+  quant: "bf16+dit8-a8-attn8-s16",
   resolution: { width: 512, height: 512 },
   steps: 20,
   guidanceScale: 4,
@@ -687,8 +687,8 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg"))(
 
 // The faithful preset `bf16` (ADR 0131 decision 3 — all 4 roles hold the BF16 bit patterns of the
 // upstream checkpoint; compute is f32). It bakes one image with the same knobs as the CFG check and
-// compares it with this machine's row. Its rounding differs from the f16 preset (f16 has a narrower
-// exponent range), so it holds its own row and is not a twin. The bf16 weights are expanded by a
+// compares it with this machine's row. Its transformer is the bf16 one, not the i8 one of the CFG
+// check's default preset, so it holds its own row and is not a twin. The bf16 weights are expanded by a
 // bitcast inside the kernel (ADR 0131 decision 1) — this check pins that this route works on the
 // real assets of the distribution too.
 test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-bf16"))(
@@ -826,7 +826,7 @@ for (const model of EXTRA_MODELS) {
 test.skipIf(!RUNNABLE || references.lacksReference("fromPretrained-512"))(
   "e2e(real GPU): the fromPretrained (fetch layer + integrity verification) PNG matches the reference sha256",
   async () => {
-    const quant = "f16+dit8-a8-attn8-s16";
+    const quant = "bf16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
     const fetched = selectionRefs(resolveSelection(readManifest(), { quant }));
     const caches = new MemoryCacheStorage();
@@ -899,7 +899,7 @@ test.skipIf(!RUNNABLE || references.lacksReference("fromPretrained-512"))(
 describe.skipIf(!RUNNABLE || references.lacksReference("onEvent-1024"))(
   "e2e(real GPU): onEvent observation does not touch the numbers (event sequence / intermediate latents / abort)",
   () => {
-    const quant = "f16+dit8-a8-attn8-s16";
+    const quant = "bf16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 1024, height: 1024 };
     const runs: string[] = [];
     let scheduler: ReturnType<typeof parseAnimaPipelineConfig>["scheduler"];

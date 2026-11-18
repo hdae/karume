@@ -112,12 +112,12 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
 });
 
 /**
- * The DiT's counts under `linearCompute: "a8"` (the `f16+dit8-a8*` presets; counted 2026-10-25):
+ * The DiT's counts under `linearCompute: "a8"` (the `bf16+dit8-a8*` presets; counted 2026-10-25):
  * the f32 counts plus **linearPrologue 28 on the i8 seat** — the erf gelu folded into the step ① of
  * the i8 linear that reads it (perf-ledger F-4), the FFN down projection of the 28 blocks (gelu
- * [S, 8192] → linear [2048, 8192]). The f16 seat has no i8a8 linear, so it stays at 0 under a8.
+ * [S, 8192] → linear [2048, 8192]). The bf16 seat has no i8a8 linear, so it stays at 0 under a8.
  */
-const ditA8 = (quant: "i8" | "f16"): FusionCounts => ({
+const ditA8 = (quant: "i8" | "bf16"): FusionCounts => ({
   ...NONE,
   silu: 2,
   rope: 56,
@@ -129,14 +129,17 @@ const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly numbe
   fusionCounts(graph, shapes, { linearCompute: "a8" });
 
 /**
- * The DiT's counts on the a8 attention seat (the `f16+dit8-a8-attn8*` presets — linearCompute and
+ * The DiT's counts on the a8 attention seat (the `bf16+dit8-a8-attn8*` presets — linearCompute and
  * attentionCompute "a8"; counted 2026-10-25): the a8 counts plus **attentionPermute 56** — each of
  * the 56 attentions (28 self, 28 cross) absorbs the `[0, 2, 1, 3]` permute of v right before it
  * (perf-ledger F-3 A4 / F-8). Its q / k reach it through the per-head rms_norm and the RoPE (self)
  * or the per-head rms_norm alone (cross), so their permutes are not adjacent. On these seats, which
  * store S, the permute of O after it stays a node.
  */
-const ditAttn8 = (quant: "i8" | "f16"): FusionCounts => ({ ...ditA8(quant), attentionPermute: 56 });
+const ditAttn8 = (quant: "i8" | "bf16"): FusionCounts => ({
+  ...ditA8(quant),
+  attentionPermute: 56,
+});
 
 const attn8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
   fusionCounts(graph, shapes, { linearCompute: "a8", attentionCompute: "a8" });
@@ -154,7 +157,7 @@ const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 10
  * tokens for cross-attention — is a multiple of 4 at every S checked here), so each of the 56 also
  * absorbs the permute of O right after it (perf-ledger F-3 A4).
  */
-const ditOnline = (quant: "i8" | "f16"): FusionCounts => ({
+const ditOnline = (quant: "i8" | "bf16"): FusionCounts => ({
   ...ditA8(quant),
   attentionPermute: 112,
 });
@@ -168,10 +171,10 @@ const onlineCounts = (graph: IrGraph, shapes: Readonly<Record<string, readonly n
   );
 
 test.skipIf(!ASSETS_AVAILABLE)(
-  "the real DiT grabs adaln 85 / rope 56 / silu 2 per run (the same on w8a8 and f16; under a8, linearPrologue 28 on the i8 seat only; attentionPermute 56 on the a8 attention seat that stores S, 112 on the online seat)",
+  "the real DiT grabs adaln 85 / rope 56 / silu 2 per run (the same on w8a8 and bf16; under a8, linearPrologue 28 on the i8 seat only; attentionPermute 56 on the a8 attention seat that stores S, 112 on the online seat)",
   async () => {
     const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
-    for (const quant of ["i8", "f16"] as const) {
+    for (const quant of ["i8", "bf16"] as const) {
       const graph = await readAnimaGraph("transformer", quant);
       // Fusion looks only at the f32 compute path, so the hit counts do not move when the weight
       // storage changes.
@@ -222,7 +225,7 @@ test.skipIf(!ASSETS_AVAILABLE)(
 test.skipIf(!ASSETS_AVAILABLE)(
   "with fusion off, the real DiT's silu 2 / rope 56 / adaln 85 all come out as fusion candidates",
   async () => {
-    const graph = await readAnimaGraph("transformer", "f16");
+    const graph = await readAnimaGraph("transformer", "bf16");
     for (const sequence of [4096, 1024]) {
       const label = `S=${sequence}`;
       const { plan, context } = planDistributionFusions(graph, ditShapes(sequence), {
@@ -259,7 +262,7 @@ test.skipIf(!ASSETS_AVAILABLE)(
 test.skipIf(!ASSETS_AVAILABLE)(
   "fusion hit counts of the real text encoder / conditioner / VAE decoder",
   async () => {
-    const textEncoder = await readAnimaGraph("text_encoder", "f16");
+    const textEncoder = await readAnimaGraph("text_encoder", "bf16");
     assertEquals(
       fusionCounts(textEncoder, { input_ids: [1, 64] }),
       { ...NONE, silu: 28, rope: 56, identityExpand: 112 },
@@ -269,23 +272,20 @@ test.skipIf(!ASSETS_AVAILABLE)(
       source_hidden_states: [1, 64, 1024],
       target_input_ids: [1, 512],
     };
-    const conditioner = await readAnimaGraph("text_conditioner", "f16");
+    const conditioner = await readAnimaGraph("text_conditioner", "bf16");
     assertEquals(
       fusionCounts(conditioner, conditionerShapes),
       { ...NONE, rope: 24, identityExpand: 48 },
       "conditioner (the 12 BSHD q/k chains each are fused too)",
     );
-    // Its 6 erf gelu → linear pairs do not fold even under a8: the conditioner's weights are f16 /
-    // bf16 on every preset (no i8a8 linear to absorb them; the quant's session reaches only the
-    // DiT).
-    for (const quant of ["f16", "bf16"] as const) {
-      assertEquals(
-        a8Counts(await readAnimaGraph("text_conditioner", quant), conditionerShapes),
-        { ...NONE, rope: 24, identityExpand: 48 },
-        `conditioner ${quant} a8: no linearPrologue`,
-      );
-    }
-    const vae = await readAnimaGraph("vae_decoder", "f16");
+    // Its 6 erf gelu → linear pairs do not fold even under a8: the conditioner's weights are bf16
+    // on every preset (no i8a8 linear to absorb them; the quant's session reaches only the DiT).
+    assertEquals(
+      a8Counts(conditioner, conditionerShapes),
+      { ...NONE, rope: 24, identityExpand: 48 },
+      "conditioner bf16 a8: no linearPrologue",
+    );
+    const vae = await readAnimaGraph("vae_decoder", "bf16");
     assertEquals(
       fusionCounts(vae, { latents: [1, 16, 64, 64] }),
       { ...NONE, silu: 29, upsample2x: 3 },
@@ -298,38 +298,32 @@ test.skipIf(!ASSETS_AVAILABLE)(
  * The pipeline's default rule `models/vae_rms_silu` (the channel RMS norm and the SiLU after it in
  * one dispatch) planned on the VAE decoder's tile graph through the VAE decoder's rule list (the
  * list the pipeline gives its Session and its estimate), against the same options with the rule
- * disabled by name, at both seats (the f16 one of the default presets and the bf16 preset's;
- * counted 2026-11-11 as the candidate `candidate/vae_rms_silu_g8`): **29** norms with the SiLU and
- * **1** without it (the mid-block attention's norm, `[1, 384, 64, 64]` over axis 1, which a conv2d
- * reads). The built-in silu's 29 go to the rule (silu 29 → 0), upsample2x keeps its 3, and the
- * steps fall by 29 × 8 + 7 = 239 (the ten nodes of a site were nine steps, the silu pair being
- * one): 334 → 95. A 1024² decode runs the tile graph 9 times.
+ * disabled by name, at the bf16 seat every preset uses (counted 2026-11-11 as the candidate
+ * `candidate/vae_rms_silu_g8`, at the f16 seat the default presets used then and at this bf16
+ * one): **29** norms with the SiLU and **1** without it (the mid-block attention's norm,
+ * `[1, 384, 64, 64]` over axis 1, which a conv2d reads). The built-in silu's 29 go to the rule
+ * (silu 29 → 0), upsample2x keeps its 3, and the steps fall by 29 × 8 + 7 = 239 (the ten nodes of a
+ * site were nine steps, the silu pair being one): 334 → 95. A 1024² decode runs the tile graph 9 times.
  */
 test.skipIf(!ASSETS_AVAILABLE)(
   "the pipeline's default rule models/vae_rms_silu takes 29 + 1 norms of the VAE decoder's tile graph and moves only silu",
   async () => {
-    for (const seat of ["f16", "bf16"]) {
-      const graph = await readAnimaGraph("vae_decoder", seat);
-      const label = `vae_decoder/${seat}`;
-      const planned = vaeRmsSiluPlans(graph, { latents: [1, 16, 64, 64] });
-      assertEquals(planned.tails, { silu: 29, none: 1 }, `${label}: hits per tail`);
-      assertEquals(
-        planned.plain.plan.counts[VAE_RMS_SILU_RULE_NAME],
-        0,
-        `${label}: the plain side`,
-      );
-      assertEquals(
-        planned.fused.plan.counts,
-        { ...planned.plain.plan.counts, silu: 0, [VAE_RMS_SILU_RULE_NAME]: 30 },
-        `${label}: the counters`,
-      );
-      assertEquals(planned.plain.plan.counts.silu, 29, `${label}: silu without the rule`);
-      assertEquals(
-        [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
-        [334, 95],
-        `${label}: steps`,
-      );
-    }
+    const graph = await readAnimaGraph("vae_decoder", "bf16");
+    const label = "vae_decoder/bf16";
+    const planned = vaeRmsSiluPlans(graph, { latents: [1, 16, 64, 64] });
+    assertEquals(planned.tails, { silu: 29, none: 1 }, `${label}: hits per tail`);
+    assertEquals(planned.plain.plan.counts[VAE_RMS_SILU_RULE_NAME], 0, `${label}: the plain side`);
+    assertEquals(
+      planned.fused.plan.counts,
+      { ...planned.plain.plan.counts, silu: 0, [VAE_RMS_SILU_RULE_NAME]: 30 },
+      `${label}: the counters`,
+    );
+    assertEquals(planned.plain.plan.counts.silu, 29, `${label}: silu without the rule`);
+    assertEquals(
+      [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
+      [334, 95],
+      `${label}: steps`,
+    );
   },
 );
 
@@ -380,7 +374,7 @@ for (const model of EXTRA_MODELS) {
       const read = (component: string, dtype: string): Promise<IrGraph> =>
         readDistributionGraph(EXTRA_DIR, manifest, model, component, dtype, MIRRORS);
       const dit: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
-      for (const quant of ["i8", "f16"] as const) {
+      for (const quant of ["i8", "bf16"] as const) {
         const graph = await read("transformer", quant);
         assertEquals(fusionCounts(graph, ditShapes(4096)), dit, `${quant}: 1024px（S=4096）`);
         assertEquals(fusionCounts(graph, ditShapes(1024)), dit, `${quant}: 512px（S=1024）`);
@@ -397,12 +391,12 @@ for (const model of EXTRA_MODELS) {
         );
       }
       assertEquals(
-        fusionCounts(await read("text_encoder", "f16"), { input_ids: [1, 64] }),
+        fusionCounts(await read("text_encoder", "bf16"), { input_ids: [1, 64] }),
         { ...NONE, silu: 28, rope: 56, identityExpand: 112 },
         "text encoder (cross-repository)",
       );
       assertEquals(
-        fusionCounts(await read("text_conditioner", "f16"), {
+        fusionCounts(await read("text_conditioner", "bf16"), {
           source_hidden_states: [1, 64, 1024],
           target_input_ids: [1, 512],
         }),
@@ -410,7 +404,7 @@ for (const model of EXTRA_MODELS) {
         "conditioner",
       );
       assertEquals(
-        fusionCounts(await read("vae_decoder", "f16"), { latents: [1, 16, 64, 64] }),
+        fusionCounts(await read("vae_decoder", "bf16"), { latents: [1, 16, 64, 64] }),
         { ...NONE, silu: 29, upsample2x: 3 },
         "VAE decoder (cross-repository, one tile)",
       );
