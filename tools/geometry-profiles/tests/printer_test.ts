@@ -7,7 +7,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { BUILTIN_GEOMETRY_PROFILES } from "@karume/runtime";
 import { describe, it } from "vite-plus/test";
 import { formatTypeScript, REPOSITORY_ROOT } from "../format.ts";
@@ -49,8 +49,19 @@ describe("literal", () => {
 describe("the printer and the GEMV choices of a table (linearGemv)", () => {
   it("prints the field of a table that carries it, and nothing for a table without it (every registered table)", () => {
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-      assertEquals(profileModule(profile).includes("linearGemv"), false, profile.id);
+      assertEquals(
+        profileModule(profile).includes("linearGemv"),
+        profile.linearGemv !== undefined,
+        profile.id,
+      );
     }
+    // Both kinds are registered: nvidia-ampere carries the field, the other tables do not
+    assertEquals(
+      BUILTIN_GEOMETRY_PROFILES.filter((profile) => profile.linearGemv !== undefined).map(
+        ({ id }) => id,
+      ),
+      ["nvidia-ampere"],
+    );
     const linearGemv = {
       sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] },
       rowsThreadTarget: 16384,
@@ -58,7 +69,8 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
         { storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false },
       ],
     } as const;
-    const [table] = BUILTIN_GEOMETRY_PROFILES;
+    const table = BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.linearGemv === undefined);
+    assert(table !== undefined);
     assertEquals(
       profileModule({ ...table, linearGemv }).includes(
         'linearGemv: { sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] }, rowsThreadTarget: 16384, parallelShapes: [{ storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false }] }',

@@ -63,9 +63,10 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // and the thread target are still the kernel module's. The `rowBlock` of a row is another change
 // since (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do
 // not read it. The per-shape exceptions of the sequential variant are the kernel module's one (the
-// i8 output head, in `oldDefaultVariant`) plus the 25 rows added since
-// (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-101 and K-112: the int4 output heads of the
-// q4_0 QAT E2B / E4B models and the bf16 linears of regular E2B / E4B).
+// i8 output head, in `oldDefaultVariant`) plus the 22 rows added since
+// (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-112: bf16 linears of regular E2B / E4B that
+// no measured device is slower with). The exceptions one device gains from and another loses with
+// are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES`: `nvidia-ampere`).
 // ---------------------------------------------------------------------------
 
 const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
@@ -287,8 +288,6 @@ const oldDefaultVariant = (shape?: Shape): LinearGemvVariant => ({
 
 /** The sequential exceptions added since the kernel module's one (the default profile's order). */
 const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
-  { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
-  { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
   { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
   { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
   { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
@@ -306,12 +305,24 @@ const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
   { storage: "bf16", n: 512, k: 2560, variant: { cols: 16, unroll: 16 } },
   { storage: "bf16", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
   { storage: "bf16", n: 2560, k: 2048, variant: { cols: 16, unroll: 8 } },
-  { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
   { storage: "bf16", n: 2560, k: 10240, variant: { cols: 16, unroll: 8 } },
   { storage: "bf16", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
   { storage: "bf16", n: 4096, k: 2560, variant: { cols: 16, unroll: 8 } },
   { storage: "bf16", n: 1024, k: 2560, variant: { cols: 16, unroll: 16 } },
   { storage: "bf16", n: 2560, k: 4096, variant: { cols: 16, unroll: 8 } },
+];
+
+/**
+ * The sequential exceptions `nvidia-ampere` carries after the default profile's (the generator's
+ * order: the order of the sweep's case table): what the RTX 3080 Ti's GEMV sweep records adopt and
+ * the default profile does not hold — the int4 output heads of the q4_0 QAT E2B / E4B models and
+ * bf16 10240 × 2560, which the RTX 5070 Ti is slower with, and the drafter shape int4 256 × 2048.
+ */
+const AMPERE_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
+  { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
+  { storage: "i4", n: 256, k: 2048, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
+  { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
 ];
 
 /** The pinned sequential variant of a shape: a row added since, otherwise the kernel module's lookup. */
@@ -483,8 +494,9 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
         if (pinned.cols !== old.cols || pinned.unroll !== old.unroll) added += 1;
       }
     }
-    // The two int4 output heads, and bf16 6144 × 1536 and 1536 × 256: the grid meets rows added since.
-    assertEquals(added, 4);
+    // bf16 6144 × 1536 and 1536 × 256: the grid meets rows added since. The int4 output heads of
+    // the grid are no row of the default profile.
+    assertEquals(added, 2);
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const n of [1, 256, 2048, 4096, 12288, 262144]) {
         for (let m = 1; m <= 64; m += 1) {
@@ -851,11 +863,27 @@ const OWN: GeometryProfile = {
 };
 
 describe("a table without the GEMV choices runs with the default profile's, resolved where a Session selects its profile", () => {
-  it("no embedded table carries the field, so every adapter runs with the default profile's choices", () => {
+  it("an embedded table without the field runs with the default profile's choices, and nvidia-ampere alone carries its own: the default's with its four sequential exceptions after them", () => {
+    const carrying: string[] = [];
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-      assertEquals("linearGemv" in profile, false, profile.id);
+      if ("linearGemv" in profile) {
+        carrying.push(profile.id);
+        continue;
+      }
       assertStrictEquals(resolveGeometryProfile(profile).linearGemv, GEMV, profile.id);
     }
+    assertEquals(carrying, ["nvidia-ampere"]);
+    const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere");
+    assert(ampere !== undefined);
+    // A table holds the field as a whole, so this also pins that its parallel rows, thread target
+    // and general variant are the default's of today: a change of those regenerates the table.
+    assertEquals(resolveGeometryProfile(ampere).linearGemv, {
+      ...GEMV,
+      sequential: {
+        variant: GEMV.sequential.variant,
+        shapes: [...GEMV.sequential.shapes, ...AMPERE_SEQUENTIAL_SHAPES],
+      },
+    });
   });
 
   it("resolveGeometryProfile fills in the default's choices and keeps every other field of the table, and keeps a table's own", () => {

@@ -299,24 +299,24 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // DECIDED: the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
     // docs/decisions/0082-linear-gemv-decode.md
     //
-    // The rows after it are the exceptions the derivation adopts from GEMV sweep records of the RTX
-    // 3080 Ti (2026-11-18). The rule (docs/spec/geometry-profiles.md, "Deriving the GEMV choices"):
-    // every word the general variant's, and at least ×1.10 over it at M = 1 in every steady group,
-    // from two records or more.
-    // - The int4 output heads of the Gemma 4 q4_0 QAT E2B / E4B models: 16 columns per workgroup,
-    //   ×1.68 to ×2.52 per dispatch in three records (perf-ledger K-101).
-    // - The bf16 linears of regular Gemma 4 E2B / E4B: a bf16 word holds 8 elements where an int4
-    //   word holds 32, so the general read-ahead of 4 words keeps a quarter of the bytes in flight;
-    //   8 or 16 words ahead is ×1.17 to ×1.89 per dispatch in three to five records (perf-ledger
-    //   K-112). The two bf16 output heads have no row: no variant gained in every record.
+    // The rows after it are bf16 linears of regular Gemma 4 E2B / E4B: a bf16 word holds 8 elements
+    // where an int4 word holds 32, so the general read-ahead of 4 words keeps a quarter of the bytes
+    // in flight. They are the exceptions that the derivation adopts from GEMV sweep records of the
+    // RTX 3080 Ti (docs/spec/geometry-profiles.md, "Deriving the GEMV choices": every word the general
+    // variant's, and at least ×1.10 over it at M = 1 in every steady group, from two records or
+    // more — ×1.17 to ×1.89 per dispatch in three to five records each, perf-ledger K-112) and
+    // that no measured device is slower with: the RTX 5070 Ti in Chrome reads them ×1.015 to ×1.495
+    // over the general variant (2026-11-18).
+    // A row a measured device is slower with is not a row of the default; it lives in the table of
+    // the device that gains from it (`nvidia-ampere` carries the int4 output heads of the q4_0 QAT
+    // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95).
     // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
     // the general variant.
-    // MUST: a row added or changed goes together with tests/gpu_linear_gemv_variant_test.ts, which
-    // compares every row's words with the general variant's on the row's own shape.
+    // MUST: a row added or changed, here or in a registered table, goes together with
+    // tests/gpu_linear_gemv_variant_test.ts, which compares every row's words with the general
+    // variant's on the row's own shape.
     shapes: [
       { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
-      { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
-      { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
       { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
       { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
       { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
@@ -334,7 +334,6 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       { storage: "bf16", n: 512, k: 2560, variant: { cols: 16, unroll: 16 } },
       { storage: "bf16", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
       { storage: "bf16", n: 2560, k: 2048, variant: { cols: 16, unroll: 8 } },
-      { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
       { storage: "bf16", n: 2560, k: 10240, variant: { cols: 16, unroll: 8 } },
       { storage: "bf16", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
       { storage: "bf16", n: 4096, k: 2560, variant: { cols: 16, unroll: 8 } },

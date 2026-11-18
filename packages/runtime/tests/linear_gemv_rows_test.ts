@@ -26,7 +26,11 @@
 import { describe, it, test } from "vite-plus/test";
 import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
-import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import {
+  DEFAULT_GEOMETRY_PROFILE,
+  resolveGeometryProfile,
+} from "../src/kernels/geometry-profile.ts";
+import { NVIDIA_AMPERE } from "../src/kernels/geometry-profiles/nvidia-ampere.ts";
 import {
   defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
@@ -431,12 +435,24 @@ describe("M=1 GEMV shape selection", () => {
     );
   });
 
-  it("selects 16 columns and 2 words ahead for the measured int4 output heads, and 8 or 16 words ahead for the measured bf16 shapes, each under its own key", () => {
+  it("selects 8 or 16 words ahead for the bf16 shapes no measured device is slower with, each under its own key, and leaves the int4 output heads and bf16 10240 × 2560 to the table of the device that gains from them", () => {
+    // The default profile: the general variant. The RTX 3080 Ti's table: its own rows.
+    const ampere = resolveGeometryProfile(NVIDIA_AMPERE).linearGemv;
     for (const k of [1536, 2560]) {
-      const head = defaultLinearGemvVariant(GEMV, { storage: "i4", n: 262144, k });
+      const shape = { storage: "i4", n: 262144, k } as const;
+      assertEquals(defaultLinearGemvVariant(GEMV, shape), { cols: 32, unroll: 4 });
+      const head = defaultLinearGemvVariant(ampere, shape);
       assertEquals(head, { cols: 16, unroll: 2 });
       assertEquals(linearGemvKey("i4", 32, head), "linear_gemv:v1:f32:c16u2:wi4g32");
     }
+    const tall = { storage: "bf16", n: 10240, k: 2560 } as const;
+    assertEquals(defaultLinearGemvVariant(GEMV, tall), { cols: 32, unroll: 4 });
+    assertEquals(defaultLinearGemvVariant(ampere, tall), { cols: 16, unroll: 8 });
+    // A table holds the default's rows too: a shape of the default selects the same variant there
+    assertEquals(defaultLinearGemvVariant(ampere, { storage: "bf16", n: 12288, k: 1536 }), {
+      cols: 16,
+      unroll: 8,
+    });
     const wide = defaultLinearGemvVariant(GEMV, { storage: "bf16", n: 12288, k: 1536 });
     assertEquals(wide, { cols: 16, unroll: 8 });
     assertEquals(linearGemvKey("bf16", undefined, wide), "linear_gemv:v1:f32:c16u8:wbf16");

@@ -1236,8 +1236,10 @@ export type EstimateFusionFacts = Omit<
  * that list), the weights' storage from the residency plan (`plannedResidentWeights`) and the
  * weights an external step may not bind (`sharedOrPooledWeights`, with the expert plan's pooled
  * weights — `pooled` — as the executor takes its pool's). The GEMV choices are the default
- * profile's: an estimate has no adapter, and every embedded table resolves to them (no table carries
- * its own `linearGemv` yet).
+ * profile's: an estimate has no adapter. An embedded table without `linearGemv` resolves to them;
+ * `nvidia-ampere` carries its own, the default's with more per-shape exceptions of the sequential
+ * variant, which no fusion and no size reads (tests/linear_gemv_profile_test.ts pins that its
+ * parallel rows and thread target are the default's).
  *
  * `options` are checked values (the entry of {@link estimateGraphMemory} ran
  * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the
