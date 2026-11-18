@@ -100,23 +100,6 @@ export type SubmitPolicy = {
   readonly minChunkSize: number;
   /** A hard limit on the dispatch count that is not exceeded even with measured evidence. */
   readonly maxChunkSize: number;
-  /**
-   * The dispatch-count limit of the **first chunk of a measurement window** (a run, or a batch
-   * section). Each following chunk of the window may hold twice as many as the one before it, until
-   * the limit that holds without this field is reached ({@link SubmitPolicy.initialChunkSize} while
-   * there is no measured evidence, {@link SubmitPolicy.maxChunkSize} once there is). Omitted: no
-   * ramp — every chunk of a window has that limit.
-   *
-   * WHY: the GPU has none of a run's work until the window's first submit, so it waits for the host
-   * to encode one whole chunk. In a run of many short dispatches (a decode token of a language
-   * model: about 900 of them, a few microseconds each on either side) that wait is several percent
-   * of the run. A small first chunk starts the GPU early, and doubling keeps it supplied while the
-   * host encodes the rest: a chunk takes the host about as long to encode as the GPU takes to run
-   * the chunk before it (perf-ledger H-29). The commands and their order do not change.
-   *
-   * MUST: within [`minChunkSize`, `maxChunkSize`] (checked at construction).
-   */
-  readonly firstChunkSize?: number;
 };
 
 /**
@@ -139,16 +122,12 @@ export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = Object.freeze({
  * enumerable fields, so inherited or non-enumerable fields are dropped, and a policy that passed
  * before the copy turns into a rejection for 0.
  */
-export const copySubmitPolicy = (policy: SubmitPolicy): SubmitPolicy => {
-  const firstChunkSize = policy.firstChunkSize;
-  return {
-    timeBudgetMs: policy.timeBudgetMs,
-    initialChunkSize: policy.initialChunkSize,
-    minChunkSize: policy.minChunkSize,
-    maxChunkSize: policy.maxChunkSize,
-    ...(firstChunkSize === undefined ? {} : { firstChunkSize }),
-  };
-};
+export const copySubmitPolicy = (policy: SubmitPolicy): SubmitPolicy => ({
+  timeBudgetMs: policy.timeBudgetMs,
+  initialChunkSize: policy.initialChunkSize,
+  minChunkSize: policy.minChunkSize,
+  maxChunkSize: policy.maxChunkSize,
+});
 
 /**
  * Safety factor applied to the estimated time. A chunk is estimated with the **average cost**
@@ -213,17 +192,6 @@ const assertPolicy = (policy: SubmitPolicy): void => {
       `SubmitPolicy.initialChunkSize (${policy.initialChunkSize}) is outside [${policy.minChunkSize}, ${policy.maxChunkSize}]`,
     );
   }
-  const first = policy.firstChunkSize;
-  if (first !== undefined) {
-    if (!Number.isInteger(first) || first < 1) {
-      throw new SubmitPolicyError(`SubmitPolicy.firstChunkSize must be an integer >= 1: ${first}`);
-    }
-    if (first < policy.minChunkSize || first > policy.maxChunkSize) {
-      throw new SubmitPolicyError(
-        `SubmitPolicy.firstChunkSize (${first}) is outside [${policy.minChunkSize}, ${policy.maxChunkSize}]`,
-      );
-    }
-  }
   if (!(policy.timeBudgetMs > 0) || !Number.isFinite(policy.timeBudgetMs)) {
     throw new SubmitPolicyError(
       `SubmitPolicy.timeBudgetMs must be a positive finite number: ${policy.timeBudgetMs}`,
@@ -266,9 +234,7 @@ export type SubmitStats = {
   readonly discardedDispatches: number;
   /**
    * The current **dispatch-count limit** of one chunk. {@link SubmitPolicy.initialChunkSize} while
-   * there is no measured evidence, {@link SubmitPolicy.maxChunkSize} once there is. Under
-   * {@link SubmitPolicy.firstChunkSize} it is the limit of the chunk being queued: the ramp's value
-   * for the chunks the open window has submitted so far.
+   * there is no measured evidence, {@link SubmitPolicy.maxChunkSize} once there is.
    *
    * NOTE: no longer the main actor of the adaptation (meaning changed at M1-P2). The real
    * boundaries are usually set first by the time budget derived from {@link
@@ -957,21 +923,13 @@ export class SubmitScheduler {
   }
 
   /**
-   * The dispatch-count limit of the chunk being queued. While there is no measured evidence it
-   * stays at the bootstrap value (invariant 1 — a measurement of 0 is no ground for growth). Under
-   * {@link SubmitPolicy.firstChunkSize} the chunks of a window ramp up to that limit: the first
-   * holds `firstChunkSize`, each later one twice the one before.
+   * The current dispatch-count limit. While there is no measured evidence it stays at the bootstrap
+   * value (invariant 1 — a measurement of 0 is no ground for growth).
    */
   #chunkSizeLimit(): number {
-    const limit =
-      this.#msPerWorkgroup === undefined
-        ? this.#policy.initialChunkSize
-        : this.#policy.maxChunkSize;
-    const first = this.#policy.firstChunkSize;
-    if (first === undefined) return limit;
-    // `#windowChunks` is the chunks already submitted in the open window (0 before its first
-    // submit and after a fence). Past 30 doublings the ramp is beyond any limit.
-    return Math.min(limit, first * 2 ** Math.min(this.#windowChunks, 30));
+    return this.#msPerWorkgroup === undefined
+      ? this.#policy.initialChunkSize
+      : this.#policy.maxChunkSize;
   }
 
   /**
