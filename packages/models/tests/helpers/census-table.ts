@@ -790,7 +790,8 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
-    // Every f16-stored linear goes to the c16 GEMM skeleton (the M=1 GEMV computes in f32 only).
+    // The seats of `bf16-c16`: every bf16-stored linear goes to the c16 GEMM skeleton, which
+    // decodes bf16 into its f16 tiles (the M=1 GEMV computes in f32 only).
     // attentionCompute is not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
