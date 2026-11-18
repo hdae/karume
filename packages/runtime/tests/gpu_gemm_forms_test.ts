@@ -60,14 +60,22 @@ const distinct = (geometries: readonly GemmGeometry[]): GemmGeometry[] => {
 
 const PROFILES = [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES];
 
-/** Every `gemmRows` geometry of the default profile and the embedded tables. */
+/** A geometry's tile: the reference every variant is compared with carries no field. */
+const withoutFields = ({ form: _form, decode: _decode, ...geometry }: GemmGeometry): GemmGeometry =>
+  geometry;
+
+/**
+ * The tile of every `gemmRows` geometry of the default profile and the embedded tables. A table's
+ * rule may carry a skeleton form; read as it is, it would make the reference of the comparison the
+ * form's own kernel.
+ */
 const GEMM_GEOMETRIES = distinct(
-  PROFILES.flatMap((profile) => profile.gemmRows.map((rule) => rule.geometry)),
+  PROFILES.flatMap((profile) => profile.gemmRows.map((rule) => withoutFields(rule.geometry))),
 );
 
-/** Every `conv2d` geometry of the default profile and the embedded tables. */
+/** The tile of every `conv2d` geometry of the default profile and the embedded tables. */
 const CONV_GEOMETRIES = distinct(
-  PROFILES.flatMap((profile) => [profile.conv2d.rows64, profile.conv2d.rows32]),
+  PROFILES.flatMap((profile) => [profile.conv2d.rows64, profile.conv2d.rows32].map(withoutFields)),
 );
 
 const name = (geometry: GemmGeometry): string =>
@@ -314,9 +322,6 @@ const withBench = async (body: (bench: Bench) => Promise<void>): Promise<void> =
     gpu.destroy();
   }
 };
-
-const withoutFields = ({ form: _form, decode: _decode, ...geometry }: GemmGeometry): GemmGeometry =>
-  geometry;
 
 // ── linear / matmul / bmm ──────────────────────────────────────────────────────────────────────
 

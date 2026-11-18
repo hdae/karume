@@ -1975,10 +1975,6 @@ const declaredWorkgroupBytes = (wgsl: string): number => {
   }, 0);
 };
 
-/**
- * The f32 / f16 GEMM geometries to compare (the default, every field of the embedded tables,
- * brought-in geometries exceeding the limits).
- */
 const gemmGeometriesOf = (profile: GeometryProfile): GemmGeometry[] => [
   ...profile.gemmRows.map((rule) => rule.geometry),
   profile.attention.qk,
@@ -1987,7 +1983,29 @@ const gemmGeometriesOf = (profile: GeometryProfile): GemmGeometry[] => [
   profile.conv2d.rows32,
 ];
 const SAMPLE_PROFILES = [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES];
-const SAMPLE_GEMM = [...SAMPLE_PROFILES.flatMap(gemmGeometriesOf), THREADS_512, STORAGE_20K];
+const withoutDecode = ({ decode: _decode, ...geometry }: GemmGeometry): GemmGeometry => geometry;
+const tileOf = ({ regM, regN, wgX, wgY }: GemmGeometry): GemmGeometry => ({
+  regM,
+  regN,
+  wgX,
+  wgY,
+});
+/**
+ * The f32 / f16 GEMM geometries to compare (the default, every field of the embedded tables,
+ * brought-in geometries exceeding the limits). A table's `conv2d` geometry may carry the counter
+ * decode, which is conv2d's alone — generation refuses it on every other op, and no other field of
+ * a table can hold it — so such a geometry is followed by the same tile and form without it, which
+ * every op takes.
+ */
+const SAMPLE_GEMM = [
+  ...SAMPLE_PROFILES.flatMap(gemmGeometriesOf),
+  THREADS_512,
+  STORAGE_20K,
+].flatMap((geometry) =>
+  geometry.decode === undefined ? [geometry] : [geometry, withoutDecode(geometry)],
+);
+/** The tiles of {@link SAMPLE_GEMM} (no skeleton form, no decode): the bases the fields are put on. */
+const SAMPLE_TILES = SAMPLE_GEMM.map(tileOf);
 const SAMPLE_I8A8 = [
   ...SAMPLE_PROFILES.flatMap(({ i8a8: { linear, ...fields } }) => [
     ...linear.map((rule) => rule.geometry),
@@ -2002,6 +2020,20 @@ const label = (geometry: GemmGeometry | I8a8Geometry): string => JSON.stringify(
 describe("the derivation of shared memory (a pure function) matches the total of codegen's var<workgroup> declarations", () => {
   it("f32 / f16 GEMM skeletons (linear, fused attention ①QK / ③PV, conv2d, matmul)", () => {
     for (const geometry of SAMPLE_GEMM) {
+      if (geometry.decode !== undefined) {
+        // conv2d's alone: the other generators refuse it, so only conv2d declares for it
+        assertThrows(
+          () => matmulWgsl(true, 128, geometry),
+          CodegenError,
+          "matmul: the geometry's decode field is conv2d's alone",
+        );
+        assertEquals(
+          gemmWorkgroupStorageBytes(geometry, "f32"),
+          declaredWorkgroupBytes(conv2dIgemmWgsl("f32", true, 64, geometry)),
+          `conv2d ${label(geometry)}`,
+        );
+        continue;
+      }
       const cases: readonly (readonly [string, GemmCompute, string])[] = [
         ["matmul", "f32", matmulWgsl(true, 128, geometry)],
         ["linear f32", "f32", linearWgsl("f32", true, "f32", 128, undefined, geometry)],
@@ -2035,7 +2067,7 @@ describe("the derivation of shared memory (a pure function) matches the total of
   });
 
   it("the f32 skeleton forms and the conv2d counter decode (perf-ledger K-88 — linear, matmul, bmm, conv2d v4): the shared tiles are declared as without them", () => {
-    for (const base of SAMPLE_GEMM) {
+    for (const base of SAMPLE_TILES) {
       for (const form of ["tb-un", "tas-tb-un"] as const) {
         const geometry: GemmGeometry = { ...base, form };
         assertEquals(

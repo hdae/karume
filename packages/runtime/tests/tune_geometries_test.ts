@@ -397,9 +397,11 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
         index,
     );
 
-  it("a linear / matmul case: the gemmRows geometry of the default and every registered table for its M, each without the form and with each form, the default first", () => {
+  it("a linear / matmul case: the tile of the gemmRows geometry of the default and every registered table for its M (a rule that carries a form counts as its tile), each tile once, without the form and with each form, the default first", () => {
     for (const rows of [64, 512, 768, 4096]) {
-      const bases = distinct(PROFILES.map((profile) => gemmRowsGeometry(profile, rows)));
+      const bases = distinct(
+        PROFILES.map((profile) => gemmTileGeometry(gemmRowsGeometry(profile, rows))),
+      );
       const candidates = k88GemmCandidates(rows);
       assertEquals(
         names(candidates),
@@ -415,10 +417,54 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
     }
   });
 
-  it("a conv2d case: the geometry of its m-tile class in the default and every registered table, each with no field, each form, the decode alone and the decode with each form", () => {
+  it("a table whose rule carries a field adds its tile once: every tile's variants appear once, whatever fields the tables' rules carry", () => {
+    const TILE: GemmGeometry = { regM: 4, regN: 4, wgX: 16, wgY: 16 };
+    const CONV_TILE: GemmGeometry = { regM: 8, regN: 4, wgX: 16, wgY: 8 };
+    const table = (id: string, gemm: GemmGeometry, conv: GemmGeometry): GeometryProfile => ({
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id,
+      gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: gemm }],
+      conv2d: { rows64: conv, rows32: conv },
+    });
+    // Three tables on one tile: without a field, with a form, with another form (and the decode)
+    const tables = [
+      table("plain", TILE, CONV_TILE),
+      table("form", { ...TILE, form: "tb-un" }, { ...CONV_TILE, form: "tb-un" }),
+      table(
+        "both",
+        { ...TILE, form: "tas-tb-un" },
+        { ...CONV_TILE, form: "tas-tb-un", decode: "counter" },
+      ),
+    ];
+    const defaultTile = gemmName(gemmRowsGeometry(DEFAULT_GEOMETRY_PROFILE, 4096));
+    const tile = gemmName(TILE);
+    assert(tile !== defaultTile);
+    assertEquals(
+      names(k88GemmCandidates(4096, tables)),
+      [defaultTile, tile].flatMap((name) => [name, `${name}:tb-un`, `${name}:tas-tb-un`]),
+    );
+    const defaultConv = conv2dCandidate(conv2dProfileGeometry(DEFAULT_GEOMETRY_PROFILE, 64)).name;
+    const conv = conv2dCandidate(CONV_TILE).name;
+    assert(conv !== defaultConv);
+    assertEquals(
+      names(k88Conv2dCandidates(1024, tables)),
+      [defaultConv, conv].flatMap((name) => [
+        name,
+        `${name}:tb-un`,
+        `${name}:tas-tb-un`,
+        `${name}:dec`,
+        `${name}:tb-un:dec`,
+        `${name}:tas-tb-un:dec`,
+      ]),
+    );
+  });
+
+  it("a conv2d case: the tile of the geometry of its m-tile class in the default and every registered table (one that carries a field counts as its tile), each tile once, with no field, each form, the decode alone and the decode with each form", () => {
     for (const channels of [1024, 96]) {
       const mTile = channels % 64 === 0 ? 64 : 32;
-      const bases = distinct(PROFILES.map((profile) => conv2dProfileGeometry(profile, mTile)));
+      const bases = distinct(
+        PROFILES.map((profile) => gemmTileGeometry(conv2dProfileGeometry(profile, mTile))),
+      );
       const candidates = k88Conv2dCandidates(channels);
       assertEquals(
         names(candidates),

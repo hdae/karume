@@ -106,8 +106,26 @@ type ProfileCase = {
   readonly expected: (profile: GeometryProfile) => readonly ExpectedKey[];
 };
 
+/**
+ * The key parts of a geometry's optional fields (perf-ledger K-88): the skeleton form of a
+ * `gemmRows` or `conv2d` geometry and conv2d's counter decode, as the keys spell them. The cases
+ * below run the vec4 kernels of f32 compute, which take them (linear K 64 N 96, matmul and bmm
+ * K 64 N 80, conv2d K 72 on a width of 20), so a table's field must show in the key the Session
+ * ran — without these parts a Session that dropped the field would pass on the tile alone.
+ */
+const fieldParts = (geometry: GemmGeometry): readonly string[] => [
+  ...(geometry.form === undefined ? [] : [`:${geometry.form}`]),
+  ...(geometry.decode === undefined ? [] : [":dec"]),
+];
+
+/** The tile's key part followed by the parts of the geometry's fields. */
+const gemmParts = (geometry: GemmGeometry): readonly string[] => [
+  gemmGeometryTileKeyPart(geometry),
+  ...fieldParts(geometry),
+];
+
 const rowsKey = (prefix: string, rows: number) => (profile: GeometryProfile) => [
-  { prefix, parts: [gemmGeometryTileKeyPart(gemmRowsGeometry(profile, rows))] },
+  { prefix, parts: gemmParts(gemmRowsGeometry(profile, rows)) },
 ];
 
 const linearCase = (m: number): ProfileCase => {
@@ -150,7 +168,7 @@ const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =
     return {
       ...linearCase(m),
       name: `linear M=${m}（gemmRows ${range}）`,
-      expected: () => [{ prefix: "linear:", parts: [gemmGeometryTileKeyPart(geometry)] }],
+      expected: () => [{ prefix: "linear:", parts: gemmParts(geometry) }],
     };
   });
 
@@ -160,6 +178,7 @@ const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =
 const conv2dParts = (geometry: GemmGeometry): readonly string[] => [
   `igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}`,
   `:wg${geometry.wgX}x${geometry.wgY}`,
+  ...fieldParts(geometry),
 ];
 
 const conv2dCase = (channelsOut: number, rows: "rows64" | "rows32"): ProfileCase => {
