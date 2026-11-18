@@ -32,7 +32,6 @@ import {
   type ModelEntry,
   openContainerSource,
   prefetchAssets,
-  type Quant,
   type ResolvedSelection,
 } from "@karume/hub";
 import {
@@ -64,22 +63,6 @@ export type SingleFileSource =
     };
 
 /**
- * A float storage of a role as the family's refusal sees it: the role converted against the plan of
- * the `label` container, its 16-bit float weights stored as `codec` (the file's `dtype`'s),
- * under the selected quant.
- */
-export type SingleFileCombination = {
-  readonly quantName: string;
-  readonly quant: Quant;
-  /** The dtype of every tensor of the role in the file. */
-  readonly dtype: TensorDtype;
-  /** The weights label of the container whose plan the role is converted against. */
-  readonly label: string;
-  /** The codec the role's 16-bit float weights are stored as: the file's, its own bits. */
-  readonly codec: Float16Codec;
-};
-
-/**
  * How a family takes one component from a single file. A role the table does not list always comes
  * from the distribution.
  */
@@ -103,12 +86,6 @@ export type SingleFileRole = {
    *   the file's dtype — for a component no preset quantizes.
    */
   readonly storage: "quant" | "file-dtype";
-  /**
-   * A combination of a float storage and the selected quant that the family does not run (one the
-   * runtime does not execute, or whose numbers nothing checks): the reason, or `undefined`. Asked
-   * once the container of the file's dtype is settled, before any fetch.
-   */
-  readonly refuse?: (combination: SingleFileCombination) => string | undefined;
 };
 
 /** A family's single-file declaration: its roles and its float storage. */
@@ -293,8 +270,7 @@ const advice = (setting: RoleSetting, refusedLabel?: string): string => {
 /**
  * The container the role is converted against under `quantName` ({@link SingleFileRole.storage}),
  * or the refusal: a role stored as a float whose tensors mix dtypes, or whose dtype has no 16-bit
- * float codec; a model without the float container; a combination the family refuses. Manifest data
- * only — nothing is fetched.
+ * float codec; a model without the float container. Manifest data only — nothing is fetched.
  *
  * SPEC: docs/spec/single-file.md#which-component-comes-from-where
  */
@@ -344,8 +320,7 @@ const resolveStorage = (setting: RoleSetting, quantName: string): RoleStorage =>
     };
   }
   const { container } = labels[label];
-  const refused = entry.refuse?.({ quantName, quant, dtype, label, codec });
-  return refused === undefined ? { label, container, float16Codec: codec } : { refusal: refused };
+  return { label, container, float16Codec: codec };
 };
 
 /** Everything one from-file role needs to check its plan. */

@@ -314,7 +314,8 @@ maintainer's ruling of 2026-11-06).
      blocks is at hand.)* *(2026-11-18: a float component from a file is converted against the plan of the model's
      `bf16` container with its 16-bit weights stored as the file's dtype (`float16Codec` of `@karume/convert`), so F16
      files need no f16 container; the graph comparison between containers is gone. Not run on a GPU with an F16 file
-     yet.)* Left from it: keeping the
+     yet.)* *(2026-11-18: a BF16 transformer under f16 linear compute is no longer refused — the f16-compute checks
+     cover bf16 storage, and `bf16-c16` runs that pair through `fromPretrained`.)* Left from it: keeping the
      converted container (designed next), `fromSingleFile` on the other families, int4 targets, LoRA, the
      runtime's `parseSafetensors` moved into the reader package, and the published-package setup (`@karume/models`
      depends on the private `@karume/convert` and `@karume/safetensors`, which JSR does not have).
@@ -339,7 +340,8 @@ maintainer's ruling of 2026-11-06).
     1. The TypeScript side: the Anima pipeline of `@karume/models` (its preset checks and messages, and
        `fromSingleFile` deriving the f16 plan of an F16 single file from the distributed bf16 container), `@karume/convert`,
        the single-file and convert specs, and the preset names in the e2e tests, the playground and the comments.
-    2. The GPU checks: the `models:anima` lane, `bf16-c16` (bf16 storage computed in f16 has no numerics check yet),
+    2. The GPU checks: the `models:anima` lane, `bf16-c16` (the numerics check of bf16 storage computed in f16 is in
+       `packages/runtime/tests/gpu_f16_compute_test.ts`),
        the A/B bands, the fusion counts and the extra repository's cross-repository reads.
     3. The sha256 rows: 11 of the 13 rows of Anima's reference file move (all but the two `bf16` rows). The new case IDs
        are written with `KARUME_REFERENCE=write`, and the rows of the old IDs are removed by hand.

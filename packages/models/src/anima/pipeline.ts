@@ -147,7 +147,6 @@ import {
 } from "../hub/components.ts";
 import {
   prepareSingleFile,
-  type SingleFileCombination,
   type SingleFileFamily,
   type SingleFileSource,
 } from "../hub/single-file.ts";
@@ -198,55 +197,28 @@ const ANIMA_FLOAT_LABEL = "bf16";
 const ANIMA_FLOAT_CODECS = { BF16: "bf16", F16: "f16" } as const;
 
 /**
- * The transformer stored as bf16 under f16 linear compute (a quant's `linearCompute: "f16"`, or an
- * explicit one, which wins over the quant's): the runtime builds it — its f16-compute GEMM reads a
- * bf16 weight as it reads an f32 one and rounds it into the f16 tile — but no GPU check covers its
- * numbers (the f16-compute checks cover f32 and f16 storage only), so a file is not run that way. An
- * F16 file's transformer is stored as f16, and f16 storage under f16 compute is checked; f16
- * attention compute reads no weight.
- */
-const refuseBf16UnderF16Compute =
-  (explicit: PipelineOptions["linearCompute"]) =>
-  ({ quantName, quant, dtype, codec }: SingleFileCombination): string | undefined => {
-    const linearCompute = explicit ?? quant.session.linearCompute;
-    if (codec !== "bf16" || linearCompute !== "f16") return undefined;
-    return (
-      `quant '${quantName}' computes the transformer's linear layers in f16 (linearCompute 'f16'` +
-      `${explicit === undefined ? "" : ", set explicitly"}), and the file's transformer is ${dtype},` +
-      " stored as bf16: bf16 storage under f16 compute is not run from a file (no check covers its" +
-      " numbers); choose a quant that computes in f32, or one that stores the transformer as int8"
-    );
-  };
-
-/**
  * The components {@link Pipeline.fromSingleFile} takes from a file (the text encoder and the VAE
  * decoder always come from the distribution). A preset decides what is quantized; what it does not
  * quantize keeps the precision of its source:
  *
  * - the transformer: an int8 quant's container, converted from any float dtype; under a quant that
  *   stores it as a float (its `bf16` container), that container's plan with its 16-bit weights
- *   stored as the file's dtype — BF16 as bf16, F16 as f16 — with the quant's Session options. bf16
- *   storage under f16 compute is refused ({@link refuseBf16UnderF16Compute});
+ *   stored as the file's dtype — BF16 as bf16, F16 as f16 — with the quant's Session options (or an
+ *   explicit `linearCompute`), as the distributed preset runs it: a BF16 file under f16 linear
+ *   compute (`bf16-c16`) is the pair `fromPretrained` runs, bf16 storage under f16 compute;
  * - the text conditioner: the `bf16` container's plan whatever the quant, stored as the file's
  *   dtype the same way (no preset quantizes it; its stage gets none of the quant's knobs).
  *
- * `linearCompute` is the caller's explicit setting.
- *
  * SPEC: docs/spec/single-file.md#which-component-comes-from-where
  */
-const animaSingleFile = (linearCompute: PipelineOptions["linearCompute"]): SingleFileFamily => ({
+const ANIMA_SINGLE_FILE: SingleFileFamily = {
   floatLabel: ANIMA_FLOAT_LABEL,
   floatCodecs: ANIMA_FLOAT_CODECS,
   roles: [
-    {
-      role: TRANSFORMER,
-      presence: "required",
-      storage: "quant",
-      refuse: refuseBf16UnderF16Compute(linearCompute),
-    },
+    { role: TRANSFORMER, presence: "required", storage: "quant" },
     { role: TEXT_CONDITIONER, presence: "optional", storage: "file-dtype" },
   ],
-});
+};
 
 /** Generation result. `data` is 8-bit RGBA (4 bytes per pixel, row-major). */
 export type GeneratedImage = {
@@ -1122,18 +1094,19 @@ export class Pipeline {
    * selected quant's transformer when the quant stores it as int8, and against the plan of the
    * model's `bf16` transformer with its 16-bit weights stored as the file's dtype (BF16 as bf16,
    * F16 as f16: the file's own bits) when the quant stores it as a float, with the quant's Session
-   * options; the `text_conditioner` from the file when the file holds one — against the plan of
-   * the model's `bf16` text conditioner, stored as the file's dtype the same way, whatever the quant
-   * (no preset quantizes it, so it keeps the file's precision) — else from the distribution; the
-   * `text_encoder` and the `vae_decoder` from the distribution. A role named in `components`
-   * comes from that replacement, never from the file.
+   * options (or the explicit ones), as the distributed preset runs it — a BF16 file under f16
+   * linear compute (`bf16-c16`) included; the `text_conditioner` from the file when the file holds
+   * one — against the plan of the model's `bf16` text conditioner, stored as the file's dtype the
+   * same way, whatever the quant (no preset quantizes it, so it keeps the file's precision) — else
+   * from the distribution; the `text_encoder` and the `vae_decoder` from the distribution. A role
+   * named in `components` comes from that replacement, never from the file.
    *
    * Everything that needs no tensor byte is refused before a weight part is fetched: a file that is
    * not safetensors or that no layout of the name map recognises, a key no component takes, a
    * tensor the plan does not use, a file with no transformer, a component stored as the float type
-   * of its tensors whose tensors mix dtypes or are F32 (no Anima container stores f32 weights), a
-   * BF16 transformer under f16 linear compute, and a tensor whose dtype is not the one an f16 or
-   * bf16 weight of a quantized container takes (neither rounds).
+   * of its tensors whose tensors mix dtypes or are F32 (no Anima container stores f32 weights), and
+   * a tensor whose dtype is not the one an f16 or bf16 weight of a quantized container takes
+   * (neither rounds).
    *
    * SPEC: docs/spec/single-file.md
    */
@@ -1149,14 +1122,13 @@ export class Pipeline {
         `${where}: retainConverted ${JSON.stringify(retainConverted)} is not a boolean`,
       );
     }
-    const family = animaSingleFile(options.linearCompute);
     return await Pipeline.#load(where, ref, options, async (loaded, selection, hubOptions) => {
       const { converted } = await prepareSingleFile(
         where,
         file,
         loaded,
         selection,
-        family,
+        ANIMA_SINGLE_FILE,
         new Set(Object.keys(options.components ?? {})),
         retainConverted === true,
         hubOptions,

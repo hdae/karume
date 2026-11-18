@@ -83,7 +83,8 @@ rule below). Anima's components:
   | F16 | The same | f16 × f32 | The quant's container with its 16-bit weights stored as f16: f16 storage under f32 compute |
   | F16 | A quant that stores it as bf16 under f16 linear and attention compute (`bf16-c16`) | f16 × f16 linear and attention | f16 storage under f16 compute, which the f16-compute checks cover |
   | F16 | A float quant with an explicit `linearCompute: "f16"` (as `bf16` with it) | f16 × f16 linear; attention in the quant's attention compute, or in an explicit `attentionCompute` (under `bf16`: f32) | The same: an explicit `linearCompute` sets the linear layers' compute alone |
-  | BF16 | A quant under f16 linear compute (`bf16-c16`), or a float quant with an explicit `linearCompute: "f16"` | bf16 × f16 linear | Refused: the runtime builds it (its f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), and the f16-compute checks cover its numbers (f32, f16 and bf16 storage), but a file is not run that way |
+  | BF16 | A quant that stores it as bf16 under f16 linear and attention compute (`bf16-c16`) | bf16 × f16 linear and attention | The quant's own pair, the one `fromPretrained` runs: bf16 storage under f16 compute (the f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), which the f16-compute checks cover (`packages/runtime/tests/gpu_f16_compute_test.ts`: equal, bit for bit, to the f32 variant on inputs rounded to f16) |
+  | BF16 | A float quant with an explicit `linearCompute: "f16"` (as `bf16` with it) | bf16 × f16 linear; attention in the quant's attention compute, or in an explicit `attentionCompute` (under `bf16`: f32) | The same: an explicit `linearCompute` sets the linear layers' compute alone |
 
   f16 attention compute reads activations only, so it does not depend on the weights' storage.
 
@@ -94,8 +95,7 @@ rule below). Anima's components:
    `parseNameMap`. It is not part of the load's progress stream.
 3. The file: its format from its first bytes, then its header (`openSafetensors`: two reads, no tensor byte).
 4. The placement (`placeTensors`), the components that come from the file, their tensor lists and the containers they
-   are converted against, with the 16-bit float codec of a float storage (the dtype rule and the family's refusals:
-   manifest data only).
+   are converted against, with the 16-bit float codec of a float storage (the dtype rule: manifest data only).
 5. The shared loader, as for `fromPretrained`, with each component from the file served by a converting source:
    part 0 of every component's container is fetched; for a component from the file, its container's two documents are
    checked against the manifest, its plan is read — for a float storage with its 16-bit float weights stored as the
@@ -125,7 +125,6 @@ Everything that needs no tensor byte is refused before a weight part is fetched,
 | A component stored as the float type of its tensors (Anima: the text conditioner; the transformer under a quant that stores it as a float) whose tensors mix dtypes | 4 | Each dtype with its tensor count and one of its file keys, and what to do |
 | Such a component whose dtype has no 16-bit float codec (Anima: `F32`) | 4 | The dtype, the family's float storages, and what to do |
 | A model without the float container whose plan such a component is converted against (Anima: no `bf16` text conditioner, whatever the file's dtype — an `f16` one is not read instead) | 4 | The component, the label, the file's dtype, and what to do |
-| A combination the family does not run (Anima: a BF16 transformer under f16 linear compute — a quant's, as `bf16-c16`'s, or an explicit `linearCompute: "f16"`) | 4 | One message: the quant, where its linear compute comes from, and the file's dtype |
 | No component left to come from the file | 4 | What the replacements take |
 | A tensor placed in a component from the file that its plan does not use | 5 | Every such tensor, with its initializer name |
 | A plan that stores a codec the conversion does not encode (Anima: none of its containers) | 5 | One message for the component: the label and the quant, the codec, the encoded codecs and, for a component its quant decides, the quants under which the component's container works |

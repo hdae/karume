@@ -9,7 +9,8 @@
 //  ① The success path: which component comes from where and against which container — the text
 //    conditioner against the bf16 container's plan, stored as the file's dtype (BF16 as bf16, F16 as
 //    f16), the transformer as an int8 quant's from any float dtype and the same way as the text
-//    conditioner under a quant that stores it as a float; an f16 container the distribution may
+//    conditioner under a quant that stores it as a float (under f16 linear compute too, its Session
+//    with the quant's options); an f16 container the distribution may
 //    still carry is never read for a float storage, and under a quant whose label is `f16` (not
 //    the float label) it is the plan as it is — the converted parts are neither fetched nor
 //    counted in the progress, the file is read up to its header only, and a role replaced by
@@ -30,7 +31,12 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import type { AssetProgress, HubRepoRef } from "@karume/hub";
-import { type IrDeclaration, openContainer } from "@karume/runtime";
+import {
+  type IrDeclaration,
+  openContainer,
+  type Session,
+  type SessionOptions,
+} from "@karume/runtime";
 import { ConvertError, NAME_MAP_FORMAT, openConvertingSource } from "@karume/convert";
 import { SafetensorsError } from "@karume/safetensors";
 import { ModelInputError, Pipeline, type SingleFileSource } from "../anima.ts";
@@ -52,6 +58,7 @@ import {
 } from "./helpers/container-loading-fixture.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
+import { PreparedModel } from "../../runtime/src/runtime/executor.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 // The loader calls the converting source through the package entry; the spy records every source
@@ -601,6 +608,48 @@ const servedByRole = async () => {
 const u16Bytes = (bits: Uint16Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
   new Uint8Array(bits.buffer.slice(0));
 
+/**
+ * Runs one generate of `pipeline` with every Session a stand-in (each returns a one-element tensor;
+ * the DiT stage then stops at the fixture's transformer graph, which has none of the DiT's inputs)
+ * and returns the options each stage's Session was created with, by the stage that created it.
+ */
+const stageSessionOptions = async (
+  pipeline: Pipeline,
+): Promise<Readonly<Record<string, SessionOptions>>> => {
+  const created: Record<string, SessionOptions> = {};
+  let stage = "";
+  const spy = vi
+    .spyOn(PreparedModel.prototype, "createContainerSession")
+    .mockImplementation(function (this: PreparedModel, _gpu, sessionOptions = {}) {
+      const output = this.graph.outputs[0];
+      created[stage] = sessionOptions;
+      // NOTE: the cast — the stages read only `run`, `diagnostics` and `dispose`.
+      return Promise.resolve({
+        run: () =>
+          Promise.resolve({
+            [output]: { dtype: "f32", shape: [1, 1, 1], data: new Float32Array(1) },
+          }),
+        diagnostics: () => ({}),
+        dispose: () => Promise.resolve(),
+      } as unknown as Session);
+    });
+  try {
+    await assertRejects(() =>
+      pipeline.generate({
+        prompt: "aba",
+        onEvent: (event) => {
+          if (event.kind === "stage" && event.at === "start") stage = event.component;
+        },
+      }),
+    );
+  } finally {
+    spy.mockRestore();
+  }
+  // Not vacuous: the transformer's Session was created.
+  assertEquals(Object.keys(created), ["text_encoder", "text_conditioner", "transformer"]);
+  return created;
+};
+
 // ---- ① The success path ----------------------------------------------------------------------
 
 describe("fromSingleFile builds an Anima pipeline from a single file and a distribution", () => {
@@ -722,6 +771,34 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
     assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
     assertEquals((await servedByRole()).get("transformer")?.codecs, ["f16", "f32"]);
+  });
+
+  it("a BF16 file under f16 linear compute — the quant's (bf16-c16) or an explicit one: stored as bf16 against the bf16 plans, the transformer's Session with the quant's options, as the distributed preset runs it", async () => {
+    const gpu = fakeGpuContext(fakeDevice({ features: ["shader-f16"] }));
+    for (const [choice, session] of [
+      [{ quant: "bf16-c16" }, { linearCompute: "f16", attentionCompute: "f16" }],
+      // An explicit `linearCompute` sets the linear layers' compute alone (quant `bf16` declares
+      // none, so attention stays in the runtime's default).
+      [{ quant: "bf16", linearCompute: "f16" }, { linearCompute: "f16" }],
+    ] as const) {
+      const { mock, ref, options } = await serve();
+      vi.mocked(openConvertingSource).mockClear();
+      await using pipeline = await Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
+        ...options,
+        gpu,
+        ...choice,
+      });
+      assert(pipeline instanceof Pipeline);
+      const { transformerI8, transformerBf16, conditionerBf16 } = CONTAINERS;
+      assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
+      assertEquals(fetchedOf(mock.paths, transformerI8), []);
+      assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
+      const view = (await servedByRole()).get("transformer");
+      assert(view !== undefined, "no converting source of 'transformer'");
+      assertEquals(view.codecs, ["bf16", "f32"]);
+      assertEquals(await view.stored(TRANSFORMER_W), u16Bytes(BF16_WEIGHT));
+      assertEquals((await stageSessionOptions(pipeline)).transformer, session, choice.quant);
+    }
   });
 
   it("a BF16 file under a quant that stores the transformer as a float: stored as bf16, the plan of the bf16 containers as it is", async () => {
@@ -952,7 +1029,7 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
 
   it("a quant whose transformer is stored in a codec that is not converted: one message with the quant, the codec and the quants that work", async () => {
     // Fault: quant `i2`, whose transformer is int2. The quants that work are those whose container
-    // for this file encodes: `bf16-c16` is left out, as it refuses a BF16 transformer.
+    // for this file encodes: `bf16-c16` among them, as `bf16` (the same bf16 container).
     const entry = modelEntry();
     const { mock, ref, options } = await serve({
       entry: {
@@ -968,7 +1045,7 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
     const message = await refused(
       () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "i2" }),
       mock.paths,
-      "the 'i2' transformer of model 'test', which the file's transformer is converted against under quant 'i2', stores codec 'int2-off', which the conversion of a file does not encode (it encodes int8-sym / f16 / bf16 / f32); the quants that work: i8 / bf16",
+      "the 'i2' transformer of model 'test', which the file's transformer is converted against under quant 'i2', stores codec 'int2-off', which the conversion of a file does not encode (it encodes int8-sym / f16 / bf16 / f32); the quants that work: i8 / bf16 / bf16-c16",
     );
     assertEquals(message.split("\n").length, 1, "one line per initializer");
   });
@@ -1064,35 +1141,6 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
       () => Pipeline.fromSingleFile(fileOf(wide).file, ref, { ...options, quant: "bf16" }),
       mock.paths,
       "the file's transformer is F32 (quant 'bf16' stores the transformer as a float), and no container stores F32 as it is (the float storages: BF16 → 'bf16', F16 → 'f16'); choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
-    );
-  });
-
-  it("a BF16 transformer under f16 linear compute — the quant's or an explicit one — in one message naming the quant and the dtype", async () => {
-    // Faults: quant `bf16-c16` (linearCompute 'f16') with a BF16 file; quant `bf16` with an
-    // explicit `linearCompute: "f16"`.
-    const { mock, ref, options } = await serve();
-    const gpu = fakeGpuContext(fakeDevice({ features: ["shader-f16"] }));
-    const declared = await refused(
-      () =>
-        Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
-          ...options,
-          gpu,
-          quant: "bf16-c16",
-        }),
-      mock.paths,
-      "quant 'bf16-c16' computes the transformer's linear layers in f16 (linearCompute 'f16'), and the file's transformer is BF16, stored as bf16: bf16 storage under f16 compute is not run from a file",
-    );
-    assertEquals(declared.split("\n").length, 1);
-    await refused(
-      () =>
-        Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
-          ...options,
-          gpu,
-          quant: "bf16",
-          linearCompute: "f16",
-        }),
-      mock.paths,
-      "quant 'bf16' computes the transformer's linear layers in f16 (linearCompute 'f16', set explicitly), and the file's transformer is BF16",
     );
   });
 
