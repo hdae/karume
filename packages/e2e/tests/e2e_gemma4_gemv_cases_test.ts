@@ -7,9 +7,25 @@
  * docs/research/2026-11-18-gemma4-gemv-census.md). It lives in e2e because it reads the
  * distribution mirrors `models/karume-gemma4*`; only part 0 of each container (the graph and the
  * binding table) is read, never a weight block.
+ *
+ * What it covers, and what it does not:
+ * - The components `model` and `drafter` only (what a decode token and a drafter run execute). A
+ *   mirror's other components (`vision`) are not read.
+ * - Both directions between the graphs and the case table: a graph's integer linear without a case
+ *   fails, and so does a case whose shape no graph has, unless it is listed with its reason
+ *   ({@link CASES_WITHOUT_A_GRAPH}).
+ * - Which linears take a parallel row is asked at M = 1 and of the default profile only: not at
+ *   the four or eight rows of a verify run, and not of a per-adapter table that carries its own
+ *   GEMV choices.
+ * - It reads all three mirrors, the mobile QAT one included, and runs in the `models:gemma4` lane
+ *   (its file name carries no `gemma4_qat_mobile`): a machine without one of the three mirrors skips
+ *   the whole file.
+ * - The rows are matched by shape, so "the linears on a row" is a statement about these graphs. A
+ *   row's shape can occur in another family's graph (int4 g32 1024×4096 does, in the SBV2 text
+ *   encoder), which this file does not read.
  */
 import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
@@ -18,7 +34,10 @@ import {
   linearGemvParallelEligible,
 } from "../../runtime/src/kernels/linear-gemv.ts";
 import { bindSymbols, planGraph } from "../../runtime/src/runtime/plan.ts";
-import { planWeightResidency } from "../../runtime/src/runtime/weight-residency.ts";
+import {
+  planWeightResidency,
+  type WeightResidency,
+} from "../../runtime/src/runtime/weight-residency.ts";
 import { GEMV_CASES, type GemvCase } from "../../runtime/src/tune/gemv-cases.ts";
 import {
   type ContainerManifest,
@@ -68,6 +87,27 @@ type IntegerLinear = {
   readonly k: number;
 };
 
+/** The seats whose weight a linear reads as float words: no integer GEMV row applies to them. */
+const FLOAT_SEATS: readonly string[] = ["raw", "f16", "bf16", "expanded"];
+
+/**
+ * The integer storage of a linear's weight seat, or `undefined` for a float seat. Any other seat
+ * fails: a borrowed weight (`shared`) is resident in its lender's storage, which the borrower's
+ * graph does not say, and `i4f16` is `expert_linear`'s — a linear over either would be counted as
+ * "no integer weight" if it were skipped.
+ */
+const integerStorageOf = (
+  seat: WeightResidency | undefined,
+  where: string,
+): Pick<IntegerLinear, "storage" | "group"> | undefined => {
+  if (seat?.seat === "i4") return { storage: "i4", group: seat.groupSize };
+  if (seat?.seat === "i2" || seat?.seat === "i8") return { storage: seat.seat };
+  if (seat !== undefined && FLOAT_SEATS.includes(seat.seat)) return undefined;
+  throw new Error(
+    `${where}: the weight's seat is '${seat?.seat ?? "(none)"}', and this test does not know whether such a linear reads integer weights`,
+  );
+};
+
 /** The integer-storage linears of a graph planned at one physical row (a decode token, a drafter run). */
 const integerLinears = (graph: IrGraph): IntegerLinear[] => {
   const residency = planWeightResidency(graph);
@@ -91,17 +131,68 @@ const integerLinears = (graph: IrGraph): IntegerLinear[] => {
     const [x, weight] = step.inputShapes;
     const m = x.slice(0, -1).reduce((product, dim) => product * dim, 1);
     assertEquals(m, 1, `${step.node.ins[1]} runs ${m} rows in a graph planned at one row`);
-    const seat = residency.get(step.node.ins[1]);
-    if (seat?.seat !== "i2" && seat?.seat !== "i4" && seat?.seat !== "i8") continue;
-    linears.push({
-      storage: seat.seat,
-      ...(seat.seat === "i4" ? { group: seat.groupSize } : {}),
-      n: weight[0],
-      k: weight[1],
-    });
+    const storage = integerStorageOf(residency.get(step.node.ins[1]), step.node.ins[1]);
+    if (storage === undefined) continue;
+    linears.push({ ...storage, n: weight[0], k: weight[1] });
   }
   return linears;
 };
+
+/**
+ * Every `model` and `drafter` graph of the three mirrors (`<mirror> <model> <component> <storage>`)
+ * with the number of its integer linears at one row. The set is exact: a graph that appears or goes,
+ * or whose count moves, fails here before any other case reads it (a graph with a row for every
+ * linear has no entry in {@link SEQUENTIAL_AT_REORDER}, so nothing else would notice its loss).
+ */
+const INTEGER_LINEARS: Readonly<Record<string, number>> = {
+  // The regular line is bf16; only its E2B ships a drafter (int8).
+  "karume-gemma4 e2b model bf16": 0,
+  "karume-gemma4 e2b drafter i8": 68,
+  "karume-gemma4 e4b model bf16": 0,
+  "karume-gemma4-qat e2b model i4": 277,
+  "karume-gemma4-qat e2b drafter i4": 68,
+  "karume-gemma4-qat e4b model i4": 344,
+  "karume-gemma4-qat e4b drafter i4": 68,
+  "karume-gemma4-qat 12b model i4": 329,
+  "karume-gemma4-qat 12b drafter i4": 68,
+  // 26B's 60 routed experts are `expert_linear`, not `linear`.
+  "karume-gemma4-qat 26b model i4": 236,
+  // One more linear per token is the f32 per_layer_model_projection.
+  "karume-gemma4-qat-mobile e2b model i4": 276,
+  "karume-gemma4-qat-mobile e4b model i4": 343,
+};
+
+/**
+ * The cases whose shape no graph of the mirrors has, each with why it is a case all the same. A
+ * case that is not listed and matches no graph fails: the sweep would measure, on every device, a
+ * shape nothing runs.
+ */
+const CASES_WITHOUT_A_GRAPH: Readonly<Record<string, string>> = {
+  "i8-n262144-k1536":
+    "the regular E2B's int8 output head: the line ships bf16 alone since 2026-11-04, but the default " +
+    "profile still holds this shape's parallel row and its sequential exception, and every row of the " +
+    "profile has a case",
+  "i8-n262144-k2560":
+    "the regular E4B's int8 output head: as E2B's — the default profile still holds its parallel row",
+};
+
+/** The ids of the cases of `cases` whose shape none of `linears` has, in table order. */
+const casesWithoutGraph = (
+  linears: readonly IntegerLinear[],
+  cases: readonly Pick<GemvCase, "id" | "storage" | "group" | "n" | "k">[],
+): string[] =>
+  cases
+    .filter(
+      (gemvCase) =>
+        !linears.some(
+          (linear) =>
+            linear.storage === gemvCase.storage &&
+            linear.group === gemvCase.group &&
+            linear.n === gemvCase.n &&
+            linear.k === gemvCase.k,
+        ),
+    )
+    .map(({ id }) => id);
 
 /** Every model, component and storage of the three mirrors, with the integer linears of its graph. */
 const mirrorLinears = async (): Promise<
@@ -245,10 +336,39 @@ describe.skipIf(!AVAILABLE)(
 describe.skipIf(!AVAILABLE)(
   "the GEMV sweep's case table covers the Gemma 4 graphs (plan, no GPU needed)",
   () => {
+    it("reads exactly the model and drafter graphs the mirrors ship, each with its count of integer linears", async () => {
+      const graphs = await mirrorLinears();
+      assertEquals(
+        Object.fromEntries(graphs.map(({ where, linears }) => [where, linears.length])),
+        INTEGER_LINEARS,
+      );
+    });
+
+    it("fails on a linear whose weight seat it cannot class as integer or float (fault: a borrowed weight, an expert weight)", () => {
+      const borrowed: WeightResidency = {
+        seat: "shared",
+        eligible: true,
+        i4Eligible: true,
+        i2Eligible: false,
+      };
+      const expert: WeightResidency = {
+        seat: "i4f16",
+        payloadBytes: 16,
+        scaleBytes: 4,
+        groupSize: 32,
+      };
+      assertThrows(() => integerStorageOf(borrowed, "w"), Error, "the weight's seat is 'shared'");
+      assertThrows(() => integerStorageOf(expert, "w"), Error, "the weight's seat is 'i4f16'");
+      assertThrows(() => integerStorageOf(undefined, "w"), Error, "the weight's seat is '(none)'");
+      assertEquals(integerStorageOf({ seat: "bf16", payloadBytes: 8 }, "w"), undefined);
+      assertEquals(
+        integerStorageOf({ seat: "i4", payloadBytes: 8, scaleBytes: 4, groupSize: 32 }, "w"),
+        { storage: "i4", group: 32 },
+      );
+    });
+
     it("has a case for every int2 / int4 / int8 linear of a decode token and of a drafter run, in every mirror", async () => {
       const graphs = await mirrorLinears();
-      // The three mirrors ship 9 such graphs with integer linears (the bf16 models have none).
-      assert(graphs.filter(({ linears }) => linears.length > 0).length >= 9);
       for (const { where, linears } of graphs) {
         assertEquals(withoutCase(linears, GEMV_CASES), [], where);
       }
@@ -261,6 +381,26 @@ describe.skipIf(!AVAILABLE)(
         withoutCase(linears, without).map((shape) => `${where}: ${shape}`),
       );
       assertEquals(missed, ["karume-gemma4-qat e2b model i4: i4 g32 262144×1536"]);
+    });
+
+    it("holds no case whose shape no graph has, but the listed ones", async () => {
+      const linears = (await mirrorLinears()).flatMap((graph) => graph.linears);
+      assertEquals(casesWithoutGraph(linears, GEMV_CASES), Object.keys(CASES_WITHOUT_A_GRAPH));
+    });
+
+    it("names a case whose shape no graph has (fault: one case of a shape nothing runs)", async () => {
+      const linears = (await mirrorLinears()).flatMap((graph) => graph.linears);
+      const orphan = {
+        id: "i4g32-n4096-k4096",
+        storage: "i4",
+        group: 32,
+        n: 4096,
+        k: 4096,
+      } as const;
+      assertEquals(casesWithoutGraph(linears, [...GEMV_CASES, orphan]), [
+        ...Object.keys(CASES_WITHOUT_A_GRAPH),
+        orphan.id,
+      ]);
     });
   },
 );
