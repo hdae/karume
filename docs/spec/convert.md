@@ -22,7 +22,9 @@ the container format is [container-v1](../container-v1.md).
 
 ## What is served
 
-`openConvertingSource` gives a `BlockSource` with the target's part count and part lengths, and `verified: true`.
+`openConvertingSource` gives a `BlockSource` with the target's part count, the target's part lengths from part 1 on,
+the length of the plan's part 0 (the target's, or [the one with another 16-bit float
+codec](#a-plan-with-another-16-bit-float-codec)), and `verified: true`.
 
 | Part | Served bytes |
 | --- | --- |
