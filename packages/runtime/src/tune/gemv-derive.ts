@@ -48,9 +48,18 @@
  *   plain and staged candidates at M = 1) and changes the numbers of Sessions at `reorder`, inside
  *   the band. A parallel row serves M = 1 to 8, so at each other row count of that range (the
  *   `no-regression` role of gemv-candidates.ts's `gemvGroupRole` — M = 4 and 8 in the case table)
- *   groups of at least {@link MIN_RECORDS} records must be evidence for the candidate, and it may be
- *   slower than the default's choice in none of them: a path that was not measured is not moved by a
- *   table.
+ *   groups of at least {@link MIN_RECORDS} records must be evidence for the kernel the row runs
+ *   there, and it may be slower than the default's choice in none of them: a path that was not
+ *   measured is not moved by a table.
+ * - A parallel row's row block is chosen by one rule, against a reference row of the same lanes:
+ *   the default's row where M = 1 keeps it, the candidate without a row block where M = 1 adopts
+ *   one. The row blocks of one lane count write the same words, so the choice is speed alone: a row
+ *   block (or none) replaces the reference's only when, at the other row counts where the two run
+ *   different kernels, it is slower in no group that is evidence (groups of {@link MIN_RECORDS}
+ *   records at each) and at least {@link GEMV_MIN_SPEEDUP} faster in every group of one row count
+ *   or more; among several, the one whose smallest gain over those row counts is largest. A row
+ *   count at which both run the same kernel (M = 4 under a row block of 4 and of 8) neither refuses
+ *   nor counts ({@link rowBlockRefusal}).
  *
  * What the field does not let the records decide: a sequential key has no group length, so cases
  * that share it and disagree keep the default; a row whose default takes packed activations stays
@@ -945,7 +954,7 @@ const rowBlockOptions = (
     : LINEAR_GEMV_PARALLEL_ROWS.filter((rows) => linearGemvParallelRowsFits(storage, lanes, rows))),
 ];
 
-/** A row's kernels at its other row counts: their gains, and the first way they fail `floor`. */
+/** A row's kernels at its other row counts: their gains, and the first way they fail. */
 type OthersReading = {
   readonly gains: readonly LinearGemvRowGain[];
   readonly failure?: string;
@@ -954,13 +963,12 @@ type OthersReading = {
 /**
  * Reads the kernels `nameAt` names at the judgement's other row counts against the default's choice
  * there: at each, evidence from {@link MIN_RECORDS} records, no failure or failed check in a current
- * group, and no gain below `floor`.
+ * group, and no gain below {@link NO_REGRESSION}.
  */
 const readOthers = (
   records: readonly Labelled[],
   judgement: CaseJudgement,
   nameAt: (m: number) => string,
-  floor: number,
 ): OthersReading => {
   const { gemvCase } = judgement;
   let failure: string | undefined;
@@ -985,12 +993,8 @@ const readOthers = (
       if (reading.kind === "ruled-out") fail(reading.reason);
       if (reading.kind !== "evidence") continue;
       gains.push({ record: path, caseId: gemvCase.id, m, gain: reading.gain });
-      if (reading.gain >= floor) continue;
-      fail(
-        floor === NO_REGRESSION
-          ? `slower than the default's choice in ${label} at M=${m} (${formatRatio(reading.gain)})`
-          : `${formatRatio(reading.gain)} < ${formatRatio(floor)} in ${label} at M=${m}`,
-      );
+      if (reading.gain >= NO_REGRESSION) continue;
+      fail(`slower than the default's choice in ${label} at M=${m} (${formatRatio(reading.gain)})`);
     }
     if (evidenceRecords(other).length < MIN_RECORDS) {
       fail(
@@ -1001,42 +1005,122 @@ const readOthers = (
   return { gains, ...(failure === undefined ? {} : { failure }) };
 };
 
-/** The smallest of a reading's gains (0 without any). */
-const smallestRowGain = ({ gains }: OthersReading): number =>
-  gains.length === 0 ? 0 : Math.min(...gains.map(({ gain }) => gain));
+/**
+ * One row block against the reference row at one other row count where the two run different
+ * kernels: per group that is evidence for both kernels the reference's time ÷ the row block's, the
+ * number of records those groups come from, a failure or failed check of the row block's kernel in a
+ * current group (`ruledOut`), and why the other groups are no evidence (`missing`).
+ */
+export type RowBlockAt = {
+  readonly m: number;
+  readonly gains: readonly { readonly label: string; readonly gain: number }[];
+  readonly records: number;
+  readonly ruledOut?: string;
+  readonly missing?: string;
+};
 
 /**
- * A row's row block among `options`: of those whose kernels pass `floor` at every other row count,
- * the one whose smallest gain is largest (the first of a tie — `options` puts none first, so a row
- * block must be faster to be taken); `undefined` when none passes.
+ * Why a row block (or none) does not replace the one its reference row has, read from the row counts
+ * where their kernels differ (`undefined`: it does). The row blocks of one lane count write the same
+ * words, so the choice among them is speed alone, and one rule decides it wherever a row is derived:
+ * it replaces the reference's only when it is never slower than the reference in a group that is
+ * evidence — evidence from {@link MIN_RECORDS} records at each such row count, its check held in every
+ * current group — and at least {@link GEMV_MIN_SPEEDUP} faster in every group of one row count or
+ * more. A row count at which both run the same kernel is no reading: it neither refuses nor counts.
  */
-const bestRowBlock = (
+export const rowBlockRefusal = (at: readonly RowBlockAt[]): string | undefined => {
+  if (at.length === 0) return "runs the reference's kernel at every other row count";
+  for (const { m, gains, records, ruledOut, missing } of at) {
+    if (ruledOut !== undefined) return ruledOut;
+    if (records < MIN_RECORDS) {
+      return `evidence at M=${m} from fewer than ${MIN_RECORDS} records (a parallel row serves M = 1 to 8: ${missing ?? ""})`;
+    }
+    const slower = gains.find(({ gain }) => gain < NO_REGRESSION);
+    if (slower !== undefined) {
+      return `slower than the reference's row block in ${slower.label} at M=${m} (${formatRatio(slower.gain)})`;
+    }
+  }
+  if (at.some(({ gains }) => gains.every(({ gain }) => gain >= GEMV_MIN_SPEEDUP))) return undefined;
+  const best = Math.max(...at.map(({ gains }) => Math.min(...gains.map(({ gain }) => gain))));
+  return `at no row count ${formatRatio(GEMV_MIN_SPEEDUP)} faster than the reference's row block in every group (at most ${formatRatio(best)})`;
+};
+
+/**
+ * Of the row blocks that replace the reference's ({@link rowBlockRefusal}), the one whose smallest
+ * gain over the row counts where it differs from the reference is largest (the first of a tie);
+ * `undefined` when none does, and the reference's stays.
+ */
+export const pickRowBlock = <Option extends { readonly at: readonly RowBlockAt[] }>(
+  options: readonly Option[],
+): Option | undefined => {
+  const score = ({ at }: Option): number =>
+    Math.min(...at.flatMap(({ gains }) => gains.map(({ gain }) => gain)));
+  return options
+    .filter((option) => rowBlockRefusal(option.at) === undefined)
+    .reduce<Option | undefined>(
+      (best, option) => (best === undefined || score(option) > score(best) ? option : best),
+      undefined,
+    );
+};
+
+/** A row block read against a reference row of the same lanes ({@link rowBlockReadings}). */
+type RowBlockOption = {
+  readonly rowBlock: LinearGemvParallelRows | undefined;
+  readonly at: readonly RowBlockAt[];
+};
+
+/**
+ * Reads every row block of `options` against the reference row (`name` at `lanes` with the row
+ * block `reference`) at the judgement's other row counts, where the two run different kernels. Both
+ * kernels are read in the same group against the default's choice there, so a group is evidence only
+ * when it is for both.
+ */
+const rowBlockReadings = (
   records: readonly Labelled[],
   judgement: CaseJudgement,
   name: string,
   lanes: LinearGemvParallelLanes | undefined,
+  reference: LinearGemvParallelRows | undefined,
   options: readonly (LinearGemvParallelRows | undefined)[],
-  floor: number,
-):
-  | { readonly rowBlock: LinearGemvParallelRows | undefined; readonly reading: OthersReading }
-  | undefined => {
-  let best:
-    | { readonly rowBlock: LinearGemvParallelRows | undefined; readonly reading: OthersReading }
-    | undefined;
-  for (const rowBlock of options) {
-    const reading = readOthers(
-      records,
-      judgement,
-      (m) => rowKernelAt(name, lanes, rowBlock, m),
-      floor,
-    );
-    if (reading.failure !== undefined) continue;
-    if (best === undefined || smallestRowGain(reading) > smallestRowGain(best.reading)) {
-      best = { rowBlock, reading };
-    }
-  }
-  return best;
-};
+): RowBlockOption[] =>
+  options.map((rowBlock) => ({
+    rowBlock,
+    at: judgement.others.flatMap((m): RowBlockAt[] => {
+      const own = rowKernelAt(name, lanes, rowBlock, m);
+      const theirs = rowKernelAt(name, lanes, reference, m);
+      if (own === theirs) return [];
+      const read = (kernel: string, record: Labelled): Reading =>
+        readGroup(
+          record,
+          judgement.gemvCase.id,
+          m,
+          kernel,
+          judgement.reference(m),
+          judgement.class,
+        );
+      const gains: { label: string; gain: number }[] = [];
+      const missing: string[] = [];
+      let ruledOut: string | undefined;
+      for (const record of records) {
+        const mine = read(own, record);
+        const base = read(theirs, record);
+        if (mine.kind === "ruled-out") ruledOut ??= mine.reason;
+        else if (mine.kind === "none") missing.push(mine.reason);
+        else if (base.kind !== "evidence") {
+          missing.push(`the reference's kernel ${theirs}: ${base.reason}`);
+        } else gains.push({ label: record.label, gain: mine.gain / base.gain });
+      }
+      return [
+        {
+          m,
+          gains,
+          records: new Set(gains.map(({ label }) => label)).size,
+          ...(ruledOut === undefined ? {} : { ruledOut }),
+          ...(missing.length === 0 ? {} : { missing: missing.join("; ") }),
+        },
+      ];
+    }),
+  }));
 
 /**
  * Every candidate the judgement takes that a record measured at M = 1 and the current runtime still
@@ -1112,20 +1196,32 @@ const evaluate = (
   if (evidenceRecords(first).length < MIN_RECORDS) {
     fail(`evidence at M=1 from fewer than ${MIN_RECORDS} records (${noEvidenceText(first)})`);
   }
-  // The other row counts: with the row block that fares best there, or — when none passes — as
-  // the candidate's own kernel, whose failure is the one named
+  // The row block of the row the candidate would give: against the candidate without one, by the
+  // one rule of a row block ({@link rowBlockRefusal}). Then that row — its own kernel, or the
+  // row-blocked one — may be slower than the default's choice at no other row count
   const { lanes } = familyOf(candidate.choice) ?? {};
-  const options = judgement.rowBlocks ? rowBlockOptions(gemvCase.storage, lanes) : [undefined];
-  const chosen = bestRowBlock(records, judgement, candidate.name, lanes, options, NO_REGRESSION);
-  const own =
-    chosen?.reading ?? readOthers(records, judgement, () => candidate.name, NO_REGRESSION);
-  if (own.failure !== undefined) fail(own.failure);
+  const rowBlock = judgement.rowBlocks
+    ? pickRowBlock(
+        rowBlockReadings(
+          records,
+          judgement,
+          candidate.name,
+          lanes,
+          undefined,
+          rowBlockOptions(gemvCase.storage, lanes).filter((option) => option !== undefined),
+        ),
+      )?.rowBlock
+    : undefined;
+  const others = readOthers(records, judgement, (m) =>
+    rowKernelAt(candidate.name, lanes, rowBlock, m),
+  );
+  if (others.failure !== undefined) fail(others.failure);
   return {
     ...candidate,
     gains,
     ...(failure === undefined ? {} : { failure }),
-    ...(chosen?.rowBlock === undefined ? {} : { rowBlock: chosen.rowBlock }),
-    rowGains: own.gains,
+    ...(rowBlock === undefined ? {} : { rowBlock }),
+    rowGains: others.gains,
   };
 };
 
@@ -1348,25 +1444,22 @@ const parallelDecision = (
   const judgement = reorderJudgement(gemvCase, ["gemv-parallel", "gemv-parallel-staged"], true);
   const outcome = judgeCase(records, judgement, kernelsOf);
   if (outcome.kind === "kept") {
-    // M = 1 keeps the default's row: its lanes stay, so another row block may still replace its own
-    // — one that is the threshold faster than the default's choice at every other row count
-    const others =
+    // M = 1 keeps the default's row: its lanes stay, and another row block may still replace its
+    // own, by the one rule of a row block with the default's row as the reference
+    const tried =
       defaultRow === undefined
         ? []
-        : rowBlockOptions(gemvCase.storage, defaultRow.lanes).filter(
-            (rowBlock) => rowBlock !== defaultRow.rowBlock,
-          );
-    const other =
-      defaultRow === undefined
-        ? undefined
-        : bestRowBlock(
+        : rowBlockReadings(
             records,
             judgement,
             defaultChoice,
             defaultRow.lanes,
-            others,
-            GEMV_MIN_SPEEDUP,
+            defaultRow.rowBlock,
+            rowBlockOptions(gemvCase.storage, defaultRow.lanes).filter(
+              (rowBlock) => rowBlock !== defaultRow.rowBlock,
+            ),
           );
+    const other = pickRowBlock(tried);
     if (defaultRow !== undefined && other !== undefined) {
       const { rowBlock: _rowBlock, ...bare } = defaultRow;
       return {
@@ -1376,33 +1469,23 @@ const parallelDecision = (
           outcome: "adopted",
           gains: [],
           ...(other.rowBlock === undefined ? {} : { derivedRowBlock: other.rowBlock }),
-          rowGains: other.reading.gains,
+          rowGains: readOthers(records, judgement, (m) =>
+            rowKernelAt(defaultChoice, defaultRow.lanes, other.rowBlock, m),
+          ).gains,
         },
         row: { ...bare, ...(other.rowBlock === undefined ? {} : { rowBlock: other.rowBlock }) },
       };
     }
     // Why no other row block replaced the default's, where one reached the threshold in some group
     // (a row whose row blocks are nowhere near it needs no line)
-    const tried =
-      defaultRow === undefined
-        ? []
-        : others.map((rowBlock) => ({
-            rowBlock,
-            reading: readOthers(
-              records,
-              judgement,
-              (m) => rowKernelAt(defaultChoice, defaultRow.lanes, rowBlock, m),
-              GEMV_MIN_SPEEDUP,
-            ),
-          }));
-    const rowBlockNote = tried.some(({ reading }) =>
-      reading.gains.some(({ gain }) => gain >= GEMV_MIN_SPEEDUP),
+    const rowBlockNote = tried.some(({ at }) =>
+      at.some(({ gains }) => gains.some(({ gain }) => gain >= GEMV_MIN_SPEEDUP)),
     )
       ? [
           `no other row block replaces the default's: ${tried
             .map(
-              ({ rowBlock, reading }) =>
-                `${rowBlock === undefined ? "none" : `${rowBlock} rows`} — ${reading.failure ?? "?"}`,
+              ({ rowBlock, at }) =>
+                `${rowBlock === undefined ? "none" : `${rowBlock} rows`} — ${rowBlockRefusal(at) ?? "?"}`,
             )
             .join("; ")}`,
         ]

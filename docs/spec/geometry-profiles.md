@@ -184,19 +184,27 @@ measures nothing and changes no default value.
 - **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
   staged candidates at M = 1, and the row block. A parallel row serves M = 1 to 8, and at each other row count of
   that range the case table has (M = 4 and 8: the `full` set) it runs its own kernel or, with a row block, the
-  row-blocked kernel of its lanes (`staged-l<lanes>r<rows>`). For a candidate the derivation reads every row block
-  the kernel exists at for its lanes, and none: one passes when, at each other row count, groups of at least two
-  records are evidence for its kernel and it is slower than the default's choice in none of them — for a
-  float-stored shape without a row that choice is the GEMM. The row takes the one whose smallest gain over those
-  groups is largest — none unless a row block is faster — and a candidate for which none passes is not adopted. The
-  adopted row replaces the shape's row in place, or is added when the shape had none.
-  - A row whose lanes and staged flag M = 1 keeps takes another row block than the default's (or none) when that
-    one is at least ×1.10 faster than the default's choice in every group at every other row count, again from groups
-    of at least two records; among several, the one whose smallest gain is largest. The default's own kernel of M = 1
-    is measured at M = 4 and 8 for this, so a device where the default's row block loses can drop it. A row
-  whose default takes packed activations stays: the packed kernels are not measured. A subgroup candidate that meets
-  the rule is named in the decision's notes and writes nothing: the subgroup form is a Session option, not a row. It
-  changes the numbers of Sessions at `reorder`, inside the band.
+  row-blocked kernel of its lanes (`staged-l<lanes>r<rows>`). At each of those row counts groups of at least two
+  records must be evidence for the kernel the derived row runs there, and it may be slower than the default's choice
+  in none of them — for a float-stored shape without a row that choice is the GEMM; a candidate whose row does not
+  meet this is not adopted. The adopted row replaces the shape's row in place, or is added when the shape had none.
+  - **The row block** of a row is chosen by one rule, against a reference row of the same lanes: the default's row
+    where M = 1 keeps its lanes and staged flag, the candidate without a row block where M = 1 adopts one. The row
+    blocks of one lane count write the same words, so the choice among them is speed alone. A row block — or none —
+    replaces the one the reference row has only when, at the other row counts where the two run different kernels,
+    it is slower than the reference in no group that is evidence (groups of at least two records at each such row
+    count, its check held in every current group) and at least ×1.10 faster in every group of one such row count or
+    more. A row count at which both run the same kernel — M = 4 under a row block of 4 and of 8 — neither refuses
+    nor counts. Among several that qualify, the one whose smallest gain over the row counts where it differs from
+    the reference is largest. So an adopted candidate gets a row block only when one clears ×1.10 somewhere and
+    regresses nowhere, and a kept row moves between row blocks (4 to 8 on M = 8 alone) or drops its own by the same
+    test. The default's own kernel of M = 1 is measured at M = 4 and 8 for this, so a device where the default's
+    row block loses can drop it.
+  - A row whose default takes packed activations stays: the packed kernels are not measured. A subgroup candidate
+    that meets the rule is named in the decision's notes and writes nothing: the subgroup form is a Session option,
+    not a row.
+  - The class changes the numbers of Sessions at `reorder`, inside the band, where it changes a row's lanes; a
+    change of the staged flag or of the row block alone changes none.
 - **Not derived**: the row-block thread target (one number for every shape, while the `full` and `row-blocks` sets
   measure a row-block height per case and row count, and no rule turns those into it) and the general sequential
   variant (it also sets the row blocks' columns and read-ahead).

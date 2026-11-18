@@ -321,11 +321,15 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
   // Not an automatic selection by GPU name.
   // docs/decisions/0098-linear-gemv-parallel.md
   //
-  // A row's `rowBlock` (the row-blocked kernel at M = 2..8) is set only where the GEMV derivation
-  // adopts it from two sweep records of the RTX 3080 Ti at M = 4 and 8 (2026-11-18): at least ×1.10
-  // faster than the row without one in every group, the baseline steady in both records
-  // (perf-ledger K-108). A row of the Gemma 4 q4_0 QAT shapes without it was below that, or had a
-  // record whose baseline was unsteady; the mobile QAT rows and the i8 heads were not measured.
+  // A row's `rowBlock` (the row-blocked kernel at M = 2..8) is set from two sweep records of the
+  // RTX 3080 Ti at M = 4 and 8 (2026-11-18, perf-ledger K-108). The rule of a row block
+  // (docs/spec/geometry-profiles.md, "Deriving the GEMV choices"): against the row without one,
+  // slower in no group and at least ×1.10 faster in every group of M = 4 or of M = 8, the baseline
+  // steady in both records. Every row set here is ×1.10 faster in every group of both row counts.
+  // A row of the Gemma 4 q4_0 QAT shapes without one was slower in a group, had a record whose
+  // baseline was unsteady, or — E2B's per_layer_projection, ×1.05 at M = 4 and ×1.28 at M = 8 with
+  // 2 rows — meets the rule only since it stopped asking ×1.10 at both row counts, and waits for the
+  // next sweep. The mobile QAT rows and the i8 heads were not measured.
   parallelShapes: [
     { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
     { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },

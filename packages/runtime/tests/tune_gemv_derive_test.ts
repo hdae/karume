@@ -43,6 +43,7 @@ import {
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
 import { GEMV_CASES } from "../src/tune/gemv-cases.ts";
+import { pickRowBlock, type RowBlockAt, rowBlockRefusal } from "../src/tune/gemv-derive.ts";
 import type { GemvSweepReport } from "../src/tune/gemv-report.ts";
 import {
   BASE_TIME,
@@ -401,7 +402,7 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
     );
   });
 
-  it("replaces the row block of a row whose lanes M = 1 keeps, at ×1.10 or more over the default's choice at every other row count", () => {
+  it("replaces the row block of a row whose lanes M = 1 keeps when another is slower in no group and ×1.10 faster at a row count", () => {
     const blocks = {
       4: { "staged-l4r2": faster(1.3), "staged-l4r4": faster(2) },
       8: { "staged-l4r2": faster(1.6), "staged-l4r4": faster(3), "staged-l4r8": faster(2.1) },
@@ -430,31 +431,53 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
       derivation.verdicts.join("\n"),
       "parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×2.000 [1] M=4",
     );
-    // Fault: one group below the threshold (×1.09 at M = 8 in record 2) keeps the row as it is
-    const below = derive(
-      [{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }],
-      [
-        {
-          caseId: Q_G512,
-          rows: PARALLEL_ROWS,
-          times: {
-            4: blocks[4],
-            8: {
-              "staged-l4r2": faster(1.09),
-              "staged-l4r4": faster(1.09),
-              "staged-l4r8": faster(1.09),
+    /** Record 2 with every row block at `gain` over the default's choice at M = 8. */
+    const record2At8 = (gain: number): LinearGemvDerivation =>
+      derive(
+        [{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }],
+        [
+          {
+            caseId: Q_G512,
+            rows: PARALLEL_ROWS,
+            times: {
+              4: blocks[4],
+              8: {
+                "staged-l4r2": faster(gain),
+                "staged-l4r4": faster(gain),
+                "staged-l4r8": faster(gain),
+              },
             },
           },
-        },
-      ],
-    );
-    const kept = decisionOf(below, "parallelShapes", Q_G512);
+        ],
+      );
+    // A group below the threshold but not slower does not refuse: M = 4 is ×1.10 faster in every group
+    assertEquals(decisionOf(record2At8(1.09), "parallelShapes", Q_G512).outcome, "adopted");
+    // Fault: slower than the default's row in one group (×0.95 at M = 8 in record 2) keeps the row
+    const slower = record2At8(0.95);
+    const kept = decisionOf(slower, "parallelShapes", Q_G512);
     assertEquals(kept.outcome, "kept");
-    assertEquals(below.linearGemv, undefined);
+    assertEquals(slower.linearGemv, undefined);
     // The decision says why each other row block did not replace the default's
     const note = kept.notes.find((line) => line.startsWith("no other row block replaces"));
-    assertStringIncludes(note ?? "", "2 rows — ×1.090 < ×1.100 in [2] at M=8");
-    assertStringIncludes(note ?? "", "4 rows — ×1.090 < ×1.100 in [2] at M=8");
+    assertStringIncludes(
+      note ?? "",
+      "2 rows — slower than the reference's row block in [2] at M=8 (×0.950)",
+    );
+    assertStringIncludes(
+      note ?? "",
+      "4 rows — slower than the reference's row block in [2] at M=8 (×0.950)",
+    );
+    // Fault: faster everywhere but ×1.10 at no row count (×1.09 in every group) keeps the row
+    const near = { "staged-l4r2": faster(1.09), "staged-l4r4": faster(1.09) };
+    const nowhere = derive([
+      {
+        caseId: Q_G512,
+        rows: PARALLEL_ROWS,
+        times: { 4: near, 8: { ...near, "staged-l4r8": faster(1.09) } },
+      },
+    ]);
+    assertEquals(decisionOf(nowhere, "parallelShapes", Q_G512).outcome, "kept");
+    assertEquals(nowhere.linearGemv, undefined);
     // A row whose row blocks reach the threshold in no group says nothing about them
     const unmeasured = derive([{ caseId: Q_G512, rows: PARALLEL_ROWS }]);
     assertEquals(
@@ -469,6 +492,112 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
       [{ caseId: Q_G512, rows: [1, 4], times: { 4: blocks[4] } }],
     );
     assertEquals(decisionOf(partial, "parallelShapes", Q_G512).outcome, "kept");
+  });
+
+  describe("a default row that carries a row block (E2B's per_layer_model_projection: 4 lanes, a row block of 4)", () => {
+    const rowOf = (derivation: LinearGemvDerivation) =>
+      derivation.linearGemv?.parallelShapes.find(
+        ({ n, k, group }) => n === 8960 && k === 1536 && group === 32,
+      );
+    const defaultRow = (() => {
+      const found = DEFAULTS.parallelShapes.find(
+        ({ n, k, group }) => n === 8960 && k === 1536 && group === 32,
+      );
+      if (found === undefined) throw new Error("the default table has no row of the case");
+      return found;
+    })();
+
+    it("is the reference: its row-blocked kernel is the default's choice at M = 4 and 8", () => {
+      assertEquals(defaultRow.rowBlock, 4);
+    });
+
+    it("moves from 4 to 8 on M = 8 alone: at M = 4 both run four rows, which neither refuses nor counts (fault of the earlier rule: ×1.000 at M = 4 refused it)", () => {
+      const derivation = derive([
+        { caseId: PLE, rows: PARALLEL_ROWS, times: { 8: { "staged-l4r8": faster(1.2) } } },
+      ]);
+      const decision = decisionOf(derivation, "parallelShapes", PLE);
+      assertEquals(
+        [decision.outcome, decision.defaultRowBlock, decision.derivedRowBlock],
+        ["adopted", 4, 8],
+      );
+      assertEquals(rowOf(derivation), { ...defaultRow, rowBlock: 8 });
+      assertStringIncludes(
+        derivation.verdicts.join("\n"),
+        "parallel-l4 with row blocks of 4 -> parallel-l4 with row blocks of 8",
+      );
+      // The row count where both run the same kernel does not enter the comparison among several:
+      // 8 rows (×1.2 at M = 8 alone) beat 2 rows (×1.15 at both); counted as ×1.000 at M = 4 they
+      // would lose (fault: the shared row count read as a gain)
+      const several = derive([
+        {
+          caseId: PLE,
+          rows: PARALLEL_ROWS,
+          times: {
+            4: { "staged-l4r2": faster(1.15) },
+            8: { "staged-l4r2": faster(1.15), "staged-l4r8": faster(1.2) },
+          },
+        },
+      ]);
+      assertEquals(decisionOf(several, "parallelShapes", PLE).derivedRowBlock, 8);
+      // Fault: ×1.09 at M = 8 is below the threshold at the one row count where the two differ
+      const below = derive([
+        { caseId: PLE, rows: PARALLEL_ROWS, times: { 8: { "staged-l4r8": faster(1.09) } } },
+      ]);
+      assertEquals(decisionOf(below, "parallelShapes", PLE).outcome, "kept");
+    });
+
+    it("changes nothing when every kernel takes the default's time (fault: a row block dropped or moved at ×1.000)", () => {
+      const derivation = derive([{ caseId: PLE, rows: PARALLEL_ROWS }]);
+      const decision = decisionOf(derivation, "parallelShapes", PLE);
+      assertEquals(
+        [decision.outcome, decision.defaultRowBlock, decision.derivedRowBlock],
+        ["kept", 4, 4],
+      );
+      assertEquals(derivation.linearGemv, undefined);
+    });
+
+    it("drops the row block only when the row's own kernel is slower in no group and ×1.10 faster at a row count", () => {
+      const own = (m4: number, m8: number): LinearGemvDerivation =>
+        derive([
+          {
+            caseId: PLE,
+            rows: PARALLEL_ROWS,
+            times: { 4: { "parallel-l4": faster(m4) }, 8: { "parallel-l4": faster(m8) } },
+          },
+        ]);
+      const dropped = own(1.2, 1.0);
+      assertEquals(
+        [
+          decisionOf(dropped, "parallelShapes", PLE).outcome,
+          decisionOf(dropped, "parallelShapes", PLE).derivedRowBlock,
+        ],
+        ["adopted", undefined],
+      );
+      const row = rowOf(dropped);
+      assertEquals(row !== undefined && "rowBlock" in row, false);
+      // Faults: faster at M = 4 but slower at M = 8, and nowhere ×1.10
+      assertEquals(decisionOf(own(1.2, 0.95), "parallelShapes", PLE).outcome, "kept");
+      assertEquals(decisionOf(own(1.05, 1.05), "parallelShapes", PLE).outcome, "kept");
+    });
+  });
+
+  it("gives an adopted candidate no row block that is not ×1.10 faster than the candidate without one at some row count (fault of the earlier rule: any margin attached one)", () => {
+    const derivation = derive([
+      {
+        caseId: Q_G512,
+        rows: PARALLEL_ROWS,
+        times: {
+          1: { "staged-l8": faster(1.3) },
+          4: { "staged-l8r2": faster(1.05) },
+          8: { "staged-l8r2": faster(1.05) },
+        },
+      },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", Q_G512);
+    assertEquals(
+      [decision.outcome, decision.derivedChoice, decision.derivedRowBlock],
+      ["adopted", "staged-l8", undefined],
+    );
   });
 
   it("leaves a row whose default takes packed activations as it is", () => {
@@ -488,6 +617,78 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
     assertEquals(decision.notes.length, 1);
     assertStringIncludes(decision.notes[0] ?? "", "subgroup32-l8 meets the rule too");
     assertEquals(derivation.linearGemv, undefined);
+  });
+});
+
+describe("the rule of a parallel row's row block (rowBlockRefusal, pickRowBlock)", () => {
+  /** A row count where the row block and the reference run different kernels, with one gain a record. */
+  const at = (m: number, ...gains: number[]): RowBlockAt => ({
+    m,
+    gains: gains.map((gain, index) => ({ label: `[${index + 1}]`, gain })),
+    records: gains.length,
+  });
+
+  it("lets a row block replace the reference's when it is slower in no group and ×1.10 faster in every group of one row count", () => {
+    // 4 → 8, and 8 → 4: only M = 8 is read, since both run four rows at M = 4
+    assertEquals(rowBlockRefusal([at(8, 1.2, 1.15)]), undefined);
+    assertEquals(rowBlockRefusal([at(8, 1.1, 1.1)]), undefined);
+    // None → 4: both row counts are read; one clears the threshold, the other only holds
+    assertEquals(rowBlockRefusal([at(4, 1.0, 1.02), at(8, 1.5, 1.4)]), undefined);
+  });
+
+  it("refuses one that runs the reference's kernel at every row count, or is nowhere ×1.10 faster (faults: every gain ×1.000; ×1.02 and ×1.03, which the earlier rule took)", () => {
+    assertStringIncludes(
+      rowBlockRefusal([]) ?? "",
+      "the reference's kernel at every other row count",
+    );
+    assertStringIncludes(
+      rowBlockRefusal([at(4, 1, 1), at(8, 1, 1)]) ?? "",
+      "at no row count ×1.100 faster than the reference's row block in every group (at most ×1.000)",
+    );
+    assertStringIncludes(
+      rowBlockRefusal([at(4, 1.02, 1.02), at(8, 1.03, 1.03)]) ?? "",
+      "at most ×1.030",
+    );
+    // ×1.10 in one record of a row count and less in the other is not every group of it
+    assertStringIncludes(rowBlockRefusal([at(8, 1.3, 1.09)]) ?? "", "at no row count");
+  });
+
+  it("refuses one that is slower in a group, however fast elsewhere (fault: ×0.99 at M = 4 beside ×2 at M = 8)", () => {
+    assertStringIncludes(
+      rowBlockRefusal([at(4, 1.2, 0.99), at(8, 2, 2)]) ?? "",
+      "slower than the reference's row block in [2] at M=4 (×0.990)",
+    );
+  });
+
+  it("refuses one without evidence from two records at a row count where it differs, or whose check failed there", () => {
+    assertStringIncludes(
+      rowBlockRefusal([at(4, 1.5, 1.5), { ...at(8, 1.5), missing: "unsteady in [2] at M=8" }]) ??
+        "",
+      "evidence at M=8 from fewer than 2 records (a parallel row serves M = 1 to 8: unsteady in [2] at M=8)",
+    );
+    assertEquals(
+      rowBlockRefusal([{ ...at(8, 1.5, 1.5), ruledOut: "outside the band in [1] at M=8" }]),
+      "outside the band in [1] at M=8",
+    );
+  });
+
+  it("picks, among those that replace it, the one whose smallest gain over the row counts where it differs is largest, and none when none does", () => {
+    const options = [
+      { rowBlock: 2, at: [at(4, 1.3, 1.3), at(8, 1.6, 1.6)] },
+      { rowBlock: 4, at: [at(4, 2, 2), at(8, 3, 1.9)] },
+      { rowBlock: 8, at: [at(4, 2, 2), at(8, 1.0, 0.98)] },
+    ];
+    assertEquals(pickRowBlock(options)?.rowBlock, 4);
+    // A tie goes to the first
+    assertEquals(
+      pickRowBlock([
+        { rowBlock: 4, at: [at(8, 1.5, 1.5)] },
+        { rowBlock: 8, at: [at(8, 1.5, 1.5)] },
+      ])?.rowBlock,
+      4,
+    );
+    assertEquals(pickRowBlock([{ rowBlock: 8, at: [at(8, 1.05, 1.05)] }]), undefined);
+    assertEquals(pickRowBlock([]), undefined);
   });
 });
 

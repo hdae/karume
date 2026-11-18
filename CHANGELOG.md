@@ -208,9 +208,10 @@ measurements in `docs/research/`.
 - `@karume/runtime/tune`: the GEMV sweep measures the row-blocked parallel GEMV at 4 and 8 rows (candidates
   `staged-l<lanes>r<rows>`; a row's `choice` gains `parallelRows`), for the lane counts M = 1 leaves adoptable and
   the default row's, and measures the default row's own kernel of M = 1 there as well. `deriveLinearGemvChoices`
-  derives the row block of a parallel row with its lanes: for an adopted candidate the row block that fares best at
-  the other row counts (none unless one is faster), and for a row M = 1 keeps another row block than the default's
-  when it is at least ×1.10 faster in every group there. `LinearGemvDecision` gains `defaultRowBlock`,
+  derives the row block of a parallel row with its lanes, by one rule against a reference row — the default's row
+  where M = 1 keeps it, an adopted candidate without a row block: a row block (or none) replaces the reference's
+  only when, at the row counts where the two run different kernels, it is slower in no group and at least ×1.10
+  faster in every group of one row count or more. `LinearGemvDecision` gains `defaultRowBlock`,
   `derivedRowBlock` and `rowGains` (the new type `LinearGemvRowGain`). A candidate that is slower than the default's
   choice at 4 or 8 rows by its own kernel is now adopted when a row block of its lanes is not. Existing records keep
   their format (`karume-gemv-sweep/4`); their groups at 4 and 8 rows of the 25 shapes whose default row gained a row
