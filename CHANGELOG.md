@@ -187,7 +187,9 @@ measurements in `docs/research/`.
     5070 Ti is slower with them (×0.89 to ×0.95), so they are not rows of the default.
   - On NVIDIA Blackwell adapters, 42 more shapes of int4 (33) and int8 (9) storage read 8 or 16 words ahead: rows
     of the embedded table `nvidia-blackwell`, derived from GEMV sweep records of an RTX 5070 Ti in Chrome (D3D12),
-    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each.
+    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each. Two of the 22
+    bf16 rows take another variant there: `1536 × 256` reads 8 words ahead in workgroups of 16 columns in place of
+    16 in workgroups of 32, and `4096 × 2560` 16 words in place of 8 (×1.20 and ×1.12 per dispatch).
   - In `SessionDiagnostics.lastRunPipelines` those dispatches read `linear_gemv:v1:f32:c16u8:wbf16`,
     `…:c16u16:wbf16` or `…:c32u16:wbf16`, and on Ampere `…:c16u2:wi4g32` and `…:c16u16:wi4g32`, in place of
     `…:c32u4:…`.
@@ -198,9 +200,10 @@ measurements in `docs/research/`.
 - `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
   choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
   `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
-  other lanes on 21 shapes, the staged form on 30, another row block on 6, and a row on 16 shapes that ran the
+  other lanes on 22 shapes, the staged form on 31, another row block on 6, and a row on 37 shapes that ran the
   sequential GEMV or the GEMM — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT
-  line and bf16 `10240 × 2560`. Each is at least ×1.10 faster per dispatch than the default's choice in every
+  line and 22 bf16 linears of regular Gemma 4 E2B and E4B. No preset of regular Gemma 4 declares linear at
+  `reorder`, so none of its presets runs the bf16 rows. Each is at least ×1.10 faster per dispatch than the default's choice in every
   record; no decode token was measured with them. On such an adapter the outputs of a `reorder` Session change
   inside the band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every
   Session on another adapter, write what they wrote. The memory estimate plans with the default profile's choices

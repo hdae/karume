@@ -203,8 +203,8 @@ maintainer's ruling of 2026-11-06).
        per-shape exceptions follow the direction by hand — 22 bf16 rows that the RTX 3080 Ti and the RTX 5070 Ti
        are both faster with stay in the default, and the four rows the RTX 5070 Ti is slower with are in
        `nvidia-ampere`, the first table to carry `linearGemv`. The RTX 5070 Ti's own choices are in
-       `nvidia-blackwell` since the same day, from 74 of its records: 42 sequential exceptions and 56 parallel rows
-       apart from the default's.)* Also open under this item:
+       `nvidia-blackwell` since the same day, from 82 of its records: 42 sequential exceptions of its own, another
+       variant on two of the default's, and 78 parallel rows apart from the default's.)* Also open under this item:
        - the derivation judges a candidate against the default profile's choice for the shape, so where that
          choice is an exception another device drops the inherited row only when its records show the general
          variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
@@ -219,9 +219,7 @@ maintainer's ruling of 2026-11-06).
          estimate that takes the adapter's table, or its GEMV choices, would remove it;
        - `nvidia-blackwell`'s choices have no end-to-end number: the RTX 5070 Ti's decode tokens were measured
          with the default's choices (the `default-gemv` switch of `gemma4-bench` compares the two in one record).
-         Its records lack 774 candidate measurements in 23 groups against the current default — the 22 bf16
-         shapes at one row, whose exceptions it inherits unmeasured, and int4 `2048 × 2560` at 8 rows
-         (`--gemv-plan` writes the batch);
+         On its 82 records the planner (`--gemv-plan`) lists nothing to measure against the current default;
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
          would allow it): their evidence is the device's sweep records;
        - the default's 22 rows on Metal, where nothing was measured and their words were not compared;

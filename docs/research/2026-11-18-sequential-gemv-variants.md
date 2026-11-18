@@ -144,6 +144,11 @@ the RTX 5070 Ti's column is the same variant against `c32u4` in its two records.
   22 rows it inherits from the default: its two records of them were taken against `c32u4`, the default of before
   those rows, so the derivation reads them as no evidence, and the variant its own records would choose is not
   registered.
+- Later still that day eight more records of the device (`gemv-sweep_2026-11-18T16-31-11` to `16-45-19`, checkout
+  `2fcacc4e`, clean) measured the 22 bf16 shapes at one row against these rows (six records, two of each shape)
+  and int4 `2048 × 2560` at eight rows (two), and the table was derived again from 82 records. It keeps 20 of them; on bf16 `1536 × 256` it takes `c16u8` in place of `c32u16` (×1.200 and
+  ×1.212) and on `4096 × 2560` `c16u16` in place of `c16u8` (×1.126 and ×1.124). On the other 20 the nearest
+  variant reads ×0.95 to ×1.08 of the row's, below ×1.10.
 
 ## 4. The identity
 
