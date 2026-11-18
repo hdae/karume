@@ -21,7 +21,7 @@
       "node-nvidia-geforce-rtx-3080-ti": "3d86b4e1671edf8dfbd25fdba14cb77dea58aabe557e29f21488fffbc4339d62"
     },
     "gemma4-qat-e2b-cut4/prefill8/reorder/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "422af0ba5c6352b5b00a1ba2d107fc078d16f4fb4279459b8c376bbd13f2ad15"
+      "node-nvidia-geforce-rtx-3080-ti": "7f5924727d56bbd3cf8fbfb135991669ab4470d5cc15b6ad3835000e3fbe0159"
     },
     "gemma4-qat-e2b-cut4/prefill8/reorder/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "db9b93f99d04b81f117163516820342c574022e83bbe3753c3a19804583bdc18"
