@@ -2155,6 +2155,11 @@ The abort check placed at the stage boundaries of construction and generation (`
 and to once a minute when hidden for 5 minutes or more, so processing that hits one timer per stage (one token for generation)
 slows down to that tick.
 
+The decode loops of generation take that yield while a run is awaited (`createAbortLap` in the same file): each boundary
+arms the timer for the next one, which checks at once when the timer was delivered during the run. A visible tab therefore
+pays no timer per decode token. A hidden tab still does: its throttled timer is not delivered within a run, so every
+boundary waits for a timer of its own, as a prefill chunk's does.
+
 Switching the yield target to `MessageChannel` (not subject to throttling) would restore the speed, but **it is not adopted** — message
 tasks can be delivered before a timer set earlier, so the ordering with aborts arriving through a timer (`setTimeout(() =>
 abort())` / `AbortSignal.timeout`) is lost, and the check "an abort that arrives after execution starts takes effect at the first stage
@@ -2414,6 +2419,12 @@ turn keeps only the text that came out in the history, and a sequence whose corr
   `AbortSignal` alike). An abort before any token was received (= in the middle of prefill) leaves the prompt
   partway into the conversation, and the `chunk` of the `prefill` event gives the number of committed chunks. Whether to send the rest
   or discard the sequence is up to the caller.
+  - **An abort whose task is still queued when a decode run returns is seen after the next run** (one more token is
+    delivered). A decode boundary checks the signal without a yield of its own when the event loop delivered a timer
+    during the run before it (`createAbortLap` in `packages/models/src/concurrency/abort.ts`); a click or a timer that
+    became ready after the event loop's last turn inside that run has not run yet at that check, and runs while the next
+    run is awaited. An abort whose task ran before the boundary — during the run, or made by the consumer between two
+    tokens — is seen at that boundary, before the next run (pinned by `generation_sequence_test.ts`).
   - **Even an abort that arrives after the final prefill delivers 1 token** (aborts are checked only at stage boundaries before a run is issued
     — ADR 0083 decision 5). The final prefill run has already returned logits, so even when aborted after that `prefill`
     event, the first token is sampled from the computed logits and delivered, and no new run

@@ -70,6 +70,15 @@
  * It is checked at stage boundaries (right before each run), and `signal.reason` is thrown **as is,
  * unwrapped** (ADR 0083 decision 5 — the precedent is `anima.PipelineOptions.signal`).
  *
+ * A check needs the event loop to have turned since the one before it, or it cannot see an abort a
+ * task delivers. A prefill chunk yields for that at its own boundary (`settleAbort`). The decode
+ * loops — every lap of which awaits a run — take the yield **while the run is awaited**
+ * (`createAbortLap`): a boundary whose previous run let the event loop deliver a timer checks at
+ * once, and one whose run did not yields as a prefill chunk does. A decode token therefore pays no
+ * timer of its own, and an abort whose task was still queued when a run returned is seen after the
+ * next run instead of before it (one more token delivered); an abort whose task ran, or one the
+ * consumer made synchronously, is seen at that boundary.
+ *
  * ## The speculative path (ADR 0096 stage 3 — when `options.speculative` is given, at any temperature)
  *
  * 1 cycle = draft (a borrower run, `k' = min(k, remaining budget − 1)` drafts) → verify (the
@@ -153,7 +162,7 @@ import type {
   SymbolBindings,
   Tensor,
 } from "@karume/runtime";
-import { settleAbort } from "../concurrency/abort.ts";
+import { createAbortLap, settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { assertPrefillBlocks, planPrefillChunksWithBlocks } from "./greedy.ts";
@@ -1783,6 +1792,10 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       let release: (() => void) | undefined;
       /** Tokens drawn (a stop token counts as one — the doc of `GenerationStop.tokens`). */
       let generated = 0;
+      // The decode loops' stage-boundary checks: every lap awaits a run, so the yield to the event
+      // loop rides on that wait (the doc of `createAbortLap`). Prefill keeps a yield of its own per
+      // chunk (`settleAbort`): its first boundary has no run before it.
+      const lap = createAbortLap(signal);
       try {
         release = await acquire();
         // An abort that arrived while queued closes here (a long preceding generation means a long
@@ -1915,7 +1928,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           /** Cycles run in this turn (the index used to leave the first one out of observation). */
           let turnCycles = 0;
           while (generated < tokenLimit) {
-            await settleAbort(signal);
+            await lap.settle();
             // k' = min(k, remaining − 1): at most k'+1 are confirmed, so the budget is not exceeded.
             // k' = 0 is one decode row.
             const budget = planDraftLength(k, tokenLimit - generated);
@@ -2122,7 +2135,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           };
           let cycle = 0;
           while (generated < tokenLimit) {
-            await settleAbort(signal);
+            await lap.settle();
             const drafts = planDraftLength(selfDepth, tokenLimit - generated);
             cycle += 1;
             const startedAt = now();
@@ -2195,7 +2208,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           while (step + 1 < tokenLimit) {
             // The stage boundary is the batch (one fence per batch); a token of a batch already run
             // is checked synchronously before it is handed out (below).
-            await settleAbort(signal);
+            await lap.settle();
             const count = Math.min(runAhead.depth, tokenLimit - 1 - step);
             const base = context.pastLength;
             const steps: RunInputs[] = [];
@@ -2253,7 +2266,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         // `tokenLimit - 1` times, and the last token stays uncommitted in `pendingToken`
         // (decision 4).
         for (let step = 0; step + 1 < tokenLimit; step += 1) {
-          await settleAbort(signal);
+          await lap.settle();
           // The wall runs from the step's head (before the derived inputs) to right after the draw
           // — the same span as a speculative cycle, taken before the delivering yield, so the
           // consumer's speed is excluded. Only the hook's `wallMs` reads this value.
@@ -2313,6 +2326,8 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         // abort with `error === controller.signal.reason`).
         throw error;
       } finally {
+        // The timer the last boundary armed has no boundary left to serve.
+        lap.clear();
         try {
           // MUST: commit the pending verify up to the frontier (whether we came via `break` /
           // `return()` / an exception — leaving it pending makes the context accept only dispose).

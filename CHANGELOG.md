@@ -169,6 +169,16 @@ measurements in `docs/research/`.
   `exact` do not change. A row applies to every linear of its shape: `1024 × 4096` is also the shape of the int4
   FFN-down linears of the SBV2 text encoder, which take it only in a Session created directly with linear at
   `reorder` and at most 8 rows (the sbv2 pipeline does not accept `numerics`).
+- `@karume/models`: a generation given a `signal` no longer waits for a timer before every decode run. The abort check
+  at a decode step's boundary needs the event loop to have turned since the check before it, and a decode step already
+  hands the thread back while the GPU works on its run: the loop now arms its `setTimeout(0)` at one boundary and, at
+  the next, checks at once when that timer was delivered meanwhile; it waits for a timer as before only when it was
+  not (a run that settled without the event loop turning, or inside the timer's delay) and at the first decode step.
+  Under Node, where a `setTimeout(0)` is a 1 ms timer, a short decode token was paying it in full. What an abort does is
+  unchanged except in one case: an abort whose task is still queued at the moment a decode run returns is seen after the
+  next run, so one more token is delivered. Prefill chunks, the other pipelines' stage boundaries and generations
+  without a `signal` are as before. Applies to every generation surface of the Gemma 4 pipelines (`chat`,
+  `ChatSession`, `sequence`), with or without a drafter, the decode run-ahead or the expert cache.
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
   dropped the field before.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the

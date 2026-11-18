@@ -549,6 +549,147 @@ describe("GenerationSequence: an interruption that arrives after the last prefil
   }
 });
 
+describe("GenerationSequence: the decode loop takes its yield to the event loop while a run is awaited", () => {
+  /** A timer of `ms` (a run on the GPU: the event loop turns while it is awaited). */
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * `fake`'s Session with `around` wrapped around each run: `before` in the synchronous part of the
+   * issue, `after` once the fake's own run settled (0-based run numbers, the prefill first).
+   */
+  const sessionAround = (
+    fake: FakeSession,
+    around: {
+      readonly before?: (run: number) => void;
+      readonly after?: (run: number) => Promise<void> | void;
+    },
+  ): typeof fake.session => {
+    let runs = 0;
+    return {
+      ...fake.session,
+      run: async (inputs, bindings, generation) => {
+        const run = runs;
+        runs += 1;
+        around.before?.(run);
+        const outputs = await fake.session.run(inputs, bindings, generation);
+        await around.after?.(run);
+        return outputs;
+      },
+    };
+  };
+
+  it("issues the next run in the task its previous run settled in, once that run let the event loop turn", async () => {
+    const fake = fakeSession({ tokens: [5, 6, 7, 8] });
+    const order: string[] = [];
+    const sequence = await createGenerationSequence({
+      session: sessionAround(fake, {
+        before: (run) => order.push(`run ${run}`),
+        after: async (run) => {
+          await sleep(3);
+          // A task queued as the run settles: a loop that yields to a timer of its own after the
+          // run lets it through before the next run; one that took its yield during the run does
+          // not wait for it.
+          setTimeout(() => order.push(`task after run ${run}`), 0);
+        },
+      }),
+      program: programOf(fake),
+    });
+    const { events } = await drain(
+      sequence.generate({ prompt: [1, 2], maxNewTokens: 4, signal: new AbortController().signal }),
+    );
+    assertEquals(tokenIds(events), [5, 6, 7, 8]);
+    // The first decode boundary follows the prefill and yields on its own (run 0's task goes
+    // first); every later one finds the event loop already turned during its run.
+    assertEquals(order, [
+      "run 0",
+      "task after run 0",
+      "run 1",
+      "run 2",
+      "task after run 1",
+      "run 3",
+      "task after run 2",
+    ]);
+  });
+
+  it("sees an abort a task delivered while a decode run was awaited at the next boundary: that run's token is delivered and no run follows", async () => {
+    const fake = fakeSession({ tokens: [5, 6, 7, 8] });
+    const controller = new AbortController();
+    const reason = new Error("stopped while the GPU was working");
+    const sequence = await createGenerationSequence({
+      session: sessionAround(fake, {
+        before: (run) => {
+          // During the first decode run.
+          if (run === 1) setTimeout(() => controller.abort(reason), 1);
+        },
+        after: () => sleep(3),
+      }),
+      program: programOf(fake),
+    });
+    const stream = sequence.generate({
+      prompt: [1, 2],
+      maxNewTokens: 4,
+      signal: controller.signal,
+    });
+    const seen: number[] = [];
+    const caught = await assertRejects(async () => {
+      for await (const event of stream) if (event.kind === "token") seen.push(event.id);
+    }, Error);
+    assert(caught === reason, `the interruption's exception is wrapped: ${String(caught)}`);
+    assertEquals(seen, [5, 6]);
+    assertEquals(fake.calls.length, 2);
+    assertEquals(await stream.done, { reason: "aborted", tokens: 2 });
+  });
+
+  it("still yields at a boundary whose run settled without the event loop turning, so an abort a timer delivers stops the loop before the next run", async () => {
+    // The fake's runs settle in microtasks: no task runs between two boundaries unless the loop
+    // yields for it.
+    const fake = fakeSession({ tokens: [5, 6, 7, 8] });
+    const controller = new AbortController();
+    const reason = new Error("stopped by a timer");
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf(fake),
+    });
+    const stream = sequence.generate({
+      prompt: [1, 2],
+      maxNewTokens: 4,
+      signal: controller.signal,
+    });
+    const seen: number[] = [];
+    const caught = await assertRejects(async () => {
+      for await (const event of stream) {
+        if (event.kind !== "token") continue;
+        seen.push(event.id);
+        // At the second token: after the timer the previous boundary armed, before this one's.
+        if (seen.length === 2) setTimeout(() => controller.abort(reason), 0);
+      }
+    }, Error);
+    assert(caught === reason, `the interruption's exception is wrapped: ${String(caught)}`);
+    assertEquals(seen, [5, 6]);
+    // The prefill and one decode run: the run after the second token was not issued.
+    assertEquals(fake.calls.length, 2);
+  });
+
+  it("leaves no timer behind when the generation ends", async () => {
+    /** The timers this process has armed and not yet delivered or dropped. */
+    const pendingTimers = (): number =>
+      process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
+    const fake = fakeSession({ tokens: [5, 6, 7] });
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf(fake),
+    });
+    const before = pendingTimers();
+    const { events } = await drain(
+      sequence.generate({ prompt: [1, 2], maxNewTokens: 3, signal: new AbortController().signal }),
+    );
+    // Read in the task the generation ended in: a timer armed for a boundary that did not come
+    // would still be pending here.
+    assertEquals(pendingTimers(), before);
+    assertEquals(tokenIds(events), [5, 6, 7]);
+  });
+});
+
 test("GenerationSequence: an interruption that arrives while queued closes without issuing a single run", async () => {
   // A request aborted while waiting closes **without deciding anything** when its turn comes.
   // Returning the budget overrun first would mean "I stopped it and got a capacity error", and the
