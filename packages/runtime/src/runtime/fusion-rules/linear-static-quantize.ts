@@ -115,8 +115,15 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
       !sameShape(linear.outputs[0].shape, srq.outputs[0].shape)
     )
       return undefined;
+    // The fused epilogue exists for the integer storages. A float-stored weight keeps its own
+    // dispatch and the SRQ stays a node, whichever way it is resident: f32 has no entry in the weight
+    // layouts, f16 and bf16 have one — and the parallel GEMV names float shapes too, so the lookup
+    // below would otherwise decide it.
     const weight = context.weightLayouts?.get(linear.node.ins[1]);
-    if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") {
+    if (
+      weight === undefined ||
+      (weight.storage !== "i2" && weight.storage !== "i4" && weight.storage !== "i8")
+    ) {
       return undefined;
     }
     // A byte-plane GEMV linear (`linearPlanesGemvVariant` — the function buildLinear reads) keeps

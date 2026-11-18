@@ -170,6 +170,18 @@ const assertRowsStorage = (storage: WeightStorage): void => {
 export const isFloatStorage = (storage: WeightStorage): storage is "f16" | "bf16" | "f32" =>
   storage === "f16" || storage === "bf16" || storage === "f32";
 
+/**
+ * The forms of the parallel GEMV that exist for i2 / i4 / i8 storage only — packed activations, the
+ * fused static-quantize epilogue, the subgroup reduction — refuse a float storage by name.
+ */
+const assertIntegerOnlyForm = (storage: WeightStorage, form: string): void => {
+  if (isFloatStorage(storage)) {
+    throw new CodegenError(
+      `linear_gemv_parallel: ${storage} storage has no ${form} form (the plain and the staged-activation forms only)`,
+    );
+  }
+};
+
 /** The per-workgroup thread limit WebGPU core guarantees (upper bound of `cols`). */
 const MAX_THREADS = 256;
 
@@ -1209,7 +1221,7 @@ export const linearGemvStaticQuantizeParams = (
       `linear static_quantize: supports only m in 1..${LINEAR_GEMV_PARALLEL_MAX_ROWS}`,
     );
   }
-  assertRowsStorage(storage);
+  assertIntegerOnlyForm(storage, "static-quantize");
   const params = new Uint32Array(264);
   params.set(linearGemvParams(storage, m, n, k, group));
   // The 4th word is a run-time rounding barrier. Do not replace the XOR with 0 by a constant expression.
@@ -1318,7 +1330,7 @@ export const linearGemvParallelPackedParams = (
   xScale: number,
   group?: number,
 ): Uint32Array<ArrayBuffer> => {
-  assertRowsStorage(storage);
+  assertIntegerOnlyForm(storage, "packed-activation");
   const params = linearGemvParams(storage, m, n, k, group);
   params[3] = activationScaleBits(xScale);
   return params;
@@ -1449,11 +1461,8 @@ const parallelWgsl = (
       "linear_gemv_parallel: staged activations exist for the plain variant only",
     );
   }
-  if (isFloatStorage(storage) && (packed || quantize)) {
-    throw new CodegenError(
-      `linear_gemv_parallel: ${storage} storage has the plain and the staged-activation variants only`,
-    );
-  }
+  if (packed) assertIntegerOnlyForm(storage, "packed-activation");
+  if (quantize) assertIntegerOnlyForm(storage, "static-quantize");
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
   // MUST: `x_scale` is the **last member** of Dims (the packed variant's params add one word at
@@ -1520,7 +1529,7 @@ export const linearGemvSubgroupWgsl = (
   if (![2, 4, 8, 16, 32].includes(lanes)) {
     throw new CodegenError("linear_gemv_parallel: invalid lane count");
   }
-  assertRowsStorage(storage);
+  assertIntegerOnlyForm(storage, "subgroup");
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
   return `enable subgroups, subgroup_size_control;

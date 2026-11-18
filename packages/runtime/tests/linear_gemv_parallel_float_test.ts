@@ -21,6 +21,7 @@ import {
   linearGemvParallelEligible,
   linearGemvParallelKey,
   type LinearGemvParallelLanes,
+  linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
   linearGemvParallelParams,
   type LinearGemvParallelShape,
@@ -29,10 +30,13 @@ import {
   linearGemvParallelWgsl,
   linearGemvParams,
   linearGemvStagedEligible,
+  linearGemvStaticQuantizePackedWgsl,
+  linearGemvStaticQuantizeParams,
   linearGemvStaticQuantizeWgsl,
   linearGemvSubgroupWgsl,
   linearGemvWgsl,
 } from "../src/kernels/linear-gemv.ts";
+import { FUSION_RULES, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { linearProgramFor } from "../src/runtime/linear-program.ts";
 import {
   LINEAR_STRATEGIES,
@@ -40,7 +44,7 @@ import {
   type LinearKnobs,
   selectLinearStrategy,
 } from "../src/runtime/linear-strategies.ts";
-import { type NodePlan, planGraph } from "../src/runtime/plan.ts";
+import { countUses, type NodePlan, planGraph } from "../src/runtime/plan.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 
 const FLOATS = ["bf16", "f16", "f32"] as const;
@@ -138,12 +142,24 @@ describe("the text of the parallel GEMV for a float-stored weight", () => {
     }
   });
 
-  it("has no packed-activation, static-quantize or subgroup form: each fails at code generation (fault: asked for anyway)", () => {
+  it("has no packed-activation, static-quantize or subgroup form: the text and the uniform of each fail naming the storage and the form (fault: asked for anyway)", () => {
+    const refusal = (storage: Float, form: string): string =>
+      `linear_gemv_parallel: ${storage} storage has no ${form} form (the plain and the staged-activation forms only)`;
     for (const storage of FLOATS) {
-      assertThrows(() => linearGemvParallelPackedWgsl(storage, undefined, 4), CodegenError);
-      assertThrows(() => linearGemvStaticQuantizeWgsl(storage, undefined, 4), CodegenError);
-      assertThrows(() => linearGemvSubgroupWgsl(storage, undefined, 4), CodegenError);
+      for (const [form, ask] of [
+        ["packed-activation", () => linearGemvParallelPackedWgsl(storage, undefined, 4)],
+        ["packed-activation", () => linearGemvStaticQuantizePackedWgsl(storage, undefined, 4)],
+        ["packed-activation", () => linearGemvParallelPackedParams(storage, 1, 256, 1536, 0.5)],
+        ["static-quantize", () => linearGemvStaticQuantizeWgsl(storage, undefined, 4)],
+        ["static-quantize", () => linearGemvStaticQuantizeParams(storage, 1, 256, 1536, 0.5)],
+        ["subgroup", () => linearGemvSubgroupWgsl(storage, undefined, 4)],
+      ] as const) {
+        assertThrows(ask, CodegenError, refusal(storage, form));
+      }
     }
+    // The integer storages keep every form
+    linearGemvSubgroupWgsl("i8", undefined, 4);
+    linearGemvParallelPackedParams("i8", 1, 256, 1536, 0.5);
   });
 });
 
@@ -373,6 +389,61 @@ describe("the selection of a float-stored linear", () => {
     assertEquals(
       choose("bf16", 1, 1536, 2048, { ...REORDER, linearCompute: "f16" }).id,
       "gemm-f16",
+    );
+  });
+});
+
+describe("the linear → static_quantize fusion on a float-stored weight", () => {
+  /** `linear [1, k] × [n, k]` → `static_quantize`, as the fusion pass plans it with `layouts`. */
+  const fused = (
+    n: number,
+    k: number,
+    layouts: ReadonlyMap<string, FusionWeightLayout>,
+    linearGemv: LinearGemvChoices,
+  ): number => {
+    const ir = mergeGraph({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["linear", "static_quantize"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [1, k] }],
+      outputs: ["q"],
+      initializers: { w: {}, b: {} },
+      values: {
+        w: { dtype: "f32", shape: [n, k] },
+        b: { dtype: "f32", shape: [n] },
+        y: { dtype: "f32", shape: [1, n] },
+        q: { dtype: "f32", shape: [1, n] },
+      },
+      nodes: [
+        { op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} },
+        { op: "static_quantize", ins: ["y"], outs: ["q"], attrs: { scale: Math.fround(0.021) } },
+      ],
+    });
+    return planFusions(planGraph(ir, {}).nodes, {
+      rules: FUSION_RULES,
+      linearGemv,
+      useCounts: countUses(ir),
+      outputNames: new Set(ir.outputs),
+      limits: {
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxComputeWorkgroupsPerDimension: 65535,
+      },
+      linearGemvReduce: "parallel",
+      linearCompute: "f32",
+      weightLayouts: layouts,
+    }).counts.linearStaticQuantize;
+  };
+
+  it("does not fuse where the table names the float shape: the fused epilogue is the integer storages' (fault: a bf16, an f16 and an f32 weight on a row of its own)", () => {
+    assertEquals(fused(1536, 2048, new Map([["w", { storage: "bf16" }]]), WITH_ROWS), 0);
+    assertEquals(fused(256, 4096, new Map([["w", { storage: "f16" }]]), WITH_ROWS), 0);
+    // An f32-resident weight has no entry in the layouts
+    assertEquals(fused(8960, 1536, new Map(), WITH_ROWS), 0);
+    // The control: the same pass fuses the i4 linear of the default table's first row
+    assertEquals(
+      fused(8960, 1536, new Map([["w", { storage: "i4", groupSize: 32 }]]), WITH_ROWS),
+      1,
     );
   });
 });
