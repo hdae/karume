@@ -1441,7 +1441,7 @@ def _extra_repo_name(_model: str) -> str:
 #: Roles every fine-tune of the extra repository borrows from the official repository instead of
 #: storing them (ADR 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the VAE decoder
 #: in every text-stack storage, and both tokenizers — the official text stack, byte-identical. Not
-#: `text_conditioner`: every extra model has its own (`own_text_conditioner=True`).
+#: `text_conditioner`: every extra model has its own ({@link text_conditioner_series}).
 ANIMA_EXTRA_SHARED_ROLES: tuple[str, ...] = (
     *(
         text_stack_role(component, storage)
