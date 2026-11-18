@@ -76,6 +76,8 @@ export type AbortLap = {
  *
  * The first `settle()` has no earlier boundary and yields as {@link settleAbort} does. Without a
  * `signal` nothing is armed and nothing yields.
+ *
+ * SPEC: docs/spec/generation.md#abort-checks
  */
 export const createAbortLap = (signal: AbortSignal | undefined): AbortLap => {
   /** The timer armed at the last boundary: whether it was delivered, and its handle. */
