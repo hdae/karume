@@ -173,7 +173,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
 
    | Family                                             | Original-weights preset | Status on 2026-10-17                                                   |
    | -------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------- |
-   | anima (all seven models)                           | `bf16`                  | shipped (ADR 0131; every checkpoint is BF16, no LoRA fusion)           |
+   | anima (all seven models)                           | `bf16`                  | shipped (ADR 0131; every checkpoint is BF16, no LoRA fusion). Since ADR [0154](0154-anima-bf16-preset-names.md) (2026-11-18) every preset stores its float components as bf16 and the f16 presets are renamed (`f16` dropped); the recipe carries it, the mirrors and the published repositories follow at the next release |
    | irodori v4 / v4.1-small                            | `f32`                   | shipped                                                                |
    | birefnet-hr                                        | `f16`                   | shipped (upstream f16)                                                 |
    | lucida, depth-anything-v2, siglip2, vowel-detector | `f32`                   | shipped                                                                |

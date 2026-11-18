@@ -69,6 +69,15 @@ measurements in `docs/research/`.
   `/3` record is refused, naming its format, and a screened row is no observation (a geometry screened out in a case no
   record timed it in is not adopted for that case's class). The records the registered tables cite are `/3` and no
   longer derive them; a family regenerates from a new sweep.
+- `karume-anima` / `karume-anima-extra` (Anima, all seven models): every float-stored component is bf16, the upstream
+  checkpoints' own values, and the presets are named from that base. `f16+dit8` → `bf16+dit8`,
+  `f16+dit8-a8` → `bf16+dit8-a8`, `f16+dit8-a8-attn8` → `bf16+dit8-a8-attn8`, `f16+dit8-a8-attn8-s16` →
+  `bf16+dit8-a8-attn8-s16` (the default), `f16-c16` → `bf16-c16` (the original weights, the transformer computed in
+  f16); `bf16` is unchanged, and `f16` is removed — with a bf16 transformer it is `bf16`. There is no alias: against a
+  revision with the new manifest, an old name is refused as an unknown preset, with the available names listed (`bf16`
+  replaces `f16`). A caller that omits `quant` gets `bf16+dit8-a8-attn8-s16`, whose text encoder, text conditioner and
+  VAE decoder are now bf16, so its images differ from the earlier default's. The f16 files leave both repositories;
+  the revisions published versions pin keep them and keep working.
 
 ### Added
 

@@ -291,10 +291,10 @@ decision 8 permits). A stage that fell back is not on the declared path: ③PV d
 dot product, and S in VRAM has f32 width. The canonical source of the decision is one pure function
 (`attentionRoute` in `packages/runtime/src/runtime/attention-route.ts`).
 
-- **Anima**: with the default preset `f16+dit8-a8-attn8-s16` (and `f16+dit4-attn8-s16`), at
+- **Anima**: with the default preset `bf16+dit8-a8-attn8-s16` (and `bf16+dit4-attn8-s16`), at
   resolutions where the self-attention N = (W/16)·(H/16) is not a multiple of 4, the self ③PV and the
   storage of S become f32. Of the 9,409 accepted shapes, 4,608 are affected (e.g. 528×528 = N 1,089),
-  and **it does not happen when both sides are multiples of 32 px**. With the `f16+dit8-a8-attn8`
+  and **it does not happen when both sides are multiples of 32 px**. With the `bf16+dit8-a8-attn8`
   preset only ③PV falls back. Cross-attention (N = 512) and ①QK (D = 128) are always as declared.
   The accepted set is not narrowed.
 - **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
@@ -1580,14 +1580,15 @@ Session across generate calls (ADR [0112](decisions/0112-anima-transformer-resid
 default `"per-stage"`. By-design constraints:
 
 - **The chain peak goes up**. The text stage and the VAE stage sit **on top of** the resident DiT. With the default preset
-  (`f16+dit8-a8-attn8-s16`) at 1024², the resident part is +2,646 MiB (weights 1,871 + backing 768 + inputs 7 MiB — runtime
+  (`bf16+dit8-a8-attn8-s16`) at 1024², the resident part is +2,646 MiB (weights 1,871 + backing 768 + inputs 7 MiB — runtime
   accounting of 2026-09-10), and the chain peak while resident is about 3.9–4.1 GiB (speculation — there is no runtime
   accounting of the text stage). That is about 1.3–1.5 GiB higher than the chain peak of per-stage operation (DiT stage
   2,647 MiB). **It cannot be used on 4 GB-class GPUs**.
-- **The quant preset doubles it**. The DiT weights are 1,875 MiB for the default preset and 3,733 MiB for the `f16` preset
-  (f32 compute — VRAM table of the 2026-08-05 final-perf-bench. The 1,871 MiB above is the runtime accounting of
-  2026-09-10, the same quantity from a different source). Residency of the `f16` preset exceeds +3.7 GB in the text stage,
-  so even an 8 GB-class GPU has little headroom (not measured).
+- **The quant preset doubles it**. The DiT weights are 1,875 MiB for the default preset and 3,733 MiB for the `bf16` preset
+  (f32 compute — VRAM table of the 2026-08-05 final-perf-bench, measured on the former `f16` preset, whose transformer
+  has the bf16 one's size. The 1,871 MiB above is the runtime accounting of 2026-09-10, the same quantity from a different
+  source). Residency of the `bf16` preset exceeds +3.7 GB in the text stage, so even an 8 GB-class GPU has little
+  headroom (not measured).
 - **When VRAM is short, the resident DiT is released and residency stops from then on** (downgrade). Before the text stage
   and before the VAE stage, the next stage's requirement is measured with a trial allocation, and if it does not fit the
   DiT is released before the stage is set up (`evicted` / `headroom`). If the measurement is wrong and the stage hits OOM,

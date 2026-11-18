@@ -319,35 +319,53 @@ maintainer's ruling of 2026-11-06).
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.
 
-- **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction)**. A component whose upstream
-  checkpoint is BF16 and that a preset does not quantize to integers is stored as bf16, the upstream bits, instead of
-  being rounded to f16: what a preset does not ask to quantize follows the precision of the source. The f16 storage of
-  those components predates bf16 execution (ADR [0131](decisions/0131-bf16-weight-execution.md), 2026-10-17), and bf16
-  costs the same bytes in the download and in VRAM.
-  - Known today: Anima. Its four upstream components are BF16; every preset but `bf16` stores the text encoder, the
-    text conditioner and the VAE decoder as f16, and `f16` / `f16-c16` store the transformer as f16.
-  - To inspect first: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice).
-    Not in scope: an F32 upstream stored as f16 (Wan's VAE, Irodori, Lucida) — that rounding halves the size and is a
-    separate choice.
-  - What it touches: the preset names (ADR [0074](decisions/0074-quant-seat-naming.md) spells the storage, so
-    `f16+dit8…` changes, the default preset's name with it — a breaking change), the re-export, the sha256 rows of
-    the affected lanes, the model cards and the Hugging Face repositories (each on the maintainer's go-ahead), and
-    whether the `:wbf16` kernels have their geometry per adapter.
+- **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
+  ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
+  preset does not quantize to integers is stored as bf16, the upstream bits, instead of being rounded to f16: what a
+  preset does not ask to quantize follows the precision of the source. The f16 storage of those components predates
+  bf16 execution (ADR [0131](decisions/0131-bf16-weight-execution.md), 2026-10-17), and bf16 costs the same bytes in the
+  download and in VRAM.
+  - *(Landed 2026-11-18 in the export recipe: every float component of the seven Anima models is bf16; the presets are
+    `bf16`, `bf16+dit8`, `bf16+dit8-a8`, `bf16+dit8-a8-attn8`, `bf16+dit8-a8-attn8-s16` (the default) and `bf16-c16`,
+    and `f16` is dropped (ADR [0074](decisions/0074-quant-seat-naming.md)'s grammar as written; no alias); neither
+    notice names an f16 series; the build takes the published containers from the local mirrors, pinned by part 0, so
+    nothing is re-exported. Both distributions were built from the mirrors into
+    `outputs/local-distributions/bf16-migration/`: every weight file is byte-identical to the mirror's of the same path,
+    and no f16 file is present or referenced.)*
+  - Left, in order (each step on the maintainer's go-ahead where it publishes or writes reference rows):
+    1. The TypeScript side: the Anima pipeline of `@karume/models` (its preset checks and messages, and
+       `fromSingleFile` deriving the f16 plan of an F16 single file from the distributed bf16 container), `@karume/convert`,
+       the single-file and convert specs, and the preset names in the e2e tests, the playground and the comments.
+    2. The GPU checks: the `models:anima` lane, `bf16-c16` (bf16 storage computed in f16 has no numerics check yet),
+       the A/B bands, the fusion counts and the extra repository's cross-repository reads.
+    3. The sha256 rows: 11 of the 13 rows of Anima's reference file move (all but the two `bf16` rows). The new case IDs
+       are written with `KARUME_REFERENCE=write`, and the rows of the old IDs are removed by hand.
+    4. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
+       decision 3 (2)) and of the new notice text of both repositories.
+    5. The local mirrors `models/karume-anima` / `models/karume-anima-extra` replaced by the staged builds.
+    6. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
+       `karume-anima-extra` rebuilt with `--resolve-refs hf` against the new main and uploaded with its f16 files deleted
+       (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
+       that republishes every manifest as `karume/6`.
+    7. The unpublished 2.9B Anima distribution takes the new names before its first publication.
+  - Later, low priority: bf16 presets for MOSS-Image (its BF16 DiT and text encoder ship only as int8, and their bf16
+    export is heavy) and for the Gemma 4 E2B drafter (int8 only).
+  - Open question: an F32 upstream stored as f16 (Irodori, Wan, Lucida) — that rounding halves the size, and whether bf16
+    storage avoids a loss there is not known.
+  - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice),
+    and whether the `:wbf16` kernels have their geometry per adapter.
 
 - **Export again the f16 containers made under the earlier rounding rule (filed 2026-11-18; the maintainer's ruling: with
   the next release, in one pass)**. `round_weights_to_f16` now rounds only what the checkpoint carries, so a
   non-persistent buffer computed at init (RoPE's `inv_freq`, T5Gemma2's `embed_scale`) keeps its f32 value; the
   distributed f16 containers below were exported while it rounded those buffers too, and they keep the earlier constants
   until they are exported again. On the small Irodori model the maintainer heard no difference between the two
-  (2026-11-18).
+  (2026-11-18). Anima's f16 containers leave the distribution instead (ADR
+  [0154](decisions/0154-anima-bf16-preset-names.md)), so the item has no Anima part.
   - Irodori v4-Small, v4.1-Small and v4.1-Small-MF: the f16 container of the text backbone (measured on v4-Small: the
     new graph is the one the f32 and i8 series already carry). Their sha256 rows are of the `f32` preset and do not move.
   - Irodori v4-Large: the f16 container of the T5Gemma2 text backbone — expected, not measured. Its three sha256 rows are
     of the `f16` preset and move with it.
-  - Anima: the f16 containers of the text encoder and the text conditioner (measured on the text conditioner: the new
-    graph is the bf16 one). Every preset but `bf16` loads them, so every sha256 row of the lane but the `bf16` ones
-    moves. The item above replaces these two containers with bf16 ones; when it is taken first, nothing of Anima is
-    left here.
   - What it touches: the export, the local mirrors, the sha256 rows named above and the Hugging Face repositories (each
     on the maintainer's go-ahead).
 
