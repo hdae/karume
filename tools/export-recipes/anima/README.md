@@ -556,6 +556,41 @@ comparison, swapping the LoRA and re-exporting would assemble against the old di
 The record stays in the series: the distribution only ever receives the roles the placement table
 names.
 
+## Assembling the distributions (`dist.py --pipeline anima` / `anima-extra`)
+
+The seven shipped models are built from the **published containers in the local mirrors**, not from series (ADR
+[0154](../../../docs/decisions/0154-anima-bf16-preset-names.md) decision 6 — the mechanism of ADR
+[0149](../../../docs/decisions/0149-irodori-rare-token-split.md) decision 5). `ANIMA_PUBLISHED_PART0` in
+`distribution.py` pins part 0 of every container, and each tokenizer file, by sha256 as published; part 0's descriptor
+declares the sha256 of the other parts. The build reads `models/karume-anima/` and `models/karume-anima-extra/`; every
+model takes its text encoder, VAE decoder and tokenizers from the official base model's entry, the rest from its own.
+`--series` is not read for these models.
+
+```sh
+cd tools/export-recipes
+uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1.0 \
+  --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 --model anima-aesthetic-v1.0 \
+  --out ../../outputs/local-distributions/<name>/karume-anima
+uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anima-copycat-20260610 \
+  --out ../../outputs/local-distributions/<name>/karume-anima-extra \
+  --ref-revision karume-anima=<commit>     # offline; the publication build uses --resolve-refs hf
+```
+
+- The mirrors are only read. A mirror folds the parts two models share into `shared/`, so the parts of one container
+  are linked side by side into a temporary part view; placement copies the bytes they point at (about 29 GiB for
+  `karume-anima` and 11 GiB for `karume-anima-extra` — a full copy: the core does not clone files, so check the free
+  space first; on a file system with copy-on-write clones the copies can be replaced by clones of the mirror's files
+  afterwards).
+- A part 0 or a tokenizer that is not the pinned one fails before a byte is written. Another part that disagrees with
+  part 0's descriptor fails while it is placed, in the staging directory, so nothing is put in place. The fix is to
+  restore the mirror from the Hub, never to re-pin.
+- The extra repository references the official repository's files at the commit given; the reference is reconciled
+  against the local mirror `models/karume-anima/`, whose bf16 files and tokenizers sit at the paths the official build
+  gives them.
+- What it cannot do: build a model or a storage whose containers are not in the mirrors (a new model, an i4
+  transformer), or re-export a model. A model without an entry in `ANIMA_PUBLISHED_PART0` is built from its series
+  (`anima_sources`), so re-exporting one is a deliberate change: remove its entry.
+
 ## Anima host pipeline reference fixture (`anima/pipeline_ref.py`)
 
 Only 4 graphs go into the IR; everything outside them — tokenization / sigma schedule / timestep

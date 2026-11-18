@@ -34,12 +34,16 @@ from ir_fixtures import ir_container
 
 import dist
 from _shared.container_read import read_asset
+from anima import distribution as anima_distribution
 from anima.card import ATTRIBUTION_NOTICE, NVIDIA_NOTICE, RIGHTS_GRANT_STATEMENT
 from anima.distribution import (
     ANIMA_AESTHETIC_MODEL_NAME,
+    ANIMA_ASSETS,
     ANIMA_BASE_MODEL_NAME,
     ANIMA_DEFAULT_QUANT,
+    ANIMA_EXTRA_SHARED_ROLES,
     ANIMA_MODELS,
+    ANIMA_PUBLISHED_PART0,
     ANIMA_QUANT_ABBREVIATIONS,
     ANIMA_QUANTS,
     ANIMA_STORAGE_FORBIDDEN,
@@ -50,6 +54,7 @@ from anima.distribution import (
     EXTRA_MODELS,
     EXTRA_NOTICE_MARKDOWN,
     EXTRA_PIPELINE,
+    EXTRA_REPO_NAME,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
     NAME_MAP_PATH,
@@ -67,6 +72,8 @@ from anima.distribution import (
     anima_dist_plan,
     anima_model,
     anima_plan,
+    anima_published_holder,
+    anima_published_sources,
     anima_quants,
     anima_sources,
     anima_weights,
@@ -379,6 +386,67 @@ def _in_subtree(
 
 def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mirrors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MUST: no test reads the real mirrors under `models/` — the build of a pinned model takes
+    its containers from there (tens of GB copied into the test's directory). Both modules'
+    `DIST_ROOT` point at an empty directory unless {@link published_mirrors} builds synthetic
+    ones."""
+    empty = tmp_path / "no-mirrors"
+    monkeypatch.setattr(anima_distribution, "DIST_ROOT", empty)
+    monkeypatch.setattr(dist, "DIST_ROOT", empty)
+
+
+#: The models the synthetic mirrors hold ({@link published_mirrors}): the official default and the
+#: base (which holds the text stack every model takes as published) in the official repository,
+#: and one fine-tune in the extra one.
+_MIRRORED: Mapping[str, tuple[str, ...]] = {
+    OFFICIAL_REPO_NAME: (ANIMA_TURBO_MODEL_NAME, ANIMA_BASE_MODEL_NAME),
+    EXTRA_REPO_NAME: ("anima-wai-v1.0",),
+}
+
+
+def _role_refs(entry: Mapping[str, Any], role: str) -> list[Mapping[str, Any]]:
+    """The file references a manifest entry declares for a role (its parts, or the tokenizer
+    file)."""
+    for name, asset in ANIMA_ASSETS.items():
+        if asset == role:
+            return [entry["assets"][name]]
+    for component, labels in ANIMA_WEIGHTS.items():
+        for label, files in labels.items():
+            if files.file == role:
+                return entry["weights"][component][label]["container"]["parts"]
+    raise AssertionError(role)
+
+
+@pytest.fixture
+def published_mirrors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Synthetic published mirrors under `<tmp_path>/models/` ({@link _MIRRORED} — assembled from
+    synthetic series, a transformer of its own per model), the pins of `ANIMA_PUBLISHED_PART0`
+    replaced by their digests (only the mirrored models are pinned), and both modules' `DIST_ROOT`
+    pointed there. They stand in for the real published bytes."""
+    root = tmp_path / "models"
+    pins: dict[str, dict[str, str]] = {}
+    for repo, models in _MIRRORED.items():
+        plans = [
+            anima_plan(
+                _build_series(tmp_path / "mirror-series", model=model, mark=f"-{model}".encode()),
+                model,
+            )
+            for model in models
+        ]
+        manifest = assemble_family(plans, root / repo, models[0])
+        for model in models:
+            entry = manifest["models"][model]
+            pins[model] = {
+                role: _role_refs(entry, role)[0]["sha256"] for role in ANIMA_PUBLISHED_PART0[model]
+            }
+    monkeypatch.setattr(anima_distribution, "ANIMA_PUBLISHED_PART0", pins)
+    monkeypatch.setattr(anima_distribution, "DIST_ROOT", root)
+    monkeypatch.setattr(dist, "DIST_ROOT", root)
+    return root
 
 
 @pytest.fixture
@@ -1449,10 +1517,10 @@ class TestFaithfulPreset:
         assert sources.text_conditioner == sources.base
         assert sources.transformer["bf16"] == tmp_path / "series" / "anima-v1.0-bf16-dyn"
 
+    @pytest.mark.usefixtures("published_mirrors")
     def test_the_card_lists_the_seat_with_its_presentation(self, tmp_path: Path) -> None:
         """The card's quant table comes from the manifest — the entry's row shows the presentation
         fields (ADR 0075) and the storage of the 4 roles."""
-        _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
         out_dir = tmp_path / "dist"
         main(
             [
@@ -1991,11 +2059,193 @@ class TestAtomicReplacement:
         assert self._siblings(out_dir) == []
 
 
+class TestPublishedContainers:
+    """A shipped model is built from the published containers in the local mirrors, not from its
+    series (ADR 0154 decision 6 — the mechanism of ADR 0149 decision 5): every container is pinned
+    by the sha256 of its part 0, and the build fails loudly, before a distribution is put in place,
+    when the mirror does not hold those bytes."""
+
+    @staticmethod
+    def _roles(spec: AnimaModel) -> set[str]:
+        return {
+            files.file for labels in anima_weights(spec).values() for files in labels.values()
+        } | set(ANIMA_ASSETS.values())
+
+    def test_every_shipped_model_has_a_pin_for_every_role_it_places(self) -> None:
+        """MUST: a model without pins would fall back to series that are no longer on disk, and a
+        role without a pin fails the build — and no pin is left that no model places."""
+        used: set[tuple[str, str]] = set()
+        for model, spec in ANIMA_MODELS.items():
+            assert model in ANIMA_PUBLISHED_PART0, model
+            for role in self._roles(spec):
+                _, holder = anima_published_holder(model, role)
+                assert role in ANIMA_PUBLISHED_PART0[holder], (model, role)
+                used.add((holder, role))
+        pinned = {
+            (holder, role) for holder, roles in ANIMA_PUBLISHED_PART0.items() for role in roles
+        }
+        assert pinned == used
+
+    def test_the_text_stack_every_model_shares_is_held_by_the_base(self) -> None:
+        """The text encoder, the VAE decoder and the tokenizers come from the official base model's
+        entry for every model — the extra repository references exactly these; the rest is each
+        model's own, in its own repository."""
+        for model in ANIMA_MODELS:
+            for role in ANIMA_EXTRA_SHARED_ROLES:
+                assert anima_published_holder(model, role) == (
+                    OFFICIAL_REPO_NAME,
+                    ANIMA_BASE_MODEL_NAME,
+                )
+            repo = OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME
+            for role in ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"):
+                assert anima_published_holder(model, role) == (repo, model)
+
+    def test_the_build_places_the_mirrors_bytes_at_the_mirrors_paths(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """A rebuild of a mirrored repository lays out the same files with the same bytes (the
+        name map is the build's own addition — the synthetic mirror was assembled without it)."""
+        out_dir = tmp_path / "dist"
+        models = _MIRRORED[OFFICIAL_REPO_NAME]
+        main(
+            [
+                "--pipeline",
+                "anima",
+                *(argument for model in models for argument in ("--model", model)),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        placed = sorted(rel for rel in verify_dist(out_dir) if rel != NAME_MAP_FILENAME)
+        assert placed == sorted(verify_dist(mirror))
+        for rel in placed:
+            assert (out_dir / rel).read_bytes() == (mirror / rel).read_bytes(), rel
+
+    def test_the_parts_are_linked_side_by_side_and_the_mirror_is_only_read(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """A mirror folds shared parts into `shared/`, so one container's parts sit in two
+        directories; the part view links them side by side, and a tokenizer is read in place."""
+        before = {
+            path: path.stat().st_mtime_ns for path in published_mirrors.rglob("*") if path.is_file()
+        }
+        published = anima_published_sources(
+            ANIMA_TURBO_MODEL_NAME, published_mirrors, tmp_path / "view"
+        )
+
+        mirror = (published_mirrors / OFFICIAL_REPO_NAME).resolve()
+        for role, path in published.placements.items():
+            if role in ANIMA_ASSETS.values():
+                assert path.resolve().is_relative_to(mirror), role
+                continue
+            parts = container_parts(path)
+            assert len(parts) > 1, role
+            assert all(part.is_symlink() for part in parts), role
+            assert all(part.resolve().is_relative_to(mirror) for part in parts), role
+        assert {
+            path: path.stat().st_mtime_ns for path in published_mirrors.rglob("*") if path.is_file()
+        } == before
+
+    def test_a_fine_tune_takes_the_text_stack_from_the_official_mirror(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        published = anima_published_sources("anima-wai-v1.0", published_mirrors, tmp_path / "view")
+
+        for role in ANIMA_EXTRA_SHARED_ROLES:
+            assert published.holders[role] == OFFICIAL_REPO_NAME, role
+        for role in ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"):
+            assert published.holders[role] == EXTRA_REPO_NAME, role
+
+    def test_a_part_0_that_is_not_the_published_one_fails_before_a_byte_is_written(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        part0 = _role_refs(manifest["models"][ANIMA_TURBO_MODEL_NAME], "transformer_bf16")[0]
+        target = published_mirrors / OFFICIAL_REPO_NAME / part0["path"]
+        target.write_bytes(target.read_bytes()[:-1] + b"\x00")
+        out_dir = tmp_path / "dist"
+
+        with pytest.raises(DistError, match="is not the published file of karume-anima"):
+            main(["--pipeline", "anima", "--model", ANIMA_TURBO_MODEL_NAME, "--out", str(out_dir)])
+        assert not out_dir.exists()
+
+    def test_a_later_part_that_differs_stops_the_build_and_leaves_nothing(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """Only part 0 is pinned; every other part is compared with part 0's declaration as it is
+        placed, inside the staging directory, so nothing is put in place."""
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        parts = _role_refs(manifest["models"][ANIMA_TURBO_MODEL_NAME], "text_conditioner_bf16")
+        target = published_mirrors / OFFICIAL_REPO_NAME / parts[1]["path"]
+        payload = bytearray(target.read_bytes())
+        payload[-1] ^= 0xFF
+        target.write_bytes(bytes(payload))
+        out_dir = tmp_path / "dist"
+
+        with pytest.raises(DistError, match="disagrees with the descriptor"):
+            main(["--pipeline", "anima", "--model", ANIMA_TURBO_MODEL_NAME, "--out", str(out_dir)])
+        assert not out_dir.exists()
+
+    def test_a_role_without_a_pin_is_refused(
+        self, tmp_path: Path, published_mirrors: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pins = {
+            holder: dict(roles)
+            for holder, roles in anima_distribution.ANIMA_PUBLISHED_PART0.items()
+        }
+        del pins[ANIMA_TURBO_MODEL_NAME]["transformer_i8"]
+        monkeypatch.setattr(anima_distribution, "ANIMA_PUBLISHED_PART0", pins)
+
+        with pytest.raises(DistError, match="no published sha256 for it"):
+            anima_published_sources(ANIMA_TURBO_MODEL_NAME, published_mirrors, tmp_path / "view")
+
+    def test_a_model_the_mirror_does_not_hold_is_refused(
+        self, tmp_path: Path, published_mirrors: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pins = {
+            holder: dict(roles)
+            for holder, roles in anima_distribution.ANIMA_PUBLISHED_PART0.items()
+        }
+        pins[ANIMA_AESTHETIC_MODEL_NAME] = dict.fromkeys(
+            ANIMA_PUBLISHED_PART0[ANIMA_AESTHETIC_MODEL_NAME], "0" * 64
+        )
+        monkeypatch.setattr(anima_distribution, "ANIMA_PUBLISHED_PART0", pins)
+
+        with pytest.raises(DistError, match=r"has no model 'anima-aesthetic-v1\.1'"):
+            anima_published_sources(
+                ANIMA_AESTHETIC_MODEL_NAME, published_mirrors, tmp_path / "view"
+            )
+
+    def test_without_a_mirror_the_build_names_the_one_it_needs(self, tmp_path: Path) -> None:
+        with pytest.raises(DistError, match="No local mirror of karume-anima"):
+            anima_published_sources(ANIMA_TURBO_MODEL_NAME, tmp_path / "none", tmp_path / "view")
+
+    def test_a_cross_repository_reference_in_the_holders_entry_is_refused(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """The holder's entry must hold the files: a role its mirror only references elsewhere is
+        taken from the repository that holds it (references are not followed)."""
+        path = published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        part0 = _role_refs(manifest["models"][ANIMA_TURBO_MODEL_NAME], "transformer_i8")[0]
+        part0.update(repo="hdae/elsewhere", revision="0" * 40)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(DistError, match="is a cross-repository reference"):
+            anima_published_sources(ANIMA_TURBO_MODEL_NAME, published_mirrors, tmp_path / "view")
+
+
+@pytest.mark.usefixtures("published_mirrors")
 class TestModelCard:
-    """`karume dist` writes the model card **after** assembly + verification."""
+    """`karume dist` writes the model card **after** assembly + verification (built from the
+    synthetic published mirrors, the path every shipped model takes)."""
 
     def _run(self, tmp_path: Path, *argv: str) -> Path:
-        _build_series(tmp_path / "series")
         out_dir = tmp_path / "dist"
         main(
             [
@@ -2089,6 +2339,7 @@ class TestModelCard:
         assert (out_dir / MODEL_CARD_FILENAME).read_bytes() == first
 
 
+@pytest.mark.usefixtures("published_mirrors")
 class TestLegalTexts:
     """The distribution repository meets the redistribution conditions of §3 of the upstream
     license (CircleStone Non-Commercial License).
@@ -2148,8 +2399,9 @@ class TestLegalTexts:
 
         There are 2 repositories, and the `NOTICE.md` at the root is a set that differs per
         Pipeline, so the legal-text checks also cover **which repository it was assembled for**.
+        It builds from the synthetic published mirrors (the class fixture); the extra repository
+        references the official one at the placeholder revision (no Hub in the tests).
         """
-        _build_series(tmp_path / "series", model=model)
         out_dir = tmp_path / "dist"
         main(
             [
@@ -2161,24 +2413,11 @@ class TestLegalTexts:
                 str(tmp_path / "series"),
                 "--out",
                 str(out_dir),
+                *((dist.ALLOW_PLACEHOLDER_FLAG,) if pipeline == "anima-extra" else ()),
                 *extra,
             ]
         )
         return out_dir
-
-    @staticmethod
-    def _official_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-        """What an extra-repository build needs: the official repository's mirror it references
-        (where the driver reads referenced mirrors, from the same synthetic text stack) and a
-        revision source — the placeholder (no Hub in the tests)."""
-        sources = _build_series(tmp_path / "official-series", model=ANIMA_BASE_MODEL_NAME)
-        assemble_family(
-            [anima_plan(sources, ANIMA_BASE_MODEL_NAME)],
-            tmp_path / "models" / OFFICIAL_REPO_NAME,
-            ANIMA_BASE_MODEL_NAME,
-        )
-        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
-        return [dist.ALLOW_PLACEHOLDER_FLAG]
 
     @staticmethod
     def _flat(text: str) -> str:
@@ -2210,16 +2449,13 @@ class TestLegalTexts:
         for sentence in ATTRIBUTION_NOTICE.split("\n"):
             assert sentence in notice
 
-    def test_the_extra_repository_ships_its_own_notice(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_the_extra_repository_ships_its_own_notice(self, tmp_path: Path) -> None:
         """The root of the fine-tune repository gets **that repository's** modification notice
         (mixing them up would make the notice a lie)."""
         out_dir = self._run(
             tmp_path,
             pipeline="anima-extra",
             model="anima-wai-v1.0",
-            extra=self._official_mirror(tmp_path, monkeypatch),
         )
 
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
@@ -2228,7 +2464,7 @@ class TestLegalTexts:
         assert ATTRIBUTION_NOTICE in notice
 
     def test_the_notice_specifies_that_the_rights_are_granted_directly_by_the_company(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
         """The latter half of §3(a) — states explicitly that the rights of use are granted directly
         by the Company to the recipient (one verbatim constant).
@@ -2243,14 +2479,13 @@ class TestLegalTexts:
             tmp_path / "extra",
             pipeline="anima-extra",
             model="anima-wai-v1.0",
-            extra=self._official_mirror(tmp_path / "extra", monkeypatch),
         )
         extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
         assert RIGHTS_GRANT_STATEMENT in official
         assert RIGHTS_GRANT_STATEMENT in extra
 
     def test_the_notice_carries_the_nvidia_attribution_in_both_repositories(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
         """NVIDIA Open Model License §3.1 / §3.2 — the attribution notice, verbatim on its own
         line, and "Built on NVIDIA Cosmos", from the one shared constant, in its own section
@@ -2264,7 +2499,6 @@ class TestLegalTexts:
             tmp_path / "extra",
             pipeline="anima-extra",
             model="anima-wai-v1.0",
-            extra=self._official_mirror(tmp_path / "extra", monkeypatch),
         )
         extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
         for notice in (official, extra):

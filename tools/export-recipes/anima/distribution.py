@@ -12,10 +12,13 @@ PIPELINES.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+import shutil
+import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -23,6 +26,7 @@ from typing import Any
 
 from _shared.calib_provenance import calib_complaint
 from _shared.container_read import ContainerReadError, read_asset
+from _shared.paths import DIST_ROOT
 from anima.card import (
     ATTRIBUTION_NOTICE,
     NVIDIA_NOTICE,
@@ -31,6 +35,7 @@ from anima.card import (
     render_extra_card,
 )
 from karume.dist import (
+    MANIFEST_FILENAME,
     Artifact,
     CrossRepoReference,
     DistError,
@@ -42,6 +47,8 @@ from karume.dist import (
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
+    component_parts,
+    sha256_file,
 )
 
 #: Name and role of the per-axis raw tables the host builds the rope tables from (an **asset** of
@@ -734,17 +741,25 @@ def anima_model(model: str) -> AnimaModel:
 def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
     """The transformer series per storage dtype (**cross-series comparisons MUST read this list**).
 
-    The byte-identity check of the raw rope tables and the LoRA attribution comparison are both
-    checks that "walk every series", and keeping the enumeration in 2 places means that the day a
-    storage slot is added only one gets updated — a series that slipped through the net passes the
-    check, and either flaw is silent at runtime (a geometry mismatch breaks only the images, an
-    attribution mismatch makes only the README false).
+    The LoRA attribution comparison walks every series, and the byte-identity check of the raw
+    rope tables walks the transformer containers placed from them ({@link anima_placements} reads
+    the same mapping) — keeping a second enumeration means that the day a storage slot is added
+    only one gets updated, a series that slipped through the net passes the check, and either flaw
+    is silent at runtime (a geometry mismatch breaks only the images, an attribution mismatch makes
+    only the README false).
     """
     return tuple(sources.transformer.values())
 
 
-def assert_shared_rope_base(sources: AnimaSources) -> None:
-    """Checks that the raw rope tables of every transformer series are byte-identical.
+def transformer_containers(placements: Mapping[str, Path]) -> tuple[Path, ...]:
+    """The transformer containers among a plan's placements (`transformer_<storage>` roles), in
+    the order they are placed — whether they come from the series or from the published mirrors."""
+    prefix = f"{ANIMA_TRANSFORMER_ROLE}_"
+    return tuple(path for role, path in placements.items() if role.startswith(prefix))
+
+
+def assert_shared_rope_base(containers: Sequence[Path]) -> None:
+    """Checks that the raw rope tables of every transformer container are byte-identical.
 
     MUST: the raw table goes into each of the bf16 / i8 / i4 series as the container's **asset**
     `rope_base` (ADR 0109 decision 4). Byte identity across all of them is checked with sha256 —
@@ -753,7 +768,6 @@ def assert_shared_rope_base(sources: AnimaSources) -> None:
     they were folded into one file, so this was also the choice of "which one to ship"; now that
     each container holds its own, **only the equality check** remains.
     """
-    containers = [series / "transformer" / "model.krm" for series in transformer_series(sources)]
     for path in containers:
         assert_component_present(path)
     digests = {path: hashlib.sha256(_rope_base_of(path)).hexdigest() for path in containers}
@@ -965,13 +979,227 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
     }
 
 
+#: Holder model → (role name → sha256 of **part 0** of the published container the role is taken as;
+#: for a tokenizer, of the file). A model listed here is built from the published containers in the
+#: local mirrors, not from its series ({@link anima_published_sources} — ADR 0154 decision 6, the
+#: mechanism of ADR 0149 decision 5): its series are no longer on disk, and an export would not
+#: reproduce the published bytes anyway (the i8 rounding may differ on another machine). Part 0's
+#: descriptor declares the sha256 of every other part (container-v1 §7), so this one digest pins
+#: the whole container; the assembly compares every other part with that declaration as it places
+#: it (`karume.dist.assert_weight_components_verified`).
+#:
+#: The text encoder, the VAE decoder and the tokenizers are held by the base model for every model
+#: ({@link anima_published_holder}); the rest by the model itself.
+#:
+#: Recorded 2026-11-18 from the published manifests of `karume-anima` at
+#: `a5fac03dc6563657b4e5c797c78cc3c813912a3e` and `karume-anima-extra` at
+#: `15731a612517df0064db69e8cb7c9825fce00c91`; the local mirrors' manifests were compared with them
+#: the same day (every entry equal), and every part 0 and tokenizer file with its declared sha256.
+#: Re-exporting a model's containers is a deliberate change: remove its entry here.
+ANIMA_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
+    ANIMA_BASE_MODEL_NAME: {
+        "text_encoder_bf16": "44aca04aacb815e0a0f0ae2b8b51d0007ae3413df4945c044bdc9cbc8275c7c6",
+        "text_conditioner_bf16": "2aaffce6c4ea2728dedffffd62a0ed190ccaefb68916b73e6432f6b5527e08d9",
+        "transformer_bf16": "e92187b16939639ffd826a1dabe2edf6eb47ffaf49274acc2b1248bbbf93ff80",
+        "transformer_i8": "7a46f4caa9e8e63579b54ba5ee2dcb03f29d545853943dd98da19f7e0dc8a724",
+        "vae_decoder_bf16": "201baa4ad52a988942b2abc34a7f9fb55c4af3427b44a9b94e5f6c4ba5fc294e",
+        "tokenizer": "0a7d6057ac8a2fe459551b89682b46f4e0b207a9081d12346683c9254138af2f",
+        "tokenizer_2": "f86dfe21b12a175a03144162f6d9b6a64746d19e73cd8d543b7dfae1db3c1825",
+    },
+    ANIMA_TURBO_MODEL_NAME: {
+        "text_conditioner_bf16": "4d1d281b97ac0d8ed0f0c18cf7639f4e812c357a6b421a3b7de189f61391c376",
+        "transformer_bf16": "c778fbf7f7220b84635f1bf0dc32cacdf0f5f9d3a2073c303f9d8c0608ae5327",
+        "transformer_i8": "2c7669008b538be906d5abfacda27201dabca9e175fc6e9d0bdbe0132937600e",
+    },
+    ANIMA_AESTHETIC_MODEL_NAME: {
+        "text_conditioner_bf16": "36af2bd9f1111adcefcfd9bff001aed776a96960a7419d93f86f2a1fff9ee0ad",
+        "transformer_bf16": "0d0fc2e226640815964a2742347787639a7a7ad3d3f62ba1e4e89cc1468e4da0",
+        "transformer_i8": "052a07a5c31a0b43e870af9589289eff290e3c7533f0b9f3d55c6449906fdd9b",
+    },
+    "anima-turbo-v1.0": {
+        "text_conditioner_bf16": "36af2bd9f1111adcefcfd9bff001aed776a96960a7419d93f86f2a1fff9ee0ad",
+        "transformer_bf16": "27d169b8a5c94c083b400bf6b147ea25888a688a14284a592ab0f367b268720d",
+        "transformer_i8": "56f7f29ef497e5a8d9776a0b7bf4bb92703684f4454cfc4abef5c8afdae5981f",
+    },
+    "anima-aesthetic-v1.0": {
+        "text_conditioner_bf16": "36af2bd9f1111adcefcfd9bff001aed776a96960a7419d93f86f2a1fff9ee0ad",
+        "transformer_bf16": "fa43dfa95ba893533c6483be6ab7ad766d9b7f4d8b5d92ebc19704fe1714d5f8",
+        "transformer_i8": "c8aa7b87a70da51b08ab00c5d2af417bdcdcc7c159fcb72a2e170e8407112ed2",
+    },
+    "anima-wai-v1.0": {
+        "text_conditioner_bf16": "fc772692d9caf35faf44e8317d3877c7a3e434a9f4f98850dc51dc964e18b87a",
+        "transformer_bf16": "bda5fcfded41bc5b678ab1f1cfe7651d7e3173020303cd27bcac2d21a40a5f95",
+        "transformer_i8": "ab22af4bb9f10548d7bc54a2473f3095f56527dedc71247595427c8ef39965f1",
+    },
+    "anima-copycat-20260610": {
+        "text_conditioner_bf16": "f8e9ac410b92502d6d62e7623f3d20ebc0eabddd539a8ba268e5fc5b512f039c",
+        "transformer_bf16": "eefac1ff92f0b1a6da8673be517a3dd7302b4b8d6fcae2adeb5e88e3f2e462a7",
+        "transformer_i8": "4deb4f2b3abc412d5e8ed43f67a63be3c11d23fec1c4d311a2a9ebc91103a3e2",
+    },
+}
+
+
+@dataclass(frozen=True)
+class AnimaPublished:
+    """One model's assembly inputs taken as **published** from the local mirrors
+    ({@link ANIMA_PUBLISHED_PART0}), in place of its series ({@link AnimaSources})."""
+
+    #: Role name → the representative path of the container in the part view (its parts side by
+    #: side as links to the mirror's files), or the tokenizer file in the mirror.
+    placements: Mapping[str, Path]
+    #: Role name → the published sha256 of part 0 (of the file, for a tokenizer).
+    part0_sha256: Mapping[str, str]
+    #: Role name → the repository whose mirror holds it (for the diagnostics).
+    holders: Mapping[str, str]
+
+
+def anima_published_holder(model: str, role: str) -> tuple[str, str]:
+    """(repository, model) whose published entry a role of `model` is taken from.
+
+    The text encoder, the VAE decoder and the tokenizers are the base model's for every model
+    ({@link ANIMA_EXTRA_SHARED_ROLES} — the parts fine-tunes do not touch; the official repository
+    folds them into `shared/`, and the extra repository references them there instead of storing
+    them). Every other role is the model's own, in its own repository.
+    """
+    if role in ANIMA_EXTRA_SHARED_ROLES:
+        return OFFICIAL_REPO_NAME, ANIMA_BASE_MODEL_NAME
+    return (OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME), model
+
+
+def _published_refs(manifest: Mapping[str, Any], repo: str, holder: str, role: str) -> list[Any]:
+    """The file references the holder's manifest entry declares for a role (every part, in order;
+    one file for a tokenizer)."""
+    entry = manifest.get("models", {}).get(holder)
+    if entry is None:
+        raise DistError(f"The mirror of {repo} has no model {holder!r} — it cannot provide {role}")
+    asset = next((name for name, files in ANIMA_ASSETS.items() if files == role), None)
+    if asset is not None:
+        refs = [entry["assets"][asset]] if asset in entry.get("assets", {}) else []
+    else:
+        component, label = next(
+            (component, label)
+            for component, labels in ANIMA_WEIGHTS.items()
+            for label, files in labels.items()
+            if files.file == role
+        )
+        declared = entry.get("weights", {}).get(component, {}).get(label, {})
+        refs = list(declared.get("container", {}).get("parts", []))
+    if not refs:
+        raise DistError(f"The mirror of {repo} declares no {role} for {holder}")
+    if any("repo" in ref for ref in refs):
+        raise DistError(
+            f"{role} of {holder} is a cross-repository reference in the mirror of {repo} — it is"
+            " taken from the repository that holds the files"
+        )
+    return refs
+
+
+def _part_view_root(model: str) -> Path:
+    """A new directory for one build's part view (links only), removed when the process exits —
+    the plan only points at it, and the assembly that reads it runs later in the same process."""
+    root = Path(tempfile.mkdtemp(prefix=f"anima-parts-{model}-"))
+    atexit.register(partial(shutil.rmtree, root, ignore_errors=True))
+    return root
+
+
+def anima_published_sources(
+    model: str, dist_root: Path, view_root: Path | None = None
+) -> AnimaPublished:
+    """The published containers `model` is built from, read from the local mirrors under
+    `dist_root` (`<dist_root>/<repository>/karume.json` — `models/` by default).
+
+    A mirror folds the parts two or more models share into `shared/`, so one container's parts can
+    sit in two directories, while the assembly reads a container as the parts beside its
+    representative path (container-v1 §8). The parts are therefore linked side by side into a part
+    view (`<view_root>/<repository>/<holder>/<output path>` — links only; the mirror is only read),
+    and placement copies the bytes they point at. A tokenizer is one file and is read in place.
+    Without `view_root` the view is a temporary directory removed when the process exits.
+
+    It reads the manifests and links, nothing more: whether the bytes are the published ones is
+    checked by {@link assert_anima_published}. It cannot build a model whose containers are not in
+    the mirrors, nor a storage the mirrors do not hold (an i4 transformer, a new model) — those
+    still come from series ({@link anima_sources}).
+    """
+    spec = anima_model(model)
+    view = _part_view_root(model) if view_root is None else view_root
+    roles = [
+        *(files.file for labels in anima_weights(spec).values() for files in labels.values()),
+        *ANIMA_ASSETS.values(),
+    ]
+    manifests: dict[str, Mapping[str, Any]] = {}
+    placements: dict[str, Path] = {}
+    pins: dict[str, str] = {}
+    holders: dict[str, str] = {}
+    for role in roles:
+        repo, holder = anima_published_holder(model, role)
+        pin = ANIMA_PUBLISHED_PART0.get(holder, {}).get(role)
+        if pin is None:
+            raise DistError(
+                f"{model} takes {role} as published by {holder}, but there is no published sha256"
+                " for it (ANIMA_PUBLISHED_PART0)"
+            )
+        if repo not in manifests:
+            path = dist_root / repo / MANIFEST_FILENAME
+            if not path.is_file():
+                raise DistError(
+                    f"No local mirror of {repo} to take the published containers from: {path}"
+                )
+            manifests[repo] = json.loads(path.read_text(encoding="utf-8"))
+        refs = _published_refs(manifests[repo], repo, holder, role)
+        files = [dist_root / repo / ref["path"] for ref in refs]
+        missing = [str(file) for file in files if not file.is_file()]
+        if missing:
+            raise DistError(
+                f"{role}: the mirror of {repo} lacks files its manifest declares: {missing}"
+            )
+        pins[role] = pin
+        holders[role] = repo
+        if role in ANIMA_ASSETS.values():
+            placements[role] = files[0]
+            continue
+        representative = view / repo / holder / OUTPUT_PATHS[role]
+        representative.parent.mkdir(parents=True, exist_ok=True)
+        for file in files:
+            link = representative.parent / file.name
+            if not link.is_symlink():
+                link.symlink_to(file.absolute())
+        placements[role] = representative
+    return AnimaPublished(placements=placements, part0_sha256=pins, holders=holders)
+
+
+def assert_anima_published(published: AnimaPublished) -> None:
+    """Check that every container taken as published starts with the pinned part 0, and that every
+    tokenizer is the pinned file ({@link ANIMA_PUBLISHED_PART0}).
+
+    The other parts are not hashed here: part 0's descriptor declares their sha256, and the
+    assembly compares each placed part with that declaration and stops before the distribution is
+    put in place (its staging is discarded). Restoring the mirror from the Hub is the fix for a
+    mismatch, never re-pinning.
+    """
+    for role, path in published.placements.items():
+        first = component_parts(path)[0]
+        actual = sha256_file(first)
+        if actual != published.part0_sha256[role]:
+            raise DistError(
+                f"{role}: {first} is not the published file of {published.holders[role]} (sha256"
+                f" {actual}, published {published.part0_sha256[role]}) — restore the mirror from"
+                " the Hub instead of rebuilding it from the series"
+            )
+
+
 def anima_plan(
-    sources: AnimaSources,
+    sources: AnimaSources | AnimaPublished,
     model: str = ANIMA_BASE_MODEL_NAME,
     *,
     spec: AnimaModel | None = None,
 ) -> ModelPlan:
     """Builds the plan for one Anima model (all checks are done here — not a byte is written).
+
+    `sources` is the model's series ({@link AnimaSources}) or its published containers
+    ({@link AnimaPublished}). The series' own records (the LoRA attribution, the i4 calibration
+    conditions) are checked on series only: a published container is pinned by its digest instead
+    and keeps the provenance it was published with. The rope-table equality and the storage checks
+    apply to both.
 
     `spec` is **the slot for an explicit override** (when omitted it is looked up by model name =
     the distribution path). Only the visual-evaluation assembly (`anima.eval_dist`) overrides it,
@@ -982,11 +1210,15 @@ def anima_plan(
     """
     assert_model_name(model)
     spec = anima_model(model) if spec is None else spec
-    assert_lora_provenance(sources, spec.lora_sha256)
-    if "i4" in spec.storages:
-        assert_calib_provenance(sources, spec)
-    assert_shared_rope_base(sources)
-    placements = anima_placements(sources)
+    if isinstance(sources, AnimaPublished):
+        assert_anima_published(sources)
+        placements = dict(sources.placements)
+    else:
+        assert_lora_provenance(sources, spec.lora_sha256)
+        if "i4" in spec.storages:
+            assert_calib_provenance(sources, spec)
+        placements = anima_placements(sources)
+    assert_shared_rope_base(transformer_containers(placements))
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, ANIMA_STORAGE_FORBIDDEN)
@@ -1006,7 +1238,9 @@ def anima_plan(
 
 
 def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> ModelPlan:
-    """Builds the plan for one Anima model from the `--series` parent (the CLI dispatches here).
+    """Builds the plan for one Anima model (the CLI dispatches here): from the published containers
+    in the local mirrors under {@link DIST_ROOT} for a model {@link ANIMA_PUBLISHED_PART0} lists,
+    from the `--series` parent otherwise.
 
     MUST: `allowed` is **the models allowed in that Pipeline's repository**. A different Pipeline
     means a different NOTICE (modification notice) at the repository root, so assembling with the
@@ -1020,6 +1254,8 @@ def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> M
             " — the modification notice at the repository root would contradict its contents, so"
             " the assembly stops"
         )
+    if model in ANIMA_PUBLISHED_PART0:
+        return anima_plan(anima_published_sources(model, DIST_ROOT), model)
     return anima_plan(anima_sources(series_dir, model), model)
 
 
