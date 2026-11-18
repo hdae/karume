@@ -1,16 +1,19 @@
 // `anima.Pipeline.fromSingleFile` without a GPU, on a tiny Anima-shaped distribution served by the
-// fake HF fetch layer (four components, four quants — `i8`, `f16`, `bf16`, `f16-c16` — and a name
-// map) and on tiny safetensors files written here. Construction opens no Session, so a fake GPU builds the
-// pipeline; no tensor byte of the file is read until a Session is, which is what lets each case
-// below observe what was fetched and what was read.
+// fake HF fetch layer (four components stored as bf16, the transformer also as int8; three quants —
+// `i8`, `bf16` and `bf16-c16` (bf16 storage, f16 compute) — and a name map) and on tiny safetensors
+// files written here. Construction opens no Session, so a fake GPU builds the pipeline; no tensor
+// byte of the file is read until a Session is, which is what lets each case below observe what was
+// fetched and what was read.
 //
 // What it pins:
 //  ① The success path: which component comes from where and against which container — the text
-//    conditioner as the file's dtype (BF16 → bf16, F16 → f16), the transformer as an int8 quant's
-//    from any float dtype and as the file's dtype under a quant that stores it as a float — the
-//    converted parts are neither fetched nor counted in the progress, the file is read up to its
-//    header only, and a role replaced by `components` is not taken from the file (the file's text
-//    conditioner would be refused there). Which parts are fetched shows the container.
+//    conditioner against the bf16 container's plan, stored as the file's dtype (BF16 as bf16, F16 as
+//    f16), the transformer as an int8 quant's from any float dtype and the same way as the text
+//    conditioner under a quant that stores it as a float; an f16 container the distribution may
+//    still carry is never read — the converted parts are neither fetched nor counted in the
+//    progress, the file is read up to its header only, and a role replaced by `components` is not
+//    taken from the file (the file's text conditioner would be refused there). Which parts are
+//    fetched shows the container; the served container shows the codec.
 //  ② Each refusal, before a weight part is fetched (the fetched paths are the manifest, the name
 //    map and descriptors only). Each case says which fault it injects.
 //  ③ The abort signal at a boundary of the single-file steps.
@@ -340,17 +343,6 @@ const CONTAINERS = {
     "test/transformer/model.i2",
     weighted("transformer", TRANSFORMER_W, TRANSFORMER_B, "int2-off", [ROPE_ASSET]),
   ),
-  transformerBf16OtherGraph: await serveContainer(
-    "test/transformer/model.bf16-other",
-    weighted(
-      "transformer",
-      TRANSFORMER_W,
-      TRANSFORMER_B,
-      "bf16",
-      [ROPE_ASSET],
-      linearGraph(TRANSFORMER_W, TRANSFORMER_B, 1),
-    ),
-  ),
 } satisfies Record<string, ServedContainer>;
 
 const quant = (
@@ -364,49 +356,30 @@ const ASSETS = {
   tokenizer_2: await fileRef("shared/tokenizer_2/t5-tokenizer.json", TOKENIZER_2),
 };
 
+/** Every role stored as bf16, the transformer as `transformer`. */
+const storedAs = (transformer: string) =>
+  quant({
+    text_encoder: "bf16",
+    text_conditioner: "bf16",
+    transformer,
+    vae_decoder: "bf16",
+  });
+
 /** The model entry; `patch` replaces fields of it. */
 const modelEntry = (patch: Record<string, unknown> = {}) => ({
   pipeline: "anima/1",
   weights: {
-    text_encoder: { f16: CONTAINERS.textEncoder.entry, bf16: CONTAINERS.textEncoder.entry },
-    text_conditioner: {
-      f16: CONTAINERS.conditionerF16.entry,
-      bf16: CONTAINERS.conditionerBf16.entry,
-    },
-    transformer: {
-      i8: CONTAINERS.transformerI8.entry,
-      f16: CONTAINERS.transformerF16.entry,
-      bf16: CONTAINERS.transformerBf16.entry,
-    },
-    vae_decoder: { f16: CONTAINERS.vaeDecoder.entry, bf16: CONTAINERS.vaeDecoder.entry },
+    text_encoder: { bf16: CONTAINERS.textEncoder.entry },
+    text_conditioner: { bf16: CONTAINERS.conditionerBf16.entry },
+    transformer: { i8: CONTAINERS.transformerI8.entry, bf16: CONTAINERS.transformerBf16.entry },
+    vae_decoder: { bf16: CONTAINERS.vaeDecoder.entry },
   },
   assets: ASSETS,
   quants: {
-    i8: quant({
-      text_encoder: "f16",
-      text_conditioner: "f16",
-      transformer: "i8",
-      vae_decoder: "f16",
-    }),
-    f16: quant({
-      text_encoder: "f16",
-      text_conditioner: "f16",
-      transformer: "f16",
-      vae_decoder: "f16",
-    }),
-    bf16: quant({
-      text_encoder: "bf16",
-      text_conditioner: "bf16",
-      transformer: "bf16",
-      vae_decoder: "bf16",
-    }),
-    "f16-c16": {
-      ...quant({
-        text_encoder: "f16",
-        text_conditioner: "f16",
-        transformer: "f16",
-        vae_decoder: "f16",
-      }),
+    i8: storedAs("i8"),
+    bf16: storedAs("bf16"),
+    "bf16-c16": {
+      ...storedAs("bf16"),
       session: { linearCompute: "f16", attentionCompute: "f16" },
       gpuFeatures: { shaderF16: true },
     },
@@ -424,6 +397,32 @@ const SERVED_FILES = [
   [ASSETS.tokenizer.path, TOKENIZER] as const,
   [ASSETS.tokenizer_2.path, TOKENIZER_2] as const,
 ];
+
+/**
+ * The model entry with the f16 containers a distribution may still carry beside its bf16 ones (an
+ * `f16` label for the text conditioner and the transformer, and a quant that stores every role as
+ * `f16`): a float component from a file never reads them.
+ */
+const withF16Containers = () => {
+  const entry = modelEntry();
+  return {
+    ...entry,
+    weights: {
+      ...entry.weights,
+      text_conditioner: { ...entry.weights.text_conditioner, f16: CONTAINERS.conditionerF16.entry },
+      transformer: { ...entry.weights.transformer, f16: CONTAINERS.transformerF16.entry },
+    },
+    quants: {
+      ...entry.quants,
+      f16: quant({
+        text_encoder: "bf16",
+        text_conditioner: "f16",
+        transformer: "f16",
+        vae_decoder: "bf16",
+      }),
+    },
+  };
+};
 
 /** Every served path → its size. */
 const SIZES = new Map(SERVED_FILES.map(([path, bytes]) => [path, bytes.byteLength]));
@@ -466,6 +465,9 @@ const BF16_BIAS = Uint16Array.from([0x3e80, 0xbf00]);
 const F16_WEIGHT = Uint16Array.from([0x3c00, 0x3800, 0xc000, 0x3400]);
 const F16_BIAS = Uint16Array.from([0x3400, 0xb800]);
 
+/** An F16 file's weight bf16 cannot hold: [1 + 2⁻¹⁰, 0.5, -2, 0.25]. */
+const F16_FINE_WEIGHT = Uint16Array.from([0x3c01, 0x3800, 0xc000, 0x3400]);
+
 const bf16 = (shape: readonly number[], data: Uint16Array): DumpTensor => ({
   dtype: "BF16",
   shape,
@@ -491,12 +493,15 @@ const singleFileTensors = (): Map<string, DumpTensor> =>
     ["net.llm_adapter.bias", bf16([2], BF16_BIAS)],
   ]);
 
-/** The same keys with F16 tensors (a fine-tune saved in F16). */
+/**
+ * The same keys with F16 tensors (a fine-tune saved in F16), the weights with a value bf16 cannot
+ * hold: stored as bf16 they would be refused (the conversion never rounds).
+ */
 const f16SingleFileTensors = (): Map<string, DumpTensor> =>
   new Map([
-    ["net.blocks.0.w", f16([2, 2], F16_WEIGHT)],
+    ["net.blocks.0.w", f16([2, 2], F16_FINE_WEIGHT)],
     ["net.blocks.0.b", f16([2], F16_BIAS)],
-    ["net.llm_adapter.embed", f16([2, 2], F16_WEIGHT)],
+    ["net.llm_adapter.embed", f16([2, 2], F16_FINE_WEIGHT)],
     ["net.llm_adapter.bias", f16([2], F16_BIAS)],
   ]);
 
@@ -560,10 +565,43 @@ const convertedTransformer = (container: ServedContainer): string[] => [
   container.parts[3].path,
 ];
 
+/**
+ * Per role, what the converting sources of the last build serve (the spy's results since its last
+ * `mockClear`): the codec set of the served container and the stored payload of one initializer.
+ */
+const servedByRole = async () => {
+  const served = new Map<
+    string,
+    {
+      readonly codecs: readonly string[];
+      readonly stored: (initializer: string) => Promise<Uint8Array<ArrayBuffer>>;
+    }
+  >();
+  for (const result of vi.mocked(openConvertingSource).mock.results) {
+    assert(result.type === "return");
+    const { source } = await result.value;
+    const view = await openContainer({ kind: "source", source });
+    const [role] = Object.keys(view.graphs);
+    served.set(role, {
+      codecs: view.model?.codecs ?? [],
+      stored: async (initializer) => {
+        const block = view.graphs[role].supplies.get(initializer)?.blocks[0];
+        assert(block !== undefined, `no block of '${initializer}'`);
+        const bytes = await source.read(block.part, block.offset, block.length);
+        return bytes.slice(0, block.payloadBytes);
+      },
+    });
+  }
+  return served;
+};
+
+const u16Bytes = (bits: Uint16Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
+  new Uint8Array(bits.buffer.slice(0));
+
 // ---- ① The success path ----------------------------------------------------------------------
 
 describe("fromSingleFile builds an Anima pipeline from a single file and a distribution", () => {
-  it("takes the transformer and the text conditioner from the file: neither the converted parts nor the text conditioner of the quant are fetched, and the progress counts only what is fetched", async () => {
+  it("takes the transformer and the text conditioner from the file: the converted parts are not fetched, and the progress counts only what is fetched", async () => {
     const { mock, ref, options } = await serve();
     const bytes = writeSafetensors(singleFileTensors(), {});
     const { file, reads } = recordedFile(bytes);
@@ -575,22 +613,18 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     assert(pipeline instanceof Pipeline);
 
     const fetched = new Set(mock.paths);
-    const { transformerI8, conditionerBf16, conditionerF16, textEncoder, vaeDecoder } = CONTAINERS;
+    const { transformerI8, conditionerBf16, textEncoder, vaeDecoder } = CONTAINERS;
     // The transformer: part 0 and the kept parts (the asset part with the rope table), never the
     // part of the converted weights (part 2: the weight, its scale and the bias).
     assertEquals(
       pathsOf(transformerI8).filter((path) => fetched.has(path)),
       [transformerI8.parts[0].path, transformerI8.parts[3].path],
     );
-    // The text conditioner from the file is stored as the bf16 container: its descriptor only.
+    // The text conditioner from the file is converted against the bf16 container: its descriptor
+    // only.
     assertEquals(
       pathsOf(conditionerBf16).filter((path) => fetched.has(path)),
       [conditionerBf16.parts[0].path],
-    );
-    // The quant's own text conditioner (f16) is not fetched at all.
-    assertEquals(
-      pathsOf(conditionerF16).filter((path) => fetched.has(path)),
-      [],
     );
     // The text encoder and the VAE decoder come from the distribution, whole.
     for (const container of [textEncoder, vaeDecoder]) {
@@ -628,51 +662,78 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     assert(pipeline instanceof Pipeline);
     const fetched = new Set(mock.paths);
     assertEquals(
-      pathsOf(CONTAINERS.conditionerF16).filter((path) => fetched.has(path)),
-      pathsOf(CONTAINERS.conditionerF16),
-    );
-    assertEquals(
       pathsOf(CONTAINERS.conditionerBf16).filter((path) => fetched.has(path)),
-      [],
+      pathsOf(CONTAINERS.conditionerBf16),
     );
   });
 
-  it("an F16 file: the text conditioner goes to the f16 container and, under a quant that stores the transformer as a float (bf16), the transformer to the f16 one", async () => {
-    const { mock, ref, options } = await serve();
-    const { file } = fileOf(f16SingleFileTensors());
-    await using pipeline = await Pipeline.fromSingleFile(file, ref, { ...options, quant: "bf16" });
-    assert(pipeline instanceof Pipeline);
-    const { transformerF16, transformerBf16, conditionerF16, conditionerBf16 } = CONTAINERS;
-    assertEquals(fetchedOf(mock.paths, transformerF16), convertedTransformer(transformerF16));
-    assertEquals(fetchedOf(mock.paths, conditionerF16), [conditionerF16.parts[0].path]);
-    // The quant's own (bf16) containers of both roles are not fetched at all.
-    assertEquals(fetchedOf(mock.paths, transformerBf16), []);
-    assertEquals(fetchedOf(mock.paths, conditionerBf16), []);
+  it("an F16 file under a quant that stores the transformer as a float: both roles are stored as f16, the file's own bits, against the plans of the bf16 containers — an f16 container the distribution carries is never fetched", async () => {
+    // Fault the second entry injects: f16 containers of both roles (and a quant naming them) beside
+    // the bf16 ones; reading either would show in the fetched paths.
+    for (const entry of [modelEntry(), withF16Containers()]) {
+      const { mock, ref, options } = await serve({ entry });
+      vi.mocked(openConvertingSource).mockClear();
+      await using pipeline = await Pipeline.fromSingleFile(
+        fileOf(f16SingleFileTensors()).file,
+        ref,
+        {
+          ...options,
+          quant: "bf16",
+        },
+      );
+      assert(pipeline instanceof Pipeline);
+      const { transformerF16, transformerBf16, conditionerF16, conditionerBf16 } = CONTAINERS;
+      assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
+      assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
+      assertEquals(
+        [...fetchedOf(mock.paths, transformerF16), ...fetchedOf(mock.paths, conditionerF16)],
+        [],
+      );
+      // The served containers store the weights as f16 — the file's bits, which bf16 cannot hold —
+      // and the f32 bias as the plan does.
+      const served = await servedByRole();
+      for (const [role, weight, bias] of [
+        ["transformer", TRANSFORMER_W, TRANSFORMER_B],
+        ["text_conditioner", CONDITIONER_W, CONDITIONER_B],
+      ] as const) {
+        const view = served.get(role);
+        assert(view !== undefined, `no converting source of '${role}'`);
+        assertEquals(view.codecs, ["f16", "f32"]);
+        assertEquals(await view.stored(weight), u16Bytes(F16_FINE_WEIGHT));
+        assertEquals(await view.stored(bias), f32Bytes([0.25, -0.5]));
+      }
+    }
   });
 
-  it("a BF16 file under a quant that stores the transformer as f16: the transformer goes to the bf16 container", async () => {
+  it("an F16 file under f16 linear compute (bf16-c16): stored as f16 against the bf16 plans, the f16 storage under f16 compute that runs", async () => {
     const { mock, ref, options } = await serve();
-    const { file } = fileOf(singleFileTensors());
-    await using pipeline = await Pipeline.fromSingleFile(file, ref, { ...options, quant: "f16" });
-    assert(pipeline instanceof Pipeline);
-    const { transformerF16, transformerBf16, conditionerBf16 } = CONTAINERS;
-    assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
-    assertEquals(fetchedOf(mock.paths, transformerF16), []);
-    assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
-  });
-
-  it("an F16 file under f16-c16 (f16 compute): the f16 containers, as the quant itself stores them", async () => {
-    const { mock, ref, options } = await serve();
+    vi.mocked(openConvertingSource).mockClear();
     const { file } = fileOf(f16SingleFileTensors());
     await using pipeline = await Pipeline.fromSingleFile(file, ref, {
       ...options,
       gpu: fakeGpuContext(fakeDevice({ features: ["shader-f16"] })),
-      quant: "f16-c16",
+      quant: "bf16-c16",
     });
     assert(pipeline instanceof Pipeline);
-    const { transformerF16, conditionerF16 } = CONTAINERS;
-    assertEquals(fetchedOf(mock.paths, transformerF16), convertedTransformer(transformerF16));
-    assertEquals(fetchedOf(mock.paths, conditionerF16), [conditionerF16.parts[0].path]);
+    const { transformerBf16, conditionerBf16 } = CONTAINERS;
+    assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
+    assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
+    assertEquals((await servedByRole()).get("transformer")?.codecs, ["f16", "f32"]);
+  });
+
+  it("a BF16 file under a quant that stores the transformer as a float: stored as bf16, the plan of the bf16 containers as it is", async () => {
+    const { mock, ref, options } = await serve({ entry: withF16Containers() });
+    vi.mocked(openConvertingSource).mockClear();
+    const { file } = fileOf(singleFileTensors());
+    await using pipeline = await Pipeline.fromSingleFile(file, ref, { ...options, quant: "bf16" });
+    assert(pipeline instanceof Pipeline);
+    const { transformerF16, transformerBf16 } = CONTAINERS;
+    assertEquals(fetchedOf(mock.paths, transformerBf16), convertedTransformer(transformerBf16));
+    assertEquals(fetchedOf(mock.paths, transformerF16), []);
+    const view = (await servedByRole()).get("transformer");
+    assert(view !== undefined);
+    assertEquals(view.codecs, ["bf16", "f32"]);
+    assertEquals(await view.stored(TRANSFORMER_W), u16Bytes(BF16_WEIGHT));
   });
 
   it("under an int8 quant the transformer is the quant's container, converted from any float dtype, a mix of them included", async () => {
@@ -683,12 +744,9 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     const { file } = fileOf(tensors);
     await using pipeline = await Pipeline.fromSingleFile(file, ref, options);
     assert(pipeline instanceof Pipeline);
-    const { transformerI8, transformerF16, transformerBf16 } = CONTAINERS;
+    const { transformerI8, transformerBf16 } = CONTAINERS;
     assertEquals(fetchedOf(mock.paths, transformerI8), convertedTransformer(transformerI8));
-    assertEquals(
-      [...fetchedOf(mock.paths, transformerF16), ...fetchedOf(mock.paths, transformerBf16)],
-      [],
-    );
+    assertEquals(fetchedOf(mock.paths, transformerBf16), []);
   });
 
   it("takes a file of the transformer alone, with the text conditioner of the quant", async () => {
@@ -703,8 +761,8 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     assert(pipeline instanceof Pipeline);
     const fetched = new Set(mock.paths);
     assertEquals(
-      pathsOf(CONTAINERS.conditionerF16).filter((path) => fetched.has(path)),
-      pathsOf(CONTAINERS.conditionerF16),
+      pathsOf(CONTAINERS.conditionerBf16).filter((path) => fetched.has(path)),
+      pathsOf(CONTAINERS.conditionerBf16),
     );
   });
 });
@@ -862,7 +920,7 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
 
   it("a quant whose transformer is stored in a codec that is not converted: one message with the quant, the codec and the quants that work", async () => {
     // Fault: quant `i2`, whose transformer is int2. The quants that work are those whose container
-    // for this file encodes: `f16-c16` is left out, as it refuses a BF16 transformer.
+    // for this file encodes: `bf16-c16` is left out, as it refuses a BF16 transformer.
     const entry = modelEntry();
     const { mock, ref, options } = await serve({
       entry: {
@@ -871,67 +929,36 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
           ...entry.weights,
           transformer: { ...entry.weights.transformer, i2: CONTAINERS.transformerI2.entry },
         },
-        quants: {
-          ...entry.quants,
-          i2: quant({
-            text_encoder: "f16",
-            text_conditioner: "f16",
-            transformer: "i2",
-            vae_decoder: "f16",
-          }),
-        },
+        quants: { ...entry.quants, i2: storedAs("i2") },
       },
     });
     const { file } = fileOf(singleFileTensors());
     const message = await refused(
       () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "i2" }),
       mock.paths,
-      "the 'i2' transformer of model 'test', which the file's transformer is converted against under quant 'i2', stores codec 'int2-off', which the conversion of a file does not encode (it encodes int8-sym / f16 / bf16 / f32); the quants that work: i8 / f16 / bf16",
+      "the 'i2' transformer of model 'test', which the file's transformer is converted against under quant 'i2', stores codec 'int2-off', which the conversion of a file does not encode (it encodes int8-sym / f16 / bf16 / f32); the quants that work: i8 / bf16",
     );
     assertEquals(message.split("\n").length, 1, "one line per initializer");
   });
 
-  it("a tensor whose dtype is not the one its weight's float codec takes, for the transformer, naming the role, the tensor, its dtype and what to do", async () => {
-    // Fault: the model's `f16` transformer label holds a bf16 plan, so an F16 file's transformer
-    // under quant `f16` lands on bf16 initializers.
+  it("a tensor whose dtype is not the one a quantized container's float weight takes, naming the role, the tensor, its dtype and what to do", async () => {
+    // Fault: the model's `i8` transformer label holds a bf16 plan. A quant that stores the
+    // transformer quantized is converted against as it is, so an F16 file lands on a bf16 weight.
     const entry = modelEntry();
     const { mock, ref, options } = await serve({
       entry: {
         ...entry,
         weights: {
           ...entry.weights,
-          transformer: { ...entry.weights.transformer, f16: CONTAINERS.transformerBf16.entry },
+          transformer: { ...entry.weights.transformer, i8: CONTAINERS.transformerBf16.entry },
         },
       },
     });
     const { file } = fileOf(f16SingleFileTensors());
     await refused(
-      () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "f16" }),
+      () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "i8" }),
       mock.paths,
       "the transformer stores 'model.layers.0.w' as bf16, which takes BF16 values as they are and never rounds, but the file's 'net.blocks.0.w' is F16; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
-    );
-  });
-
-  it("a tensor whose dtype is not the one its weight's float codec takes, for the text conditioner, telling how to take the distribution's", async () => {
-    // Fault: the model's `f16` text conditioner label holds a bf16 plan.
-    const entry = modelEntry();
-    const { mock, ref, options } = await serve({
-      entry: {
-        ...entry,
-        weights: {
-          ...entry.weights,
-          text_conditioner: {
-            f16: CONTAINERS.conditionerBf16.entry,
-            bf16: CONTAINERS.conditionerBf16.entry,
-          },
-        },
-      },
-    });
-    const { file } = fileOf(f16SingleFileTensors());
-    await refused(
-      () => Pipeline.fromSingleFile(file, ref, options),
-      mock.paths,
-      "the text_conditioner stores 'model.embed' as bf16, which takes BF16 values as they are and never rounds, but the file's 'net.llm_adapter.embed' is F16; pass components: { text_conditioner: … } to take the distribution's text_conditioner",
     );
   });
 
@@ -963,15 +990,15 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
   });
 
   it("under a quant that stores the transformer as a float: a transformer whose tensors mix dtypes, and an F32 one, each with the int8 quants to choose", async () => {
-    // Faults: the transformer's weight F16 beside its BF16 bias (quant `f16`); the transformer F32
-    // throughout (quant `bf16`).
+    // Faults: the transformer's weight F16 beside its BF16 bias; the transformer F32 throughout
+    // (quant `bf16` both times).
     const { mock, ref, options } = await serve();
     const mixed = singleFileTensors();
     mixed.set("net.blocks.0.w", f16([2, 2], F16_WEIGHT));
     await refused(
-      () => Pipeline.fromSingleFile(fileOf(mixed).file, ref, { ...options, quant: "f16" }),
+      () => Pipeline.fromSingleFile(fileOf(mixed).file, ref, { ...options, quant: "bf16" }),
       mock.paths,
-      "the file's transformer mixes dtypes: F16 (1 tensor(s), e.g. 'net.blocks.0.w'), BF16 (1 tensor(s), e.g. 'net.blocks.0.b'); it is stored as the float type of its tensors (quant 'f16' stores the transformer as a float), so they must all have one; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
+      "the file's transformer mixes dtypes: F16 (1 tensor(s), e.g. 'net.blocks.0.w'), BF16 (1 tensor(s), e.g. 'net.blocks.0.b'); it is stored as the float type of its tensors (quant 'bf16' stores the transformer as a float), so they must all have one; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
     );
     const wide = singleFileTensors();
     wide.set("net.blocks.0.w", f32([2, 2], [1, 0.5, -2, 0.25]));
@@ -984,8 +1011,8 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
   });
 
   it("a BF16 transformer under f16 linear compute — the quant's or an explicit one — in one message naming the quant and the dtype", async () => {
-    // Faults: quant `f16-c16` (linearCompute 'f16') with a BF16 file; quant `f16` with an explicit
-    // `linearCompute: "f16"`.
+    // Faults: quant `bf16-c16` (linearCompute 'f16') with a BF16 file; quant `bf16` with an
+    // explicit `linearCompute: "f16"`.
     const { mock, ref, options } = await serve();
     const gpu = fakeGpuContext(fakeDevice({ features: ["shader-f16"] }));
     const declared = await refused(
@@ -993,10 +1020,10 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
         Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
           ...options,
           gpu,
-          quant: "f16-c16",
+          quant: "bf16-c16",
         }),
       mock.paths,
-      "quant 'f16-c16' computes the transformer's linear layers in f16 (linearCompute 'f16'), and the file's transformer is BF16, stored as bf16: bf16 storage under f16 compute is not run from a file",
+      "quant 'bf16-c16' computes the transformer's linear layers in f16 (linearCompute 'f16'), and the file's transformer is BF16, stored as bf16: bf16 storage under f16 compute is not run from a file",
     );
     assertEquals(declared.split("\n").length, 1);
     await refused(
@@ -1004,38 +1031,11 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
         Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
           ...options,
           gpu,
-          quant: "f16",
+          quant: "bf16",
           linearCompute: "f16",
         }),
       mock.paths,
-      "quant 'f16' computes the transformer's linear layers in f16 (linearCompute 'f16', set explicitly), and the file's transformer is BF16",
-    );
-  });
-
-  it("a container of the file's dtype whose graph is not the quant's own", async () => {
-    // Fault: the model's bf16 transformer has another graph than its f16 one, and quant `f16` would
-    // run a BF16 file's transformer on it.
-    const entry = modelEntry();
-    const { mock, ref, options } = await serve({
-      entry: {
-        ...entry,
-        weights: {
-          ...entry.weights,
-          transformer: {
-            ...entry.weights.transformer,
-            bf16: CONTAINERS.transformerBf16OtherGraph.entry,
-          },
-        },
-      },
-    });
-    await refused(
-      () =>
-        Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
-          ...options,
-          quant: "f16",
-        }),
-      mock.paths,
-      "quant 'f16' stores the transformer as 'f16', and the file's BF16 transformer would run the 'bf16' container with that quant's Session options, but the two containers' graphs differ",
+      "quant 'bf16' computes the transformer's linear layers in f16 (linearCompute 'f16', set explicitly), and the file's transformer is BF16",
     );
   });
 
@@ -1056,28 +1056,30 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
     );
   });
 
-  it("a model with no bf16 text conditioner to store the file's", async () => {
-    // Fault: the model's text conditioner exists as f16 only.
+  it("a model with no bf16 text conditioner, whose plan the file's is converted against — an F16 file too, although the model has an f16 one", async () => {
+    // Fault: the model's text conditioner exists as f16 only (every quant names it).
     const entry = modelEntry();
+    const conditionerF16 = (stored: ReturnType<typeof storedAs>) => ({
+      ...stored,
+      weights: { ...stored.weights, text_conditioner: "f16" },
+    });
     const { mock, ref, options } = await serve({
       entry: {
         ...entry,
         weights: { ...entry.weights, text_conditioner: { f16: CONTAINERS.conditionerF16.entry } },
-        quants: {
-          ...entry.quants,
-          bf16: {
-            ...entry.quants.bf16,
-            weights: { ...entry.quants.bf16.weights, text_conditioner: "f16" },
-          },
-        },
+        quants: { i8: conditionerF16(storedAs("i8")), bf16: conditionerF16(storedAs("bf16")) },
       },
     });
-    const { file } = fileOf(singleFileTensors());
-    await refused(
-      () => Pipeline.fromSingleFile(file, ref, options),
-      mock.paths,
-      "model 'test' has no 'bf16' text_conditioner, which the file's text_conditioner is stored as",
-    );
+    for (const [tensors, dtype] of [
+      [singleFileTensors(), "BF16"],
+      [f16SingleFileTensors(), "F16"],
+    ] as const) {
+      await refused(
+        () => Pipeline.fromSingleFile(fileOf(tensors).file, ref, options),
+        mock.paths,
+        `model 'test' has no 'bf16' text_conditioner, whose plan the file's text_conditioner is converted against (its tensors are ${dtype})`,
+      );
+    }
   });
 
   it("the family's admission still runs on the converted components before a weight part", async () => {

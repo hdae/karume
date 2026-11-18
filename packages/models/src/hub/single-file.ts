@@ -16,8 +16,9 @@
  * 3. The placement (`placeTensors`): a key no component takes is refused, and so is a component of
  *    the map this family does not take from a file.
  * 4. Which role comes from where ({@link SingleFileRole}), the tensor lists and the target
- *    containers ({@link SingleFileFamily}: a float storage is the one of the file's dtype); the
- *    plan checks are handed to the loader ({@link ConvertedComponent.checkPlan}).
+ *    containers ({@link SingleFileFamily}: a float storage is the plan of the family's float
+ *    container with its 16-bit float weights stored as the file's dtype); the plan checks are handed
+ *    to the loader ({@link ConvertedComponent.checkPlan}).
  *
  * SPEC: docs/spec/single-file.md
  */
@@ -36,6 +37,7 @@ import {
 } from "@karume/hub";
 import {
   ENCODED_CODECS,
+  type Float16Codec,
   type NameMap,
   parseNameMap,
   placeTensors,
@@ -62,16 +64,19 @@ export type SingleFileSource =
     };
 
 /**
- * A float storage of a role as the family's refusal sees it: the role stored as `label` — the
- * container of the file's `dtype` — under the selected quant.
+ * A float storage of a role as the family's refusal sees it: the role converted against the plan of
+ * the `label` container, its 16-bit float weights stored as `codec` (the file's `dtype`'s),
+ * under the selected quant.
  */
 export type SingleFileCombination = {
   readonly quantName: string;
   readonly quant: Quant;
   /** The dtype of every tensor of the role in the file. */
   readonly dtype: TensorDtype;
-  /** The weights label of the container the role is converted against. */
+  /** The weights label of the container whose plan the role is converted against. */
   readonly label: string;
+  /** The codec the role's 16-bit float weights are stored as: the file's, its own bits. */
+  readonly codec: Float16Codec;
 };
 
 /**
@@ -90,13 +95,12 @@ export type SingleFileRole = {
    * what is quantized; what it does not quantize keeps the precision of its source:
    *
    * - `"quant"`: the selected quant decides. A quant that stores the role quantized (its label is
-   *   not one of {@link SingleFileFamily.floatLabels}) gives its own container, which converts from
-   *   any float dtype; a quant that stores it as a float gives the container of the file's dtype,
-   *   run with the quant's Session options. MUST: that container's graph is the quant's container's
-   *   (checked against the manifest's graph descriptor hashes), since the options were declared for
-   *   it.
-   * - `"file-dtype"`: the container of the file's dtype whatever the quant — for a component no
-   *   preset quantizes.
+   *   not {@link SingleFileFamily.floatLabel}) gives its own container, which converts from any
+   *   float dtype; a quant that stores it as a float gives its own container too — the float one —
+   *   with its 16-bit float weights stored as the file's dtype, run with the quant's Session
+   *   options (declared for that very container and its graph).
+   * - `"file-dtype"`: the float container whatever the quant, its 16-bit float weights stored as
+   *   the file's dtype — for a component no preset quantizes.
    */
   readonly storage: "quant" | "file-dtype";
   /**
@@ -107,15 +111,22 @@ export type SingleFileRole = {
   readonly refuse?: (combination: SingleFileCombination) => string | undefined;
 };
 
-/** A family's single-file declaration: its roles and its float storages. */
+/** A family's single-file declaration: its roles and its float storage. */
 export type SingleFileFamily = {
   readonly roles: readonly SingleFileRole[];
   /**
-   * The weights label whose container stores each float dtype as it is (a bit copy), for every role
-   * of the table. A dtype with no label has no such container: a role whose storage is chosen by
-   * its dtype is refused for it.
+   * The weights label of the distribution's float container of every role of the table: the plan a
+   * role stored as a float is converted against, whatever the file's float dtype. No container of
+   * another label is read for a float storage, whether the distribution has one or not.
    */
-  readonly floatLabels: Readonly<Partial<Record<TensorDtype, string>>>;
+  readonly floatLabel: string;
+  /**
+   * The 16-bit float codec each float dtype is stored as, its own bits (the float container's f16
+   * and bf16 weights are stored as it; both take two bytes an element, so no block moves). A dtype
+   * with no codec cannot be stored as it is: a role whose storage is chosen by its dtype is refused
+   * for it.
+   */
+  readonly floatCodecs: Readonly<Partial<Record<TensorDtype, Float16Codec>>>;
 };
 
 /** The first bytes the format is told from (the 8-byte header length and the header's first byte). */
@@ -218,9 +229,16 @@ type RoleSetting = {
   readonly dtypes: ReadonlyMap<TensorDtype, readonly string[]>;
 };
 
-/** The container a role is converted against, or why there is none. */
+/**
+ * The container a role is converted against — with the codec its 16-bit float weights are stored
+ * as, for a float storage — or why there is none.
+ */
 type RoleStorage =
-  | { readonly label: string; readonly container: ContainerRef }
+  | {
+      readonly label: string;
+      readonly container: ContainerRef;
+      readonly float16Codec?: Float16Codec;
+    }
   | { readonly refusal: string };
 
 /** The role's file keys by dtype, in the order the dtypes first appear. */
@@ -238,12 +256,12 @@ const keysByDtype = (
 };
 
 const isFloatLabel = (family: SingleFileFamily, label: string): boolean =>
-  Object.values(family.floatLabels).includes(label);
+  label === family.floatLabel;
 
 /** The family's float storages, as a message names them (`BF16 → 'bf16', F16 → 'f16'`). */
 const floatStorages = (family: SingleFileFamily): string =>
-  Object.entries(family.floatLabels)
-    .map(([dtype, label]) => `${dtype} → '${label}'`)
+  Object.entries(family.floatCodecs)
+    .map(([dtype, codec]) => `${dtype} → '${codec}'`)
     .join(", ");
 
 /**
@@ -264,14 +282,14 @@ const advice = (setting: RoleSetting): string => {
       ? `model '${modelName}' has no quant that stores the ${role} quantized (which converts from any float dtype)`
       : `choose a quant that stores the ${role} quantized, which converts from any float dtype: ${quantized.join(" / ")}`;
   }
-  return `the file's ${role} must hold ${Object.keys(family.floatLabels).join(" or ")} tensors`;
+  return `the file's ${role} must hold ${Object.keys(family.floatCodecs).join(" or ")} tensors`;
 };
 
 /**
  * The container the role is converted against under `quantName` ({@link SingleFileRole.storage}),
- * or the refusal: a role stored as a float whose tensors mix dtypes, or whose dtype no container
- * stores as it is; a model without that container; a container whose graph is not the quant's
- * own; a combination the family refuses. Manifest data only — nothing is fetched.
+ * or the refusal: a role stored as a float whose tensors mix dtypes, or whose dtype has no 16-bit
+ * float codec; a model without the float container; a combination the family refuses. Manifest data
+ * only — nothing is fetched.
  *
  * SPEC: docs/spec/single-file.md#which-component-comes-from-where
  */
@@ -303,38 +321,26 @@ const resolveStorage = (setting: RoleSetting, quantName: string): RoleStorage =>
     };
   }
   const dtype = first;
-  const label = family.floatLabels[dtype];
-  if (label === undefined) {
+  const codec = family.floatCodecs[dtype];
+  if (codec === undefined) {
     return {
       refusal:
         `the file's ${role} is ${dtype}${asFloat}, and no container stores ${dtype} as it is` +
         ` (the float storages: ${floatStorages(family)}); ${advice(setting)}`,
     };
   }
+  // For a `"quant"` role this is the quant's own label (it is the float label).
+  const label = family.floatLabel;
   if (!Object.hasOwn(labels, label)) {
     return {
       refusal:
-        `model '${modelName}' has no '${label}' ${role}, which the file's ${role} is stored as` +
-        ` (its tensors are ${dtype}); ${advice(setting)}`,
+        `model '${modelName}' has no '${label}' ${role}, whose plan the file's ${role} is converted` +
+        ` against (its tensors are ${dtype}); ${advice(setting)}`,
     };
   }
   const { container } = labels[label];
-  if (entry.storage === "quant" && quantLabel !== undefined && label !== quantLabel) {
-    const own = labels[quantLabel].container.descriptor.graph.sha256;
-    const stored = container.descriptor.graph.sha256;
-    if (stored !== own) {
-      return {
-        refusal:
-          `quant '${quantName}' stores the ${role} as '${quantLabel}', and the file's ${dtype}` +
-          ` ${role} would run the '${label}' container with that quant's Session options, but the` +
-          ` two containers' graphs differ (graph descriptor sha256 ${own} / ${stored}); ${advice(
-            setting,
-          )}`,
-      };
-    }
-  }
-  const refused = entry.refuse?.({ quantName, quant, dtype, label });
-  return refused === undefined ? { label, container } : { refusal: refused };
+  const refused = entry.refuse?.({ quantName, quant, dtype, label, codec });
+  return refused === undefined ? { label, container, float16Codec: codec } : { refusal: refused };
 };
 
 /** Everything one from-file role needs to check its plan. */
@@ -364,7 +370,10 @@ const quantsThatEncode = async (context: RoleContext): Promise<readonly string[]
     labelOf.set(quant, storage.label);
     if (storage.label === failing || working.has(storage.label)) continue;
     await prefetchAssets(loaded, [storage.container.parts[0]], options);
-    const codecs = await readPlanCodecs(openContainerSource(loaded, storage.container, options));
+    const codecs = await readPlanCodecs(
+      openContainerSource(loaded, storage.container, options),
+      storage.float16Codec === undefined ? {} : { float16Codec: storage.float16Codec },
+    );
     working.set(
       storage.label,
       codecs.every(({ codec }) => ENCODED_CODECS.includes(codec)),
@@ -384,7 +393,10 @@ const exactDtype = (codec: CodecName): TensorDtype | undefined =>
  * The refusals of one from-file role that need its plan: a tensor the plan does not use, a codec
  * `@karume/convert` does not encode (one message per role, with the quants that work), and a
  * tensor whose dtype is not the one an initializer's float codec stores as it is (f16 and bf16
- * storage never round, so such a tensor would fail at its first read otherwise).
+ * storage never round, so such a tensor would fail at its first read otherwise). `plan` is the plan
+ * the role is converted against — for a float storage, with its 16-bit float weights already
+ * stored as the file's dtype, so the last refusal is left to a quantized container's f16 or bf16
+ * initializers.
  *
  * SPEC: docs/spec/single-file.md#the-refusals
  */
@@ -534,6 +546,7 @@ export const prepareSingleFile = async (
     converted[role] = {
       container: storage.container,
       tensors,
+      ...(storage.float16Codec === undefined ? {} : { float16Codec: storage.float16Codec }),
       checkPlan: (plan) => checkRolePlan(context, plan),
       ...(retainEncoded ? { retainEncoded: true } : {}),
     };

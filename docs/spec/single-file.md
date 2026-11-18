@@ -28,47 +28,51 @@ of the ADR [0152](../decisions/0152-maintained-specs-and-declared-numeric-requir
 ## Which component comes from where
 
 A family declares the components it takes from a file, each with whether the file must hold it and how the container
-its tensors are converted against is chosen, and which weights label holds which float dtype as it is. A component it
-does not declare comes from the distribution. The rule: **a preset decides what is quantized; what it does not
-quantize keeps the precision of its source** — a float component from the file is converted against the container
-whose storage is the file's dtype, a bit copy. Anima's float labels are `BF16` → `bf16` and `F16` → `f16`; `F32` has
-none (no Anima container stores f32 weights). Anima's components:
+its tensors are converted against is chosen; the weights label of its float container; and the 16-bit float codec
+each float dtype is stored as. A component it does not declare comes from the distribution. The rule: **a preset
+decides what is quantized; what it does not quantize keeps the precision of its source** — a float component from the
+file is converted against the plan of the model's float container, with that plan's 16-bit float weights stored as
+the file's dtype ([a plan with another 16-bit float codec](convert.md#a-plan-with-another-16-bit-float-codec)): a bit
+copy, never a rounding to the container's type. Anima's float container is `bf16` (every float weight of its
+distribution is bf16, the upstream's bits); `BF16` is stored as `bf16` and `F16` as `f16`; `F32` has none (no Anima
+container stores f32 weights). No container of another label is read for a float component, whether the distribution
+carries one or not. Anima's components:
 
 | Component | From | Converted against |
 | --- | --- | --- |
-| `transformer` | The file (required) | Under a quant that stores it as int8: that quant's transformer container, whatever the file's float dtype (a mix of them included). Under a quant that stores it as a float (`f16`, `f16-c16`, `bf16`): the model's transformer container of the file's dtype (BF16 → `bf16`, F16 → `f16`), run with the quant's Session options |
-| `text_conditioner` | The file when the file holds one, else the distribution | When from the file: the model's text conditioner container of the file's dtype (BF16 → `bf16`, F16 → `f16`), whatever the quant — no preset quantizes the text conditioner |
+| `transformer` | The file (required) | Under a quant that stores it as int8: that quant's transformer container, whatever the file's float dtype (a mix of them included). Under a quant that stores it as a float (as `bf16`: `bf16`, `bf16-c16`): that quant's own `bf16` transformer, its 16-bit weights stored as the file's dtype (BF16 as bf16, F16 as f16), run with the quant's Session options |
+| `text_conditioner` | The file when the file holds one, else the distribution | When from the file: the model's `bf16` text conditioner, its 16-bit weights stored as the file's dtype, whatever the quant — no preset quantizes the text conditioner |
 | `text_encoder`, `vae_decoder` | The distribution | — (the selected quant's, as `fromPretrained`) |
 
-- **The dtype rule.** Where the container is chosen by the dtype, the dtype is that of the component's tensors in the
-  file: one dtype for the whole component. A component whose tensors mix dtypes is refused naming each, and a dtype
-  with no float label is refused with what to do (below). Which quant stores a component quantized is read from its
-  weights label: a label that is not one of the family's float labels is a quantized storage.
+- **The dtype rule.** Where the storage follows the dtype, the dtype is that of the component's tensors in the file:
+  one dtype for the whole component. A component whose tensors mix dtypes is refused naming each, and a dtype with no
+  16-bit float codec is refused with what to do (below). Which quant stores a component quantized is read from its
+  weights label: a label that is not the family's float label is a quantized storage.
 - A component named in `options.components` comes from that replacement, never from the file, whatever the file
   holds; its tensors in the file are not read.
 - The file "holds" a component when the name map's layout that recognises the file places at least one key in it.
 - When no component is left to come from the file, the call is refused: it is a `fromPretrained` call.
-- A component converted from the file runs the graph of the container it is converted against. The transformer's graph
-  is the same for every storage of it in a distribution — in every Anima manifest of `karume-anima` and
-  `karume-anima-extra` the `f16`, `i8` and `bf16` transformer containers carry the same graph descriptor (one sha256) —
-  so the quant's Session options, declared for the quant's own container, apply to the container of the file's dtype
-  unchanged. The shared code does not assume it: when the container of the file's dtype is not the quant's own, their
-  graph descriptor hashes in the manifest are compared and a difference is refused.
-- The text conditioner's graphs differ between its `f16` and `bf16` containers — in their constant tables only (the
-  f16 export also rounds the module's non-persistent buffers, the bf16 one leaves them f32 —
-  ADR [0131](../decisions/0131-bf16-weight-execution.md) decision 2) — and the text conditioner from the file runs the
-  graph of the container of its dtype under every preset. Its Session gets the options every text stage gets (none of
-  the preset's knobs); f16 and bf16 storage under f32 compute need no GPU feature. Under a preset whose own text
-  conditioner is f16, a BF16 file's images can differ from `fromPretrained`'s.
+- A component converted from the file runs the graph of the container whose plan it is converted against. For the
+  transformer that is the selected quant's own container under every quant, so the quant's Session options, declared
+  for that container, apply as they are; with its 16-bit weights stored as f16 instead of bf16 the graph does not
+  change (the plan changes in that codec alone).
+- The text conditioner from the file runs the graph of the model's `bf16` text conditioner under every preset, an F16
+  file's as well. Its Session gets the options every text stage gets (none of the preset's knobs); f16 and bf16
+  storage under f32 compute need no GPU feature. Under a preset whose own text conditioner is the `bf16` one, a BF16
+  file of the distribution's weights runs what `fromPretrained` runs; under a preset that stores it otherwise, the
+  images can differ from `fromPretrained`'s. The exporter rounds only what a checkpoint carries, for f16 and bf16
+  alike (`round_weights_to_f16` / `round_weights_to_bf16` in `tools/exporter/src/karume/quantize.py`; the module's
+  non-persistent buffers stay f32), so an f16 export of the text conditioner carries the bf16 export's graph
+  descriptor, and an F16 file's text conditioner runs the graph such an export has.
 - What this opens for the transformer, with the runtime's part in it:
 
   | File | Quant | Storage × compute | |
   | --- | --- | --- | --- |
   | Any float dtype | An int8 quant | int8, the quant's compute | As before: the quant's own container |
-  | BF16 | `bf16`, `f16` | bf16 × f32 | The `bf16` preset's own pair |
-  | F16 | `f16`, `bf16` | f16 × f32 | The `f16` preset's own pair |
-  | F16 | `f16-c16` | f16 × f16 linear and attention | The `f16-c16` preset's own pair |
-  | BF16 | `f16-c16`, or any quant with an explicit `linearCompute: "f16"` | bf16 × f16 linear | Refused: the runtime builds it (its f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), but no distributed preset runs it and no GPU check covers its numbers (the f16-compute checks cover f32 and f16 storage) |
+  | BF16 | A quant that stores it as bf16 under f32 compute (`bf16`) | bf16 × f32 | The quant's own pair |
+  | F16 | The same | f16 × f32 | The quant's container with its 16-bit weights stored as f16: f16 storage under f32 compute |
+  | F16 | A quant that stores it as bf16 under f16 linear compute (`bf16-c16`), or any float quant with an explicit `linearCompute: "f16"` | f16 × f16 linear and attention | f16 storage under f16 compute, which the f16-compute checks cover |
+  | BF16 | The same | bf16 × f16 linear | Refused: the runtime builds it (its f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), but no GPU check covers its numbers (the f16-compute checks cover f32 and f16 storage) |
 
   f16 attention compute reads activations only, so it does not depend on the weights' storage.
 
@@ -79,12 +83,14 @@ none (no Anima container stores f32 weights). Anima's components:
    `parseNameMap`. It is not part of the load's progress stream.
 3. The file: its format from its first bytes, then its header (`openSafetensors`: two reads, no tensor byte).
 4. The placement (`placeTensors`), the components that come from the file, their tensor lists and the containers they
-   are converted against (the dtype rule, the graph comparison and the family's refusals: manifest data only).
+   are converted against, with the 16-bit float codec of a float storage (the dtype rule and the family's refusals:
+   manifest data only).
 5. The shared loader, as for `fromPretrained`, with each component from the file served by a converting source:
    part 0 of every component's container is fetched; for a component from the file, its container's two documents are
-   checked against the manifest, its plan checks run (below), and the converting source is built (with its own checks:
-   a tensor missing for an initializer, a shape that differs). Then the family's admission, on the same opener; then
-   the weight parts and the assets.
+   checked against the manifest, its plan is read — for a float storage with its 16-bit float weights stored as the
+   file's dtype —, its plan checks run (below), and the converting source is built (with its own checks: a tensor
+   missing for an initializer, a shape that differs). Then the family's admission, on the same opener; then the weight
+   parts and the assets.
 6. The build, as `fromPretrained`.
 
 The abort signal is checked at the same kind of boundaries as in `fromPretrained`: the fetches, after the name map,
@@ -106,10 +112,9 @@ Everything that needs no tensor byte is refused before a weight part is fetched,
 | A file that holds no component the family requires (Anima: the transformer) | 4 | The component and the layout |
 | A tensor of a component from the file that is not `F32`, `F16` or `BF16` | 4 | Every such tensor and its dtype |
 | A component stored as the float type of its tensors (Anima: the text conditioner; the transformer under a quant that stores it as a float) whose tensors mix dtypes | 4 | Each dtype with its tensor count and one of its file keys, and what to do |
-| Such a component whose dtype has no float label (Anima: `F32`) | 4 | The dtype, the family's float storages, and what to do |
-| A model without the container a component is stored as (Anima: no `f16` or `bf16` text conditioner for the file's dtype) | 4 | The component, the label, the file's dtype, and what to do |
-| A container of the file's dtype whose graph is not the quant's own container's (the manifest's graph descriptor sha256) | 4 | The quant, both labels and both hashes, and what to do |
-| A combination the family does not run (Anima: a BF16 transformer under f16 linear compute — `f16-c16`, or an explicit `linearCompute: "f16"`) | 4 | One message: the quant, where its linear compute comes from, and the file's dtype |
+| Such a component whose dtype has no 16-bit float codec (Anima: `F32`) | 4 | The dtype, the family's float storages, and what to do |
+| A model without the float container whose plan such a component is converted against (Anima: no `bf16` text conditioner, whatever the file's dtype — an `f16` one is not read instead) | 4 | The component, the label, the file's dtype, and what to do |
+| A combination the family does not run (Anima: a BF16 transformer under f16 linear compute — a quant's, as `bf16-c16`'s, or an explicit `linearCompute: "f16"`) | 4 | One message: the quant, where its linear compute comes from, and the file's dtype |
 | No component left to come from the file | 4 | What the replacements take |
 | A tensor placed in a component from the file that its plan does not use | 5 | Every such tensor, with its initializer name |
 | A plan that stores a codec the conversion does not encode (Anima: none of its containers) | 5 | One message for the component: the label and the quant, the codec, the encoded codecs and, for a component its quant decides, the quants under which the component's container works |
@@ -122,8 +127,9 @@ Everything that needs no tensor byte is refused before a weight part is fetched,
   dtype, with those quants named, for a component its quant decides (Anima's transformer: the int8 quants).
 - f16 and bf16 storage never round (the conversion stores a value of the type as it is and refuses another), so an
   initializer stored as one takes tensors of that dtype only; without the last plan refusal such a file would fail at
-  the first read of a Session. With the container chosen by the file's dtype it holds by construction; it still
-  catches a manifest whose label holds another float codec.
+  the first read of a Session. For a float storage it holds by construction (the plan's 16-bit float weights are
+  stored as the file's dtype); it catches an f16 or bf16 weight in the container of a quant that stores the component
+  quantized.
 - To name the quants that work, each quant's container for the component is settled as above (a quant refused there
   does not work), and the part 0 of every such container other than the failing one is fetched (on that refusal only,
   outside the progress stream) and its plan read.
@@ -137,7 +143,7 @@ Everything that needs no tensor byte is refused before a weight part is fetched,
 | Part 0 of each component's container (for a component from the file: of the container it is converted against) | Yes | Yes, from the start |
 | The const part and the asset parts of a component from the file | Yes | Yes, added to the total once its plan has been read, before any of them is fetched |
 | The parts a converting source builds (`convertedParts`) | No | No |
-| The container of the selected quant for a component that comes from the file against another container (Anima's text conditioner, and its transformer under a float quant whose label is not the file's dtype) | No | No |
+| The container of the selected quant for a component that comes from the file against another container (Anima's text conditioner under a quant whose own is not the `bf16` one) | No | No |
 | Every part of a component from the distribution or a replacement, and the assets | Yes | Yes |
 
 - The load's progress is one stream, as for `fromPretrained`; its total grows once, by the kept parts of each

@@ -85,6 +85,7 @@ import {
   resolveSelection,
 } from "@karume/hub";
 import {
+  type Float16Codec,
   openConvertingSource,
   type PlannedCodec,
   readPlanCodecs,
@@ -199,6 +200,12 @@ export type ConvertedComponent = {
   readonly container: ContainerRef;
   /** Initializer name → tensor. */
   readonly tensors: TensorList;
+  /**
+   * The codec the container's `f16` and `bf16` initializers are stored as (`float16Codec` of
+   * `@karume/convert`): the plan is the container's with that codec in their place, read and
+   * converted against as such. Omitted: the container's plan as it is.
+   */
+  readonly float16Codec?: Float16Codec;
   /**
    * The caller's refusals that need the plan — the codec of every initializer it stores — run once
    * the container's descriptor is fetched and checked against the manifest, before the converting
@@ -626,11 +633,15 @@ export const loadContainerComponents = async <Admitted>(
     }
     // The target's two documents were checked against the manifest just above; the converting
     // source reads its plan from the same part 0, so the container it serves (whose part 0 states
-    // no hash for what it converts) is opened without expected values.
-    await seat.converted.checkPlan(await readPlanCodecs(source));
+    // no hash for what it converts, and with another 16-bit float codec is one of its own) is
+    // opened without expected values.
+    const { float16Codec } = seat.converted;
+    const plan = float16Codec === undefined ? {} : { float16Codec };
+    await seat.converted.checkPlan(await readPlanCodecs(source, plan));
     const conversion = await openConvertingSource({
       target: source,
       tensors: seat.converted.tensors,
+      ...plan,
       ...(seat.converted.retainEncoded === true ? { retainEncoded: true } : {}),
     });
     const served = await openContainer({ kind: "source", source: conversion.source });

@@ -185,30 +185,36 @@ const ROPE_BASE = "rope_base";
 const COMPONENT_KEYS = [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER] as const;
 
 /**
- * The weights labels of Anima's float storages: the container that stores each float dtype as it
- * is. F32 has none (no Anima container stores f32 weights).
+ * The weights label of Anima's float containers: every float weight of the distribution is bf16
+ * (the upstream's bits), and a float component from a file is converted against that container's
+ * plan whatever the file's float dtype.
  */
-const ANIMA_FLOAT_LABELS = { BF16: "bf16", F16: "f16" } as const;
+const ANIMA_FLOAT_LABEL = "bf16";
 
 /**
- * The transformer stored as bf16 under f16 linear compute (`f16-c16`'s, or an explicit
- * `linearCompute: "f16"`, which wins over the quant's): the runtime builds it — its f16-compute GEMM
- * reads a bf16 weight as it reads an f32 one and rounds it into the f16 tile — but no distributed
- * preset runs that pair and no GPU check covers its numbers (the f16-compute checks cover f32 and
- * f16 storage only), so a file is not run that way. f16 storage under f16 compute is `f16-c16`
- * itself, and f16 attention compute reads no weight.
+ * The 16-bit float codec each float dtype of a file is stored as, its own bits — an F16 file's
+ * weights stay f16, never rounded to bf16. F32 has none (no Anima container stores f32 weights).
+ */
+const ANIMA_FLOAT_CODECS = { BF16: "bf16", F16: "f16" } as const;
+
+/**
+ * The transformer stored as bf16 under f16 linear compute (a quant's `linearCompute: "f16"`, or an
+ * explicit one, which wins over the quant's): the runtime builds it — its f16-compute GEMM reads a
+ * bf16 weight as it reads an f32 one and rounds it into the f16 tile — but no GPU check covers its
+ * numbers (the f16-compute checks cover f32 and f16 storage only), so a file is not run that way. An
+ * F16 file's transformer is stored as f16, and f16 storage under f16 compute is checked; f16
+ * attention compute reads no weight.
  */
 const refuseBf16UnderF16Compute =
   (explicit: PipelineOptions["linearCompute"]) =>
-  ({ quantName, quant, dtype, label }: SingleFileCombination): string | undefined => {
+  ({ quantName, quant, dtype, codec }: SingleFileCombination): string | undefined => {
     const linearCompute = explicit ?? quant.session.linearCompute;
-    if (label !== ANIMA_FLOAT_LABELS.BF16 || linearCompute !== "f16") return undefined;
+    if (codec !== "bf16" || linearCompute !== "f16") return undefined;
     return (
       `quant '${quantName}' computes the transformer's linear layers in f16 (linearCompute 'f16'` +
       `${explicit === undefined ? "" : ", set explicitly"}), and the file's transformer is ${dtype},` +
-      " stored as bf16: bf16 storage under f16 compute is not run from a file (no distributed preset" +
-      " runs it, and no check covers its numbers); choose a quant that computes in f32, or one that" +
-      " stores the transformer as int8"
+      " stored as bf16: bf16 storage under f16 compute is not run from a file (no check covers its" +
+      " numbers); choose a quant that computes in f32, or one that stores the transformer as int8"
     );
   };
 
@@ -218,20 +224,19 @@ const refuseBf16UnderF16Compute =
  * quantize keeps the precision of its source:
  *
  * - the transformer: an int8 quant's container, converted from any float dtype; under a quant that
- *   stores it as a float (`f16`, `f16-c16`, `bf16`), the container of the file's dtype — BF16 →
- *   `bf16`, F16 → `f16` — with the quant's Session options. The transformer's graph is the same for
- *   every storage of it in a distribution (the manifest's graph descriptor hashes, checked by the
- *   shared code), so the options apply to it unchanged. bf16 storage under f16 compute is refused
- *   ({@link refuseBf16UnderF16Compute});
- * - the text conditioner: the container of the file's dtype whatever the quant (no preset
- *   quantizes it; its stage gets none of the quant's knobs).
+ *   stores it as a float (its `bf16` container), that container's plan with its 16-bit weights
+ *   stored as the file's dtype — BF16 as bf16, F16 as f16 — with the quant's Session options. bf16
+ *   storage under f16 compute is refused ({@link refuseBf16UnderF16Compute});
+ * - the text conditioner: the `bf16` container's plan whatever the quant, stored as the file's
+ *   dtype the same way (no preset quantizes it; its stage gets none of the quant's knobs).
  *
  * `linearCompute` is the caller's explicit setting.
  *
  * SPEC: docs/spec/single-file.md#which-component-comes-from-where
  */
 const animaSingleFile = (linearCompute: PipelineOptions["linearCompute"]): SingleFileFamily => ({
-  floatLabels: ANIMA_FLOAT_LABELS,
+  floatLabel: ANIMA_FLOAT_LABEL,
+  floatCodecs: ANIMA_FLOAT_CODECS,
   roles: [
     {
       role: TRANSFORMER,
@@ -1114,20 +1119,21 @@ export class Pipeline {
    *   the converted weights in host memory so that only the first Session build reads the file.
    *
    * Which component comes from where: the `transformer` from the file (required) — stored as the
-   * selected quant's transformer when the quant stores it as int8, and as the model's container of
-   * the file's dtype (BF16 → `bf16`, F16 → `f16`) when the quant stores it as a float, with the
-   * quant's Session options; the `text_conditioner` from the file when the file holds one —
-   * stored as the model's container of the file's dtype whatever the quant (no preset quantizes
-   * it, so it keeps the file's precision) — else from the distribution; the `text_encoder` and the
-   * `vae_decoder` from the distribution. A role named in `components` comes from that replacement,
-   * never from the file.
+   * selected quant's transformer when the quant stores it as int8, and against the plan of the
+   * model's `bf16` transformer with its 16-bit weights stored as the file's dtype (BF16 as bf16,
+   * F16 as f16: the file's own bits) when the quant stores it as a float, with the quant's Session
+   * options; the `text_conditioner` from the file when the file holds one — against the plan of
+   * the model's `bf16` text conditioner, stored as the file's dtype the same way, whatever the quant
+   * (no preset quantizes it, so it keeps the file's precision) — else from the distribution; the
+   * `text_encoder` and the `vae_decoder` from the distribution. A role named in `components`
+   * comes from that replacement, never from the file.
    *
    * Everything that needs no tensor byte is refused before a weight part is fetched: a file that is
    * not safetensors or that no layout of the name map recognises, a key no component takes, a
    * tensor the plan does not use, a file with no transformer, a component stored as the float type
    * of its tensors whose tensors mix dtypes or are F32 (no Anima container stores f32 weights), a
-   * BF16 transformer under f16 linear compute (`f16-c16`), and a tensor whose dtype is not the one
-   * an f16 or bf16 weight takes (neither rounds).
+   * BF16 transformer under f16 linear compute, and a tensor whose dtype is not the one an f16 or
+   * bf16 weight of a quantized container takes (neither rounds).
    *
    * SPEC: docs/spec/single-file.md
    */
