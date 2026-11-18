@@ -311,7 +311,10 @@ maintainer's ruling of 2026-11-06).
      conditioner always and for the transformer under the float quants; a mix of dtypes and F32 are refused, and so is
      a BF16 transformer under f16 linear compute, which nothing checks); [spec/single-file.md](spec/single-file.md),
      [spec/convert.md](spec/convert.md#the-encodings). Not run on a GPU with an F16 file yet: none with the base's 28
-     blocks is at hand.)* Left from it: keeping the
+     blocks is at hand.)* *(2026-11-18: a float component from a file is converted against the plan of the model's
+     `bf16` container with its 16-bit weights stored as the file's dtype (`float16Codec` of `@karume/convert`), so F16
+     files need no f16 container; the graph comparison between containers is gone. Not run on a GPU with an F16 file
+     yet.)* Left from it: keeping the
      converted container (designed next), `fromSingleFile` on the other families, int4 targets, LoRA, the
      runtime's `parseSafetensors` moved into the reader package, and the published-package setup (`@karume/models`
      depends on the private `@karume/convert` and `@karume/safetensors`, which JSR does not have).
@@ -348,10 +351,9 @@ maintainer's ruling of 2026-11-06).
        (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
        that republishes every manifest as `karume/6`.
     7. The unpublished 2.9B Anima distribution takes the new names before its first publication.
-  - Later, low priority: bf16 presets for MOSS-Image (its BF16 DiT and text encoder ship only as int8, and their bf16
-    export is heavy) and for the Gemma 4 E2B drafter (int8 only).
-  - Open question: an F32 upstream stored as f16 (Irodori, Wan, Lucida) — that rounding halves the size, and whether bf16
-    storage avoids a loss there is not known.
+  - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
+    whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
+    probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
   - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice),
     and whether the `:wbf16` kernels have their geometry per adapter.
 

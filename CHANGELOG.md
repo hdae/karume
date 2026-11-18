@@ -166,19 +166,21 @@ measurements in `docs/research/`.
   (the type `SingleFileSource`) — and a distribution, with no export step. The file must be safetensors; its tensors
   are placed with the distribution's name map and converted while each Session reads them. A preset decides what is
   quantized, and what it does not quantize keeps the precision of the file: the transformer is converted against an
-  int8 quant's plan from any float dtype, and under a quant that stores it as a float (`f16`, `f16-c16`, `bf16`)
-  against the model's container of the file's dtype (BF16 → `bf16`, F16 → `f16`, a bit copy) with the quant's
-  options; the text conditioner, when the file holds one, against the model's container of the file's dtype whatever
-  the quant; the text encoder and the VAE decoder come from the distribution, and a component named in `components`
-  from its replacement. The converted parts are neither downloaded nor counted in the progress, and everything that
+  int8 quant's plan from any float dtype, and under a quant that stores it as a float (`bf16`, `bf16-c16`) against the
+  plan of that quant's `bf16` container with its 16-bit weights stored as the file's dtype (BF16 as bf16, F16 as f16:
+  the file's own bits, never rounded) with the quant's options; the text conditioner, when the file holds one, against
+  the model's `bf16` text conditioner the same way, whatever the quant; no f16 container is read. The text encoder and
+  the VAE decoder come from the distribution, and a component named in `components` from its replacement. The converted parts are neither downloaded nor counted in the progress, and everything that
   needs no tensor byte is refused before a weight part is downloaded — among it a component stored as a float whose
-  tensors mix dtypes or are F32, and a BF16 transformer under f16 linear compute (`f16-c16`, or an explicit
-  `linearCompute: "f16"`), which no distributed preset runs. The pipeline reads the file for as long as it lives. Every Session build of a component from
+  tensors mix dtypes or are F32, and a BF16 transformer under f16 linear compute (`bf16-c16`, or an explicit
+  `linearCompute: "f16"`), which no GPU check covers yet. The pipeline reads the file for as long as it lives. Every Session build of a component from
   the file converts it again (in the default per-stage residency, every generate); the option `retainConverted: true`
   (`FromSingleFileOptions`, which `fromPretrained` does not take) keeps the converted weights in host memory so that
   only the first build reads the file, at their converted size (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as
   bf16) until the pipeline is released. `@karume/models` now depends on the private workspace packages
   `@karume/convert` and `@karume/safetensors`.
+- `@karume/convert` (private): `float16Codec` on `openConvertingSource` and `readPlanCodecs` stores every f16 and bf16
+  initializer of a plan as the given 16-bit codec (the same blocks, a part 0 of its own).
 
 ### Changed
 
