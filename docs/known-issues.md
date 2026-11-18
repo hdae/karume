@@ -594,14 +594,27 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
 - Records: `outputs/diag/restructure-2026-11-15/` (`wan-ti2v-write.log`, `wan-5f-alone.log`, `wan-9f-alone.log`; local,
   untracked).
 
-## Style-Bert-VITS2: the style setting seems to have no effect (reported 2026-11-18; not investigated)
+## Style-Bert-VITS2: the style setting seems to have no effect (reported and investigated 2026-11-18; no defect found)
 
-Reported by the maintainer: choosing another style, or another style weight, does not seem to change the speech, and
-this has been so for a long time. The expressiveness that comes from the text (the BERT features) does work, so the
-suspicion is that the style vector does not reach the model or reaches it without effect. Nothing is measured yet: not
-whether the output words change with the style at all, and not what the upstream implementation gives for the same
-model, text and style.
+Reported by the maintainer: choosing another style, or another style weight, does not seem to change the speech. The
+investigation found the style path intact and its effect equal to upstream's: for model F1, one text and zero noise,
+`f16+bert8` gives the upstream `net_g`'s numbers at every style and weight tried (the prior means differ by a relative
+3.4e-4, the durations are equal), and the change from Neutral to another style is the same in both (Angry at weight 1:
+4.1 % of the prior means, 2.4 dB of log-mel distance along a DTW path). The table of the distribution is upstream's
+`style_vectors.npy` bit for bit, the formula and its mean row are upstream's, and the exported graph keeps the style
+vector as an input that 811 of its 899 nodes depend on.
 
-- Impact: the style options of the `sbv2` pipeline. The default style is what every run may effectively be getting.
-- Next: compare, for one model and text, the output under two styles; then follow the style vector from the asset to the
-  graph input against the upstream implementation. To be looked into before the next release.
+What explains the report (the first two are upstream's behaviour too):
+
+- At weight 1 a style changes the speech less than another seed does: 0.7–2.7 dB for the six styles against about 4.5 dB
+  for a seed and 15 dB for another text. The effect grows about linearly with the weight and is plain from about 5.
+- `Neutral` is the mean row the formula mixes towards, so its weight changes nothing (the waveform is bit-identical).
+- The playground's weight control ends at 2 (`apps/playground/src/models/sbv2/request.ts`); upstream's goes to 20.
+
+Open, undecided:
+
+- No test fails if the style stops having an effect: the sha256 rows and the export's golden use Neutral at weight 1.
+- Whether the playground's weight range follows upstream's.
+
+Record: `outputs/diag/sbv2-style-2026-11-18/` (`REPORT.md`, the scripts, the tables, and WAV files of the settings
+compared under `listen/`; local, untracked). Not covered: the other three models, and upstream's own text front end.
