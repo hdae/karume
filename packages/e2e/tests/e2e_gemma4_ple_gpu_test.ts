@@ -45,6 +45,7 @@ import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
 import { Pipeline } from "../../models/gemma.ts";
 import * as gemma4QatMobile from "../../models/gemma4-qat-mobile.ts";
+import { WHOLE_ROW_SAMPLING } from "../../models/src/gemma/pipeline.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../../models/src/gemma/ple-gpu.ts";
 import { mirrorAvailable, openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -294,61 +295,94 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
   },
 );
 
-// Decode at temperature > 0 does not take the greedy path; it runs as a normal run
-// (= `enqueueRead`). The gather and the target go into the same batch, so the only extra fences
-// the GPU-resident path pays are those of the prefill chunks (ADR 0054 addendum "batched readback
-// of graph outputs" — the path's open item ①).
-test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
-  "PLE GPU-resident: decode on the default sampler path also gives the host's id sequence, with extra fences only for prefill (real GPU)",
-  async () => {
-    const source = nodeDirectory(QAT_ROOT);
-    const generate = async (
-      pleResidency: "host" | "gpu",
-    ): Promise<{ ids: number[]; fences: number }> => {
-      const gpu = await acquireGpu();
-      try {
-        const pipeline = await gemma4QatMobile.Pipeline.fromPretrained(source, {
-          model: "e2b",
-          pleResidency,
-          gpu,
-        });
-        const fences = countFences(gpu);
+// Decode at temperature > 0 does not take the greedy path. It runs one of two ways, and each has
+// its case below:
+//
+// - **a normal run** (= `enqueueRead` on the GPU-resident path) — what a sampler the candidate
+//   selection does not serve runs (no top-k, a repetition penalty, a logit bias). The case takes the
+//   sampler of the other one and builds its pipelines with the test-only key `WHOLE_ROW_SAMPLING`,
+//   so the two cases differ in the path alone;
+// - **a candidate step** (`enqueue` of the target and of the selection in one batch) — what a
+//   sampler with a top-k runs.
+//
+// Either way the gather and the target go into the same batch, so the only extra fences the
+// GPU-resident path pays are those of the prefill chunks (ADR 0054 addendum "batched readback of
+// graph outputs" — the path's open item ①).
+for (const path of [
+  { name: "a normal run", wholeRow: true, extraFences: 0 },
+  { name: "a candidate step", wholeRow: false, extraFences: 1 },
+] as const) {
+  test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
+    `PLE GPU-resident: sampled decode as ${path.name} also gives the host's id sequence, with extra fences only for prefill (real GPU)`,
+    async () => {
+      const source = nodeDirectory(QAT_ROOT);
+      const generate = async (
+        pleResidency: "host" | "gpu",
+      ): Promise<{ ids: number[]; fences: number }> => {
+        const gpu = await acquireGpu();
         try {
-          const ids: number[] = [];
-          const stream = pipeline.chat([{ role: "user", content: PROMPT }], {
-            maxNewTokens: GREEDY_STEPS,
-            sampler: { temperature: 0.8, topK: 40, seed: 7 },
-            onToken: (id) => ids.push(id),
+          const pipeline = await gemma4QatMobile.Pipeline.fromPretrained(source, {
+            model: "e2b",
+            pleResidency,
+            gpu,
+            ...(path.wholeRow ? { [WHOLE_ROW_SAMPLING]: true as const } : {}),
           });
-          await stream.text();
-          return { ids, fences: fences.count() };
+          const fences = countFences(gpu);
+          try {
+            const ids: number[] = [];
+            const stream = pipeline.chat([{ role: "user", content: PROMPT }], {
+              maxNewTokens: GREEDY_STEPS,
+              sampler: { temperature: 0.8, topK: 40, seed: 7 },
+              onToken: (id) => ids.push(id),
+            });
+            await stream.text();
+            const stop = await stream.done;
+            // The path the case names is the one that ran.
+            assertEquals(
+              stop.candidateSelection === undefined,
+              path.wholeRow,
+              `the stop's candidate counters: ${JSON.stringify(stop.candidateSelection)}`,
+            );
+            if (stop.candidateSelection !== undefined) {
+              assert(stop.candidateSelection.steps > 0, "no step drew from the candidates");
+            }
+            return { ids, fences: fences.count() };
+          } finally {
+            fences.restore();
+            await pipeline.dispose();
+          }
         } finally {
-          fences.restore();
-          await pipeline.dispose();
+          gpu.destroy();
         }
-      } finally {
-        gpu.destroy();
-      }
-    };
-    const host = await generate("host");
-    assertEquals(
-      host.ids.length,
-      GREEDY_STEPS,
-      "the host path did not generate the full step count",
-    );
-    const resident = await generate("gpu");
-    assertEquals(
-      resident.ids,
-      host.ids,
-      "the GPU-resident path's generated id sequence (sampler path)",
-    );
-    // The only extra queue wait the GPU-resident path pays over the host path is the gather batch
-    // of one prefill chunk; the 16 decode tokens pay none (they are read back by the map at the
-    // end of the same batch). Before the path's open item ① each decode added one (= 16 + 1).
-    // Neither path pays the wait for released memory that a run building a slot backing starts
-    // with (ADR 0095 addendum of 2026-10-24): the sampler has a top-k, so both issue the decode
-    // through enqueue (the candidate selection), which never waits. A host path that read the whole
-    // row would issue a run and pay that wait once, and the two counts would match.
-    assertEquals(resident.fences - host.fences, 1, `host ${host.fences} / gpu ${resident.fences}`);
-  },
-);
+      };
+      const host = await generate("host");
+      assertEquals(
+        host.ids.length,
+        GREEDY_STEPS,
+        "the host path did not generate the full step count",
+      );
+      const resident = await generate("gpu");
+      assertEquals(
+        resident.ids,
+        host.ids,
+        "the GPU-resident path's generated id sequence (sampler path)",
+      );
+      // The only extra queue wait the GPU-resident path pays over the host path is the gather batch
+      // of one prefill chunk; the 16 decode tokens pay none (they are read back by the map at the
+      // end of the same batch). Before the path's open item ① each decode added one (= 16 + 1).
+      //
+      // As a normal run the host path pays one wait of its own: its decode run builds a slot
+      // backing, and a run that builds one first waits for released memory (ADR 0095 addendum of
+      // 2026-10-24). The resident path builds its backings through enqueue, which never waits, so
+      // the two counts match.
+      //
+      // As a candidate step neither path pays that wait — both issue the decode through enqueue —
+      // so the resident path's gather batch shows: one more than the host path.
+      assertEquals(
+        resident.fences - host.fences,
+        path.extraFences,
+        `host ${host.fences} / gpu ${resident.fences}`,
+      );
+    },
+  );
+}
