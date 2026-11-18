@@ -377,14 +377,14 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
     refuse: ({ compute, weightStorage, where }) =>
       compute === "f16" && weightStorage === "i8"
         ? `${where}: linearCompute 'f16' cannot be combined with i8-resident weights (w8a16 is not implemented). ` +
-          "Set linearCompute to 'a8', or store this weight as f32 / f16"
+          "Set linearCompute to 'a8', or store this weight as f32 / f16 / bf16"
         : undefined,
   },
   {
     refuse: ({ compute, weightStorage, where }) =>
       compute === "f16" && weightStorage === "i4"
         ? `${where}: linearCompute 'f16' cannot be combined with i4-resident weights (w4a16 is not implemented). ` +
-          "Set linearCompute to 'a8', or store this weight as f32 / f16"
+          "Set linearCompute to 'a8', or store this weight as f32 / f16 / bf16"
         : undefined,
   },
   // Small M branches to the GEMV family (ADR 0082). In the bucket M ≤ 64 the default GEMM skeleton has

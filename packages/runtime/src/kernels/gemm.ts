@@ -2027,7 +2027,7 @@ const linearVariantWgsl = (
   if (compute === "f16" && weight === "i8") {
     throw new CodegenError(
       "linear: i8 weight storage × f16 compute (w8a16) is not implemented — " +
-        "set linearCompute to 'f32' or 'a8', or keep the weights in f32 / f16 storage",
+        "set linearCompute to 'f32' or 'a8', or keep the weights in f32 / f16 / bf16 storage",
     );
   }
   // i4 is the same (w4a16 is not implemented — ADR 0069; the reason not to fall back silently to
@@ -2035,7 +2035,7 @@ const linearVariantWgsl = (
   if (compute === "f16" && weight === "i4") {
     throw new CodegenError(
       "linear: i4 weight storage × f16 compute (w4a16) is not implemented — " +
-        "set linearCompute to 'f32', or keep the weights in f32 / f16 storage",
+        "set linearCompute to 'f32', or keep the weights in f32 / f16 / bf16 storage",
     );
   }
   // MUST: the log2 of the group length is one-to-one with i4 (generating without it emits WGSL with
