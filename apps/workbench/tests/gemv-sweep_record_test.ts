@@ -95,6 +95,18 @@ describe("mergeGemvSweepReports", () => {
   });
 
   describe("when the records do not belong to one sweep", () => {
+    it("throws for another geometry profile (its GEMM references were built with another geometry)", () => {
+      const other = gemvPerCase(CASE_B, { geometryProfile: "nvidia-ampere" });
+      expect(() => mergeGemvSweepReports([gemvPerCase(CASE_A), other], PLANNED)).toThrow(
+        /Record 1 differs from record 0/,
+      );
+      const same = [
+        gemvPerCase(CASE_A, { geometryProfile: "nvidia-ampere" }),
+        gemvPerCase(CASE_B, { geometryProfile: "nvidia-ampere" }),
+      ];
+      expect(mergeGemvSweepReports(same, PLANNED).geometryProfile).toBe("nvidia-ampere");
+    });
+
     it("throws for other gates (another device's candidates)", () => {
       const other = gemvPerCase(CASE_B, {
         gates: {

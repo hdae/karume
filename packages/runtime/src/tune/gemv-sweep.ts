@@ -5,7 +5,9 @@
  * (`karume-gemv-sweep/4`). It derives no table and changes no choice.
  *
  * Per case and row count it measures the baseline (what a Session at the level `exact` runs with
- * the default profile), the default profile's choice at `reorder` and the candidates of the set
+ * the default profile's GEMV choices — where that is the GEMM, a float-stored case past one row, with
+ * the tile geometry of the profile the sweep's device resolves to, as a Session on it would; the
+ * record names that profile), the default profile's choice at `reorder` and the candidates of the set
  * (gemv-candidates.ts — all, or those the caller names) together, through harness.ts's primitives
  * (its measurement protocol). A case's row counts are measured in ascending order, so at M = 4 and 8
  * the run has the case's M = 1 group (when it measured it): a reorder candidate whose row there
@@ -47,6 +49,7 @@ import { tiledWorkgroups, gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import type { Tolerance } from "../reference/allclose.ts";
 import { opTolerance } from "../reference/op-tolerance.ts";
+import { sessionGeometryProfile } from "../runtime/geometry-selection.ts";
 import type { LinearProgram } from "../runtime/linear-program.ts";
 import {
   type GemvCandidate,
@@ -486,6 +489,8 @@ export const sweepGemvCase = async (
 ): Promise<GemvCaseResult> => {
   const { gpu } = context;
   const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
+  // The profile a Session on this device runs with: the GEMM reference takes its geometry
+  const reference = sessionGeometryProfile(gpu);
   const weightScale = !isFloatGemvStorage(gemvCase.storage);
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
@@ -572,7 +577,7 @@ export const sweepGemvCase = async (
     for (const kernel of kernels.slice(1)) {
       if (gemvCarriedFromM1(m, kernel.candidate, plan.profile, m1Group)) continue;
       try {
-        const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
+        const program = gemvProgram(gemvCase, m, kernel.candidate.choice, reference);
         kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
         kernel.state = {
           kind: "skipped",
@@ -594,7 +599,7 @@ export const sweepGemvCase = async (
         if (gpu.lost !== undefined) break;
         if (kernel.state.kind !== "planned") continue;
         try {
-          const program = gemvProgram(gemvCase, m, kernel.candidate.choice);
+          const program = gemvProgram(gemvCase, m, kernel.candidate.choice, reference);
           kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
           const launch = gemvLaunch(program, kernel.output, limit, weightScale);
           const ready = await prepareLaunch(context, launch, resources);
@@ -906,6 +911,8 @@ export type GemvSweepParts = {
   readonly aborted: boolean;
   readonly userAgent: string;
   readonly adapter: ReportAdapter;
+  /** The id of the profile the sweep's device resolved to ({@link GemvSweepReport.geometryProfile}). */
+  readonly geometryProfile: string;
   readonly gates: GemvSweepGates;
   readonly timing: { readonly feature: boolean; readonly unit: TimingUnit };
   readonly candidateSet: GemvCandidateSet;
@@ -931,6 +938,7 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
   aborted: parts.aborted,
   userAgent: parts.userAgent,
   adapter: parts.adapter,
+  geometryProfile: parts.geometryProfile,
   gates: parts.gates,
   gpuTiming: {
     feature: parts.timing.feature,
@@ -1056,6 +1064,7 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
       aborted,
       userAgent: navigator.userAgent,
       adapter,
+      geometryProfile: sessionGeometryProfile(gpu).id,
       gates,
       timing: { feature: gpu.gpuTimingEnabled, unit: context.unit },
       candidateSet: plan.candidateSet,

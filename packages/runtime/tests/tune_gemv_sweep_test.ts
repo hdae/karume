@@ -1,7 +1,9 @@
 // The GEMV sweep on a real GPU (src/tune/gemv-sweep.ts): one small shape per storage with every
 // candidate kind — the column variants, a row-block height, the parallel GEMV plain and staged, and
 // the subgroup form where the device has it; for the float storages the column variants and the
-// parallel GEMV against the GEMM past one row — measured through the sweep's own path, the public
+// parallel GEMV against the GEMM past one row (the GEMM of the profile the device resolves to: an
+// injected table with another GEMM geometry changes the reference's kernel and no other) — measured
+// through the sweep's own path, the public
 // entry point over one case of the table, and the calibration of a case's first kernel after the
 // workbench entry's idle time. The GPU sections are SKIPped explicitly without an adapter.
 //
@@ -15,6 +17,12 @@ import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { runGemvSweep } from "../tune.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import {
+  DEFAULT_GEOMETRY_PROFILE,
+  type GeometryProfile,
+  selectGeometryProfile,
+} from "../src/kernels/geometry-profile.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import {
   type GemvCandidate,
@@ -23,6 +31,7 @@ import {
   gemvCandidates,
   type GemvMeasurementPlan,
   gemvProfileChoice,
+  gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
 import { gemvCaseFingerprint, gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
@@ -117,10 +126,13 @@ const sweepWith = async (
   gemvCase: GemvCase,
   plansFor: (gates: GemvGates) => GemvMeasurementPlan[],
   settings: Partial<GemvCaseSettings> = {},
+  /** A table injected in place of the one the adapter selects. */
+  geometryProfile?: GeometryProfile,
 ): Promise<GemvCaseResult> => {
   const gpu = await acquireGpu({
     subgroups: "available",
     ...(timestampQuery ? { gpuTiming: true } : {}),
+    ...(geometryProfile === undefined ? {} : { geometryProfile }),
   });
   const context = await createSweepContext(gpu, "ns");
   try {
@@ -220,6 +232,38 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
     });
   }
 
+  it("measures a float-stored case's GEMM with the tile geometry of the profile its device resolves to (an injected table with one GEMM geometry for every row count)", async () => {
+    const [gemvCase] = SMALL_FLOAT;
+    // The default profile and every embedded table take reg16x16r1x4w4 at 4 rows; this table does not
+    const oneBucket: GeometryProfile = {
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id: "test-one-bucket",
+      gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: defaultGemmGeometry() }],
+    };
+    const plans = (gates: GemvGates): GemvMeasurementPlan[] => [
+      planOf(gemvCase, 4, pick(gemvCase, 4, gates, ["parallel-l8"])),
+    ];
+    const selected = await sweepWith(gemvCase, plans);
+    const injected = await sweepWith(gemvCase, plans, {}, oneBucket);
+    const rowOf = (result: GemvCaseResult, name: string): GemvSweepRow => {
+      const row = result.rows.find((one) => one.candidate === name);
+      if (row === undefined) throw new Error(`no row ${name}`);
+      assertEquals(row.error, undefined, rowLabel(row));
+      assertEquals(row.withinBand, true, rowLabel(row));
+      return row;
+    };
+    assertEquals(rowOf(selected, "gemm").keys, ["linear:v2:f32:reg16x16r1x4w4v4:wbf16"]);
+    assertEquals(rowOf(injected, "gemm").keys, ["linear:v2:f32:reg128x128r8x8w16v4:wbf16"]);
+    const { choice } = gemvBaseline(gemvCase, 4);
+    assertEquals(
+      rowOf(injected, "gemm").kernel,
+      gemvKernelId(gemvCase, 4, choice, (one, m, chosen) => gemvProgram(one, m, chosen, oneBucket)),
+    );
+    assert(rowOf(injected, "gemm").kernel !== rowOf(selected, "gemm").kernel);
+    // The candidate is the same kernel under both
+    assertEquals(rowOf(injected, "parallel-l8").kernel, rowOf(selected, "parallel-l8").kernel);
+  });
+
   it("calibrates the first kernel of a case that starts after the entry's idle time like the same kernel later in the case (fault: a cold device)", async () => {
     const gemvCase = GEMV_CASES.find(({ id }) => id === "i4g512-n256-k1536");
     if (gemvCase === undefined) throw new Error("no case i4g512-n256-k1536");
@@ -291,6 +335,9 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
       );
     }
     assertEquals(record.settings.quickLookMargin, 1.25);
+    // The profile a Session on this adapter runs with (nothing is injected here)
+    assert(adapter !== null);
+    assertEquals(record.geometryProfile, selectGeometryProfile(adapter.info).id);
     assertEquals(record.gpuTiming.unit, timestampQuery ? "ns" : "wall");
     assertEquals(record.rows.filter((row) => row.isBaseline).length, 1);
     for (const row of record.rows) {

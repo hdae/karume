@@ -17,7 +17,10 @@
  *   the row count in the case table), the default profile's choices its summary names are the
  *   current ones, and the rows of those choices — the baseline, and the choice at `reorder` where
  *   the sweep measures it — are current and timed. It is steady when its baseline spread is at most
- *   {@link GEMV_STEADY_SPREAD}.
+ *   {@link GEMV_STEADY_SPREAD}. The GEMM that is the baseline of a float-stored case past one row
+ *   takes its tile geometry from a geometry profile, so its current kernel is the one the table the
+ *   records derive for builds (what a Session on the adapter runs once the table is its table): a
+ *   group whose GEMM was measured with another geometry — under another profile — is not current.
  * - A group is evidence for a candidate when it is current and steady and the candidate's row is
  *   current and timed (not screened out by the quick look, not skipped because the same record's
  *   M = 1 group already left it unadoptable) with its check held. A row that failed or
@@ -64,6 +67,7 @@ import {
   assertGeometryProfile,
   DEFAULT_GEOMETRY_PROFILE,
   type GeometryProfile,
+  selectGeometryProfile,
 } from "../kernels/geometry-profile.ts";
 import type {
   LinearGemvChoices,
@@ -84,6 +88,7 @@ import {
   gemvGroupRole,
   gemvKernelsAt,
   gemvProfileChoice,
+  gemvProgram,
   gemvRowCountsIn,
   isGemvCandidateSet,
 } from "./gemv-candidates.ts";
@@ -158,6 +163,8 @@ type GemvSweepSource = {
   readonly candidateSet: GemvCandidateSet;
   readonly userAgent?: string;
   readonly adapter: Adapter;
+  /** The id of the profile the sweep's device resolved to (absent in a record written before the field). */
+  readonly geometryProfile?: string;
   readonly gates: GemvGates;
   /** The planned cases' fingerprints, by id. */
   readonly cases: ReadonlyMap<string, string>;
@@ -421,6 +428,7 @@ const parseGemvSweepRecord = (
     group.rows.set(row.candidate, row);
   });
   const userAgent = typeof record.userAgent === "string" ? record.userAgent : undefined;
+  const geometryProfile = optionalAt(record, "geometryProfile", isString, where);
   return {
     path: meta.path,
     sha256: meta.sha256,
@@ -428,6 +436,7 @@ const parseGemvSweepRecord = (
     candidateSet,
     ...(userAgent === undefined ? {} : { userAgent }),
     adapter,
+    ...(geometryProfile === undefined ? {} : { geometryProfile }),
     gates: { subgroups, maxComputeWorkgroupsPerDimension: limit },
     cases,
     groups,
@@ -437,8 +446,12 @@ const parseGemvSweepRecord = (
 /** The current runtime's kernels of a case at a row count, by candidate name (fingerprints). */
 type CurrentKernels = (gemvCase: GemvCase, m: number) => ReadonlyMap<string, string>;
 
-/** {@link CurrentKernels} with each (case, row count) built once. */
-const currentKernels = (): CurrentKernels => {
+/**
+ * {@link CurrentKernels} with each (case, row count) built once. `table` is the profile the adapter
+ * runs with: the GEMM reference of a float-stored case takes its tile geometry (the GEMV kernels
+ * read nothing of it).
+ */
+const currentKernels = (table: GeometryProfile): CurrentKernels => {
   const cache = new Map<string, ReadonlyMap<string, string>>();
   return (gemvCase, m) => {
     const key = groupKey(gemvCase.id, m);
@@ -447,7 +460,9 @@ const currentKernels = (): CurrentKernels => {
     const kernels = new Map(
       gemvKernelsAt(gemvCase, m).map(({ name, choice }) => [
         name,
-        gemvKernelId(gemvCase, m, choice),
+        gemvKernelId(gemvCase, m, choice, (one, rows, chosen) =>
+          gemvProgram(one, rows, chosen, table),
+        ),
       ]),
     );
     cache.set(key, kernels);
@@ -490,6 +505,8 @@ const groupState = (
   source: GemvSweepSource,
   group: GroupObservation,
   kernelsOf: CurrentKernels,
+  /** The id of the table the current kernels were built for (names it in a reason). */
+  tableId: string,
 ): GroupState => {
   const { caseId, m } = group;
   const stale = (cause: "case" | "choices" | "references", reason: string): GroupState => ({
@@ -537,6 +554,18 @@ const groupState = (
     }
     const staleness = rowStaleness(row, kernels);
     if (staleness !== undefined) {
+      // The GEMM takes its tile geometry from the profile the sweep's device resolved to: a
+      // no-regression reading against another geometry says nothing about this table's adapter
+      if (row.choice.id === "gemm-f32" && row.kernel !== undefined) {
+        const measured =
+          source.geometryProfile === undefined
+            ? "a profile the record does not name"
+            : `the profile '${source.geometryProfile}'`;
+        return stale(
+          "references",
+          `the GEMM reference was measured under ${measured}, and it is not the GEMM kernel the table '${tableId}' runs there`,
+        );
+      }
       return stale("references", `the reference ${name} is not current (${staleness})`);
     }
   }
@@ -564,12 +593,19 @@ type Labelled = {
   readonly states: ReadonlyMap<string, GroupState>;
 };
 
-const labelled = (sources: readonly GemvSweepSource[], kernelsOf: CurrentKernels): Labelled[] =>
+const labelled = (
+  sources: readonly GemvSweepSource[],
+  kernelsOf: CurrentKernels,
+  tableId: string,
+): Labelled[] =>
   sources.map((source, index) => ({
     source,
     label: `[${index + 1}]`,
     states: new Map(
-      [...source.groups].map(([key, group]) => [key, groupState(source, group, kernelsOf)]),
+      [...source.groups].map(([key, group]) => [
+        key,
+        groupState(source, group, kernelsOf, tableId),
+      ]),
     ),
   }));
 
@@ -1330,8 +1366,8 @@ export const deriveLinearGemvChoices = (
   options: DeriveLinearGemvOptions,
 ): LinearGemvDerivation => {
   const sources = readRecords(inputs, options.table);
-  const kernelsOf = currentKernels();
-  const records = labelled(sources, kernelsOf);
+  const kernelsOf = currentKernels(options.table);
+  const records = labelled(sources, kernelsOf, options.table.id);
   const defaults = DEFAULT_GEOMETRY_PROFILE.linearGemv;
   const cases = GEMV_CASES.filter((gemvCase) =>
     sources.some((source) => source.cases.has(gemvCase.id)),
@@ -1482,8 +1518,10 @@ export const planGemvMeasurements = (
       );
     }
   }
-  const kernelsOf = currentKernels();
-  const records = labelled(sources, kernelsOf);
+  // Without a table to derive for: the embedded table the adapter of the records selects
+  const table = options.table ?? selectGeometryProfile(first.adapter);
+  const kernelsOf = currentKernels(table);
+  const records = labelled(sources, kernelsOf, table.id);
   const missing: GemvMissingMeasurement[] = [];
   let groups = 0;
   for (const gemvCase of GEMV_CASES) {

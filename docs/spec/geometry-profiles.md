@@ -93,9 +93,13 @@ adapter's match and measures nothing at run time.
   ([workbench.md](workbench.md#the-gemv-sweeps-record)): each row carries the fingerprint of its kernel and each case
   its own.
 - A case of a float storage (bf16, f16, f32) is measured at 1, 4 and 8 rows. Such a weight has no row-block form, so
-  past one row its baseline is the GEMM under f32 compute with the default profile's geometry (the candidate `gemm`),
+  past one row its baseline is the GEMM under f32 compute (the candidate `gemm`),
   it has no identical-class candidate there, and its reorder candidates are the parallel GEMV's plain and staged
   forms (it has no subgroup form). Its buffers hold no scale.
+- The GEMM's tile geometry is not a GEMV choice: a Session takes it from the profile its device resolves to. The
+  sweep builds that GEMM with the profile its own device resolves to (the embedded table of the adapter, the default
+  profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
+  the record (`geometryProfile`). Every other kernel of the sweep reads nothing of the profile.
 - No registered table carries them. A table without them runs with the default profile's, the values measured on the
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
@@ -121,7 +125,10 @@ measures nothing and changes no default value.
   `kernel` fingerprint). A group is current when its case is the current runtime's (the record's case fingerprint, and
   the row count in the case table), the default profile's choices its summary names at `exact` and `reorder` are the
   current ones, and the rows of those choices — the baseline, and the choice at `reorder` where the sweep measures it
-  — are current and timed. A group is evidence for a candidate when it is current, steady, and the candidate's row is
+  — are current and timed. The current kernel of a GEMM baseline is the one the table the records derive for builds:
+  a group whose GEMM was measured with another tile geometry (under another profile) is not current, and the reason
+  names the record's profile and the table. A record that does not name its profile is read by the same comparison of
+  kernel fingerprints. A group is evidence for a candidate when it is current, steady, and the candidate's row is
   current and timed (a row the quick look screened out, or one the sweep skipped because the same record's M = 1 group
   left the candidate unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is
   refused). So a change to one kernel, or a case
@@ -161,7 +168,8 @@ measures nothing and changes no default value.
 ## Planning the GEMV measurements
 
 `planGemvMeasurements` of `@karume/runtime/tune` reads the same records (the same refusals) and says what they lack
-for the derivation to be complete under the current runtime: per case and row count of the `full` set, the
+for the derivation to be complete under the current runtime (the GEMM baselines read against the table given, or,
+without one, against the embedded table the records' adapter selects): per case and row count of the `full` set, the
 candidates the derivation reads there — at M = 1 every candidate, at M = 4 and 8 the reorder class, on the records'
 gates (subgroups, grid limit; records whose gates differ are refused) — that fewer than two records hold a current,
 steady group with a current row of. A row the quick look screened out counts as looked at (measured again, it would be

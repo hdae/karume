@@ -7,10 +7,15 @@
 // current runtime writes. Every kernel takes `BASE_TIME` unless a case gives it another time, so a
 // candidate's gain is `BASE_TIME ÷ its time`. No GPU.
 
+import {
+  DEFAULT_GEOMETRY_PROFILE,
+  type GeometryProfile,
+} from "../../src/kernels/geometry-profile.ts";
 import { opTolerance } from "../../src/reference/op-tolerance.ts";
 import {
   type GemvGates,
   gemvMeasurementPlans,
+  gemvProgram,
   PARALLEL_MAX_ROWS,
 } from "../../src/tune/gemv-candidates.ts";
 import { gemvCaseOf } from "../../src/tune/gemv-cases.ts";
@@ -57,6 +62,11 @@ export type GemvCaseSpec = {
 export type GemvRecordOptions = {
   readonly adapter?: GemvSweepReport["adapter"];
   readonly candidateSet?: "quick" | "full" | "row-blocks";
+  /**
+   * The profile the sweep's device resolved to (default: the default profile): the record names its
+   * id, and the GEMM rows of a float-stored case carry the fingerprint of the GEMM it builds.
+   */
+  readonly profile?: GeometryProfile;
 };
 
 /** A row without its measurement: its identity and launch fields, and its time as `quick`. */
@@ -95,6 +105,7 @@ export const gemvRecord = (
 ): GemvSweepReport => {
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
+  const profile = options.profile ?? DEFAULT_GEOMETRY_PROFILE;
   for (const spec of specs) {
     const gemvCase = gemvCaseOf(spec.caseId);
     if (gemvCase === undefined) throw new Error(`no case ${spec.caseId}`);
@@ -119,7 +130,9 @@ export const gemvRecord = (
           class: candidate.class,
           isBaseline,
           choice: choiceRecord(candidate.choice, gemvCase.storage),
-          kernel: gemvKernelId(gemvCase, plan.m, candidate.choice),
+          kernel: gemvKernelId(gemvCase, plan.m, candidate.choice, (one, m, choice) =>
+            gemvProgram(one, m, choice, profile),
+          ),
           reps: 100,
           // Off Chrome's 100 µs step, so the record does not look quantized
           rounds: [perDispatch * 100 + 1, perDispatch * 101 + 1],
@@ -170,6 +183,7 @@ export const gemvRecord = (
     aborted: false,
     userAgent: "Node.js/24",
     adapter: options.adapter ?? GEMV_ADAPTER,
+    geometryProfile: profile.id,
     gates: {
       subgroups: true,
       features: { subgroups: true, subgroupSizeControl: true, subgroupId: true },

@@ -3,7 +3,10 @@
  * level `exact` runs for the shape with the default profile), the **candidates** in two classes, and
  * each one's program. The baseline is a kernel of the GEMV family, except for a float-stored weight
  * (bf16 / f16 / f32) at M ≥ 2: that storage has no row-block form, so its Session runs the GEMM
- * there, and the GEMM is what the parallel GEMV is read against.
+ * there, and the GEMM is what the parallel GEMV is read against. The GEMV choices are the default
+ * profile's; the GEMM's tile geometry is not a GEMV choice, and a Session takes it from the profile
+ * its device resolves to — so the GEMM reference is built with that profile ({@link gemvProgram}'s
+ * `reference`), not with the default one.
  *
  * - *identical* — the baseline's summation order, so the output words must be the baseline's: the
  *   sequential M = 1 kernel's variants (columns per workgroup × words read ahead) and, for M ≥ 2, the
@@ -27,6 +30,7 @@
 
 import {
   DEFAULT_GEOMETRY_PROFILE,
+  type GeometryProfile,
   type ResolvedGeometryProfile,
 } from "../kernels/geometry-profile.ts";
 import {
@@ -388,7 +392,7 @@ const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): Linear
 };
 
 /** The facts `linearProgramFor` builds a case's program from at `m` rows. */
-const programFacts = (gemvCase: GemvCase, m: number) =>
+const programFacts = (gemvCase: GemvCase, m: number, reference: GeometryProfile) =>
   ({
     x: [m, gemvCase.k],
     weight: [gemvCase.n, gemvCase.k],
@@ -400,18 +404,27 @@ const programFacts = (gemvCase: GemvCase, m: number) =>
     // No packed pairing and no folded producer: the sweep measures the f32-activation forms.
     packedScale: undefined,
     prologue: undefined,
-    // Read by the GEMM and i8a8 programs only: the GEMM a float-stored weight's reference at M ≥ 2
-    // runs takes the default profile's geometry, as the baseline takes the default profile's choices.
-    geometryProfile: PROFILE,
+    // Read by the GEMM and i8a8 programs only: the GEMM that is a float-stored weight's reference
+    // at M ≥ 2 takes its tile geometry from here. A GEMV program reads nothing of it.
+    geometryProfile: reference,
     linearI8a8Dot: "emu",
   }) as const;
 
-/** The program of a choice for a case at `m` rows (`linearProgramFor`). */
+/**
+ * The program of a choice for a case at `m` rows (`linearProgramFor`).
+ *
+ * `reference` is the profile whose GEMM geometry the GEMM takes — the reference of a float-stored
+ * case at M ≥ 2. MUST: where a row is measured or read as evidence it is the profile the device
+ * resolves to (the sweep: `sessionGeometryProfile` of its device; the derivation: the table it
+ * derives for), because a parallel row is adopted only if it is not slower than what a Session on
+ * that device runs. The default profile's is for callers that build GEMV programs alone.
+ */
 export const gemvProgram = (
   gemvCase: GemvCase,
   m: number,
   choice: GemvKernelChoice,
-): LinearProgram => linearProgramFor(choice, programFacts(gemvCase, m));
+  reference: GeometryProfile = PROFILE,
+): LinearProgram => linearProgramFor(choice, programFacts(gemvCase, m, reference));
 
 /** The workgroup count of each axis of a program's dispatch (`ceil(items / tile)`, no limit). */
 export const programWorkgroups = (

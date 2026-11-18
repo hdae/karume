@@ -129,8 +129,10 @@ measurements in `docs/research/`.
   regular Gemma 4 E2B and E4B in bf16, at 1, 4 and 8 rows; past one row their baseline is the GEMM (candidate
   `gemm`), which is what an `exact` Session runs there, and `deriveLinearGemvChoices` reads a parallel row of such a
   shape against it. `GemvSweepChoice` is now a union: a member of the GEMV family, or
-  `{ id: "gemm-f32", storage, v4 }` for that baseline. Records taken before lack the bf16 cases; none of their
-  groups becomes stale.
+  `{ id: "gemm-f32", storage, v4 }` for that baseline. That GEMM is built with the tile geometry of the profile the
+  sweep's device resolves to — what a Session there runs —, the record names the profile (`geometryProfile`), and the
+  derivation reads such a group as current only when its GEMM is the kernel the table it derives for builds. Records
+  taken before lack the bf16 cases; none of their groups becomes stale.
 - `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
   canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
   `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and

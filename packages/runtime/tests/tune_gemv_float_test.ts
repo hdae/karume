@@ -4,14 +4,20 @@
 // oracle's restoration of each storage, the record's form of the GEMM and the derivation of a
 // parallel row read against the GEMM at M = 4 and 8.
 //
+// The GEMM reference takes its tile geometry from the profile the device resolves to, so a record's
+// group whose GEMM was measured under another geometry is not current for the table derived for.
+//
 // Faults injected: a bf16 word read high half first, an f16 half read as bf16 (the oracle's value
 // moves); a launch that binds a scale buffer (the WGSL's roles refuse it); a parallel candidate
-// slower than the GEMM at M = 8 (the row is not adopted); a record whose GEMM row has no `v4` (refused).
+// slower than the GEMM at M = 8 (the row is not adopted); a record whose GEMM row has no `v4`
+// (refused); records measured under the default profile's GEMM derived for a table with another
+// GEMM geometry (no row is adopted, the groups are reported as not current).
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { deriveLinearGemvChoices, type GemvSweepInput, planGemvMeasurements } from "../tune.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
+import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import {
   type GemvCandidate,
@@ -25,6 +31,7 @@ import {
   isGemmChoice,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "../src/tune/gemv-cases.ts";
+import { gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
 import { gemvOracle } from "../src/tune/gemv-oracle.ts";
 import { choiceOfRecord, choiceRecord, type GemvSweepReport } from "../src/tune/gemv-report.ts";
 import { gemvLaunch } from "../src/tune/gemv-sweep.ts";
@@ -108,6 +115,50 @@ describe("the baseline of a float-stored case", () => {
             : `${row.stagedActivations === true ? "staged" : "parallel"}-l${row.lanes}`;
         assertEquals(gemvProfileChoice(gemvCase, m, "reorder").name, expected, `M=${m}`);
       }
+    }
+  });
+});
+
+/** A profile whose GEMM geometry at few rows is not the default profile's (one bucket for every row count). */
+const ONE_BUCKET: GeometryProfile = {
+  ...DEFAULT_GEOMETRY_PROFILE,
+  id: "test-one-bucket",
+  gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: defaultGemmGeometry() }],
+};
+
+describe("the GEMM reference of a float-stored case", () => {
+  it("is built with the tile geometry of the profile given — the one the measuring device resolves to", () => {
+    const { choice } = gemvBaseline(DOWN, 4);
+    const underDefault = gemvProgram(DOWN, 4, choice).dispatches[0];
+    const underOther = gemvProgram(DOWN, 4, choice, ONE_BUCKET).dispatches[0];
+    assertEquals(underDefault.key, "linear:v2:f32:reg16x16r1x4w4v4:wbf16");
+    assertEquals(underOther.key, "linear:v2:f32:reg128x128r8x8w16v4:wbf16");
+    // 1536 columns in tiles of 128 instead of 16
+    assertEquals(underOther.grid, {
+      kind: "tiled",
+      axes: [
+        { items: 1536, tile: 128 },
+        { items: 4, tile: 128 },
+        { items: 1, tile: 1 },
+      ],
+    });
+    assert(
+      gemvKernelId(DOWN, 4, choice) !==
+        gemvKernelId(DOWN, 4, choice, (one, m, chosen) => gemvProgram(one, m, chosen, ONE_BUCKET)),
+    );
+  });
+
+  it("leaves every GEMV kernel as it is: the sequential GEMV and the parallel forms read nothing of the profile", () => {
+    const kernels = [gemvBaseline(DOWN, 1), ...gemvCandidates(DOWN, 4, "full", GATES)];
+    for (const { name, choice } of kernels) {
+      const m = name.startsWith("c") ? 1 : 4;
+      assertEquals(
+        gemvKernelId(DOWN, m, choice, (one, rows, chosen) =>
+          gemvProgram(one, rows, chosen, ONE_BUCKET),
+        ),
+        gemvKernelId(DOWN, m, choice),
+        name,
+      );
     }
   });
 });
@@ -278,8 +329,15 @@ const input = (
   path: string,
   specs: readonly GemvCaseSpec[],
   change: (record: GemvSweepReport) => unknown = (record) => record,
+  profile?: GeometryProfile,
 ): GemvSweepInput => ({
-  report: change(gemvRecord(`2026-11-18T0${path.length % 10}:00:00.000Z`, specs)),
+  report: change(
+    gemvRecord(
+      `2026-11-18T0${path.length % 10}:00:00.000Z`,
+      specs,
+      profile === undefined ? {} : { profile },
+    ),
+  ),
   path,
   sha256: `sha-${path}`,
 });
@@ -356,6 +414,112 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
         ),
       Error,
       "choice.v4 is not a boolean",
+    );
+  });
+
+  describe("for a table whose GEMM geometry is not the one the records were measured under", () => {
+    /** The records' adapter's table, with the one-bucket GEMM geometry. */
+    const OTHER_TABLE: GeometryProfile = { ...TABLE, gemmRows: ONE_BUCKET.gemmRows };
+    const specs = measured({ 1: fast, 4: fast, 8: fast });
+    const deriveFor = (table: GeometryProfile, recordsUnder?: GeometryProfile) => {
+      const derivation = deriveLinearGemvChoices(
+        [
+          input("a.json", specs, undefined, recordsUnder),
+          input("bb.json", specs, undefined, recordsUnder),
+        ],
+        { table },
+      );
+      const decision = derivation.decisions.find(
+        ({ field, cases }) => field === "parallelShapes" && cases.includes(DOWN.id),
+      );
+      assert(decision !== undefined);
+      return { derivation, decision };
+    };
+
+    it("adopts no row and reports the groups past one row as not current, naming both profiles (fault: records of the default profile's GEMM)", () => {
+      const { derivation, decision } = deriveFor(OTHER_TABLE);
+      assertEquals(decision.outcome, "kept");
+      assertStringIncludes(decision.reason ?? "", "evidence at M=4 from fewer than 2 records");
+      assertEquals(
+        derivation.stale.map(({ caseId, m, cause }) => [caseId, m, cause]),
+        ["a.json", "bb.json"].flatMap(() => [
+          [DOWN.id, 4, "references"],
+          [DOWN.id, 8, "references"],
+        ]),
+      );
+      assertEquals(
+        derivation.stale[0].reason,
+        "the GEMM reference was measured under the profile 'default', and it is not the GEMM kernel the table 'test-gpu' runs there",
+      );
+      // The same records are evidence for the table they were measured under
+      assertEquals(deriveFor(TABLE).decision.outcome, "adopted");
+    });
+
+    it("adopts the row from records measured under the table's own GEMM geometry", () => {
+      const { derivation, decision } = deriveFor(OTHER_TABLE, OTHER_TABLE);
+      assertEquals(decision.outcome, "adopted");
+      assertEquals(derivation.stale, []);
+    });
+
+    it("says of a record without the field that it does not name its profile", () => {
+      const unnamed = (record: GemvSweepReport): unknown => {
+        const { geometryProfile: _dropped, ...rest } = record;
+        return rest;
+      };
+      const derivation = deriveLinearGemvChoices(
+        [input("a.json", specs, unnamed), input("bb.json", specs, unnamed)],
+        { table: OTHER_TABLE },
+      );
+      assertStringIncludes(
+        derivation.stale[0].reason,
+        "measured under a profile the record does not name",
+      );
+      // …and reads it where its GEMM is the table's: a record's kernel fingerprint decides
+      const same = deriveLinearGemvChoices(
+        [input("a.json", specs, unnamed), input("bb.json", specs, unnamed)],
+        { table: TABLE },
+      );
+      assertEquals(same.stale, []);
+    });
+
+    it("keeps an integer case's evidence: its kernels are the GEMV family's under any profile", () => {
+      const ple = "i4g32-n8960-k1536";
+      const derivation = deriveLinearGemvChoices(
+        [
+          input("a.json", [{ caseId: ple, rows: [1, 4, 8] }]),
+          input("bb.json", [{ caseId: ple, rows: [1, 4, 8] }]),
+        ],
+        { table: OTHER_TABLE },
+      );
+      assertEquals(derivation.stale, []);
+    });
+
+    it("plans the groups past one row again, and nothing at one row", () => {
+      const records = [input("a.json", specs), input("bb.json", specs)];
+      const lacking = (table: GeometryProfile): number[] =>
+        planGemvMeasurements(records, { table })
+          .missing.filter(({ caseId }) => caseId === DOWN.id)
+          .map(({ m }) => m);
+      assertEquals(lacking(TABLE), []);
+      assertEquals(lacking(OTHER_TABLE), [4, 8]);
+    });
+  });
+
+  it("refuses a record whose profile id is not a string (fault: a number)", () => {
+    assertThrows(
+      () =>
+        deriveLinearGemvChoices(
+          [
+            input("a.json", measured({ 1: fast })),
+            input("bb.json", measured({ 1: fast }), (record) => ({
+              ...record,
+              geometryProfile: 3,
+            })),
+          ],
+          { table: TABLE },
+        ),
+      Error,
+      "geometryProfile is invalid",
     );
   });
 

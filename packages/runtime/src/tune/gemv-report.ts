@@ -203,6 +203,15 @@ export type GemvSweepReport = {
   readonly aborted: boolean;
   readonly userAgent: string;
   readonly adapter: ReportAdapter;
+  /**
+   * The id of the geometry profile the sweep's device resolved to (the embedded table of its
+   * adapter, or `default`): the profile a Session on that device runs with. The GEMM that is the
+   * baseline of a float-stored case past one row was built with its tile geometry; every other
+   * kernel of the sweep reads nothing of it. A record written before the field existed has none (its
+   * GEMM rows were built with the default profile's geometry); a row's `kernel` fingerprint is what
+   * a derivation compares.
+   */
+  readonly geometryProfile: string;
   readonly gates: GemvSweepGates;
   readonly gpuTiming: {
     readonly feature: boolean;

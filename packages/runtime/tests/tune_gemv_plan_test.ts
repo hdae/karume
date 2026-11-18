@@ -731,6 +731,7 @@ describe("the record", () => {
     aborted: false,
     userAgent: "Node.js/24",
     adapter: { vendor: "nvidia", architecture: "ampere", device: "", description: "" },
+    geometryProfile: "nvidia-ampere",
     gates: gemvSweepGates({
       features: new Set(["subgroups"]),
       wgslLanguageFeatures: new Set(["subgroup_id"]),

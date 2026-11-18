@@ -16,6 +16,7 @@ const sharedFields = (report: GemvSweepReport) => {
     format: report.format,
     userAgent: report.userAgent,
     adapter: report.adapter,
+    geometryProfile: report.geometryProfile,
     gates: report.gates,
     timingFeature: report.gpuTiming.feature,
     timingUnit: report.gpuTiming.unit,
@@ -29,8 +30,8 @@ const sharedFields = (report: GemvSweepReport) => {
  * cases, and `gpuTiming.quantized` when any record's rounds looked quantized (the safe side, as for
  * the geometry sweep's merge).
  *
- * Throws when the records do not belong to one sweep (format, browser, adapter, gates, timing,
- * settings other than `cases`), when a record is not per-case, or when a case is unplanned or comes
+ * Throws when the records do not belong to one sweep (format, browser, adapter, geometry profile,
+ * gates, timing, settings other than `cases`), when a record is not per-case, or when a case is unplanned or comes
  * twice.
  */
 export const mergeGemvSweepReports = (
@@ -41,7 +42,7 @@ export const mergeGemvSweepReports = (
     reports,
     options,
     sharedFields,
-    "its format, browser, adapter, gates, timing or settings",
+    "its format, browser, adapter, geometry profile, gates, timing or settings",
   );
   const rows = reports.flatMap((report) => report.rows);
   return {

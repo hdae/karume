@@ -71,6 +71,8 @@ export type PerCaseOptions = {
   readonly quantized?: boolean;
   readonly date?: string;
   readonly gates?: GemvSweepReport["gates"];
+  /** The profile the sweep's device resolved to (default `default`). */
+  readonly geometryProfile?: string;
   readonly summary?: Partial<GemvSweepCaseSummary>;
 };
 
@@ -90,6 +92,7 @@ export const gemvPerCase = (caseId: string, options: PerCaseOptions = {}): GemvS
     aborted: options.aborted ?? false,
     userAgent: "Node.js/24",
     adapter: ADAPTER,
+    geometryProfile: options.geometryProfile ?? "default",
     gates: options.gates ?? {
       subgroups: true,
       features: { subgroups: true, subgroupSizeControl: true, subgroupId: true },
