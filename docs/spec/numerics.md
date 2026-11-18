@@ -64,6 +64,12 @@ and, for int4, the group length:
 Each strategy's level and the kind of evidence it carries are stated in the strategy tables
 (`packages/runtime/src/runtime/linear-strategies.ts`, `state-attention-strategies.ts`).
 
+An op outside these kinds runs the same kernels at every level. Where it has more than one, the others are checked to
+give its reference kernel's bits and the choice is a static rule of the shape, as for `linear`'s GEMV kernels:
+`expert_linear`'s reference kernel is its one-row form, and a run of 2 to 768 tokens over weight rows of 64 words or
+more takes the grouped form, whose words are the one-row form's (`expertLinearGrouped` in
+`packages/runtime/src/kernels/expert-linear.ts`; the GPU tests and the `kernel-check` entry compare them).
+
 ### Strategies that depend on the adapter
 
 The subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder` strategies whose gain depends on
