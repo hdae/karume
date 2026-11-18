@@ -55,6 +55,9 @@
 | integer GEMV (`integerGemv`) △ | 整数 GEMV | packed 活性の SRQ コードと重みの整数コードの積をグループごとに厳密な整数で足し、scale は最後に決まった順で 1 回だけ掛ける decode 用 GEMV（opt-in・QAT E2B の計測した形だけ） | — | ADR 0140 |
 | byte-plane GEMV (`linearGemvPlanes`) △ | バイトプレーン GEMV | i2 の重みの語をバイトプレーンに分け、`unpack4x8unorm` と厳密な変換で −2..1 の値にして f32 の活性と掛けて足す decode 用 GEMV。参照との違いは足す順と、チャネルの scale を和の後で 1 回掛けることだけ（契約クラス R・linear が `reorder` のときに private な Session キー `[REORDER_STRATEGIES]` でだけ選ぶ・QAT E2B の lm_head の形だけ） | — | ADR 0141 |
 | row block of a parallel row (`rowBlock`) | 並列 GEMV の行ブロック | プロファイルの行がこの欄を持つ形状が M = 2〜8 で取る並列 GEMV の形。1 スレッドが 1 列の 1 レーンを複数行ぶん受け持ち、重みの読み出しと decode を 1 回にまとめる。出力は同じ lanes の並列 GEMV と語単位で同一 | 逐次 GEMV の行ブロック（スレッド数の目標から高さが決まる）とは別 | `docs/spec/geometry-profiles.md` |
+| sequential variant (`c<cols>u<unroll>`) | 逐次 GEMV の変種（`c32u4` のように書く） | 1 行の逐次 GEMV の形。`cols` = 1 workgroup が受け持つ出力列数、`unroll` = 積和の前にまとめて読む重みの語数。どの変種も同じ積を同じ順に足すので出力の語は同じで、選択は速さだけ | — | `docs/spec/geometry-profiles.md` |
+| per-shape exception (of the sequential variant) | 形状ごとの例外 | プロファイルの `linearGemv.sequential.shapes` の行。格納型と重みの形状ごとに、1 行のときだけ一般の変種の代わりに走る変種を持つ。既定プロファイルには計測済みのどの機でも遅くならない行だけを置き、ある機だけが得をする行はその機のテーブルに置く | — | `docs/spec/geometry-profiles.md` |
+| visit (decode bench) | visit | `gemma4-bench` の 1 ラウンドの中の、あるアームの 1 回ぶん（パイプラインを作って chat を回して解放するまで。プロファイルのスイッチがある bench ではデバイスも visit ごとに取る）。数 % の差は chat ではなく visit を単位にし、ラウンドで対にして比べる | 訪問 | `docs/spec/workbench.md` |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
 | fake-quant | fake-quant | 重みを量子化格子へ丸めて f32 のまま持つ処理 | — | `tools/exporter/src/karume/quantize.py` |
 | quality measurement (`quality.json`) | 品質計測 | export 時に torch CPU で測る量子化誤差の記録 | — | ADR 0113 決定 4・5 |

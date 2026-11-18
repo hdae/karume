@@ -75,8 +75,8 @@ adapter's match and measures nothing at run time.
   they are among the things derived, their records are listed with the others, their rule follows the tile
   geometry's (which is left out when no sweep record was given) and their decisions follow the verdict lines; when
   they were carried, they are among the things carried over.
-- The headers of the three tables registered before the generator existed (`apple-metal-3`, `nvidia-ampere`,
-  `nvidia-blackwell`) are older prose. Each is replaced when its table is regenerated.
+- The header of `apple-metal-3`, registered before the generator existed, is older prose. It is replaced when the
+  table is regenerated.
 
 ## The GEMV choices of linear
 
@@ -106,24 +106,38 @@ adapter's match and measures nothing at run time.
   sweep builds that GEMM with the profile its own device resolves to (the embedded table of the adapter, the default
   profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
   the record (`geometryProfile`). Every other kernel of the sweep reads nothing of the profile.
-- No registered table carries them. A table without them runs with the default profile's, the values measured on the
-  RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
-  and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
-  profile's.
+- `nvidia-ampere` carries them; `nvidia-blackwell` and `apple-metal-3` do not. A table without them runs with the
+  default profile's: the Session fills them in once, where it selects its profile, so the linear selection, the
+  fusion pass and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the
+  default profile's; `nvidia-ampere`'s differ from them in per-shape exceptions of the sequential variant alone,
+  which no size and no fusion reads.
 - The default profile's sequential variant is 32 columns per workgroup and 4 weight words read ahead (`c32u4`). Its
-  per-shape exceptions are the shapes for which the derivation adopts another variant from GEMV sweep records of the
-  RTX 3080 Ti ([perf-ledger](../perf-ledger.md) K-101, K-112), 26 rows:
-  - the int8 output head `262144 × 1536`: `c16u4`;
-  - the int4 output heads of the Gemma 4 q4_0 QAT E2B and E4B models, `262144 × 1536` and `262144 × 2560`: `c16u2`;
-  - 23 bf16 linears of regular Gemma 4 E2B and E4B — every bf16 case of the sweep but the two output heads — which
-    read 8 or 16 words ahead: `c16u8` on 12 shapes, `c16u16` on 10 and `c32u16` on `1536 × 256`. A bf16 word holds 8
-    elements where an int4 word holds 32, so 4 words ahead keep a quarter of the bytes in flight.
-
-  An exception names a storage and a shape, has no group length, and applies at one row: a row block takes the
-  general variant. Its words are the general variant's, so every Session runs it, at `exact` too, on every adapter
-  whose table has no GEMV choices of its own.
+  per-shape exceptions are 23 rows:
+  - the int8 output head `262144 × 1536`: `c16u4`. The row predates the derivation
+    ([ADR 0082](../decisions/0082-linear-gemv-decode.md), addendum 10); the derivation did not adopt it, and keeps
+    it where records hold its case. No shipped model has a linear of this shape and storage;
+  - 22 bf16 linears of regular Gemma 4 E2B and E4B, which read 8 or 16 words ahead: `c16u8` on 11 shapes, `c16u16`
+    on 10 and `c32u16` on `1536 × 256`. A bf16 word holds 8 elements where an int4 word holds 32, so 4 words ahead
+    keep a quarter of the bytes in flight. The derivation adopts them from GEMV sweep records of the RTX 3080 Ti
+    ([perf-ledger](../perf-ledger.md) K-112), and the RTX 5070 Ti in Chrome reads each of them faster than `c32u4`
+    as well.
+- A row is added to the default profile only where no measured device is slower with it: every adapter whose table
+  has no GEMV choices of its own runs it. A row that one device gains from and another loses with is a row of the
+  first one's table. The devices measured are the RTX 3080 Ti and the RTX 5070 Ti; no Apple device is, and
+  `apple-metal-3` runs the default's rows. The 22 bf16 rows meet this. The int8 head's row, which predates it, does
+  not: the RTX 5070 Ti reads `c32u4` ×1.04 faster than the row's `c16u4`.
+- `nvidia-ampere`'s field is the default profile's choices with four more per-shape exceptions, what the derivation
+  adopts from the RTX 3080 Ti's records beyond the default's rows: the int4 output heads of the Gemma 4 q4_0 QAT E2B
+  and E4B models, `262144 × 1536` and `262144 × 2560` (`c16u2`), bf16 `10240 × 2560` (`c16u8`) and the MTP drafter
+  shape int4 `256 × 2048` (`c16u16`) — each slower than `c32u4` on the RTX 5070 Ti. The derivation leaves the two
+  bf16 output heads on the general variant: no candidate gained in every record.
+- An exception names a storage and a shape, has no group length, and applies at one row: a row block takes the
+  general variant. Its words are the general variant's, so a Session runs it at `exact` too.
 - A table carries the field only as a whole: the default's choices with the derived ones in place. Its provenance has
-  no entry for the field (the profile's type holds none); the records it came from are in the table's header.
+  no entry for the field (the profile's type holds none); the records it came from are in the table's header. So a
+  table holds the default's parallel rows, thread target and general variant as they were when it was generated, and
+  a change of those in the default profile regenerates the table (a core-lane test compares `nvidia-ampere`'s with
+  the default's).
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
 - The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
   reads it.
@@ -289,12 +303,17 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
-  they moved into the profile and the rows added since —, and a profile with other choices changes the selection and
-  the pipeline key (core lane).
-- Every per-shape exception of the default profile's sequential variant: on the development machine's GPU its kernel
-  writes the words the general variant writes, on the exception's own shape and on two small shapes that leave the
-  last workgroup partial and a remainder after the read-ahead loop, with a host reference on a spread of columns (GPU
-  tests). The rows are read from the profile, so a row added later is checked too.
+  they moved into the profile and the rows added since —; `nvidia-ampere`'s equal the default's with its four pinned
+  exceptions after them, and no other registered table carries the field; a profile with other choices changes the
+  selection and the pipeline key (core lane).
+- Every per-shape exception of the sequential variant that can run — the default profile's and those of every
+  registered table that carries GEMV choices: on the development machine's GPU its kernel writes the words the
+  general variant writes, on the exception's own shape, on one small shape that leaves the last workgroup partial
+  and a remainder after the read-ahead loop, and on one of a single word (or group) per row, which never enters the
+  loop; an int4 exception at group lengths of 32 and of 64; with a host reference on a spread of columns (GPU tests).
+  The rows are read from the profiles, so a row added later, or a table that starts to carry the field, is checked
+  too. On another backend the evidence is that device's GEMV sweep record: its rows of the identical class are
+  compared with the baseline word for word on the case's own shape.
 - The row-blocked parallel GEMV: every output word equal to the parallel GEMV's at the same lanes for every storage,
   lane count, row block and row count, on the development machine's GPU and, through the workbench's `kernel-check`
   entry, on a browser's backend; a Session takes it exactly where its table's row carries a row block (GPU tests and

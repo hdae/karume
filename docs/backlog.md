@@ -199,7 +199,22 @@ maintainer's ruling of 2026-11-06).
        table. Needs: GEMV sweep records of the Apple M2 (none yet) and of the devices collaborators measure; the rule
        itself (to be proposed with the three devices' overlap in numbers); the generator deriving the default from
        records of several adapters. A reorder Session's numbers then follow the table of its device where one
-       carries rows of its own (inside the band, as today's rows are).
+       carries rows of its own (inside the band, as today's rows are). *(2026-11-18: the sequential variant's
+       per-shape exceptions follow the direction by hand — 22 bf16 rows that the RTX 3080 Ti and the RTX 5070 Ti
+       are both faster with stay in the default, and the four rows the RTX 5070 Ti is slower with are in
+       `nvidia-ampere`, the first table to carry `linearGemv`.)* Also open under this item:
+       - the derivation judges a candidate against the default profile's choice for the shape, so where that
+         choice is an exception another device drops the inherited row only when its records show the general
+         variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
+         several devices has to say what removes a row of the default from a device's table;
+       - a table holds the field as a whole, so `nvidia-ampere` holds a copy of the default's parallel rows and
+         thread target: a change of those in the default regenerates every table that carries the field (a
+         core-lane test catches the drift);
+       - the default's 22 rows on Metal, where nothing was measured and their words were not compared;
+       - the default's int8 output-head row (`262144 × 1536`, `c16u4`), which predates the direction: the RTX
+         5070 Ti reads the general variant ×1.04 faster, and no shipped model has that shape in int8;
+       - the choice between sequential variants a few percent apart moves with the records given, and the
+         narrowed sweeps measured four hand-picked variants (the planner still lists the others).
      - A hosted benchmark page for collaborators (filed 2026-11-18; the maintainer has an AMD device in reach). The
        workbench's public build (download only) with one short batch a collaborator runs, the record sent back by
        hand. Open: the host (the page is cross-origin isolated through response headers, which the static host has to
@@ -236,7 +251,7 @@ maintainer's ruling of 2026-11-06).
        shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case sets, which
        moves those families' case-set versions; regenerating the registered
        tables from GEMV sweeps; the two drafter shapes with a large gain whose row-block baseline was unsteady
-       (`256 × 2048`, `256 × 5120`) and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101; their sequential variant and the bf16 linears' landed 2026-11-18 as exceptions of the default profile, K-112); the sequential exceptions on the other devices, which run the RTX 3080 Ti's and measured none; the drafter shape `256 × 2048`, for which the records adopt a sequential variant that is not applied; the bf16 output heads, whose general variant ran at two speeds from record to record; a rule for the row-block thread target from the `row-blocks` set; the shared
+       (`256 × 2048`, `256 × 5120`) and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101; their sequential variant landed 2026-11-18 as rows of `nvidia-ampere`, and the bf16 linears' as exceptions of the default profile, K-112); the RTX 5070 Ti's own sequential choices, derived from its own records (one record of each shape exists; the RTX 3080 Ti's rows it is slower with are not in the default); the bf16 output heads, whose general variant ran at two speeds from record to record on the RTX 3080 Ti; a rule for the row-block thread target from the `row-blocks` set; the shared
        sequential keys whose cases disagree (the key has no group length); the packed rows (not measured); the
        integer and byte-plane GEMV tables, which are still in the kernel source; the geometry sweep's rounds taken
        geometry after geometry (interleaving them as the GEMV sweep does needs a steadiness rule from evidence to

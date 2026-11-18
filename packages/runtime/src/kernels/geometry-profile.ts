@@ -307,9 +307,10 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // more — ×1.17 to ×1.89 per dispatch in three to five records each, perf-ledger K-112) and
     // that no measured device is slower with: the RTX 5070 Ti in Chrome reads them ×1.015 to ×1.495
     // over the general variant (2026-11-18).
-    // A row a measured device is slower with is not a row of the default; it lives in the table of
+    // A row a measured device is slower with is not added to the default; it lives in the table of
     // the device that gains from it (`nvidia-ampere` carries the int4 output heads of the q4_0 QAT
-    // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95).
+    // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95). The INT8
+    // row above predates this: the RTX 5070 Ti reads the general variant ×1.04 faster on its shape.
     // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
     // the general variant.
     // MUST: a row added or changed, here or in a registered table, goes together with

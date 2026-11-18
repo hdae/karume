@@ -140,8 +140,11 @@ parallel candidates 0.23 (E2B, 129 rows) and 0.26 (E4B, 115 rows); the baselines
   quarter of the bytes in flight. This is a per-shape exception of the sequential variant (`sequential.shapes`), a
   choice of the identical class that changes no number of any Session; the derivation adopts it from these records for
   the three shapes two records hold (6144 × 1536, 12288 × 1536, 1536 × 12288: `c16u8`, ×1.55–1.70). It is not
-  registered here. Registered later the same day for 23 shapes, from more records and with a decode A/B:
-  [the sequential variants](2026-11-18-sequential-gemv-variants.md).
+  registered here. Registered later the same day, from more records and with a decode A/B — 22 shapes in the default
+  profile and one more in the RTX 3080 Ti's table ([the sequential variants](2026-11-18-sequential-gemv-variants.md)).
+  The numbers of this note — the gains per dispatch of §4 and the decode token of §7 — are against an `exact` that
+  ran `c32u4` on those shapes; with the exceptions `exact` is faster (an E2B token 18.8 ms by the interval between
+  two tokens in that note's runs), and the parallel GEMV's gain over it was not measured again.
 
 ## 6. Why no row is registered
 
