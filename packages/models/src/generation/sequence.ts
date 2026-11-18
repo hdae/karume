@@ -350,8 +350,8 @@ export type GenerationStop = {
    */
   readonly decodeAhead?: GenerationDecodeAhead;
   /**
-   * Candidate selection counters (present only on turns of a sequence with
-   * `options.candidateSelection` — absent altogether otherwise).
+   * Candidate selection counters (present only on turns that sample — a temperature above 0 — of a
+   * sequence with `options.candidateSelection`; absent altogether otherwise).
    */
   readonly candidateSelection?: GenerationCandidateCounts;
 } & (
@@ -371,10 +371,10 @@ export type GenerationStop = {
 export type GenerationCandidateCounts = {
   /**
    * The leading entries a step asked the selection for (`Sampler.topCandidates`). `0` = the turn
-   * did not use the selection: its sampler does not qualify (temperature 0, no top-k, a repetition
-   * penalty or a logit bias, or more entries than the selection offers), or the decode ran on
-   * another path (a drafter, the expert cache, an observation hook). Its decode steps then read the
-   * whole row, or the GPU's maximum at temperature 0, as without the selection.
+   * did not use the selection: its sampler does not qualify (no top-k, a repetition penalty or a
+   * logit bias, or more entries than the selection offers), or the decode ran on another path (a
+   * drafter, the expert cache, an observation hook). Its decode steps then read the whole row, as
+   * without the selection.
    */
   readonly count: number;
   /** Decode steps whose token was drawn from the selected entries. */
@@ -1807,9 +1807,13 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       options.onRun === undefined
         ? sampler.topCandidates(program.vocabSize, selection.maxCount)
         : undefined;
-    /** This turn's candidate counters (only on a sequence built with `candidateSelection`). */
+    /**
+     * This turn's candidate counters: only on a sequence built with `candidateSelection`, and only
+     * for a turn that samples. At temperature 0 no step draws, so there is nothing to say about
+     * where a draw read from, and the turn's stop is the one a sequence without the selection gives.
+     */
     const candidateTally =
-      selection === undefined
+      selection === undefined || (request.sampler?.temperature ?? 0) === 0
         ? undefined
         : { count: candidates?.count ?? 0, steps: 0, fallbacks: 0 };
     const pickGreedy = (result: GreedyRunResult): number => {

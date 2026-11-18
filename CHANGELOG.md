@@ -79,9 +79,10 @@ measurements in `docs/research/`.
   vocabulary that holds too many of them) reads the whole row. It applies to samplers with a temperature above 0 and
   a `topK`, without a repetition penalty or a logit bias — the distributions' own sampler among them — on the
   pipelines that select the maximum on the GPU at temperature 0 (not under the expert cache, with a drafter or with
-  `onRunDiagnostics`); it has no option. The stop of a turn of such a pipeline carries `candidateSelection`
-  (`GenerationCandidateCounts`, a new exported type): the leading logits asked per step (0 = the turn did not use the
-  selection), the decode steps drawn from them and the steps that read the whole row.
+  `onRunDiagnostics`); it has no option. The stop of a turn that samples on such a pipeline carries
+  `candidateSelection` (`GenerationCandidateCounts`, a new exported type): the leading logits asked per step (0 = the
+  turn did not use the selection), the decode steps drawn from them and the steps that read the whole row. The stop
+  of a turn at temperature 0 is unchanged.
 - `@karume/runtime/tune`: `runGemvSweep`, the GEMV sweep. On a dedicated device it measures the GEMV choices of
   `linear` at the shapes of its case table — the default profile's GEMV rows and the other integer-storage linears a
   decode token or a draft step of the Gemma 4 distributions runs at one row (the int2 and int4 output heads, the MTP

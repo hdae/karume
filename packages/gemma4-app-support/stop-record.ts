@@ -27,9 +27,9 @@ export type StopRecord = {
    */
   readonly decodeAhead?: GenerationDecodeAhead;
   /**
-   * Present on generations of a pipeline that has the candidate selection: the leading logits a
-   * sampled decode step read back in place of the whole row (0 = the generation did not use the
-   * selection), the steps drawn from them, and the steps that read the whole row after all.
+   * Present on generations that sample on a pipeline that has the candidate selection: the leading
+   * logits a sampled decode step read back in place of the whole row (0 = the generation did not
+   * use the selection), the steps drawn from them, and the steps that read the whole row after all.
    */
   readonly candidateSelection?: GenerationCandidateCounts;
 };

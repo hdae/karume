@@ -162,7 +162,6 @@ describe("GenerationSequence: the candidate selection", () => {
   describe("on a turn the selection does not serve", () => {
     it("decodes as without it and says so with a count of 0", async () => {
       for (const [name, sampler, options] of [
-        ["temperature 0", { topK: 3 }, {}],
         ["no top-k", { temperature: 1, seed: 7 }, {}],
         ["a repetition penalty", { ...SAMPLED, repetitionPenalty: 1.3 }, {}],
         ["a logit bias", { ...SAMPLED, logitBias: [[5, -1]] }, {}],
@@ -190,6 +189,25 @@ describe("GenerationSequence: the candidate selection", () => {
       assertEquals(seen?.runs, 0);
       assertEquals(observed, 10);
       assertEquals(stop.candidateSelection, { count: 0, steps: 0, fallbacks: 0 });
+    });
+  });
+
+  describe("on a turn at temperature 0", () => {
+    it("reports nothing: no step draws, and the stop is the one a sequence without the selection gives", async () => {
+      for (const sampler of [
+        undefined,
+        { topK: 3 },
+        { temperature: 0, topK: 3, topP: 0.9 },
+      ] as const) {
+        const request = { ...REQUEST, ...(sampler === undefined ? {} : { sampler }) };
+        const whole = await turn(request);
+        const selected = await turn(request, { selection: {} });
+        assertEquals(selected.tokens, whole.tokens);
+        assertEquals(selected.seen?.runs, 0);
+        assertEquals(Object.hasOwn(selected.stop, "candidateSelection"), false);
+        assertEquals(selected.stop, whole.stop);
+        assertEquals(selected.stop, { reason: "max-tokens", tokens: 10 });
+      }
     });
   });
 

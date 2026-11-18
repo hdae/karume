@@ -85,8 +85,8 @@ export type ChatStop =
       readonly decodeAhead?: GenerationDecodeAhead;
       /**
        * The candidate selection counters (`GenerationStop.candidateSelection` copied as is — present
-       * only for turns of a sequence built with the selection). MUST: copy it, for the same reason as
-       * `speculation`.
+       * only for turns that sample on a sequence built with the selection). MUST: copy it, for the
+       * same reason as `speculation`.
        */
       readonly candidateSelection?: GenerationCandidateCounts;
     };

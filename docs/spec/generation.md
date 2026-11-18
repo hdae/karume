@@ -98,7 +98,8 @@ logits.
 
 ### What a turn reports
 
-The stop of a turn of a pipeline that has the selection carries `candidateSelection`:
+The stop of a turn that samples (a temperature above 0) on a pipeline that has the selection carries
+`candidateSelection`:
 
 | Field | Meaning |
 | --- | --- |
@@ -106,8 +107,9 @@ The stop of a turn of a pipeline that has the selection carries `candidateSelect
 | `steps` | Decode steps drawn from the selected entries |
 | `fallbacks` | Decode steps that did not decide and read the whole row |
 
-A pipeline without the selection reports no `candidateSelection`. The chat stop and the workbench's stop record copy
-it, and the decode bench's summary line says `65 candidates: <steps> steps, <fallbacks> whole-row`.
+A turn at temperature 0 draws nothing and reports no `candidateSelection`: its stop is what it was without the
+selection. Neither does a pipeline without the selection. The chat stop and the workbench's stop record copy it, and
+the decode bench's summary line says `65 candidates: <steps> steps, <fallbacks> whole-row`.
 
 ### The other side
 
