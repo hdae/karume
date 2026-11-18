@@ -2575,3 +2575,34 @@ describe("speculation without maxNewTokens runs to the limit", () => {
     assertEquals(run.drafter.calls.length, 0);
   });
 });
+
+test("an abort a timer delivers between two cycles stops the turn before the next cycle, though no run let the event loop turn", async () => {
+  // The fakes' runs settle in microtasks, so the timer is delivered only where the loop yields to
+  // the event loop: at a cycle's boundary. Every draft misses, so a cycle delivers one token.
+  const opened = await openSpeculative({ drafter: wrongDrafter() });
+  const controller = new AbortController();
+  const reason = new Error("stopped by a timer");
+  const stream = opened.sequence.generate({
+    prompt: PROMPT,
+    maxNewTokens: 6,
+    signal: controller.signal,
+  });
+  const seen: number[] = [];
+  let cyclesAtTimer = -1;
+  const caught = await assertRejects(async () => {
+    for await (const event of stream) {
+      if (event.kind !== "token") continue;
+      seen.push(event.id);
+      // At the first cycle's token.
+      if (seen.length === 2) {
+        cyclesAtTimer = verifyCalls(opened.fake).length;
+        setTimeout(() => controller.abort(reason), 0);
+      }
+    }
+  }, Error);
+  assert(caught === reason, `the interruption's exception is wrapped: ${String(caught)}`);
+  assertEquals(cyclesAtTimer, 1);
+  assertEquals(verifyCalls(opened.fake).length, cyclesAtTimer, "a cycle ran after the abort");
+  assertEquals(seen.length, 2);
+  assertEquals((await stream.done).reason, "aborted");
+});

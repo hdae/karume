@@ -551,3 +551,33 @@ describe("self-speculation over the expert cache: the setup", () => {
     );
   });
 });
+
+describe("self-speculation over the expert cache: the abort check at a cycle's boundary", () => {
+  it("stops the turn before the next cycle for an abort a timer delivers between two cycles, though no run let the event loop turn", async () => {
+    // The scripted cache's runs settle in microtasks, so the timer is delivered only where the
+    // loop yields to the event loop: at a cycle's boundary.
+    const cached = await cachedSequence({});
+    const controller = new AbortController();
+    const reason = new Error("stopped by a timer");
+    const stream = cached.sequence.generate({ ...greedy(13), signal: controller.signal });
+    const seen: number[] = [];
+    let callsAtTimer = -1;
+    const caught = await assertRejects(async () => {
+      for await (const event of stream) {
+        if (event.kind !== "token") continue;
+        seen.push(event.id);
+        // At the first cycle's first token: the cycle's runs are all behind it.
+        if (seen.length === 2) {
+          callsAtTimer = cached.log.length;
+          setTimeout(() => controller.abort(reason), 0);
+        }
+      }
+    }, Error);
+    assert(caught === reason, `the interruption's exception is wrapped: ${String(caught)}`);
+    // The cache was not called again: no draft, no load, no run of a second cycle.
+    assertEquals(cached.log.length, callsAtTimer);
+    // The prefill's token and the first cycle's four (three drafts confirmed and one more).
+    assertEquals(seen, [4, 5, 6, 7, 8]);
+    assertEquals((await stream.done).reason, "aborted");
+  });
+});

@@ -402,4 +402,39 @@ describe("the decode run-ahead (greedyAhead)", () => {
       expect(fake.disposals()).toBe(1);
     });
   });
+
+  describe("the abort check at a batch's boundary", () => {
+    it("stops the turn before the next batch for an abort a timer delivers between two batches, though no run let the event loop turn", async () => {
+      // The fake's batches settle in microtasks, so the timer is delivered only where the loop
+      // yields to the event loop: at a batch's boundary.
+      const rig = await open("ahead", { depth: 2 });
+      const controller = new AbortController();
+      const reason = new Error("stopped by a timer");
+      const stream = rig.sequence.generate({
+        prompt: [1, 2, 3],
+        maxNewTokens: 9,
+        signal: controller.signal,
+      });
+      const seen: number[] = [];
+      let batchesAtTimer = -1;
+      const consume = async (): Promise<void> => {
+        for await (const event of stream) {
+          if (event.kind !== "token") continue;
+          seen.push(event.id);
+          // At the first batch's last token: the next thing the loop does is its boundary.
+          if (seen.length === 3) {
+            batchesAtTimer = rig.fake.aheadBatches.length;
+            setTimeout(() => controller.abort(reason), 0);
+          }
+        }
+      };
+      await expect(consume()).rejects.toBe(reason);
+      expect(batchesAtTimer).toBe(1);
+      expect(rig.fake.aheadBatches).toEqual([2]);
+      // The prefill's token and the first batch's two.
+      expect(seen).toEqual([4, 5, 6]);
+      expect((await stream.done).reason).toBe("aborted");
+      await rig.sequence.dispose();
+    });
+  });
 });
