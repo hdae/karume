@@ -1592,7 +1592,7 @@ export const linearGemvParallelRowsFits = (
   storage: WeightStorage,
   lanes: LinearGemvParallelLanes,
   rows: number,
-): rows is LinearGemvParallelRows =>
+): boolean =>
   (storage === "i2" || storage === "i4" || storage === "i8") &&
   (LINEAR_GEMV_PARALLEL_ROWS as readonly number[]).includes(rows) &&
   workgroupVariableBytes(128 * rows * 4) +
