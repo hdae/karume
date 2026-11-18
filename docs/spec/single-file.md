@@ -83,7 +83,7 @@ rule below). Anima's components:
   | F16 | The same | f16 × f32 | The quant's container with its 16-bit weights stored as f16: f16 storage under f32 compute |
   | F16 | A quant that stores it as bf16 under f16 linear and attention compute (`bf16-c16`) | f16 × f16 linear and attention | f16 storage under f16 compute, which the f16-compute checks cover |
   | F16 | A float quant with an explicit `linearCompute: "f16"` (as `bf16` with it) | f16 × f16 linear; attention in the quant's attention compute, or in an explicit `attentionCompute` (under `bf16`: f32) | The same: an explicit `linearCompute` sets the linear layers' compute alone |
-  | BF16 | A quant under f16 linear compute (`bf16-c16`), or a float quant with an explicit `linearCompute: "f16"` | bf16 × f16 linear | Refused: the runtime builds it (its f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), but no GPU check covers its numbers (the f16-compute checks cover f32 and f16 storage) |
+  | BF16 | A quant under f16 linear compute (`bf16-c16`), or a float quant with an explicit `linearCompute: "f16"` | bf16 × f16 linear | Refused: the runtime builds it (its f16-compute GEMM reads a bf16 weight like an f32 one and rounds it into the f16 tile), and the f16-compute checks cover its numbers (f32, f16 and bf16 storage), but a file is not run that way |
 
   f16 attention compute reads activations only, so it does not depend on the weights' storage.
 

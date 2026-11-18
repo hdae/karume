@@ -40,7 +40,8 @@
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
+import { decodeBf16 } from "../src/format/bf16.ts";
+import { decodeF16, f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import {
   attentionPvKey,
@@ -57,8 +58,9 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
+import { bf16BytesFromBits, f32ToBf16Bits } from "./helpers/bf16.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
-import { f32ToF16Bits, quantizeF16 } from "./helpers/f16.ts";
+import { f16BytesFromBits, f32ToF16Bits, quantizeF16 } from "./helpers/f16.ts";
 import {
   type DeclarationJson,
   f32Bytes,
@@ -384,6 +386,271 @@ test.skipIf(!F16_GPU)(
           1,
           `linear wf16 ${name}: the f16 compute key did not run`,
         );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// linear: bf16 weight storage x f16 compute
+// ---------------------------------------------------------------------------
+//
+// The f16-compute GEMM reads a bf16 weight as it reads an f32 one (the bit-cast decode of
+// src/kernels/weight-storage.ts) and rounds it into the f16 tile, so the oracle is the one above:
+// the default variant on x and w rounded to f16 by the host, where w is the f32 value of the bf16
+// word. Unlike f16 storage, that rounding is not a no-op for every word: bf16 keeps the f32 exponent
+// range, so the words below f16's normal range round into its subnormals or to zero.
+//
+// Every linear takes the default GEMM skeleton here: the GEMV family, the split-K GEMM and the i8a8
+// path are chosen only under f32 compute (LINEAR_SELECTION in src/runtime/linear-strategies.ts), so
+// M = 1 runs the GEMM too. What varies is the v4 / scalar form and the geometry the profile's
+// `gemmRows` rules give the row count; the shapes walk both forms and the row buckets of the
+// embedded tables (≤ 16, ≤ 128, ≤ 256, above 512).
+//
+// Out of contract, not pinned: a bf16 word above f16's largest finite value. bf16 has no value in
+// (65504, 65536), so every such word converts to ±Inf in the tile (WGSL's runtime float conversion),
+// and the host rounding gives the oracle the same ±Inf. From there WGSL's finite-math assumption
+// makes every expression on an infinity indeterminate, in the kernel and in the oracle alike, so
+// no output word is a contract. Nothing in the runtime refuses such a weight: the bf16 decode states
+// that weights hold no non-finite values (src/kernels/weight-storage.ts), and the exporter's bf16
+// rounding refuses only bf16's own overflow (round_weights_to_bf16 in
+// tools/exporter/src/karume/quantize.py).
+
+/**
+ * The row counts the bf16 case adds to {@link LINEAR_SHAPES}: M = 1 (where f32 compute would take
+ * the GEMV) and the row buckets above 128 (the geometry a DiT's token count runs).
+ */
+const BF16_EXTRA_SHAPES: typeof LINEAR_SHAPES = [
+  { name: "v4 m1 n64 k32", m: 1, n: 64, k: 32 },
+  { name: "scalar m1 n7 k37", m: 1, n: 7, k: 37 },
+  { name: "scalar m200 n23 k37", m: 200, n: 23, k: 37 },
+  { name: "v4 m530 n136 k36", m: 530, n: 136, k: 36 },
+];
+
+const BF16_LINEAR_SHAPES: typeof LINEAR_SHAPES = [...LINEAR_SHAPES, ...BF16_EXTRA_SHAPES];
+
+/** A bf16 word from its sign, its unbiased exponent (a normal f32 one) and its 7 mantissa bits. */
+const bf16Word = (negative: boolean, exponent: number, mantissa: number): number =>
+  (negative ? 0x8000 : 0) | ((exponent + 127) << 7) | mantissa;
+
+type Bf16WeightClass = {
+  readonly name: string;
+  /** The word of flat element `i`, the `j`-th of its row. */
+  readonly word: (i: number, j: number) => number;
+  /**
+   * Whether the row adds a bias. The rows whose words are tiny take none: a bias of order 1 would
+   * absorb their sum below its last bit, and a wrong rounding of the weight would not show.
+   */
+  readonly biased: boolean;
+  /** What the class claims about one decoded value (checked on the host, without a GPU). */
+  readonly holds: (value: number) => boolean;
+};
+
+const F16_MIN_NORMAL = 2 ** -14;
+
+/**
+ * The value classes where bf16 and f16 differ, one per output row (row `r` takes class `r % 5`).
+ * Each row is all of one class, so a row's output words depend on that class alone.
+ */
+const BF16_WEIGHT_CLASSES: readonly Bf16WeightClass[] = [
+  {
+    // bf16's 7 mantissa bits fit in f16's 10, so every bf16 value in f16's normal range is exact
+    // in f16: the tile rounding does not move it.
+    name: "exact in both",
+    word: (i) => f32ToBf16Bits(WS(i)),
+    biased: true,
+    holds: (value) =>
+      Math.abs(value) >= F16_MIN_NORMAL && Math.abs(value) <= 65504 && roundToF16(value) === value,
+  },
+  {
+    // Exponents -15 to -17: f16 subnormals whose step 2^-24 still holds every mantissa bit.
+    name: "f16 subnormal, exact",
+    word: (i) => bf16Word(i % 2 === 1, -15 - (i % 3), (i * 37) % 128),
+    biased: false,
+    holds: (value) =>
+      value !== 0 && Math.abs(value) < F16_MIN_NORMAL && roundToF16(value) === value,
+  },
+  {
+    // Exponents -18 to -24 with an odd mantissa: below the f16 subnormal step, so the tile rounds.
+    // Every fourth word is a fixed edge: 3·2^-25 and 5·2^-25 are ties that go up and down to the
+    // even 2^-23, and (1 + 2^-7)·2^-25 is just above half the smallest subnormal (it rounds up to
+    // 2^-24, not to zero).
+    name: "f16 subnormal, rounded",
+    word: (i, j) => {
+      const negative = i % 2 === 1;
+      if (j % 4 === 0) {
+        const edge = Math.floor(i / 4) % 3;
+        return edge === 0
+          ? bf16Word(negative, -24, 64)
+          : edge === 1
+            ? bf16Word(negative, -23, 32)
+            : bf16Word(negative, -25, 1);
+      }
+      return bf16Word(negative, -18 - (i % 7), ((i * 53) % 128) | 1);
+    },
+    biased: false,
+    holds: (value) =>
+      Math.abs(value) < F16_MIN_NORMAL && roundToF16(value) !== value && roundToF16(value) !== 0,
+  },
+  {
+    // Rounds to a zero: 2^-25 exactly (the tie between 0 and 2^-24 goes to the even 0), smaller
+    // normal f32 values, the smallest normal f32 and words that are f32 subnormals (exponent field
+    // 0 — WGSL lets the bit cast flush them, which gives the same zero).
+    name: "rounds to zero",
+    word: (i, j) => {
+      const negative = i % 2 === 1;
+      const kind = j % 4;
+      if (kind === 0) return bf16Word(negative, -25, 0);
+      if (kind === 1) return bf16Word(negative, -26 - (i % 14), (i * 29) % 128);
+      if (kind === 2) return (negative ? 0x8000 : 0) | (((i * 13) % 127) + 1);
+      return bf16Word(negative, -126, 0);
+    },
+    biased: false,
+    holds: (value) => value !== 0 && roundToF16(value) === 0,
+  },
+  {
+    // Negative zero between f16-exact values. The sign of a zero weight reaches no output word of
+    // a sum with a non-zero term (and WGSL lets an implementation ignore a zero's sign), so this
+    // row checks that -0 decodes and rounds without disturbing the sum.
+    name: "negative zero",
+    word: (i, j) => (j % 2 === 0 ? 0x8000 : f32ToBf16Bits(WS(i))),
+    biased: true,
+    holds: (value) =>
+      Object.is(value, -0) || (Math.abs(value) >= F16_MIN_NORMAL && roundToF16(value) === value),
+  },
+];
+
+const bf16ClassOfRow = (row: number): Bf16WeightClass =>
+  BF16_WEIGHT_CLASSES[row % BF16_WEIGHT_CLASSES.length];
+
+/** The bf16 words of an `[n, k]` weight, each row of its class. */
+const bf16ClassWords = (n: number, k: number): number[] =>
+  Array.from({ length: n * k }, (_, i) => bf16ClassOfRow(Math.floor(i / k)).word(i, i % k));
+
+test("the bf16 weight classes hold what their names say (host)", () => {
+  const n = 40;
+  const k = 37;
+  const values = decodeBf16(bf16BytesFromBits(bf16ClassWords(n, k)));
+  for (let i = 0; i < values.length; i += 1) {
+    const weightClass = bf16ClassOfRow(Math.floor(i / k));
+    assert(
+      weightClass.holds(values[i]),
+      `element ${i} (${weightClass.name}) = ${values[i]} rounds to ${roundToF16(values[i])}`,
+    );
+  }
+  // The fixed edges of the rounded class land where RTNE puts them (the oracle's rounding)
+  assertEquals(roundToF16(3 * 2 ** -25), 2 ** -23);
+  assertEquals(roundToF16(5 * 2 ** -25), 2 ** -23);
+  assertEquals(roundToF16((1 + 2 ** -7) * 2 ** -25), 2 ** -24);
+  assertEquals(roundToF16(2 ** -25), 0);
+});
+
+/** The initializer tensors of {@link linearWf16Graph} for a weight of `codec` and an f32 bias. */
+const linearTensors = (
+  weight: Uint8Array<ArrayBuffer>,
+  codec: "f16" | "bf16",
+  bias: Float32Array,
+): readonly TensorInput[] => [
+  { graph: GRAPH_NAME, initializer: "b", bytes: f32Bytes(bias), encoding: { codec: "f32" } },
+  { graph: GRAPH_NAME, initializer: "w", bytes: weight, encoding: { codec } },
+];
+
+test.skipIf(!F16_GPU)(
+  "the pair bf16 weight storage x f16 compute matches 'the f32 variant with x and w rounded to f16' bit for bit, f16 subnormals included (real GPU)",
+  async () => {
+    const gpu = await acquireGpu({ shaderF16: true });
+    const profile = deviceGeometryProfile(gpu);
+    try {
+      for (const shape of BF16_LINEAR_SHAPES) {
+        const { name, m, n, k } = shape;
+        const x = fill([m, k], XS);
+        const weight = bf16BytesFromBits(bf16ClassWords(n, k));
+        const bias = Float32Array.from({ length: n }, (_, row) =>
+          bf16ClassOfRow(row).biased ? BS(row) : 0,
+        );
+        // The graph is storage-agnostic: the codec of the weight tensor makes it bf16-resident.
+        const graph = linearWf16Graph(m, n, k);
+        const tensors = linearTensors(weight, "bf16", bias);
+
+        const actual = await runGraph(gpu, graph, { x }, { linearCompute: "f16" }, tensors);
+        // Oracle: the weight is the f32 value of each bf16 word (the production decode), rounded
+        // to f16 by the host, and goes in as an f32 graph input under the default compute.
+        const oracle = await runGraph(gpu, linearInputGraph(m, n, k), {
+          x: roundedTensor(x),
+          w: tensorOf([n, k], roundedCopy(decodeBf16(weight))),
+          b: tensorOf([n], bias),
+        });
+        const plain = await runGraph(gpu, graph, { x }, {}, tensors);
+
+        assertBitEqual(actual.output, oracle.output, `linear wbf16 ${name}`);
+        assertDiffers(actual.output, plain.output, `linear wbf16 ${name}`);
+
+        const v4 = k % 4 === 0 && n % 4 === 0;
+        const expected = linearKey("bf16", v4, "f16", m, undefined, gemmRowsGeometry(profile, m));
+        assertEquals(
+          actual.keys.filter((key) => key === expected).length,
+          1,
+          `linear wbf16 ${name}: '${expected}' did not run (${actual.keys.join(", ")})`,
+        );
+        assertEquals(
+          actual.keys.length,
+          1,
+          `linear wbf16 ${name}: another kernel ran (${actual.keys.join(", ")})`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+test.skipIf(!F16_GPU)(
+  "bf16 and f16 storage of the same f16-exact values give identical words under f16 compute (real GPU)",
+  async () => {
+    // The relation the bf16-c16 preset relies on: the upstream bf16 weights in f16's normal range
+    // are exact in f16, so storing them as bf16 instead of f16 changes no output word.
+    const gpu = await acquireGpu({ shaderF16: true });
+    const profile = deviceGeometryProfile(gpu);
+    try {
+      for (const shape of BF16_LINEAR_SHAPES) {
+        const { name, m, n, k } = shape;
+        const x = fill([m, k], XS);
+        const bias = Float32Array.from({ length: n }, (_, i) => BS(i));
+        const bf16 = bf16BytesFromBits(
+          Array.from({ length: n * k }, (_, i) => f32ToBf16Bits(WS(i))),
+        );
+        const values = decodeBf16(bf16);
+        const f16 = f16BytesFromBits(Array.from(values, f32ToF16Bits));
+        // Precondition on the host: both storages decode to the same f32 words.
+        assertBitEqual(decodeF16(f16), values, `linear ${name}: the f16 copy of the bf16 values`);
+        const graph = linearWf16Graph(m, n, k);
+
+        const fromBf16 = await runGraph(
+          gpu,
+          graph,
+          { x },
+          { linearCompute: "f16" },
+          linearTensors(bf16, "bf16", bias),
+        );
+        const fromF16 = await runGraph(
+          gpu,
+          graph,
+          { x },
+          { linearCompute: "f16" },
+          linearTensors(f16, "f16", bias),
+        );
+        const plain = await runGraph(gpu, graph, { x }, {}, linearTensors(bf16, "bf16", bias));
+
+        assertBitEqual(fromBf16.output, fromF16.output, `linear wbf16 vs wf16 ${name}`);
+        assertDiffers(fromBf16.output, plain.output, `linear wbf16 vs wf16 ${name}`);
+
+        // Each run read its own storage (not one shared expansion to f32).
+        const v4 = k % 4 === 0 && n % 4 === 0;
+        const geometry = gemmRowsGeometry(profile, m);
+        assertEquals(fromBf16.keys, [linearKey("bf16", v4, "f16", m, undefined, geometry)]);
+        assertEquals(fromF16.keys, [linearKey("f16", v4, "f16", m, undefined, geometry)]);
       }
     } finally {
       gpu.destroy();
