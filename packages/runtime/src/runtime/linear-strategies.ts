@@ -36,6 +36,8 @@ import {
   linearGemvParallelEligible,
   type LinearGemvParallelLanes,
   linearGemvParallelLanes,
+  linearGemvParallelRowBlock,
+  type LinearGemvParallelRows,
   type LinearGemvRowsVariant,
   linearGemvStagedEligible,
   linearGemvUnit,
@@ -215,6 +217,11 @@ export type LinearGemvChoice = {
   readonly variant: LinearGemvVariant;
   /** The row-block form (`undefined` unless the id is `gemv-rows`). */
   readonly rowsVariant: LinearGemvRowsVariant | undefined;
+  /**
+   * The rows a thread of the row-blocked parallel kernel holds (`gemv-parallel-staged` at M ≥ 2 of a
+   * shape whose profile row carries a row block); absent: one workgroup row per row.
+   */
+  readonly parallelRows?: LinearGemvParallelRows;
 };
 
 /** The facts with what every entry derives from them, computed once per selection. */
@@ -249,7 +256,9 @@ const gemvRows = (m: number): boolean => m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
  * MUST: a choice that changes numbers happens only when explicitly requested — at the level `exact`
  * (`linearGemvReduce: "sequential"`) the reference path's kernel and WGSL stay as they are.
  * The staged-activation form (K-90) is bit-identical to the plain parallel one, so it is taken wherever
- * the profile's table marks the shape, without an option of its own.
+ * the profile's table marks the shape, without an option of its own. So is its row-blocked form at
+ * M ≥ 2 (`parallelRows`), which a shape takes where its profile row carries a row block — whether or
+ * not the row is staged at M = 1.
  * The subgroup form exists for i2 / i4 / i8 storage: a float-stored weight under
  * `"parallel-subgroup32"` takes the plain or staged parallel form, which sums in the same order.
  */
@@ -272,11 +281,16 @@ const gemvChoice = (
   const variant = rowsVariant ?? defaultLinearGemvVariant(linearGemv, { storage, n, k });
   // Only the parallel (non-subgroup) form has a packed-activation kernel; past the refusal above a
   // packed linear always has lanes and no subgroup reduction.
+  const parallelRows =
+    lanes !== undefined && !subgroup && packed === undefined
+      ? linearGemvParallelRowBlock(linearGemv, storage, m, n, k, groupSize)
+      : undefined;
   const staged =
     lanes !== undefined &&
     !subgroup &&
     packed === undefined &&
-    linearGemvStagedEligible(linearGemv, storage, m, n, k, groupSize) !== undefined;
+    (parallelRows !== undefined ||
+      linearGemvStagedEligible(linearGemv, storage, m, n, k, groupSize) !== undefined);
   const id: LinearGemvChoice["id"] =
     lanes !== undefined
       ? subgroup
@@ -289,7 +303,15 @@ const gemvChoice = (
       : rowsVariant === undefined
         ? "gemv-m1"
         : "gemv-rows";
-  return { id, storage, groupSize, lanes, variant, rowsVariant };
+  return {
+    id,
+    storage,
+    groupSize,
+    lanes,
+    variant,
+    rowsVariant,
+    ...(parallelRows === undefined ? {} : { parallelRows }),
+  };
 };
 
 /**

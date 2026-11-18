@@ -2,7 +2,7 @@
  * The kernel checks: the identity checks of `@karume/kernel-checks` — the same cases and criteria as
  * the runtime's node GPU tests — on this host's GPU. In a browser that reaches the backends the node
  * lanes (Dawn / Vulkan) do not: D3D12 in Chrome on Windows, Metal on macOS. This entry is the manual
- * procedure of the release runbook's subgroup checkbox (all twelve checks).
+ * procedure of the release runbook's subgroup checkbox (all thirteen checks).
  */
 
 import { type CheckProgress, subgroup32Available } from "@karume/kernel-checks";

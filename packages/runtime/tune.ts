@@ -272,6 +272,7 @@ export type {
   LinearGemvDerivation,
   LinearGemvGain,
   LinearGemvRecordGroups,
+  LinearGemvRowGain,
   LinearGemvStaleGroup,
   PlanGemvMeasurementsOptions,
 } from "./src/tune/gemv-derive.ts";

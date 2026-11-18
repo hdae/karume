@@ -69,12 +69,16 @@ import {
   type GeometryProfile,
   selectGeometryProfile,
 } from "../kernels/geometry-profile.ts";
-import type {
-  LinearGemvChoices,
-  LinearGemvParallelLanes,
-  LinearGemvParallelShape,
-  LinearGemvShapeVariant,
-  LinearGemvVariant,
+import {
+  LINEAR_GEMV_PARALLEL_ROWS,
+  type LinearGemvChoices,
+  type LinearGemvParallelLanes,
+  type LinearGemvParallelRows,
+  linearGemvParallelRowsFits,
+  linearGemvParallelRowsFor,
+  type LinearGemvParallelShape,
+  type LinearGemvShapeVariant,
+  type LinearGemvVariant,
 } from "../kernels/linear-gemv.ts";
 import { formatRatio } from "./derive.ts";
 import {
@@ -240,6 +244,9 @@ const LANES = [2, 4, 8, 16, 32] as const satisfies readonly LinearGemvParallelLa
 const isLanes = (value: unknown): value is LinearGemvParallelLanes =>
   LANES.some((lanes) => lanes === value);
 
+const isParallelRows = (value: unknown): value is LinearGemvParallelRows =>
+  LINEAR_GEMV_PARALLEL_ROWS.some((rows) => rows === value);
+
 const isClass = (value: unknown): value is GemvCandidateClass =>
   value === "identical" || value === "reorder";
 
@@ -283,6 +290,7 @@ const parseChoice = (value: unknown, where: string): GemvSweepChoice => {
     }
     rowsVariant = { ...variantAt(rowsAt, `${where} choice.rowsVariant`), rows };
   }
+  const parallelRows = optionalAt(choice, "parallelRows", isParallelRows, `${where} choice`);
   return {
     id,
     storage,
@@ -290,6 +298,7 @@ const parseChoice = (value: unknown, where: string): GemvSweepChoice => {
     ...(lanes === undefined ? {} : { lanes }),
     variant,
     ...(rowsVariant === undefined ? {} : { rowsVariant }),
+    ...(parallelRows === undefined ? {} : { parallelRows }),
   };
 };
 
@@ -679,6 +688,9 @@ export type LinearGemvGain = {
   readonly gain: number;
 };
 
+/** A gain of a parallel row's kernel at one of its other row counts (M = 4 or 8). */
+export type LinearGemvRowGain = LinearGemvGain & { readonly m: number };
+
 /** One decision of the derivation: a shape (or the thread target) of one class, adopted or kept. */
 export type LinearGemvDecision = {
   readonly class: GemvCandidateClass;
@@ -704,6 +716,15 @@ export type LinearGemvDecision = {
   readonly candidate?: string;
   /** At M = 1, per group that is evidence (and per case of the key). */
   readonly gains: readonly LinearGemvGain[];
+  /** `parallelShapes`: the row block of the default's row (absent: none). */
+  readonly defaultRowBlock?: LinearGemvParallelRows;
+  /** `parallelShapes`: the row block of the derived row (absent: none). */
+  readonly derivedRowBlock?: LinearGemvParallelRows;
+  /**
+   * `parallelShapes`, when the derived row differs from the default's: the derived row's kernels at
+   * its other row counts against the default's choice there, per group that is evidence.
+   */
+  readonly rowGains?: readonly LinearGemvRowGain[];
   /** What the records showed that the field does not hold (the subgroup form). */
   readonly notes: readonly string[];
 };
@@ -838,7 +859,15 @@ type Evaluation = {
   readonly choice: GemvSweepChoice;
   readonly gains: readonly LinearGemvGain[];
   readonly failure?: string;
+  /** The row block its row takes at the other row counts (a parallel row's; absent: none). */
+  readonly rowBlock?: LinearGemvParallelRows;
+  /** Its kernels' gains at the other row counts, with that row block. */
+  readonly rowGains: readonly LinearGemvRowGain[];
 };
+
+/** A row's choice as a member of the GEMV family, or undefined for the GEMM. */
+const familyOf = (choice: GemvSweepChoice): GemvSweepFamilyChoice | undefined =>
+  choice.id === "gemm-f32" ? undefined : choice;
 
 /**
  * The GEMV-family choice of an evaluated candidate. The judgements take the column forms and the
@@ -881,6 +910,132 @@ type CaseJudgement = {
   readonly takes: (row: Pick<RowObservation, "class" | "choice">) => boolean;
   /** The row counts besides M = 1 the decision reads (no regression allowed there). */
   readonly others: readonly number[];
+  /**
+   * Whether a candidate is read at the other row counts with each row block its lanes can carry (a
+   * parallel row's candidates), instead of by its own kernel alone.
+   */
+  readonly rowBlocks: boolean;
+};
+
+/**
+ * The candidate name of the kernel a parallel row runs at `m` rows: its row-blocked form under the
+ * cap `rowBlock`, or — without a row block, and at M = 1 — the row's own (`name`).
+ */
+const rowKernelAt = (
+  name: string,
+  lanes: LinearGemvParallelLanes | undefined,
+  rowBlock: LinearGemvParallelRows | undefined,
+  m: number,
+): string => {
+  const rows =
+    rowBlock === undefined || lanes === undefined
+      ? undefined
+      : linearGemvParallelRowsFor(m, rowBlock);
+  return rows === undefined ? name : `staged-l${lanes}r${rows}`;
+};
+
+/** The row blocks a parallel row of `lanes` can carry: none first, then every cap the kernel exists at. */
+const rowBlockOptions = (
+  storage: GemvCase["storage"],
+  lanes: LinearGemvParallelLanes | undefined,
+): (LinearGemvParallelRows | undefined)[] => [
+  undefined,
+  ...(lanes === undefined
+    ? []
+    : LINEAR_GEMV_PARALLEL_ROWS.filter((rows) => linearGemvParallelRowsFits(storage, lanes, rows))),
+];
+
+/** A row's kernels at its other row counts: their gains, and the first way they fail `floor`. */
+type OthersReading = {
+  readonly gains: readonly LinearGemvRowGain[];
+  readonly failure?: string;
+};
+
+/**
+ * Reads the kernels `nameAt` names at the judgement's other row counts against the default's choice
+ * there: at each, evidence from {@link MIN_RECORDS} records, no failure or failed check in a current
+ * group, and no gain below `floor`.
+ */
+const readOthers = (
+  records: readonly Labelled[],
+  judgement: CaseJudgement,
+  nameAt: (m: number) => string,
+  floor: number,
+): OthersReading => {
+  const { gemvCase } = judgement;
+  let failure: string | undefined;
+  const fail = (text: string): void => {
+    failure ??= text;
+  };
+  const gains: LinearGemvRowGain[] = [];
+  for (const m of judgement.others) {
+    const other = records.map((record) => ({
+      label: record.label,
+      path: record.source.path,
+      reading: readGroup(
+        record,
+        gemvCase.id,
+        m,
+        nameAt(m),
+        judgement.reference(m),
+        judgement.class,
+      ),
+    }));
+    for (const { reading, label, path } of other) {
+      if (reading.kind === "ruled-out") fail(reading.reason);
+      if (reading.kind !== "evidence") continue;
+      gains.push({ record: path, caseId: gemvCase.id, m, gain: reading.gain });
+      if (reading.gain >= floor) continue;
+      fail(
+        floor === NO_REGRESSION
+          ? `slower than the default's choice in ${label} at M=${m} (${formatRatio(reading.gain)})`
+          : `${formatRatio(reading.gain)} < ${formatRatio(floor)} in ${label} at M=${m}`,
+      );
+    }
+    if (evidenceRecords(other).length < MIN_RECORDS) {
+      fail(
+        `evidence at M=${m} from fewer than ${MIN_RECORDS} records (a parallel row serves M = 1 to 8: ${noEvidenceText(other)})`,
+      );
+    }
+  }
+  return { gains, ...(failure === undefined ? {} : { failure }) };
+};
+
+/** The smallest of a reading's gains (0 without any). */
+const smallestRowGain = ({ gains }: OthersReading): number =>
+  gains.length === 0 ? 0 : Math.min(...gains.map(({ gain }) => gain));
+
+/**
+ * A row's row block among `options`: of those whose kernels pass `floor` at every other row count,
+ * the one whose smallest gain is largest (the first of a tie — `options` puts none first, so a row
+ * block must be faster to be taken); `undefined` when none passes.
+ */
+const bestRowBlock = (
+  records: readonly Labelled[],
+  judgement: CaseJudgement,
+  name: string,
+  lanes: LinearGemvParallelLanes | undefined,
+  options: readonly (LinearGemvParallelRows | undefined)[],
+  floor: number,
+):
+  | { readonly rowBlock: LinearGemvParallelRows | undefined; readonly reading: OthersReading }
+  | undefined => {
+  let best:
+    | { readonly rowBlock: LinearGemvParallelRows | undefined; readonly reading: OthersReading }
+    | undefined;
+  for (const rowBlock of options) {
+    const reading = readOthers(
+      records,
+      judgement,
+      (m) => rowKernelAt(name, lanes, rowBlock, m),
+      floor,
+    );
+    if (reading.failure !== undefined) continue;
+    if (best === undefined || smallestRowGain(reading) > smallestRowGain(best.reading)) {
+      best = { rowBlock, reading };
+    }
+  }
+  return best;
 };
 
 /**
@@ -957,23 +1112,21 @@ const evaluate = (
   if (evidenceRecords(first).length < MIN_RECORDS) {
     fail(`evidence at M=1 from fewer than ${MIN_RECORDS} records (${noEvidenceText(first)})`);
   }
-  for (const m of judgement.others) {
-    const other = readAt(m);
-    for (const { reading, label } of other) {
-      if (reading.kind === "ruled-out") fail(reading.reason);
-      else if (reading.kind === "evidence" && reading.gain < NO_REGRESSION) {
-        fail(
-          `slower than the default's choice in ${label} at M=${m} (${formatRatio(reading.gain)})`,
-        );
-      }
-    }
-    if (evidenceRecords(other).length < MIN_RECORDS) {
-      fail(
-        `evidence at M=${m} from fewer than ${MIN_RECORDS} records (a parallel row serves M = 1 to 8: ${noEvidenceText(other)})`,
-      );
-    }
-  }
-  return { ...candidate, gains, ...(failure === undefined ? {} : { failure }) };
+  // The other row counts: with the row block that fares best there, or — when none passes — as
+  // the candidate's own kernel, whose failure is the one named
+  const { lanes } = familyOf(candidate.choice) ?? {};
+  const options = judgement.rowBlocks ? rowBlockOptions(gemvCase.storage, lanes) : [undefined];
+  const chosen = bestRowBlock(records, judgement, candidate.name, lanes, options, NO_REGRESSION);
+  const own =
+    chosen?.reading ?? readOthers(records, judgement, () => candidate.name, NO_REGRESSION);
+  if (own.failure !== undefined) fail(own.failure);
+  return {
+    ...candidate,
+    gains,
+    ...(failure === undefined ? {} : { failure }),
+    ...(chosen?.rowBlock === undefined ? {} : { rowBlock: chosen.rowBlock }),
+    rowGains: own.gains,
+  };
 };
 
 /** The outcome of one case and class: the adopted candidate, or why the default stays. */
@@ -1031,19 +1184,29 @@ const identicalJudgement = (gemvCase: GemvCase): CaseJudgement => {
     reference: () => baseline,
     takes: (row) => row.class === "identical" && row.choice.id === "gemv-m1",
     others: [],
+    rowBlocks: false,
   };
 };
 
-/** The reorder class of one case for the table (plain and staged, or subgroup for the notes). */
+/**
+ * The reorder class of one case: for the table the plain and the staged form, read at the other row
+ * counts with the row blocks their lanes can carry; for the notes the subgroup form, by its own
+ * kernel. A row-blocked kernel is no candidate at M = 1 (it is a row's form at M ≥ 2).
+ */
 const reorderJudgement = (
   gemvCase: GemvCase,
   ids: readonly GemvSweepChoice["id"][],
+  rowBlocks: boolean,
 ): CaseJudgement => ({
   gemvCase,
   class: "reorder",
   reference: (m) => gemvProfileChoice(gemvCase, m, "reorder").name,
-  takes: (row) => row.class === "reorder" && ids.includes(row.choice.id),
+  takes: (row) =>
+    row.class === "reorder" &&
+    ids.includes(row.choice.id) &&
+    familyOf(row.choice)?.parallelRows === undefined,
   others: noRegressionRows(gemvCase),
+  rowBlocks,
 });
 
 const gainsText = (gains: readonly LinearGemvGain[], records: readonly Labelled[]): string => {
@@ -1055,6 +1218,14 @@ const gainsText = (gains: readonly LinearGemvGain[], records: readonly Labelled[
     })
     .join(", ");
 };
+
+const rowGainsText = (gains: readonly LinearGemvRowGain[], records: readonly Labelled[]): string =>
+  gains
+    .map(({ record, m, gain }) => {
+      const label = records.find(({ source }) => source.path === record)?.label ?? record;
+      return `${formatRatio(gain)} ${label} M=${m}`;
+    })
+    .join(", ");
 
 /** The sequential key's decision from its cases' (they must agree). */
 const sequentialDecision = (
@@ -1141,7 +1312,7 @@ const parallelDecision = (
       : parallelName(defaultRow);
   const subgroup = judgeCase(
     records,
-    reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"]),
+    reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"], false),
     kernelsOf,
   );
   const notes =
@@ -1157,7 +1328,11 @@ const parallelDecision = (
     cases: [gemvCase.id],
     defaultChoice,
     notes,
+    ...(defaultRow?.rowBlock === undefined ? {} : { defaultRowBlock: defaultRow.rowBlock }),
   } as const;
+  /** The fields of a decision whose row keeps the default's row block. */
+  const sameRowBlock =
+    defaultRow?.rowBlock === undefined ? {} : { derivedRowBlock: defaultRow.rowBlock };
   if (defaultRow?.packedActivations === true) {
     return {
       decision: {
@@ -1166,15 +1341,42 @@ const parallelDecision = (
         outcome: "kept",
         reason: "the default takes packed activations, whose kernels the sweep does not measure",
         gains: [],
+        ...sameRowBlock,
       },
     };
   }
-  const outcome = judgeCase(
-    records,
-    reorderJudgement(gemvCase, ["gemv-parallel", "gemv-parallel-staged"]),
-    kernelsOf,
-  );
+  const judgement = reorderJudgement(gemvCase, ["gemv-parallel", "gemv-parallel-staged"], true);
+  const outcome = judgeCase(records, judgement, kernelsOf);
   if (outcome.kind === "kept") {
+    // M = 1 keeps the default's row: its lanes stay, so another row block may still replace its own
+    // — one that is the threshold faster than the default's choice at every other row count
+    const other =
+      defaultRow === undefined
+        ? undefined
+        : bestRowBlock(
+            records,
+            judgement,
+            defaultChoice,
+            defaultRow.lanes,
+            rowBlockOptions(gemvCase.storage, defaultRow.lanes).filter(
+              (rowBlock) => rowBlock !== defaultRow.rowBlock,
+            ),
+            GEMV_MIN_SPEEDUP,
+          );
+    if (defaultRow !== undefined && other !== undefined) {
+      const { rowBlock: _rowBlock, ...bare } = defaultRow;
+      return {
+        decision: {
+          ...head,
+          derivedChoice: defaultChoice,
+          outcome: "adopted",
+          gains: [],
+          ...(other.rowBlock === undefined ? {} : { derivedRowBlock: other.rowBlock }),
+          rowGains: other.reading.gains,
+        },
+        row: { ...bare, ...(other.rowBlock === undefined ? {} : { rowBlock: other.rowBlock }) },
+      };
+    }
     return {
       decision: {
         ...head,
@@ -1183,6 +1385,7 @@ const parallelDecision = (
         reason: outcome.reason,
         ...(outcome.nearest === undefined ? {} : { candidate: outcome.nearest.name }),
         gains: outcome.nearest?.gains ?? [],
+        ...sameRowBlock,
       },
     };
   }
@@ -1197,6 +1400,7 @@ const parallelDecision = (
     lanes,
     packedActivations: false,
     ...(id === "gemv-parallel-staged" ? { stagedActivations: true } : {}),
+    ...(evaluation.rowBlock === undefined ? {} : { rowBlock: evaluation.rowBlock }),
   };
   return {
     decision: {
@@ -1205,6 +1409,8 @@ const parallelDecision = (
       outcome: "adopted",
       candidate: evaluation.name,
       gains: evaluation.gains,
+      ...(evaluation.rowBlock === undefined ? {} : { derivedRowBlock: evaluation.rowBlock }),
+      rowGains: evaluation.rowGains,
     },
     row,
   };
@@ -1246,10 +1452,18 @@ const decisionLine = (decision: LinearGemvDecision, records: readonly Labelled[]
       : decision.outcome === "adopted"
         ? ` (${gainsText(decision.gains, records)})`
         : `; ${decision.candidate}: ${gainsText(decision.gains, records)}`;
+  // A parallel row is named with its row block, the form it takes at M ≥ 2
+  const blocked = (choice: string, rowBlock: LinearGemvParallelRows | undefined): string =>
+    rowBlock === undefined ? choice : `${choice} with row blocks of ${rowBlock}`;
+  const from = blocked(decision.defaultChoice, decision.defaultRowBlock);
+  const rowGains =
+    decision.rowGains === undefined || decision.rowGains.length === 0
+      ? ""
+      : `; at the other row counts: ${rowGainsText(decision.rowGains, records)}`;
   const body =
     decision.outcome === "adopted"
-      ? `${decision.defaultChoice} -> ${decision.derivedChoice}${gains}`
-      : `keeps ${decision.defaultChoice} (${decision.reason ?? "?"})${gains}`;
+      ? `${from} -> ${blocked(decision.derivedChoice, decision.derivedRowBlock)}${gains}${rowGains}`
+      : `keeps ${from} (${decision.reason ?? "?"})${gains}`;
   return [`  - ${shape}${cases}: ${body}`, ...decision.notes.map((note) => `    - ${note}`)].join(
     "\n",
   );

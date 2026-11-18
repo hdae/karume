@@ -82,7 +82,8 @@ adapter's match and measures nothing at run time.
 
 - A profile can also hold the GEMV choices of linear (`linearGemv`): the variant of the sequential kernel and its
   per-shape exceptions, the thread target that decides the row-block height, and the rows of the shapes that take the
-  parallel GEMV with their lane count and their packed and staged flags.
+  parallel GEMV with their lane count, their packed and staged flags and the row block they take at M = 2 to 8
+  ([below](#the-row-block-of-a-parallel-row)).
 - What measures them on a host's GPU is the GEMV sweep: `runGemvSweep` of `@karume/runtime/tune`, run by the
   workbench's `gemv-sweep` entry ([workbench.md](workbench.md#the-entries)). Its cases are the shapes of the default
   profile's GEMV rows, the other integer-storage linears a decode token or a draft step of the Gemma 4 distributions
@@ -90,7 +91,8 @@ adapter's match and measures nothing at run time.
   in bf16, so that a table can be derived for a shape the default profile gives no row; per case and row count it
   measures the baseline (what a Session at the level `exact` runs with
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
-  and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`, after a
+  and against the parallel GEMV at each lane count, plain, staged and subgroup — and at M = 4 and 8 its row-blocked
+  form at each height of at most M rows the kernel exists at —, held to the band of `linear`, after a
   quick look that times in full only the references and the kernels near enough to matter; at M = 4 and 8 it skips the
   reorder candidates that the case's M = 1 group of the same run leaves unadoptable by the rule below
   ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)). Its record is `karume-gemv-sweep/4`
@@ -113,6 +115,30 @@ adapter's match and measures nothing at run time.
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
 - The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
   reads it.
+
+### The row block of a parallel row
+
+- A parallel row can carry a row block (`rowBlock`: 2, 4 or 8). A linear of that shape at the level `reorder` with
+  M = 2 to 8 rows — a speculative verification, a short prefill — then runs the row-blocked parallel GEMV: a thread
+  holds one lane of one output column for R rows, reads each weight word and decodes it once, and multiply-adds it with
+  every row's activation, which the workgroup stages per row in workgroup memory. R is the largest of 2, 4 and 8 that
+  is at most M and at most the row block: M = 8 under a row block of 4 runs two y tiles of four rows, and M = 3 runs
+  two tiles of two, the second holding one row.
+- Without a row block every row count runs the row's kernel of M = 1, one workgroup row per row, which reads and
+  decodes the weights once per row.
+- The row-blocked kernel writes the words of the parallel GEMV at the same lanes: each row's sum takes the same words
+  in the same order through the same tree. A verify row therefore equals the decode row of the same input, as before.
+- The row block does not depend on the row's staged flag, which is the form at M = 1: the row-blocked kernel always
+  stages. A row block over activations read from storage is not built (on the reference device it measured ×0.4 to
+  ×1.2 of the kernel without one).
+- The kernel exists where the staged activations of its rows and its partial sums fit the workgroup storage WebGPU
+  core guarantees (16,384 B), so no device limit decides it: i4 up to 8 rows at 2, 4 and 8 lanes, 4 at 16 and 2 at
+  32; i8 up to 8 rows through 16 lanes and 4 at 32; i2 up to 8 rows at 2 and 4 lanes, 4 at 8, 2 at 16 and none at 32.
+  A table whose row names a row block the kernel does not exist at, or sets one on a row that takes packed
+  activations, is refused.
+- M = 1, the level `exact`, row counts above 8, the subgroup form, a row that takes packed activations and the
+  linear → static_quantize fusion run what they ran without the field.
+- No row of the default profile carries a row block.
 
 ## Deriving the GEMV choices
 
@@ -153,10 +179,18 @@ measures nothing and changes no default value.
   bf16 cases a derived table may carry `sequential.shapes` rows for bf16, and an `exact` Session on that adapter then
   runs another sequential variant (columns per workgroup, words read ahead) that gives the same words.
 - **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
-  staged candidates at M = 1. A parallel row serves M = 1 to 8, so at each other row count of that range the case
-  table has (M = 4 and 8: the `full` set) groups of at least two records must be evidence for the candidate, and it
-  may be slower than the default's choice in none of them — for a float-stored shape without a row that choice is
-  the GEMM. The adopted row replaces the shape's row in place, or is added when the shape had none. A row
+  staged candidates at M = 1, and the row block. A parallel row serves M = 1 to 8, and at each other row count of
+  that range the case table has (M = 4 and 8: the `full` set) it runs its own kernel or, with a row block, the
+  row-blocked kernel of its lanes (`staged-l<lanes>r<rows>`). For a candidate the derivation reads every row block
+  the kernel exists at for its lanes, and none: one passes when, at each other row count, groups of at least two
+  records are evidence for its kernel and it is slower than the default's choice in none of them — for a
+  float-stored shape without a row that choice is the GEMM. The row takes the one whose smallest gain over those
+  groups is largest — none unless a row block is faster — and a candidate for which none passes is not adopted. The
+  adopted row replaces the shape's row in place, or is added when the shape had none.
+  - A row whose lanes and staged flag M = 1 keeps takes another row block than the default's (or none) when that
+    one is at least ×1.10 faster than the default's choice in every group at every other row count, again from groups
+    of at least two records; among several, the one whose smallest gain is largest. The default's own kernel of M = 1
+    is measured at M = 4 and 8 for this, so a device where the default's row block loses can drop it. A row
   whose default takes packed activations stays: the packed kernels are not measured. A subgroup candidate that meets
   the rule is named in the decision's notes and writes nothing: the subgroup form is a Session option, not a row. It
   changes the numbers of Sessions at `reorder`, inside the band.
@@ -165,7 +199,8 @@ measures nothing and changes no default value.
   variant (it also sets the row blocks' columns and read-ahead).
 - **Output**: the field (absent when nothing is adopted), the default profile's choices, one decision per sequential
   key, per parallel row and for the thread target (adopted or kept, the default's choice and the derived one, the gains
-  per group that is evidence, why it was kept), the groups that are not current (record, case, row count, and whether
+  per group that is evidence, why it was kept; for a parallel row also the row block of the default's row and of the
+  derived one, and the derived row's gains at its other row counts), the groups that are not current (record, case, row count, and whether
   the case, the default's choices or a reference's row moved), the lines that state them (per record its groups —
   current and steady, unsteady, not current by cause — and its rows of current groups that are not current), the
   rule's two numbers and the records used (path, sha256, date, candidate set, user agent and those counts; the adapter
@@ -228,8 +263,12 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
   the profile, and a profile with other choices changes the selection and the pipeline key (core lane).
-- The GEMV derivation on hand-built records: the adoption rule, the steadiness bound, the kept cases, groups as the
-  unit of evidence (a stale, screened or skipped row is no evidence while its record's other groups are; records that each hold
+- The row-blocked parallel GEMV: every output word equal to the parallel GEMV's at the same lanes for every storage,
+  lane count, row block and row count, on the development machine's GPU and, through the workbench's `kernel-check`
+  entry, on a browser's backend; a Session takes it exactly where its table's row carries a row block (GPU tests and
+  core lane).
+- The GEMV derivation on hand-built records: the adoption rule, the row block of a parallel row, the steadiness bound,
+  the kept cases, groups as the unit of evidence (a stale, screened or skipped row is no evidence while its record's other groups are; records that each hold
   half of the cases derive what a complete pair derives; groups that are not current are reported) and the refusals
   (core lane); the generator's dry run, its write path and the carry-over of an existing `linearGemv`.
 - The plan of GEMV measurements: exactly the missing candidates, and a batch the workbench's own batch reader accepts

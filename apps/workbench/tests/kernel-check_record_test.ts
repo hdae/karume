@@ -52,6 +52,7 @@ describe("kernelCheckRecord", () => {
       ["state-attention-rewrites", "fail"],
       ["gemv-integer", "not-run"],
       ["gemv-planes", "not-run"],
+      ["gemv-parallel-rows", "not-run"],
       ["state-kv16", "not-run"],
       ["score-f16-store", "not-run"],
       ["state-bidirectional", "not-run"],

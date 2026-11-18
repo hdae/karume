@@ -134,6 +134,11 @@ export {
   linearStaticQuantizeWidth,
 } from "./src/fusion-twins/linear-static-quantize.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
+export {
+  checkGemvParallelRows,
+  GEMV_PARALLEL_ROWS_CASES,
+  type GemvParallelRowsCheckOptions,
+} from "./src/gemv-parallel-rows.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
   checkStateBidirectional,

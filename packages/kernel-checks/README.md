@@ -5,7 +5,8 @@ backend a kernel rewrite relies on, in one implementation shared by
 
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
   `gpu_rms_norm_subgroup_test.ts`, `gpu_rms_norm_prefetch_test.ts`, `gpu_state_attention_fold_test.ts`,
-  `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
+  `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_linear_gemv_parallel_rows_test.ts`,
+  `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
   `gpu_attention_online_tiled_test.ts`,
   `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` and the
   twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`,
@@ -27,6 +28,7 @@ So the entry runs exactly the cases and criteria the tests run; there is no copy
 | States attention rewrites (perf-ledger K-55 / K-91): folded ①' vs ①', unrolled ③' and fused stats + PV vs their v1 WGSL, u32 identity, plus order-only mutants that must mismatch | `checkStateQkFold`, `checkStatePvUnroll`, `checkStateStatsPvUnroll`, `checkStateAttentionMutants`, and `checkStateAttentionMutantMatrix` (each mutant on every case of its shape — the workbench entry runs it, the node test does not; all five: `checkStateAttentionRewrites`) | nothing optional |
 | Integer GEMV `integerGemv`: every output word equals the CPU reference, rows past M unwritten (mirror class E — ADR 0140) | `checkIntegerGemv` (and `benchIntegerGemv`, a single-kernel timing, not a check) | nothing optional |
 | Byte-plane GEMV `REORDER_STRATEGIES.linearGemvPlanes`: the f64 band, the A/B band against the sequential GEMV, two dispatches identical, nothing written past the outputs, NaN propagation (class R — ADR 0141; the fault injection runs in the node test only, through `PlanesGemvCheckOptions.mutate`) | `checkPlanesGemv` (and `benchPlanesGemv`, a single-kernel timing, not a check) | nothing optional |
+| Row-blocked parallel GEMV (a profile row's `rowBlock`, M = 2..8): every output word vs the parallel GEMV at the same lanes, row 0 vs the parallel GEMV's row at M = 1, rows past M unwritten, the FP64 band — every (lanes, rows) pair the kernel exists at, a block reaching past M and several blocks (perf-ledger K-108) | `checkGemvParallelRows` | nothing optional |
 | f16 full state slots `fullStateStorage`: every reader vs its f32 form over a rounded slot, the append vs host rounding on every rounding boundary (class C — ADR 0143) | `checkStateKv16` (and `checkStateKv16Mutants`, node test only) | nothing optional |
 | f16 attention scores `attentionScoreStorage`: the store vs host rounding (ADR 0031) | `checkScoreF16Store` | nothing optional |
 | Bidirectional block of the sliding ①ₜ (`GenerationRun.bidirectionalRows`): every S word vs the same kernel keeping every score plus a host mirror of the predicate, u32 identity (ADR 0144) | `checkStateBidirectional` (and `stateBidirectionalMutants`, node test only) | nothing optional |
@@ -53,7 +55,7 @@ internal error scopes and also fails on an uncaptured WebGPU error or a lost dev
 otherwise read back the buffers' initial contents for both runs of a case; a mutation anchor that
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
 (`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `RMS_NORM_PREFETCH_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
-`GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`,
+`GEMV_PLANES_CASES`, `GEMV_PARALLEL_ROWS_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`,
 `ATTENTION_ONLINE_TILED_CASES`,
 `FUSION_TWIN_CASES` and each twin module's `…_TWIN_CASES`) and the
 mutant count

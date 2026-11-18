@@ -36,6 +36,8 @@ import {
   linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
   linearGemvParallelParams,
+  linearGemvParallelRowsKey,
+  linearGemvParallelRowsWgsl,
   linearGemvParallelStagedKey,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
@@ -339,19 +341,27 @@ const linearGemvProgram = (
   /** The producer SRQ's scale (only for the packed form — ADR 0105). */
   packedScale: number | undefined,
 ): LinearProgram => {
-  const { storage, groupSize, lanes, variant, rowsVariant } = choice;
+  const { storage, groupSize, lanes, variant, rowsVariant, parallelRows } = choice;
   const subgroup = choice.id === "gemv-parallel-subgroup32";
   const staged = choice.id === "gemv-parallel-staged";
-  const rows = rowsVariant?.rows ?? 1;
+  if (parallelRows !== undefined && (!staged || lanes === undefined)) {
+    throw new ExecutionError(
+      `${where}: a row block of ${parallelRows} rows belongs to the staged parallel form, not ${choice.id}`,
+    );
+  }
+  // The rows of a y tile: the row block of the sequential form, or of the parallel one.
+  const rows = rowsVariant?.rows ?? parallelRows ?? 1;
   const key =
     lanes !== undefined
       ? subgroup
         ? linearGemvSubgroupKey(storage, groupSize, lanes)
         : packedScale !== undefined
           ? linearGemvParallelPackedKey(storage, groupSize, lanes)
-          : staged
-            ? linearGemvParallelStagedKey(storage, groupSize, lanes)
-            : linearGemvParallelKey(storage, groupSize, lanes)
+          : parallelRows !== undefined
+            ? linearGemvParallelRowsKey(storage, groupSize, lanes, parallelRows)
+            : staged
+              ? linearGemvParallelStagedKey(storage, groupSize, lanes)
+              : linearGemvParallelKey(storage, groupSize, lanes)
       : rowsVariant === undefined
         ? linearGemvKey(storage, groupSize, variant)
         : linearGemvRowsKey(storage, groupSize, rowsVariant);
@@ -361,9 +371,11 @@ const linearGemvProgram = (
         ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
         : packedScale !== undefined
           ? linearGemvParallelPackedWgsl(storage, groupSize, lanes)
-          : staged
-            ? linearGemvParallelStagedWgsl(storage, groupSize, lanes)
-            : linearGemvParallelWgsl(storage, groupSize, lanes)
+          : parallelRows !== undefined
+            ? linearGemvParallelRowsWgsl(storage, groupSize, lanes, parallelRows)
+            : staged
+              ? linearGemvParallelStagedWgsl(storage, groupSize, lanes)
+              : linearGemvParallelWgsl(storage, groupSize, lanes)
       : rowsVariant === undefined
         ? linearGemvWgsl(storage, groupSize, variant)
         : linearGemvRowsWgsl(storage, groupSize, rowsVariant);

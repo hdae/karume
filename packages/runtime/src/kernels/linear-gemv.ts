@@ -131,6 +131,7 @@ import {
   weightScaleWgsl,
   type WeightStorage,
 } from "./weight-storage.ts";
+import { workgroupVariableBytes } from "./workgroup-storage.ts";
 
 /**
  * Elements carried by one weight word (`vec4<u32>` or `vec4<f32>` = 16 B) = **the reduction step**
@@ -651,6 +652,12 @@ const mac = (fma: boolean, x: string, d: string): string =>
   fma ? `    acc = fma(${x}, ${d}, acc);` : `    acc = acc + ${x} * ${d};`;
 
 /**
+ * The f32 value of one i4 code `u = q + 8` (`nibble`: the WGSL expression of the code, 0..15) — the
+ * one spelling every i4 GEMV kernel decodes with, so they cannot drift apart.
+ */
+const i4Decoded = (nibble: string): string => `f32(i32(${nibble}) - 8)`;
+
+/**
  * Unrolled multiply-adds for one word (32 i4 elements) (M=1 variant).
  *
  * The nibble order is the same as `dequant4` in weight-storage.ts (element 2i = low / 2i+1 = high,
@@ -678,8 +685,8 @@ const unitMacsI4 = (slot: string, packed = false, fma = false, staged = false): 
           const low = lanes[(lane * 2) % 4];
           const high = lanes[(lane * 2 + 1) % 4];
           return [
-            mac(fma, `${source}.${low}`, `(f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot})`),
-            mac(fma, `${source}.${high}`, `(f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot})`),
+            mac(fma, `${source}.${low}`, `(${i4Decoded(`${bytes}.${byte} & 0xFu`)} * ws${slot})`),
+            mac(fma, `${source}.${high}`, `(${i4Decoded(`${bytes}.${byte} >> 4u`)} * ws${slot})`),
           ];
         })
         .join("\n");
@@ -1064,7 +1071,24 @@ export type LinearGemvParallelShape = {
    * activation quads or one per word, where an i4 word reads eight).
    */
   readonly stagedActivations?: true;
+  /**
+   * The row block the shape takes at M = 2..8 (speculative verification, short prefill): a thread of
+   * the row-blocked kernel ({@link linearGemvParallelRowsWgsl}) holds the largest power of two of
+   * rows that is at most this and at most M ({@link linearGemvParallelRowBlock}). Absent: every row
+   * count takes the kernel of M = 1, one workgroup row per row. **Set only for rows that measured
+   * faster** at M = 4 and 8, and only where the kernel exists for the row's storage and lanes
+   * ({@link linearGemvParallelRowsFits}). The kernel stages its activations whatever
+   * `stagedActivations` says (that flag is the form at M = 1). Never set together with
+   * `packedActivations`.
+   */
+  readonly rowBlock?: LinearGemvParallelRows;
 };
+
+/** Rows one thread of the row-blocked parallel GEMV holds (the height of a y tile). */
+export type LinearGemvParallelRows = 2 | 4 | 8;
+
+/** The row-block heights of the parallel GEMV, ascending. */
+export const LINEAR_GEMV_PARALLEL_ROWS: readonly LinearGemvParallelRows[] = [2, 4, 8];
 
 /**
  * Row lookup in the Session's table of parallel shapes (including the M range, in one place).
@@ -1176,6 +1200,44 @@ export const linearGemvStagedEligible = (
   if (lanes === undefined) return undefined;
   const shape = parallelShapeFor(choices, storage, m, n, k, group);
   return shape?.stagedActivations === true && !shape.packedActivations ? lanes : undefined;
+};
+
+/**
+ * The rows per thread of a row block that serves `m` rows under the cap `rowBlock`: the largest of
+ * {@link LINEAR_GEMV_PARALLEL_ROWS} that is at most both (`undefined` below 2 rows). M = 4 under a
+ * cap of 8 takes 4, M = 8 under a cap of 4 takes two y tiles of 4, and M = 3 takes 2 (its second
+ * tile holds one row).
+ */
+export const linearGemvParallelRowsFor = (
+  m: number,
+  rowBlock: LinearGemvParallelRows,
+): LinearGemvParallelRows | undefined =>
+  LINEAR_GEMV_PARALLEL_ROWS.findLast((rows) => rows <= m && rows <= rowBlock);
+
+/**
+ * The **only pure function** that returns "how many rows a thread holds when this shape takes the
+ * **row-blocked** parallel GEMV": {@link linearGemvParallelEligible} narrowed by the profile row's
+ * `rowBlock`, for M = 2..8. `undefined` means the shape keeps the kernel of M = 1 (plain or staged)
+ * at this row count. The row-blocked kernel is bit-identical to {@link linearGemvParallelWgsl} at
+ * the row's lanes, so taking it changes speed only.
+ *
+ * MUST: the selection reads this one function. A packed row (ADR 0105) never takes a row block — its
+ * binding is `vec4<u32>`, which the staged loads do not read.
+ */
+export const linearGemvParallelRowBlock = (
+  choices: LinearGemvChoices,
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  group?: number,
+): LinearGemvParallelRows | undefined => {
+  if (m < 2) return undefined;
+  const lanes = linearGemvParallelEligible(choices, storage, m, n, k, group);
+  if (lanes === undefined) return undefined;
+  const shape = parallelShapeFor(choices, storage, m, n, k, group);
+  if (shape?.rowBlock === undefined || shape.packedActivations) return undefined;
+  return linearGemvParallelRowsFor(m, shape.rowBlock);
 };
 
 export const linearGemvParallelKey = (
@@ -1504,6 +1566,249 @@ ${staged ? stagedReduction(storage, lanes, shift) : plainReduction(storage, lane
         ? "quantize(bitcast<u32>(partial[lid] + bias[col]) ^ dims.rounding_mask)"
         : "partial[lid] + bias[col]"
     };
+  }
+}
+`;
+};
+
+/**
+ * The workgroup storage WebGPU core guarantees (`maxComputeWorkgroupStorageSize`). The row-blocked
+ * parallel kernel stays within it, so which shapes take it does not depend on a device's limits.
+ */
+const CORE_WORKGROUP_STORAGE_BYTES = 16384;
+
+/**
+ * Whether the row-blocked parallel GEMV exists for these parameters: an integer storage, `rows` one
+ * of {@link LINEAR_GEMV_PARALLEL_ROWS}, and its workgroup storage — as WebGPU counts it: `rows`
+ * partial sums per thread and `rows` copies of a chunk's activation quads — within what WebGPU core
+ * guarantees. So the i4 kernel of 32 lanes stops at 2 rows, and the i2 kernel of 32 lanes has none.
+ */
+export const linearGemvParallelRowsFits = (
+  storage: WeightStorage,
+  lanes: LinearGemvParallelLanes,
+  rows: number,
+): rows is LinearGemvParallelRows =>
+  (storage === "i2" || storage === "i4" || storage === "i8") &&
+  (LINEAR_GEMV_PARALLEL_ROWS as readonly number[]).includes(rows) &&
+  workgroupVariableBytes(128 * rows * 4) +
+    workgroupVariableBytes(lanes * (linearGemvUnit(storage) / 4) * rows * 16) <=
+    CORE_WORKGROUP_STORAGE_BYTES;
+
+/**
+ * The key of the row-blocked parallel GEMV: the staged-activation key plus `:r<rows>` — `rows` is
+ * baked into the WGSL (accumulators, partial sums, the staged copies, the y-tile height).
+ */
+export const linearGemvParallelRowsKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+  rows: LinearGemvParallelRows,
+): string => `${linearGemvParallelStagedKey(storage, group, lanes)}:r${rows}`;
+
+/**
+ * The multiply-adds of one weight word against `rows` rows (row-blocked parallel GEMV): every
+ * element's decoded weight is computed once — the same expression and the same single f32 multiply
+ * as {@link unitMacs} — and each row multiply-adds it with its own staged activation, in ascending
+ * element order with explicit `fma()`, so each row's sum is the parallel kernel's, bit for bit.
+ * Row `r` reads its quads from the `r`-th block of `stagedQuads` slots of the staged copy.
+ */
+const rowsUnitMacs = (
+  storage: "i2" | "i4" | "i8",
+  rows: LinearGemvParallelRows,
+  stagedQuads: number,
+): string => {
+  const rowList = Array.from({ length: rows }, (_, row) => row);
+  const quadOf = (name: string, row: number, quad: number): string =>
+    `    let ${name} = sx[${stagedSlot(`${row * stagedQuads}u + sx_base + ${quad}u`)}];`;
+  if (storage === "i4") {
+    return LANES.map((component, quad) => {
+      const bytes = `bt_${quad}`;
+      const decoded = LANES.flatMap((byte, lane) => [
+        `    let dt_${quad}_${lane * 2} = (${i4Decoded(`${bytes}.${byte} & 0xFu`)} * wst);`,
+        `    let dt_${quad}_${lane * 2 + 1} = (${i4Decoded(`${bytes}.${byte} >> 4u`)} * wst);`,
+      ]).join("\n");
+      const macs = rowList
+        .map((row) => {
+          const xa = `xat_${quad}_${row}`;
+          const xb = `xbt_${quad}_${row}`;
+          const lines = Array.from(
+            { length: 8 },
+            (_, element) =>
+              `    acc${row} = fma(${element < 4 ? xa : xb}.${LANES[element % 4]}, dt_${quad}_${element}, acc${row});`,
+          ).join("\n");
+          return `${quadOf(xa, row, quad * 2)}
+${quadOf(xb, row, quad * 2 + 1)}
+${lines}`;
+        })
+        .join("\n");
+      return `    let ${bytes} = unpack4xU8(pwt.${component});
+${decoded}
+${macs}`;
+    }).join("\n");
+  }
+  if (storage === "i8") {
+    return LANES.map((component, quad) => {
+      const bytes = `bt_${quad}`;
+      const decoded = LANES.map(
+        (lane, element) =>
+          `    let dt_${quad}_${element} = (f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR});`,
+      ).join("\n");
+      const macs = rowList
+        .map((row) => {
+          const xa = `xat_${quad}_${row}`;
+          const lines = LANES.map(
+            (lane, element) =>
+              `    acc${row} = fma(${xa}.${lane}, dt_${quad}_${element}, acc${row});`,
+          ).join("\n");
+          return `${quadOf(xa, row, quad)}
+${lines}`;
+        })
+        .join("\n");
+      return `    let ${bytes} = unpack4xI8(pwt.${component});
+${decoded}
+${macs}`;
+    }).join("\n");
+  }
+  return LANES.flatMap((component, word) =>
+    LANES.map((_, byte) => {
+      const index = word * 4 + byte;
+      const quantized = `qt_${index}`;
+      const decoded = `dt_${index}`;
+      const macs = rowList
+        .map((row) => {
+          const activation = `xt_${index}_${row}`;
+          const lines = LANES.map(
+            (lane) => `    acc${row} = fma(${activation}.${lane}, ${decoded}.${lane}, acc${row});`,
+          ).join("\n");
+          return `${quadOf(activation, row, index)}
+${lines}`;
+        })
+        .join("\n");
+      return `    let ${quantized} = (pwt.${component} >> ${byte * 8}u) & 255u;
+    let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
+${macs}`;
+    }),
+  ).join("\n");
+};
+
+/**
+ * The **row-blocked parallel GEMV** (M ≥ 2 of the parallel family: speculative verification and
+ * short prefill): one thread holds one lane of one output column for `rows` rows. It reads each
+ * weight word (and i4 group scale) once and decodes it once, and multiply-adds it with every row's
+ * activation, staged per row in workgroup memory as in {@link linearGemvParallelStagedWgsl}. The
+ * dispatch is `[ceil(n / (128 / lanes)), ceil(m / rows), 1]`; the kernels without a row block spend
+ * one workgroup row per row and read and decode the weights once per row.
+ *
+ * Bit identity with {@link linearGemvParallelWgsl} at the same lanes (MUST): for every row, lane `l`
+ * takes the words `l, l + lanes, …` in ascending order with the same decode and the same `fma` text,
+ * the partial sums of a row meet in the same tree, and the bias is added last — only the work
+ * assignment across rows differs.
+ * MUST: rows beyond m re-read the last row (reads stay inside the binding) and are never stored;
+ * `dims.m ≥ 1` as for {@link linearGemvRowsWgsl}. Params are {@link linearGemvParams}.
+ * MUST: both barriers of a chunk sit in uniform control flow and every thread runs every chunk, as
+ * in the staged form.
+ *
+ * Only the staged form has a row block: on the reference device a row block over activations read
+ * from storage measured ×0.4–1.2 of the kernel without one (the activation loads bound it), where
+ * this form measured ×1.2–3 (perf-ledger K-108).
+ */
+export const linearGemvParallelRowsWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+  rows: LinearGemvParallelRows,
+): string => {
+  if (![2, 4, 8, 16, 32].includes(lanes)) {
+    throw new CodegenError("linear_gemv_parallel: invalid lane count");
+  }
+  if (storage !== "i2" && storage !== "i4" && storage !== "i8") {
+    throw new CodegenError(`linear_gemv_parallel: no row block for ${storage} storage`);
+  }
+  if (!linearGemvParallelRowsFits(storage, lanes, rows)) {
+    throw new CodegenError(
+      `linear_gemv_parallel: no row block of ${rows} rows for ${storage} at ${lanes} lanes (rows are ${LINEAR_GEMV_PARALLEL_ROWS.join(
+        " / ",
+      )}, and the staged activations and partial sums fit ${CORE_WORKGROUP_STORAGE_BYTES} B of workgroup storage)`,
+    );
+  }
+  const unit = linearGemvUnit(storage);
+  const shift = gemvGroupShift(storage, group);
+  const quads = unit / 4;
+  const perRound = lanes * quads;
+  const rowList = Array.from({ length: rows }, (_, row) => row);
+  const partialOf = (row: number, index: string): string =>
+    `partial[${row === 0 ? "" : `${row * 128}u + `}${index}]`;
+  return `// karume linear gemv K parallel rows (${storage}, ${lanes} lanes/output, ${rows} rows / thread, staged activations)
+struct Dims {
+  m: u32,
+  n: u32,
+  k: u32,
+}
+@group(0) @binding(0) var<uniform> dims: Dims;
+${bindings(unit, storage)}
+var<workgroup> partial: array<f32, ${128 * rows}>;
+var<workgroup> sx: array<vec4<f32>, ${perRound * rows}u>;
+
+@compute @workgroup_size(128)
+fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+  let lane = lid % ${lanes}u;
+  let col = wg.x * ${128 / lanes}u + lid / ${lanes}u;
+  // The first row of the row block and the start of x per row (in quads). Rows beyond m re-read the
+  // last row (only to keep reads in range; write-back is only inside the row count)
+  let kq = dims.k / 4u;
+  let row0 = wg.y * ${rows}u;
+${rowList.map((row) => `  let xr${row} = min(row0 + ${row}u, dims.m - 1u) * kq;`).join("\n")}
+${rowList.map((row) => `  var acc${row} = 0.0;`).join("\n")}
+  // Edge columns load their share of the staged activation and pass every barrier; their hoisted
+  // reads take the last column, and their sums are never stored.
+  let units = dims.k / ${unit}u;
+  let col_read = min(col, dims.n - 1u);
+  let row_base = col_read * units;${scaleSetupWgsl(storage, shift, "col_read")}
+  let sx_base = lane * ${quads}u;
+  let chunks = (units + ${lanes - 1}u) / ${lanes}u;
+  for (var chunk = 0u; chunk < chunks; chunk += 1u) {
+    // Chunk c stages, per row, the activation quads of words c·${lanes} … c·${lanes} + ${lanes - 1}.
+    for (var q = lid; q < ${perRound}u; q += 128u) {
+      let v = chunk * ${perRound}u + q;
+${rowList
+  .map(
+    (row) => `      var staged_quad${row} = vec4<f32>(0.0);
+      if (v < kq) {
+        staged_quad${row} = x[xr${row} + v];
+      }
+      sx[${stagedSlot(`${row * perRound}u + q`)}] = staged_quad${row};`,
+  )
+  .join("\n")}
+    }
+    workgroupBarrier();
+    let unit = chunk * ${lanes}u + lane;
+    if (col < dims.n && unit < units) {
+${unitLoads(storage, "t", "unit", shift, "", false, false)}
+${rowsUnitMacs(storage, rows, perRound)}
+    }
+    workgroupBarrier();
+  }
+${rowList.map((row) => `  ${partialOf(row, "lid")} = acc${row};`).join("\n")}
+  workgroupBarrier();
+  for (var width = ${lanes / 2}u; width > 0u; width /= 2u) {
+    if (lane < width) {
+${rowList
+  .map(
+    (row) =>
+      `      ${partialOf(row, "lid")} = ${partialOf(row, "lid")} + ${partialOf(row, "lid + width")};`,
+  )
+  .join("\n")}
+    }
+    workgroupBarrier();
+  }
+  if (col < dims.n && lane == 0u) {
+${rowList
+  .map(
+    (row) => `    if (row0 + ${row}u < dims.m) {
+      out[(row0 + ${row}u) * dims.n + col] = ${partialOf(row, "lid")} + bias[col];
+    }`,
+  )
+  .join("\n")}
   }
 }
 `;

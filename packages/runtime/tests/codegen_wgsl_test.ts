@@ -237,6 +237,7 @@ import {
   defaultLinearGemvVariant,
   linearGemvKey,
   linearGemvParallelPackedWgsl,
+  linearGemvParallelRowsWgsl,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
   linearGemvRowsKey,
@@ -716,6 +717,13 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ],
     ["linear_gemv_parallel_staged_wf16_l8.wgsl", linearGemvParallelStagedWgsl("f16", undefined, 8)],
     ["linear_gemv_parallel_staged_f32_l2.wgsl", linearGemvParallelStagedWgsl("f32", undefined, 2)],
+    // The row-blocked form (K-108): a thread holds several rows, the weights read and decoded once.
+    ["linear_gemv_parallel_rows_g32_l4_r4.wgsl", linearGemvParallelRowsWgsl("i4", 32, 4, 4)],
+    [
+      "linear_gemv_parallel_rows_wi8_l32_r2.wgsl",
+      linearGemvParallelRowsWgsl("i8", undefined, 32, 2),
+    ],
+    ["linear_gemv_parallel_rows_wi2_l4_r2.wgsl", linearGemvParallelRowsWgsl("i2", undefined, 4, 2)],
     [
       "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
       linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),

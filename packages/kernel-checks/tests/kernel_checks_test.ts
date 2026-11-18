@@ -5,6 +5,7 @@ import {
   ATTENTION_ONLINE_TILED_CASES,
   FUSION_TWIN_CASES,
   GEMV_INTEGER_CASES,
+  GEMV_PARALLEL_ROWS_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_NORM_PREFETCH_CASES,
@@ -160,6 +161,8 @@ describe("the expected case counts each check exports", () => {
     assertEquals(Object.keys(STATE_KV16_CASES), ["state-kv16-readers", "state-kv16-append"]);
     assertEquals(GEMV_INTEGER_CASES, { "gemv-integer": 692 });
     assertEquals(GEMV_PLANES_CASES, { "gemv-planes": 240 });
+    // i4: 6 shapes × 30 (lanes, rows, M) cases; i8: 3 × 34; i2: 3 × 23
+    assertEquals(GEMV_PARALLEL_ROWS_CASES, { "gemv-parallel-rows": 351 });
     assertEquals(ATTENTION_ONLINE_TILED_CASES, {
       "attention-online-tiled-producer": 18,
       "attention-online-tiled-wg": 28,

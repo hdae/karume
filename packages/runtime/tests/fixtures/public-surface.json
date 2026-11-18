@@ -829,6 +829,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvRowGain",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LinearGemvStaleGroup",
         "kind": "typeAlias"
       },

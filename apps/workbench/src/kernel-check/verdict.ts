@@ -28,6 +28,7 @@ export const KERNEL_CHECK_IDS = [
   "state-attention-rewrites",
   "gemv-integer",
   "gemv-planes",
+  "gemv-parallel-rows",
   "state-kv16",
   "score-f16-store",
   "state-bidirectional",

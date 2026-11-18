@@ -8,6 +8,7 @@ import {
   checkAttentionOnlineTiled,
   checkExpertLinear,
   checkFusionTwins,
+  checkGemvParallelRows,
   checkGemvSubgroup,
   checkIntegerGemv,
   type CheckOptions,
@@ -19,6 +20,7 @@ import {
   checkStateBidirectional,
   checkStateKv16,
   GEMV_INTEGER_CASES,
+  GEMV_PARALLEL_ROWS_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_NORM_PREFETCH_CASES,
@@ -110,6 +112,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkPlanesGemv(gpu, options)],
       expectedCases: GEMV_PLANES_CASES,
+    }),
+  },
+  // The row-blocked parallel GEMV (a profile row's row block, M = 2..8) against the parallel GEMV
+  // at the same lanes: u32 identity, plus the FP64 band (perf-ledger K-108).
+  {
+    id: "gemv-parallel-rows",
+    title: "Parallel GEMV row blocks",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkGemvParallelRows(gpu, options)],
+      expectedCases: GEMV_PARALLEL_ROWS_CASES,
     }),
   },
   // The f16 append against host rounding, and every reader of an f16 slot against its f32 kernel

@@ -21,11 +21,12 @@ import {
   type I8a8RowsRule,
 } from "../kernels/geometry-profile.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
-import type {
-  LinearGemvChoices,
-  LinearGemvParallelShape,
-  LinearGemvShapeVariant,
-  LinearGemvVariant,
+import {
+  LINEAR_GEMV_PARALLEL_ROWS,
+  type LinearGemvChoices,
+  type LinearGemvParallelShape,
+  type LinearGemvShapeVariant,
+  type LinearGemvVariant,
 } from "../kernels/linear-gemv.ts";
 
 /**
@@ -270,13 +271,13 @@ const readGemvShapeVariant = (value: unknown, path: string): LinearGemvShapeVari
   };
 };
 
-/** One shape row of the parallel GEMV (`group` and `stagedActivations` optional). */
+/** One shape row of the parallel GEMV (`group`, `stagedActivations` and `rowBlock` optional). */
 const readGemvParallelShape = (value: unknown, path: string): LinearGemvParallelShape => {
   const fields = readRecord(
     value,
     path,
     ["storage", "n", "k", "lanes", "packedActivations"],
-    ["group", "stagedActivations"],
+    ["group", "stagedActivations", "rowBlock"],
   );
   if (typeof fields.packedActivations !== "boolean") {
     return fail(
@@ -300,6 +301,11 @@ const readGemvParallelShape = (value: unknown, path: string): LinearGemvParallel
     lanes: readMember(fields.lanes, child(path, "lanes"), LANES),
     packedActivations: fields.packedActivations,
     ...(fields.stagedActivations === undefined ? {} : { stagedActivations: true }),
+    ...(fields.rowBlock === undefined
+      ? {}
+      : {
+          rowBlock: readMember(fields.rowBlock, child(path, "rowBlock"), LINEAR_GEMV_PARALLEL_ROWS),
+        }),
   };
 };
 

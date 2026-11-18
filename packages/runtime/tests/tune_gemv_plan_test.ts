@@ -16,7 +16,12 @@ import { describe, it } from "vite-plus/test";
 import { gemvSweepCandidateNames, gemvSweepCases } from "../tune.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
-import { isFloatStorage, type LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
+import {
+  isFloatStorage,
+  type LinearGemvChoices,
+  type LinearGemvParallelLanes,
+  type LinearGemvParallelRows,
+} from "../src/kernels/linear-gemv.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import {
   GEMV_MIN_SPEEDUP,
@@ -33,6 +38,7 @@ import {
   gemvMeasurementPlans,
   gemvProfileChoice,
   gemvProgram,
+  programWorkgroups,
 } from "../src/tune/gemv-candidates.ts";
 import {
   GEMV_CASES,
@@ -246,13 +252,69 @@ describe("the candidates", () => {
       assertEquals(gemvCandidates(caseOf("i2-n12288-k1536"), 64, "row-blocks", GATES).length, 2);
     });
 
-    it("take the reorder class at M = 1, 4 and 8 only", () => {
+    it("take the reorder class at M = 1, 4 and 8 only, with the row-blocked form at M = 4 and 8", () => {
+      // Plain, staged and subgroup at 5 lane counts; then the row blocks of at most M rows the
+      // kernel exists at (i4: 2 / 4 / 8 rows up to 8 lanes, 2 / 4 at 16, 2 at 32)
+      const expected: Readonly<Record<number, number>> = {
+        1: 15,
+        4: 15 + 9,
+        8: 15 + 12,
+        16: 0,
+        64: 0,
+      };
       for (const m of [1, 4, 8, 16, 64]) {
         const reorder = gemvCandidates(PLE, m, "full", GATES).filter(
           (candidate) => candidate.class === "reorder",
         );
-        assertEquals(reorder.length, m <= 8 ? 15 : 0, `M=${m}`);
+        assertEquals(reorder.length, expected[m], `M=${m}`);
       }
+    });
+
+    it("name a row-blocked candidate by its lanes and rows, and build the staged form with that row block", () => {
+      const blocked = (m: number): string[] =>
+        names(
+          gemvCandidates(PLE, m, "full", GATES).filter(
+            ({ choice }) => "parallelRows" in choice && choice.parallelRows !== undefined,
+          ),
+        );
+      assertEquals(blocked(1), []);
+      assertEquals(blocked(4), [
+        "staged-l2r2",
+        "staged-l2r4",
+        "staged-l4r2",
+        "staged-l4r4",
+        "staged-l8r2",
+        "staged-l8r4",
+        "staged-l16r2",
+        "staged-l16r4",
+        "staged-l32r2",
+      ]);
+      assertEquals(
+        blocked(8).filter((name) => name.endsWith("r8")),
+        ["staged-l2r8", "staged-l4r8", "staged-l8r8"],
+      );
+      // i2 stages 16 quads a word: no row block at 32 lanes
+      assert(
+        !names(gemvCandidates(caseOf("i2-n12288-k1536"), 8, "full", GATES)).some((name) =>
+          name.startsWith("staged-l32r"),
+        ),
+      );
+      const [candidate] = gemvCandidates(PLE, 8, "full", GATES).filter(
+        ({ name }) => name === "staged-l4r4",
+      );
+      assertEquals(candidate.class, "reorder");
+      assertEquals(candidate.choice.id, "gemv-parallel-staged");
+      const [dispatch] = gemvProgram(PLE, 8, candidate.choice).dispatches;
+      assertEquals(dispatch.key, "linear_gemv_parallel:wi4g32:l4:staged-x:r4");
+      // Two y tiles of four rows
+      assertEquals(programWorkgroups(gemvProgram(PLE, 8, candidate.choice)), [[280, 2, 1]]);
+      // The record's choice keeps the rows, and stands for the same kernel
+      const recorded = choiceRecord(candidate.choice, PLE.storage);
+      assertEquals("parallelRows" in recorded ? recorded.parallelRows : undefined, 4);
+      assertEquals(
+        gemvKernelId(PLE, 8, choiceOfRecord(recorded)),
+        gemvKernelId(PLE, 8, candidate.choice),
+      );
     });
   });
 
@@ -357,14 +419,26 @@ describe("the candidates", () => {
     }
   });
 
-  it("have a candidate of the same name at M = 1 for every reorder candidate at M = 4 and 8", () => {
+  it("have at M = 1 a candidate of the same name for every reorder candidate at M = 4 and 8, or for a row-blocked one the plain and the staged candidate of its lanes", () => {
     for (const gates of [GATES, NO_SUBGROUPS]) {
       for (const gemvCase of GEMV_CASES) {
-        const first = names(gemvCandidates(gemvCase, 1, "full", gates));
+        // The baseline is no candidate of the list, and the default's choice at reorder may be it
+        const first = [
+          gemvBaseline(gemvCase, 1).name,
+          ...names(gemvCandidates(gemvCase, 1, "full", gates)),
+        ];
         for (const m of [4, 8]) {
           for (const candidate of gemvCandidates(gemvCase, m, "full", gates)) {
             if (candidate.class !== "reorder") continue;
-            assert(first.includes(candidate.name), `${gemvCase.id} M=${m}: ${candidate.name}`);
+            const where = `${gemvCase.id} M=${m}: ${candidate.name}`;
+            const { choice } = candidate;
+            const lanes = "lanes" in choice ? choice.lanes : undefined;
+            if (!("parallelRows" in choice) || choice.parallelRows === undefined) {
+              assert(first.includes(candidate.name), where);
+              continue;
+            }
+            assert(first.includes(`parallel-l${lanes}`), where);
+            assert(first.includes(`staged-l${lanes}`), where);
           }
         }
       }
@@ -495,6 +569,96 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
     );
     // Any other candidate at a gain of 1 is skipped
     assertEquals(carried(groupOf([held("staged-l8", REFERENCE_TIME)])), false);
+  });
+
+  describe("a row-blocked candidate, which has no row at M = 1 and is read by the rows of its lanes", () => {
+    /** Whether `staged-l<lanes>r<rows>` is measured at M = 4, given the M = 1 group. */
+    const blocked = (
+      group: GemvM1Group | undefined,
+      lanes: LinearGemvParallelLanes = 8,
+      rows: LinearGemvParallelRows = 4,
+    ): boolean =>
+      gemvCarriedFromM1(
+        4,
+        {
+          name: `staged-l${lanes}r${rows}`,
+          class: "reorder",
+          choice: { lanes, parallelRows: rows },
+        },
+        REFERENCES,
+        group,
+      );
+    /** The plain and the staged candidate of 8 lanes at M = 1, each at a gain over the default. */
+    const lanes8 = (plain: number, staged: number): GemvM1Group =>
+      groupOf([held("parallel-l8", at(plain)), held("staged-l8", at(staged))]);
+
+    it("is measured at the lanes of the default's choice at reorder, whatever the other rows say (the row the derivation keeps)", () => {
+      // 4 lanes are the default's: its own gain is 1, and the staged candidate of 4 lanes is slower
+      const group = groupOf([held("staged-l4", at(0.8))]);
+      assertEquals(blocked(group, 4, 2), true);
+      assertEquals(blocked(group, 4, 4), true);
+    });
+
+    it("is measured when the plain or the staged candidate of its lanes is carried from M = 1", () => {
+      assertEquals(blocked(lanes8(1.3, 0.9)), true);
+      assertEquals(blocked(lanes8(0.9, 1.3)), true);
+      assertEquals(blocked(lanes8(1.3, 1.3)), true);
+    });
+
+    it("is skipped when M = 1 leaves both candidates of its lanes unadoptable (fault: ×1.09 and ×1.09)", () => {
+      assertEquals(blocked(lanes8(1.09, 1.09)), false);
+      assertEquals(
+        blocked(
+          groupOf([{ candidate: "parallel-l8", screened: true }, held("staged-l8", at(1.09))]),
+        ),
+        false,
+      );
+      assertEquals(
+        blocked(
+          groupOf([
+            held("parallel-l8", at(1.3), { withinBand: false }),
+            { candidate: "staged-l8", error: "Error: lost" },
+          ]),
+        ),
+        false,
+      );
+    });
+
+    it("is measured when the M = 1 group has no row of a candidate of its lanes (a run narrowed to other candidates)", () => {
+      assertEquals(blocked(groupOf([])), true);
+      assertEquals(blocked(groupOf([held("staged-l8", at(1.09))])), true);
+      assertEquals(blocked(undefined), true);
+    });
+
+    it("leaves the default's choice at reorder at M = 1 measured where the default's row carries a row block: the reference at the row count is then the row-blocked kernel (fault: its own gain of 1)", () => {
+      const references = { exact: "c32u4r2", reorder: "staged-l4r4" } as const;
+      assertEquals(
+        gemvCarriedFromM1(4, { name: DEFAULT_REORDER, class: "reorder" }, references, groupOf([])),
+        true,
+      );
+      // The control: another candidate at a gain of 1 is skipped
+      assertEquals(
+        gemvCarriedFromM1(
+          4,
+          { name: "staged-l4", class: "reorder" },
+          references,
+          groupOf([held("staged-l4", REFERENCE_TIME)]),
+        ),
+        false,
+      );
+    });
+
+    it("is measured as a reference when it is the default's choice at reorder at the row count", () => {
+      assertEquals(
+        gemvCarriedFromM1(
+          4,
+          { name: "staged-l8r4", class: "reorder", choice: { lanes: 8, parallelRows: 4 } },
+          { exact: "c32u4r2", reorder: "staged-l8r4" },
+          lanes8(1.09, 1.09),
+        ),
+        true,
+      );
+    });
   });
 
   it("skips nothing without the run's M = 1 group, for a candidate the M = 1 group has no row of, for the identical class, or at a row count not read for a regression", () => {

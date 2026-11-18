@@ -282,12 +282,20 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
     assertStringIncludes(decision.reason ?? "", "outside the band in [2] at M=1");
   });
 
-  it("keeps the default when the candidate is slower at another row count of the parallel range (fault: ×0.95 at M = 4)", () => {
+  it("keeps the default when the candidate is slower at another row count of the parallel range, with and without a row block (fault: ×0.95 at M = 4)", () => {
     const regressed = derive([
       {
         caseId: PLE,
         rows: PARALLEL_ROWS,
-        times: { 1: { "staged-l8": faster(1.3) }, 4: { "staged-l8": faster(0.95) } },
+        times: {
+          1: { "staged-l8": faster(1.3) },
+          // Its own kernel and every row block of its lanes
+          4: {
+            "staged-l8": faster(0.95),
+            "staged-l8r2": faster(0.95),
+            "staged-l8r4": faster(0.95),
+          },
+        },
       },
     ]);
     const decision = decisionOf(regressed, "parallelShapes", PLE);
@@ -321,6 +329,133 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
     // The sequential exception is read at M = 1 alone, so quick records still decide it
     assertEquals(decisionOf(quick, "sequential.shapes", PLE).outcome, "adopted");
     assertEquals(quick.linearGemv?.parallelShapes, DEFAULTS.parallelShapes);
+  });
+
+  it("gives the adopted row the row block that fares best at the other row counts: the largest smallest gain over the default's choice there", () => {
+    const derivation = derive([
+      {
+        caseId: PLE,
+        rows: PARALLEL_ROWS,
+        times: {
+          1: { "staged-l8": faster(1.3) },
+          // A cap of 2: ×1.2 and ×1.3. A cap of 4: ×1.5 and ×1.4. A cap of 8: ×1.5 (four rows at
+          // M = 4) and ×2 — the largest smallest gain
+          4: { "staged-l8r2": faster(1.2), "staged-l8r4": faster(1.5) },
+          8: { "staged-l8r2": faster(1.3), "staged-l8r4": faster(1.4), "staged-l8r8": faster(2) },
+        },
+      },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(
+      [decision.outcome, decision.derivedChoice, decision.derivedRowBlock],
+      ["adopted", "staged-l8", 8],
+    );
+    assertEquals(
+      decision.rowGains?.map(({ m, gain }) => `M${m} ${gain.toFixed(1)}`),
+      ["M4 1.5", "M4 1.5", "M8 2.0", "M8 2.0"],
+    );
+    const row = derivation.linearGemv?.parallelShapes.find(
+      ({ n, k, group }) => n === 8960 && k === 1536 && group === 32,
+    );
+    assertEquals(row, {
+      storage: "i4",
+      n: 8960,
+      k: 1536,
+      group: 32,
+      lanes: 8,
+      packedActivations: false,
+      stagedActivations: true,
+      rowBlock: 8,
+    });
+    assertStringIncludes(derivation.verdicts.join("\n"), "-> staged-l8 with row blocks of 8");
+  });
+
+  it("takes no row block that is not faster than the candidate's own kernel at the other row counts (fault: every row block at the default's time)", () => {
+    const derivation = derive([
+      { caseId: PLE, rows: PARALLEL_ROWS, times: at1({ "staged-l8": faster(1.3) }) },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals([decision.outcome, decision.derivedRowBlock], ["adopted", undefined]);
+    const row = derivation.linearGemv?.parallelShapes.find(
+      ({ n, k, group }) => n === 8960 && k === 1536 && group === 32,
+    );
+    assertEquals(row !== undefined && "rowBlock" in row, false);
+  });
+
+  it("adopts a candidate that is slower at another row count by its own kernel when a row block of its lanes is not", () => {
+    const derivation = derive([
+      {
+        caseId: PLE,
+        rows: PARALLEL_ROWS,
+        times: {
+          1: { "staged-l8": faster(1.3) },
+          4: { "staged-l8": faster(0.95), "staged-l8r4": faster(1.2) },
+          8: { "staged-l8": faster(0.9), "staged-l8r4": faster(1.1) },
+        },
+      },
+    ]);
+    const decision = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(
+      [decision.outcome, decision.derivedChoice, decision.derivedRowBlock],
+      ["adopted", "staged-l8", 4],
+    );
+  });
+
+  it("replaces the row block of a row whose lanes M = 1 keeps, at ×1.10 or more over the default's choice at every other row count", () => {
+    const blocks = {
+      4: { "staged-l4r2": faster(1.3), "staged-l4r4": faster(2) },
+      8: { "staged-l4r2": faster(1.6), "staged-l4r4": faster(3), "staged-l4r8": faster(2.1) },
+    };
+    // The default's row of the case: 4 lanes, plain, no row block
+    const defaultRow = DEFAULTS.parallelShapes.find(
+      ({ n, k, group }) => n === 2048 && k === 1536 && group === 512,
+    );
+    assert(defaultRow !== undefined, "the default table names the case's shape");
+    assertEquals(defaultRow.rowBlock, undefined);
+    const derivation = derive([{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }]);
+    const decision = decisionOf(derivation, "parallelShapes", Q_G512);
+    assertEquals(
+      [decision.outcome, decision.defaultChoice, decision.derivedChoice],
+      ["adopted", "parallel-l4", "parallel-l4"],
+    );
+    // A cap of 4 (×2 and ×3) and a cap of 8 (×2 and ×2.1) tie on the smallest gain: the lower cap
+    assertEquals([decision.defaultRowBlock, decision.derivedRowBlock], [undefined, 4]);
+    assertEquals(
+      derivation.linearGemv?.parallelShapes.find(
+        ({ n, k, group }) => n === 2048 && k === 1536 && group === 512,
+      ),
+      { ...defaultRow, rowBlock: 4 },
+    );
+    assertStringIncludes(
+      derivation.verdicts.join("\n"),
+      "parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×2.000 [1] M=4",
+    );
+    // Fault: one group below the threshold (×1.09 at M = 8 in record 2) keeps the row as it is
+    const below = derive(
+      [{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }],
+      [
+        {
+          caseId: Q_G512,
+          rows: PARALLEL_ROWS,
+          times: {
+            4: blocks[4],
+            8: {
+              "staged-l4r2": faster(1.09),
+              "staged-l4r4": faster(1.09),
+              "staged-l4r8": faster(1.09),
+            },
+          },
+        },
+      ],
+    );
+    assertEquals(decisionOf(below, "parallelShapes", Q_G512).outcome, "kept");
+    assertEquals(below.linearGemv, undefined);
+    // Fault: a record without M = 8 gives a row block no evidence there
+    const partial = derive(
+      [{ caseId: Q_G512, rows: PARALLEL_ROWS, times: blocks }],
+      [{ caseId: Q_G512, rows: [1, 4], times: { 4: blocks[4] } }],
+    );
+    assertEquals(decisionOf(partial, "parallelShapes", Q_G512).outcome, "kept");
   });
 
   it("leaves a row whose default takes packed activations as it is", () => {
@@ -492,9 +627,21 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
       rows: PARALLEL_ROWS,
       times: at1({ "staged-l8": faster(1.3) }),
     };
+    // A run that skips the candidate at M = 4 skips the row blocks of its lanes with it
     const skipped = derive(
       [adopted],
-      [{ ...adopted, fields: { 4: { "staged-l8": { skipped: true } } } }],
+      [
+        {
+          ...adopted,
+          fields: {
+            4: {
+              "staged-l8": { skipped: true },
+              "staged-l8r2": { skipped: true },
+              "staged-l8r4": { skipped: true },
+            },
+          },
+        },
+      ],
     );
     const decision = decisionOf(skipped, "parallelShapes", PLE);
     assertEquals([decision.outcome, decision.candidate], ["kept", "staged-l8"]);

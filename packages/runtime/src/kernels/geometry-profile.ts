@@ -58,8 +58,10 @@ import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
 import {
   assertLinearGemvVariant,
   isFloatStorage,
+  LINEAR_GEMV_PARALLEL_ROWS,
   type LinearGemvChoices,
   type LinearGemvParallelLanes,
+  linearGemvParallelRowsFits,
 } from "./linear-gemv.ts";
 import type { WeightStorage } from "./weight-storage.ts";
 
@@ -965,7 +967,7 @@ const assertGemvShapeVariantShape = (value: unknown, where: string, path: string
 };
 
 const assertGemvParallelShapeShape = (value: unknown, where: string, path: string): void => {
-  const { storage, n, k, group, lanes, packedActivations, stagedActivations } = recordOf(
+  const { storage, n, k, group, lanes, packedActivations, stagedActivations, rowBlock } = recordOf(
     value,
     where,
     path,
@@ -991,6 +993,26 @@ const assertGemvParallelShapeShape = (value: unknown, where: string, path: strin
   if (named !== undefined && isFloatStorage(named) && (group !== undefined || packedActivations)) {
     throw new CodegenError(
       `${where}: ${path}: a row of ${String(storage)} storage takes no group and no packedActivations`,
+    );
+  }
+  if (rowBlock === undefined) return;
+  assertOneOf(LINEAR_GEMV_PARALLEL_ROWS, rowBlock, where, `${path}.rowBlock`);
+  if (packedActivations) {
+    throw new CodegenError(
+      `${where}: ${path}.rowBlock is set on a row that takes packed activations (the row-blocked kernel reads f32 activations)`,
+    );
+  }
+  // The storage and the lanes passed the checks above; the kernel's own predicate decides the fit.
+  const rowStorage = PARALLEL_GEMV_STORAGES.find((one) => one === storage);
+  const rowLanes = PARALLEL_GEMV_LANES.find((one) => one === lanes);
+  if (
+    rowStorage === undefined ||
+    rowLanes === undefined ||
+    typeof rowBlock !== "number" ||
+    !linearGemvParallelRowsFits(rowStorage, rowLanes, rowBlock)
+  ) {
+    throw new CodegenError(
+      `${where}: ${path}.rowBlock ${JSON.stringify(rowBlock)} has no kernel for ${JSON.stringify(storage)} at ${JSON.stringify(lanes)} lanes (its staged activations exceed the workgroup storage)`,
     );
   }
 };

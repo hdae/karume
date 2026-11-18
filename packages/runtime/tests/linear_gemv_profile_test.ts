@@ -652,6 +652,73 @@ describe("a profile with other GEMV choices changes the selection and the pipeli
     assertEquals(keyOf(withRow(STAGED, unstaged), STAGED), "linear_gemv_parallel:wi4g32:l32");
   });
 
+  it("the row block: a row that carries one takes the row-blocked kernel at M = 2..8 in y tiles of its rows, and a row without it one workgroup row per row (fault: the field removed)", () => {
+    const { rowBlock: _rowBlock, ...bare } = measured(WIDE);
+    const without = withRow(WIDE, bare);
+    const blocked = withRow(WIDE, { ...bare, rowBlock: 4 });
+    const at = (m: number, knobs: Partial<LinearKnobs> = REORDER): Linear => ({
+      ...WIDE,
+      m,
+      knobs,
+    });
+    for (const [m, key] of [
+      [2, "linear_gemv_parallel:wi4g32:l4:staged-x:r2"],
+      [3, "linear_gemv_parallel:wi4g32:l4:staged-x:r2"],
+      [4, "linear_gemv_parallel:wi4g32:l4:staged-x:r4"],
+      [8, "linear_gemv_parallel:wi4g32:l4:staged-x:r4"],
+    ] as const) {
+      assertEquals(keyOf(blocked, at(m)), key, `M=${m}`);
+      assertEquals(keyOf(without, at(m)), "linear_gemv_parallel:wi4g32:l4", `M=${m}`);
+    }
+    // A cap of 8 gives M = 8 one block
+    assertEquals(
+      keyOf(withRow(WIDE, { ...bare, rowBlock: 8 }), at(8)),
+      "linear_gemv_parallel:wi4g32:l4:staged-x:r8",
+    );
+    // M = 1, the level exact, a row count past the parallel range and the subgroup form keep theirs
+    assertEquals(keyOf(blocked, at(1)), "linear_gemv_parallel:wi4g32:l4");
+    assertEquals(keyOf(blocked, at(4, {})), keyOf(without, at(4, {})));
+    assertEquals(keyOf(blocked, at(9)), keyOf(without, at(9)));
+    assertEquals(
+      keyOf(blocked, at(4, { linearGemvReduce: "parallel-subgroup32" })),
+      "linear_gemv_parallel:wi4g32:l4:subgroup32",
+    );
+    // The grid: 32 columns a workgroup at 4 lanes, and the block's rows a y tile
+    const plan = linearPlan(8, WIDE.n, WIDE.k);
+    const choice = selectLinearStrategy({
+      plan,
+      weightStorage: "i4",
+      groupSize: 32,
+      knobs: { ...KNOBS, ...REORDER },
+      linearGemv: blocked,
+      packed: undefined,
+      prologue: undefined,
+    });
+    assert("parallelRows" in choice && choice.parallelRows === 4, JSON.stringify(choice));
+    const [x, weight] = plan.inputShapes;
+    const [dispatch] = linearProgramFor(choice, {
+      x,
+      weight,
+      m: 8,
+      n: WIDE.n,
+      k: WIDE.k,
+      weightStorage: "i4",
+      groupSize: 32,
+      packedScale: undefined,
+      prologue: undefined,
+      geometryProfile: DEFAULT_GEOMETRY_PROFILE,
+      linearI8a8Dot: "dp4a",
+    }).dispatches;
+    assertEquals(dispatch.grid, {
+      kind: "tiled",
+      axes: [
+        { items: WIDE.n, tile: 32 },
+        { items: 8, tile: 4 },
+        { items: 1, tile: 1 },
+      ],
+    });
+  });
+
   it("the fusion pass reads the same table: linear → static_quantize fuses only on a shape the table names", () => {
     const { n, k } = WIDE;
     const ir = mergeGraph({
@@ -840,6 +907,16 @@ describe("assertGeometryProfile checks the GEMV choices", () => {
         false,
         "linearGemv.parallelShapes[0].stagedActivations must be true or absent",
       ],
+      [
+        ["linearGemv", "parallelShapes", 0, "rowBlock"],
+        3,
+        "linearGemv.parallelShapes[0].rowBlock must be one of 2 / 4 / 8 (3)",
+      ],
+      [
+        ["linearGemv", "parallelShapes", 0, "rowBlock"],
+        true,
+        "linearGemv.parallelShapes[0].rowBlock must be one of 2 / 4 / 8 (true)",
+      ],
     ] as const) {
       assertThrows(
         () => assertGeometryProfile(brokenAt(path, value)),
@@ -847,5 +924,38 @@ describe("assertGeometryProfile checks the GEMV choices", () => {
         `${where}: ${message}`,
       );
     }
+  });
+
+  it("accepts a row block the kernel exists at, and rejects one it does not exist at or one on a packed row", () => {
+    const where = "Geometry profile 'broken-gemv'";
+    const indexOf = (wanted: (row: LinearGemvParallelShape) => boolean): number => {
+      const index = OWN.linearGemv?.parallelShapes.findIndex(wanted) ?? -1;
+      assert(index >= 0, "the default table has no such row");
+      return index;
+    };
+    // i4 at 4 lanes: every height. i4 at 32 lanes: 2 rows are the most its workgroup storage holds
+    const wide = indexOf(
+      (row) => row.storage === "i4" && row.lanes === 4 && !row.packedActivations,
+    );
+    const narrow = indexOf(
+      (row) => row.storage === "i4" && row.lanes === 32 && !row.packedActivations,
+    );
+    const packed = indexOf((row) => row.packedActivations);
+    for (const rows of [2, 4, 8]) {
+      assertGeometryProfile(brokenAt(["linearGemv", "parallelShapes", wide, "rowBlock"], rows));
+    }
+    assertGeometryProfile(brokenAt(["linearGemv", "parallelShapes", narrow, "rowBlock"], 2));
+    assertThrows(
+      () =>
+        assertGeometryProfile(brokenAt(["linearGemv", "parallelShapes", narrow, "rowBlock"], 4)),
+      CodegenError,
+      `${where}: linearGemv.parallelShapes[${narrow}].rowBlock 4 has no kernel for "i4" at 32 lanes`,
+    );
+    assertThrows(
+      () =>
+        assertGeometryProfile(brokenAt(["linearGemv", "parallelShapes", packed, "rowBlock"], 2)),
+      CodegenError,
+      `${where}: linearGemv.parallelShapes[${packed}].rowBlock is set on a row that takes packed activations`,
+    );
   });
 });

@@ -191,6 +191,26 @@ measurements in `docs/research/`.
   next run, so one more token is delivered. Prefill chunks, the other pipelines' stage boundaries and generations
   without a `signal` are as before. Applies to every generation surface of the Gemma 4 pipelines (`chat`,
   `ChatSession`, `sequence`), with or without a drafter, the decode run-ahead or the expert cache.
+- `@karume/runtime`: a linear at the level `reorder` with 2 to 8 rows — the verify run of speculative decoding, a
+  short prefill — runs a row-blocked form of the parallel GEMV on the shapes whose profile row carries a row block
+  (`rowBlock` of a row of `GeometryProfile.linearGemv.parallelShapes`: 2, 4 or 8). A thread holds one lane of one
+  output column for several rows, so the weights are read and decoded once instead of once per row, and the
+  activations are staged per row in workgroup memory. Outputs are bit-identical to the parallel GEMV at the same
+  lanes (a verify row still equals the decode row of the same input); the pipeline key of such a dispatch is the
+  staged key with `:r<rows>`, and M = 1, the level `exact`, the subgroup form and packed-activation rows are
+  unchanged. A table refuses a row block the kernel does not exist at (its staged activations must fit 16,384 B of
+  workgroup storage) or one on a packed-activation row.
+- `@karume/runtime/tune`: the GEMV sweep measures the row-blocked parallel GEMV at 4 and 8 rows (candidates
+  `staged-l<lanes>r<rows>`; a row's `choice` gains `parallelRows`), for the lane counts M = 1 leaves adoptable and
+  the default row's, and measures the default row's own kernel of M = 1 there as well. `deriveLinearGemvChoices`
+  derives the row block of a parallel row with its lanes: for an adopted candidate the row block that fares best at
+  the other row counts (none unless one is faster), and for a row M = 1 keeps another row block than the default's
+  when it is at least ×1.10 faster in every group there. `LinearGemvDecision` gains `defaultRowBlock`,
+  `derivedRowBlock` and `rowGains` (the new type `LinearGemvRowGain`). A candidate that is slower than the default's
+  choice at 4 or 8 rows by its own kernel is now adopted when a row block of its lanes is not. Existing records keep
+  their format (`karume-gemv-sweep/4`).
+- The workbench's `kernel-check` entry runs a thirteenth check, `gemv-parallel-rows`: the row-blocked parallel GEMV
+  against the parallel GEMV at the same lanes, word for word, at every lane count and row block the kernel exists at.
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
   dropped the field before.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the

@@ -957,8 +957,8 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   default preset** (on 2026-09-26 the claim that "it can rarely split with the default preset" was
   withdrawn). Even with attention at the level `reorder`, the reduction order of attention is the same
   for M=1 and M=4 (①′ applies for M ≤ 8 and ③′ for M < 16, so both decode and verify are ①′ + ③′).
-  Identity including the other paths whose shape changes with M (the row blocks of the GEMV family and
-  so on) is checked in 2 tiers by `e2e_gemma4_speculative_test.ts` — speculation ⑤ = u32 equality of
+  Identity including the other paths whose shape changes with M (the row blocks of the GEMV family, the
+  row-blocked parallel GEMV a profile row's row block selects at M = 2 to 8, and so on) is checked in 2 tiers by `e2e_gemma4_speculative_test.ts` — speculation ⑤ = u32 equality of
   verify row 0 and the decode logits (the combinations of 3 attention forms × the parallel GEMV,
   attention `"sequential"` / `"parallel"` × the sequential GEMV, each with the RMS→add fusion (and the
   linear→SRQ fusion) applied or left out), and speculation ① / ② = equality of the generated

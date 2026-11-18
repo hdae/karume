@@ -18,6 +18,7 @@ describe("the kernel-check entry's checks", () => {
       "state-attention-rewrites": false,
       "gemv-integer": false,
       "gemv-planes": false,
+      "gemv-parallel-rows": false,
       "state-kv16": false,
       "score-f16-store": false,
       "state-bidirectional": false,

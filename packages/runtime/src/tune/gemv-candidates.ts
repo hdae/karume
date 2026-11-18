@@ -12,8 +12,9 @@
  *   sequential M = 1 kernel's variants (columns per workgroup × words read ahead) and, for M ≥ 2, the
  *   row-block heights.
  * - *reorder* — another summation order, held to the band of `linear`: the parallel GEMV at each
- *   lane count, plain and with staged activations, for M = 1..8, and its subgroup form where the
- *   device has the features the kernel needs.
+ *   lane count, plain and with staged activations, for M = 1..8, its subgroup form where the
+ *   device has the features the kernel needs, and for M ≥ 2 its row-blocked form at each height
+ *   the kernel exists at.
  *
  * A candidate is a `LinearGemvChoice` (src/runtime/linear-strategies.ts; a baseline may be the
  * GEMM's choice — {@link GemvKernelChoice}), and its dispatches are
@@ -37,7 +38,9 @@ import {
   defaultLinearGemvVariant,
   isFloatStorage,
   LINEAR_GEMV_PARALLEL_MAX_ROWS,
+  LINEAR_GEMV_PARALLEL_ROWS,
   type LinearGemvParallelLanes,
+  linearGemvParallelRowsFits,
   linearGemvRowsForShape,
   type LinearGemvVariant,
 } from "../kernels/linear-gemv.ts";
@@ -80,7 +83,8 @@ export type GemvKernelChoice = LinearGemvChoice | LinearGemmChoice;
 export type GemvCandidate = {
   /**
    * Unique within a case and row count: `c32u4`, `c32u4r8`, `parallel-l4`, `staged-l32`,
-   * `subgroup32-l8`, and `gemm` for the GEMM as a reference.
+   * `staged-l4r4` (the row-blocked form, 4 rows a thread), `subgroup32-l8`, and `gemm` for the
+   * GEMM as a reference.
    */
   readonly name: string;
   readonly class: GemvCandidateClass;
@@ -124,7 +128,7 @@ const gemvChoiceName = (choice: GemvKernelChoice): string => {
     case "gemv-parallel":
       return `parallel-l${choice.lanes ?? 0}`;
     case "gemv-parallel-staged":
-      return `staged-l${choice.lanes ?? 0}`;
+      return `staged-l${choice.lanes ?? 0}${choice.parallelRows === undefined ? "" : `r${choice.parallelRows}`}`;
     case "gemv-parallel-subgroup32":
       return `subgroup32-l${choice.lanes ?? 0}`;
     case "gemv-parallel-packed":
@@ -294,19 +298,44 @@ export type GemvM1Group = {
  *    group (baseline spread at most {@link GEMV_STEADY_SPREAD}). An unsteady group is no evidence,
  *    so its times rule nothing out; without the default's time at M = 1 the gain is unknown.
  *
+ * A row-blocked candidate (`choice.parallelRows`) has no row at M = 1: it is the form a parallel
+ * row of its lanes takes at M ≥ 2, so it is read by the rows of that lane count — measured when the
+ * default's choice at `reorder` at M = 1 has its lanes (the row the derivation keeps), or when the
+ * plain or the staged candidate of its lanes is carried by the conditions above.
+ *
  * Measured whatever M = 1 says: the references at `m` (`references` — the baseline and the default's
- * choice at `reorder`, which every gain is read against), the identical class, every role but
- * `no-regression`, and a candidate the M = 1 group has no row of.
+ * choice at `reorder`, which every gain is read against), the default's choice at `reorder` at M = 1
+ * (the same kernel unless the default's row carries a row block), the identical class, every role
+ * but `no-regression`, and a candidate the M = 1 group has no row of.
  */
 export const gemvCarriedFromM1 = (
   m: number,
-  candidate: Pick<GemvCandidate, "name" | "class">,
+  candidate: Pick<GemvCandidate, "name" | "class"> & {
+    readonly choice?: Pick<LinearGemvChoice, "lanes" | "parallelRows"> | LinearGemmChoice;
+  },
   references: { readonly exact: string; readonly reorder: string },
   first: GemvM1Group | undefined,
 ): boolean => {
   if (first === undefined || gemvGroupRole(m, candidate.class) !== "no-regression") return true;
   if (candidate.name === references.exact || candidate.name === references.reorder) return true;
-  const row = first.rows.find((one) => one.candidate === candidate.name);
+  // The default's choice at M = 1 is its row's own kernel: where the row carries a row block, the
+  // reference at `m` is the row-blocked one, and this is what shows whether the block pays here
+  if (candidate.name === first.profile.reorder) return true;
+  // The GEMM (a float-stored weight's reference) has no lanes and no row block
+  const { choice } = candidate;
+  const lanes =
+    choice !== undefined && "parallelRows" in choice && choice.parallelRows !== undefined
+      ? choice.lanes
+      : undefined;
+  if (lanes === undefined) return carriedByItsRow(candidate.name, first);
+  return [`parallel-l${lanes}`, `staged-l${lanes}`].some(
+    (base) => base === first.profile.reorder || carriedByItsRow(base, first),
+  );
+};
+
+/** Whether the M = 1 row of `name` leaves the candidate adoptable ({@link gemvCarriedFromM1}'s conditions). */
+const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
+  const row = first.rows.find((one) => one.candidate === name);
   if (row === undefined) return true;
   if (row.perDispatch === undefined || row.screened === true || row.error !== undefined) {
     return false;
@@ -376,7 +405,8 @@ const identicalChoices = (
 
 /**
  * The reorder class at `m` rows (M ≤ 8): every lane count, plain, staged and — when gated in, and for
- * an integer storage, the only ones with that form — subgroup.
+ * an integer storage, the only ones with that form — subgroup; then, for M ≥ 2, the row-blocked form
+ * at every lane count and every height of at most `m` rows the kernel exists at.
  */
 const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): LinearGemvChoice[] => {
   if (m > LINEAR_GEMV_PARALLEL_MAX_ROWS) return [];
@@ -385,16 +415,32 @@ const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): Linear
   const ids: LinearGemvChoice["id"][] = ["gemv-parallel", "gemv-parallel-staged"];
   // The subgroup form exists for the integer storages only
   if (gates.subgroups && !isFloatStorage(storage)) ids.push("gemv-parallel-subgroup32");
-  return ids.flatMap((id) =>
-    GEMV_LANES.map((lanes): LinearGemvChoice => ({
-      id,
+  const rowBlocks = GEMV_LANES.flatMap((lanes) =>
+    LINEAR_GEMV_PARALLEL_ROWS.filter(
+      (rows) => rows <= m && linearGemvParallelRowsFits(storage, lanes, rows),
+    ).map((rows): LinearGemvChoice => ({
+      id: "gemv-parallel-staged",
       storage,
       groupSize: group,
       lanes,
       variant,
       rowsVariant: undefined,
+      parallelRows: rows,
     })),
   );
+  return [
+    ...ids.flatMap((id) =>
+      GEMV_LANES.map((lanes): LinearGemvChoice => ({
+        id,
+        storage,
+        groupSize: group,
+        lanes,
+        variant,
+        rowsVariant: undefined,
+      })),
+    ),
+    ...rowBlocks,
+  ];
 };
 
 /** The facts `linearProgramFor` builds a case's program from at `m` rows. */

@@ -15,7 +15,7 @@
  * row there carries the `skipped` mark, its summary a count of skipped kernels.
  */
 
-import type { LinearGemvParallelLanes } from "../kernels/linear-gemv.ts";
+import type { LinearGemvParallelLanes, LinearGemvParallelRows } from "../kernels/linear-gemv.ts";
 import type { LinearGemvChoice } from "../runtime/linear-strategies.ts";
 import {
   type GemvCandidateClass,
@@ -39,6 +39,8 @@ export type GemvSweepFamilyChoice = {
   readonly lanes?: LinearGemvParallelLanes;
   readonly variant: { readonly cols: number; readonly unroll: number };
   readonly rowsVariant?: { readonly cols: number; readonly unroll: number; readonly rows: number };
+  /** The rows a thread of the row-blocked parallel form holds (absent for every other kernel). */
+  readonly parallelRows?: LinearGemvParallelRows;
 };
 
 /**
@@ -298,6 +300,7 @@ export const choiceRecord = (
             rows: choice.rowsVariant.rows,
           },
         }),
+    ...(choice.parallelRows === undefined ? {} : { parallelRows: choice.parallelRows }),
   };
 };
 
@@ -312,4 +315,5 @@ export const choiceOfRecord = (choice: GemvSweepChoice): GemvKernelChoice =>
         lanes: choice.lanes,
         variant: choice.variant,
         rowsVariant: choice.rowsVariant,
+        ...(choice.parallelRows === undefined ? {} : { parallelRows: choice.parallelRows }),
       };
