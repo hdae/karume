@@ -448,8 +448,6 @@ export type PipelineOptions = {
    * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
-  /** Test only ({@link WHOLE_ROW_SAMPLING}): sampled decode steps read the whole logits row back. */
-  readonly [WHOLE_ROW_SAMPLING]?: true;
   /**
    * The numeric requirement of the language-model Sessions: how far each kind of op may stand from
    * its reference kernel (`exact` or `reorder`, for the whole model and per op kind — the runtime's
@@ -815,12 +813,8 @@ export type ChatOptions = {
 };
 
 /**
- * The internal state of {@link Pipeline} (not exposed on the public surface — exported only for the
- * mobile QAT subclass in `./qat-pipeline.ts`).
- */
-/**
- * A test-only key of {@link PipelineOptions} (a symbol, so no distribution, saved setting or
- * untyped caller can carry it): the pipeline is built **without the candidate selection**, so a
+ * A test-only key of a pipeline's options (a symbol, so no distribution, saved setting or untyped
+ * caller can carry it, and not a member of the public {@link PipelineOptions} type): the pipeline is built **without the candidate selection**, so a
  * decode step that samples from the top-k reads the whole logits row back and draws from it on the
  * host, as every such step did before the selection existed.
  *
@@ -834,6 +828,19 @@ export type ChatOptions = {
  */
 export const WHOLE_ROW_SAMPLING: unique symbol = Symbol("karume.gemma.wholeRowSampling");
 
+/**
+ * Whether `options` carry {@link WHOLE_ROW_SAMPLING}. The key is read through this type, internal
+ * to the module, so the public options type does not name it; a test passes it in an object spread.
+ */
+const wholeRowSampling = (options: PipelineOptions): boolean => {
+  const internal: PipelineOptions & { readonly [WHOLE_ROW_SAMPLING]?: true } = options;
+  return internal[WHOLE_ROW_SAMPLING] === true;
+};
+
+/**
+ * The internal state of {@link Pipeline} (not exposed on the public surface — exported only for the
+ * mobile QAT subclass in `./qat-pipeline.ts`).
+ */
 export type Gemma4State = {
   /**
    * The name of the entry point used for construction ({@link gemmaEntryName}). The prefix of
@@ -2036,7 +2043,7 @@ export class GemmaPipeline {
           ? {}
           : { fullStateStorage: sessionOptions.fullStateStorage }),
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
-        ...(greedyOutput?.candidates === undefined || options[WHOLE_ROW_SAMPLING] === true
+        ...(greedyOutput?.candidates === undefined || wholeRowSampling(options)
           ? {}
           : { candidateSelection: greedyOutput.candidates }),
         graph: model.graph,
