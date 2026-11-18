@@ -5,14 +5,19 @@
  * is `linear`'s own sequential GEMV (`linearGemvWgsl`, i4) on the picked expert's rows with the
  * steps widened to f32 (exact — ADR 0069 decision 3): every output word of every pick MUST equal
  * that GEMV's word. A word that differs is a different expert row, x row, step or summation order.
- * Both forms of the kernel are held to it at both shapes: the one-row form, and the grouped form
- * (the rows that picked one expert share the walk of its weight row), which a run of two or more
- * tokens takes for gate_up's long rows.
+ * Three kernels are held to it at both shapes: the one-row form, the grouped form (the rows that
+ * picked one expert share the walk of its weight row, which a run of two or more tokens takes for
+ * gate_up's long rows), and the grouped form over a pool (the form the expert cache runs). The
+ * grouped form calls a word function where the one-row form and `linear`'s GEMV have the same text
+ * inline, so that a backend's compiler rounds both alike is what this check shows per backend.
  *
  * The two 26B projections: gate_up (n 1408, k 2816, x shared by the picks) and down (n 2816, k 704,
- * one x row per pick), each over E = 8 experts, T = 3 tokens of k = 8 picks whose ids repeat within
- * and across tokens (expert 6 five times, by all three tokens). Every column of the expert output
- * starts as a NaN pattern, so an unwritten word mismatches too.
+ * one x row per pick), each over E = 8 experts, T = 9 tokens of k = 8 picks. The experts are picked
+ * 9, 16, 12, 7, 10, 6, 3 and 9 times ({@link SHARERS}), so the grouped form takes every walk it
+ * generates, alone and after another: 8 + 1, two scans of 8, 8 + 4, 4 + 2 + 1, 8 + 2, 4 + 2 and
+ * 2 + 1 rows; an id repeats within a token too. In the pool the experts sit in another order than
+ * their ids (a slot table maps them), so an addressing slip reads another expert. Every column of
+ * the expert output starts as a NaN pattern, so an unwritten word mismatches too.
  */
 
 import type { GpuContext } from "../../runtime/src/gpu/device.ts";
@@ -41,17 +46,24 @@ import {
 
 const GROUP = 32;
 const EXPERTS = 8;
-const TOKENS = 3;
+const TOKENS = 9;
 const PICKS = 8;
+/** How many of the T × k pick rows pick each expert (module doc). */
+const SHARERS: readonly number[] = [9, 16, 12, 7, 10, 6, 3, 9];
+/** The slot of each expert in the pool of the pooled form: a permutation, no expert in its own slot. */
+const SLOT_OF: readonly number[] = [3, 6, 1, 4, 7, 2, 5, 0];
 const NAN_FILL = 0x7fc00000;
 const NEGATIVE_ZERO = 0x80000000;
 
-/** The ids of the T × k picks: repeats within a token (t0 j0 / j5, t2 j1 / j6) and across tokens. */
-const IDS: readonly number[] = [
-  [3, 0, 7, 1, 6, 3, 2, 5],
-  [5, 4, 1, 0, 2, 7, 6, 3],
-  [2, 6, 6, 0, 4, 1, 5, 6],
-].flat();
+/**
+ * The ids of the T × k picks: {@link SHARERS}' ids in order (expert 0 nine times, expert 1 sixteen
+ * times, …) spread over the rows by a fixed permutation (row `i` takes entry `29 i + 5 mod 72`), so
+ * the rows of one expert are scattered over the tokens and repeat within some of them.
+ */
+const IDS: readonly number[] = (() => {
+  const sorted = SHARERS.flatMap((count, expert) => new Array<number>(count).fill(expert));
+  return sorted.map((_, row) => sorted[(row * 29 + 5) % sorted.length]);
+})();
 
 type Shape = {
   readonly name: string;
@@ -130,6 +142,8 @@ export const checkExpertLinear = async (
     options.mutateGrouped,
     "grouped",
   );
+  const pooledGrouped = expertLinearWgsl("i4f16", GROUP, true, true);
+  if (IDS.length !== TOKENS * PICKS) throw new Error("expert-linear: the routing is not T × k ids");
   for (const shape of SHAPES) {
     throwIfAborted(options);
     const { n, k, sharedX } = shape;
@@ -209,6 +223,52 @@ export const checkExpertLinear = async (
           rows * n,
           dispatch(await compile(mutatedGrouped), bound, workgroups),
         );
+        // The pooled grouped form: every expert resident, in the slot SLOT_OF gives it.
+        const pooledWords = (per: number, source: Uint32Array<ArrayBuffer>) => {
+          const pool = new Uint32Array(source.length);
+          SLOT_OF.forEach((slot, expert) => {
+            pool.set(source.subarray(expert * per, (expert + 1) * per), slot * per);
+          });
+          return pool;
+        };
+        // An expert's f16 steps are a whole number of u32 words (n · k / 32 is even at both shapes).
+        const stepWordsPerExpert = (n * k) / GROUP / 2;
+        if (!Number.isInteger(stepWordsPerExpert)) {
+          throw new Error("expert-linear: an expert's f16 steps do not fill whole words");
+        }
+        device.queue.writeBuffer(out, 0, new Uint32Array(rows * n).fill(NAN_FILL));
+        const gotPooled = await readBack(
+          out,
+          rows * n,
+          dispatch(
+            await compile(pooledGrouped),
+            [
+              make(
+                expertLinearParams(
+                  "i4f16",
+                  {
+                    tokens: TOKENS,
+                    picks: PICKS,
+                    n,
+                    k,
+                    experts: EXPERTS,
+                    sharedX,
+                    slots: EXPERTS,
+                  },
+                  GROUP,
+                ),
+                U.UNIFORM | U.COPY_DST,
+              ),
+              bound[1],
+              bound[2],
+              make(pooledWords((n * k) / 8, data.packed)),
+              out,
+              make(pooledWords(stepWordsPerExpert, data.stepWords)),
+              make(Int32Array.from(SLOT_OF)),
+            ],
+            workgroups,
+          ),
+        );
         // The oracle: linear's M = 1 GEMV over one expert's rows (bias 0, steps widened), in the
         // default profile's variant (built without a Session, so no adapter's table applies).
         const gemv = await compile(
@@ -261,6 +321,11 @@ export const checkExpertLinear = async (
                 wordsOf(gotGrouped),
                 expected,
               ),
+              compareWords(
+                "the pooled grouped form vs linear's GEMV on that expert (u32)",
+                wordsOf(gotPooled),
+                expected,
+              ),
             ],
           });
           options.onProgress?.({ part: "expert-linear", done: cases.length, total });
@@ -274,7 +339,7 @@ export const checkExpertLinear = async (
   return {
     id: "expert-linear",
     title:
-      "expert_linear (f16 steps), one-row and grouped: against linear's GEMV on each picked expert",
+      "expert_linear (f16 steps), one-row, grouped and pooled grouped: against linear's GEMV on each picked expert",
     cases,
     requirements: [],
   };

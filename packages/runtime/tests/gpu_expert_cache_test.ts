@@ -20,6 +20,10 @@
 //
 // Every load goes through the staging ring; the last describe adds the host tier (`hostBytes`) and
 // loads larger than the ring (rounds).
+//
+// One more graph has weight rows long enough for the grouped form of expert_linear (64 words): a run
+// of several rows over the cache takes that form over the pool, and its exact run is the resident
+// Session's bytes too.
 
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -27,6 +31,7 @@ import type { BoundContainer } from "../src/format/container/bind.ts";
 import { openContainer } from "../src/format/container/open.ts";
 import { parseIrDeclarationValue } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { expertLinearKey } from "../src/kernels/expert-linear.ts";
 import {
   createSessionFromContainer,
   type ExpertCache,
@@ -253,6 +258,60 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
       });
     });
   }
+
+  // Long weight rows: gate_up reads 2048 elements (64 words of i4), so a run of several rows takes
+  // the grouped form — over the pool with the cache, over every expert without. Four rows of 4
+  // picks over 16 experts share experts whatever the routing is (16 pick rows, and the routing
+  // below reaches fewer than 16 experts), so walks of several rows run.
+  it("runs the grouped expert_linear over the pool for long weight rows, bit-identical to full residency", async () => {
+    const long: ExpertGraphShape = { experts: 16, picks: 4, width: 2048, ffn: 32, layers: 1 };
+    const rows = 4;
+    const container = await containerOf(
+      "in-memory",
+      expertGraph(long),
+      expertTensors(long, "i4f16"),
+    );
+    await withSessions(
+      container,
+      async (resident, cached, cache) => {
+        const inputs: RunInputs = {
+          x: {
+            dtype: "f32",
+            shape: [rows, long.width],
+            data: waveValues(rows * long.width, 13, 1.5),
+          },
+        };
+        const expected = await resident.run(inputs);
+        const kernels = (session: Session): (readonly [string, number])[] =>
+          (session.diagnostics().lastRunPipelines ?? [])
+            .filter(({ key }) => key.startsWith("expert_linear:"))
+            .map(({ key, dispatchCount }) => [key, dispatchCount] as const)
+            .sort(([left], [right]) => (left < right ? -1 : 1));
+        // Resident: gate_up grouped, down (32 elements a row) one-row.
+        assertEquals(kernels(resident), [
+          [expertLinearKey("i4f16", 32), 1],
+          [expertLinearKey("i4f16", 32, false, true), 1],
+        ]);
+        const converged = await converge(cache, () => cache.run(inputs));
+        const [first] = converged.runs;
+        const last = converged.runs.at(-1);
+        // MUST (precondition): the input misses, so the exact run is a run again after a load.
+        assert(first.missing > 0, "the first run missed nothing");
+        assert(last !== undefined && last.missing === 0);
+        // MUST (precondition): rows share experts, so the grouped form walks several rows at once.
+        const picked = new Set(last.routing.ids).size;
+        assert(picked < rows * long.picks, `${picked} experts for ${rows * long.picks} pick rows`);
+        // Under the cache: the same two forms, over the pool.
+        assertEquals(kernels(cached), [
+          [expertLinearKey("i4f16", 32, true), 1],
+          [expertLinearKey("i4f16", 32, true, true), 1],
+        ]);
+        assertNotEquals(bits(first.outputs["out"]), bits(expected["out"]), "missed run");
+        assertEquals(bits(last.outputs["out"]), bits(expected["out"]), "exact run");
+      },
+      16,
+    );
+  });
 
   // One slot count per layer: 8 in layer 0, 12 in layer 1. Layer 1 holds more experts than layer
   // 0's count (its slots 8 to 11 are used — a pool or a kernel sized by layer 0's count would fail
