@@ -7,7 +7,7 @@
  * 1. `fromSingleFile(file, mirror, { model: "anima-v1.0", quant: "bf16" })` equals
  *    `fromPretrained(mirror, { model: "anima-v1.0", quant: "bf16" })`: every component of the bf16
  *    preset is the upstream bits, so the file converted against its plans gives the same weights.
- * 2. The default quant with `components: { text_conditioner: { source: mirror } }` equals
+ * 2. The default quant with `components: { text_conditioner: { source: mirror, model } }` equals
  *    `fromPretrained` with the default quant: the transformer converted against the `i8` plan gives
  *    the `i8` files' weights.
  * 3. The default quant with the text conditioner from the file, stored against the plan of the
@@ -41,6 +41,18 @@ const FILE = new URL(
 );
 const MIRROR_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 const MODEL = "anima-v1.0";
+
+/**
+ * The text conditioner of {@link MODEL} as a component replacement. MUST name the model: a
+ * replacement without one takes the repository's default model, which is another, and the bf16
+ * text conditioners of the two differ in a few values too small for f16 to hold.
+ */
+const DISTRIBUTED_TEXT_CONDITIONER = <Source>(
+  source: Source,
+): { source: Source; model: string } => ({
+  source,
+  model: MODEL,
+});
 
 const exists = async (url: URL): Promise<boolean> => {
   try {
@@ -161,7 +173,7 @@ describe("anima.Pipeline.fromSingleFile on the upstream base file (real GPU)", (
         async () =>
           Pipeline.fromSingleFile(await upstreamFile(), mirror, {
             ...(await optionsOf()),
-            components: { text_conditioner: { source: mirror } },
+            components: { text_conditioner: DISTRIBUTED_TEXT_CONDITIONER(mirror) },
           }),
       );
       assertEquals(fromFile, await defaultPretrainedSha());
@@ -201,7 +213,7 @@ describe("anima.Pipeline.fromSingleFile on the upstream base file (real GPU)", (
       };
       const pipeline = await Pipeline.fromSingleFile(file, mirror, {
         ...(await optionsOf()),
-        components: { text_conditioner: { source: mirror } },
+        components: { text_conditioner: DISTRIBUTED_TEXT_CONDITIONER(mirror) },
         retainConverted: true,
       });
       const shas: string[] = [];
