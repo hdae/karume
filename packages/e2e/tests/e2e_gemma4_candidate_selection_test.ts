@@ -16,8 +16,9 @@
  *    match too, and the pipeline with the selection must report that it drew from it
  *    (`done.candidateSelection`) — a selection that fell back to the whole row at every step would
  *    pass the id comparison alone.
- * ② **a two-turn sequence** — the second turn prefills with the first turn's frontier prepended, so
- *    a frontier lost or fed twice around the selection's draw shows as a different second turn.
+ * ② **a two-turn sequence** at a temperature other than 1 — the second turn prefills with the first
+ *    turn's frontier prepended, so a frontier lost or fed twice around the selection's draw shows as
+ *    a different second turn. Each turn's stop reports its own draws from the selection.
  *
  * 12B has suppressed tokens (`<image|>` / `<audio|>`), which the draw masks on the host from two
  * more leading entries.
@@ -82,7 +83,7 @@ const CHATS: readonly {
 
 type Observed = {
   readonly chats: readonly { readonly ids: readonly number[]; readonly stop: ChatStop }[];
-  readonly turns: readonly (readonly number[])[];
+  readonly turns: readonly { readonly ids: readonly number[]; readonly stop: ChatStop }[];
 };
 
 /** Everything one pipeline produces (one load per pipeline). */
@@ -106,7 +107,7 @@ const observe = async (model: string, wholeRow: boolean): Promise<Observed> => {
     }
     const tokenizer = pipeline.tokenizer;
     const sequence = await pipeline.sequence();
-    const turns: number[][] = [];
+    const turns: { ids: number[]; stop: ChatStop }[] = [];
     try {
       for (const [prompt, maxNewTokens] of [
         [chatPrompt(tokenizer, [{ role: "user", content: "Describe a harbour at dawn." }]), 24],
@@ -116,11 +117,10 @@ const observe = async (model: string, wholeRow: boolean): Promise<Observed> => {
         const stream = sequence.generate({
           prompt,
           maxNewTokens,
-          sampler: { temperature: 1.5, topK: 64, topP: 0.95, seed: 11 },
+          sampler: TURN_SAMPLER,
         });
         for await (const event of stream) if (event.kind === "token") ids.push(event.id);
-        await stream.done;
-        turns.push(ids);
+        turns.push({ ids, stop: await stream.done });
       }
     } finally {
       await sequence.dispose();
@@ -136,6 +136,9 @@ const stopOf = (stop: ChatStop): Omit<ChatStop, "candidateSelection"> => {
   const { candidateSelection: _counters, ...rest } = stop;
   return rest;
 };
+
+/** The two-turn sequence's sampler: a temperature other than 1. */
+const TURN_SAMPLER: SamplerSpec = { temperature: 1.5, topK: 64, topP: 0.95, seed: 11 };
 
 /** The models, with the leading entries the declared sampler asks for: top-k 64 + suppressed + 1. */
 for (const [model, count] of [
@@ -168,14 +171,33 @@ for (const [model, count] of [
         const expected = (CHATS[at].sampler.topK ?? 0) + (count - 65) + 1;
         assertEquals(counters.count, expected, `chat ${at}: the entries asked for`);
         assertEquals(counters.steps + counters.fallbacks, decodeSteps, `chat ${at}`);
-        // A step may legitimately read the whole row (a tie the entries cannot settle); a turn
-        // that mostly does is not using the selection.
+        // A step may legitimately read the whole row (a tie the entries cannot settle, a part
+        // that holds too many of them). Which steps do depends on the logits of these prompts on
+        // these weights and this device, so the count is not pinned; the bound is what they need
+        // with room to spare, and a selection that stopped answering reads the whole row at most
+        // of the steps.
         assert(
           counters.fallbacks <= 2,
           `chat ${at}: ${counters.fallbacks} of ${decodeSteps} decode steps read the whole row`,
         );
       }
-      assertEquals(selected.turns, whole.turns, "the two-turn sequence's token ids");
+      for (const [at, turn] of selected.turns.entries()) {
+        const reference = whole.turns[at];
+        assertEquals(turn.ids, reference.ids, `turn ${at} token ids`);
+        assertEquals(stopOf(turn.stop), stopOf(reference.stop), `turn ${at} stop`);
+        assertEquals(reference.stop.candidateSelection, undefined, `turn ${at}`);
+        // The second turn draws from the selection as the first does: its counters are its own.
+        const counters = turn.stop.candidateSelection;
+        assert(counters !== undefined, `turn ${at}: the sequence did not report the selection`);
+        assertEquals(counters.count, (TURN_SAMPLER.topK ?? 0) + (count - 65) + 1, `turn ${at}`);
+        assertEquals(counters.steps + counters.fallbacks, turn.stop.tokens - 1, `turn ${at}`);
+        // A temperature other than 1 adds the ties it rounds two logits into; the same reading
+        // of the bound as above.
+        assert(
+          counters.fallbacks <= 2,
+          `turn ${at}: ${counters.fallbacks} of ${turn.stop.tokens - 1} decode steps read the whole row`,
+        );
+      }
       assert(
         new Set(selected.chats[0].ids).size > 8,
         "the open request's tokens barely vary, so the comparison says little",
