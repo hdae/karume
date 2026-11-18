@@ -70,7 +70,8 @@
  *
  * {@link runGemvSweep} measures the GEMV choices of `linear` (the sequential variant, the row-block
  * height, the parallel GEMV's lane count, staged or subgroup) on a dedicated device, at the shapes of
- * the default profile's GEMV rows, and returns its own record (`karume-gemv-sweep/4`). After a warm
+ * its case table (the default profile's GEMV rows and the other integer-storage linears a Gemma 4
+ * decode token or draft step runs), and returns its own record (`karume-gemv-sweep/4`). After a warm
  * start, every kernel of a row count gets a quick look, and only the references and the kernels near
  * enough to matter are timed and checked: a screened kernel's row holds its quick time only. At M = 4
  * and 8 a reorder candidate that the same run's M = 1 group of the case already leaves unadoptable is

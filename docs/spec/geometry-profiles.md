@@ -83,8 +83,10 @@ adapter's match and measures nothing at run time.
   parallel GEMV with their lane count and their packed and staged flags.
 - What measures them on a host's GPU is the GEMV sweep: `runGemvSweep` of `@karume/runtime/tune`, run by the
   workbench's `gemv-sweep` entry ([workbench.md](workbench.md#the-entries)). Its cases are the shapes of the default
-  profile's GEMV rows and the linears of regular Gemma 4 E2B and E4B in bf16; per case and row count it measures the
-  baseline (what a Session at the level `exact` runs with
+  profile's GEMV rows, the other integer-storage linears a decode token or a draft step of the Gemma 4 distributions
+  runs at one row (the int2 and int4 output heads, the MTP drafters) and the linears of regular Gemma 4 E2B and E4B
+  in bf16, so that a table can be derived for a shape the default profile gives no row; per case and row count it
+  measures the baseline (what a Session at the level `exact` runs with
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
   and against the parallel GEMV at each lane count, plain, staged and subgroup, held to the band of `linear`, after a
   quick look that times in full only the references and the kernels near enough to matter; at M = 4 and 8 it skips the

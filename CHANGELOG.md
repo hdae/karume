@@ -73,7 +73,9 @@ measurements in `docs/research/`.
 ### Added
 
 - `@karume/runtime/tune`: `runGemvSweep`, the GEMV sweep. On a dedicated device it measures the GEMV choices of
-  `linear` at the shapes of the default profile's GEMV rows and the row counts 1, 4, 8, 16 and 64 (the sets `quick`:
+  `linear` at the shapes of its case table — the default profile's GEMV rows and the other integer-storage linears a
+  decode token or a draft step of the Gemma 4 distributions runs at one row (the int2 and int4 output heads, the MTP
+  drafters) — and the row counts 1, 4, 8, 16 and 64 (the sets `quick`:
   M = 1; `full`: M = 1, 4 and 8; `row-blocks`: M = 16 and 64): per case the
   baseline (what a Session at the level `exact` runs), the sequential variants and row-block heights, whose output
   words must equal the baseline's, and the parallel GEMV at each lane count, plain, staged and — where the device has
