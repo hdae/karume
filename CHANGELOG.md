@@ -187,8 +187,14 @@ measurements in `docs/research/`.
   such a row as a geometry of its own under its one adoption rule and writes an adopted one into the table's
   `gemmRows` rule or `conv2d` field with its fields; it refuses a row that carries a field its op does not take. A
   sweep of every case has 1,517 rows at `"quick+"` (821 before) and 10,040 at `"full"` (6,269 before). The case
-  sets, the default kernels and their fingerprints do not change: a stored table still matches, and no embedded table
-  carries the fields.
+  sets, the default kernels and their fingerprints do not change: a stored table still matches.
+- `@karume/runtime`: the embedded table `nvidia-blackwell` (NVIDIA Blackwell adapters, measured on an RTX 5070 Ti in
+  Chrome on D3D12) is derived again from one `quick+` sweep and adopts the skeleton forms and the counter decode: its
+  `gemmRows` rules above 64 rows carry a form (×1.07–1.11 over the default geometry on the sweep's linear / matmul /
+  bmm cases) and both `conv2d` fields a form with the decode (×1.20 and ×1.26); the tiles of two rules of 129 to 512
+  rows, of `conv2d.rows64`, of the i8a8 linear above 512 rows and of the i8a8 attention's ①QK move with it. Speed
+  only: every timed row of the sweep is identical to the default geometry's output, and the pipeline keys of those
+  kernels now end in `:tb-un`, `:tas-tb-un` and, for conv2d, `:dec`. The other embedded tables are unchanged.
 - Exporter: `karume.quantize.round_weights_to_f16` follows the rule `round_weights_to_bf16` follows — it rounds only
   what the checkpoint carries (every parameter and the persistent buffers) and leaves non-persistent buffers computed
   at init, such as RoPE's `inv_freq`, at their f32 values. Before, it rounded every f32 buffer, so the constants an f16
@@ -306,7 +312,8 @@ measurements in `docs/research/`.
   k-major. `decode` (`"counter"`, in `conv2d` only) is the im2col decode of conv2d's vec4 implicit GEMM: a per-slot
   counter instead of a division per K tile, and an edge path that checks the input row once per quad. The output
   words are the same as without them; only speed differs, and the pipeline key names them (`:tb-un`, `:tas-tb-un`,
-  `:dec`). A geometry without them keeps its keys and WGSL byte for byte, and no embedded table carries them.
+  `:dec`). A geometry without them keeps its keys and WGSL byte for byte; of the embedded tables,
+  `nvidia-blackwell` carries them (below).
   `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept them there and
   reject any other value, the decode outside `conv2d` and either field in `attention`, naming the field.
 - `@karume/runtime/tune`: the candidate set `"k88"` of `runGeometrySweep`, an evaluation of those two fields on

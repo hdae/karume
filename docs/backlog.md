@@ -213,6 +213,10 @@ maintainer's ruling of 2026-11-06).
        cases, and five drafter shapes take a default row —
        [research](research/2026-11-18-gemma4-gemv-census.md).)* Open: the
        registered tables' `gemm` and `conv2d` families derived from a sweep that measured those fields, and the K-88
+       2026-11-18: `nvidia-blackwell` derived again from a `quick+` sweep of the RTX 5070 Ti with those fields; it
+       carries a form in its `gemmRows` rules above 64 rows and a form with the decode in both `conv2d` fields.)*
+       Open: the `gemm` and `conv2d` families of `nvidia-ampere` and `apple-metal-3` derived from a sweep that
+       measured those fields (on the RTX 3080 Ti a case of that sweep heats the card: in chunks), and the K-88
        shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case sets, which
        moves those families' case-set versions; regenerating the registered
        tables from GEMV sweeps; the two drafter shapes with a large gain whose row-block baseline was unsteady

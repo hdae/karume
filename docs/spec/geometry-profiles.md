@@ -48,7 +48,9 @@ adapter's match and measures nothing at run time.
 - The two sets grow by these candidates: `quick+` from 821 to 1,517 rows over the sweep's 78 cases, `full` from 6,269
   to 10,040. The case sets, the default kernels and their fingerprints do not change, so a registered table still
   matches.
-- No registered table carries a field. A table takes one when its family is derived from a sweep that measured it.
+- `nvidia-blackwell` carries them: a form in its four `gemmRows` rules above 64 rows, and a form with the decode in
+  both `conv2d` fields. `nvidia-ampere` and `apple-metal-3` carry none; a table takes one when its family is derived
+  from a sweep that measured it.
 
 ## A record
 
