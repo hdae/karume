@@ -140,7 +140,8 @@ parallel candidates 0.23 (E2B, 129 rows) and 0.26 (E4B, 115 rows); the baselines
   quarter of the bytes in flight. This is a per-shape exception of the sequential variant (`sequential.shapes`), a
   choice of the identical class that changes no number of any Session; the derivation adopts it from these records for
   the three shapes two records hold (6144 × 1536, 12288 × 1536, 1536 × 12288: `c16u8`, ×1.55–1.70). It is not
-  registered here.
+  registered here. Registered later the same day for 23 shapes, from more records and with a decode A/B:
+  [the sequential variants](2026-11-18-sequential-gemv-variants.md).
 
 ## 6. Why no row is registered
 

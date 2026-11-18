@@ -236,7 +236,7 @@ maintainer's ruling of 2026-11-06).
        shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case sets, which
        moves those families' case-set versions; regenerating the registered
        tables from GEMV sweeps; the two drafter shapes with a large gain whose row-block baseline was unsteady
-       (`256 × 2048`, `256 × 5120`) and the int4 output heads (perf-ledger K-101); a rule for the row-block thread target from the `row-blocks` set; the shared
+       (`256 × 2048`, `256 × 5120`) and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101; their sequential variant and the bf16 linears' landed 2026-11-18 as exceptions of the default profile, K-112); the sequential exceptions on the other devices, which run the RTX 3080 Ti's and measured none; the drafter shape `256 × 2048`, for which the records adopt a sequential variant that is not applied; the bf16 output heads, whose general variant ran at two speeds from record to record; a rule for the row-block thread target from the `row-blocks` set; the shared
        sequential keys whose cases disagree (the key has no group length); the packed rows (not measured); the
        integer and byte-plane GEMV tables, which are still in the kernel source; the geometry sweep's rounds taken
        geometry after geometry (interleaving them as the GEMV sweep does needs a steadiness rule from evidence to

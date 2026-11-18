@@ -173,6 +173,19 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime`: the sequential GEMV of one row runs another variant of its kernel on 25 more shapes: 16 output
+  columns per workgroup on the int4 output heads of the Gemma 4 q4_0 QAT E2B and E4B models (`262144 × 1536`,
+  `262144 × 2560`), and 8 or 16 weight words read ahead, where it read 4, on 23 bf16 linears of regular Gemma 4 E2B
+  and E4B (every one but the two output heads). Outputs do not change by a bit — a variant changes which columns a
+  workgroup takes and how many words it reads before it multiply-adds them, not the order of the additions —, so a
+  Session at `exact` runs it. In `SessionDiagnostics.lastRunPipelines` those dispatches read
+  `linear_gemv:v1:f32:c16u2:wi4g32`, and `…:c16u8:wbf16`, `…:c16u16:wbf16` or `…:c32u16:wbf16`, in place of
+  `…:c32u4:…`. On an RTX 3080 Ti under Node a decode token of regular Gemma 4 `bf16` takes 18.8 ms in place of
+  23.4 ms (E2B) and 27.7 ms in place of 36.1 ms (E4B); of the QAT line, E2B `i4-fast` 6.4 in place of 6.7 ms, E4B
+  `i4` 23.6 in place of 24.4 ms and E4B `i4-fast` 11.1 in place of 11.9 ms, and E2B `i4` shows no difference the
+  measurement resolves. The shapes are rows of the default geometry profile
+  (`GeometryProfile.linearGemv.sequential.shapes`), measured on that card; every embedded table runs with them, and
+  they were measured on no other device.
 - `@karume/runtime`: with linear at the level `reorder`, five linear shapes of the Gemma 4 MTP drafters take the
   parallel GEMV in place of the sequential one: int4 (group 32) `256 × 3072` and `256 × 1024` of the q4_0 QAT E2B / E4B
   drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`

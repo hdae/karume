@@ -110,6 +110,18 @@ adapter's match and measures nothing at run time.
   RTX 3080 Ti: the Session fills them in once, where it selects its profile, so the linear selection, the fusion pass
   and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the default
   profile's.
+- The default profile's sequential variant is 32 columns per workgroup and 4 weight words read ahead (`c32u4`). Its
+  per-shape exceptions are the shapes for which the derivation adopts another variant from GEMV sweep records of the
+  RTX 3080 Ti ([perf-ledger](../perf-ledger.md) K-101, K-112), 26 rows:
+  - the int8 output head `262144 × 1536`: `c16u4`;
+  - the int4 output heads of the Gemma 4 q4_0 QAT E2B and E4B models, `262144 × 1536` and `262144 × 2560`: `c16u2`;
+  - 23 bf16 linears of regular Gemma 4 E2B and E4B — every bf16 case of the sweep but the two output heads — which
+    read 8 or 16 words ahead: `c16u8` on 12 shapes, `c16u16` on 10 and `c32u16` on `1536 × 256`. A bf16 word holds 8
+    elements where an int4 word holds 32, so 4 words ahead keep a quarter of the bytes in flight.
+
+  An exception names a storage and a shape, has no group length, and applies at one row: a row block takes the
+  general variant. Its words are the general variant's, so every Session runs it, at `exact` too, on every adapter
+  whose table has no GEMV choices of its own.
 - A table carries the field only as a whole: the default's choices with the derived ones in place. Its provenance has
   no entry for the field (the profile's type holds none); the records it came from are in the table's header.
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
@@ -276,8 +288,13 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
-- The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
-  the profile, and a profile with other choices changes the selection and the pipeline key (core lane).
+- The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
+  they moved into the profile and the rows added since —, and a profile with other choices changes the selection and
+  the pipeline key (core lane).
+- Every per-shape exception of the default profile's sequential variant: on the development machine's GPU its kernel
+  writes the words the general variant writes, on the exception's own shape and on two small shapes that leave the
+  last workgroup partial and a remainder after the read-ahead loop, with a host reference on a spread of columns (GPU
+  tests). The rows are read from the profile, so a row added later is checked too.
 - The row-blocked parallel GEMV: every output word equal to the parallel GEMV's at the same lanes for every storage,
   lane count, row block and row count, on the development machine's GPU and, through the workbench's `kernel-check`
   entry, on a browser's backend; a Session takes it exactly where its table's row carries a row block (GPU tests and

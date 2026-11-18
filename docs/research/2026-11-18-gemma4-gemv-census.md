@@ -322,7 +322,8 @@ The two int4 heads were measured in two records each (µs per dispatch; the two 
   10). It would take 0.54 ms off an E2B token and 0.93 ms off an E4B token at `exact` and at `reorder` alike, the
   default preset `i4` included. It is not applied here: it changes what a Session at `exact` runs, which this work
   was not asked to change, and it needs its own bit-identity GPU check, as the int8 exception has
-  (`gpu_linear_gemv_variant_test.ts`).
+  (`gpu_linear_gemv_variant_test.ts`). Applied later the same day, with that check and a decode A/B:
+  [the sequential variants](2026-11-18-sequential-gemv-variants.md).
 - The mobile lines' int2 heads gain nothing from the parallel GEMV at one row (×1.02 and ×1.01 for the best candidate,
   one record, steady) and nothing from another sequential variant (×1.04, ×0.93). Their time is 0.29 and 0.45 ms.
 - The drafters' heads (`262144 × 256` three times per run, `262144 × 1024` on 12B) do not gain either at k = 256
