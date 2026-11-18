@@ -100,6 +100,7 @@ import {
   type GemvGates,
   gemvGroupRole,
   gemvKernelsAt,
+  gemvParallelName,
   gemvProfileChoice,
   gemvProgram,
   gemvRowCountsIn,
@@ -936,11 +937,9 @@ const rowKernelAt = (
   rowBlock: LinearGemvParallelRows | undefined,
   m: number,
 ): string => {
-  const rows =
-    rowBlock === undefined || lanes === undefined
-      ? undefined
-      : linearGemvParallelRowsFor(m, rowBlock);
-  return rows === undefined ? name : `staged-l${lanes}r${rows}`;
+  if (rowBlock === undefined || lanes === undefined) return name;
+  const rows = linearGemvParallelRowsFor(m, rowBlock);
+  return rows === undefined ? name : gemvParallelName("staged", lanes, rows);
 };
 
 /** The row blocks a parallel row of `lanes` can carry: none first, then every cap the kernel exists at. */

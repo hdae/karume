@@ -40,6 +40,7 @@ import {
   LINEAR_GEMV_PARALLEL_MAX_ROWS,
   LINEAR_GEMV_PARALLEL_ROWS,
   type LinearGemvParallelLanes,
+  type LinearGemvParallelRows,
   linearGemvParallelRowsFits,
   linearGemvRowsForShape,
   type LinearGemvVariant,
@@ -115,6 +116,18 @@ const PROFILE: ResolvedGeometryProfile = DEFAULT_GEOMETRY_PROFILE;
 export const isGemmChoice = (choice: GemvKernelChoice): choice is LinearGemmChoice =>
   choice.id === "gemm-f32" || choice.id === "gemm-f16";
 
+/**
+ * The name of a parallel GEMV candidate over plain f32 activations: `parallel-l<lanes>`,
+ * `staged-l<lanes>`, and the row-blocked form `staged-l<lanes>r<rows>` (the staged form alone
+ * has one). The one spelling: a record's rows are matched by name, so the candidate list, the rule
+ * of what M = 1 carries and the derivation's reading of a row at other row counts all call this.
+ */
+export const gemvParallelName = (
+  form: "parallel" | "staged",
+  lanes: number,
+  rows?: LinearGemvParallelRows,
+): string => `${form}-l${lanes}${rows === undefined ? "" : `r${rows}`}`;
+
 /** The candidate's name (the class and the shape are the row's own fields). */
 const gemvChoiceName = (choice: GemvKernelChoice): string => {
   // One name whatever the tile geometry: the kernel's fingerprint tells two GEMMs apart
@@ -126,9 +139,9 @@ const gemvChoiceName = (choice: GemvKernelChoice): string => {
     case "gemv-rows":
       return `c${choice.rowsVariant?.cols ?? cols}u${choice.rowsVariant?.unroll ?? unroll}r${choice.rowsVariant?.rows ?? 1}`;
     case "gemv-parallel":
-      return `parallel-l${choice.lanes ?? 0}`;
+      return gemvParallelName("parallel", choice.lanes ?? 0);
     case "gemv-parallel-staged":
-      return `staged-l${choice.lanes ?? 0}${choice.parallelRows === undefined ? "" : `r${choice.parallelRows}`}`;
+      return gemvParallelName("staged", choice.lanes ?? 0, choice.parallelRows);
     case "gemv-parallel-subgroup32":
       return `subgroup32-l${choice.lanes ?? 0}`;
     case "gemv-parallel-packed":
@@ -328,7 +341,7 @@ export const gemvCarriedFromM1 = (
       ? choice.lanes
       : undefined;
   if (lanes === undefined) return carriedByItsRow(candidate.name, first);
-  return [`parallel-l${lanes}`, `staged-l${lanes}`].some(
+  return [gemvParallelName("parallel", lanes), gemvParallelName("staged", lanes)].some(
     (base) => base === first.profile.reorder || carriedByItsRow(base, first),
   );
 };
