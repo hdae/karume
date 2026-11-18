@@ -17,8 +17,9 @@
  * With the default `residency: "per-stage"` the **position** of each release matters. The text path
  * (weights 1,396MiB) is released **before** the DiT load, and the DiT **before** the VAE load. The
  * DiT weights differ by a factor of two between quant presets (default preset
- * `f16+dit8-a8-attn8-s16` = 1,875MiB, `f16` preset = 3,733MiB — the VRAM table of the 2026-08-05
- * final-perf-bench). Since the VAE is always tiled, **the chain peak is the DiT stage**, and the
+ * `bf16+dit8-a8-attn8-s16` = 1,875MiB in the VRAM table of the 2026-08-05 final-perf-bench; the
+ * 16-bit transformer of the `bf16` preset is 3,732MiB of files, not yet measured in that table).
+ * Since the VAE is always tiled, **the chain peak is the DiT stage**, and the
  * default VRAM assumption is "the largest single stage". So {@link Pipeline.fromAssets}
  * **opens no Session at all** — it only opens containers (`openContainer` = parsing the two
  * documents), and GPU residency is opened and closed per stage inside

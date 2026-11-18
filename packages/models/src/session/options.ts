@@ -219,7 +219,7 @@ const accepts = (policy: FamilySessionPolicy, key: string): boolean => {
  * fetched**). Called later, both an unsupported declaration and a wrong explicit setting would fail
  * only after a GB-scale fetch.
  *
- * @param where Subject of the diagnostic (`"anima.Pipeline: quant 'f16'"`).
+ * @param where Subject of the diagnostic (`"anima.Pipeline: quant 'bf16'"`).
  */
 export const resolveSessionOptions = (
   policy: FamilySessionPolicy,

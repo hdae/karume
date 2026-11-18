@@ -98,16 +98,16 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
       "anima-turbo": {
         pipeline: "anima/1",
         weights: Object.fromEntries(
-          WEIGHT_NAMES.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
+          WEIGHT_NAMES.map((name) => [name, { bf16: declaredContainer(`${name}/model.bf16`) }]),
         ),
         assets: {},
         quants: {
-          "f16+dit8-a8-attn8-s16": {
-            weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
+          "bf16+dit8-a8-attn8-s16": {
+            weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "bf16"])),
             session: {},
           },
         },
-        defaultQuant: "f16+dit8-a8-attn8-s16",
+        defaultQuant: "bf16+dit8-a8-attn8-s16",
         pipelineConfig: {
           scheduler: { shift: 3, numTrainTimesteps: 1000 },
           defaults: {
@@ -197,9 +197,9 @@ test("fromAssets: an unknown scheduler.type fails before touching the assets", a
 test("fromAssets: a nonexistent quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "bf16+dit8-a8" }),
     Error,
-    "available: f16+dit8-a8-attn8-s16",
+    "available: bf16+dit8-a8-attn8-s16",
   );
 });
 
@@ -283,8 +283,8 @@ const manifestWithSession = (session: Record<string, unknown>) =>
   parseManifest(
     manifestText({
       quants: {
-        "f16+dit8-a8-attn8-s16": {
-          weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
+        "bf16+dit8-a8-attn8-s16": {
+          weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "bf16"])),
           session,
         },
       },
