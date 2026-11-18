@@ -243,11 +243,13 @@ What the census shows:
 | `1024 × 7680`, `4096 × 1024`, `1024 × 4096`, `8192 × 1024`, `1024 × 8192`, `3840 × 1024`, `262144 × 1024` | int4 g32 | the q4_0 QAT 12B drafter |
 | `256 × 3072`, `1024 × 256`, `256 × 1024`, `2048 × 256`, `256 × 2048`, `262144 × 256` | int8 | the regular E2B drafter |
 
-The case table grows from 66 to 90 cases; the `full` set from 5,044 to 6,827 kernels with the subgroup features (4,066 to
-5,510 without), the `quick` set from 1,569 to 2,124. No group of an existing record goes stale (the fingerprints are
-per case): the dry run of the generator on the RTX 3080 Ti record of 2026-11-18T02-55 still reads its 198 groups as
-current. `packages/e2e/tests/e2e_gemma4_gemv_cases_test.ts` fails when a mirror's graph holds an integer linear without
-a case.
+The integer-storage cases grow from 66 to 90. With the 25 bf16 cases of regular Gemma 4 added the same day
+([research](2026-11-18-float-parallel-gemv.md)) the table holds 115: the `full` set is 8,240 kernels with the
+subgroup features (6,923 without) and the `quick` set 2,595 (2,156), of which the 24 cases here are 1,783 (1,444) and
+555 (442). No group of an existing record goes stale (the fingerprints are per case): the dry run of the generator on
+the RTX 3080 Ti record of 2026-11-18T02-55 still read its 198 groups as current.
+`packages/e2e/tests/e2e_gemma4_gemv_cases_test.ts` fails when a mirror's graph holds an integer linear without a case,
+and when a case — integer or bf16 — has a shape no graph has.
 
 ## 4. The sweep of the new cases and the derivation
 

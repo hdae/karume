@@ -11,8 +11,11 @@
  * What it covers, and what it does not:
  * - The components `model` and `drafter` only (what a decode token and a drafter run execute). A
  *   mirror's other components (`vision`) are not read.
- * - Both directions between the graphs and the case table: a graph's integer linear without a case
- *   fails, and so does a case whose shape no graph has, unless it is listed with its reason
+ * - Both directions between the graphs and the case table. Graph → case is asked of the integer
+ *   linears only: a graph's int2 / int4 / int8 linear without a case fails, a float-stored one does
+ *   not (the regular models' bf16 linears all have a case, the mobile models' one f32 linear has
+ *   none). Case → graph is asked of every case, the bf16 ones included: a case whose storage and
+ *   shape no graph's linear has fails, unless it is listed with its reason
  *   ({@link CASES_WITHOUT_A_GRAPH}).
  * - Which linears take a parallel row is asked at M = 1 and of the default profile only: not at
  *   the four or eight rows of a verify run, and not of a per-adapter table that carries its own
@@ -87,8 +90,24 @@ type IntegerLinear = {
   readonly k: number;
 };
 
-/** The seats whose weight a linear reads as float words: no integer GEMV row applies to them. */
-const FLOAT_SEATS: readonly string[] = ["raw", "f16", "bf16", "expanded"];
+/** One float-storage linear shape of a graph at one row (the storage the GEMV sweep names it by). */
+type FloatLinear = {
+  readonly storage: "bf16" | "f16" | "f32";
+  readonly n: number;
+  readonly k: number;
+};
+
+/**
+ * The seats whose weight a linear reads as float words, with the storage a GEMV sweep case names
+ * such a weight by: bf16 and f16 are resident as stored, `raw` is f32 as stored and `expanded` is
+ * decoded to f32 at load.
+ */
+const FLOAT_SEATS: Readonly<Record<string, FloatLinear["storage"]>> = {
+  bf16: "bf16",
+  f16: "f16",
+  raw: "f32",
+  expanded: "f32",
+};
 
 /**
  * The integer storage of a linear's weight seat, or `undefined` for a float seat. Any other seat
@@ -102,14 +121,19 @@ const integerStorageOf = (
 ): Pick<IntegerLinear, "storage" | "group"> | undefined => {
   if (seat?.seat === "i4") return { storage: "i4", group: seat.groupSize };
   if (seat?.seat === "i2" || seat?.seat === "i8") return { storage: seat.seat };
-  if (seat !== undefined && FLOAT_SEATS.includes(seat.seat)) return undefined;
+  if (seat !== undefined && Object.hasOwn(FLOAT_SEATS, seat.seat)) return undefined;
   throw new Error(
     `${where}: the weight's seat is '${seat?.seat ?? "(none)"}', and this test does not know whether such a linear reads integer weights`,
   );
 };
 
-/** The integer-storage linears of a graph planned at one physical row (a decode token, a drafter run). */
-const integerLinears = (graph: IrGraph): IntegerLinear[] => {
+/**
+ * The linears of a graph planned at one physical row (a decode token, a drafter run): the
+ * integer-storage ones, and the float-storage ones apart.
+ */
+const graphLinears = (
+  graph: IrGraph,
+): { readonly linears: IntegerLinear[]; readonly floats: FloatLinear[] } => {
   const residency = planWeightResidency(graph);
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
@@ -126,16 +150,21 @@ const integerLinears = (graph: IrGraph): IntegerLinear[] => {
   );
   const plan = planGraph(graph, bindSymbols(graph, inputShapes), stateShapes);
   const linears: IntegerLinear[] = [];
+  const floats: FloatLinear[] = [];
   for (const step of plan.nodes) {
     if (step.node.op !== "linear") continue;
     const [x, weight] = step.inputShapes;
     const m = x.slice(0, -1).reduce((product, dim) => product * dim, 1);
     assertEquals(m, 1, `${step.node.ins[1]} runs ${m} rows in a graph planned at one row`);
-    const storage = integerStorageOf(residency.get(step.node.ins[1]), step.node.ins[1]);
-    if (storage === undefined) continue;
-    linears.push({ ...storage, n: weight[0], k: weight[1] });
+    const seat = residency.get(step.node.ins[1]);
+    const storage = integerStorageOf(seat, step.node.ins[1]);
+    if (storage !== undefined) linears.push({ ...storage, n: weight[0], k: weight[1] });
+    // A seat that is neither integer nor float has thrown above.
+    else if (seat !== undefined) {
+      floats.push({ storage: FLOAT_SEATS[seat.seat], n: weight[0], k: weight[1] });
+    }
   }
-  return linears;
+  return { linears, floats };
 };
 
 /**
@@ -163,6 +192,18 @@ const INTEGER_LINEARS: Readonly<Record<string, number>> = {
 };
 
 /**
+ * The graphs with float-stored linears, each with their number at one row: the regular line's models
+ * in bf16, and the f32 per_layer_model_projection of the mobile models. A graph that is not listed
+ * has none.
+ */
+const FLOAT_LINEARS: Readonly<Record<string, number>> = {
+  "karume-gemma4 e2b model bf16": 277,
+  "karume-gemma4 e4b model bf16": 344,
+  "karume-gemma4-qat-mobile e2b model i4": 1,
+  "karume-gemma4-qat-mobile e4b model i4": 1,
+};
+
+/**
  * The cases whose shape no graph of the mirrors has, each with why it is a case all the same. A
  * case that is not listed and matches no graph fails: the sweep would measure, on every device, a
  * shape nothing runs.
@@ -176,9 +217,12 @@ const CASES_WITHOUT_A_GRAPH: Readonly<Record<string, string>> = {
     "the regular E4B's int8 output head: as E2B's — the default profile still holds its parallel row",
 };
 
-/** The ids of the cases of `cases` whose shape none of `linears` has, in table order. */
+/**
+ * The ids of the cases of `cases` whose storage and shape none of `linears` has, in table order (a
+ * float-stored linear and a float case have no group length).
+ */
 const casesWithoutGraph = (
-  linears: readonly IntegerLinear[],
+  linears: readonly (IntegerLinear | FloatLinear)[],
   cases: readonly Pick<GemvCase, "id" | "storage" | "group" | "n" | "k">[],
 ): string[] =>
   cases
@@ -187,18 +231,25 @@ const casesWithoutGraph = (
         !linears.some(
           (linear) =>
             linear.storage === gemvCase.storage &&
-            linear.group === gemvCase.group &&
+            ("group" in linear ? linear.group : undefined) === gemvCase.group &&
             linear.n === gemvCase.n &&
             linear.k === gemvCase.k,
         ),
     )
     .map(({ id }) => id);
 
-/** Every model, component and storage of the three mirrors, with the integer linears of its graph. */
+/**
+ * Every model, component and storage of the three mirrors, with the integer linears of its graph
+ * (`linears`) and its float-stored ones (`floats`).
+ */
 const mirrorLinears = async (): Promise<
-  { readonly where: string; readonly linears: readonly IntegerLinear[] }[]
+  {
+    readonly where: string;
+    readonly linears: readonly IntegerLinear[];
+    readonly floats: readonly FloatLinear[];
+  }[]
 > => {
-  const found: { where: string; linears: IntegerLinear[] }[] = [];
+  const found: { where: string; linears: IntegerLinear[]; floats: FloatLinear[] }[] = [];
   for (const mirror of MIRRORS) {
     const root = rootOf(mirror);
     const manifest: ContainerManifest = JSON.parse(
@@ -212,7 +263,7 @@ const mirrorLinears = async (): Promise<
           const graph = await readContainerGraph(new URL(head.path, root), component);
           found.push({
             where: `${mirror} ${model} ${component} ${dtype}`,
-            linears: integerLinears(graph),
+            ...graphLinears(graph),
           });
         }
       }
@@ -342,6 +393,14 @@ describe.skipIf(!AVAILABLE)(
         Object.fromEntries(graphs.map(({ where, linears }) => [where, linears.length])),
         INTEGER_LINEARS,
       );
+      assertEquals(
+        Object.fromEntries(
+          graphs
+            .filter(({ floats }) => floats.length > 0)
+            .map((graph) => [graph.where, graph.floats.length]),
+        ),
+        FLOAT_LINEARS,
+      );
     });
 
     it("fails on a linear whose weight seat it cannot class as integer or float (fault: a borrowed weight, an expert weight)", () => {
@@ -383,13 +442,19 @@ describe.skipIf(!AVAILABLE)(
       assertEquals(missed, ["karume-gemma4-qat e2b model i4: i4 g32 262144×1536"]);
     });
 
-    it("holds no case whose shape no graph has, but the listed ones", async () => {
-      const linears = (await mirrorLinears()).flatMap((graph) => graph.linears);
+    it("holds no case — integer or bf16 — whose shape no graph has, but the listed ones", async () => {
+      const linears = (await mirrorLinears()).flatMap((graph) => [
+        ...graph.linears,
+        ...graph.floats,
+      ]);
       assertEquals(casesWithoutGraph(linears, GEMV_CASES), Object.keys(CASES_WITHOUT_A_GRAPH));
     });
 
-    it("names a case whose shape no graph has (fault: one case of a shape nothing runs)", async () => {
-      const linears = (await mirrorLinears()).flatMap((graph) => graph.linears);
+    it("names a case whose shape no graph has (faults: an int4 and a bf16 case of shapes nothing runs)", async () => {
+      const linears = (await mirrorLinears()).flatMap((graph) => [
+        ...graph.linears,
+        ...graph.floats,
+      ]);
       const orphan = {
         id: "i4g32-n4096-k4096",
         storage: "i4",
@@ -397,10 +462,26 @@ describe.skipIf(!AVAILABLE)(
         n: 4096,
         k: 4096,
       } as const;
-      assertEquals(casesWithoutGraph(linears, [...GEMV_CASES, orphan]), [
+      // 12B's sliding k / v shape, which the mirrors hold in int4 g32 and not in bf16.
+      const floatOrphan = { id: "bf16-n2048-k3840", storage: "bf16", n: 2048, k: 3840 } as const;
+      assertEquals(casesWithoutGraph(linears, [...GEMV_CASES, orphan, floatOrphan]), [
         ...Object.keys(CASES_WITHOUT_A_GRAPH),
         orphan.id,
+        floatOrphan.id,
       ]);
+    });
+
+    it("misses the bf16 cases when the float-stored linears are left out (fault: the integer linears alone)", async () => {
+      const integer = (await mirrorLinears()).flatMap((graph) => graph.linears);
+      const missed = casesWithoutGraph(integer, GEMV_CASES);
+      assertEquals(
+        missed.filter((id) => !id.startsWith("bf16-")),
+        Object.keys(CASES_WITHOUT_A_GRAPH),
+      );
+      assertEquals(
+        missed.filter((id) => id.startsWith("bf16-")),
+        GEMV_CASES.filter(({ storage }) => storage === "bf16").map(({ id }) => id),
+      );
     });
   },
 );

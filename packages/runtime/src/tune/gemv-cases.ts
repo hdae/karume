@@ -92,8 +92,9 @@ const E_DRAFTERS = "Gemma 4 E2B / E4B q4_0 QAT drafter, i4 g32";
 const G26B = "Gemma 4 26B A4B q4_0 QAT, i4 g32";
 
 /**
- * The case table, grouped by model in the order of the default profile's rows: within a group the
- * profile's rows first, then the group's shapes that have none (the output heads, the MTP drafter).
+ * The case table. The integer-storage cases come first, grouped by model in the order of the default
+ * profile's rows: within a group the profile's rows first, then the group's shapes that have none
+ * (the output heads, the MTP drafter). The bf16 cases of regular Gemma 4 follow.
  */
 export const GEMV_CASES: readonly GemvCase[] = [
   // Gemma 4 E2B (regular, i4 g32 and the i8 output head).
