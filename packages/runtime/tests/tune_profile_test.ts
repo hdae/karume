@@ -27,7 +27,9 @@ import {
 import { describe, it } from "vite-plus/test";
 import {
   deriveGeometryProfile,
+  geometryProfileMismatch,
   type GeometrySweepInput,
+  parseGeometryProfileJson,
   sweepCaseSetIds,
   sweepDefaultKernelsIds,
 } from "../tune.ts";
@@ -2061,5 +2063,283 @@ describe("the evaluation set k88 (perf-ledger K-88): no table is derived from it
       Error,
       "settings.candidateSet k88 is an evaluation set (perf-ledger K-88)",
     );
+  });
+});
+
+describe("deriveProfile: a skeleton form and the counter decode of an f32 geometry are candidates like any other (perf-ledger K-88)", () => {
+  const TB: GemmGeometry = { ...BIG, form: "tb-un" };
+  const TAS: GemmGeometry = { ...BIG, form: "tas-tb-un" };
+  const A_TB: GemmGeometry = { ...A, form: "tb-un" };
+  const conv = (channels: number, mTile: number): CaseRef => ({
+    caseId: `conv2d-c${channels}-m${mTile}`,
+    op: "conv2d",
+    shape: `Cin${channels} Cout${channels} 8x8 3x3`,
+  });
+  const attention: CaseRef = {
+    caseId: "attention-qk-m1024",
+    op: "attention",
+    shape: "qk BH16 M1024 N1024 D128",
+  };
+  const CONV64 = gemmMTileGeometry(64);
+  const CONV_DEC: GemmGeometry = { ...CONV64, decode: "counter" };
+  const CONV_BOTH: GemmGeometry = { ...CONV64, form: "tas-tb-un", decode: "counter" };
+  const convRows = (
+    ref: CaseRef,
+    mTile: number,
+    measured: readonly (readonly [GemmGeometry, number])[],
+  ): Record<string, unknown>[] => [
+    row(ref, conv2dCandidate(gemmMTileGeometry(mTile)), true),
+    ...measured.map(([geometry, speedup]) =>
+      row(ref, conv2dCandidate(geometry), false, { speedup, identical: true }),
+    ),
+  ];
+
+  it("a form on the default's own tile is read with its field, judged apart from the tile without it, and the gemmRows rule carries it", () => {
+    const sources = [
+      source([
+        ...caseRows(linearCase(1024), BIG, [
+          [TB, { speedup: 1.3 }],
+          [TAS, { speedup: 1.2 }],
+          [A, { speedup: 1.1 }],
+          [A_TB, { speedup: 1.25 }],
+        ]),
+        ...caseRows(matmulCase(4096), BIG, [
+          [TB, { speedup: 1.2 }],
+          [TAS, { speedup: 1.25 }],
+          [A, { speedup: 1.1 }],
+          [A_TB, { speedup: 1.04 }],
+        ]),
+      ]),
+    ];
+    assertEquals(
+      sources[0].rows.find((entry) => entry.geometry === "reg128x128r8x8w16:tb-un")?.geometryParams,
+      TB,
+    );
+    const verdicts = deriveProfile(sources, OPTIONS);
+    const verdict = verdictOf(verdicts, "gemmRows > 512");
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.name, "reg128x128r8x8w16:tb-un");
+    assertEquals(verdict.outcome.geometry, TB);
+    assertStringIncludes(rejectionOf(verdict, TAS), "below the adopted");
+    assertStringIncludes(rejectionOf(verdict, A), "below the adopted");
+    // The same tile with the form loses on its own evidence, not on the tile's
+    assertStringIncludes(rejectionOf(verdict, A_TB), "matmul-m4096: ×1.040 < ×1.050");
+    const profile = buildGeometryProfile(
+      { id: "forms", vendor: "apple", architecture: "metal-3" },
+      sources,
+      verdicts,
+    );
+    assertEquals(profile.gemmRows.at(-1)?.geometry, TB);
+    // The other buckets and the fused attention keep geometries without a field
+    for (const rule of profile.gemmRows.slice(0, -1)) assert(!("form" in rule.geometry));
+    assert(!("form" in profile.attention.qk) && !("form" in profile.attention.pv));
+    assertGeometryProfile(profile);
+  });
+
+  it("conv2d adopts the counter decode with a form into its m-tile class, and the other class keeps the default", () => {
+    const sources = [
+      source([
+        ...convRows(conv(192, 64), 64, [
+          [{ ...CONV64, form: "tb-un" }, 1.03],
+          [CONV_DEC, 1.2],
+          [CONV_BOTH, 1.25],
+        ]),
+        ...convRows(conv(96, 32), 32, [[{ ...gemmMTileGeometry(32), decode: "counter" }, 1.04]]),
+      ]),
+    ];
+    const verdicts = deriveProfile(sources, OPTIONS);
+    const rows64 = verdictOf(verdicts, "conv2d.rows64");
+    assert(rows64.outcome.kind === "adopted");
+    assertEquals(rows64.outcome.name, "igemm64x128:wg16x8:tas-tb-un:dec");
+    assertEquals(rows64.outcome.geometry, CONV_BOTH);
+    assertEquals(
+      rows64.rejected.map(({ name }) => name),
+      ["igemm64x128:wg16x8:dec", "igemm64x128:wg16x8:tb-un"],
+    );
+    assertEquals(verdictOf(verdicts, "conv2d.rows32").outcome.kind, "default");
+    const profile = buildGeometryProfile(
+      { id: "decode", vendor: "apple", architecture: "metal-3" },
+      sources,
+      verdicts,
+    );
+    assertEquals(profile.conv2d, { rows64: CONV_BOTH, rows32: gemmMTileGeometry(32) });
+    assertGeometryProfile(profile);
+  });
+
+  it("a default row that carries a form is not the runtime's default (the ratio baseline is the tile without it)", () => {
+    assertThrows(
+      () =>
+        deriveProfile(
+          [source([row(linearCase(1024), gemmCandidate(TB), true)], "sweep.json")],
+          OPTIONS,
+        ),
+      Error,
+      "gemmRows > 512: the sweep's default row (reg128x128r8x8w16:tb-un) differs from the current runtime's default (reg128x128r8x8w16)",
+    );
+  });
+
+  it("rows of one name whose fields differ fail (a form is part of the geometry's identity)", () => {
+    const renamed = {
+      ...row(matmulCase(4096), gemmCandidate(TAS), false),
+      geometry: gemmCandidate(TB).name,
+    };
+    assertThrows(
+      () =>
+        deriveProfile(
+          [
+            source([
+              ...caseRows(linearCase(1024), BIG, [[TB, { speedup: 1.3 }]]),
+              row(matmulCase(4096), gemmCandidate(BIG), true),
+              { ...renamed, speedupVsDefault: 1.3, identicalToDefault: true },
+            ]),
+          ],
+          OPTIONS,
+        ),
+      Error,
+      "gemmRows > 512: geometryParams of geometry reg128x128r8x8w16:tb-un differ between rows",
+    );
+  });
+
+  it("a field where no kernel takes it, and a value a field does not have, fail the record naming the row", () => {
+    const bad = (
+      ref: CaseRef,
+      geometryParams: Record<string, unknown>,
+    ): Record<string, unknown> => ({
+      ...row(ref, gemmCandidate(A), false, { speedup: 1.2, identical: true }),
+      geometryParams,
+    });
+    const refuses = (rows: Record<string, unknown>[], message: string): void => {
+      assertThrows(() => source(rows), Error, message);
+    };
+    // The fused attention keeps the original form: a row with one is the tile's own kernel
+    refuses(
+      [row(attention, gemmCandidate(BIG), true), bad(attention, { ...A, form: "tb-un" })],
+      "rows[1]: geometryParams has unexpected fields form",
+    );
+    // The counter decode is conv2d's alone
+    refuses(
+      [...caseRows(linearCase(1024), BIG, []), bad(linearCase(1024), { ...A, decode: "counter" })],
+      "rows[1]: geometryParams has unexpected fields decode",
+    );
+    // An i8a8 geometry takes neither
+    refuses(
+      [
+        row(
+          { caseId: "i8a8-linear-m1024", op: "i8a8-linear", shape: "M1024 N64 K64" },
+          i8a8Candidate(defaultI8a8Geometry("linear")),
+          true,
+        ),
+        bad(
+          { caseId: "i8a8-linear-m1024", op: "i8a8-linear", shape: "M1024 N64 K64" },
+          { ...defaultI8a8Geometry("linear"), regM: 4, form: "tb-un" },
+        ),
+      ],
+      "rows[1]: geometryParams has unexpected fields form",
+    );
+    refuses(
+      [...caseRows(linearCase(1024), BIG, []), bad(linearCase(1024), { ...A, form: "un" })],
+      'rows[1]: geometryParams.form must be "tb-un", "tas-tb-un" or absent ("un")',
+    );
+    refuses(
+      [
+        ...convRows(conv(192, 64), 64, []),
+        bad(conv(192, 64), { ...CONV64, regM: 4, decode: "table" }),
+      ],
+      'rows[1]: geometryParams.decode must be "counter" or absent ("table")',
+    );
+  });
+});
+
+describe("deriveGeometryProfile: a table that adopts a form and the decode stands for the kernels it runs (perf-ledger K-88)", () => {
+  // Cases of the current shape table: the fingerprints rebuild the rows with the sweep's case plan
+  const LINEAR: CaseRef = {
+    caseId: "linear-m1024-n2048-k2048",
+    op: "linear",
+    shape: "M1024 N2048 K2048",
+  };
+  const CONV: CaseRef = {
+    caseId: "conv2d-c192-256x256",
+    op: "conv2d",
+    shape: "Cin192 Cout192 256x256 3x3",
+  };
+  const TB: GemmGeometry = { ...BIG, form: "tb-un" };
+  const CONV64 = gemmMTileGeometry(64);
+  const CONV_BOTH: GemmGeometry = { ...CONV64, form: "tb-un", decode: "counter" };
+  const rows = [
+    ...caseRows(LINEAR, BIG, [[TB, { speedup: 1.2 }]]),
+    row(CONV, conv2dCandidate(CONV64), true),
+    row(CONV, conv2dCandidate(CONV_BOTH), false, { speedup: 1.3, identical: true }),
+  ];
+  const measured = [
+    { caseId: LINEAR.caseId, geometryParams: BIG },
+    { caseId: LINEAR.caseId, geometryParams: TB },
+    { caseId: CONV.caseId, geometryParams: CONV64 },
+    { caseId: CONV.caseId, geometryParams: CONV_BOTH },
+  ];
+  const adapter = { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" };
+  const derived = () =>
+    derive({
+      ...report(rows),
+      dp4a: false,
+      candidateKernels: sweepCandidateKernelsId(measured, false),
+    }).profile;
+
+  it("the measured-candidate fingerprint tells a form's kernel from its tile's, and the record derives a table carrying both fields", () => {
+    assert(
+      sweepCandidateKernelsId(measured, false) !==
+        sweepCandidateKernelsId(
+          measured.map((entry) => ({
+            ...entry,
+            geometryParams: entry.caseId === LINEAR.caseId ? BIG : entry.geometryParams,
+          })),
+          false,
+        ),
+    );
+    const profile = derived();
+    assertEquals(profile.gemmRows.at(-1)?.geometry, TB);
+    assertEquals(profile.conv2d.rows64, CONV_BOTH);
+    // The literal a table file is written from: the tile first, then the form, then the decode
+    assertEquals(Object.keys(profile.conv2d.rows64), [
+      "regM",
+      "regN",
+      "wgX",
+      "wgY",
+      "form",
+      "decode",
+    ]);
+  });
+
+  it("the table's family fingerprints are those of the kernels with the fields: it matches as derived, and not once a field is taken out", () => {
+    const profile = derived();
+    assertEquals(geometryProfileMismatch(profile, adapter), undefined);
+    const plain = (geometry: GemmGeometry): GemmGeometry => {
+      const { form: _form, decode: _decode, ...tile } = geometry;
+      return tile;
+    };
+    assert(
+      profile.provenance?.families.gemm?.kernels !==
+        familyKernelsId({ ...profile, gemmRows: DEFAULT_GEOMETRY_PROFILE.gemmRows }, "gemm"),
+    );
+    const withoutForm = {
+      ...profile,
+      gemmRows: profile.gemmRows.map((rule) => ({ ...rule, geometry: plain(rule.geometry) })),
+    };
+    assertStringIncludes(
+      geometryProfileMismatch(withoutForm, adapter) ?? "",
+      "family gemm: kernel fingerprint differs",
+    );
+    const withoutDecode = {
+      ...profile,
+      conv2d: { ...profile.conv2d, rows64: { ...CONV64, form: "tb-un" as const } },
+    };
+    assertStringIncludes(
+      geometryProfileMismatch(withoutDecode, adapter) ?? "",
+      "family conv2d: kernel fingerprint differs",
+    );
+  });
+
+  it("the saved table reads back with its fields", () => {
+    const profile = derived();
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(profile)), profile);
   });
 });

@@ -39,6 +39,12 @@
  * - A row the quick look screened out (`screened`, harness.ts's protocol rule 4) is no observation:
  *   it has no ratio and no output match, so a geometry screened out in a case that no other sweep
  *   timed it in is not taken (its verdict says so).
+ * - A skeleton form of the f32 GEMM and conv2d's counter decode (perf-ledger K-88) are part of a
+ *   geometry: a tile with a form is a candidate of its own, judged by the same rule, and an adopted
+ *   one is written into the field with it (`gemmRows` the form, `conv2d` the form and the decode).
+ *   The sweep measures them only in the cases whose kernel takes them (harness.ts's
+ *   `candidatesFor`), so a class with a case that does not would never adopt one (not measured
+ *   there); every linear / matmul / bmm and conv2d case of the sweep's table takes them.
  * - If the geometry of the sweep's default row differs from the current runtime's default, nothing
  *   is generated (fail loudly). The ratio to the default is relative to the default row, so if the
  *   baseline differs from the current default, "faster than the default" does not hold on the
@@ -325,25 +331,58 @@ const isI8a8Op = (op: SweepOp): boolean =>
   op === "i8a8-linear" || op === "i8a8-attention" || op === "i8a8-conv3d";
 
 /**
- * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family, which
- * may also carry the vec4 skeleton `skeleton: "vec4"` — perf-ledger K-85; a wrong combination of
- * family and fields fails).
+ * The optional fields a row's geometry may carry, by op: the i8a8 family the vec4 skeleton
+ * (perf-ledger K-85); linear / matmul / bmm the skeleton form and conv2d the form and the counter
+ * decode (perf-ledger K-88) — where the profile takes them (`assertGeometryProfile`). The fused
+ * attention takes none: its kernels keep the original form, so a row with one would be the tile's
+ * own kernel under another name.
+ */
+const optionalGeometryFields = (op: SweepOp): readonly ("skeleton" | "form" | "decode")[] => {
+  switch (op) {
+    case "linear":
+    case "matmul":
+    case "bmm":
+      return ["form"];
+    case "conv2d":
+      return ["form", "decode"];
+    case "attention":
+      return [];
+    case "i8a8-linear":
+    case "i8a8-attention":
+    case "i8a8-conv3d":
+      return ["skeleton"];
+  }
+};
+
+/**
+ * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family) with
+ * the optional fields of the row's op ({@link optionalGeometryFields}); a wrong combination of op
+ * and fields, or a value a field does not have, fails.
  */
 const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geometry => {
   if (!isRecord(value)) throw new Error(`${where}: geometryParams is not an object`);
   const keys = isI8a8Op(op)
     ? (["regM", "regN", "wgX", "wgY", "tileK"] as const)
     : (["regM", "regN", "wgX", "wgY"] as const);
-  const extra = Object.keys(value).filter(
-    (key) => !(keys as readonly string[]).includes(key) && !(isI8a8Op(op) && key === "skeleton"),
-  );
+  const allowed: readonly string[] = [...keys, ...optionalGeometryFields(op)];
+  const extra = Object.keys(value).filter((key) => !allowed.includes(key));
   if (extra.length > 0) {
     throw new Error(`${where}: geometryParams has unexpected fields ${extra.join(", ")}`);
   }
-  const { skeleton } = value;
+  const { skeleton, form, decode } = value;
   if (skeleton !== undefined && skeleton !== "vec4") {
     throw new Error(
       `${where}: geometryParams.skeleton must be "vec4" or absent (${JSON.stringify(skeleton)})`,
+    );
+  }
+  if (form !== undefined && form !== "tb-un" && form !== "tas-tb-un") {
+    throw new Error(
+      `${where}: geometryParams.form must be "tb-un", "tas-tb-un" or absent (${JSON.stringify(form)})`,
+    );
+  }
+  if (decode !== undefined && decode !== "counter") {
+    throw new Error(
+      `${where}: geometryParams.decode must be "counter" or absent (${JSON.stringify(decode)})`,
     );
   }
   const params: Record<string, number> = {};
@@ -366,7 +405,16 @@ const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geomet
         // Absent stays absent (a geometry without it keeps its key and WGSL byte for byte)
         ...(skeleton === undefined ? {} : { skeleton }),
       } satisfies I8a8Geometry)
-    : { regM: params.regM, regN: params.regN, wgX: params.wgX, wgY: params.wgY };
+    : ({
+        regM: params.regM,
+        regN: params.regN,
+        wgX: params.wgX,
+        wgY: params.wgY,
+        // Absent stays absent, and the fields keep one order: the table's literal is written from
+        // this object
+        ...(form === undefined ? {} : { form }),
+        ...(decode === undefined ? {} : { decode }),
+      } satisfies GemmGeometry);
 };
 
 const parseRow = (value: unknown, where: string): SweepObservation => {
@@ -1011,15 +1059,18 @@ const slotOf = (
 };
 
 /**
- * The identity of a geometry (an i8a8 geometry with the vec4 skeleton is another geometry than the
- * same tile without it — another kernel, a candidate of its own).
+ * The identity of a geometry (an i8a8 geometry with the vec4 skeleton, and an f32 geometry with a
+ * skeleton form or the counter decode, is another geometry than the same tile without it — another
+ * kernel, a candidate of its own).
  */
 const geometryKey = (geometry: Geometry): string =>
   "tileK" in geometry
     ? `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY},${geometry.tileK}${
         geometry.skeleton === undefined ? "" : `,${geometry.skeleton}`
       }`
-    : `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY}`;
+    : `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY}${
+        geometry.form === undefined ? "" : `,${geometry.form}`
+      }${geometry.decode === undefined ? "" : `,${geometry.decode}`}`;
 
 const geometricMean = (values: readonly number[]): number =>
   Math.exp(values.reduce((sum, value) => sum + Math.log(value), 0) / values.length);

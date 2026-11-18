@@ -16,10 +16,14 @@
  * There are three candidate sets a table is derived from ({@link CandidateSet}): `quick` (the
  * default + 4–5 shapes), `quick+` (quick ∪ the geometries adopted by the registered profiles — the
  * default) and `full` (the whole grid — for the i8a8 linear a grid of its own with the vec4
- * skeleton and the K64 tiles, {@link i8a8LinearCandidates}). One more, `k88`, is an evaluation set
- * ({@link EVALUATION_SETS}): the f32 skeleton forms with the conv2d counter decode (perf-ledger
- * K-88), on cases of its own, outside the sweep's case set, so it changes neither the other sets
- * nor any fingerprint.
+ * skeleton and the K64 tiles, {@link i8a8LinearCandidates}). The per-family lists
+ * ({@link gemmCandidatesIn}, {@link conv2dCandidatesIn}) hold tiles only. In `quick+` and `full`
+ * ({@link SKELETON_FIELD_SETS}) a linear / matmul / bmm case also measures each tile with each
+ * skeleton form, and a conv2d case each tile with each form, the counter decode and both
+ * (perf-ledger K-88 — {@link gemmFieldCandidatesIn}, {@link conv2dFieldCandidatesIn}; the sweep adds
+ * them only to a case whose kernel takes the fields, harness.ts's `candidatesFor`). One more set,
+ * `k88`, is an evaluation set ({@link EVALUATION_SETS}): the same fields on cases of its own,
+ * outside the sweep's case set, so it changes neither the other sets nor any fingerprint.
  */
 import {
   assertGemmGeometry,
@@ -98,6 +102,17 @@ export const conv2dCandidate = (geometry: GemmGeometry): GemmCandidate => ({
     geometry,
   )}${geometry.decode === undefined ? "" : ":dec"}`,
   geometry,
+});
+
+/**
+ * The tile of an f32 geometry: the geometry without the skeleton form and the counter decode. The
+ * candidate lists hold tiles; the fields are added per case ({@link skeletonVariants}).
+ */
+export const gemmTileGeometry = ({ regM, regN, wgX, wgY }: GemmGeometry): GemmGeometry => ({
+  regM,
+  regN,
+  wgX,
+  wgY,
 });
 
 export const i8a8Candidate = (geometry: I8a8Geometry): I8a8Candidate => ({
@@ -229,36 +244,43 @@ export const quickConv2dCandidates = (): GemmCandidate[] =>
     .map(({ geometry }) => conv2dCandidate(geometry));
 
 /**
- * The f32 set of `quick+` = quick ∪ every `gemmRows` rule and `attention.qk` / `pv` of the
- * registered profiles (`BUILTIN_GEOMETRY_PROFILES`). The geometries of the registered tables are
- * re-measured every time to read, next to the default and within quick's time, "whether that table
- * is fast on this machine too" (the generator only considers geometries measured in every case of a
- * field, so if a table's adopted geometry is missing from the set, a sweep that rebuilds the table
- * regresses that field to the default).
+ * The f32 set of `quick+` = quick ∪ the tile of every `gemmRows` rule and `attention.qk` / `pv`
+ * of the registered profiles (`profiles` — the embedded tables unless a test passes its own list).
+ * The geometries of the registered tables are re-measured every time to read, next to the default
+ * and within quick's time, "whether that table is fast on this machine too" (the generator only
+ * considers geometries measured in every case of a field, so if a table's adopted geometry is
+ * missing from the set, a sweep that rebuilds the table regresses that field to the default). A
+ * rule that carries a skeleton form is listed by its tile: a case measures every tile with every
+ * form ({@link gemmFieldCandidatesIn}), the table's own among them.
  */
-export const quickPlusGemmCandidates = (): GemmCandidate[] =>
+export const quickPlusGemmCandidates = (
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): GemmCandidate[] =>
   unique([
     ...quickGemmCandidates(),
-    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
-      ...profile.gemmRows.map((rule) => gemmCandidate(rule.geometry)),
+    ...profiles.flatMap((profile) => [
+      ...profile.gemmRows.map((rule) => gemmCandidate(gemmTileGeometry(rule.geometry))),
       gemmCandidate(profile.attention.qk),
       gemmCandidate(profile.attention.pv),
     ]),
   ]);
 
 /**
- * The conv2d set of `quick+` = f32's quick+ with tileN ∈ {64, 128} ∪ `conv2d.rows64` / `rows32` of
- * the registered profiles (a table's conv2d geometries are added regardless of the tileN
- * condition).
+ * The conv2d set of `quick+` = f32's quick+ with tileN ∈ {64, 128} ∪ the tiles of
+ * `conv2d.rows64` / `rows32` of the registered profiles (a table's conv2d geometries are added
+ * regardless of the tileN condition; one that carries a form or the decode is listed by its tile,
+ * as in {@link quickPlusGemmCandidates}).
  */
-export const quickPlusConv2dCandidates = (): GemmCandidate[] =>
+export const quickPlusConv2dCandidates = (
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): GemmCandidate[] =>
   unique([
-    ...quickPlusGemmCandidates()
+    ...quickPlusGemmCandidates(profiles)
       .filter(({ geometry }) => [64, 128].includes(gemmTileN(geometry)))
       .map(({ geometry }) => conv2dCandidate(geometry)),
-    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
-      conv2dCandidate(profile.conv2d.rows64),
-      conv2dCandidate(profile.conv2d.rows32),
+    ...profiles.flatMap((profile) => [
+      conv2dCandidate(gemmTileGeometry(profile.conv2d.rows64)),
+      conv2dCandidate(gemmTileGeometry(profile.conv2d.rows32)),
     ]),
   ]);
 
@@ -339,17 +361,19 @@ export const i8a8LinearCandidates = (): I8a8Candidate[] =>
     fitsEveryDevice(geometry),
   );
 
-/** The skeleton forms of the f32 GEMM (perf-ledger K-88), in the order the `k88` set measures them. */
+/** The skeleton forms of the f32 GEMM (perf-ledger K-88), in the order a case measures them. */
 const K88_FORMS = ["tb-un", "tas-tb-un"] as const;
 
 /**
- * The geometries of a `k88` case: each base geometry (`bases` — deduplicated, in order) without
- * the fields, then with each skeleton form, and for conv2d (`decode`) the counter decode alone and
- * with each form.
+ * The geometries a case measures for the K-88 fields: the tile of each base geometry (`bases` —
+ * deduplicated, in order; a base that carries a field counts as its tile) without the fields, then
+ * with each skeleton form, and for conv2d (`decode`) the counter decode alone and with each form.
+ * A tile and its variants stay next to each other, so they are timed close together.
  */
-const k88Variants = (bases: readonly GemmGeometry[], decode: boolean): GemmGeometry[] => {
+const skeletonVariants = (bases: readonly GemmGeometry[], decode: boolean): GemmGeometry[] => {
   const seen = new Set<string>();
   return bases
+    .map(gemmTileGeometry)
     .filter((base) => {
       const key = JSON.stringify(base);
       if (seen.has(key)) return false;
@@ -379,7 +403,7 @@ export const k88GemmCandidates = (
   profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
 ): GemmCandidate[] =>
   unique(
-    k88Variants(
+    skeletonVariants(
       [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) => gemmRowsGeometry(profile, rows)),
       false,
     ).map(gemmCandidate),
@@ -397,7 +421,7 @@ export const k88Conv2dCandidates = (
 ): GemmCandidate[] => {
   const mTile = conv2dIgemmMTile(channelsOut);
   return unique(
-    k88Variants(
+    skeletonVariants(
       [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) =>
         conv2dProfileGeometry(profile, mTile),
       ),
@@ -445,7 +469,10 @@ const noCandidates = (set: CandidateSet, family: string, reason: string): never 
 const K88_PER_CASE =
   "they depend on the case's row count or m-tile class — candidatesFor gives them per case";
 
-/** The set for the f32 skeleton (linear / matmul / bmm / fused attention). */
+/**
+ * The set for the f32 skeleton, as tiles (no skeleton form): what the fused attention measures, and
+ * the bases of {@link gemmFieldCandidatesIn}.
+ */
 export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
   switch (set) {
     case "quick":
@@ -459,7 +486,10 @@ export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
   }
 };
 
-/** The set for conv2d's implicit GEMM. */
+/**
+ * The set for conv2d's implicit GEMM, as tiles (no skeleton form, no counter decode): the bases of
+ * {@link conv2dFieldCandidatesIn}.
+ */
 export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
   switch (set) {
     case "quick":
@@ -471,6 +501,50 @@ export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
     case "k88":
       return noCandidates(set, "conv2d", K88_PER_CASE);
   }
+};
+
+/**
+ * The candidate sets whose linear / matmul / bmm and conv2d cases also measure the K-88 fields
+ * (perf-ledger K-88): `quick+`, so that every sweep at the default set gives a table the chance to
+ * adopt them, and `full`. `quick` stays the short look at tiles alone — the fields would double it
+ * (434 → 838 rows over the sweep's 78 cases), and a table is not rebuilt from `quick` anyway (it
+ * lacks the registered tables' geometries).
+ */
+export const SKELETON_FIELD_SETS: readonly CandidateSet[] = ["quick+", "full"];
+
+/**
+ * What a linear / matmul / bmm case whose kernel takes the skeleton form measures in `set`
+ * (harness.ts's `candidatesFor`): in {@link SKELETON_FIELD_SETS}, every tile of
+ * {@link gemmCandidatesIn} followed by the same tile with each form; in `quick`, the tiles.
+ */
+export const gemmFieldCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
+  const tiles = gemmCandidatesIn(set);
+  return SKELETON_FIELD_SETS.includes(set)
+    ? unique(
+        skeletonVariants(
+          tiles.map(({ geometry }) => geometry),
+          false,
+        ).map(gemmCandidate),
+      )
+    : tiles;
+};
+
+/**
+ * What a conv2d case whose kernel takes the fields measures in `set`: in
+ * {@link SKELETON_FIELD_SETS}, every tile of {@link conv2dCandidatesIn} followed by the same tile
+ * with each form, with the counter decode alone and with the decode and each form; in `quick`, the
+ * tiles.
+ */
+export const conv2dFieldCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
+  const tiles = conv2dCandidatesIn(set);
+  return SKELETON_FIELD_SETS.includes(set)
+    ? unique(
+        skeletonVariants(
+          tiles.map(({ geometry }) => geometry),
+          true,
+        ).map(conv2dCandidate),
+      )
+    : tiles;
 };
 
 /**

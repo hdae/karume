@@ -10,14 +10,23 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assert, assertEquals } from "@std/assert";
 import { BUILTIN_GEOMETRY_PROFILES } from "@karume/runtime";
-import { deriveGeometryProfile } from "@karume/runtime/tune";
+import { deriveGeometryProfile, geometryProfileMismatch } from "@karume/runtime/tune";
 import { makeTempDir, remove } from "@karume/test-support/fs";
 import { afterEach, beforeEach, describe, it } from "vite-plus/test";
-import { REPOSITORY_ROOT } from "../format.ts";
+import { formatTypeScript, REPOSITORY_ROOT } from "../format.ts";
 import { type CommandEnvironment, main, PROFILES_DIRECTORY } from "../generate.ts";
+import { profileModule } from "../literal.ts";
 import { loadRecord } from "../records.ts";
 import { INDEX_PATH, PROFILE_TEST_PATH } from "../registration.ts";
-import { ADAPTER, bytesOf, sweepRecord, workbenchRecord } from "./helpers/records.ts";
+import {
+  ADAPTER,
+  bytesOf,
+  CONV2D_FIELDS_GEOMETRY,
+  fieldsSweepRecord,
+  FORM_GEOMETRY,
+  sweepRecord,
+  workbenchRecord,
+} from "./helpers/records.ts";
 
 const RECORD_A = "outputs/workbench/browser-test-gpu/geometry-sweep_a.json";
 const RECORD_B = "outputs/diag/bare-b.json";
@@ -160,5 +169,72 @@ describe("a new adapter's first table", () => {
         readFileSync(join(REPOSITORY_ROOT, path), "utf8"),
       );
     }
+  });
+});
+
+describe("a table that adopts a skeleton form and conv2d's counter decode (perf-ledger K-88)", () => {
+  const RECORD = "outputs/workbench/browser-test-gpu/geometry-sweep_fields.json";
+
+  beforeEach(() => {
+    write(
+      RECORD,
+      bytesOf(workbenchRecord("geometry-sweep", fieldsSweepRecord("2026-11-18T01:00:00Z"))),
+    );
+  });
+
+  it("the dry run names the adopted geometries with their fields", async () => {
+    const code = await main(
+      ["test-gpu", `--records=${RECORD}`, ...MATCH, "--dry-run"],
+      environment(),
+    );
+    assertEquals(code, 0, stderr.join("\n"));
+    const printed = stdout.join("\n");
+    assertEquals(printed.includes("adopted reg128x128r8x8w16:tb-un ×1.200"), true, printed);
+    assertEquals(
+      printed.includes("adopted igemm64x128:wg16x8:tas-tb-un:dec ×1.300"),
+      true,
+      printed,
+    );
+    assertEquals(readdirSync(join(root, PROFILES_DIRECTORY)), ["index.ts"]);
+  });
+
+  it("is written with the fields in its rules, and the file is what the printer gives for the table it exports", async () => {
+    const code = await main(["test-gpu", `--records=${RECORD}`, ...MATCH], environment());
+    assertEquals(code, 0, stderr.join("\n"));
+    const path = `${PROFILES_DIRECTORY}/test-gpu.ts`;
+    const text = readFileSync(join(root, path), "utf8");
+    assertEquals(
+      text.includes('{ regM: 8, regN: 8, wgX: 16, wgY: 16, form: "tb-un" }'),
+      true,
+      text,
+    );
+    assertEquals(
+      text.includes(
+        'rows64: { regM: 8, regN: 8, wgX: 16, wgY: 8, form: "tas-tb-un", decode: "counter" }',
+      ),
+      true,
+      text,
+    );
+    const module: unknown = await import(pathToFileURL(join(root, path)).href);
+    assert(typeof module === "object" && module !== null && "TEST_GPU" in module);
+    const table = module.TEST_GPU;
+    const record = loadRecord(readFileSync(join(root, RECORD)), RECORD, "records");
+    const expected = deriveGeometryProfile([record], {
+      id: "test-gpu",
+      vendor: ADAPTER.vendor,
+      architecture: ADAPTER.architecture,
+      minSpeedup: 1.05,
+    }).profile;
+    assertEquals(table, expected);
+    assertEquals(expected.gemmRows.at(-1)?.geometry, FORM_GEOMETRY);
+    assertEquals(expected.conv2d.rows64, CONV2D_FIELDS_GEOMETRY);
+    // The check the core lane runs on every registered table: the file from its import line on is
+    // the printer's text for the table
+    assertEquals(
+      text.slice(text.indexOf("import type {")),
+      formatTypeScript(profileModule(expected), path),
+    );
+    // … and the written table stands for the kernels it runs on its adapter
+    assertEquals(geometryProfileMismatch(expected, ADAPTER), undefined);
   });
 });

@@ -338,8 +338,8 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       // Write the ratio baseline, the kernels of the measured candidates and the case-set versions
       // into the record (the generator matches them against the current runtime — ADR 0117 decision
       // 8). All are pure functions that read no GPU, with a negligible cost next to the sweep (the
-      // default fingerprint over every case takes about 13 ms; the candidate fingerprint stays under
-      // 1 second even for every row of full). The case-set versions and the baseline are one value
+      // default fingerprint over every case takes about 13 ms; the candidate fingerprint about 0.4 s
+      // for every row of quick+ and 3 s for every row of full). The case-set versions and the baseline are one value
       // per op family of the planned cases, each over the set's own case table restricted to the
       // family (ADR 0117 addendum 2026-11-12), so an evaluation set never claims the sweep's
       caseSets: candidateSetCaseSetIds(plan.candidateSet, familiesOf(plan.cases)),

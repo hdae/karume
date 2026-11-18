@@ -17,8 +17,8 @@ import {
   i8a8GeometryKeyPart,
   i8a8WorkgroupStorageBytes,
 } from "../src/kernels/i8a8-geometry.ts";
-import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
-import { conv2dIgemmKey } from "../src/kernels/conv2d.ts";
+import { gemmMTileGeometry, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { conv2dIgemmKey, conv2dUsesVec4 } from "../src/kernels/conv2d.ts";
 import {
   conv2dProfileGeometry,
   DEFAULT_GEOMETRY_PROFILE,
@@ -31,9 +31,12 @@ import {
   conv2dCandidate,
   conv2dCandidates,
   conv2dCandidatesIn,
+  conv2dFieldCandidatesIn,
   gemmCandidate,
   gemmCandidates,
   gemmCandidatesIn,
+  gemmFieldCandidatesIn,
+  gemmTileGeometry,
   i8a8Candidate,
   i8a8Candidates,
   i8a8CandidatesIn,
@@ -48,9 +51,10 @@ import {
   quickPlusConv2dCandidates,
   quickPlusGemmCandidates,
   quickPlusI8a8Candidates,
+  SKELETON_FIELD_SETS,
 } from "../src/tune/geometries.ts";
-import { SWEEP_CASES } from "../src/tune/cases.ts";
-import { candidatesFor, selectedCandidates } from "../src/tune/harness.ts";
+import { type Conv2dCase, type LinearCase, SWEEP_CASES } from "../src/tune/cases.ts";
+import { candidatesFor, casePlan, selectedCandidates } from "../src/tune/harness.ts";
 
 const names = (items: readonly { readonly name: string }[]): string[] =>
   items.map((item) => item.name);
@@ -277,7 +281,7 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
       includesAll(
         names(quickPlusGemmCandidates()),
         [
-          ...profile.gemmRows.map((rule) => gemmCandidate(rule.geometry).name),
+          ...profile.gemmRows.map((rule) => gemmCandidate(gemmTileGeometry(rule.geometry)).name),
           gemmCandidate(profile.attention.qk).name,
           gemmCandidate(profile.attention.pv).name,
         ],
@@ -285,7 +289,10 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
       );
       includesAll(
         names(quickPlusConv2dCandidates()),
-        [conv2dCandidate(profile.conv2d.rows64).name, conv2dCandidate(profile.conv2d.rows32).name],
+        [
+          conv2dCandidate(gemmTileGeometry(profile.conv2d.rows64)).name,
+          conv2dCandidate(gemmTileGeometry(profile.conv2d.rows32)).name,
+        ],
         `${profile.id} conv2d`,
       );
       includesAll(
@@ -441,7 +448,7 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
     }
   });
 
-  it("leaves quick / quick+ / full as they were (no form, no decode), and gives no candidates outside a case", () => {
+  it("the per-family lists of quick / quick+ / full hold tiles only (no form, no decode), and k88 gives no candidates outside a case", () => {
     for (const set of ["quick", "quick+", "full"] as const) {
       for (const { name, geometry } of [...gemmCandidatesIn(set), ...conv2dCandidatesIn(set)]) {
         assert(!("form" in geometry) && !("decode" in geometry), `${set}: ${name}`);
@@ -453,5 +460,165 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
     // A geometry without the fields keeps its name
     assertEquals(gemmCandidate(defaultGemmGeometry()).name, "reg128x128r8x8w16");
     assertEquals(conv2dCandidate(gemmMTileGeometry(64)).name, "igemm64x128:wg16x8");
+  });
+});
+
+describe("the K-88 fields as candidates of the table-deriving sets (perf-ledger K-88)", () => {
+  const FORMS = ["tb-un", "tas-tb-un"] as const;
+  /** A tile's name followed by the names of its variants, in the order a case measures them. */
+  const withForms = (tile: string): string[] => [tile, ...FORMS.map((form) => `${tile}:${form}`)];
+  const withFormsAndDecode = (tile: string): string[] => [
+    ...withForms(tile),
+    `${tile}:dec`,
+    ...FORMS.map((form) => `${tile}:${form}:dec`),
+  ];
+  const casesOf = (...ops: readonly string[]) =>
+    SWEEP_CASES.filter((sweepCase) => ops.includes(sweepCase.op));
+  /** A linear whose N is no multiple of 4 and a conv2d whose output width is none: scalar kernels. */
+  const SCALAR_LINEAR: LinearCase = {
+    id: "linear-m64-n6-k1024",
+    op: "linear",
+    m: 64,
+    n: 6,
+    k: 1024,
+    censusCount: 0,
+    source: "test: N % 4 != 0",
+  };
+  const SCALAR_CONV2D: Conv2dCase = {
+    id: "conv2d-c96-6x6",
+    op: "conv2d",
+    channelsIn: 96,
+    channelsOut: 96,
+    height: 6,
+    width: 6,
+    censusCount: 0,
+    source: "test: Wout % 4 != 0",
+  };
+
+  it("are measured in quick+ and full, and quick stays the tiles alone", () => {
+    assertEquals(SKELETON_FIELD_SETS, ["quick+", "full"]);
+    assertEquals(names(gemmFieldCandidatesIn("quick")), names(gemmCandidatesIn("quick")));
+    assertEquals(names(conv2dFieldCandidatesIn("quick")), names(conv2dCandidatesIn("quick")));
+  });
+
+  it("a linear / matmul / bmm case measures every tile of the set, each followed by the tile with each skeleton form", () => {
+    for (const set of SKELETON_FIELD_SETS) {
+      const expected = names(gemmCandidatesIn(set)).flatMap(withForms);
+      assertEquals(names(gemmFieldCandidatesIn(set)), expected, set);
+      for (const sweepCase of casesOf("linear", "matmul", "bmm")) {
+        assertEquals(names(candidatesFor(sweepCase, set)), expected, `${set} ${sweepCase.id}`);
+      }
+    }
+    // The grid of full: 54 tiles, 162 geometries per case
+    assertEquals(gemmFieldCandidatesIn("full").length, 3 * gemmCandidates().length);
+    assertEquals(gemmFieldCandidatesIn("full").length, 162);
+    for (const sweepCase of casesOf("linear", "matmul", "bmm")) {
+      assertEquals(
+        names(candidatesFor(sweepCase, "quick")),
+        names(gemmCandidatesIn("quick")),
+        sweepCase.id,
+      );
+    }
+  });
+
+  it("a conv2d case measures every tile, each followed by the tile with each form, with the counter decode, and with the decode and each form", () => {
+    for (const set of SKELETON_FIELD_SETS) {
+      const expected = names(conv2dCandidatesIn(set)).flatMap(withFormsAndDecode);
+      assertEquals(names(conv2dFieldCandidatesIn(set)), expected, set);
+      for (const sweepCase of casesOf("conv2d")) {
+        assertEquals(names(candidatesFor(sweepCase, set)), expected, `${set} ${sweepCase.id}`);
+      }
+    }
+    assertEquals(conv2dFieldCandidatesIn("full").length, 6 * conv2dCandidates().length);
+    assertEquals(conv2dFieldCandidatesIn("full").length, 126);
+  });
+
+  it("every candidate carries exactly the fields its name spells, and passes the runtime's check", () => {
+    for (const set of SKELETON_FIELD_SETS) {
+      for (const { name, geometry } of gemmFieldCandidatesIn(set)) {
+        assertGemmGeometry(geometry, name);
+        assertEquals(name, `${gemmName(geometry)}${"form" in geometry ? `:${geometry.form}` : ""}`);
+        assert(!("decode" in geometry), name);
+      }
+      for (const { name, geometry } of conv2dFieldCandidatesIn(set)) {
+        assertGemmGeometry(geometry, name);
+        assertEquals(name, conv2dCandidate(geometry).name);
+        assertEquals(name.endsWith(":dec"), geometry.decode === "counter", name);
+        assertEquals(/:(tas-)?tb-un/.test(name), geometry.form !== undefined, name);
+      }
+    }
+  });
+
+  it("the fused attention measures the tiles alone in every set (its kernels keep the original form)", () => {
+    for (const set of ["quick", "quick+", "full"] as const) {
+      for (const sweepCase of casesOf("attention")) {
+        assertEquals(names(candidatesFor(sweepCase, set)), names(gemmCandidatesIn(set)), set);
+      }
+    }
+  });
+
+  it("every linear / matmul / bmm and conv2d case of the sweep's table runs the vec4 kernel that takes the fields (a class with a case that does not could never adopt one: not measured there)", () => {
+    for (const sweepCase of casesOf("linear", "matmul", "bmm", "conv2d")) {
+      const v4 =
+        sweepCase.op === "conv2d"
+          ? conv2dUsesVec4(sweepCase.channelsIn * 9, sweepCase.width, 1)
+          : "k" in sweepCase && gemmUsesVec4(sweepCase.k, sweepCase.n);
+      assert(v4, sweepCase.id);
+    }
+  });
+
+  it("a case whose kernel does not take the fields (a scalar kernel) measures the tiles alone", () => {
+    for (const set of SKELETON_FIELD_SETS) {
+      assertEquals(names(candidatesFor(SCALAR_LINEAR, set)), names(gemmCandidatesIn(set)), set);
+      assertEquals(names(candidatesFor(SCALAR_CONV2D, set)), names(conv2dCandidatesIn(set)), set);
+    }
+  });
+
+  it("no case measures one kernel twice: the pipeline keys of a case's candidates are pairwise different", () => {
+    const targets = [...casesOf("linear", "matmul", "bmm", "conv2d"), SCALAR_LINEAR, SCALAR_CONV2D];
+    for (const set of SKELETON_FIELD_SETS) {
+      for (const sweepCase of targets) {
+        const plan = casePlan(sweepCase, Number.POSITIVE_INFINITY, false);
+        const candidates = candidatesFor(sweepCase, set);
+        const keys = candidates.map((candidate) => plan.launch(candidate).key);
+        assertEquals(new Set(keys).size, candidates.length, `${set} ${sweepCase.id}`);
+      }
+    }
+  });
+
+  it("quick+ lists a table's rule that carries a form or the decode by its tile, so every case measures the table's own geometry among the tile's variants", () => {
+    const TILE: GemmGeometry = { regM: 2, regN: 8, wgX: 8, wgY: 4 };
+    const CONV_TILE: GemmGeometry = { regM: 2, regN: 4, wgX: 16, wgY: 16 };
+    for (const tile of [TILE, CONV_TILE]) {
+      assert(!names(quickPlusGemmCandidates()).includes(gemmName(tile)), "outside quick+ today");
+    }
+    const profile: GeometryProfile = {
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id: "synthetic-k88",
+      gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: { ...TILE, form: "tas-tb-un" } }],
+      conv2d: {
+        rows64: { ...CONV_TILE, form: "tb-un", decode: "counter" },
+        rows32: DEFAULT_GEOMETRY_PROFILE.conv2d.rows32,
+      },
+    };
+    const gemm = quickPlusGemmCandidates([profile]);
+    const conv2d = quickPlusConv2dCandidates([profile]);
+    assert(names(gemm).includes(gemmName(TILE)), "the gemmRows rule's tile");
+    assert(names(conv2d).includes(conv2dCandidate(CONV_TILE).name), "the conv2d rule's tile");
+    for (const { name, geometry } of [...gemm, ...conv2d]) {
+      assert(!("form" in geometry) && !("decode" in geometry), name);
+    }
+    // … and a case measures every listed tile with every field (the two cases above), which
+    // includes the rule itself
+    assert(
+      withForms(gemmName(TILE)).includes(gemmCandidate(profile.gemmRows[0].geometry).name),
+      "the gemmRows rule",
+    );
+    assert(
+      withFormsAndDecode(conv2dCandidate(CONV_TILE).name).includes(
+        conv2dCandidate(profile.conv2d.rows64).name,
+      ),
+      "the conv2d rule",
+    );
   });
 });

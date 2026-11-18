@@ -26,6 +26,30 @@ adapter's match and measures nothing at run time.
   ratio and no output match: it is no observation, so a geometry screened out in a case that no record timed it in is
   not adopted for that case's class (its verdict says so).
 
+## The skeleton form and the counter decode
+
+- A geometry of the f32 GEMM can carry two fields beside its tile: the skeleton form (`form`: `"tb-un"` or
+  `"tas-tb-un"`) in the row-count rules of linear / matmul / bmm (`gemmRows`) and in `conv2d`, and the counter decode
+  (`decode: "counter"`) in `conv2d` only. The fused attention's fields take neither. The output words are the same
+  with and without them; they are a choice of speed, and the pipeline key names them.
+- The sweep's candidate sets `quick+` and `full` measure them. A linear / matmul / bmm case measures every tile of the
+  set and then the same tile with each form (three geometries per tile). A conv2d case measures every tile, the tile
+  with each form, with the decode, and with the decode and each form (six per tile). `quick` measures the tiles alone.
+- A case measures the fields only when its kernel takes them: the vec4 kernel of f32 compute, by the predicate the
+  pipeline keys use. Every linear / matmul / bmm and conv2d case of the sweep's table runs that kernel. The fused
+  attention measures the tiles alone: its kernels keep the original form, so a field there would time one kernel twice.
+- The derivation reads a tile with a field as a geometry of its own, under the same rule as any other: identical
+  output and the threshold on every case of its class, the largest geometric mean. An adopted one is written into the
+  rule with its fields. A class with a case that did not measure it does not adopt it.
+- A record's row that carries a field its op does not take (a form on a fused-attention row, the decode outside conv2d)
+  or a value the field does not have is refused, naming the row.
+- `quick+` lists a registered table's rule that carries a field by its tile; the cases then measure that tile with
+  every field, the table's own geometry among them.
+- The two sets grow by these candidates: `quick+` from 821 to 1,517 rows over the sweep's 78 cases, `full` from 6,269
+  to 10,040. The case sets, the default kernels and their fingerprints do not change, so a registered table still
+  matches.
+- No registered table carries a field. A table takes one when its family is derived from a sweep that measured it.
+
 ## A record
 
 - A workbench record (`karume-workbench/1`), unwrapped to its `data`, or a bare runtime record
@@ -178,6 +202,10 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   the case checks that the derivation refuses them by their format, until the family is swept again. Without the
   records the case is skipped and says which files are missing.
 - `apple-metal-3` has no such case: every record it cites has a format the derivation no longer accepts.
+- The skeleton form and the counter decode as candidates (core lane): what each case measures in each set, that no
+  case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
+  kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
+  by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, the values the GEMV kernel module held before they moved into
   the profile, and a profile with other choices changes the selection and the pipeline key (core lane).
 - The GEMV derivation on hand-built records: the adoption rule, the steadiness bound, the kept cases, groups as the

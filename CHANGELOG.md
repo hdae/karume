@@ -155,6 +155,16 @@ measurements in `docs/research/`.
   no longer reads a device still on its idle clocks. In `runGeometrySweep` and in the single-dispatch timings of
   `runAttentionRouteBench`, a calibration whose pass comes out below a quarter of the 80 ms target is done again after
   a warm start, up to three calibrations in all. The records' formats do not change; a sweep takes a few seconds longer per case.
+- `@karume/runtime/tune`: the candidate sets `"quick+"` (the default) and `"full"` of `runGeometrySweep` measure the
+  skeleton forms of the f32 GEMM and conv2d's counter decode (`GemmGeometry.form` / `decode`, perf-ledger K-88) on
+  every tile: a linear / matmul / bmm case each tile and the tile with each form, a conv2d case each tile, with each
+  form, with the decode, and with the decode and each form (the names a record's rows carry: `…:tb-un`,
+  `…:tas-tb-un`, `…:dec`). The fused attention and `"quick"` measure the tiles alone. `deriveGeometryProfile` reads
+  such a row as a geometry of its own under its one adoption rule and writes an adopted one into the table's
+  `gemmRows` rule or `conv2d` field with its fields; it refuses a row that carries a field its op does not take. A
+  sweep of every case has 1,517 rows at `"quick+"` (821 before) and 10,040 at `"full"` (6,269 before). The case
+  sets, the default kernels and their fingerprints do not change: a stored table still matches, and no embedded table
+  carries the fields.
 - Exporter: `karume.quantize.round_weights_to_f16` follows the rule `round_weights_to_bf16` follows — it rounds only
   what the checkpoint carries (every parameter and the persistent buffers) and leaves non-persistent buffers computed
   at init, such as RoPE's `inv_freq`, at their f32 values. Before, it rounded every f32 buffer, so the constants an f16

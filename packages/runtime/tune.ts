@@ -128,7 +128,10 @@ export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/swe
 /**
  * The candidate set (`"quick"`, `"quick+"`, `"full"`, or an evaluation set on cases of its own,
  * from whose record no table is derived: `"k88"` — the f32 GEMM skeleton forms and the conv2d
- * counter decode) and the op families of a sweep.
+ * counter decode) and the op families of a sweep. In `"quick+"` and `"full"` a linear / matmul /
+ * bmm case measures every tile also with each skeleton form, and a conv2d case also with the
+ * counter decode and with both, so a table derived from their records can adopt them; `"quick"`
+ * measures the tiles alone.
  */
 export type { CandidateSet as GeometrySweepCandidateSet } from "./src/tune/geometries.ts";
 export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";

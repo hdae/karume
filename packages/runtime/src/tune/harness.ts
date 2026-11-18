@@ -86,7 +86,7 @@ import type { StorageRoles } from "../gpu/pipeline-cache.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { BUFFER_USAGE, MAP_MODE } from "../gpu/webgpu-constants.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
-import { gemmMTileGeometry, gemmUsesVec4 } from "../kernels/gemm.ts";
+import { gemmMTileGeometry, gemmTakesForm, gemmUsesVec4 } from "../kernels/gemm.ts";
 import {
   defaultGemmGeometry,
   type GemmGeometry,
@@ -176,8 +176,10 @@ import {
   type CandidateSet,
   conv2dCandidate,
   conv2dCandidatesIn,
+  conv2dFieldCandidatesIn,
   gemmCandidate,
   gemmCandidatesIn,
+  gemmFieldCandidatesIn,
   type GeometryCandidate,
   i8a8Candidate,
   i8a8CandidatesIn,
@@ -385,13 +387,23 @@ const scaleResources = (
       : [];
 
 /**
+ * Whether a case of the f32 skeleton runs the vec4 kernel: linear / matmul / bmm by K and N
+ * (`gemmUsesVec4`), conv2d by its flat K (Cin · 3 · 3), output width and stride 1
+ * (`conv2dUsesVec4`). The one place the case plans and {@link candidatesFor} read it.
+ */
+const caseUsesVec4 = (sweepCase: LinearCase | MatmulCase | BmmCase | Conv2dCase): boolean =>
+  sweepCase.op === "conv2d"
+    ? conv2dUsesVec4(sweepCase.channelsIn * 9, sweepCase.width, 1)
+    : gemmUsesVec4(sweepCase.k, sweepCase.n);
+
+/**
  * f32 linear (f16-stored weights unless the case names another storage — the `k88` cases) — the
  * GEMM path of src/runtime/linear-program.ts (`linearGemmProgram`).
  */
 const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
   const { m, n, k, groupSize } = sweepCase;
   const weight = sweepCase.weight ?? "f16";
-  const v4 = gemmUsesVec4(k, n);
+  const v4 = caseUsesVec4(sweepCase);
   const scale = scaleResources(weight, n, k, groupSize);
   return {
     resources: [
@@ -432,7 +444,7 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
 const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
   const { m, n, k } = sweepCase;
   // linear.ts:79
-  const v4 = gemmUsesVec4(k, n);
+  const v4 = caseUsesVec4(sweepCase);
   return {
     resources: [
       // a[m,k] / b[k,n] / c[m,n] (bindings 1..3 = in the order binds[0] / binds[1] / outs[0],
@@ -472,7 +484,7 @@ const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
 const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
   const { batch, m, n, k } = sweepCase;
   // linear.ts:124
-  const v4 = gemmUsesVec4(k, n);
+  const v4 = caseUsesVec4(sweepCase);
   return {
     resources: [
       // a[batch,m,k] / b[batch,k,n] / c[batch,m,n] (bindings 1..3 = linear.ts:143-147)
@@ -749,7 +761,7 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
   // conv.ts:390-394 (M = Cout, N = Hout·Wout, K = Cin·Kh·Kw)
   const n = height * width;
   const kFlat = channelsIn * 9;
-  const v4 = conv2dUsesVec4(kFlat, width, 1);
+  const v4 = caseUsesVec4(sweepCase);
   const mTile = conv2dIgemmMTile(channelsOut);
   const scale = scaleResources(weight, channelsOut, kFlat, undefined);
   return {
@@ -860,6 +872,14 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
 /**
  * The candidates per op family (the set `set`). Even when the default geometry is not included,
  * {@link sweepCase} adds it at the front.
+ *
+ * A linear / matmul / bmm or conv2d case also measures its tiles with the skeleton forms (and, for
+ * conv2d, the counter decode — perf-ledger K-88; geometries.ts's `SKELETON_FIELD_SETS`) when its
+ * kernel takes them: the vec4 kernel of f32 compute, by the predicate the pipeline keys use
+ * (`gemmTakesForm`; conv2d's decode has the same condition, `conv2dCounterDecode`). Any other
+ * kernel generates the original text under the original key whatever the geometry carries, so a
+ * field there would time the tile's own kernel a second time: such a case measures the tiles
+ * alone, as the fused attention does.
  */
 export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): GeometryCandidate[] => {
   switch (sweepCase.op) {
@@ -867,11 +887,18 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
     case "matmul":
     case "bmm":
       // The evaluation set k88 measures the geometries the tables give this row count
-      return set === "k88" ? k88GemmCandidates(sweepCase.m) : gemmCandidatesIn(set);
+      if (set === "k88") return k88GemmCandidates(sweepCase.m);
+      // The sweep's linears compute in f32 (linearPlan), the compute the forms are built for
+      return gemmTakesForm(sweepCase.op, caseUsesVec4(sweepCase))
+        ? gemmFieldCandidatesIn(set)
+        : gemmCandidatesIn(set);
     case "attention":
       return gemmCandidatesIn(set);
     case "conv2d":
-      return set === "k88" ? k88Conv2dCandidates(sweepCase.channelsOut) : conv2dCandidatesIn(set);
+      if (set === "k88") return k88Conv2dCandidates(sweepCase.channelsOut);
+      return gemmTakesForm("conv2d", caseUsesVec4(sweepCase))
+        ? conv2dFieldCandidatesIn(set)
+        : conv2dCandidatesIn(set);
     case "i8a8-linear":
       // `full` gives the i8a8 linear its own grid (the skeleton and the K64 tiles included)
       return i8a8LinearCandidatesIn(set);
