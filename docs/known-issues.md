@@ -457,6 +457,57 @@ repeated over the 18 builds of a session A/B.
 - **Not known**: whether the first pipeline's memory is not back when its dispose resolves, or the second build needs
   more than the first; what the subgroup features change in this model's plan or allocations.
 
+## Under Node + Dawn on the RTX 3080 Ti, the NVIDIA driver sometimes prints `NVVM compilation failed: 3` at the end of a process (filed 2026-11-18; not reproduced, cause unknown)
+
+At or after the end of a Node process that used WebGPU through Dawn (Vulkan), stderr has shown
+
+```text
+NVVM compilation failed: 3
+Warning: NVIDIA: CreatePipeline: failed to compile internal representation
+```
+
+sometimes followed by `Segmentation fault (core dumped)`. Every result of those runs was written, and where the run
+checked its outputs, checked, before the lines appeared.
+
+- **Sightings**: seven, all in investigation runs of 2026-10-24 to 2026-10-31 (records under `outputs/diag/`, local,
+  untracked):
+
+  | # | Run | Kernels | Where | What |
+  | --- | --- | --- | --- | --- |
+  | 1, 2 | `perf-recon-2026-10-24/matrix-kernels-other`, round 1 | f32 GEMM skeleton variants (the spike of perf-ledger K-88) | "at the end of two long multi-pipeline Node runs" | the first line |
+  | 3 | the same lens, the verifier's run of 6 variants × 5 shapes (30 pipelines), 5 rounds | the same | at the very end, after every pipeline was used and compared; not in two re-runs | both lines |
+  | 4 | `perf-recon-2026-10-24/attn-compliant`, set `factor` | online attention variants | after the last result line of the second of two processes | both lines, then a segmentation fault |
+  | 5 | the same, set `hog` | online attention variants | after the results of the first of two processes | both lines |
+  | 6 | `perf-recon-2026-10-24/attn-d3d12` | online attention variants | at exit, after the results were written | both lines, then a segmentation fault |
+  | 7 | `qat-0151-2026-10-31/llm-decode`, 32 processes | the runtime's own kernels (a Gemma 4 decode) | among the last two lines of one process | the first line (only two lines per process were kept) |
+
+- **In common**: Node 24 with Dawn (npm `webgpu` 0.6.2) on Vulkan, the RTX 3080 Ti, the NVIDIA driver 615.78.08
+  (recorded for sighting 7; the driver installed today); a harness that ended with `process.exit(0)` while its device
+  was alive; the lines at or after the last result. Four of the seven ran no K-88 code, and one ran only the runtime's
+  own kernels. No sighting in Chrome on either development GPU, in the test lanes, or in a run that destroys its device
+  before it exits (`runGeometrySweep`, the workbench's entries).
+- **Where the lines come from**: the first string is in the driver's SPIR-V compiler (`libnvidia-glvkspirv.so`), the
+  second in `libnvidia-glcore.so` (`strings`). They report a pipeline compile that failed inside the driver, at a point
+  where the application creates no pipeline. What the code 3 stands for is not known.
+- **A/B of 2026-11-18** (`outputs/diag/decode-optimization-2026-11-18/gemm-forms/nvvm/`, local, untracked): fresh
+  processes that build 48 f32 GEMM pipelines through the runtime's pipeline cache (linear, matmul and conv2d on the
+  tiles with the largest register blocks), run each, read the last output back and end. Four arms, interleaved: the
+  kernels without a K-88 field or with the skeleton forms and the counter decode, and `process.exit(0)` at once or
+  after `device.destroy()` and `device.lost`. Every process had an empty driver shader cache of its own
+  (`__GL_SHADER_DISK_CACHE_PATH`), so each compiled its pipelines as a first run does. 16 processes per arm: no line
+  and no non-zero exit status in any of the 64. Two workbench sweeps of the same
+  day built 134 pipelines with a K-88 field each, over five device lifetimes, without a line. So the message was **not
+  reproduced** and stays unattributed: nothing ties it to the K-88 kernels (32 processes with them and an immediate
+  exit gave none: below about 9 % per process at 95 %), and the exit path is neither shown nor ruled out as its cause.
+- **Impact**: none known on results. A harness that exits without destroying its device can print the lines and, as
+  in two of the seven sightings, end with a segmentation fault, which turns its exit status non-zero after its
+  results are complete.
+- **To reproduce at scale** (not run: it needs the GPU alone for about an hour): the harnesses of sightings 4 and 5
+  showed the lines in one of two processes each, so port `attn-compliant/run-bench.ts` to the current checkout (it
+  imports a worktree that no longer exists), and run its `factor` and `hog` sets 20 times per arm with the two exit
+  paths of the A/B above, counting the lines and the non-zero statuses per arm. Lines only in the arm that exits at
+  once attribute the message to the exit path; lines in both arms make it a property of those kernels' compile.
+
 ## The decode bench's split mode fails intermittently (filed 2026-11-03; the `gemma4-bench` entry's split arms only)
 
 On the maintainer's M2 (Chrome 158), arms of the decode bench (then the Playground's `/gemma4-bench` page, now the
