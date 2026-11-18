@@ -55,7 +55,7 @@ export type DiagnosticsSink = (diagnostics: SessionDiagnostics, phase: RunPhase)
 /** The explicit Session options a build may pass (the pipeline resolves them over the preset's). */
 export type GemmaSessionOptions = Pick<
   FromPretrainedOptions,
-  "integerGemv" | "packedStaticQuantize" | "numerics" | "fusionRules"
+  "integerGemv" | "packedStaticQuantize" | "numerics" | "fusionRules" | "submitPolicy"
 >;
 
 /** The pipeline options a build may pass as they are. */

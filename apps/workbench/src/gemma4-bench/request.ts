@@ -31,6 +31,7 @@ import {
   type BenchSettings,
   type DecodeAhead,
   defaultArmDrafts,
+  type FirstChunk,
   resolveArm,
   SAMPLER_KINDS,
 } from "./plan.ts";
@@ -44,8 +45,9 @@ const ARM_FORM = "<mount>/<model>[@<preset>][:<switch>]…";
  * the WebGPU calls instead of pass timing), `linear-reorder` (linear at the level `reorder` on a
  * preset that does not declare it), `integer` (the integer GEMV), `ple-gpu` (the PLE on the GPU),
  * `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise),
- * `no-signal` (the chats are sent without an `AbortSignal`) and `sampled` (the distribution's sampler
- * with seed 0, whatever the bench's `sampler` is).
+ * `no-signal` (the chats are sent without an `AbortSignal`), `sampled` (the distribution's sampler
+ * with seed 0, whatever the bench's `sampler` is) and `first8` / `first16` / `first32` / `first64` /
+ * `first-off` (the first chunk of a run's submits; the pipeline's own submit policy otherwise).
  */
 const ARM_SWITCHES = [
   "tap-off",
@@ -59,6 +61,11 @@ const ARM_SWITCHES = [
   "ahead8",
   "no-signal",
   "sampled",
+  "first8",
+  "first16",
+  "first32",
+  "first64",
+  "first-off",
 ] as const;
 type ArmSwitch = (typeof ARM_SWITCHES)[number];
 
@@ -68,6 +75,16 @@ const AHEAD_DEPTHS: Readonly<Record<"ahead2" | "ahead4" | "ahead8", DecodeAhead>
   ahead2: "2",
   ahead4: "4",
   ahead8: "8",
+};
+
+const FIRST_CHUNKS: Readonly<
+  Record<"first8" | "first16" | "first32" | "first64" | "first-off", FirstChunk>
+> = {
+  first8: "8",
+  first16: "16",
+  first32: "32",
+  first64: "64",
+  "first-off": "off",
 };
 
 /** One arm of the `arms` text: as written (a refusal names it so) and as a draft. */
@@ -105,6 +122,7 @@ const parseArm = (text: string, position: number): NamedArm => {
   let integerGemv = false;
   let pleOnGpu = false;
   let decodeAhead: DecodeAhead | undefined;
+  let firstChunk: FirstChunk | undefined;
   const seen = new Set<ArmSwitch>();
   for (const name of switchTexts) {
     if (!isArmSwitch(name)) {
@@ -140,6 +158,16 @@ const parseArm = (text: string, position: number): NamedArm => {
         break;
       case "ple-gpu":
         pleOnGpu = true;
+        break;
+      case "first8":
+      case "first16":
+      case "first32":
+      case "first64":
+      case "first-off":
+        if (firstChunk !== undefined) {
+          throw armError(position, text, "names more than one first chunk");
+        }
+        firstChunk = FIRST_CHUNKS[name];
         break;
       default:
         if (decodeAhead !== undefined) {
@@ -187,6 +215,7 @@ const parseArm = (text: string, position: number): NamedArm => {
       ...(integerGemv ? { integerGemv: true } : {}),
       ...(pleOnGpu ? { pleOnGpu: true } : {}),
       ...(decodeAhead === undefined ? {} : { decodeAhead }),
+      ...(firstChunk === undefined ? {} : { firstChunk }),
     },
   };
 };

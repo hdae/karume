@@ -7,6 +7,7 @@ import {
   type ArmResolution,
   BENCH_PROMPTS,
   defaultArmDrafts,
+  firstChunkPolicy,
   integerGemvSession,
   meetsDistinctIdCondition,
   resolveArm,
@@ -175,6 +176,22 @@ describe("the arms", () => {
       ]);
     });
 
+    it("passes the submit policy of a first-chunk switch: the runtime default at the Gemma cap, with that first chunk or without one", () => {
+      const base = { timeBudgetMs: 100, initialChunkSize: 16, minChunkSize: 1, maxChunkSize: 128 };
+      expect(armOf(resolveArm(draft({ firstChunk: "16" }), MANIFESTS)).session).toEqual({
+        submitPolicy: { ...base, firstChunkSize: 16 },
+      });
+      expect(armOf(resolveArm(draft({ firstChunk: "off" }), MANIFESTS)).session).toEqual({
+        submitPolicy: base,
+      });
+      // Without the switch no policy is passed: the pipeline's own applies.
+      expect(armOf(resolveArm(draft(), MANIFESTS)).session).toBeUndefined();
+      // Next to another switch's Session options.
+      expect(
+        armOf(resolveArm(draft({ integerGemv: true, firstChunk: "8" }), MANIFESTS)).session,
+      ).toEqual({ integerGemv: true, submitPolicy: { ...base, firstChunkSize: 8 } });
+    });
+
     it("refuses an arm it cannot run, saying why and naming what the manifest has", () => {
       for (const [given, error] of [
         [
@@ -270,6 +287,14 @@ describe("the arms", () => {
         "mobile QAT e2b i4 (integer) (PLE GPU) (tap off)",
       ],
       [{ ...mobile, quant: "i4", tap: true, hostMarks: true }, "mobile QAT e2b i4 (host)"],
+      [
+        { ...mobile, quant: "i4", tap: false, session: { submitPolicy: firstChunkPolicy("16") } },
+        "mobile QAT e2b i4 (first chunk 16) (tap off)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: true, session: { submitPolicy: firstChunkPolicy("off") } },
+        "mobile QAT e2b i4 (first chunk off)",
+      ],
       [
         { ...mobile, quant: "i4", tap: true, hostMarks: true, noSignal: true },
         "mobile QAT e2b i4 (no signal) (host)",
