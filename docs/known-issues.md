@@ -157,9 +157,11 @@ on Metal too, so the harness is not blind there.
 | `state-attention-rewrites` (`state-qk-fold`) | folded ①′ vs ①′ | 252 of 252, the F = 8 classes the product folds included |
 | `state-attention-rewrites` (`state-pv-unroll`, `state-stats-pv-unroll`) | the unrolled forms (perf-ledger K-91) vs their v1 WGSL | 532 of 546 and 476 of 490 |
 | `state-kv16` (`state-kv16-readers`) | f16 full-slot readers vs their f32 forms over a rounded slot | 31 of 246, the read-only reader's O words only |
+| `expert-linear` (the grouped form and the pooled grouped form; measured 2026-11-18 on the M2) | the form that shares the walk of an expert's weight row among the rows that picked it vs `linear`'s GEMV on that expert | 55 of 72 cases of the `down` projection (n 2816, k 704, one x row per pick), 33,919 of 202,752 words in each form; none of the 72 `gate_up` cases |
 
 Identical on Metal: every fusion twin part, the prefetch form of `rms_norm` (below), the subgroup GEMV and RMS
-reductions, the integer and byte-plane GEMVs, the f16 score store, the bidirectional block and the expert linear.
+reductions, the integer and byte-plane GEMVs, the row-blocked parallel GEMV, the f16 score store, the bidirectional
+block and the one-row form of the expert linear.
 
 Fixed (2026-11-13): `rms-norm-prefetch` (96 of 118 cases in each of its 3 parts) and `fusion-rms-norm-rope` (4 of
 8) failed here until then. With x and the weight in registers before `inv` exists, Metal computed the prefetch form's
@@ -173,6 +175,15 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
   (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
   seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
+  The grouped form of `expert_linear` is the exception to "one form on every device": a Session runs the one-row form
+  for a one-token run and the grouped form for a run of 2 to 768 tokens (`expertLinearGrouped`), at every numerics
+  level, on the statement that the two write the same words. On Metal they do not for the `down` projection (the
+  first failing word differs by 4 ULP), so on an Apple GPU the MoE output of Gemma 4 26B A4B for a token depends in
+  the last bits on whether the token was computed in a run of one or of several: a prefill and the rows a
+  speculative decode verifies are not the words one-token decode gives. The grouped form calls a word function
+  where the one-row form has the same multiply-add text inline; why `gate_up` (shared x) stays identical and `down`
+  does not is not analysed. Not measured: whether any token id changes. What to do is undecided (the record is
+  `outputs/workbench/browser-apple-m2/kernel-check_2026-11-18T19-23-24.json`, untracked; checkout `453921bc`).
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
   Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above). Analysis of the table's
@@ -582,3 +593,15 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   for this reason (`SHORT_FRAMES` in `packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts`).
 - Records: `outputs/diag/restructure-2026-11-15/` (`wan-ti2v-write.log`, `wan-5f-alone.log`, `wan-9f-alone.log`; local,
   untracked).
+
+## Style-Bert-VITS2: the style setting seems to have no effect (reported 2026-11-18; not investigated)
+
+Reported by the maintainer: choosing another style, or another style weight, does not seem to change the speech, and
+this has been so for a long time. The expressiveness that comes from the text (the BERT features) does work, so the
+suspicion is that the style vector does not reach the model or reaches it without effect. Nothing is measured yet: not
+whether the output words change with the style at all, and not what the upstream implementation gives for the same
+model, text and style.
+
+- Impact: the style options of the `sbv2` pipeline. The default style is what every run may effectively be getting.
+- Next: compare, for one model and text, the output under two styles; then follow the style vector from the asset to the
+  graph input against the upstream implementation. To be looked into before the next release.
