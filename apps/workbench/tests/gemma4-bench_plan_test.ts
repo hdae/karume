@@ -222,11 +222,12 @@ describe("the arms", () => {
           model: "e2b",
           quant: "bf16",
           tap: true,
+          linearReorder: true,
           session: { numerics: { ops: { linear: "reorder" } } },
         },
         "Gemma 4 e2b bf16 (linear reorder)",
       ],
-      // The integer GEMV's options hold linear at reorder too: its own mark says it
+      // The integer GEMV's options hold linear at reorder too: alone it is marked as itself…
       [
         {
           ...mobile,
@@ -235,6 +236,17 @@ describe("the arms", () => {
           session: { ...integer, numerics: { ops: { linear: "reorder" } } },
         },
         "mobile QAT e2b i4 (integer)",
+      ],
+      // …and an arm that asked for both switches names both
+      [
+        {
+          ...mobile,
+          quant: "i4",
+          tap: false,
+          linearReorder: true,
+          session: { ...integer, numerics: { ops: { linear: "reorder" } } },
+        },
+        "mobile QAT e2b i4 (linear reorder) (integer) (tap off)",
       ],
       [
         { ...mobile, quant: "i4", tap: false, session: integer, pipeline: { pleResidency: "gpu" } },

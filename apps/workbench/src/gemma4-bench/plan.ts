@@ -157,6 +157,12 @@ export type BenchArm = {
    * the per-kernel attribution (only with the tap on; absent = the product's own passes).
    */
   readonly split?: boolean;
+  /**
+   * Whether the arm asked for linear at `reorder` on a preset that does not declare it (the
+   * `linear-reorder` switch). The label names it; the integer GEMV's options hold the same level, so
+   * {@link session} alone does not tell the two switches apart.
+   */
+  readonly linearReorder?: true;
   /** The Session options passed explicitly (absent = none: the preset's declaration alone). */
   readonly session?: ArmSessionOptions;
   /** The pipeline options passed explicitly (absent = none — {@link ArmPipelineOptions}). */
@@ -172,15 +178,14 @@ export const MOUNT_SHORT_LABELS: Readonly<Record<GemmaMount, string>> = {
 };
 
 export const armLabel = (
-  arm: Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split" | "session" | "pipeline">,
+  arm: Pick<
+    BenchArm,
+    "mount" | "model" | "quant" | "tap" | "split" | "linearReorder" | "session" | "pipeline"
+  >,
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
-    arm.session?.integerGemv === true
-      ? " (integer)"
-      : arm.session?.numerics?.ops?.linear === "reorder"
-        ? " (linear reorder)"
-        : ""
-  }${
+    arm.linearReorder === true ? " (linear reorder)" : ""
+  }${arm.session?.integerGemv === true ? " (integer)" : ""}${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
     arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"
@@ -273,6 +278,7 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       tap: draft.tap,
       // The arms parser refuses split without the tap (`parseArmsText`): it owns that rule.
       ...(draft.split === true ? { split: true } : {}),
+      ...(draft.linearReorder === true ? { linearReorder: true } : {}),
       ...(Object.keys(session).length === 0 ? {} : { session }),
       ...(Object.keys(pipeline).length === 0 ? {} : { pipeline }),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),
