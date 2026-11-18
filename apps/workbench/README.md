@@ -100,8 +100,11 @@ others with); an arm is `<mount>/<model>[@<preset>][:<switch>]…`:
   `ple-gpu` (the pipeline option `pleResidency: "gpu"`), `ahead2` / `ahead4` / `ahead8` (the
   pipeline option `decodeAhead`; it needs `ple-gpu`, except on 12B, which has no PLE), `no-signal`
   (the chats are sent without an `AbortSignal`, so the generation loop does not yield to the event
-  loop before a run; a cancel then takes effect between two chats) and `sampled` (this arm's chats
-  use the distribution's sampler with seed 0, whatever the `sampler` parameter is).
+  loop before a run; a cancel then takes effect between two chats), `sampled` (this arm's chats
+  use the distribution's sampler with seed 0, whatever the `sampler` parameter is) and `first8` /
+  `first16` / `first32` / `first64` / `first-off` (the Session option `submitPolicy`: the runtime
+  default at the Gemma pipelines' cap of 128 dispatches per submit, with that `firstChunkSize` or
+  with none; without the switch the pipeline's own policy applies).
 
 None of `,`, `@` and `:` occurs in the mirrors' model and preset names, and none needs quoting in a
 shell or escaping in a URL query. An arm that does not parse, names what its manifest does not have
