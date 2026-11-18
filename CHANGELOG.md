@@ -128,8 +128,8 @@ measurements in `docs/research/`.
 - `@karume/runtime/tune`: the GEMV sweep measures float-stored shapes. Its case table gains the 25 linears of
   regular Gemma 4 E2B and E4B in bf16, at 1, 4 and 8 rows; past one row their baseline is the GEMM (candidate
   `gemm`), which is what an `exact` Session runs there, and `deriveLinearGemvChoices` reads a parallel row of such a
-  shape against it. `GemvSweepChoice` is now a union: a member of the GEMV family, or
-  `{ id: "gemm-f32", storage, v4 }` for that baseline. That GEMM is built with the tile geometry of the profile the
+  shape against it. `GemvSweepChoice` is now a union of two exported types: `GemvSweepFamilyChoice`, a member of the GEMV family, and
+  `GemvSweepGemmChoice`, `{ id: "gemm-f32", storage, v4 }`, for that baseline. That GEMM is built with the tile geometry of the profile the
   sweep's device resolves to — what a Session there runs —, the record names the profile (`geometryProfile`), and the
   derivation reads such a group as current only when its GEMM is the kernel the table it derives for builds. Records
   taken before lack the bf16 cases; none of their groups becomes stale.

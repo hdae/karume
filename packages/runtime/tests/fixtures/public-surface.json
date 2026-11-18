@@ -717,7 +717,15 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvSweepFamilyChoice",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvSweepGates",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepGemmChoice",
         "kind": "typeAlias"
       },
       {

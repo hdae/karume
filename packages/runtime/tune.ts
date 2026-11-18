@@ -205,7 +205,9 @@ export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
  * Measures the GEMV choices of `linear` on a dedicated device and returns the record
  * (`karume-gemv-sweep/4`): per case (a weight storage, i4 group and `[n, k]` the GEMV family serves
  * in the models) and row count, the baseline — what a Session at the level `exact` runs with the
- * default profile — and the candidates in two classes: `identical` (the sequential M = 1 variants and
+ * default profile's GEMV choices; for a float-stored case past one row that is the GEMM, built with
+ * the tile geometry of the profile the sweep's device resolves to, whose id the record names — and
+ * the candidates in two classes: `identical` (the sequential M = 1 variants and
  * the row-block heights, whose output words must be the baseline's) and `reorder` (the parallel GEMV
  * at each lane count, plain, staged and — where the device has the features — subgroup, held to the
  * band of `linear` against an f64 oracle on the host). After a warm start on the baseline, every
@@ -241,7 +243,9 @@ export type {
   GemvSweepCaseEntry,
   GemvSweepCaseSummary,
   GemvSweepChoice,
+  GemvSweepFamilyChoice,
   GemvSweepGates,
+  GemvSweepGemmChoice,
   GemvSweepReport,
   GemvSweepRow,
 } from "./src/tune/gemv-report.ts";
