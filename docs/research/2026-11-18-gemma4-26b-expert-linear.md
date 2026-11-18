@@ -8,12 +8,19 @@ and of a parallel prototype. Scripts, logs and records: `outputs/diag/decode-opt
 
 - A run of several tokens now walks an expert's weight row once for the rows that picked it (the grouped form, for
   gate_up's long rows). Decode under the expert cache with self-speculation at depth 4 takes ×0.85 of the time per
-  token on the RTX 3080 Ti with the same tokens; a clean verify of 5 rows goes from 64.5 to 48.1 ms.
+  token on the RTX 3080 Ti with the same tokens; a clean verify of 5 rows goes from 64.5 to 48.1 ms. The card was
+  throttling; the gain is expected to be smaller on a cool one (§6).
 - A one-token run is unchanged by it. Of its 2.9 ms of routed experts per forward, 2.3 ms is gate_up
   (77 µs per dispatch) and 0.6–0.7 ms is down (21–23 µs).
 - The 48 µs per dispatch that K-103 compared with 17–30 µs for dense rows is the time of eight weight rows: one
-  `expert_linear` dispatch reads the 8 picked experts. Per multiply-add the kernel is not slower than the dense
-  parallel GEMV.
+  `expert_linear` dispatch reads the 8 picked experts. Per multiply-add gate_up runs at about half the rate of the
+  dense parallel GEMV's head, and down at about its rate.
+- Two bit-identical changes of the one-row kernel gain in the kernel bench (8 words to a round: 13% of gate_up; 4
+  words read a round ahead: 29%). The second was built and showed nothing in the untimed forward, so it was taken out
+  (§4.1).
+- A parallel prototype (the reorder class, perf-ledger K-103) takes 0.9 ms off the median forward of 18.8 ms and
+  1.2 ms off the fastest one (§4.2): at K-103's line of 1 ms. Nothing was built for it; it is the maintainer's
+  decision.
 
 ## 2. Setup
 
@@ -21,9 +28,9 @@ The RTX 3080 Ti (12 GB) under Node and Dawn, branch `wip/opt-expert-linear` from
 exact expert cache (64 slots per layer unless stated, every expert in the host tier), preset `i4-fast` unless stated,
 greedy, the three prompts of [research 2026-11-10](2026-11-10-gemma4-26b-fast.md) §2 with 96 new tokens.
 
-The card was shared with four other measurement legs and ran at 85–93 °C with its thermal slowdown flag set in almost
-every run here, so absolute times are slower than those of the earlier records (a decode token at depth 4 took 50–60 ms
-against 38–42 ms on 2026-11-10). Every comparison below is inside one process with the arms interleaved.
+The card was shared with four other measurement legs and ran at 77–93 °C, with its thermal slowdown flag set in most
+runs, so absolute times are slower than those of the earlier records (a decode token at depth 4 took 50–60 ms against
+38–42 ms on 2026-11-10). Every comparison below is inside one process with the arms interleaved.
 
 - **Kernel bench** (`kernel-bench.ts`): one dispatch of the pooled kernel (i4 codes, f16 steps, 64 slots of 128
   experts) at the two shapes of 26B — gate_up (n 1408, k 2816, x shared by the picks) and down (n 2816, k 704, one x row
@@ -31,8 +38,9 @@ against 38–42 ms on 2026-11-10). Every comparison below is inside one process 
   (15 rounds; median and minimum), every variant's output compared word for word with the first. Synthetic routing: a
   token keeps each pick of the token before it with probability `overlap`.
 - **Decode A/B** (`decode-ab.ts`): one pipeline, two arms on one Session, switched at recipe time. Arm `base` compiles
-  `expert_linear` from the kernel module of the branch point; arm `grouped` is the tree. Per prompt one untimed
-  generation, then A B B A (B A A B on odd rounds); the token ids of every generation are compared.
+  `expert_linear` from the kernel module of the branch point; arm `grouped` is the tree; arm `par` is the tree with
+  the parallel prototype for runs of one token. Per prompt one untimed generation, then A B B A (B A A B on odd
+  rounds); the token ids of every generation are compared. A **clean** run is one that missed no expert.
 
 ## 3. The forward at the branch point
 
@@ -70,9 +78,59 @@ Kernel bench, 8 pick rows (`logs/kb-batch1.log`). µs per dispatch, median / min
   experts run at about 410 M per ms (gate_up) and 680–770 M per ms (down), the dense parallel GEMV of the head at about
   770 M per ms (738 M in 0.96 ms on 2026-11-10).
 - The columns per workgroup do not help. Prefetching 8 words in place of 4 takes 13% off gate_up and nothing off down.
-- The parallel prototype (the form of `linear`'s parallel GEMV: lanes stride the words, `fma`, a tree of adds) takes 46%
-  off gate_up at 4 lanes and 11% off down at 2 lanes: 38.6 µs per layer, 1.16 ms per forward of per-kernel time. It
-  changes the summation order.
+- The parallel prototype (the form of `linear`'s parallel GEMV: lanes stride the words, `fma`, a tree of adds;
+  `par-proto.ts`) takes 46% off gate_up at 4 lanes and 11% off down at 2 lanes: 38.6 µs per layer, 1.16 ms per forward
+  of per-kernel time. It changes the summation order.
+
+### 4.1 Reading a round ahead
+
+The kernel reads the 4 words of a round and then sums them, so a thread waits for memory at the start of every round;
+a run of one token has 352 (gate_up) or 704 (down) warps of threads for the whole GPU, too few to hide the wait. A
+second bench (`logs/job-tests-bench.log`, the card at 77–88 °C) measured more words to a round, and a look-ahead in
+which each round reads the words and steps of the next round before its own multiply-adds. The multiply-add text and
+its order are the same in all of them, and every output word was identical.
+
+| Variant | gate_up | down |
+| --- | ---: | ---: |
+| 4 words to a round (the kernel at the branch point) | 75.6 / 75.4 | 20.4 / 19.9 |
+| 8 words | 66.3 / 66.2 (×0.877) | 20.0 / 19.8 (×0.984) |
+| 11 words | 67.9 / 67.7 (×0.898) | 19.7 / 19.5 (×0.969) |
+| 22 words | 63.8 / 63.7 (×0.844) | 19.4 / 19.2 (×0.955) |
+| 4 words, read a round ahead | 53.7 / 53.5 (×0.711) | 20.1 / 19.3 (×0.985) |
+| 8 words, read a round ahead | 69.6 / 69.4 (×0.921) | 22.3 / 21.3 (×1.094) |
+| 11 words, read a round ahead | 80.6 / 80.3 (×1.067) | 23.4 / 22.6 (×1.150) |
+| 22 words, read a round ahead | 80.8 / 80.7 (×1.069) | 26.8 / 25.9 (×1.317) |
+
+- In the bench, reading 4 words a round ahead takes 29% off gate_up (21.8 µs per dispatch) and leaves down where it
+  was: 22 µs per layer, about 0.66 ms per forward of per-kernel time.
+- **The forward does not show it.** With the look-ahead built into the one-row kernel (key `v2`; the GPU tests and the
+  kernel check passed with it), the decode A/B without self-speculation (`logs/ab-lookahead-d0.log`, 12 generations of
+  64 tokens per arm, the same tokens) gave a clean one-row run 18.15 ms at the branch point and 18.33 ms with it
+  (median of 756 runs each; minimum 12.11 and 12.73 ms), and a paired decode ratio of ×0.981 (0.895–1.125). The same
+  comparison of two arms with identical one-row kernels gave 18.97 and 19.05 ms (§6). The gain is below 1% of a decode
+  token, so the look-ahead was taken out again; the patch is `lookahead-not-adopted.patch` beside the scripts.
+- This is the second time on this backend that per-kernel time taken with timestamp queries (one pass per dispatch, or
+  a stack of one dispatch) overstates what a faster small-to-medium dispatch buys in an untimed forward (research
+  2026-11-10 §8.1 was the first). Why was not investigated; the card ran at 79–91 °C during the A/B, mostly at 90.
+
+### 4.2 The parallel prototype in a forward
+
+The decode A/B without self-speculation with the prototype for every run of one token (4 lanes for gate_up, 2 for
+down) against the tree (`logs/ab-fast-64-d0-par.log`, 12 generations of 64 tokens per arm):
+
+| Measure | Tree | Prototype |
+| --- | ---: | ---: |
+| clean run of 1 row, ms, median / minimum (756 runs each) | 18.85 / 12.84 | 17.96 / 11.68 |
+| decode ms per token, median / minimum | 48.90 / 46.32 | 48.83 / 43.36 |
+
+- The forward is 0.89 ms shorter by the median and 1.16 ms by the minimum (the per-kernel estimate was 1.16 ms).
+  K-103's line is 1 ms off the forward.
+- Decode under the cache did not move measurably (paired ratio ×0.999, 0.84–1.09): at 64 slots without
+  self-speculation a decode token is about 2.5 runs with their loads, and the generations differ by more than 5%.
+- The token ids were the same as the tree's on these three prompts, which is an observation: the prototype reorders
+  the sum. It is a measurement aid — it has no check of the id or the slot and no grid-stride — and nothing of it is in
+  the tree. A kernel of this form would be the op's second numeric contract, shared by the pooled and the resident
+  form, selected by a Session at `reorder`; `i4-fast` declares that level, so its numbers on 26B would move.
 
 ## 5. Several tokens: the grouped form
 
@@ -120,10 +178,33 @@ generation of a prompt gave the same token ids in both arms.
 | | clean run of 1 row, ms (1,140 runs) | 18.97 / 11.82 | 19.05 / 12.94 | ×1.004 |
 | | time to the first token, ms | 1135.0 / 976.7 | 1077.0 / 906.6 | ×0.949 |
 
-- Without self-speculation every decode run has one row, both arms run the same kernels, and the paired ratio is the
-  noise of this card on that day: ±8% between generations of one arm, 1% on the medians.
+- Without self-speculation every decode run has one row and both arms run the same kernels: the paired ratio moved
+  between 0.91 and 1.08 around 1.009, which is the noise of this card on that day.
 - With self-speculation at depth 4 the verify of 5 rows takes the grouped form, and all six paired ratios are below
   0.89. The size of the gain depends on the card's thermal state: the same clean prefill chunk of 8 rows took 91.5 ms
-  with the one-row kernel in the first process and 49.6 ms in the second, and gained ×0.68 and ×0.90. The runs of
-  several rows are the sustained heavy kernels, and they slow down the most when the card throttles. On a cool card
-  the gain per decode token is expected to be smaller than ×0.85; it was not measured on one.
+  with the one-row kernel in the first process and 49.6 ms in the second, and gained ×0.68 and ×0.90. A possible
+  reason, not checked: the runs of several rows are the longest stretches of heavy kernels, and they slow down the
+  most when the card throttles. On a cool card the gain per decode token is expected to be smaller than ×0.85; it was
+  not measured on one.
+- The routing of the prefill's chunks (`[sharing]` in the later logs): a chunk of 8 real rows reaches 30.9 experts with
+  its 64 pick rows per layer on average (462 runs), a chunk of 6 real rows 21.8 with 48 — about half, as the bench's
+  synthetic routing at overlap 0.5 does. The verify's routing was not recorded.
+
+## 7. Checks
+
+- The GPU tests of the tree on the RTX 3080 Ti (`logs/job-tests-bench.log`, commit `47760d48`): 5 files, 25 tests
+  passed — the grouped form against the one-row form word for word, the expert-linear kernel check (both forms against
+  `linear`'s GEMV at the 26B shapes), the Session tests and the expert cache's. The same files pass on Mesa's llvmpipe.
+- Every generation of the A/Bs between the branch point's kernel and the tree gave the same token ids in both arms
+  (depth 4, without self-speculation, and the look-ahead build without self-speculation).
+
+## 8. Not measured
+
+- A cool card, and any other device: Chrome on the RTX 5070 Ti (the `kernel-check` entry for the identity, the chat for
+  the speed), Metal.
+- The 26B cut model's test with its sha256 rows (`KARUME_SERIES=1`, `e2e_gemma4_26b_cut_test.ts`): queued and
+  withdrawn when the GPU queue was cut to short jobs.
+- The fitted slots, the preset `i4`, temperature 1, and the per-kernel times of a verify (all withdrawn with the queue).
+- The grouped walk with the look-ahead or 8 words to a round; walks of other row counts than 8 / 4 / 2 / 1 (the bench
+  measured one loop per count up to 4 and up to 8, §5).
+- Resident prefill (26B does not fit this card).
