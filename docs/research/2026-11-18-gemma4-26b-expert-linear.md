@@ -195,6 +195,8 @@ generation of a prompt gave the same token ids in both arms.
 - The GPU tests of the tree on the RTX 3080 Ti (`logs/job-tests-bench.log`, commit `47760d48`): 5 files, 25 tests
   passed — the grouped form against the one-row form word for word, the expert-linear kernel check (both forms against
   `linear`'s GEMV at the 26B shapes), the Session tests and the expert cache's. The same files pass on Mesa's llvmpipe.
+- The 26B cut model's product case (`KARUME_SERIES=1`, `e2e_gemma4_26b_cut_test.ts`, `logs/cut-test-product.log`):
+  the sha256 rows of this machine at the golden rows still hold with the grouped form in the teacher-forced chunks.
 - Every generation of the A/Bs between the branch point's kernel and the tree gave the same token ids in both arms
   (depth 4, without self-speculation, and the look-ahead build without self-speculation).
 
@@ -202,9 +204,12 @@ generation of a prompt gave the same token ids in both arms.
 
 - A cool card, and any other device: Chrome on the RTX 5070 Ti (the `kernel-check` entry for the identity, the chat for
   the speed), Metal.
-- The 26B cut model's test with its sha256 rows (`KARUME_SERIES=1`, `e2e_gemma4_26b_cut_test.ts`): queued and
-  withdrawn when the GPU queue was cut to short jobs.
-- The fitted slots, the preset `i4`, temperature 1, and the per-kernel times of a verify (all withdrawn with the queue).
+- The cut model's cases under the expert cache (⑦a to ⑦e of `e2e_gemma4_26b_cut_test.ts`: the cache against a resident
+  Session, self-speculation, and the verify census that now expects gate_up grouped and down one-row). The whole file
+  does not fit the five minutes a GPU job was given that day; a run cut off at 285 s had passed its cases up to ⑥
+  (`logs/cut-test-all.log`).
+- The fitted slots, the preset `i4`, temperature 1, and the per-kernel times of a verify (queued, and withdrawn when the
+  GPU queue was cut to one short job at a time).
 - The grouped walk with the look-ahead or 8 words to a round; walks of other row counts than 8 / 4 / 2 / 1 (the bench
   measured one loop per count up to 4 and up to 8, §5).
 - Resident prefill (26B does not fit this card).
