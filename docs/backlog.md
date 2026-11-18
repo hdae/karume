@@ -620,6 +620,14 @@ maintainer's ruling of 2026-11-06).
   is not in hit runs, as corrected in the addendum of 2026-09-25). The adoption of candidates and the kill criteria are
   in [perf-ledger](perf-ledger.md), the attribution in [research 2026-09-19](research/2026-09-19-qat-speed-recon.md).
 
+- **Host side of a Gemma 4 decode token (2026-11-18)**: built — the abort yield taken while a decode run is awaited
+  (H-31) and the candidate selection on the GPU for a sampler with a top-k (H-32); measured and not adopted — the
+  first-chunk ramp of submit (H-29, slower under Node). Left: the browser measurements (H-31 by the decode bench's
+  `no-signal` switch; H-32 has no whole-row arm in the bench, because the key that turns the selection off is test-only;
+  H-29's ramp was not measured there), E4B and 12B after the changes, the measurement of K-49, and the sampler without
+  a top-k (H-45). The numbers are in [research 2026-11-18](research/2026-11-18-decode-host.md), the rows in
+  [perf-ledger](perf-ledger.md).
+
 - **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
   stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
   would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
