@@ -34,7 +34,9 @@ reference kernel.
   is not an error: that op kind runs its reference kernel.
 - A value outside this shape fails at Session construction: a value that is not an object, a level outside the two, an
   unknown field, an unknown op kind. An unknown key is never read as "not declared".
-- The memory estimate takes the same declaration and derives the same kernels from it.
+- The memory estimate takes the same declaration and derives the same kernels from it, up to what a kernel choice
+  takes from the adapter's geometry profile: an estimate has no adapter and reads the default profile's
+  ([geometry-profiles.md](geometry-profiles.md#the-gemv-choices-of-linear)).
 
 ## What a level selects
 

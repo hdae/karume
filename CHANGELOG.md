@@ -185,6 +185,9 @@ measurements in `docs/research/`.
     q4_0 QAT E2B and E4B models (`262144 × 1536`, `262144 × 2560`), 8 words ahead on bf16 `10240 × 2560` and 16 on
     the MTP drafter shape int4 `256 × 2048`. An RTX 3080 Ti gains from them (×1.18 to ×1.87 per dispatch); an RTX
     5070 Ti is slower with them (×0.89 to ×0.95), so they are not rows of the default.
+  - On NVIDIA Blackwell adapters, 42 more shapes of int4 (33) and int8 (9) storage read 8 or 16 words ahead: rows
+    of the embedded table `nvidia-blackwell`, derived from GEMV sweep records of an RTX 5070 Ti in Chrome (D3D12),
+    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each.
   - In `SessionDiagnostics.lastRunPipelines` those dispatches read `linear_gemv:v1:f32:c16u8:wbf16`,
     `…:c16u16:wbf16` or `…:c32u16:wbf16`, and on Ampere `…:c16u2:wi4g32` and `…:c16u16:wi4g32`, in place of
     `…:c32u4:…`.
@@ -192,6 +195,16 @@ measurements in `docs/research/`.
     and 27.7 ms in place of 36.1 ms (E4B). Of the QAT line, E4B `i4` takes 23.6 in place of 24.4 ms and E4B
     `i4-fast` 11.1 in place of 11.9 ms; E2B `i4-fast` read 6.4 in place of 6.7 ms once and 6.49 in place of 6.53 ms
     when repeated, and E2B `i4` shows no difference the measurement resolves.
+- `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
+  choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
+  `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
+  other lanes on 21 shapes, the staged form on 30, another row block on 6, and a row on 16 shapes that ran the
+  sequential GEMV or the GEMM — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT
+  line and bf16 `10240 × 2560`. Each is at least ×1.10 faster per dispatch than the default's choice in every
+  record; no decode token was measured with them. On such an adapter the outputs of a `reorder` Session change
+  inside the band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every
+  Session on another adapter, write what they wrote. The memory estimate plans with the default profile's choices
+  as before; for the Gemma 4 distributions it gives the same numbers ([limitations](docs/limitations.md)).
 - `@karume/runtime`: with linear at the level `reorder`, five linear shapes of the Gemma 4 MTP drafters take the
   parallel GEMV in place of the sequential one: int4 (group 32) `256 × 3072` and `256 × 1024` of the q4_0 QAT E2B / E4B
   drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`

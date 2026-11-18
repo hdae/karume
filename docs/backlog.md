@@ -202,14 +202,28 @@ maintainer's ruling of 2026-11-06).
        carries rows of its own (inside the band, as today's rows are). *(2026-11-18: the sequential variant's
        per-shape exceptions follow the direction by hand — 22 bf16 rows that the RTX 3080 Ti and the RTX 5070 Ti
        are both faster with stay in the default, and the four rows the RTX 5070 Ti is slower with are in
-       `nvidia-ampere`, the first table to carry `linearGemv`.)* Also open under this item:
+       `nvidia-ampere`, the first table to carry `linearGemv`. The RTX 5070 Ti's own choices are in
+       `nvidia-blackwell` since the same day, from 74 of its records: 42 sequential exceptions and 56 parallel rows
+       apart from the default's.)* Also open under this item:
        - the derivation judges a candidate against the default profile's choice for the shape, so where that
          choice is an exception another device drops the inherited row only when its records show the general
          variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
          several devices has to say what removes a row of the default from a device's table;
        - a table holds the field as a whole, so `nvidia-ampere` holds a copy of the default's parallel rows and
-         thread target: a change of those in the default regenerates every table that carries the field (a
-         core-lane test catches the drift);
+         thread target, and `nvidia-blackwell` of the default's thread target and of the rows its records do not
+         replace: a change of those in the default regenerates every table that carries the field (a core-lane
+         test catches the drift);
+       - the memory estimate plans its fusions with the default profile's choices, so a table with parallel rows
+         on more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
+         `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An
+         estimate that takes the adapter's table, or its GEMV choices, would remove it;
+       - `nvidia-blackwell`'s choices have no end-to-end number: the RTX 5070 Ti's decode tokens were measured
+         with the default's choices (the `default-gemv` switch of `gemma4-bench` compares the two in one record).
+         Its records lack 774 candidate measurements in 23 groups against the current default — the 22 bf16
+         shapes at one row, whose exceptions it inherits unmeasured, and int4 `2048 × 2560` at 8 rows
+         (`--gemv-plan` writes the batch);
+       - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
+         would allow it): their evidence is the device's sweep records;
        - the default's 22 rows on Metal, where nothing was measured and their words were not compared;
        - the default's int8 output-head row (`262144 × 1536`, `c16u4`), which predates the direction: the RTX
          5070 Ti reads the general variant ×1.04 faster, and no shipped model has that shape in int8;

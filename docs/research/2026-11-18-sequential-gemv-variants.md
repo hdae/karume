@@ -60,8 +60,8 @@
     measurement planner (`--gemv-plan`) on the 15 records still lists, for 12 bf16 cases at one row, 30 candidates
     that fewer than two records hold a steady group of — the 20 other sequential variants among them. The dry run
     names a narrowed record by its set, `full`.
-- The RTX 5070 Ti (Chrome 157 on Windows, D3D12, the table `nvidia-blackwell`, checkout `72f2ada9`, clean — so its
-  baseline is `c32u4` on every shape): `gemv-sweep_2026-11-18T12-22-44` and `13-53-17` (the int4 heads),
+- The RTX 5070 Ti (Chrome 157 on Windows, D3D12, the table `nvidia-blackwell`, which carried no GEMV choices then,
+  checkout `72f2ada9`, clean — so its baseline is `c32u4` on every shape): `gemv-sweep_2026-11-18T12-22-44` and `13-53-17` (the int4 heads),
   `12-58-03` and `14-28-44` (the 23 bf16 shapes), `12-32-24` and `14-02-58` (the drafter shape), all at one row with
   the whole grid, every group steady. This work did not take them.
 - A decode token: the workbench's `gemma4-bench` entry, greedy, the prompt `few-ids`, 3 chats per visit (the first
@@ -138,6 +138,12 @@ the RTX 5070 Ti's column is the same variant against `c32u4` in its two records.
 - On the RTX 5070 Ti the rows that are faster gain less than on the RTX 3080 Ti, and another variant is often the
   fastest there (`c16u8` where the row says `c16u16`, and the reverse). No rule adopts from one record of each; its
   own choices wait for its own derivation.
+- Later the same day the table `nvidia-blackwell` was derived from 74 records of that device
+  ([spec](../spec/geometry-profiles.md#the-gemv-choices-of-linear)). It carries 42 exceptions of its own, all on
+  int4 and int8 shapes, and none of the four rows of `nvidia-ampere`. For the bf16 shapes of this note it runs the
+  22 rows it inherits from the default: its two records of them were taken against `c32u4`, the default of before
+  those rows, so the derivation reads them as no evidence, and the variant its own records would choose is not
+  registered.
 
 ## 4. The identity
 
@@ -250,7 +256,8 @@ exceptions, "before" the same without; the difference is before − with, paired
 
 - Metal: no GEMV sweep record of an Apple device exists. `apple-metal-3` carries no GEMV choices, so it runs the
   default profile's 22 bf16 rows; whether they gain there, and the identity of their words there, are not known.
-- A decode token on the RTX 5070 Ti, with either placement of the rows.
+- A decode token on the RTX 5070 Ti, with either placement of the rows or with the choices its table carries since
+  that day.
 - The model lanes, beyond the two reference files of §4.
 - A speculative decode: the verify run puts the head at several rows, a row block, which takes no exception; the
   draft steps run the drafter, of whose shapes `nvidia-ampere` now has one row (`256 × 2048`), not measured end to end.

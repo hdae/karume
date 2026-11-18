@@ -106,11 +106,17 @@ adapter's match and measures nothing at run time.
   sweep builds that GEMM with the profile its own device resolves to (the embedded table of the adapter, the default
   profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
   the record (`geometryProfile`). Every other kernel of the sweep reads nothing of the profile.
-- `nvidia-ampere` carries them; `nvidia-blackwell` and `apple-metal-3` do not. A table without them runs with the
+- `nvidia-ampere` and `nvidia-blackwell` carry them; `apple-metal-3` does not. A table without them runs with the
   default profile's: the Session fills them in once, where it selects its profile, so the linear selection, the
-  fusion pass and the recipe builder all read the same choices. The memory estimate, which has no adapter, reads the
-  default profile's; `nvidia-ampere`'s differ from them in per-shape exceptions of the sequential variant alone,
-  which no size and no fusion reads.
+  fusion pass and the recipe builder all read the same choices.
+- The memory estimate has no adapter and reads the default profile's. Of the choices, the fusion pass reads which
+  shapes have a parallel row (the linear → `static_quantize` fusion) and a row's packed-activation flag (the packed
+  pairing); no size reads the sequential variants, a row's lanes, its staged flag or its row block. No registered
+  table removes a parallel row of the default, moves a packed flag or adds a packed row. `nvidia-ampere`'s parallel
+  rows are the default's. `nvidia-blackwell` has rows on 16 shapes the default has none for, so on that adapter the
+  Session's fusion plan differs from the estimate's where a linear of one of those shapes feeds a `static_quantize`
+  with linear at `reorder` and at most 8 rows. No graph of a Gemma 4 distribution has such a linear: their plans and
+  estimates are the same under both ([limitations](../limitations.md), the section on `workspaceBytes`).
 - The default profile's sequential variant is 32 columns per workgroup and 4 weight words read ahead (`c32u4`). Its
   per-shape exceptions are 23 rows:
   - the int8 output head `262144 × 1536`: `c16u4`. The row predates the derivation
@@ -131,13 +137,30 @@ adapter's match and measures nothing at run time.
   and E4B models, `262144 × 1536` and `262144 × 2560` (`c16u2`), bf16 `10240 × 2560` (`c16u8`) and the MTP drafter
   shape int4 `256 × 2048` (`c16u16`) — each slower than `c32u4` on the RTX 5070 Ti. The derivation leaves the two
   bf16 output heads on the general variant: no candidate gained in every record.
+- `nvidia-blackwell`'s field is the default profile's choices with what the derivation adopts from 74 GEMV sweep
+  records of the RTX 5070 Ti in Chrome (D3D12) in place:
+  - 42 per-shape exceptions after the default's 23, on int4 (33) and int8 (9) shapes, which read 8 or 16 words
+    ahead: `c16u8` on 16 shapes, `c32u8` on 16, `c16u16` on 9 and `c32u16` on one. The default's rows are inherited
+    as they are: the records give `c32u4` ×1.04 over the int8 head's `c16u4`, less than the ×1.10 that removes a
+    row, and their groups of the 22 bf16 shapes were measured against the default of before those rows, so they are
+    no evidence about them. None of `nvidia-ampere`'s four rows is adopted there.
+  - 56 parallel rows apart from the default's. 40 of the default's 71 rows are changed: other lanes on 21, the
+    staged flag set on 30, another row block on 6 (three lose theirs, two go from 4 to 8 and one from 2 to 4). 16
+    rows are on shapes the default has none for: int4 8 and int8 5 (shapes of the MTP drafters), the int2 output
+    heads `262144 × 1536` and `262144 × 2560`, and bf16 `10240 × 2560` — the first row of a float storage in a
+    profile.
+  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 21
+    rows with other lanes and on the 16 added ones, inside the band of `linear`. On the other 19 changed rows it
+    writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
+    at the same lanes.
 - An exception names a storage and a shape, has no group length, and applies at one row: a row block takes the
   general variant. Its words are the general variant's, so a Session runs it at `exact` too.
 - A table carries the field only as a whole: the default's choices with the derived ones in place. Its provenance has
   no entry for the field (the profile's type holds none); the records it came from are in the table's header. So a
   table holds the default's parallel rows, thread target and general variant as they were when it was generated, and
-  a change of those in the default profile regenerates the table (a core-lane test compares `nvidia-ampere`'s with
-  the default's).
+  a change of those in the default profile regenerates the table (a core-lane test compares each such table with the
+  default's: `nvidia-ampere`'s row for row, `nvidia-blackwell`'s by what it inherits and by the counts of what it
+  changes and adds).
 - `SessionOptions.linearGemvRowsThreadTarget`, when given, replaces the profile's thread target.
 - The printer writes the field of a table that carries it, and the saved-table reader (`parseGeometryProfileJson`)
   reads it.
@@ -304,8 +327,11 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
   they moved into the profile and the rows added since —; `nvidia-ampere`'s equal the default's with its four pinned
-  exceptions after them, and no other registered table carries the field; a profile with other choices changes the
-  selection and the pipeline key (core lane).
+  exceptions after them; `nvidia-blackwell`'s hold the default's general variant, thread target and 23 exceptions
+  with 42 of their own after them, and every parallel row of the default in the default's order, 40 of them changed,
+  with 16 added; no registered table removes a parallel row of the default, moves a packed flag or adds a packed
+  row; `apple-metal-3` carries no field; a profile with other choices changes the selection and the pipeline key
+  (core lane).
 - Every per-shape exception of the sequential variant that can run — the default profile's and those of every
   registered table that carries GEMV choices: on the development machine's GPU its kernel writes the words the
   general variant writes, on the exception's own shape, on one small shape that leaves the last workgroup partial
@@ -314,6 +340,11 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   The rows are read from the profiles, so a row added later, or a table that starts to carry the field, is checked
   too. On another backend the evidence is that device's GEMV sweep record: its rows of the identical class are
   compared with the baseline word for word on the case's own shape.
+- A table's parallel rows select among the kernels of the parallel GEMV, which the GPU tests of that family check
+  per storage and lane count on shapes of their own (the band against the f64 reference, and the staged and
+  row-blocked forms word for word against the plain one at the same lanes). No test runs a table's rows on their
+  own shapes: that evidence is the device's GEMV sweep records, where every row of the reorder class is held to the
+  band of `linear` against an f64 oracle on the case's shape, at 1, 4 and 8 rows.
 - The row-blocked parallel GEMV: every output word equal to the parallel GEMV's at the same lanes for every storage,
   lane count, row block and row count, on the development machine's GPU and, through the workbench's `kernel-check`
   entry, on a browser's backend; a Session takes it exactly where its table's row carries a row block (GPU tests and

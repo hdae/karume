@@ -707,7 +707,26 @@ for row-block attention the temporaries and output of one row block, to which th
 applies), and so are the two quantization temporaries of linear i8a8 (ADR
 [0093](decisions/0093-transient-liveness-packing.md) addendum 2026-11-11). It describes the Session only
 for the options it is given: a fusion or compute option the Session gets and the estimate does not is
-planned at the runtime default, and the windows it folds are counted unfused. The `unaccounted` field
+planned at the runtime default, and the windows it folds are counted unfused. It also has no adapter:
+it plans its fusions with the default geometry profile's GEMV choices, and a Session plans them with
+those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
+a linear whose shape has a parallel row, and `nvidia-blackwell` (the RTX 5070 Ti's table) has rows on
+16 shapes the default has none for; no registered table removes a row of the default or changes which
+rows read packed activations (a core-lane test). On that adapter a linear of one of those shapes that
+feeds a `static_quantize`, with linear at `reorder` and at most 8 rows, is one fused step in the
+Session and two nodes in the estimate: the estimate then counts the linear's f32 output (4 · rows · N
+bytes: at most 327,680 for the 13 shapes that are not an output head, 8,388,608 for the three that
+are) where the Session has none, and may count the `static_quantize`'s output as packed int8 where
+the Session keeps it f32. No graph of a
+Gemma 4 distribution has such a linear (2026-11-18): over every model and drafter graph of the three
+distributions, 470 of the 7,556 linears taken at 1, 4 and 8 rows are on one of the 16 shapes — drafter
+linears, the bf16 `10240 × 2560` of regular E4B and the int2 output heads of the mobile line — and
+none feeds a `static_quantize`; the fusion plans of the mobile line's `i4`, `i4-gemvpar` and `i4-fast`
+at 1, 4 and 8 rows are the same step for step under both sets of choices, and so is every byte
+(resident, peak and each scenario's workspace) of 23 estimates: the models and drafters of the three
+distributions at their `bf16`, `i4`, `i4-gemvpar` and `i4-fast` presets. A table
+injected with `acquireGpu({ geometryProfile })` that names other parallel shapes is in the same
+position, and nothing checks it. The `unaccounted` field
 lists what is not counted, verbatim — ① fusion the options passed do not describe ② the quantization
 intermediates of a linear i8a8 whose weight is borrowed (`sharedWeights`) and the in-node temporaries
 of conv3d i8a8 ③ params buffers ④ the implementation staging of `queue.writeBuffer` ⑤ the window of
@@ -854,7 +873,7 @@ gemma4's prefill runs each chunk with the physical row count of "the smallest bu
 
 linear with i4 / i8 storage × f32 compute is taken by the GEMV family for 1 ≤ M ≤ 64 (ADR
 [0082](decisions/0082-linear-gemv-decode.md) addendum 5), which stays a full u32 match with the default
-GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 3 by-design constraints:
+GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design constraints:
 
 - **The row-block height `rows` is a pure function of (storage, m, n), and the parallelism target of
   16384 threads is the saturation point of the reference device (RTX 3080 Ti), held by the default geometry profile (`linearGemv.rowsThreadTarget`) that every embedded table takes**. On GPUs whose
@@ -872,14 +891,24 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 3 by-design 
   ×1.89 per dispatch) and are faster on the RTX 5070 Ti in Chrome too (×1.015 to ×1.495, 2026-11-18); a row a
   measured device is slower with is not in the default but in the table of the device that gains from it
   (`nvidia-ampere`: the int4 output heads of the q4_0 QAT E2B / E4B models, bf16 `10240 × 2560` and the drafter shape
-  int4 `256 × 2048`, which the RTX 5070 Ti reads ×0.89 to ×0.95 — [perf-ledger](perf-ledger.md) K-101, K-112). No
+  int4 `256 × 2048`, which the RTX 5070 Ti reads ×0.89 to ×0.95 — [perf-ledger](perf-ledger.md) K-101, K-112;
+  `nvidia-blackwell`: 42 int4 and int8 shapes, from the RTX 5070 Ti's own records). No
   Apple device has measured any of them: `apple-metal-3` runs the default's rows unmeasured, and on Metal their
   words were not compared with the general variant's (on Vulkan and on D3D12 they were). The int8 head's row is
   older than this rule and is slower than the general variant on the RTX 5070 Ti (×0.96); no shipped model has a
   linear of its shape and storage. A table derived from a
   device's own GEMV sweep records starts from the default's exceptions: it keeps the ones its records give no
   evidence about, and removes one only when its records adopt the general variant over it, which takes ×1.10 in
-  every group — a device on which an inherited exception is slower by less keeps it.
+  every group — a device on which an inherited exception is slower by less keeps it. `nvidia-blackwell` is such a
+  table: it keeps the int8 head's row, and it keeps the 22 bf16 rows without evidence of its own, its records of
+  those shapes having been taken against the default of before the rows.
+- **On NVIDIA Blackwell adapters the parallel rows are that table's own**: `nvidia-blackwell` holds 56 parallel rows
+  apart from the default's (other lanes on 21 of the default's rows, 16 rows on shapes the default has none for,
+  the staged form or another row block on the rest), derived from GEMV sweep records of one RTX 5070 Ti in Chrome
+  on D3D12. A Session with linear at `reorder` there gives other bits than the same Session on another adapter on
+  the 37 shapes whose lanes differ or whose row is new, inside the band of `linear`. Each row is at least ×1.10
+  faster per dispatch than the default's choice in every record; no decode token has been measured with them, and
+  no test runs them on their own shapes on the development machine — the records hold their band readings.
 - **The first turn pays the shader parsing cost**: a row-block variant is WGSL unrolled over its rows,
   and the parse and validation cost is superlinear in the amount of text. Even at the ceiling
   (256 elements/word), i4 with 8 rows / i8 with 16 rows cost ≈ 55–60 ms each, and the 5 pipelines that
