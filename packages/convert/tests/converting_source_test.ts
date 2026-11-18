@@ -569,6 +569,195 @@ describe("the plan read before a conversion (readPlanCodecs)", () => {
   });
 });
 
+describe("a plan whose 16-bit float weights are stored as another 16-bit float type (float16Codec)", () => {
+  /** F16 bits bf16 cannot hold: a finer mantissa (1 + 2⁻¹⁰), −0.5, 2⁻²⁴, 65504, +0 and −0. */
+  const F16_BITS = Uint16Array.from([0x3c01, 0xb800, 0x0001, 0x7bff, 0x0000, 0x8000]);
+  /** BF16 bits f16 cannot hold: 1 + 2⁻⁷ beside 3.39e38, 2⁻¹³³ (below f16's grid), −2, +0, −0. */
+  const BF16_BITS = Uint16Array.from([0x3f81, 0x7f7f, 0x0001, 0xc000, 0x0000, 0x8000]);
+  const HALF_SHAPE = [2, 3] as const;
+  const bytesOf = (bits: Uint16Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
+    new Uint8Array(bits.buffer.slice(0));
+
+  /**
+   * Two 16-bit float weights (`half.a`, `half.b`, stored as `codecs[0]` / `codecs[1]` with
+   * `bytes`) beside an int8 weight and an f32 one (fixtures), a const and a dedicated asset part,
+   * in the small parts of {@link writeTarget}.
+   */
+  const writeHalfTarget = async (
+    codecs: readonly ["f16" | "bf16", "f16" | "bf16"],
+    bytes: Uint8Array<ArrayBuffer>,
+  ): Promise<WrittenContainer> =>
+    writeModelContainer(
+      {
+        graphs: {
+          [GRAPH]: declaration({
+            "half.a": HALF_SHAPE,
+            "half.b": HALF_SHAPE,
+            "blocks.0.w": fixture("int8-rows").shape,
+            "blocks.0.b": fixture("f32-from-bf16").shape,
+            "const.rope": [16],
+          }),
+        },
+        consts: [
+          {
+            graph: GRAPH,
+            initializer: "const.rope",
+            bytes: CONST_ROPE.slice(),
+            encoding: { codec: "f32" },
+          },
+        ],
+        weights: [
+          ...codecs.map((codec, i) => ({
+            graph: GRAPH,
+            initializer: i === 0 ? "half.a" : "half.b",
+            bytes: bytes.slice(),
+            encoding: { codec },
+          })),
+          ...["int8-rows", "f32-from-bf16"].map((name, i) => ({
+            graph: GRAPH,
+            initializer: i === 0 ? "blocks.0.w" : "blocks.0.b",
+            bytes: hexBytes(fixture(name).data),
+            encoding: encodingOf(name),
+          })),
+        ],
+        assets: [
+          { name: "rope_base", role: "rope-base", bytes: ROPE_BASE.slice(), dedicatedPart: true },
+        ],
+        provenance: { license: "apache-2.0" },
+      },
+      { partBytes: 512, blockBytes: 200 },
+    );
+
+  /** The source: the two 16-bit weights as `dtype` with `bits`, the others the fixtures' sources. */
+  const halfTensors = (dtype: "F16" | "BF16", bits: Uint16Array<ArrayBuffer>) =>
+    new Map<string, SourceTensor>([
+      ...["half.a", "half.b"].map(
+        (name) =>
+          [name, { dtype, shape: HALF_SHAPE, read: () => Promise.resolve(bytesOf(bits)) }] as const,
+      ),
+      ...["int8-rows", "f32-from-bf16"].map((name, i) => {
+        const entry = fixture(name);
+        const tensor: SourceTensor = {
+          dtype: dtypeOf(entry.sourceDtype),
+          shape: entry.shape,
+          read: () => Promise.resolve(hexBytes(entry.source)),
+        };
+        return [i === 0 ? "blocks.0.w" : "blocks.0.b", tensor] as const;
+      }),
+    ]);
+
+  /** Writes what the converting source over `target` serves for `tensors` with `float16Codec`. */
+  const convertAndWrite = async (
+    target: WrittenContainer,
+    tensors: ReadonlyMap<string, SourceTensor>,
+    float16Codec: "f16" | "bf16",
+  ) => {
+    const recorded = recordingSource(target.parts, false);
+    const converting = await openConvertingSource({
+      target: recorded.source,
+      tensors,
+      float16Codec,
+    });
+    const { sink, parts } = collectingSink();
+    const result = await writeContainer(converting.source, sink);
+    return { recorded, converting, parts, result };
+  };
+
+  it("an F16 source against a plan whose 16-bit weights are bf16, stored as f16: the written container is the one exported with those weights as f16, byte for byte, the int8 and f32 weights as the plan stores them", async () => {
+    // The distributed plan holds one bf16 and one f16 weight; the f16 export of the same graph
+    // and values is the expectation.
+    const target = await writeHalfTarget(["bf16", "f16"], new Uint8Array(12));
+    const f16Export = await writeHalfTarget(["f16", "f16"], bytesOf(F16_BITS));
+    const { recorded, parts, result } = await convertAndWrite(
+      target,
+      halfTensors("F16", F16_BITS),
+      "f16",
+    );
+    assertEquals(parts, [...f16Export.parts]);
+    assertEquals(result.descriptor.model.length, f16Export.modelDescriptorBytes.byteLength);
+    assertEquals(result.descriptor.graph.sha256, await sha256Hex(target.graphDescriptorBytes));
+    // The target is read for its part 0, its const part and its asset part only.
+    assertEquals(
+      [...recorded.partsRead].sort((a, b) => a - b),
+      [0, 1, target.parts.length - 1],
+    );
+    // Fault: without the option the plan's bf16 weight takes BF16 values only, and the F16 value
+    // 1 + 2⁻¹⁰ is refused, not rounded.
+    const plain = await openConvertingSource({
+      target: recordingSource(target.parts, false).source,
+      tensors: halfTensors("F16", F16_BITS),
+    });
+    const view = await openContainer({ kind: "source", source: plain.source });
+    const block = view.graphs[GRAPH].supplies.get("half.a")?.blocks[0];
+    assert(block !== undefined);
+    const error = await assertRejects(
+      () => plain.source.read(block.part, block.offset, block.length),
+      ConvertError,
+    );
+    assertStringIncludes(error.message, "element 0 (1.0009765625) is not a bf16 value");
+  });
+
+  it("a BF16 source against a plan whose 16-bit weights are f16 and bf16, stored as bf16: the bf16 export of those weights, byte for byte", async () => {
+    const target = await writeHalfTarget(["f16", "bf16"], new Uint8Array(12));
+    const bf16Export = await writeHalfTarget(["bf16", "bf16"], bytesOf(BF16_BITS));
+    const { parts } = await convertAndWrite(target, halfTensors("BF16", BF16_BITS), "bf16");
+    assertEquals(parts, [...bf16Export.parts]);
+  });
+
+  it("serves a part 0 of its own, as long as its model descriptor names the codec, with the target's graph descriptor and blocks; a plan whose 16-bit weights already have the codec is served as the target's", async () => {
+    const target = await writeHalfTarget(["bf16", "f16"], new Uint8Array(12));
+    const f16Export = await writeHalfTarget(["f16", "f16"], bytesOf(F16_BITS));
+    const { converting } = await convertAndWrite(target, halfTensors("F16", F16_BITS), "f16");
+    const served = converting.source;
+    assertEquals(served.partLength(0), f16Export.parts[0].byteLength);
+    assert(served.partLength(0) !== target.parts[0].byteLength, "part 0 kept the target's length");
+    const view = await openContainer({ kind: "source", source: served });
+    const model = view.model;
+    assert(model !== undefined);
+    assertEquals(model.codecs, ["f16", "f32", "int8-sym"]);
+    assertEquals(
+      model.blocks.map(({ id, part, offset, length, role }) => [id, part, offset, length, role]),
+      target.model.blocks.map(({ id, part, offset, length, role }) => [
+        id,
+        part,
+        offset,
+        length,
+        role,
+      ]),
+    );
+    const part0 = await served.read(0, 0, served.partLength(0));
+    assertEquals(
+      part0.slice(24, 24 + target.graphDescriptorBytes.byteLength),
+      target.graphDescriptorBytes,
+    );
+    // Already f16: the same plan, the same part 0 length.
+    const same = await openConvertingSource({
+      target: recordingSource(f16Export.parts, false).source,
+      tensors: halfTensors("F16", F16_BITS),
+      float16Codec: "f16",
+    });
+    assertEquals(same.source.partLength(0), f16Export.parts[0].byteLength);
+  });
+
+  it("readPlanCodecs with the option gives the plan the converting source encodes against, from part 0 alone", async () => {
+    const target = await writeHalfTarget(["bf16", "f16"], new Uint8Array(12));
+    const recorded = recordingSource(target.parts, false);
+    const codecs = await readPlanCodecs(recorded.source, { float16Codec: "f16" });
+    assertEquals(
+      codecs
+        .map(({ initializer, codec }) => [initializer, codec])
+        .sort(([left = ""], [right = ""]) => left.localeCompare(right)),
+      [
+        ["blocks.0.b", "f32"],
+        ["blocks.0.w", "int8-sym"],
+        ["half.a", "f16"],
+        ["half.b", "f16"],
+      ],
+    );
+    assertEquals([...recorded.partsRead], [0]);
+  });
+});
+
 describe("the writer", () => {
   it("writes the target's parts byte for byte, part 0 last, and returns their lengths and sha256", async () => {
     const written = await writeTarget();

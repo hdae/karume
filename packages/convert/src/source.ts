@@ -2,9 +2,10 @@
  * The converting block source: the target preset's container as a `BlockSource` whose weight
  * blocks are encoded from a tensor list while they are read.
  *
- * - Part 0 is the target's, with the sha256 of every converted block and of every part that holds
- *   one replaced by {@link INVALID_SHA256} (the same length, so no other byte moves): the document
- *   never states a hash the served bytes do not have. The writer (`write.ts`) puts the real ones in.
+ * - Part 0 is the plan's — the target's, or the one with another 16-bit float codec
+ *   (`float16Codec`) —, with the sha256 of every converted block and of every part that holds one
+ *   replaced by {@link INVALID_SHA256} (the same length, so no other byte moves): the document never
+ *   states a hash the served bytes do not have. The writer (`write.ts`) puts the real ones in.
  * - The const part and the asset parts are the target's bytes. When the target is unverified, each
  *   block a read touches is read whole and checked against its declared sha256 first (the check
  *   `openContainer` would have made), because this source declares itself verified.
@@ -25,7 +26,7 @@ import {
 } from "@karume/runtime/container";
 import { type Encoded, ENCODED_CODECS, encodeValues } from "./encode.ts";
 import { ConvertError } from "./errors.ts";
-import { type PlannedInitializer, readPlan } from "./plan.ts";
+import { type Float16Codec, type PlannedInitializer, readPlan } from "./plan.ts";
 import { tensorByteLength, type TensorList, tensorValues } from "./tensors.ts";
 
 /** The sha256 a served part 0 states for what is converted here (not the digest of any bytes). */
@@ -40,6 +41,14 @@ export type ConvertingSourceInput = {
   readonly tensors: TensorList;
   /** Initializer name → tensor name (the identity when omitted). */
   readonly tensorName?: (initializer: string) => string;
+  /**
+   * The codec every initializer the target stores as `f16` or `bf16` is stored as (`readPlan`'s
+   * `float16Codec`); part 0 is then served with that plan's model descriptor, and
+   * its length is that plan's. Omitted: the target's plan.
+   *
+   * SPEC: docs/spec/convert.md#a-plan-with-another-16-bit-float-codec
+   */
+  readonly float16Codec?: Float16Codec;
   /**
    * Keep the encoded payloads of every initializer once they are encoded, for as long as the source
    * is reachable: a block of an initializer encoded before is served from memory, its tensor not
@@ -106,7 +115,10 @@ export const openConvertingSource = async (
   input: ConvertingSourceInput,
 ): Promise<ConvertingSource> => {
   const { target, tensors } = input;
-  const plan = await readPlan(target);
+  const plan = await readPlan(
+    target,
+    input.float16Codec === undefined ? {} : { float16Codec: input.float16Codec },
+  );
   const problems: string[] = [];
   const used = new Set<string>();
   const conversions: Conversion[] = [];
@@ -302,7 +314,8 @@ export const openConvertingSource = async (
     return bytes.subarray(offset - start, end - start);
   };
 
-  const partLength = (index: number): number => target.partLength(index);
+  const partLength = (index: number): number =>
+    index === 0 ? part0.byteLength : target.partLength(index);
   const source: BlockSource = {
     partCount: target.partCount,
     verified: true,

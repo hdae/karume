@@ -21,6 +21,9 @@
  *   stores — what a caller checks before it gives a tensor list ({@link ENCODED_CODECS} are the
  *   codecs encoded here). A converting source says which parts it builds (`convertedParts`), so a
  *   caller fetches only the others.
+ * - {@link openConvertingSource} and {@link readPlanCodecs} take `float16Codec` ({@link PlanOptions}): the target's plan with every `f16` and `bf16`
+ *   initializer stored as that codec instead — the plan of the same container exported with that
+ *   16-bit float type, since both take two bytes an element and no block moves.
  *
  * Web standard APIs only; no side effects at import.
  *
@@ -31,7 +34,7 @@ export { ConvertError } from "./src/errors.ts";
 export { ENCODED_CODECS } from "./src/encode.ts";
 export { NAME_MAP_FORMAT, parseNameMap, placeTensors } from "./src/name-map.ts";
 export { readPlanCodecs } from "./src/plan.ts";
-export type { PlannedCodec } from "./src/plan.ts";
+export type { Float16Codec, PlanOptions, PlannedCodec } from "./src/plan.ts";
 export type {
   NameMap,
   NameMapComponent,

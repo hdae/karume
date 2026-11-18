@@ -16,6 +16,9 @@ the container format is [container-v1](../container-v1.md).
   converting source is built; a tensor is read when a block of it is read.
 - **The tensor names** (`tensorName`): initializer name → tensor name. It is the identity when omitted. A
   [name map](#the-name-map) gives this mapping per component of a file.
+- **The 16-bit float codec** (`float16Codec`, `f16` or `bf16`; optional): the plan is the target's with this codec
+  in place of every `f16` and `bf16` initializer's ([below](#a-plan-with-another-16-bit-float-codec)). Omitted:
+  the target's plan as it is.
 
 ## What is served
 
@@ -23,7 +26,7 @@ the container format is [container-v1](../container-v1.md).
 
 | Part | Served bytes |
 | --- | --- |
-| Part 0 | The target's, except the sha256 of every converted block and of every part that holds one, which is 64 `0` characters. The document keeps its length; the header and the graph descriptor are the target's. |
+| Part 0 | The plan's — the target's, or [the one with another 16-bit float codec](#a-plan-with-another-16-bit-float-codec) —, except the sha256 of every converted block and of every part that holds one, which is 64 `0` characters. The document keeps the plan's length; the header and the graph descriptor are the plan's. |
 | The const part (part 1) and the asset parts | The target's bytes, with their true hashes. When the target is unverified, every block a read touches is read whole and checked against its declared sha256 before the range is returned. |
 | A part that holds converted blocks | Built from the encoded payloads: each block's payload at its offset, its tail padding and the gaps between blocks 0x00, for any offset and length inside the part. The target is never read for it. |
 
@@ -62,9 +65,10 @@ Any other target codec is refused.
 What `f16` guarantees, and what it does not:
 
 - An F16 tensor without a NaN is stored bit for bit (its f32 values are exact, and each is an f16 value). With an F16
-  source, the parts written against an f16 plan equal an f16 export of the same values: the exporter stores the
-  values the recipe rounded to f16, which for F16 values is a no-op, and an initializer the plan stores as `f32` beside
-  them takes the value itself, as the exporter's does.
+  source, the parts written against an f16 plan — a distributed one, or a bf16 plan with `float16Codec: "f16"` —
+  equal an f16 export of the same values and layout: the exporter stores the values the recipe rounded to f16, which
+  for F16 values is a no-op, and an initializer the plan stores as `f32` beside them takes the value itself, as the
+  exporter's does.
 - A BF16 or F32 source is stored only when every value of the tensor is an f16 value; otherwise it is refused, not
   rounded. The exporter's f16 presets of a BF16 upstream round the model to f16 first (the recipe's rounding, before
   the export), and this conversion does not reproduce that: it never changes a value.
@@ -76,6 +80,26 @@ converting source — and gives every initializer the plan stores in its weight 
 `initializer`, `codec`), in the order of the graphs and of their binding tables. It is what a caller decides on before
 it gives a tensor list: whether every codec is one encoded here (`ENCODED_CODECS`: `int8-sym`, `f16`, `bf16`, `f32`), and
 whether a tensor's dtype can be stored as its initializer's codec. A codec is listed whether it is encoded here or not.
+With `float16Codec` it reads the plan the converting source given the same option encodes against.
+
+## A plan with another 16-bit float codec
+
+With `float16Codec`, every initializer the target stores as `f16` or `bf16` is stored as the codec given; every
+other initializer (`int8-sym`, `f32`) is stored as the target stores it. The two codecs store an element in two bytes,
+with no scale and the same packing in the codec ledger, so the plan keeps every block of the target — its part, offset
+and length —, every part past part 0 at its length, the const part, the assets and the graph descriptor.
+
+- What changes is the model descriptor: the codec of those bindings and the codec set. With it change its length in
+  the header and part 0's length (`bf16` is one character longer than `f16` at each binding it names).
+- That part 0 is made here: the target's header with the new model descriptor length, the target's graph descriptor,
+  and the model descriptor serialized canonically. The runtime's reader opens it as it opens the target's, so a part 0
+  made wrongly is refused there; the target's own model descriptor must still be canonical.
+- A plan whose 16-bit initializers already have the codec is the target's, part 0 included.
+- Guarantee: with an F16 source and `f16` over a plan whose 16-bit weights are bf16 (or the other way round with a BF16
+  source and `bf16`), the written container is, byte for byte, the one the exporter writes from those values with the
+  16-bit weights stored as the source's type, provided that export differs from the target in the 16-bit codec alone
+  (the same graph descriptor and the same blocks). Checked on a synthetic container in both directions
+  (`packages/convert/tests/converting_source_test.ts`).
 
 ## The checks when it is built
 
