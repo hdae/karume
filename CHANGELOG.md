@@ -220,9 +220,10 @@ measurements in `docs/research/`.
 - The workbench's `kernel-check` entry runs a thirteenth check, `gemv-parallel-rows`: the row-blocked parallel GEMV
   against the parallel GEMV at the same lanes, word for word, at every lane count and row block the kernel exists at.
 - `@karume/runtime`: `expert_linear` in a run of two or more tokens walks an expert's weight row once for the rows
+- `@karume/runtime`: `expert_linear` in a run of 2 to 768 tokens walks an expert's weight row once for the rows
   that picked it (up to 8 rows to a walk) where the weight row has 64 words or more — of Gemma 4 26B A4B's two
   projections, gate_up. Outputs do not change by a bit; in `SessionDiagnostics.lastRunPipelines` the key of such a
-  dispatch gains `:rows8`. Under the expert cache with self-speculation at depth 4 a 26B decode token took ×0.85 of
+  dispatch gains `:rows8` (the name of the form). Under the expert cache with self-speculation at depth 4 a 26B decode token took ×0.85 of
   the time on an RTX 3080 Ti that was throttling (the verify of 5 rows is such a run), and the prefill's chunks of 8
   rows ×0.68 to ×0.90; a run of one token is unchanged.
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it

@@ -52,11 +52,15 @@
  * that expert's weight row once per row. In the grouped form the thread of the first row that
  * picked an expert walks the expert's weight row for the rows that picked it, up to
  * {@link EXPERT_LINEAR_GROUP_ROWS} rows in one walk ({@link EXPERT_LINEAR_WALK_ROWS} lists the
- * walks), each row keeping its own sum; a row an earlier row leads is written by that row's thread. Which rows share an expert is read from
- * `index` on the GPU (a scan of the run's rows per thread), so nothing goes to the host.
- * {@link expertLinearGrouped} says which dispatch takes it: finding the rows costs a short weight
- * row about what the shared walk saves, so only a row of {@link EXPERT_LINEAR_GROUP_MIN_WORDS}
- * words or more is grouped (a static rule of the shape, never a run-time choice).
+ * walks), each row keeping its own sum; a row an earlier row leads is written by that row's
+ * thread. Which rows share an expert is read from `index` on the GPU (a scan of the run's rows per
+ * thread), so nothing goes to the host. An expert many rows picked is walked by one thread per
+ * column, a walk after another.
+ *
+ * {@link expertLinearGrouped} says which dispatch takes it, by a static rule of the shape (never a
+ * run-time choice): finding the rows costs a short weight row about what the shared walk saves, so
+ * only a row of {@link EXPERT_LINEAR_GROUP_MIN_WORDS} words or more is grouped, and only a run of
+ * the token counts the form was measured at (up to {@link EXPERT_LINEAR_GROUP_MAX_TOKENS}).
  *
  * MUST: a row's sum is the one-row form's — the same elements in ascending k through the same
  * multiply-add text (`expert_word` holds {@link unitMacs}, as `linear`'s row block calls its word
@@ -132,20 +136,35 @@ const storageKeyPart = (storage: ExpertLinearStorage): string =>
   storage === "f32" ? "" : storage === "i4" ? ":wi4" : ":wi4h";
 
 /**
- * Whether a dispatch takes the grouped form (module doc): a run of two or more tokens over weight
- * rows of {@link EXPERT_LINEAR_GROUP_MIN_WORDS} words or more. One token's picks are distinct
- * experts, so a one-token run has no rows to share a walk. The two forms write the same words, so
- * the choice changes no number.
+ * The most tokens of a run the grouped form is taken for: the longest run it was measured at (the
+ * kernel alone at 26B's gate_up, 5 to 768 tokens, with a routing like a prompt's and with three
+ * quarters of the rows on the same 8 experts as a bucket's pad rows are — perf-ledger K-104). It is
+ * also the chunk length of the distributions, so no run of theirs is longer.
+ */
+export const EXPERT_LINEAR_GROUP_MAX_TOKENS = 768;
+
+/**
+ * Whether a dispatch takes the grouped form (module doc): a run of 2 to
+ * {@link EXPERT_LINEAR_GROUP_MAX_TOKENS} tokens over weight rows of
+ * {@link EXPERT_LINEAR_GROUP_MIN_WORDS} words or more. One token's picks are distinct experts, so a
+ * one-token run has no rows to share a walk. The two forms write the same words, so the choice
+ * changes no number.
  */
 export const expertLinearGrouped = (
   storage: ExpertLinearStorage,
   tokens: number,
   k: number,
-): boolean => tokens > 1 && k / expertLinearUnit(storage) >= EXPERT_LINEAR_GROUP_MIN_WORDS;
+): boolean =>
+  tokens > 1 &&
+  tokens <= EXPERT_LINEAR_GROUP_MAX_TOKENS &&
+  k / expertLinearUnit(storage) >= EXPERT_LINEAR_GROUP_MIN_WORDS;
 
 /**
- * The pipeline key (codegen determinism: same key → byte-identical WGSL). The pooled form's part
- * stays last, so a key with it removed is the resident key of the same form.
+ * The pipeline key (codegen determinism: same key → byte-identical WGSL). `:rows<n>` names the
+ * grouped form by the rows a scan finds ({@link EXPERT_LINEAR_GROUP_ROWS}); the walks' row counts
+ * ({@link EXPERT_LINEAR_WALK_ROWS}) are not in the key, so a change to that list MUST come with a
+ * change to this key's version. The pooled form's part stays last, so a key with it removed is the
+ * resident key of the same form.
  */
 export const expertLinearKey = (
   storage: ExpertLinearStorage,

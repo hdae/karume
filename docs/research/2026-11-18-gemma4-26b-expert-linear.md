@@ -161,6 +161,35 @@ synthetic routing; a form named "n rows" generated one loop per row count up to 
   four loops in the WGSL in place of the eight a loop per count needs (the pooled kernel is 378 lines against 312 for
   the one-row form).
 
+### 5.1 Long runs
+
+A resident prefill chunk has up to 768 tokens (6,144 pick rows), and the pad rows of a bucket are likely to pick the
+same few experts. In the grouped form one thread per column then walks all the rows of such an expert, a walk of 8
+after another, and every thread scans the run's rows. The kernel bench at gate_up (`logs/job-long-runs.log`; 11 rounds
+at 16 and 64 tokens, 7 at 256 and 768, at least 2 dispatches to a pass; the pool of 64 slots, so every slot is picked
+from 64 tokens on) with the synthetic routing and with a pad-heavy one, in which only the first quarter of the tokens is
+routed that way and every later token picks the same 8 experts in the same order. ms per dispatch, median / minimum;
+every output word identical:
+
+| T | Routing | One-row | Grouped |
+| ---: | --- | ---: | ---: |
+| 16 | overlap 0.5 | 1.130 / 1.126 | 0.521 / 0.520 (×0.461) |
+| 16 | 4 routed, 12 on the same 8 experts | 0.972 / 0.966 | 0.467 / 0.464 (×0.481) |
+| 64 | overlap 0.5 | 4.977 / 4.966 | 1.292 / 1.279 (×0.260) |
+| 64 | 16 routed, 48 on the same 8 | 4.327 / 4.305 | 1.690 / 1.657 (×0.390) |
+| 256 | overlap 0.5 | 20.27 / 20.22 | 4.30 / 4.24 (×0.212) |
+| 256 | 64 routed, 192 on the same 8 | 18.19 / 17.95 | 6.33 / 6.21 (×0.348) |
+| 768 | overlap 0.5 | 61.09 / 60.92 | 12.98 / 12.49 (×0.212) |
+| 768 | 192 routed, 576 on the same 8 | 64.91 / 39.79 | 27.47 / 19.53 (×0.423) |
+
+- The grouped form is faster at every length measured, and by more the longer the run: the rows per expert grow with
+  the run while the weight row is still read once per 8 of them. With three quarters of the rows on 8 experts the gain
+  is smaller (those 8 × 1408 threads carry most of the work) and still more than half.
+- So the grouped form is taken for runs of 2 to 768 tokens, the lengths measured (`EXPERT_LINEAR_GROUP_MAX_TOKENS`);
+  768 is also the chunk length of the distributions. A longer run keeps the one-row kernel.
+- This is the kernel alone, over a pool. Not measured: a resident forward at these lengths (26B does not fit this
+  card), the resident weight of 128 experts, and a run with more than three quarters of pad rows.
+
 ## 6. Decode and prefill, end to end
 
 Decode A/B (§2), `i4-fast`, 64 slots, 2 rounds × 3 prompts × (A B B A) = 12 generations of 96 tokens per arm. Every
@@ -212,4 +241,5 @@ generation of a prompt gave the same token ids in both arms.
   GPU queue was cut to one short job at a time).
 - The grouped walk with the look-ahead or 8 words to a round; walks of other row counts than 8 / 4 / 2 / 1 (the bench
   measured one loop per count up to 4 and up to 8, §5).
-- Resident prefill (26B does not fit this card).
+- Resident prefill as a whole (26B does not fit this card): §5.1 has the kernel alone at its chunk lengths, over a
+  pool.

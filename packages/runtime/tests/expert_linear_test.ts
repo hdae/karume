@@ -10,6 +10,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
+  EXPERT_LINEAR_GROUP_MAX_TOKENS,
   EXPERT_LINEAR_GROUP_MIN_WORDS,
   EXPERT_LINEAR_GROUP_ROWS,
   EXPERT_LINEAR_WALK_ROWS,
@@ -259,6 +260,14 @@ describe("which dispatch takes the grouped form of expert_linear", () => {
     assertEquals(expertLinearGrouped("i4f16", 8, 2816), true);
     assertEquals(expertLinearGrouped("i4f16", 5, 704), false);
     assertEquals(expertLinearGrouped("i4f16", 8, 704), false);
+  });
+
+  it("groups runs of up to 768 tokens, the longest it was measured at, and no longer one", () => {
+    assertEquals(EXPERT_LINEAR_GROUP_MAX_TOKENS, 768);
+    assertEquals(expertLinearGrouped("i4f16", 2, 2816), true);
+    assertEquals(expertLinearGrouped("i4f16", 768, 2816), true);
+    assertEquals(expertLinearGrouped("i4f16", 769, 2816), false);
+    assertEquals(expertLinearGrouped("f32", 4096, 4096), false);
   });
 
   it("never groups a run of one token, whose picks are distinct experts", () => {
