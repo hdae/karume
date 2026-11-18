@@ -217,9 +217,10 @@ maintainer's ruling of 2026-11-06).
          on more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
          `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An
          estimate that takes the adapter's table, or its GEMV choices, would remove it;
-       - `nvidia-blackwell`'s choices have no end-to-end number: the RTX 5070 Ti's decode tokens were measured
-         with the default's choices (the `default-gemv` switch of `gemma4-bench` compares the two in one record).
-         On its 82 records the planner (`--gemv-plan`) lists nothing to measure against the current default;
+       - `nvidia-blackwell`'s choices have one end-to-end measurement, of the table before its derivation from 82
+         records ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a token with the default's choices,
+         E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); the table derived from 82 records, a speculative decode and the
+         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists nothing to measure against the current default;
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
          would allow it): their evidence is the device's sweep records;
        - the default's 22 rows on Metal, where nothing was measured and their words were not compared;

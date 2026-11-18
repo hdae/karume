@@ -262,7 +262,8 @@ exceptions, "before" the same without; the difference is before − with, paired
 - Metal: no GEMV sweep record of an Apple device exists. `apple-metal-3` carries no GEMV choices, so it runs the
   default profile's 22 bf16 rows; whether they gain there, and the identity of their words there, are not known.
 - A decode token on the RTX 5070 Ti, with either placement of the rows or with the choices its table carries since
-  that day.
+  that day. (Measured later that day with the table's choices against the default's and without the exceptions:
+  [the table's decode](2026-11-18-blackwell-gemv-table-decode.md).)
 - The model lanes, beyond the two reference files of §4.
 - A speculative decode: the verify run puts the head at several rows, a row block, which takes no exception; the
   draft steps run the drafter, of whose shapes `nvidia-ampere` now has one row (`256 × 2048`), not measured end to end.

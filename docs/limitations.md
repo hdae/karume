@@ -910,9 +910,10 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   22 of them bf16 —, the staged form or another row block on the rest), derived from GEMV sweep records of one RTX
   5070 Ti in Chrome on D3D12. A Session with linear at `reorder` there gives other bits than the same Session on
   another adapter on the 59 shapes whose lanes differ or whose row is new, inside the band of `linear`. Each row is
-  at least ×1.10 faster per dispatch than the default's choice in every record; no decode token has been measured
-  with them, and no test runs them on their own shapes on the development machine — the records hold their band
-  readings. A parallel row is reached only by a Session that runs linear at `reorder`, and no preset of regular
+  at least ×1.10 faster per dispatch than the default's choice in every record. A decode token was measured with
+  the table as it was before its last derivation (QAT `i4-fast` E2B, E4B and 12B, the same tokens —
+  [research](research/2026-11-18-blackwell-gemv-table-decode.md)), not with these rows; no test runs them on their own shapes on the development machine — the
+  records hold their band readings. A parallel row is reached only by a Session that runs linear at `reorder`, and no preset of regular
   (bf16) Gemma 4 declares that level, so no Session of a shipped preset runs the bf16 rows.
 - **The first turn pays the shader parsing cost**: a row-block variant is WGSL unrolled over its rows,
   and the parse and validation cost is superlinear in the amount of text. Even at the ceiling

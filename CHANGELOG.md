@@ -196,7 +196,8 @@ measurements in `docs/research/`.
   - On an RTX 3080 Ti under Node a decode token of regular Gemma 4 `bf16` takes 18.8 ms in place of 23.4 ms (E2B)
     and 27.7 ms in place of 36.1 ms (E4B). Of the QAT line, E4B `i4` takes 23.6 in place of 24.4 ms and E4B
     `i4-fast` 11.1 in place of 11.9 ms; E2B `i4-fast` read 6.4 in place of 6.7 ms once and 6.49 in place of 6.53 ms
-    when repeated, and E2B `i4` shows no difference the measurement resolves.
+    when repeated, and E2B `i4` shows no difference the measurement resolves. On an RTX 5070 Ti in Chrome a decode
+    token of regular E2B `bf16` takes 19.1 ms in place of 22.9 ms.
 - `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
   choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
   `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
@@ -204,7 +205,9 @@ measurements in `docs/research/`.
   sequential GEMV or the GEMM — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT
   line and 22 bf16 linears of regular Gemma 4 E2B and E4B. No preset of regular Gemma 4 declares linear at
   `reorder`, so none of its presets runs the bf16 rows. Each is at least ×1.10 faster per dispatch than the default's choice in every
-  record; no decode token was measured with them. On such an adapter the outputs of a `reorder` Session change
+  record. On an RTX 5070 Ti in Chrome, with the choices of the table before its last derivation, a decode token of
+  QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the default's choices (E2B and E4B by 1 to 3 %, which the
+  measurement does not resolve); the bf16 parallel rows were not measured. On such an adapter the outputs of a `reorder` Session change
   inside the band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every
   Session on another adapter, write what they wrote. The memory estimate plans with the default profile's choices
   as before; for the Gemma 4 distributions it gives the same numbers ([limitations](docs/limitations.md)).
