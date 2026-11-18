@@ -444,6 +444,22 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
     });
   });
 
+  it("gives the adopted float row no row block: a float case has no row-blocked candidate to measure or to read", () => {
+    for (const m of [4, 8]) {
+      for (const { choice, name: candidate } of gemvCandidates(DOWN, m, "full", GATES)) {
+        assert(!("parallelRows" in choice) || choice.parallelRows === undefined, candidate);
+      }
+    }
+    const { derivation, decision } = decisionOf(measured({ 1: fast, 4: fast, 8: fast }));
+    assertEquals(decision.outcome, "adopted");
+    assertEquals([decision.defaultRowBlock, decision.derivedRowBlock], [undefined, undefined]);
+    assert(
+      derivation.linearGemv?.parallelShapes.every(
+        (row) => !isFloatStorage(row.storage) || row.rowBlock === undefined,
+      ),
+    );
+  });
+
   it("keeps the default when the candidate is slower than the default's choice at 8 rows in one record (fault: ×0.95 there)", () => {
     const slowAtEight = { [name]: BASE_TIME / 0.95 };
     const { decision } = decisionOf(

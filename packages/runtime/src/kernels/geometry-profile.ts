@@ -1052,14 +1052,20 @@ const assertGemvParallelShapeShape = (value: unknown, where: string, path: strin
       `${where}: ${path}.rowBlock is set on a row that takes packed activations (the row-blocked kernel reads f32 activations)`,
     );
   }
+  // The row-blocked kernel is the integer storages' alone: a float-stored row runs the kernel of
+  // M = 1 at every row count it serves, and a row block on it would name a kernel that does not exist.
+  if (named !== undefined && isFloatStorage(named)) {
+    throw new CodegenError(
+      `${where}: ${path}.rowBlock is set on a row of ${named} storage (the row-blocked kernel exists for i2 / i4 / i8 storage)`,
+    );
+  }
   // The storage and the lanes passed the checks above; the kernel's own predicate decides the fit.
-  const rowStorage = PARALLEL_GEMV_STORAGES.find((one) => one === storage);
   const rowLanes = PARALLEL_GEMV_LANES.find((one) => one === lanes);
   if (
-    rowStorage === undefined ||
+    named === undefined ||
     rowLanes === undefined ||
     typeof rowBlock !== "number" ||
-    !linearGemvParallelRowsFits(rowStorage, rowLanes, rowBlock)
+    !linearGemvParallelRowsFits(named, rowLanes, rowBlock)
   ) {
     throw new CodegenError(
       `${where}: ${path}.rowBlock ${JSON.stringify(rowBlock)} has no kernel for ${JSON.stringify(storage)} at ${JSON.stringify(lanes)} lanes (its staged activations exceed the workgroup storage)`,

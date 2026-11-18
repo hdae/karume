@@ -101,7 +101,7 @@ adapter's match and measures nothing at run time.
 - A case of a float storage (bf16, f16, f32) is measured at 1, 4 and 8 rows. Such a weight has no row-block form, so
   past one row its baseline is the GEMM under f32 compute (the candidate `gemm`),
   it has no identical-class candidate there, and its reorder candidates are the parallel GEMV's plain and staged
-  forms (it has no subgroup form). Its buffers hold no scale.
+  forms (it has no subgroup form and no row-blocked form). Its buffers hold no scale.
 - The GEMM's tile geometry is not a GEMV choice: a Session takes it from the profile its device resolves to. The
   sweep builds that GEMM with the profile its own device resolves to (the embedded table of the adapter, the default
   profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
@@ -136,6 +136,10 @@ adapter's match and measures nothing at run time.
   32; i8 up to 8 rows through 16 lanes and 4 at 32; i2 up to 8 rows at 2 and 4 lanes, 4 at 8, 2 at 16 and none at 32.
   A table whose row names a row block the kernel does not exist at, or sets one on a row that takes packed
   activations, is refused.
+- A row of a float storage (bf16, f16, f32) carries no row block: the row-blocked kernel exists for i2, i4 and i8
+  storage. Such a row runs its kernel of M = 1 at every row count of 1 to 8, one workgroup row per row. A table that
+  sets a row block on a float-stored row is refused, the GEMV sweep has no row-blocked candidate for a float case,
+  and a derived float row has none.
 - M = 1, the level `exact`, row counts above 8, the subgroup form, a row that takes packed activations and the
   linear → static_quantize fusion run what they ran without the field.
 - The default profile's rows carry the row block the derivation adopts from two GEMV sweep records of the RTX

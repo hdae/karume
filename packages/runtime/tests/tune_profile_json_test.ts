@@ -649,6 +649,16 @@ describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearG
       withParallelRow({ ...plain, packedActivations: true, rowBlock: 2 }),
       "linearGemv.parallelShapes[0].rowBlock is set on a row that takes packed activations",
     );
+    // A float-stored row has no row-blocked kernel
+    const float = { storage: "bf16", n: 1536, k: 2048, lanes: 4, packedActivations: false };
+    assertEquals(
+      parseGeometryProfileJson(withParallelRow(float)).linearGemv?.parallelShapes[0],
+      float,
+    );
+    rejects(
+      withParallelRow({ ...float, rowBlock: 2 }),
+      "linearGemv.parallelShapes[0].rowBlock is set on a row of bf16 storage",
+    );
   });
 });
 

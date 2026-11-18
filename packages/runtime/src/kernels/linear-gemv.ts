@@ -1080,7 +1080,9 @@ export type LinearGemvParallelShape = {
    * faster** at M = 4 and 8, and only where the kernel exists for the row's storage and lanes
    * ({@link linearGemvParallelRowsFits}). The kernel stages its activations whatever
    * `stagedActivations` says (that flag is the form at M = 1). Never set together with
-   * `packedActivations`.
+   * `packedActivations`, and never on a row of a float storage (f16 / bf16 / f32): the row-blocked
+   * kernel exists for i2 / i4 / i8 storage, and a float-stored row runs the kernel of M = 1 at every
+   * row count it serves. The profile's guard refuses both.
    */
   readonly rowBlock?: LinearGemvParallelRows;
 };
@@ -1225,7 +1227,9 @@ export const linearGemvParallelRowsFor = (
  * the row's lanes, so taking it changes speed only.
  *
  * MUST: the selection reads this one function. A packed row (ADR 0105) never takes a row block — its
- * binding is `vec4<u32>`, which the staged loads do not read.
+ * binding is `vec4<u32>`, which the staged loads do not read. Nor does a row of a float storage: the
+ * profile's guard refuses the field there, and {@link linearGemvParallelRowsWgsl} refuses the storage
+ * (a table that skipped the guard fails at the kernel's text, it is not read as "no row block").
  */
 export const linearGemvParallelRowBlock = (
   choices: LinearGemvChoices,

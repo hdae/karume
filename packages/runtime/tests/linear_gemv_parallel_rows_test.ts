@@ -7,10 +7,14 @@
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { CodegenError } from "../src/codegen/errors.ts";
-import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import {
+  assertGeometryProfile,
+  DEFAULT_GEOMETRY_PROFILE,
+} from "../src/kernels/geometry-profile.ts";
 import {
   LINEAR_GEMV_PARALLEL_ROWS,
   type LinearGemvChoices,
+  linearGemvParallelEligible,
   type LinearGemvParallelLanes,
   linearGemvParallelRowBlock,
   type LinearGemvParallelRows,
@@ -179,6 +183,69 @@ describe("linearGemvParallelRowBlock", () => {
 /** The lines of a kernel's text that match `pattern`. */
 const linesOf = (code: string, pattern: RegExp): string[] =>
   code.split("\n").filter((line) => pattern.test(line));
+
+describe("a row block on a float-stored parallel row", () => {
+  const FLOATS = ["bf16", "f16", "f32"] as const;
+  /** A float row as the profile takes it: no group, no packed activations. */
+  const floatRow = (storage: (typeof FLOATS)[number]): LinearGemvParallelShape => ({
+    storage,
+    n: 1536,
+    k: 2048,
+    lanes: 4,
+    packedActivations: false,
+  });
+  const profileOf = (row: LinearGemvParallelShape) => ({
+    ...DEFAULT_GEOMETRY_PROFILE,
+    id: "float-row-block",
+    linearGemv: { ...GEMV, parallelShapes: [row] },
+  });
+
+  it("has no kernel: at no lane count and no height", () => {
+    for (const storage of FLOATS) {
+      for (const lanes of LANES) {
+        for (const rows of LINEAR_GEMV_PARALLEL_ROWS) {
+          assertEquals(linearGemvParallelRowsFits(storage, lanes, rows), false);
+        }
+      }
+    }
+  });
+
+  it("is refused by the profile's guard, naming the row and the storage (fault: the field added to a valid float row)", () => {
+    for (const storage of FLOATS) {
+      assertGeometryProfile(profileOf(floatRow(storage)));
+      for (const rowBlock of LINEAR_GEMV_PARALLEL_ROWS) {
+        assertThrows(
+          () => assertGeometryProfile(profileOf({ ...floatRow(storage), rowBlock })),
+          CodegenError,
+          `Geometry profile 'float-row-block': linearGemv.parallelShapes[0].rowBlock is set on a row of ${storage} storage (the row-blocked kernel exists for i2 / i4 / i8 storage)`,
+        );
+      }
+    }
+  });
+
+  it("is not taken by a valid float row: every row count of 2 to 8 runs the kernel of M = 1", () => {
+    for (const storage of FLOATS) {
+      const row = floatRow(storage);
+      const choices = withRow(row);
+      for (const m of [2, 3, 4, 5, 6, 7, 8]) {
+        assertEquals(linearGemvParallelEligible(choices, storage, m, row.n, row.k), row.lanes);
+        assertEquals(linearGemvParallelRowBlock(choices, storage, m, row.n, row.k), undefined);
+      }
+    }
+  });
+
+  it("fails at the kernel's text when a table that skipped the guard carries one: it is not read as no row block", () => {
+    const row = floatRow("bf16");
+    const choices = withRow({ ...row, rowBlock: 2 });
+    const rows = linearGemvParallelRowBlock(choices, "bf16", 4, row.n, row.k);
+    assertEquals(rows, 2);
+    assertThrows(
+      () => linearGemvParallelRowsWgsl("bf16", undefined, row.lanes, 2),
+      CodegenError,
+      "no row block for bf16 storage",
+    );
+  });
+});
 
 describe("the row-blocked parallel GEMV's key and WGSL", () => {
   it("appends the rows to the staged key, so the storage, lane and staged discriminators stay where they are", () => {

@@ -199,7 +199,8 @@ measurements in `docs/research/`.
   lanes (a verify row still equals the decode row of the same input); the pipeline key of such a dispatch is the
   staged key with `:r<rows>`, and M = 1, the level `exact`, the subgroup form and packed-activation rows are
   unchanged. A table refuses a row block the kernel does not exist at (its staged activations must fit 16,384 B of
-  workgroup storage) or one on a packed-activation row. 25 rows of the default profile — Gemma 4 q4_0 QAT shapes of
+  workgroup storage), one on a packed-activation row, and one on a float-stored row (bf16, f16, f32: the row-blocked
+  kernel exists for i2, i4 and i8 storage, and a float-stored parallel row runs its kernel of one row at 2 to 8 rows). 25 rows of the default profile — Gemma 4 q4_0 QAT shapes of
   E2B, E4B, 12B and 26B — carry the row block the RTX 3080 Ti measured faster at 4 and at 8 rows in two sweeps
   (×1.1 to ×3.4 per dispatch), and every table without GEMV choices of its own runs with them. On that card under
   Node the verify run of a q4_0 QAT E2B `i4-fast` speculative decode takes 10.0 ms instead of 13.8 ms (1.36 instead

@@ -942,7 +942,10 @@ const rowKernelAt = (
   return rows === undefined ? name : gemvParallelName("staged", lanes, rows);
 };
 
-/** The row blocks a parallel row of `lanes` can carry: none first, then every cap the kernel exists at. */
+/**
+ * The row blocks a parallel row of `lanes` can carry: none first, then every cap the kernel exists
+ * at. A float storage has none of the second kind, so a derived float row never carries a row block.
+ */
 const rowBlockOptions = (
   storage: GemvCase["storage"],
   lanes: LinearGemvParallelLanes | undefined,

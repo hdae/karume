@@ -419,7 +419,8 @@ const identicalChoices = (
 /**
  * The reorder class at `m` rows (M ≤ 8): every lane count, plain, staged and — when gated in, and for
  * an integer storage, the only ones with that form — subgroup; then, for M ≥ 2, the row-blocked form
- * at every lane count and every height of at most `m` rows the kernel exists at.
+ * at every lane count and every height of at most `m` rows the kernel exists at — none for a float
+ * storage, which has no row-blocked kernel ({@link linearGemvParallelRowsFits}).
  */
 const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): LinearGemvChoice[] => {
   if (m > LINEAR_GEMV_PARALLEL_MAX_ROWS) return [];
