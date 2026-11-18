@@ -72,6 +72,11 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/runtime`: `SubmitPolicy.firstChunkSize`, optional. With it the first chunk of a run's submits holds at most
+  that many dispatches and each later chunk of the run twice the one before, up to the limit the policy has without
+  it. The GPU gets a run's first work after a few dispatches instead of a whole chunk, which matters to a run of many
+  short dispatches. The commands and their order do not change, and a policy without the field cuts its chunks as
+  before.
 - `@karume/models/gemma`: a decode step that samples from the top-k reads back the leading logits of the row,
   selected on the GPU, instead of the whole row (16 KiB in place of 1 MiB), and the sampler draws from them. The token
   ids are the ones the whole row gives for the same seed: the sampler ranks, normalizes and draws on the host as
