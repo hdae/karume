@@ -271,5 +271,26 @@ describe.skipIf(!GPU_AVAILABLE)(
         gpu.destroy();
       }
     });
+
+    it("the comparison can fail: a grouped walk that sums its second row over its first row's x mismatches", async () => {
+      const gpu = await acquireGpu();
+      try {
+        const part = await checkExpertLinear(gpu, {
+          mutateGrouped: (wgsl) =>
+            wgsl.replaceAll("let xr1 = select(m1, m1 /", "let xr1 = select(m0, m0 /"),
+        });
+        const failing = (name: string): number =>
+          part.cases.filter((testCase) =>
+            testCase.criteria.some(
+              (criterion) => criterion.name.startsWith(name) && criterion.failures > 0,
+            ),
+          ).length;
+        // Only the grouped criterion fails, and only on rows that are not the first of a walk.
+        assert(failing("the grouped form") > 0, "no grouped row mismatched");
+        assertEquals(failing("expert_linear vs"), 0);
+      } finally {
+        gpu.destroy();
+      }
+    });
   },
 );

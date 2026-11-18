@@ -45,6 +45,25 @@
  * resident is bit-identical to the resident kernel's. A non-resident pick writes 0 (every output
  * is still written — ADR 0014): the host reads the routing and runs the row again after loading.
  * The runtime alone writes the table, so a slot of K or more breaks an invariant and writes NaN.
+ *
+ * ## The grouped form (runs of two or more tokens over long weight rows)
+ *
+ * Rows of different tokens often pick the same expert, and the one-row form then reads and decodes
+ * that expert's weight row once per row. In the grouped form the thread of the first row that
+ * picked an expert walks the expert's weight row for the rows that picked it, up to
+ * {@link EXPERT_LINEAR_GROUP_ROWS} rows in one walk ({@link EXPERT_LINEAR_WALK_ROWS} lists the
+ * walks), each row keeping its own sum; a row an earlier row leads is written by that row's thread. Which rows share an expert is read from
+ * `index` on the GPU (a scan of the run's rows per thread), so nothing goes to the host.
+ * {@link expertLinearGrouped} says which dispatch takes it: finding the rows costs a short weight
+ * row about what the shared walk saves, so only a row of {@link EXPERT_LINEAR_GROUP_MIN_WORDS}
+ * words or more is grouped (a static rule of the shape, never a run-time choice).
+ *
+ * MUST: a row's sum is the one-row form's — the same elements in ascending k through the same
+ * multiply-add text (`expert_word` holds {@link unitMacs}, as `linear`'s row block calls its word
+ * function per row), so the two forms write the same words; the GPU test and the kernel check
+ * compare them as u32. Every output is still written exactly once: the rows the kernel does not sum
+ * (an id out of range, an expert that is not resident, a broken slot) are written by their own
+ * threads, as in the one-row form. The one-row form's text does not change with this form.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -70,6 +89,31 @@ export const EXPERT_LINEAR_TABLE_BINDING = 6;
 /** Weight words issued ahead of their multiply-adds (memory parallelism, as `linear`'s GEMV). */
 export const EXPERT_LINEAR_UNROLL = 4;
 
+/**
+ * The rows of one expert a thread finds in one scan of the grouped form (module doc), and so the
+ * most rows one walk of the expert's weight row carries; more rows of one expert take another scan.
+ */
+export const EXPERT_LINEAR_GROUP_ROWS = 8;
+
+/**
+ * The row counts a walk of the grouped form is generated for, largest first. The rows of a scan are
+ * walked in the largest count they still fill (5 rows: a walk of 4, then a walk of 1), which keeps
+ * the WGSL to one loop per count listed here instead of one per count up to
+ * {@link EXPERT_LINEAR_GROUP_ROWS}. MUST: descending, ending in 1 (every row is walked).
+ */
+export const EXPERT_LINEAR_WALK_ROWS: readonly number[] = [8, 4, 2, 1];
+
+/** {@link EXPERT_LINEAR_WALK_ROWS} that a scan can fill. */
+const walkRows = (): readonly number[] =>
+  EXPERT_LINEAR_WALK_ROWS.filter((rows) => rows <= EXPERT_LINEAR_GROUP_ROWS);
+
+/**
+ * The fewest words of a weight row (16 bytes each: 32 i4 elements, 4 f32) the grouped form is taken
+ * for. Measured on the two projections of Gemma 4 26B on an RTX 3080 Ti (perf-ledger K-104): a row
+ * of 88 words gains from the shared walk, a row of 22 words does not.
+ */
+export const EXPERT_LINEAR_GROUP_MIN_WORDS = 64;
+
 /** The quiet NaN written to a row whose expert id is out of range (ADR 0061). */
 export const EXPERT_LINEAR_OOB_BITS = 0x7fc00000;
 
@@ -87,15 +131,33 @@ const groupShift = (
 const storageKeyPart = (storage: ExpertLinearStorage): string =>
   storage === "f32" ? "" : storage === "i4" ? ":wi4" : ":wi4h";
 
-/** The pipeline key (codegen determinism: same key → byte-identical WGSL). */
+/**
+ * Whether a dispatch takes the grouped form (module doc): a run of two or more tokens over weight
+ * rows of {@link EXPERT_LINEAR_GROUP_MIN_WORDS} words or more. One token's picks are distinct
+ * experts, so a one-token run has no rows to share a walk. The two forms write the same words, so
+ * the choice changes no number.
+ */
+export const expertLinearGrouped = (
+  storage: ExpertLinearStorage,
+  tokens: number,
+  k: number,
+): boolean => tokens > 1 && k / expertLinearUnit(storage) >= EXPERT_LINEAR_GROUP_MIN_WORDS;
+
+/**
+ * The pipeline key (codegen determinism: same key → byte-identical WGSL). The pooled form's part
+ * stays last, so a key with it removed is the resident key of the same form.
+ */
 export const expertLinearKey = (
   storage: ExpertLinearStorage,
   groupSize?: number,
   pooled = false,
+  grouped = false,
 ): string =>
   `expert_linear:v1:f32:i32:c${EXPERT_LINEAR_COLS}u${EXPERT_LINEAR_UNROLL}${storageKeyPart(
     storage,
-  )}${i4GroupKeyPart(groupSize)}${pooled ? ":pool" : ""}`;
+  )}${i4GroupKeyPart(groupSize)}${grouped ? `:rows${EXPERT_LINEAR_GROUP_ROWS}` : ""}${
+    pooled ? ":pool" : ""
+  }`;
 
 const scaleBinding = (storage: ExpertLinearStorage): string =>
   storage === "i4"
@@ -143,6 +205,123 @@ const wordMacs = (storage: ExpertLinearStorage, slot: string): string =>
     .map((line) => `  ${line}`)
     .join("\n");
 
+/**
+ * `expert_word` of the grouped form: one weight word's multiply-adds onto `initial`, the one-row
+ * form's own text ({@link unitMacs}), as `linear`'s row block calls its word function per row.
+ */
+const wordFunction = (storage: ExpertLinearStorage): string => `
+// One weight word's multiply-adds onto \`initial\`, in the one-row form's element order and spelling
+fn expert_word(pwa: vec4<${storage === "f32" ? "f32" : "u32"}>, xqa: u32${
+  isI4(storage) ? ", wsa: f32" : ""
+}, initial: f32) -> f32 {
+  var acc = initial;
+${unitMacs(storage === "f32" ? "f32" : "i4", "a")}
+  return acc;
+}`;
+
+/** The reads of one word in the grouped form: the weight word, the group step (i4), the x offset. */
+const groupedLoads = (
+  storage: ExpertLinearStorage,
+  slot: string,
+  unitExpr: string,
+  shift: number | undefined,
+): string => {
+  const unit = expertLinearUnit(storage);
+  const step = `scale_base + ((unit${slot} * ${unit}u) >> ${shift}u)`;
+  const groupStep =
+    storage === "i4"
+      ? `
+              let ws${slot} = wscale[${step}];`
+      : storage === "i4f16"
+        ? `
+              let ws${slot} = step_at(${step});`
+        : "";
+  return `              let unit${slot} = ${unitExpr};
+              let pw${slot} = w[row_base + unit${slot}];${groupStep}
+              let xo${slot} = unit${slot} * ${unit / 4}u;`;
+};
+
+/** One word onto each of the walk's rows, row by row (each row's sum stays in ascending k). */
+const groupedMacs = (storage: ExpertLinearStorage, slot: string, rows: number): string =>
+  Array.from(
+    { length: rows },
+    (_, row) =>
+      `              acc${row} = expert_word(pw${slot}, xr${row} + xo${slot}${
+        isI4(storage) ? `, ws${slot}` : ""
+      }, acc${row});`,
+  ).join("\n");
+
+/**
+ * A walk of the weight row for `rows` rows of the expert, `members[start .. start + rows)`, taken
+ * while that many of the scan's rows are left.
+ */
+const groupedWalk = (
+  storage: ExpertLinearStorage,
+  shift: number | undefined,
+  rows: number,
+): string => {
+  const each = (line: (row: number) => string): string =>
+    Array.from({ length: rows }, (_, row) => line(row)).join("\n");
+  const slots = Array.from({ length: EXPERT_LINEAR_UNROLL }, (_, slot) => `${slot}`);
+  return `          for (; count - start >= ${rows}u; start = start + ${rows}u) {
+${each((row) => `            let m${row} = members[start + ${row}u];`)}
+${each(
+  (row) =>
+    `            let xr${row} = select(m${row}, m${row} / dims.picks, dims.shared_x == 1u) * quads;`,
+)}
+${each((row) => `            var acc${row} = 0.0;`)}
+            var unit = 0u;
+            for (; unit + ${EXPERT_LINEAR_UNROLL}u <= units; unit = unit + ${EXPERT_LINEAR_UNROLL}u) {
+${slots.map((slot) => groupedLoads(storage, slot, `unit + ${slot}u`, shift)).join("\n")}
+${slots.map((slot) => groupedMacs(storage, slot, rows)).join("\n")}
+            }
+            for (; unit < units; unit = unit + 1u) {
+${groupedLoads(storage, "t", "unit", shift)}
+${groupedMacs(storage, "t", rows)}
+            }
+${each((row) => `            out[m${row} * dims.n + col] = acc${row};`)}
+          }`;
+};
+
+/**
+ * The body of the grouped form from a pick's weight row `wrow` on (module doc): the thread of the
+ * first row that picked the expert walks the weight row for every row that picked it — the rows
+ * found {@link EXPERT_LINEAR_GROUP_ROWS} at a time, each batch in walks of the largest of
+ * {@link EXPERT_LINEAR_WALK_ROWS} it still fills.
+ */
+const groupedBody = (
+  storage: ExpertLinearStorage,
+  shift: number | undefined,
+  scaleBase: string,
+): string => `      // The rows that picked this expert share the walk of its weight row, in the thread of the
+      // first of them: a row that an earlier row leads is written by that row's thread
+      var leads = true;
+      for (var earlier = 0u; earlier < row; earlier = earlier + 1u) {
+        if (index[earlier] == pick) {
+          leads = false;
+          break;
+        }
+      }
+      if (leads) {
+        let row_base = wrow * units;${scaleBase.replace("\n      ", "\n        ")}
+        var next = row;
+        while (next < dims.rows) {
+          var members: array<u32, ${EXPERT_LINEAR_GROUP_ROWS}>;
+          var count = 0u;
+          while (next < dims.rows && count < ${EXPERT_LINEAR_GROUP_ROWS}u) {
+            if (index[next] == pick) {
+              members[count] = next;
+              count = count + 1u;
+            }
+            next = next + 1u;
+          }
+          var start = 0u;
+${walkRows()
+  .map((rows) => groupedWalk(storage, shift, rows))
+  .join("\n")}
+        }
+      }`;
+
 /** The head of a pick row up to its weight row `wrow`: the resident form addresses the expert. */
 const RESIDENT_HEAD = `    let pick = index[row];
     // an id outside [0, E) breaks the planner's invariant: NaN instead of another expert's row
@@ -176,6 +355,7 @@ export const expertLinearWgsl = (
   storage: ExpertLinearStorage,
   groupSize?: number,
   pooled = false,
+  grouped = false,
 ): string => {
   const shift = groupShift(storage, groupSize);
   const unit = expertLinearUnit(storage);
@@ -192,7 +372,24 @@ export const expertLinearWgsl = (
       : storage === "i4"
         ? ", i4 weight storage"
         : ", i4 weight storage with f16 steps";
-  return `// karume expert_linear (y[t, j] = weight[index[t, j]] · x[t (, j)], f32${note}, ${EXPERT_LINEAR_COLS} cols / wg, ${EXPERT_LINEAR_UNROLL} words prefetched)
+  const oneRowBody = `      let row_base = wrow * units;${scaleBase}
+      let x_base = select(row, row / dims.picks, dims.shared_x == 1u) * quads;
+      var acc = 0.0;
+      var unit = 0u;
+      // Issue the prefetched words first, then the multiply-adds; words stay in ascending order,
+      // so the addition order per output does not depend on the prefetch count
+      for (; unit + ${EXPERT_LINEAR_UNROLL}u <= units; unit = unit + ${EXPERT_LINEAR_UNROLL}u) {
+${loads}
+${macs}
+      }
+      for (; unit < units; unit = unit + 1u) {
+${wordLoads(storage, "t", "unit", shift)}
+${wordMacs(storage, "t")}
+      }
+      out[row * dims.n + col] = acc;`;
+  return `// karume expert_linear (y[t, j] = weight[index[t, j]] · x[t (, j)], f32${note}, ${EXPERT_LINEAR_COLS} cols / wg, ${EXPERT_LINEAR_UNROLL} words prefetched${
+    grouped ? `, the rows of an expert grouped ${walkRows().join(" / ")} to a walk` : ""
+  })
 struct Dims {
   rows: u32,
   n: u32,
@@ -212,7 +409,7 @@ struct Dims {
     pooled
       ? `\n@group(0) @binding(${EXPERT_LINEAR_TABLE_BINDING}) var<storage, read> table: array<i32>;`
       : ""
-  }
+  }${grouped ? wordFunction(storage) : ""}
 
 @compute @workgroup_size(${EXPERT_LINEAR_COLS})
 fn main(
@@ -229,21 +426,7 @@ fn main(
   var row = gid.y;
   while (row < dims.rows) {
 ${pooled ? POOLED_HEAD : RESIDENT_HEAD}
-      let row_base = wrow * units;${scaleBase}
-      let x_base = select(row, row / dims.picks, dims.shared_x == 1u) * quads;
-      var acc = 0.0;
-      var unit = 0u;
-      // Issue the prefetched words first, then the multiply-adds; words stay in ascending order,
-      // so the addition order per output does not depend on the prefetch count
-      for (; unit + ${EXPERT_LINEAR_UNROLL}u <= units; unit = unit + ${EXPERT_LINEAR_UNROLL}u) {
-${loads}
-${macs}
-      }
-      for (; unit < units; unit = unit + 1u) {
-${wordLoads(storage, "t", "unit", shift)}
-${wordMacs(storage, "t")}
-      }
-      out[row * dims.n + col] = acc;
+${grouped ? groupedBody(storage, shift, scaleBase) : oneRowBody}
     }
     row = row + nwg.y;
   }

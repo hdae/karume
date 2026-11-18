@@ -265,9 +265,10 @@ The attention follows upstream's masks with the block on sliding layers only, no
   on D3D12 pages heaps over PCIe past its budget instead of failing an allocation (from Dawn's code, not observed), so a model that
   does not fit gets slow instead of stopping, and `capacity: "fit"` and the headroom check may report a fit there; the manifest
   keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`.
-- **Prefill**: `expert_linear` runs each of a chunk's T × 8 rows on its own expert's weights, with no grouping of rows by expert,
-  and 26B's dense parts have neither the RMS→add fusion nor parallel-GEMV rows (their tables list measured widths only, and 2816 is
-  not among them). Speed is not measured.
+- **Prefill**: `expert_linear` runs each of a chunk's T × 8 rows on its own expert's weights; for the long rows of gate_up
+  the rows that picked one expert share the walk of its weight row (the grouped form), still with one multiply-add per row
+  and element, and the down projection has no grouping of rows by expert. 26B's dense parts have neither the RMS→add
+  fusion nor parallel-GEMV rows (their tables list measured widths only, and 2816 is not among them). Speed is not measured.
 - **Checked on**: the full model only in Chrome on the RTX 5070 Ti; on the RTX 3080 Ti under Dawn, a model cut after 12 layers
   against the export's goldens (`e2e_gemma4_26b_cut_test.ts`).
 

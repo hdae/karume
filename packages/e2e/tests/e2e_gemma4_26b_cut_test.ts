@@ -71,8 +71,9 @@
 //    pipeline's without the cache with the same options at the same chunk rows, with misses, loads,
 //    drafts confirmed and verifies that missed, and every verify run's census shows the forms ran:
 //    every dense linear on the parallel GEMV (none on the sequential one), the RMS→add fusion, the
-//    attention on its parallel or parallel-fused keys, and `expert_linear` on its pooled key (the routed
-//    experts keep their sequential order under every option). Nothing is compared with the
+//    attention on its parallel or parallel-fused keys, and `expert_linear` on its pooled keys — a
+//    run of several rows takes the grouped form for gate_up and the one-row form for down (the
+//    routed experts keep their sequential order under every option). Nothing is compared with the
 //    reference-order tokens: the parallel forms change the rounding
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
@@ -1319,8 +1320,13 @@ const SEQUENTIAL_GEMV_FAMILY = keyFamily(
   linearGemvKey("i4", 32, defaultLinearGemvVariant(DEFAULT_GEOMETRY_PROFILE.linearGemv)),
 );
 const GEMM_FAMILY = keyFamily(linearKey("f32", true));
-/** The pooled `expert_linear` key of the cache (i4 codes, f16 steps, group 32 — ADR 0145). */
+/**
+ * The pooled `expert_linear` keys of the cache (i4 codes, f16 steps, group 32 — ADR 0145) in a run
+ * of several rows, which a verify is: the grouped form for gate_up's long weight rows, the one-row
+ * form for down's short ones.
+ */
 const POOLED_EXPERT_KEY = expertLinearKey("i4f16", 32, true);
+const POOLED_GROUPED_EXPERT_KEY = expertLinearKey("i4f16", 32, true, true);
 /** The states-form attention's kernels (①QK, ②row statistics, ③PV and the fused ②+③). */
 const STATE_ATTENTION_PREFIX = "attention_state";
 
@@ -1329,8 +1335,9 @@ const STATE_ATTENTION_PREFIX = "attention_state";
  * graph, one dispatch each) on the parallel GEMV and none on the sequential GEMV or the GEMM, an
  * RMS→add pair fused, every attention node's ①QK on a parallel key and its ②+③ on the fused key or
  * on the row statistics plus a parallel ③PV (no sequential states-form kernel), and every
- * `expert_linear` (`experts` of the graph) on the pooled
- * key — the routed experts keep their sequential order under every option.
+ * `expert_linear` (`experts` of the graph) on its pooled key of a run of several rows, half of them
+ * (gate_up) grouped and half (down) one-row — the routed experts keep their sequential order under
+ * every option.
  */
 const parallelFormFailures = (
   where: string,
@@ -1368,9 +1375,12 @@ const parallelFormFailures = (
     );
   }
   const experts = count((key) => keyFamily(key) === keyFamily(POOLED_EXPERT_KEY));
-  const pooled = count((key) => key === POOLED_EXPERT_KEY);
-  if (pooled !== graph.experts || experts !== pooled) {
-    fail(`${pooled} pooled of ${experts} expert_linear dispatches for ${graph.experts} nodes`);
+  const oneRow = count((key) => key === POOLED_EXPERT_KEY);
+  const grouped = count((key) => key === POOLED_GROUPED_EXPERT_KEY);
+  if (experts !== graph.experts || grouped * 2 !== experts || oneRow * 2 !== experts) {
+    fail(
+      `${grouped} pooled grouped and ${oneRow} pooled one-row of ${experts} expert_linear dispatches for ${graph.experts} nodes (half each)`,
+    );
   }
   return failures;
 };

@@ -24,6 +24,7 @@ import {
   EXPERT_LINEAR_SCALE_BINDING,
   EXPERT_LINEAR_TABLE_BINDING,
   expertLinearDispatch,
+  expertLinearGrouped,
   expertLinearKey,
   expertLinearParams,
   expertLinearWgsl,
@@ -310,6 +311,10 @@ export const buildEmbedding = async (
  * runs with K in its params and the index's slot table at {@link EXPERT_LINEAR_TABLE_BINDING}. E stays
  * the declaration's (the table's length). Without the cache the key, WGSL, params and bindings are
  * the resident form's, unchanged.
+ *
+ * A run of two or more tokens over long weight rows takes the grouped form (the kernel's module doc,
+ * `expertLinearGrouped`): its rows that picked one expert share the walk of that expert's weight
+ * row. The key names the form; the params, bindings and workgroups are the one-row form's.
  */
 export const buildExpertLinear = async (
   face: RecipeBuildFace,
@@ -326,10 +331,11 @@ export const buildExpertLinear = async (
   const groupSize = storage === "f32" ? undefined : face.weightGroupSize(step);
   const pool = face.expertTable(step);
   const pooled = pool !== undefined;
-  const key = expertLinearKey(storage, groupSize, pooled);
+  const grouped = expertLinearGrouped(storage, tokens, k);
+  const key = expertLinearKey(storage, groupSize, pooled, grouped);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    expertLinearWgsl(storage, groupSize, pooled),
+    expertLinearWgsl(storage, groupSize, pooled, grouped),
   );
   const params = face.writeParams(
     expertLinearParams(

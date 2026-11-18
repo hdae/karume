@@ -5,11 +5,14 @@
  * is `linear`'s own sequential GEMV (`linearGemvWgsl`, i4) on the picked expert's rows with the
  * steps widened to f32 (exact — ADR 0069 decision 3): every output word of every pick MUST equal
  * that GEMV's word. A word that differs is a different expert row, x row, step or summation order.
+ * Both forms of the kernel are held to it at both shapes: the one-row form, and the grouped form
+ * (the rows that picked one expert share the walk of its weight row), which a run of two or more
+ * tokens takes for gate_up's long rows.
  *
  * The two 26B projections: gate_up (n 1408, k 2816, x shared by the picks) and down (n 2816, k 704,
  * one x row per pick), each over E = 8 experts, T = 3 tokens of k = 8 picks whose ids repeat within
- * and across tokens. Every column of the expert output starts as a NaN pattern, so an unwritten word
- * mismatches too.
+ * and across tokens (expert 6 five times, by all three tokens). Every column of the expert output
+ * starts as a NaN pattern, so an unwritten word mismatches too.
  */
 
 import type { GpuContext } from "../../runtime/src/gpu/device.ts";
@@ -92,11 +95,15 @@ const fixtureOf = (shape: Shape) => {
 /**
  * Runs the check. Needs no optional feature (`unpack2x16float` is core WGSL).
  *
- * @param mutate Rewrites the expert_linear WGSL (a fault for the tests that show the check fails).
+ * @param mutate Rewrites the one-row WGSL (a fault for the tests that show the check fails).
+ * @param mutateGrouped Rewrites the grouped WGSL (likewise).
  */
 export const checkExpertLinear = async (
   gpu: GpuContext,
-  options: CheckOptions & { readonly mutate?: (wgsl: string) => string } = {},
+  options: CheckOptions & {
+    readonly mutate?: (wgsl: string) => string;
+    readonly mutateGrouped?: (wgsl: string) => string;
+  } = {},
 ): Promise<CheckPart> => {
   const { device } = gpu;
   const cases: CheckCase[] = [];
@@ -106,11 +113,23 @@ export const checkExpertLinear = async (
       layout: "auto",
       compute: { module: device.createShaderModule({ code }), entryPoint: "main" },
     });
-  const wgsl = expertLinearWgsl("i4f16", GROUP);
-  const mutated = options.mutate === undefined ? wgsl : options.mutate(wgsl);
-  if (options.mutate !== undefined && mutated === wgsl) {
-    throw new Error("expert-linear: the mutation left the WGSL unchanged");
-  }
+  const mutation = (
+    wgsl: string,
+    mutate: ((wgsl: string) => string) | undefined,
+    form: string,
+  ): string => {
+    const mutated = mutate === undefined ? wgsl : mutate(wgsl);
+    if (mutate !== undefined && mutated === wgsl) {
+      throw new Error(`expert-linear: the mutation left the ${form} WGSL unchanged`);
+    }
+    return mutated;
+  };
+  const mutated = mutation(expertLinearWgsl("i4f16", GROUP), options.mutate, "one-row");
+  const mutatedGrouped = mutation(
+    expertLinearWgsl("i4f16", GROUP, false, true),
+    options.mutateGrouped,
+    "grouped",
+  );
   for (const shape of SHAPES) {
     throwIfAborted(options);
     const { n, k, sharedX } = shape;
@@ -159,29 +178,36 @@ export const checkExpertLinear = async (
         const rows = TOKENS * PICKS;
         const out = make(rows * n * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
         device.queue.writeBuffer(out, 0, new Uint32Array(rows * n).fill(NAN_FILL));
-        const kernel = await compile(mutated);
+        const bound = [
+          make(
+            expertLinearParams(
+              "i4f16",
+              { tokens: TOKENS, picks: PICKS, n, k, experts: EXPERTS, sharedX },
+              GROUP,
+            ),
+            U.UNIFORM | U.COPY_DST,
+          ),
+          make(data.x),
+          make(Int32Array.from(IDS)),
+          make(data.packed),
+          out,
+          make(data.stepWords),
+        ];
+        const workgroups = expertLinearDispatch(
+          rows,
+          n,
+          gpu.limits.maxComputeWorkgroupsPerDimension,
+        );
         const got = await readBack(
           out,
           rows * n,
-          dispatch(
-            kernel,
-            [
-              make(
-                expertLinearParams(
-                  "i4f16",
-                  { tokens: TOKENS, picks: PICKS, n, k, experts: EXPERTS, sharedX },
-                  GROUP,
-                ),
-                U.UNIFORM | U.COPY_DST,
-              ),
-              make(data.x),
-              make(Int32Array.from(IDS)),
-              make(data.packed),
-              out,
-              make(data.stepWords),
-            ],
-            expertLinearDispatch(rows, n, gpu.limits.maxComputeWorkgroupsPerDimension),
-          ),
+          dispatch(await compile(mutated), bound, workgroups),
+        );
+        device.queue.writeBuffer(out, 0, new Uint32Array(rows * n).fill(NAN_FILL));
+        const gotGrouped = await readBack(
+          out,
+          rows * n,
+          dispatch(await compile(mutatedGrouped), bound, workgroups),
         );
         // The oracle: linear's M = 1 GEMV over one expert's rows (bias 0, steps widened), in the
         // default profile's variant (built without a Session, so no adapter's table applies).
@@ -220,13 +246,21 @@ export const checkExpertLinear = async (
             ),
           );
           // linear adds its zero bias, so a −0 sum comes back +0 there.
-          const words = got
-            .slice(row * n, (row + 1) * n)
-            .map((word) => (word === NEGATIVE_ZERO ? 0 : word));
+          const wordsOf = (all: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
+            all.slice(row * n, (row + 1) * n).map((word) => (word === NEGATIVE_ZERO ? 0 : word));
           cases.push({
             label: `${shape.name} t${Math.floor(row / PICKS)} j${row % PICKS} (expert ${expert})`,
             criteria: [
-              compareWords("expert_linear vs linear's GEMV on that expert (u32)", words, expected),
+              compareWords(
+                "expert_linear vs linear's GEMV on that expert (u32)",
+                wordsOf(got),
+                expected,
+              ),
+              compareWords(
+                "the grouped form vs linear's GEMV on that expert (u32)",
+                wordsOf(gotGrouped),
+                expected,
+              ),
             ],
           });
           options.onProgress?.({ part: "expert-linear", done: cases.length, total });
@@ -239,7 +273,8 @@ export const checkExpertLinear = async (
   }
   return {
     id: "expert-linear",
-    title: "expert_linear (f16 steps): against linear's GEMV on each picked expert",
+    title:
+      "expert_linear (f16 steps), one-row and grouped: against linear's GEMV on each picked expert",
     cases,
     requirements: [],
   };

@@ -9,6 +9,14 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import {
+  EXPERT_LINEAR_GROUP_MIN_WORDS,
+  EXPERT_LINEAR_GROUP_ROWS,
+  EXPERT_LINEAR_WALK_ROWS,
+  expertLinearGrouped,
+  expertLinearKey,
+  expertLinearWgsl,
+} from "../src/kernels/expert-linear.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";
 import { OpContractError } from "../src/ops.ts";
 import {
@@ -188,6 +196,89 @@ const I4F16: StorageSpec = { codec: "int4-sym-g-f16", groupSize: 32 };
 // ---------------------------------------------------------------------------
 // The plan-time producer rule (ADR 0145 decision 2)
 // ---------------------------------------------------------------------------
+
+describe("the two forms of the expert_linear kernel", () => {
+  // The one-row keys as they were before the grouped form existed, and the grouped keys, written
+  // out by hand.
+  const KEYS = [
+    [
+      "f32",
+      undefined,
+      false,
+      "expert_linear:v1:f32:i32:c32u4",
+      "expert_linear:v1:f32:i32:c32u4:rows8",
+    ],
+    [
+      "i4",
+      32,
+      false,
+      "expert_linear:v1:f32:i32:c32u4:wi4g32",
+      "expert_linear:v1:f32:i32:c32u4:wi4g32:rows8",
+    ],
+    [
+      "i4f16",
+      32,
+      true,
+      "expert_linear:v1:f32:i32:c32u4:wi4hg32:pool",
+      "expert_linear:v1:f32:i32:c32u4:wi4hg32:rows8:pool",
+    ],
+  ] as const;
+
+  it("keeps the one-row form's key and gives the grouped form a key of its own, naming the rows of a walk, the pooled part last", () => {
+    assertEquals(EXPERT_LINEAR_GROUP_ROWS, 8);
+    assertEquals(EXPERT_LINEAR_WALK_ROWS, [8, 4, 2, 1]);
+    for (const [storage, group, pooled, oneRow, grouped] of KEYS) {
+      assertEquals(expertLinearKey(storage, group, pooled), oneRow);
+      assertEquals(expertLinearKey(storage, group, pooled, true), grouped);
+    }
+  });
+
+  it("generates the grouped form without changing a byte of the one-row form", () => {
+    for (const [storage, group, pooled] of KEYS) {
+      const oneRow = expertLinearWgsl(storage, group, pooled);
+      const grouped = expertLinearWgsl(storage, group, pooled, true);
+      assertEquals(expertLinearWgsl(storage, group, pooled, false), oneRow);
+      // The one-row form has no word function and no leader scan; the grouped form has both.
+      assertEquals(oneRow.includes("expert_word"), false);
+      assertEquals(oneRow.includes("leads"), false);
+      assertEquals(grouped.includes("fn expert_word("), true);
+      assertEquals(grouped.includes("var leads = true;"), true);
+      // One walk loop per listed row count, the largest first.
+      assertEquals(
+        [...grouped.matchAll(/for \(; count - start >= (\d+)u;/g)].map((match) => Number(match[1])),
+        [8, 4, 2, 1],
+      );
+      // Same key → byte-identical WGSL.
+      assertEquals(expertLinearWgsl(storage, group, pooled, true), grouped);
+    }
+  });
+});
+
+describe("which dispatch takes the grouped form of expert_linear", () => {
+  it("groups a run of several tokens over the long rows of 26B's gate_up, and not the short rows of its down", () => {
+    // gate_up reads k = 2816 (88 words of 32 i4 elements), down k = 704 (22 words).
+    assertEquals(expertLinearGrouped("i4f16", 5, 2816), true);
+    assertEquals(expertLinearGrouped("i4f16", 8, 2816), true);
+    assertEquals(expertLinearGrouped("i4f16", 5, 704), false);
+    assertEquals(expertLinearGrouped("i4f16", 8, 704), false);
+  });
+
+  it("never groups a run of one token, whose picks are distinct experts", () => {
+    assertEquals(expertLinearGrouped("i4f16", 1, 2816), false);
+    assertEquals(expertLinearGrouped("i4", 1, 65536), false);
+    assertEquals(expertLinearGrouped("f32", 1, 4096), false);
+  });
+
+  it("draws the line at 64 words of a weight row, a word being 32 i4 elements or 4 f32 elements", () => {
+    assertEquals(EXPERT_LINEAR_GROUP_MIN_WORDS, 64);
+    assertEquals(expertLinearGrouped("i4", 2, 64 * 32), true);
+    assertEquals(expertLinearGrouped("i4", 2, 63 * 32), false);
+    assertEquals(expertLinearGrouped("i4f16", 2, 64 * 32), true);
+    assertEquals(expertLinearGrouped("i4f16", 2, 63 * 32), false);
+    assertEquals(expertLinearGrouped("f32", 2, 64 * 4), true);
+    assertEquals(expertLinearGrouped("f32", 2, 63 * 4), false);
+  });
+});
 
 describe("the producer rule of an expert_linear index (at Session construction)", () => {
   it("accepts output 1 of a topk over the weight's E", () => {

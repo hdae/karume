@@ -12,11 +12,20 @@
 // production decoders (the f16 steps widened exactly — ADR 0069 decision 3). The routing ids MUST
 // match exactly; the output is compared within the GEMM band the GEMV tests use. The token axis is
 // symbolic and the Session runs two lengths. The compressed weights MUST stay resident (no host
-// expansion — ADR 0145 decision 2).
+// expansion — ADR 0145 decision 2). Its weight rows are short, so every run takes the one-row kernel.
+//
+// A second graph has long weight rows (64 words) and nothing but the routing and one expert_linear:
+//
+//   topk(scores, k) = (picked, index)  →  h = expert_linear(x, index, weight)
+//
+// A run of five tokens takes the grouped kernel (rows that picked one expert share the walk of its
+// weight row), a run of one token the one-row kernel, and every word of a token's rows MUST be the
+// same in both: the two kernels are one numeric contract.
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { expertLinearKey } from "../src/kernels/expert-linear.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import {
   applyReferenceOp,
@@ -183,6 +192,131 @@ const RESIDENT_BYTES: Readonly<Record<Storage, number>> = {
   i4f16: 12288 + 768 * 2 + 6144 + 384 * 2,
 };
 
+/** The expert_linear rows of a run's census, as [key, dispatches]. */
+const expertKernels = (
+  rows: readonly { readonly key: string; readonly dispatchCount: number }[] | undefined,
+): [string, number][] =>
+  (rows ?? [])
+    .filter((row) => row.key.startsWith("expert_linear:"))
+    .map((row) => [row.key, row.dispatchCount]);
+
+const LONG_PICKS = 3;
+const LONG_OUT = 40;
+/**
+ * The picks of five tokens in pick order: expert 4 by every token (five rows: a walk of four and a
+ * walk of one), expert 1 by four, experts 2 and 5 by two, experts 0 and 3 by one.
+ */
+const LONG_ROUTING = [
+  [4, 1, 5],
+  [1, 4, 0],
+  [4, 2, 1],
+  [4, 1, 3],
+  [2, 4, 5],
+];
+
+/** Scores whose top three are `picks` in order (every score distinct, so there is no tie). */
+const scoresOf = (picks: readonly number[]): number[] =>
+  Array.from({ length: E }, (_, expert) => {
+    const rank = picks.indexOf(expert);
+    return rank < 0 ? -1 - expert : LONG_PICKS - rank;
+  });
+
+/** The routing and one expert_linear over weight rows of `width` elements. */
+const longRowDeclaration = (width: number): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["expert_linear", "topk"] },
+  symbols: ["T"],
+  inputs: [
+    { name: "x", dtype: "f32", shape: ["T", width] },
+    { name: "scores", dtype: "f32", shape: ["T", E] },
+  ],
+  outputs: ["h", "index"],
+  initializers: { weight: {} },
+  values: {
+    weight: { dtype: "f32", shape: [E, LONG_OUT, width] },
+    picked: { dtype: "f32", shape: ["T", LONG_PICKS] },
+    index: { dtype: "i32", shape: ["T", LONG_PICKS] },
+    h: { dtype: "f32", shape: ["T", LONG_PICKS, LONG_OUT] },
+  },
+  nodes: [
+    { op: "topk", ins: ["scores"], outs: ["picked", "index"], attrs: { k: LONG_PICKS } },
+    { op: "expert_linear", ins: ["x", "index", "weight"], outs: ["h"], attrs: {} },
+  ],
+});
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "expert_linear over long weight rows through a Session (real GPU)",
+  () => {
+    for (const storage of ["f32", "i4", "i4f16"] as const) {
+      it(`gives each token of a five-token run the words of its own one-token run, with ${storage} weights: the grouped kernel against the one-row kernel`, async () => {
+        // 64 words of a weight row: 4 f32 elements or 32 i4 elements to a word.
+        const width = storage === "f32" ? 256 : 2048;
+        const shape = [E, LONG_OUT, width];
+        const weight = stored(storage, values(E * LONG_OUT * width, 19, 0.15), shape);
+        const opened = await openModelBytes(longRowDeclaration(width), [
+          { graph: GRAPH_NAME, initializer: "weight", ...weight },
+        ]);
+        const group = storage === "f32" ? undefined : GROUP;
+        const tokens = LONG_ROUTING.length;
+        const x = values(tokens * width, 23, 1.5);
+        const scores = Float32Array.from(LONG_ROUTING.flatMap((picks) => scoresOf(picks)));
+        const gpu = await acquireGpu();
+        try {
+          const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
+          try {
+            const all = await session.run({
+              x: refTensor([tokens, width], x),
+              scores: refTensor([tokens, E], scores),
+            });
+            assertEquals(
+              [...all["index"].data],
+              LONG_ROUTING.flat(),
+              "the routing of the five tokens",
+            );
+            assertEquals(
+              expertKernels(session.diagnostics().lastRunPipelines),
+              [[expertLinearKey(storage, group, false, true), 1]],
+              "five tokens: the grouped kernel",
+            );
+            const span = LONG_PICKS * LONG_OUT;
+            const words = new Uint32Array(
+              all["h"].data.buffer,
+              all["h"].data.byteOffset,
+              tokens * span,
+            );
+            for (let token = 0; token < tokens; token += 1) {
+              const one = await session.run({
+                x: refTensor([1, width], x.slice(token * width, (token + 1) * width)),
+                scores: refTensor([1, E], scores.slice(token * E, (token + 1) * E)),
+              });
+              assertEquals(
+                expertKernels(session.diagnostics().lastRunPipelines),
+                [[expertLinearKey(storage, group), 1]],
+                `token ${token} alone: the one-row kernel`,
+              );
+              assertEquals(
+                [...words.subarray(token * span, (token + 1) * span)],
+                [...new Uint32Array(one["h"].data.buffer, one["h"].data.byteOffset, span)],
+                `token ${token}: the words of its rows in the five-token run and alone`,
+              );
+            }
+            // MUST (precondition): the rows hold sums, not zeros — an unbound weight would compare equal.
+            assert(
+              words.filter((word) => word !== 0).length > words.length / 2,
+              "h is mostly zero",
+            );
+          } finally {
+            await session.dispose();
+          }
+        } finally {
+          gpu.destroy();
+        }
+      });
+    }
+  },
+);
+
 describe.skipIf(!GPU_AVAILABLE)("expert_linear through a Session (real GPU)", () => {
   for (const storage of ["f32", "i4", "i4f16"] as const) {
     it(`runs a routed expert FFN with ${storage} expert weights like the CPU reference, at two token counts`, async () => {
@@ -229,6 +363,12 @@ describe.skipIf(!GPU_AVAILABLE)("expert_linear through a Session (real GPU)", ()
             assertEquals([...outputs["index"].data], [...expected.index.data], `${where}: routing`);
             const report = compareTensors(outputs["out"], expected.out, GEMM_TOLERANCE);
             assertEquals(report.pass, true, `${where}: ${formatAllclose(report)}`);
+            // Short weight rows: both expert_linear nodes on the one-row kernel at every length.
+            assertEquals(
+              expertKernels(session.diagnostics().lastRunPipelines),
+              [[expertLinearKey(storage, storage === "f32" ? undefined : GROUP), 2]],
+              `${where}: the expert_linear kernels of the run`,
+            );
           }
         } finally {
           await session.dispose();
