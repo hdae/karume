@@ -863,7 +863,7 @@ const OWN: GeometryProfile = {
 };
 
 describe("a table without the GEMV choices runs with the default profile's, resolved where a Session selects its profile", () => {
-  it("an embedded table without the field runs with the default profile's choices, and nvidia-ampere alone carries its own: the default's with its four sequential exceptions after them", () => {
+  it("an embedded table without the field runs with the default profile's choices, and the two NVIDIA tables carry their own; nvidia-ampere's are the default's with its four sequential exceptions after them", () => {
     const carrying: string[] = [];
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       if ("linearGemv" in profile) {
@@ -872,7 +872,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       }
       assertStrictEquals(resolveGeometryProfile(profile).linearGemv, GEMV, profile.id);
     }
-    assertEquals(carrying, ["nvidia-ampere"]);
+    assertEquals(carrying, ["nvidia-ampere", "nvidia-blackwell"]);
     const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere");
     assert(ampere !== undefined);
     // A table holds the field as a whole, so this also pins that its parallel rows, thread target
@@ -884,6 +884,73 @@ describe("a table without the GEMV choices runs with the default profile's, reso
         shapes: [...GEMV.sequential.shapes, ...AMPERE_SEQUENTIAL_SHAPES],
       },
     });
+  });
+
+  it("nvidia-blackwell's are the default's with what its own records adopt in place: 42 more sequential exceptions, and 56 parallel rows changed or added", () => {
+    const blackwell = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-blackwell");
+    assert(blackwell?.linearGemv !== undefined);
+    const own = blackwell.linearGemv;
+    // What the derivation never writes is the default's of today
+    assertEquals(own.sequential.variant, GEMV.sequential.variant);
+    assertEquals(own.rowsThreadTarget, GEMV.rowsThreadTarget);
+    // The default's exceptions are inherited as they are, the table's own follow
+    const inherited = GEMV.sequential.shapes.length;
+    assertEquals(own.sequential.shapes.slice(0, inherited), GEMV.sequential.shapes);
+    assertEquals(own.sequential.shapes.length - inherited, 42);
+    // Every parallel row of the default is there, in the default's order, with the rows added after
+    const key = (row: LinearGemvParallelShape): string =>
+      [row.storage, row.n, row.k, row.group ?? "-"].join(" ");
+    assertEquals(
+      own.parallelShapes.slice(0, GEMV.parallelShapes.length).map(key),
+      GEMV.parallelShapes.map(key),
+    );
+    const changed = GEMV.parallelShapes.filter(
+      (row, index) => JSON.stringify(row) !== JSON.stringify(own.parallelShapes[index]),
+    ).length;
+    const added = own.parallelShapes.length - GEMV.parallelShapes.length;
+    assertEquals([changed, added], [40, 16]);
+  });
+
+  it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {
+    // The memory estimate has no adapter and plans its fusions with the default profile's choices.
+    // The fusion pass reads two things of them: which shapes have a parallel row (the
+    // linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing). With
+    // this held, a table's plan differs from the estimate's only through the shapes it adds a row
+    // for (docs/limitations.md, the `workspaceBytes` section).
+    let tables = 0;
+    for (const profile of BUILTIN_GEOMETRY_PROFILES) {
+      if (profile.linearGemv === undefined) continue;
+      tables += 1;
+      const own = profile.linearGemv.parallelShapes;
+      for (const row of GEMV.parallelShapes) {
+        const match = own.find(
+          (one) =>
+            one.storage === row.storage &&
+            one.n === row.n &&
+            one.k === row.k &&
+            one.group === row.group,
+        );
+        assert(match !== undefined, `${profile.id}: no row ${row.storage} ${row.n}×${row.k}`);
+        assertEquals(
+          match.packedActivations,
+          row.packedActivations,
+          `${profile.id}: ${row.storage} ${row.n}×${row.k} packedActivations`,
+        );
+      }
+      const packedAdded = own.filter(
+        (one) =>
+          one.packedActivations &&
+          !GEMV.parallelShapes.some(
+            (row) =>
+              row.storage === one.storage &&
+              row.n === one.n &&
+              row.k === one.k &&
+              row.group === one.group,
+          ),
+      );
+      assertEquals(packedAdded, [], `${profile.id}: an added row with packed activations`);
+    }
+    assertEquals(tables, 2);
   });
 
   it("resolveGeometryProfile fills in the default's choices and keeps every other field of the table, and keeps a table's own", () => {

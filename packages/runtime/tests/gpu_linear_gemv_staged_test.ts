@@ -132,7 +132,7 @@ describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV (K-90, real GPU
               for (const untouched of out.subarray(m * n)) assertEquals(untouched, 0x7fc00000);
               return out.slice(0, m * n);
             };
-            for (const lanes of [2, 4, 16, 32] satisfies LinearGemvParallelLanes[]) {
+            for (const lanes of [2, 4, 8, 16, 32] satisfies LinearGemvParallelLanes[]) {
               for (const m of [1, 4, 8]) {
                 const where = `${storage} K${k} g${shapeGroup ?? "-"} L${lanes} M${m}`;
                 const plain = await run(

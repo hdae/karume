@@ -21,8 +21,10 @@ import { createVisitProbe, type VisitDeviceProbe } from "../src/gemma4-bench/vis
 
 /** An adapter whose table carries GEMV choices of its own (the RTX 3080 Ti's). */
 const AMPERE: BenchAdapter = { vendor: "nvidia", architecture: "ampere", description: "" };
-/** An adapter whose table carries none (the RTX 5070 Ti's). */
+/** Another one, whose own parallel rows differ from the default profile's (the RTX 5070 Ti's). */
 const BLACKWELL: BenchAdapter = { vendor: "nvidia", architecture: "blackwell", description: "" };
+/** An adapter whose table carries none (the Apple M2's). */
+const APPLE: BenchAdapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
 /** An adapter no embedded table matches. */
 const UNKNOWN: BenchAdapter = { vendor: "acme", architecture: "anvil", description: "" };
 
@@ -45,10 +47,10 @@ describe("the profile of a bench arm", () => {
       tableCarriesGemv: true,
       linearGemv: own,
     });
-    expect(tableOf("nvidia-blackwell").linearGemv).toBeUndefined();
-    expect(armGemvChoices(BLACKWELL, [])).toEqual({
+    expect(tableOf("apple-metal-3").linearGemv).toBeUndefined();
+    expect(armGemvChoices(APPLE, [])).toEqual({
       switches: [],
-      table: "nvidia-blackwell",
+      table: "apple-metal-3",
       tableCarriesGemv: false,
       linearGemv: DEFAULT_GEMV,
     });
@@ -64,13 +66,19 @@ describe("the profile of a bench arm", () => {
       DEFAULT_GEMV.sequential.shapes.length,
     );
     // A table without the field is itself under the switch
-    expect(armGeometryProfile(BLACKWELL, ["default-gemv"])).toEqual(tableOf("nvidia-blackwell"));
+    expect(armGeometryProfile(APPLE, ["default-gemv"])).toEqual(tableOf("apple-metal-3"));
+    // A table whose parallel rows are its own runs the default profile's rows under the switch
+    expect(tableOf("nvidia-blackwell").linearGemv?.parallelShapes).not.toEqual(
+      DEFAULT_GEMV.parallelShapes,
+    );
+    expect(armGemvChoices(BLACKWELL, ["default-gemv"]).linearGemv).toBe(DEFAULT_GEMV);
   });
 
   it("general-sequential removes every per-shape exception of the sequential variant and nothing else", () => {
     for (const [adapter, id] of [
       [AMPERE, "nvidia-ampere"],
       [BLACKWELL, "nvidia-blackwell"],
+      [APPLE, "apple-metal-3"],
     ] as const) {
       const table = tableOf(id);
       const before = table.linearGemv ?? DEFAULT_GEMV;
@@ -107,7 +115,7 @@ describe("the profile of a bench arm", () => {
   });
 
   it("is a table the runtime's guard accepts, for every adapter and every set of switches", () => {
-    for (const adapter of [AMPERE, BLACKWELL, UNKNOWN]) {
+    for (const adapter of [AMPERE, BLACKWELL, APPLE, UNKNOWN]) {
       for (const switches of [
         ["default-gemv"],
         ["general-sequential"],
@@ -129,8 +137,13 @@ describe("the profile of a bench arm", () => {
     expect(gemvChoicesLine("arm 2 X", armGemvChoices(AMPERE, ["default-gemv"]))).toBe(
       `arm 2 X · table nvidia-ampere · the default profile's GEMV choices · sequential c32u4 with ${DEFAULT_GEMV.sequential.shapes.length} per-shape exceptions · ${rows} parallel rows`,
     );
-    expect(gemvChoicesLine("arm 2 X", armGemvChoices(BLACKWELL, ["general-sequential"]))).toBe(
-      `arm 2 X · table nvidia-blackwell · the default profile's GEMV choices, the sequential exceptions removed · sequential c32u4 with 0 per-shape exceptions · ${rows} parallel rows`,
+    expect(gemvChoicesLine("arm 2 X", armGemvChoices(APPLE, ["general-sequential"]))).toBe(
+      `arm 2 X · table apple-metal-3 · the default profile's GEMV choices, the sequential exceptions removed · sequential c32u4 with 0 per-shape exceptions · ${rows} parallel rows`,
+    );
+    // A table's own parallel rows are counted as they are
+    const blackwell = tableOf("nvidia-blackwell").linearGemv;
+    expect(gemvChoicesLine("arm 1 X", armGemvChoices(BLACKWELL, []))).toBe(
+      `arm 1 X · table nvidia-blackwell · the table's own GEMV choices · sequential c32u4 with ${blackwell?.sequential.shapes.length} per-shape exceptions · ${blackwell?.parallelShapes.length} parallel rows`,
     );
   });
 });

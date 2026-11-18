@@ -55,12 +55,14 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
         profile.id,
       );
     }
-    // Both kinds are registered: nvidia-ampere carries the field, the other tables do not
+    // Both kinds are registered: the two NVIDIA tables carry the field, apple-metal-3 does not
     assertEquals(
-      BUILTIN_GEOMETRY_PROFILES.filter((profile) => profile.linearGemv !== undefined).map(
-        ({ id }) => id,
-      ),
-      ["nvidia-ampere"],
+      BUILTIN_GEOMETRY_PROFILES.map(({ id, linearGemv }) => [id, linearGemv !== undefined]),
+      [
+        ["apple-metal-3", false],
+        ["nvidia-ampere", true],
+        ["nvidia-blackwell", true],
+      ],
     );
     const linearGemv = {
       sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] },

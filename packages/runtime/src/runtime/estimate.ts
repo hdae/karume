@@ -1236,10 +1236,17 @@ export type EstimateFusionFacts = Omit<
  * that list), the weights' storage from the residency plan (`plannedResidentWeights`) and the
  * weights an external step may not bind (`sharedOrPooledWeights`, with the expert plan's pooled
  * weights — `pooled` — as the executor takes its pool's). The GEMV choices are the default
- * profile's: an estimate has no adapter. An embedded table without `linearGemv` resolves to them;
- * `nvidia-ampere` carries its own, the default's with more per-shape exceptions of the sequential
- * variant, which no fusion and no size reads (tests/linear_gemv_profile_test.ts pins that its
- * parallel rows and thread target are the default's).
+ * profile's: an estimate has no adapter. An embedded table without `linearGemv` resolves to them.
+ * NOTE: a table that carries its own makes this plan an approximation of the Session's in one
+ * place. Of the choices, the fusion pass reads which shapes have a parallel row (the
+ * linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing), and no
+ * size reads the rest (the sequential variants, a row's lanes, staged flag and row block: the
+ * kernels they select hold no temporary). `nvidia-ampere`'s parallel rows are the default's.
+ * `nvidia-blackwell` adds rows on 16 shapes, removes none and keeps every packed flag
+ * (tests/linear_gemv_profile_test.ts pins both tables): on that adapter a linear of one of those
+ * shapes that feeds a `static_quantize`, at `reorder` and up to 8 rows, folds in the Session and
+ * not here. No graph of a Gemma 4 distribution has one, so their plans are the Session's
+ * (docs/limitations.md, the `workspaceBytes` section).
  *
  * `options` are checked values (the entry of {@link estimateGraphMemory} ran
  * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the

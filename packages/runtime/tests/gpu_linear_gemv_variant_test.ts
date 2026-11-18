@@ -140,14 +140,14 @@ test.skipIf(!GPU_AVAILABLE)(
 // The CPU reference keeps the comparison from being vacuous (two kernels that write nothing, or the
 // same wrong words): every column of the small shapes, 256 columns spread over a real one.
 //
-// Mutations it detects (fault injection, 2026-11-18, the 27 rows of that day — 23 of the default
-// profile and 4 more of nvidia-ampere, 3 of them i4 —, 90 shapes):
+// Mutations it detects (fault injection, 2026-11-18, the 69 rows of that day — 23 of the default
+// profile, 4 more of nvidia-ampere and 42 more of nvidia-blackwell, 36 of them i4 —, 315 shapes):
 // - in the exception's WGSL alone, the first two multiply-adds of every run of them swapped (the
 //   same products, another order of addition) → the u32 comparison fails on the real shape of every
-//   row at every group (30) and on 34 of the 60 small shapes, while the CPU reference holds on all
-//   90 — the check means nothing unless it is exact u32 equality;
+//   row at every group (105) and on 151 of the 210 small shapes, while the CPU reference holds on
+//   all 315 — the check means nothing unless it is exact u32 equality;
 // - an exception's kernel that returns before it writes → the u32 comparison and the CPU reference
-//   fail on all 90 shapes. They do because the output buffer is cleared before each kernel: without
+//   fail on all 315 shapes. They do because the output buffer is cleared before each kernel: without
 //   the clear this mutation passed, the buffer still holding the general variant's words.
 
 /** The group lengths an i4 row is compared at: the shipped weights' and a second one. */

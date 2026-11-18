@@ -204,8 +204,10 @@ export type SessionFusionFacts<Name extends string> = {
   /**
    * The GEMV choices of the profile the Session resolved (`SessionState.geometryProfile.linearGemv`;
    * a caller without a device passes the default profile's — the value an embedded table without
-   * the field resolves to; `nvidia-ampere` carries its own, which differ from it in the sequential
-   * variant's per-shape exceptions alone, and the fusion pass reads the parallel rows).
+   * the field resolves to). The fusion pass reads the parallel rows: which shapes have one, and a
+   * row's packed-activation flag. `nvidia-ampere`'s are the default's; `nvidia-blackwell` has rows
+   * on 16 more shapes, so a plan made with the default's choices is that adapter's plan only where
+   * no linear of those shapes feeds a `static_quantize` (the NOTE of `estimateFusionFacts`).
    */
   readonly linearGemv: LinearGemvChoices;
   readonly residentWeights: ReadonlyMap<string, ResidentWeightStorage>;
