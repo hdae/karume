@@ -35,19 +35,27 @@ file is converted against the plan of the model's float container, with that pla
 the file's dtype ([a plan with another 16-bit float codec](convert.md#a-plan-with-another-16-bit-float-codec)): a bit
 copy, never a rounding to the container's type. Anima's float container is `bf16` (every float weight of its
 distribution is bf16, the upstream's bits); `BF16` is stored as `bf16` and `F16` as `f16`; `F32` has none (no Anima
-container stores f32 weights). No container of another label is read for a float component, whether the distribution
-carries one or not. Anima's components:
+container stores f32 weights). No container of another label is read for a component stored as a float, whether the
+distribution carries one or not; which quant stores a component as a float is read from its label alone (the dtype
+rule below). Anima's components:
 
 | Component | From | Converted against |
 | --- | --- | --- |
-| `transformer` | The file (required) | Under a quant that stores it as int8: that quant's transformer container, whatever the file's float dtype (a mix of them included). Under a quant that stores it as a float (as `bf16`: `bf16`, `bf16-c16`): that quant's own `bf16` transformer, its 16-bit weights stored as the file's dtype (BF16 as bf16, F16 as f16), run with the quant's Session options |
+| `transformer` | The file (required) | Under a quant whose transformer label is not `bf16` (a quantized storage — the int8 quants): that quant's transformer container as it is; an int8 one converts from any float dtype (a mix of them included), and one whose weights are f16 or bf16 takes the dtype those weights take (the dtype rule). Under a quant that stores it as a float (as `bf16`: `bf16`, `bf16-c16`): that quant's own `bf16` transformer, its 16-bit weights stored as the file's dtype (BF16 as bf16, F16 as f16), run with the quant's Session options |
 | `text_conditioner` | The file when the file holds one, else the distribution | When from the file: the model's `bf16` text conditioner, its 16-bit weights stored as the file's dtype, whatever the quant — no preset quantizes the text conditioner |
 | `text_encoder`, `vae_decoder` | The distribution | — (the selected quant's, as `fromPretrained`) |
 
 - **The dtype rule.** Where the storage follows the dtype, the dtype is that of the component's tensors in the file:
   one dtype for the whole component. A component whose tensors mix dtypes is refused naming each, and a dtype with no
   16-bit float codec is refused with what to do (below). Which quant stores a component quantized is read from its
-  weights label: a label that is not the family's float label is a quantized storage.
+  weights label alone, not from the codecs its container stores: the family's float label is the float storage, and
+  every other label is a quantized storage — an int8 container, and as well a container of another label whose
+  weights are f16 or bf16 (as a quant whose transformer label is `f16`). A quantized storage's container is the plan
+  as it is, with no other 16-bit float codec put in its place: an initializer it stores as `f16` takes `F16` tensors
+  and one it stores as `bf16` takes `BF16` tensors, and neither rounds (the dtype refusal of step 5). So under a quant
+  whose transformer label is `f16`, an F16 file is converted against that `f16` container and runs it, and a BF16
+  file is refused; the text conditioner from the file is converted against the `bf16` one under that quant as under
+  every other.
 - A component named in `options.components` comes from that replacement, never from the file, whatever the file
   holds; its tensors in the file are not read.
 - The file "holds" a component when the name map's layout that recognises the file places at least one key in it.
@@ -69,6 +77,8 @@ carries one or not. Anima's components:
   | File | Quant | Storage × compute | |
   | --- | --- | --- | --- |
   | Any float dtype | An int8 quant | int8, the quant's compute | As before: the quant's own container |
+  | F16 | A quant whose transformer label is not `bf16` and whose container stores the weights as f16 (as one labelled `f16`) | f16, the quant's compute (or an explicit one) | The quant's own container as it is |
+  | BF16 | The same | — | Refused by the dtype check (step 5): that container's f16 weights take F16 tensors only |
   | BF16 | A quant that stores it as bf16 under f32 compute (`bf16`) | bf16 × f32 | The quant's own pair |
   | F16 | The same | f16 × f32 | The quant's container with its 16-bit weights stored as f16: f16 storage under f32 compute |
   | F16 | A quant that stores it as bf16 under f16 linear and attention compute (`bf16-c16`) | f16 × f16 linear and attention | f16 storage under f16 compute, which the f16-compute checks cover |

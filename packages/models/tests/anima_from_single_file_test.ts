@@ -10,10 +10,11 @@
 //    conditioner against the bf16 container's plan, stored as the file's dtype (BF16 as bf16, F16 as
 //    f16), the transformer as an int8 quant's from any float dtype and the same way as the text
 //    conditioner under a quant that stores it as a float; an f16 container the distribution may
-//    still carry is never read — the converted parts are neither fetched nor counted in the
-//    progress, the file is read up to its header only, and a role replaced by `components` is not
-//    taken from the file (the file's text conditioner would be refused there). Which parts are
-//    fetched shows the container; the served container shows the codec.
+//    still carry is never read for a float storage, and under a quant whose label is `f16` (not
+//    the float label) it is the plan as it is — the converted parts are neither fetched nor
+//    counted in the progress, the file is read up to its header only, and a role replaced by
+//    `components` is not taken from the file (the file's text conditioner would be refused there).
+//    Which parts are fetched shows the container; the served container shows the codec.
 //  ② Each refusal, before a weight part is fetched (the fetched paths are the manifest, the name
 //    map and descriptors only). Each case says which fault it injects.
 //  ③ The abort signal at a boundary of the single-file steps.
@@ -401,7 +402,9 @@ const SERVED_FILES = [
 /**
  * The model entry with the f16 containers a distribution may still carry beside its bf16 ones (an
  * `f16` label for the text conditioner and the transformer, and a quant that stores every role as
- * `f16`): a float component from a file never reads them.
+ * `f16`): a component from a file stored as a float never reads them. Quant `f16`'s labels are not
+ * the float label, so under it the transformer is a quantized storage, converted against the f16
+ * container as it is.
  */
 const withF16Containers = () => {
   const entry = modelEntry();
@@ -736,17 +739,46 @@ describe("fromSingleFile builds an Anima pipeline from a single file and a distr
     assertEquals(await view.stored(TRANSFORMER_W), u16Bytes(BF16_WEIGHT));
   });
 
+  it("an F16 file under a quant whose transformer label is f16, not the float label: the transformer is converted against that quant's f16 container as it is, the text conditioner against the bf16 plan as f16", async () => {
+    // A label other than the family's float label is a quantized storage, whatever its container
+    // stores: its own plan, no 16-bit float codec put in its place.
+    const { mock, ref, options } = await serve({ entry: withF16Containers() });
+    vi.mocked(openConvertingSource).mockClear();
+    const { file } = fileOf(f16SingleFileTensors());
+    await using pipeline = await Pipeline.fromSingleFile(file, ref, { ...options, quant: "f16" });
+    assert(pipeline instanceof Pipeline);
+    const { transformerF16, transformerBf16, conditionerF16, conditionerBf16 } = CONTAINERS;
+    assertEquals(fetchedOf(mock.paths, transformerF16), convertedTransformer(transformerF16));
+    assertEquals(fetchedOf(mock.paths, transformerBf16), []);
+    assertEquals(fetchedOf(mock.paths, conditionerBf16), [conditionerBf16.parts[0].path]);
+    assertEquals(fetchedOf(mock.paths, conditionerF16), []);
+    const served = await servedByRole();
+    for (const [role, weight] of [
+      ["transformer", TRANSFORMER_W],
+      ["text_conditioner", CONDITIONER_W],
+    ] as const) {
+      const view = served.get(role);
+      assert(view !== undefined, `no converting source of '${role}'`);
+      assertEquals(view.codecs, ["f16", "f32"]);
+      assertEquals(await view.stored(weight), u16Bytes(F16_FINE_WEIGHT));
+    }
+  });
+
   it("under an int8 quant the transformer is the quant's container, converted from any float dtype, a mix of them included", async () => {
-    const { mock, ref, options } = await serve();
+    // The f16 and bf16 transformers the distribution carries beside it are not fetched.
+    const { mock, ref, options } = await serve({ entry: withF16Containers() });
     const tensors = singleFileTensors();
     tensors.set("net.blocks.0.w", f16([2, 2], F16_WEIGHT));
     tensors.set("net.blocks.0.b", f32([2], [0.25, -0.5]));
     const { file } = fileOf(tensors);
     await using pipeline = await Pipeline.fromSingleFile(file, ref, options);
     assert(pipeline instanceof Pipeline);
-    const { transformerI8, transformerBf16 } = CONTAINERS;
+    const { transformerI8, transformerF16, transformerBf16 } = CONTAINERS;
     assertEquals(fetchedOf(mock.paths, transformerI8), convertedTransformer(transformerI8));
-    assertEquals(fetchedOf(mock.paths, transformerBf16), []);
+    assertEquals(
+      [...fetchedOf(mock.paths, transformerF16), ...fetchedOf(mock.paths, transformerBf16)],
+      [],
+    );
   });
 
   it("takes a file of the transformer alone, with the text conditioner of the quant", async () => {
@@ -959,6 +991,21 @@ describe("fromSingleFile refuses before a weight part is fetched", () => {
       () => Pipeline.fromSingleFile(file, ref, { ...options, quant: "i8" }),
       mock.paths,
       "the transformer stores 'model.layers.0.w' as bf16, which takes BF16 values as they are and never rounds, but the file's 'net.blocks.0.w' is F16; choose a quant that stores the transformer quantized, which converts from any float dtype: i8",
+    );
+  });
+
+  it("a BF16 file under a quant whose transformer label is f16, not the float label: refused by the dtype check of that quant's f16 container", async () => {
+    // Fault: quant `f16` of a distribution that carries f16 containers. Its transformer label is a
+    // quantized storage, so its f16 plan is the plan as it is, and an f16 weight takes F16 only.
+    const { mock, ref, options } = await serve({ entry: withF16Containers() });
+    await refused(
+      () =>
+        Pipeline.fromSingleFile(fileOf(singleFileTensors()).file, ref, {
+          ...options,
+          quant: "f16",
+        }),
+      mock.paths,
+      "the transformer stores 'model.layers.0.w' as f16, which takes F16 values as they are and never rounds, but the file's 'net.blocks.0.w' is BF16; ",
     );
   });
 
