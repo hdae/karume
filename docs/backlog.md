@@ -62,7 +62,7 @@ maintainer's ruling of 2026-11-06).
 
 1. **26B A4B (MoE)** (maintainer 2026-11-08): every expert resident ✅ 2026-11-08 (ADR
    [0145](decisions/0145-gemma4-26b-moe-resident.md) and its addendum; in the local mirror, ran in Chrome on the RTX 5070 Ti
-   with about 0.8 GB of 16 GB left; released in 0.19.0). Left: the grouped prefill form of `expert_linear` (perf-ledger K-104), the drafter and vision of 26B. The dense parts'
+   with about 0.8 GB of 16 GB left; released in 0.19.0). The grouped form of `expert_linear` for runs of several rows ✅ 2026-11-18 (perf-ledger K-104). Left: the drafter and vision of 26B. The dense parts'
    fusion and parallel-GEMV rows at width 2816 ✅ 2026-11-10 (`i4-gemvpar` / `i4-fast` for 26B, a decode forward ×0.70 on the
    RTX 3080 Ti, and 30.1 against 22.8 tokens per second under the expert cache in Chrome on the RTX 5070 Ti —
    [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md)). Then see whether a MoE cache that loads the
@@ -90,9 +90,11 @@ maintainer's ruling of 2026-11-06).
    ADR 0146 addendum "per-layer slots"; the cut model gives the tokens without the cache). The maintainer's Chrome A/B ✅
    2026-11-10 (the same tokens; `fitted` at depth 4 decodes 22.6 tokens per second against 20.5 at 64 — research §6.5).
    The cost per run ✅ 2026-11-10 (the drafts' whole forwards and the verify padded to 8 rows — research §6.6); the
-   verify in a bucket of `depth + 1` rows ✅ 2026-11-10. Next, by the measured share: `expert_linear` reading each
-   distinct expert once and skipping pad rows, a depth sweep in Chrome, drafts chained on the GPU, and the load after a
-   cut for its last row alone.
+   verify in a bucket of `depth + 1` rows ✅ 2026-11-10. `expert_linear` reading each distinct expert once in a run of
+   several rows ✅ 2026-11-18 (the grouped form, for gate_up's long weight rows — perf-ledger K-104; pad rows are not
+   skipped, their picks share walks like any other rows'). Next: the grouped form checked in Chrome on the RTX 5070 Ti
+   (the `kernel-check` entry and the chat's decode), a depth sweep in Chrome, drafts chained on the GPU, and the load
+   after a cut for its last row alone.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 
