@@ -175,6 +175,11 @@ export type Sampler = {
    * or when it needs more entries than `maxCount` or than the row has.
    */
   topCandidates(vocabSize: number, maxCount: number): SamplerCandidates | undefined;
+  /**
+   * Whether a step of this sampler samples: the specification's temperature, as snapshotted at
+   * creation, is above 0. At temperature 0 a step takes the maximum and draws nothing.
+   */
+  readonly samples: boolean;
 };
 
 /**
@@ -945,6 +950,7 @@ export const createSampler = (
   };
   return {
     ...(plainGreedy ? { greedy } : {}),
+    samples: (frozen.temperature ?? 0) > 0,
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
       const { tokens, probabilities } = samplerDistribution(logits, frozen, history, suppressed);
       // One candidate (temperature 0 / topK 1 / vocabulary 1) makes the draw trivial, so the RNG

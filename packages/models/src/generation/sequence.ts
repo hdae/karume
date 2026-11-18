@@ -1809,11 +1809,12 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         : undefined;
     /**
      * This turn's candidate counters: only on a sequence built with `candidateSelection`, and only
-     * for a turn that samples. At temperature 0 no step draws, so there is nothing to say about
-     * where a draw read from, and the turn's stop is the one a sequence without the selection gives.
+     * for a turn that samples (the sampler's own snapshot of the request says so). At temperature 0
+     * no step draws, so there is nothing to say about where a draw read from, and the turn's stop is
+     * the one a sequence without the selection gives.
      */
     const candidateTally =
-      selection === undefined || (request.sampler?.temperature ?? 0) === 0
+      selection === undefined || !sampler.samples
         ? undefined
         : { count: candidates?.count ?? 0, steps: 0, fallbacks: 0 };
     const pickGreedy = (result: GreedyRunResult): number => {
