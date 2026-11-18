@@ -81,8 +81,9 @@ logits.
 
 - The first `n` entries of the whole row's ranking are merged from the parts' lists (`leadingEntries`), `n` =
   `topK` + the number of suppressed tokens + 1.
-- The merge **does not decide** when a part's whole list was taken: that part may hold more of the row's first `n`
-  than it returned.
+- The merge **does not decide** when a part's whole list was taken before the last of the `n` entries: that part may
+  hold an entry that ranks above the ones merged after it. A part whose last returned entry is the `n`-th hides
+  nothing.
 - The sampler builds its draw target from the `n` entries (`Sampler.topCandidates`): it leaves out the suppressed ids,
   applies the temperature as the whole-row path does, orders the candidates by processed value and id, takes the first
   `topK`, and computes the weights, their sums and the top-p cut with the function the whole-row path uses.

@@ -162,10 +162,31 @@ describe("the leading entries of a row from per-part selections", () => {
       [13, 6],
     ]);
 
-    it("gives up: the row's first entries all lie in one part, and the part returned as many as were asked", () => {
-      // Part 1 returned its first three; the row's first three are those — and a fourth of the
-      // part, which it did not return, would be the row's fourth.
-      assertEquals(leadingEntries(selectParts(crowded, 4, 3), 3), undefined);
+    it("gives up when a part's whole list was taken before the last entry: what the part did not return would be the next", () => {
+      // Part 1 returned its first three (ids 1, 5, 9). The row's fourth is id 13, which the part
+      // did not return: the merge would take id 0 (−5) for it.
+      assertEquals(leadingEntries(selectParts(crowded, 4, 3), 4), undefined);
+    });
+
+    it("does not give up when a part's last returned entry is the last one asked for: what the part did not return ranks below it", () => {
+      assertEquals([...(leadingEntries(selectParts(crowded, 4, 3), 3)?.indices ?? [])], [1, 5, 9]);
+      // Over rows with crowded parts, whenever the merge answers, it is the row's ranking.
+      const uniform = stream(23);
+      let answered = 0;
+      for (let round = 0; round < 200; round += 1) {
+        const row = new Float32Array(64);
+        for (let id = 0; id < 64; id += 1) row[id] = Math.floor(uniform() * 12) - 6;
+        const count = 1 + Math.floor(uniform() * 12);
+        const entries = leadingEntries(selectParts(row, 4, 3), count);
+        if (entries === undefined) continue;
+        answered += 1;
+        assertEquals(
+          [...entries.indices],
+          ranked(row, allIds(row)).slice(0, count),
+          `round ${round}`,
+        );
+      }
+      assert(answered > 20, `only ${answered} rounds answered`);
     });
 
     it("does not give up while every part still has an entry it returned and was not asked for", () => {

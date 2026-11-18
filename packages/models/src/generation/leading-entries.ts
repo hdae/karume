@@ -57,9 +57,10 @@ const ranksAbove = (a: number, aId: number, b: number, bId: number): boolean => 
  * The merge takes, `count` times, the best of the parts' current heads (a heap of the parts, keyed
  * by their heads). It is the row's ranking as long as every entry a part did not return ranks below
  * everything taken — which holds for a part whose last returned entry was not taken: its other
- * entries rank below that one. A part **whose whole list was taken** may hold more of the row's
- * first `count` (unless it has no more entries than it returned), so the result is not known →
- * `undefined`.
+ * entries rank below that one. A part **whose whole list was taken before the merge's last entry**
+ * may hold an entry that ranks above what the merge took after it (unless it has no more entries
+ * than it returned), so the result is not known → `undefined`. A part whose last returned entry is
+ * the merge's last entry hides nothing: what it did not return ranks below that entry.
  *
  * Selections that are not what the GPU half promises — a layout of the wrong size, a place outside
  * the part, a list that is not in the ranking's order where the merge walks it — give `undefined`
@@ -136,15 +137,13 @@ export const leadingEntries = (
     outIndices[at] = place * parts + best;
     taken[best] += 1;
     if (taken[best] >= perPart) {
+      // The part's whole list is taken. What it did not return ranks below this entry and may rank
+      // above the next one, so only the merge's last entry may be a part's last.
+      if (width > perPart && at < count - 1) return undefined;
       size -= 1;
       heap[0] = heap[size];
     }
     siftDown(0);
-  }
-  if (width > perPart) {
-    for (let part = 0; part < parts; part += 1) {
-      if (taken[part] >= perPart) return undefined;
-    }
   }
   return { values: outValues, indices: outIndices };
 };
