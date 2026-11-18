@@ -70,7 +70,7 @@ describe.skipIf(!GPU_AVAILABLE)("row-blocked parallel GEMV (real GPU)", () => {
       const part = await checkGemvParallelRows(gpu, {
         mutate: (wgsl) => wgsl.replace("if (row0 + 1u < dims.m) {", "if (true) {"),
       });
-      // Only a row count whose last block reaches past it has a row to spill: M = rows + 1.
+      // Only a row count that leaves the last block one row has a second row to spill.
       const spilled = failing(part, "row-blocked: rows past M left unwritten");
       assert(spilled > 0, "no case caught the spilled row");
       for (const one of part.cases) {

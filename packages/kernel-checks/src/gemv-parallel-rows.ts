@@ -47,19 +47,21 @@ type Storage = "i2" | "i4" | "i8";
 const UNWRITTEN = 0x7fc00000;
 /** Output rows of the buffers (the largest M). */
 const ROWS = 8;
-/** Output columns: not a multiple of any lane count's columns per workgroup (edge columns). */
-const COLUMNS = 36;
+/**
+ * Output columns: a workgroup holds 128 / lanes columns (64, 32, 16, 8 or 4), and 37 is a multiple
+ * of none, so the last workgroup of every lane count has columns past N (the edge-column guard).
+ */
+const COLUMNS = 37;
 const LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
 const STORAGES: readonly Storage[] = ["i2", "i4", "i8"];
 const PART = "gemv-parallel-rows";
 
 /**
- * The row counts a block of `rows` rows is run at: one full block, a block and one row of the next
- * (the last y tile reaches past M), and the largest M (several blocks) — the ones up to 8.
+ * The row counts a block of `rows` rows is run at: every M a row's row block can be selected at,
+ * from one block to 8 — whole blocks, and every number of rows the last y tile can be left with.
  */
-const rowCountsOf = (rows: LinearGemvParallelRows): number[] => [
-  ...new Set([rows, rows + 1, ROWS].filter((m) => m <= ROWS)),
-];
+const rowCountsOf = (rows: LinearGemvParallelRows): number[] =>
+  Array.from({ length: ROWS - rows + 1 }, (_, i) => rows + i);
 
 /**
  * The (K, group) shapes per storage: one unit (fewer words than lanes), five units, 4096 (several
@@ -182,7 +184,7 @@ const caseCount = (): number =>
  * (lanes, rows) pairs the kernel exists at × the row counts of each block height.
  */
 export const GEMV_PARALLEL_ROWS_CASES = {
-  "gemv-parallel-rows": 351,
+  "gemv-parallel-rows": 675,
 } as const satisfies ExpectedCases;
 
 export type GemvParallelRowsCheckOptions = CheckOptions & {
