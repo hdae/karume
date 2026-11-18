@@ -70,8 +70,13 @@ distributions were built from are no longer on disk.
 6. **The distributions are rebuilt from the published containers, not re-exported.** The recipe takes every container of
    the seven models, and the two tokenizer files, from the local mirrors of the two repositories, and pins each by the
    sha256 of its part 0 (of the file, for a tokenizer) as published — part 0's descriptor declares the sha256 of every
-   other part, which the assembly compares as it places them. This is the mechanism of ADR 0149 decision 5 for Irodori.
-   Re-exporting a model's containers is a deliberate change to that table.
+   other part. Before a byte is written, the build hashes every part 0 and tokenizer file against its pin, and every
+   other part of a container the extra repository borrows from the official one (the text encoder and the VAE decoder):
+   a borrowed container is only referenced, so nothing compares it later. The other parts of a container a repository
+   stores are compared with part 0's declaration as the assembly places them in its staging directory, which a mismatch
+   discards before anything is put in place. The published bytes are pinned instead of re-exported, as for Irodori
+   (ADR 0149 decision 5); a stored part is hashed once, as it is placed. Re-exporting a model's containers is a
+   deliberate change to that table.
 7. **A single-file checkpoint whose tensors are F16 stays loadable under a float preset.** Its f16 plan is derived from
    the distributed bf16 container, not from an f16 container kept for that purpose.
 

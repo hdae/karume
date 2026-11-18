@@ -559,7 +559,7 @@ names.
 ## Assembling the distributions (`dist.py --pipeline anima` / `anima-extra`)
 
 The seven shipped models are built from the **published containers in the local mirrors**, not from series (ADR
-[0154](../../../docs/decisions/0154-anima-bf16-preset-names.md) decision 6 — the mechanism of ADR
+[0154](../../../docs/decisions/0154-anima-bf16-preset-names.md) decision 6 — pinned like Irodori's, ADR
 [0149](../../../docs/decisions/0149-irodori-rare-token-split.md) decision 5). `ANIMA_PUBLISHED_PART0` in
 `distribution.py` pins part 0 of every container, and each tokenizer file, by sha256 as published; part 0's descriptor
 declares the sha256 of the other parts. The build reads `models/karume-anima/` and `models/karume-anima-extra/`; every
@@ -586,9 +586,12 @@ uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anim
   `karume-anima` and 11 GiB for `karume-anima-extra` — a full copy: the core does not clone files, so check the free
   space first; on a file system with copy-on-write clones the copies can be replaced by clones of the mirror's files
   afterwards).
-- A part 0 or a tokenizer that is not the pinned one fails before a byte is written. Another part that disagrees with
-  part 0's descriptor fails while it is placed, in the staging directory, so nothing is put in place. The fix is to
-  restore the mirror from the Hub, never to re-pin.
+- Before a byte is written, the build hashes every part 0 and tokenizer against its pin, and every part of a container
+  the extra repository borrows (the text encoder and the VAE decoder, which are only referenced and so never compared
+  later) against part 0's descriptor. Another part of a container the repository stores is compared with part 0's
+  descriptor as it is placed, in the staging directory, so a mismatch puts nothing in place. The placed copies of part
+  0 and the tokenizers are not compared with the pins again. The fix for a mismatch is to restore the mirror from the
+  Hub, never to re-pin.
 - The extra repository references the official repository's files at the commit given; the reference is reconciled
   against the local mirror `models/karume-anima/`, whose bf16 files and tokenizers sit at the paths the official build
   gives them.

@@ -34,6 +34,7 @@ from anima.card import (
     render_base_card,
     render_extra_card,
 )
+from karume.container import ContainerFormatError
 from karume.dist import (
     MANIFEST_FILENAME,
     Artifact,
@@ -50,6 +51,7 @@ from karume.dist import (
     component_parts,
     sha256_file,
 )
+from karume.verify import ContainerError, verify_container
 
 #: Name and role of the per-axis raw tables the host builds the rope tables from (an **asset** of
 #: the container — ADR 0109 decision 4). The content is the bytes of one safetensors file as is (the
@@ -981,12 +983,13 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
 
 #: Holder model → (role name → sha256 of **part 0** of the published container the role is taken as;
 #: for a tokenizer, of the file). A model listed here is built from the published containers in the
-#: local mirrors, not from its series ({@link anima_published_sources} — ADR 0154 decision 6, the
-#: mechanism of ADR 0149 decision 5): its series are no longer on disk, and an export would not
-#: reproduce the published bytes anyway (the i8 rounding may differ on another machine). Part 0's
-#: descriptor declares the sha256 of every other part (container-v1 §7), so this one digest pins
-#: the whole container; the assembly compares every other part with that declaration as it places
-#: it (`karume.dist.assert_weight_components_verified`).
+#: local mirrors, not from its series ({@link anima_published_sources} — ADR 0154 decision 6): its
+#: series are no longer on disk, and an export would not reproduce the published bytes anyway (the
+#: i8 rounding may differ on another machine). Part 0's descriptor declares the sha256 of every
+#: other part (container-v1 §7), so this one digest pins the whole container. What is compared
+#: when is {@link assert_anima_published}'s: part 0, the tokenizers and every part of a borrowed
+#: container before a byte is written; the other parts of a stored container as the assembly
+#: places them, in its staging directory.
 #:
 #: The text encoder, the VAE decoder and the tokenizers are held by the base model for every model
 #: ({@link anima_published_holder}); the rest by the model itself.
@@ -1049,8 +1052,21 @@ class AnimaPublished:
     placements: Mapping[str, Path]
     #: Role name → the published sha256 of part 0 (of the file, for a tokenizer).
     part0_sha256: Mapping[str, str]
-    #: Role name → the repository whose mirror holds it (for the diagnostics).
+    #: Role name → the repository whose mirror holds it.
     holders: Mapping[str, str]
+    #: The repository the model is built into ({@link anima_repository}).
+    repository: str
+
+    @property
+    def borrowed(self) -> tuple[str, ...]:
+        """The roles held by another repository: referenced across repositories, never placed in
+        this one."""
+        return tuple(role for role, repo in self.holders.items() if repo != self.repository)
+
+
+def anima_repository(model: str) -> str:
+    """The distribution repository a model is published in."""
+    return OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME
 
 
 def anima_published_holder(model: str, role: str) -> tuple[str, str]:
@@ -1063,7 +1079,7 @@ def anima_published_holder(model: str, role: str) -> tuple[str, str]:
     """
     if role in ANIMA_EXTRA_SHARED_ROLES:
         return OFFICIAL_REPO_NAME, ANIMA_BASE_MODEL_NAME
-    return (OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME), model
+    return anima_repository(model), model
 
 
 def _published_refs(manifest: Mapping[str, Any], repo: str, holder: str, role: str) -> list[Any]:
@@ -1173,27 +1189,55 @@ def anima_published_sources(
             if not link.is_symlink():
                 link.symlink_to(file.absolute())
         placements[role] = representative
-    return AnimaPublished(placements=placements, part0_sha256=pins, holders=holders)
+    return AnimaPublished(
+        placements=placements,
+        part0_sha256=pins,
+        holders=holders,
+        repository=anima_repository(model),
+    )
 
 
 def assert_anima_published(published: AnimaPublished) -> None:
-    """Check that every container taken as published starts with the pinned part 0, and that every
-    tokenizer is the pinned file ({@link ANIMA_PUBLISHED_PART0}).
+    """Check, before a byte is written, that every container taken as published starts with the
+    pinned part 0 and every tokenizer is the pinned file ({@link ANIMA_PUBLISHED_PART0}), and that
+    every other part of a **borrowed** container ({@link AnimaPublished.borrowed}) has the sha256
+    part 0's descriptor declares for it.
 
-    The other parts are not hashed here: part 0's descriptor declares their sha256, and the
-    assembly compares each placed part with that declaration and stops before the distribution is
-    put in place (its staging is discarded). Restoring the mirror from the Hub is the fix for a
-    mismatch, never re-pinning.
+    The other parts of a container this repository stores are not hashed here: the assembly
+    hashes each copy it places in the staging directory and compares it with part 0's declaration
+    (`karume.dist.assemble_family`), so a mismatch discards the staging before anything is put in
+    place. MUST: a borrowed container is hashed here, every part of it, because nothing later
+    compares it with the descriptor — it is only referenced, the assembly does not compare
+    cross-repository parts, and the reference check compares the mirror's file with itself (the
+    same reason as Irodori's `assert_irodori_published_containers`). The placed copies of part 0
+    and of the tokenizers are not compared with the pins again (a shared one is compared with its
+    source). Restoring the mirror from the Hub is the fix for a mismatch, never re-pinning.
     """
     for role, path in published.placements.items():
-        first = component_parts(path)[0]
-        actual = sha256_file(first)
+        parts = component_parts(path)
+        actual = sha256_file(parts[0])
         if actual != published.part0_sha256[role]:
             raise DistError(
-                f"{role}: {first} is not the published file of {published.holders[role]} (sha256"
-                f" {actual}, published {published.part0_sha256[role]}) — restore the mirror from"
-                " the Hub instead of rebuilding it from the series"
+                f"{role}: {parts[0]} is not the published file of {published.holders[role]}"
+                f" (sha256 {actual}, published {published.part0_sha256[role]}) — restore the"
+                " mirror from the Hub instead of rebuilding it from the series"
             )
+        if role not in published.borrowed or len(parts) == 1:
+            continue
+        try:
+            descriptor = verify_container(parts).read.model
+        except (ContainerError, ContainerFormatError) as cause:
+            raise DistError(f"{role}: {parts[0]} cannot be read as a container: {cause}") from cause
+        declared = (
+            {} if descriptor is None else {part.index: part.sha256 for part in descriptor.parts}
+        )
+        for index, part in enumerate(parts[1:], start=1):
+            if sha256_file(part) != declared.get(index):
+                raise DistError(
+                    f"{role}: {part} is not the part {index} the published part 0 of"
+                    f" {published.holders[role]} declares ({declared.get(index)}) — restore the"
+                    " mirror from the Hub"
+                )
 
 
 def anima_plan(

@@ -2061,9 +2061,9 @@ class TestAtomicReplacement:
 
 class TestPublishedContainers:
     """A shipped model is built from the published containers in the local mirrors, not from its
-    series (ADR 0154 decision 6 — the mechanism of ADR 0149 decision 5): every container is pinned
-    by the sha256 of its part 0, and the build fails loudly, before a distribution is put in place,
-    when the mirror does not hold those bytes."""
+    series (ADR 0154 decision 6): every container is pinned by the sha256 of its part 0, and the
+    build fails loudly, before a distribution is put in place, when the mirror does not hold those
+    bytes."""
 
     @staticmethod
     def _roles(spec: AnimaModel) -> set[str]:
@@ -2190,6 +2190,37 @@ class TestPublishedContainers:
 
         with pytest.raises(DistError, match="disagrees with the descriptor"):
             main(["--pipeline", "anima", "--model", ANIMA_TURBO_MODEL_NAME, "--out", str(out_dir)])
+        assert not out_dir.exists()
+        assert not out_dir.with_name(out_dir.name + STAGING_SUFFIX).exists()
+
+    def test_a_borrowed_part_that_differs_fails_before_a_byte_is_written(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """MUST: a fine-tune only references the official text stack, so neither placement nor the
+        reference check (the mirror's file against itself) compares its parts with the descriptor —
+        the plan hashes every part of a borrowed container."""
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        parts = _role_refs(manifest["models"][ANIMA_BASE_MODEL_NAME], "text_encoder_bf16")
+        target = published_mirrors / OFFICIAL_REPO_NAME / parts[1]["path"]
+        payload = bytearray(target.read_bytes())
+        payload[-1] ^= 0xFF
+        target.write_bytes(bytes(payload))
+        out_dir = tmp_path / "dist"
+
+        with pytest.raises(DistError, match="is not the part 1 the published part 0 of"):
+            main(
+                [
+                    "--pipeline",
+                    "anima-extra",
+                    "--model",
+                    "anima-wai-v1.0",
+                    "--out",
+                    str(out_dir),
+                    dist.ALLOW_PLACEHOLDER_FLAG,
+                ]
+            )
         assert not out_dir.exists()
         assert not out_dir.with_name(out_dir.name + STAGING_SUFFIX).exists()
 
