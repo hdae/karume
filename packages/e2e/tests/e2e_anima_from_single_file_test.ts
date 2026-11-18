@@ -10,9 +10,9 @@
  * 2. The default quant with `components: { text_conditioner: { source: mirror } }` equals
  *    `fromPretrained` with the default quant: the transformer converted against the `i8` plan gives
  *    the `i8` files' weights.
- * 3. The default quant with the text conditioner from the file (stored as the `bf16` container
- *    while the preset's own is f16): an image comes out; whether it equals case 2's is logged, not
- *    asserted.
+ * 3. The default quant with the text conditioner from the file, stored against the plan of the
+ *    `bf16` text conditioner the preset itself uses: the file's BF16 tensors are the upstream bits
+ *    that container holds, so the image equals `fromPretrained`'s at the default quant.
  * 4. Case 2 with `retainConverted: true`, through a reader that counts its reads: the two images of
  *    one pipeline are equal and equal `fromPretrained`'s at the default quant, and the second
  *    generation reads nothing of the file (the transformer's converted weights are kept in memory).
@@ -169,7 +169,7 @@ describe("anima.Pipeline.fromSingleFile on the upstream base file (real GPU)", (
   );
 
   it.skipIf(!RUNNABLE)(
-    "the default quant with the text conditioner from the file (bf16 under an f16 preset): an image comes out",
+    "the default quant with the text conditioner from the file: the image equals fromPretrained's at the default quant",
     async () => {
       const fromFile = await imageSha(
         `fromSingleFile ${MODEL} (default quant, the file's text conditioner)`,
@@ -180,14 +180,9 @@ describe("anima.Pipeline.fromSingleFile on the upstream base file (real GPU)", (
             await optionsOf(),
           ),
       );
-      const reference = await defaultPretrainedSha();
-      // Not asserted: the preset's own text conditioner is f16, and this one is the file's bf16
-      // bits, so the two images need not be equal.
-      console.log(
-        `[e2e] the file's text conditioner (bf16) under the default quant ${
-          fromFile === reference ? "gives the same image as" : "gives another image than"
-        } the distribution's (f16): ${fromFile} / ${reference}`,
-      );
+      // The preset's own text conditioner is the `bf16` container, which holds the upstream bits,
+      // and the file's BF16 tensors are stored as bf16 against its plan: the same weights.
+      assertEquals(fromFile, await defaultPretrainedSha());
     },
   );
 
