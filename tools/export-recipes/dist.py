@@ -5,7 +5,9 @@ core wheel alone", not all of them (ADR 0065 decision 2 — per-model recipes li
 wheel). Now that every family has moved, the core's table is **empty**, so this dictionary alone
 is the source of truth of the accepted set.
 
-    uv run python dist.py                                  # default = anima (5 variants, ADR 0087)
+    uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1.0 \\
+        --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 --model anima-aesthetic-v1.0 \\
+        --out ../../models/karume-anima                    # the 5 variants (ADR 0087)
     uv run python dist.py --pipeline anima-extra \\
         --model anima-wai-v1.0 --model anima-copycat-20260610 \\
         --out ../../models/karume-anima-extra \\
@@ -160,6 +162,21 @@ PIPELINES: Mapping[str, Pipeline] = {
     # the checkpoint's own, stored in this repository).
     "moss-image": moss_distribution.PIPELINE,
     **CORE_PIPELINES,
+}
+
+#: Pipeline name → the recipe's check of a build's output directory against the local mirrors it
+#: reads (`(out_dir, models)`), for the pipelines that take published containers from `models/`:
+#: the assembly replaces its output wholesale, so a build into a mirror it reads must not drop that
+#: mirror's other models. Run by {@link main} before a byte is written.
+OUTPUT_CHECKS: Mapping[str, Callable[[Path, Sequence[str]], None]] = {
+    "anima": partial(
+        anima_distribution.assert_output_keeps_mirrors,
+        allowed=anima_distribution.OFFICIAL_MODELS,
+    ),
+    "anima-extra": partial(
+        anima_distribution.assert_output_keeps_mirrors,
+        allowed=anima_distribution.EXTRA_MODELS,
+    ),
 }
 
 #: Keeps the UX of the old `karume dist` (no arguments) on the driver side.
@@ -540,8 +557,14 @@ def main(argv: Sequence[str] | None = None, *, get: HfGet = hf_get) -> None:
     # Settled before a byte is written (the core's assembly replaces out_dir wholesale through
     # staging) and before the plans read several GB of series.
     pipeline = pipelines[args.pipeline]
+    models = selected_models(pipeline, args.models)
+    check_output = OUTPUT_CHECKS.get(args.pipeline)
+    # The output as the core resolves it (`karume.dist.main`); with `--repo` and no `--out` the
+    # core refuses the build itself.
+    if check_output is not None and (args.out is not None or args.repo is None):
+        check_output(args.out if args.out is not None else out_dir_hook(pipeline, models), models)
     revisions, check = reference_pins(
-        declared_references(pipeline, selected_models(pipeline, args.models)),
+        declared_references(pipeline, models),
         parse_reference_revisions(args.ref_revisions),
         resolve=args.resolve_refs,
         allow_placeholder=args.allow_placeholder_ref,

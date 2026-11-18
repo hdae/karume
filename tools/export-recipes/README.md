@@ -71,7 +71,9 @@ the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py                                   # default = anima
+uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1.0 \
+    --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 --model anima-aesthetic-v1.0 \
+    --out ../../models/karume-anima                     # the 5 official variants
 uv run python dist.py --pipeline irodori                # v4-small
 uv run python dist.py --pipeline irodori --model v4.1-small \
     --resolve-refs hf                                   # references karume-irodori-v4-small

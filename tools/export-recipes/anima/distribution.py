@@ -1094,6 +1094,19 @@ def _published_refs(manifest: Mapping[str, Any], repo: str, holder: str, role: s
     return refs
 
 
+def _published_roles(model: str) -> list[str]:
+    """Every role a model places: its weights files in every label it declares, then the
+    tokenizers."""
+    return [
+        *(
+            files.file
+            for labels in anima_weights(anima_model(model)).values()
+            for files in labels.values()
+        ),
+        *ANIMA_ASSETS.values(),
+    ]
+
+
 def _part_view_root(model: str) -> Path:
     """A new directory for one build's part view (links only), removed when the process exits —
     the plan only points at it, and the assembly that reads it runs later in the same process."""
@@ -1120,12 +1133,8 @@ def anima_published_sources(
     the mirrors, nor a storage the mirrors do not hold (an i4 transformer, a new model) — those
     still come from series ({@link anima_sources}).
     """
-    spec = anima_model(model)
     view = _part_view_root(model) if view_root is None else view_root
-    roles = [
-        *(files.file for labels in anima_weights(spec).values() for files in labels.values()),
-        *ANIMA_ASSETS.values(),
-    ]
+    roles = _published_roles(model)
     manifests: dict[str, Mapping[str, Any]] = {}
     placements: dict[str, Path] = {}
     pins: dict[str, str] = {}
@@ -1257,6 +1266,59 @@ def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> M
     if model in ANIMA_PUBLISHED_PART0:
         return anima_plan(anima_published_sources(model, DIST_ROOT), model)
     return anima_plan(anima_sources(series_dir, model), model)
+
+
+def assert_output_keeps_mirrors(
+    out_dir: Path,
+    models: Sequence[str],
+    allowed: tuple[str, ...],
+    dist_root: Path | None = None,
+) -> None:
+    """Refuse a build whose output directory is a local mirror it takes published containers from
+    ({@link anima_published_sources}), unless the build holds every model that mirror's manifest
+    holds. `allowed` is the models of the pipeline that builds (as in {@link anima_dist_plan});
+    `dist_root` is {@link DIST_ROOT} unless given.
+
+    MUST: checked before a byte is written or staged. The assembly replaces its output wholesale
+    (`karume.dist.assemble_family`), and without `--out` the output is the repository's mirror
+    (`models/<repository>`) while the default selection is one model: such a build would replace
+    the mirror with a distribution that lacks the other models, and their published containers,
+    which no series can reproduce, would be nowhere on disk. A build that selects every model of
+    the mirror into the mirror itself places the same containers again, so it is allowed.
+    """
+    root = DIST_ROOT if dist_root is None else dist_root
+    target = out_dir.resolve()
+    # A model outside `allowed` is refused by the plan with its own message; one without pins
+    # reads no mirror.
+    read = sorted(
+        {
+            anima_published_holder(model, role)[0]
+            for model in models
+            if model in allowed and model in ANIMA_PUBLISHED_PART0
+            for role in _published_roles(model)
+        }
+    )
+    for repo in read:
+        mirror = root / repo
+        manifest = mirror / MANIFEST_FILENAME
+        if mirror.resolve() != target or not manifest.is_file():
+            continue
+        held = list(json.loads(manifest.read_text(encoding="utf-8")).get("models", {}))
+        lost = [name for name in held if name not in models]
+        if not lost:
+            continue
+        keep = [*models, *lost]
+        instead = (
+            "pass another --out, or select every model of the mirror: "
+            + " ".join(f"--model {name}" for name in keep)
+            if all(name in allowed for name in keep)
+            else "pass another --out"
+        )
+        raise DistError(
+            f"The output {out_dir} is the local mirror of {repo}, which this build reads the"
+            f" published containers from, and the build replaces it wholesale: {lost} would be"
+            f" lost from it (their published containers would be nowhere on disk) — {instead}"
+        )
 
 
 def license_markdown() -> str:

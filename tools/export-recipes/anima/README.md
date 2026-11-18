@@ -576,8 +576,13 @@ uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anim
   --ref-revision karume-anima=<commit>     # offline; the publication build uses --resolve-refs hf
 ```
 
-- The mirrors are only read. A mirror folds the parts two models share into `shared/`, so the parts of one container
-  are linked side by side into a temporary part view; placement copies the bytes they point at (about 29 GiB for
+- The build writes into a mirror only when its output is that mirror, and it replaces its output wholesale. A build
+  whose output is a mirror it reads (`--out` omitted builds into `models/<repository>`, and the default selection is
+  one model) is therefore refused before a byte is written unless it selects every model that mirror's manifest holds:
+  the error names the models that would be lost and the `--model` list that keeps them. A build of every model into the
+  mirror itself, as the release runbook does, places the same containers again.
+- A mirror folds the parts two models share into `shared/`, so the parts of one container are linked side by side into
+  a temporary part view; placement copies the bytes they point at (about 29 GiB for
   `karume-anima` and 11 GiB for `karume-anima-extra` — a full copy: the core does not clone files, so check the free
   space first; on a file system with copy-on-write clones the copies can be replaced by clones of the mirror's files
   afterwards).

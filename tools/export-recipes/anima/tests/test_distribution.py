@@ -2171,6 +2171,7 @@ class TestPublishedContainers:
         with pytest.raises(DistError, match="is not the published file of karume-anima"):
             main(["--pipeline", "anima", "--model", ANIMA_TURBO_MODEL_NAME, "--out", str(out_dir)])
         assert not out_dir.exists()
+        assert not out_dir.with_name(out_dir.name + STAGING_SUFFIX).exists()
 
     def test_a_later_part_that_differs_stops_the_build_and_leaves_nothing(
         self, tmp_path: Path, published_mirrors: Path
@@ -2190,6 +2191,7 @@ class TestPublishedContainers:
         with pytest.raises(DistError, match="disagrees with the descriptor"):
             main(["--pipeline", "anima", "--model", ANIMA_TURBO_MODEL_NAME, "--out", str(out_dir)])
         assert not out_dir.exists()
+        assert not out_dir.with_name(out_dir.name + STAGING_SUFFIX).exists()
 
     def test_a_role_without_a_pin_is_refused(
         self, tmp_path: Path, published_mirrors: Path, monkeypatch: pytest.MonkeyPatch
@@ -2238,6 +2240,126 @@ class TestPublishedContainers:
 
         with pytest.raises(DistError, match="is a cross-repository reference"):
             anima_published_sources(ANIMA_TURBO_MODEL_NAME, published_mirrors, tmp_path / "view")
+
+    def test_a_mirror_that_lacks_a_declared_file_is_refused(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        part = _role_refs(manifest["models"][ANIMA_TURBO_MODEL_NAME], "transformer_i8")[1]
+        (published_mirrors / OFFICIAL_REPO_NAME / part["path"]).unlink()
+
+        with pytest.raises(DistError, match="lacks files its manifest declares"):
+            anima_published_sources(ANIMA_TURBO_MODEL_NAME, published_mirrors, tmp_path / "view")
+
+    @staticmethod
+    def _snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+        """Every file under `root` with its bytes and modification time."""
+        return {
+            str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def test_a_whole_build_leaves_the_mirrors_it_reads_unchanged(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """Both builds read the mirrors and write elsewhere — the fine-tune's reads both."""
+        before = self._snapshot(published_mirrors)
+        models = _MIRRORED[OFFICIAL_REPO_NAME]
+        main(
+            [
+                "--pipeline",
+                "anima",
+                *(argument for model in models for argument in ("--model", model)),
+                "--out",
+                str(tmp_path / "official"),
+            ]
+        )
+        main(
+            [
+                "--pipeline",
+                "anima-extra",
+                "--model",
+                "anima-wai-v1.0",
+                "--out",
+                str(tmp_path / "extra"),
+                dist.ALLOW_PLACEHOLDER_FLAG,
+            ]
+        )
+
+        assert self._snapshot(published_mirrors) == before
+
+    @pytest.mark.parametrize("explicit_out", [False, True], ids=["default-out", "explicit-out"])
+    def test_a_build_into_a_mirror_it_reads_that_drops_a_model_is_refused(
+        self, published_mirrors: Path, explicit_out: bool
+    ) -> None:
+        """MUST: without `--out` the output is the repository's mirror and the selection is the
+        default model alone — the wholesale replacement would drop the mirror's other models. The
+        refusal comes before a byte is written: the mirror is as it was and no staging is left."""
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        before = self._snapshot(published_mirrors)
+
+        with pytest.raises(DistError) as raised:
+            main(["--pipeline", "anima", *(("--out", str(mirror)) if explicit_out else ())])
+
+        message = str(raised.value)
+        assert f"['{ANIMA_BASE_MODEL_NAME}'] would be lost" in message
+        assert f"--model {ANIMA_TURBO_MODEL_NAME} --model {ANIMA_BASE_MODEL_NAME}" in message
+        assert self._snapshot(published_mirrors) == before
+        assert not mirror.with_name(mirror.name + STAGING_SUFFIX).exists()
+
+    def test_a_fine_tune_build_into_the_official_mirror_is_refused(
+        self, published_mirrors: Path
+    ) -> None:
+        """The fine-tune reads the official mirror for its text stack; none of that mirror's
+        models belongs in the extra repository, so the only way out is another `--out`."""
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        before = self._snapshot(published_mirrors)
+
+        with pytest.raises(DistError, match=r"would be lost .* pass another --out$"):
+            main(
+                [
+                    "--pipeline",
+                    "anima-extra",
+                    "--model",
+                    "anima-wai-v1.0",
+                    "--out",
+                    str(mirror),
+                    dist.ALLOW_PLACEHOLDER_FLAG,
+                ]
+            )
+        assert self._snapshot(published_mirrors) == before
+
+    def test_a_build_of_every_model_into_its_mirror_is_allowed(
+        self, published_mirrors: Path
+    ) -> None:
+        """The release runbook rebuilds a repository into its mirror with every model selected:
+        the same containers are placed again."""
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        weights = {
+            rel: (mirror / rel).read_bytes()
+            for rel in verify_dist(mirror)
+            if rel != NAME_MAP_FILENAME
+        }
+        models = _MIRRORED[OFFICIAL_REPO_NAME]
+
+        main(
+            [
+                "--pipeline",
+                "anima",
+                *(argument for model in models for argument in ("--model", model)),
+                "--out",
+                str(mirror),
+            ]
+        )
+
+        assert {
+            rel: (mirror / rel).read_bytes()
+            for rel in verify_dist(mirror)
+            if rel != NAME_MAP_FILENAME
+        } == weights
 
 
 @pytest.mark.usefixtures("published_mirrors")
