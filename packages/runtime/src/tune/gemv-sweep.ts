@@ -67,7 +67,8 @@ import {
   type GemvSelection,
   isGemvCandidateSet,
 } from "./gemv-candidates.ts";
-import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "./gemv-cases.ts";
+import { isFloatStorage } from "../kernels/linear-gemv.ts";
+import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
 import { gemvCaseFingerprint, gemvProgramKernelId } from "./gemv-fingerprint.ts";
 import { bandAgainstOracle, gemvOracle } from "./gemv-oracle.ts";
 import {
@@ -190,7 +191,7 @@ const caseResources = (gemvCase: GemvCase, rows: number): ResourceSpec[] => {
   const { storage, group, n, k } = gemvCase;
   const x: ResourceSpec = { name: "x", bytes: rows * k * 4, fill: "f32" };
   const bias: ResourceSpec = { name: "bias", bytes: n * 4, fill: "f32" };
-  if (isFloatGemvStorage(storage)) {
+  if (isFloatStorage(storage)) {
     // A float storage has no scale buffer: its words are the elements (k is a multiple of the
     // elements of a 16 B word, so the byte length is whole words).
     return [
@@ -491,7 +492,7 @@ export const sweepGemvCase = async (
   const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
   // The profile a Session on this device runs with: the GEMM reference takes its geometry
   const reference = sessionGeometryProfile(gpu);
-  const weightScale = !isFloatGemvStorage(gemvCase.storage);
+  const weightScale = !isFloatStorage(gemvCase.storage);
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
   const emit = (row: GemvSweepRow): void => {

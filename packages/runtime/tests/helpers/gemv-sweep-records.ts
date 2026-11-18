@@ -11,12 +11,12 @@ import {
   DEFAULT_GEOMETRY_PROFILE,
   type GeometryProfile,
 } from "../../src/kernels/geometry-profile.ts";
+import { LINEAR_GEMV_PARALLEL_MAX_ROWS } from "../../src/kernels/linear-gemv.ts";
 import { opTolerance } from "../../src/reference/op-tolerance.ts";
 import {
   type GemvGates,
   gemvMeasurementPlans,
   gemvProgram,
-  PARALLEL_MAX_ROWS,
 } from "../../src/tune/gemv-candidates.ts";
 import { gemvCaseOf } from "../../src/tune/gemv-cases.ts";
 import { gemvKernelId } from "../../src/tune/gemv-fingerprint.ts";
@@ -172,7 +172,7 @@ export const gemvRecord = (
   const measured = specs.flatMap(({ rows: counts }) => counts ?? [1]);
   const candidateSet =
     options.candidateSet ??
-    (measured.some((m) => m > PARALLEL_MAX_ROWS)
+    (measured.some((m) => m > LINEAR_GEMV_PARALLEL_MAX_ROWS)
       ? "row-blocks"
       : measured.some((m) => m > 1)
         ? "full"

@@ -57,6 +57,7 @@ import {
 import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
 import {
   assertLinearGemvVariant,
+  isFloatStorage,
   type LinearGemvChoices,
   type LinearGemvParallelLanes,
 } from "./linear-gemv.ts";
@@ -876,9 +877,6 @@ const SEQUENTIAL_GEMV_STORAGES: readonly WeightStorage[] = ["f32", "f16", "bf16"
 /** The storages of the parallel GEMV. */
 const PARALLEL_GEMV_STORAGES: readonly WeightStorage[] = ["i2", "i4", "i8", "bf16", "f16", "f32"];
 
-/** The storages of the parallel GEMV without a scale: no i4 group, no packed-activation kernel. */
-const FLOAT_GEMV_STORAGES: readonly unknown[] = ["bf16", "f16", "f32"];
-
 /** The lane counts the parallel GEMV generates. */
 const PARALLEL_GEMV_LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
 
@@ -945,7 +943,8 @@ const assertGemvParallelShapeShape = (value: unknown, where: string, path: strin
   }
   // A float-storage row that named a group would match no linear (the lookup compares the group),
   // and one marked packed would name a kernel that does not exist: both are a broken table.
-  if (FLOAT_GEMV_STORAGES.includes(storage) && (group !== undefined || packedActivations)) {
+  const named = PARALLEL_GEMV_STORAGES.find((one) => one === storage);
+  if (named !== undefined && isFloatStorage(named) && (group !== undefined || packedActivations)) {
     throw new CodegenError(
       `${where}: ${path}: a row of ${String(storage)} storage takes no group and no packedActivations`,
     );

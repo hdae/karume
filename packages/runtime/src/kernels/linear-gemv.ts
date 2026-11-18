@@ -162,8 +162,12 @@ const assertRowsStorage = (storage: WeightStorage): void => {
   }
 };
 
-/** f16 / bf16 / f32: one weight word is the elements themselves, with no scale buffer. */
-const isFloatStorage = (storage: WeightStorage): storage is "f16" | "bf16" | "f32" =>
+/**
+ * f16 / bf16 / f32: one weight word is the elements themselves, with no scale buffer. The one
+ * predicate of "a float-stored weight" for the GEMV family, its selection, the profile's guard and
+ * the GEMV sweep.
+ */
+export const isFloatStorage = (storage: WeightStorage): storage is "f16" | "bf16" | "f32" =>
   storage === "f16" || storage === "bf16" || storage === "f32";
 
 /** The per-workgroup thread limit WebGPU core guarantees (upper bound of `cols`). */
@@ -1200,7 +1204,11 @@ export const linearGemvStaticQuantizeParams = (
   scale: number,
   group?: number,
 ): Uint32Array<ArrayBuffer> => {
-  if (m < 1 || m > 8) throw new CodegenError("linear static_quantize: supports only m in 1..8");
+  if (m < 1 || m > LINEAR_GEMV_PARALLEL_MAX_ROWS) {
+    throw new CodegenError(
+      `linear static_quantize: supports only m in 1..${LINEAR_GEMV_PARALLEL_MAX_ROWS}`,
+    );
+  }
   assertRowsStorage(storage);
   const params = new Uint32Array(264);
   params.set(linearGemvParams(storage, m, n, k, group));

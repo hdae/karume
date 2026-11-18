@@ -30,7 +30,8 @@ import {
   gemvRowCountsIn,
   isGemmChoice,
 } from "../src/tune/gemv-candidates.ts";
-import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "../src/tune/gemv-cases.ts";
+import { isFloatStorage } from "../src/kernels/linear-gemv.ts";
+import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
 import { gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
 import { gemvOracle } from "../src/tune/gemv-oracle.ts";
 import { choiceOfRecord, choiceRecord, type GemvSweepReport } from "../src/tune/gemv-report.ts";
@@ -66,7 +67,7 @@ const PARALLEL_NAMES = [2, 4, 8, 16, 32].flatMap((lanes) => [
 
 describe("the float-stored cases of the case table", () => {
   it("are the linears of regular Gemma 4 E2B and E4B in bf16, at the row counts of the parallel range", () => {
-    const float = GEMV_CASES.filter(({ storage }) => isFloatGemvStorage(storage));
+    const float = GEMV_CASES.filter(({ storage }) => isFloatStorage(storage));
     assertEquals(float.length, 25);
     for (const gemvCase of float) {
       assertEquals(gemvCase.storage, "bf16");
@@ -79,7 +80,7 @@ describe("the float-stored cases of the case table", () => {
   });
 
   it("add to the table without moving a case that was there (the i2 / i4 / i8 cases keep their order and row counts)", () => {
-    const integer = GEMV_CASES.filter(({ storage }) => !isFloatGemvStorage(storage));
+    const integer = GEMV_CASES.filter(({ storage }) => !isFloatStorage(storage));
     assertEquals(GEMV_CASES.slice(0, integer.length), integer);
     assertEquals(integer[0].id, "i4g32-n8960-k1536");
     for (const gemvCase of integer) assertEquals(gemvCase.rows, [1, 4, 8, 16, 64]);

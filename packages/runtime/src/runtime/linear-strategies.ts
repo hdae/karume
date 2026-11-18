@@ -29,6 +29,7 @@ import { type GemmCompute, gemmUsesVec4 } from "../kernels/gemm.ts";
 import {
   defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
+  isFloatStorage,
   LINEAR_GEMV_MAX_ROWS,
   type LinearGemvChoices,
   linearGemvPackedEligible,
@@ -259,8 +260,7 @@ const gemvChoice = (
   packed: LinearFacts["packed"],
 ): LinearGemvChoice => {
   const { m, n, k, knobs, linearGemv } = linear;
-  const float = storage === "f16" || storage === "bf16" || storage === "f32";
-  const subgroup = knobs.linearGemvReduce === "parallel-subgroup32" && !float;
+  const subgroup = knobs.linearGemvReduce === "parallel-subgroup32" && !isFloatStorage(storage);
   const lanes =
     knobs.linearGemvReduce !== "sequential"
       ? linearGemvParallelLanes(linearGemv, storage, m, n, k, groupSize)
@@ -381,9 +381,7 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
   {
     choose: (linear) => {
       const { m, n, weightStorage, compute, v4, k, knobs, linearGemv } = linear;
-      if (weightStorage !== "f16" && weightStorage !== "bf16" && weightStorage !== "f32") {
-        return undefined;
-      }
+      if (!isFloatStorage(weightStorage)) return undefined;
       if (compute !== "f32" || !v4 || k <= 0 || k % linearGemvUnit(weightStorage) !== 0) {
         return undefined;
       }

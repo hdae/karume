@@ -35,6 +35,8 @@ import {
 } from "../kernels/geometry-profile.ts";
 import {
   defaultLinearGemvVariant,
+  isFloatStorage,
+  LINEAR_GEMV_PARALLEL_MAX_ROWS,
   type LinearGemvParallelLanes,
   linearGemvRowsForShape,
   type LinearGemvVariant,
@@ -51,7 +53,7 @@ import {
 import type { NumericLevel } from "../runtime/numerics.ts";
 import type { NodePlan } from "../runtime/plan.ts";
 import { executionKnobDefaults } from "../runtime/session-options-check.ts";
-import { GEMV_CASES, type GemvCase, isFloatGemvStorage } from "./gemv-cases.ts";
+import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
 
 /**
  * The candidate sets: `quick` (M = 1, a small identical grid), `full` (every row count a derivation
@@ -101,9 +103,6 @@ const GEMV_COLS: readonly number[] = [16, 32, 64, 128, 256];
 
 /** The words read ahead of the sequential M = 1 kernel's grid. */
 const GEMV_UNROLLS: readonly number[] = [1, 2, 4, 8, 16];
-
-/** The largest row count the parallel GEMV takes (the selection's range: its rows serve M = 1 to 8). */
-export const PARALLEL_MAX_ROWS = 8;
 
 /** The profile the baseline and the profile's choices are read from. */
 const PROFILE: ResolvedGeometryProfile = DEFAULT_GEOMETRY_PROFILE;
@@ -184,7 +183,7 @@ export const gemvProfileChoice = (
   });
   if ("refusal" in resolution) throw new Error(`Case ${gemvCase.id}: ${resolution.refusal}`);
   const { choice } = resolution;
-  if (choice.id === "gemm-f32" && isFloatGemvStorage(gemvCase.storage) && m > 1) {
+  if (choice.id === "gemm-f32" && isFloatStorage(gemvCase.storage) && m > 1) {
     return candidateOf(choice);
   }
   if (
@@ -212,7 +211,11 @@ export const gemvBaseline = (gemvCase: GemvCase, m: number): GemvCandidate =>
  */
 export const gemvRowCountsIn = (gemvCase: GemvCase, set: GemvCandidateSet): readonly number[] =>
   gemvCase.rows.filter((m) =>
-    set === "quick" ? m === 1 : set === "full" ? m <= PARALLEL_MAX_ROWS : m > PARALLEL_MAX_ROWS,
+    set === "quick"
+      ? m === 1
+      : set === "full"
+        ? m <= LINEAR_GEMV_PARALLEL_MAX_ROWS
+        : m > LINEAR_GEMV_PARALLEL_MAX_ROWS,
   );
 
 /**
@@ -233,7 +236,7 @@ export type GemvGroupRole = "winner" | "no-regression" | "unread";
 export const gemvGroupRole = (m: number, candidateClass: GemvCandidateClass): GemvGroupRole =>
   m === 1
     ? "winner"
-    : candidateClass === "reorder" && m <= PARALLEL_MAX_ROWS
+    : candidateClass === "reorder" && m <= LINEAR_GEMV_PARALLEL_MAX_ROWS
       ? "no-regression"
       : "unread";
 
@@ -373,12 +376,12 @@ const identicalChoices = (
 
 /** The reorder class at `m` rows (M ≤ 8): every lane count, plain, staged and — when gated in — subgroup. */
 const reorderChoices = (gemvCase: GemvCase, m: number, gates: GemvGates): LinearGemvChoice[] => {
-  if (m > PARALLEL_MAX_ROWS) return [];
+  if (m > LINEAR_GEMV_PARALLEL_MAX_ROWS) return [];
   const { storage, group, n, k } = gemvCase;
   const variant = defaultLinearGemvVariant(PROFILE.linearGemv, { storage, n, k });
   const ids: LinearGemvChoice["id"][] = ["gemv-parallel", "gemv-parallel-staged"];
   // The subgroup form exists for the integer storages only
-  if (gates.subgroups && !isFloatGemvStorage(storage)) ids.push("gemv-parallel-subgroup32");
+  if (gates.subgroups && !isFloatStorage(storage)) ids.push("gemv-parallel-subgroup32");
   return ids.flatMap((id) =>
     GEMV_LANES.map((lanes): LinearGemvChoice => ({
       id,

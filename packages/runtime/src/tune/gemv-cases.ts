@@ -17,15 +17,14 @@
  * ({@link GEMV_SWEEP_FLOAT_ROW_COUNTS}).
  */
 
+import { isFloatStorage } from "../kernels/linear-gemv.ts";
+
 /**
- * The weight storages the GEMV sweep measures: the storages of the profile's GEMV rows, and bf16,
- * the storage regular Gemma 4 ships in.
+ * The weight storages the GEMV sweep measures: the storages of the profile's GEMV rows, bf16 — the
+ * storage regular Gemma 4 ships in —, and the other float storages the parallel GEMV takes, f16 and
+ * f32 (the table has no case of those two yet).
  */
 export type GemvSweepStorage = "i2" | "i4" | "i8" | "bf16" | "f16" | "f32";
-
-/** The storages whose weight words are the elements themselves, with no scale buffer. */
-export const isFloatGemvStorage = (storage: GemvSweepStorage): storage is "bf16" | "f16" | "f32" =>
-  storage === "bf16" || storage === "f16" || storage === "f32";
 
 /** One shape of the GEMV sweep. */
 export type GemvCase = {
@@ -70,7 +69,7 @@ const shape = (
   ...(group === undefined ? {} : { group }),
   n,
   k,
-  rows: isFloatGemvStorage(storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
+  rows: isFloatStorage(storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
   source,
 });
 

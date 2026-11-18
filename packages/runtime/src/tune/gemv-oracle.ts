@@ -11,7 +11,8 @@
  */
 
 import type { Tolerance } from "../reference/allclose.ts";
-import { type GemvSweepStorage, isFloatGemvStorage } from "./gemv-cases.ts";
+import { isFloatStorage } from "../kernels/linear-gemv.ts";
+import type { GemvSweepStorage } from "./gemv-cases.ts";
 
 /** The shape the oracle evaluates. */
 export type GemvOracleShape = {
@@ -119,12 +120,12 @@ export const gemvOracle = async (
     if (column > 0 && column % columnsPerSlice === 0) await pause();
     sums.fill(0);
     for (let groupIndex = 0; groupIndex < groupsPerRow; groupIndex += 1) {
-      const scale = isFloatGemvStorage(storage) ? 1 : f32(streams.scale());
+      const scale = isFloatStorage(storage) ? 1 : f32(streams.scale());
       const start = groupIndex * group;
       for (let element = start; element < start + group; element += perWord) {
         const word = streams.weight();
         for (let lane = 0; lane < perWord; lane += 1) {
-          const weight = isFloatGemvStorage(storage)
+          const weight = isFloatStorage(storage)
             ? floatElement(storage, word, lane, f32)
             : Math.fround(decode(storage, word, lane) * scale);
           const at = element + lane;

@@ -16,7 +16,7 @@ import { describe, it } from "vite-plus/test";
 import { gemvSweepCandidateNames, gemvSweepCases } from "../tune.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
-import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
+import { isFloatStorage, type LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import {
   GEMV_MIN_SPEEDUP,
@@ -39,7 +39,6 @@ import {
   GEMV_SWEEP_FLOAT_ROW_COUNTS,
   GEMV_SWEEP_ROW_COUNTS,
   type GemvCase,
-  isFloatGemvStorage,
 } from "../src/tune/gemv-cases.ts";
 import {
   gemvCaseFingerprint,
@@ -121,7 +120,7 @@ describe("the case table", () => {
       // A float storage has no row block: its cases stop at the parallel GEMV's range
       assertEquals(
         gemvCase.rows,
-        isFloatGemvStorage(gemvCase.storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
+        isFloatStorage(gemvCase.storage) ? GEMV_SWEEP_FLOAT_ROW_COUNTS : GEMV_SWEEP_ROW_COUNTS,
       );
     }
     assertEquals(GEMV_SWEEP_ROW_COUNTS, [1, 4, 8, 16, 64]);
@@ -134,7 +133,7 @@ describe("the case table", () => {
         const { choice } = gemvBaseline(gemvCase, m);
         assertEquals(
           choice.id,
-          m === 1 ? "gemv-m1" : isFloatGemvStorage(gemvCase.storage) ? "gemm-f32" : "gemv-rows",
+          m === 1 ? "gemv-m1" : isFloatStorage(gemvCase.storage) ? "gemm-f32" : "gemv-rows",
           `${gemvCase.id} M=${m}`,
         );
       }
