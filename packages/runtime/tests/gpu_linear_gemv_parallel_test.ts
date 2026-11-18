@@ -271,6 +271,10 @@ describe.skipIf(!GPU_AVAILABLE)("where the parallel GEMV accumulation applies (r
         { storage: "i4", bits: 4, n: 128, k: 2816, group: 32 },
         { storage: "i4", bits: 4, n: 2816, k: 2112, group: 32 },
         { storage: "i4", bits: 4, n: 262144, k: 2816, group: 32 },
+        // Representatives of the MTP drafter rows (2026-11-18) — l32 at the E2B / E4B drafters'
+        // width and l32 staged at 12B's, at the real n.
+        { storage: "i4", bits: 4, n: 256, k: 3072, group: 32 },
+        { storage: "i4", bits: 4, n: 1024, k: 8192, group: 32 },
       ] as const) {
         const { storage, n, k, bits, group } = shape;
         const w = Uint8Array.from(

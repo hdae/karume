@@ -208,11 +208,15 @@ maintainer's ruling of 2026-11-06).
        GEMM and conv2d's counter decode (perf-ledger K-88) are candidates of the geometry sweep's `quick+` and `full`
        sets on every tile, and the derivation adopts a tile with them by its one rule and writes it into the table;
        no case set, default kernel or table changed —
-       [spec/geometry-profiles.md](spec/geometry-profiles.md#the-skeleton-form-and-the-counter-decode).)* Open: the
+       [spec/geometry-profiles.md](spec/geometry-profiles.md#the-skeleton-form-and-the-counter-decode).)* *(Landed
+       2026-11-18: the GEMV sweep's case table also holds the Gemma 4 output heads and MTP drafter shapes, 24 integer
+       cases, and five drafter shapes take a default row —
+       [research](research/2026-11-18-gemma4-gemv-census.md).)* Open: the
        registered tables' `gemm` and `conv2d` families derived from a sweep that measured those fields, and the K-88
        shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case sets, which
        moves those families' case-set versions; regenerating the registered
-       tables from GEMV sweeps; a rule for the row-block thread target from the `row-blocks` set; the shared
+       tables from GEMV sweeps; the two drafter shapes with a large gain whose row-block baseline was unsteady
+       (`256 × 2048`, `256 × 5120`) and the int4 output heads (perf-ledger K-101); a rule for the row-block thread target from the `row-blocks` set; the shared
        sequential keys whose cases disagree (the key has no group length); the packed rows (not measured); the
        integer and byte-plane GEMV tables, which are still in the kernel source; the geometry sweep's rounds taken
        geometry after geometry (interleaving them as the GEMV sweep does needs a steadiness rule from evidence to

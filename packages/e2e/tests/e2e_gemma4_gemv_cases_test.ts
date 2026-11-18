@@ -1,7 +1,10 @@
 /**
- * The GEMV sweep's case table against the real Gemma 4 graphs (no GPU): every linear over int2 /
- * int4 / int8 weights that a decode token of a model or a run of its MTP drafter executes is a case
- * of the sweep, so every device's table can be derived for it. It lives in e2e because it reads the
+ * The GEMV sweep's case table and the default profile's parallel rows against the real Gemma 4
+ * graphs (no GPU): every linear over int2 / int4 / int8 weights that a decode token of a model or a
+ * run of its MTP drafter executes is a case of the sweep, so every device's table can be derived for
+ * it; and the linears that stay on the sequential GEMV at the level `reorder` with the default
+ * profile are exactly the listed ones (the census of
+ * docs/research/2026-11-18-gemma4-gemv-census.md). It lives in e2e because it reads the
  * distribution mirrors `models/karume-gemma4*`; only part 0 of each container (the graph and the
  * binding table) is read, never a weight block.
  */
@@ -9,6 +12,11 @@ import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
+import {
+  type LinearGemvChoices,
+  linearGemvParallelEligible,
+} from "../../runtime/src/kernels/linear-gemv.ts";
 import { bindSymbols, planGraph } from "../../runtime/src/runtime/plan.ts";
 import { planWeightResidency } from "../../runtime/src/runtime/weight-residency.ts";
 import { GEMV_CASES, type GemvCase } from "../../runtime/src/tune/gemv-cases.ts";
@@ -142,6 +150,97 @@ const withoutCase = (linears: readonly IntegerLinear[], cases: readonly GemvCase
       .map(spelled),
   ),
 ];
+
+/**
+ * The integer linears of `linears` that take no parallel row of `choices` at one row (the recipe
+ * builder's predicate), as `<shape> ×<count>` in the order met: what a Session with linear at
+ * `reorder` still runs on the sequential GEMV.
+ */
+const sequentialAtReorder = (
+  linears: readonly IntegerLinear[],
+  choices: LinearGemvChoices,
+): string[] => {
+  const counts = new Map<string, number>();
+  for (const linear of linears) {
+    const { storage, n, k, group } = linear;
+    if (linearGemvParallelEligible(choices, storage, 1, n, k, group) !== undefined) continue;
+    counts.set(spelled(linear), (counts.get(spelled(linear)) ?? 0) + 1);
+  }
+  return [...counts].map(([shape, count]) => `${shape} ×${count}`);
+};
+
+/**
+ * Per graph, the integer linears the default profile gives no parallel row (a graph that is not
+ * listed has none). Each is on the sequential GEMV at `reorder` for a measured reason, recorded in
+ * docs/research/2026-11-18-gemma4-gemv-census.md.
+ */
+const SEQUENTIAL_AT_REORDER: Readonly<Record<string, readonly string[]>> = {
+  "karume-gemma4 e2b drafter i8": [
+    "i8 256×3072 ×3",
+    "i8 1024×256 ×9",
+    "i8 256×1024 ×9",
+    "i8 2048×256 ×27",
+    "i8 256×2048 ×15",
+    "i8 262144×256 ×3",
+  ],
+  "karume-gemma4-qat e2b model i4": ["i4 g32 262144×1536 ×1"],
+  "karume-gemma4-qat e2b drafter i4": [
+    "i4 g32 1024×256 ×9",
+    "i4 g32 2048×256 ×27",
+    "i4 g32 256×2048 ×15",
+    "i4 g32 262144×256 ×3",
+  ],
+  "karume-gemma4-qat e4b model i4": ["i4 g32 262144×2560 ×1"],
+  "karume-gemma4-qat e4b drafter i4": [
+    "i4 g32 256×5120 ×3",
+    "i4 g32 1024×256 ×9",
+    "i4 g32 2048×256 ×27",
+    "i4 g32 256×2048 ×15",
+    "i4 g32 262144×256 ×3",
+  ],
+  "karume-gemma4-qat 12b drafter i4": [
+    "i4 g32 4096×1024 ×9",
+    "i4 g32 8192×1024 ×27",
+    "i4 g32 3840×1024 ×2",
+    "i4 g32 262144×1024 ×3",
+  ],
+  "karume-gemma4-qat-mobile e2b model i4": ["i2 262144×1536 ×1"],
+  "karume-gemma4-qat-mobile e4b model i4": ["i2 262144×2560 ×1"],
+};
+
+describe.skipIf(!AVAILABLE)(
+  "the default profile's parallel rows on the Gemma 4 graphs (plan, no GPU needed)",
+  () => {
+    it("leaves exactly the listed int2 / int4 / int8 linears on the sequential GEMV at reorder", async () => {
+      const graphs = await mirrorLinears();
+      const listed = new Set(Object.keys(SEQUENTIAL_AT_REORDER));
+      for (const { where, linears } of graphs) {
+        assertEquals(
+          sequentialAtReorder(linears, DEFAULT_GEOMETRY_PROFILE.linearGemv),
+          SEQUENTIAL_AT_REORDER[where] ?? [],
+          where,
+        );
+        listed.delete(where);
+      }
+      assertEquals([...listed], [], "a listed graph is not in the mirrors");
+    });
+
+    it("lists a linear whose row is taken away (fault: the 12B output head's row removed)", async () => {
+      const graphs = await mirrorLinears();
+      const defaults = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+      const without: LinearGemvChoices = {
+        ...defaults,
+        parallelShapes: defaults.parallelShapes.filter(
+          ({ storage, n, k }) => !(storage === "i4" && n === 262144 && k === 3840),
+        ),
+      };
+      const model = graphs.find(({ where }) => where === "karume-gemma4-qat 12b model i4");
+      assert(model !== undefined);
+      assertEquals(sequentialAtReorder(model.linears, defaults), []);
+      assertEquals(sequentialAtReorder(model.linears, without), ["i4 g32 262144×3840 ×1"]);
+    });
+  },
+);
 
 describe.skipIf(!AVAILABLE)(
   "the GEMV sweep's case table covers the Gemma 4 graphs (plan, no GPU needed)",

@@ -161,6 +161,12 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime`: with linear at the level `reorder`, five linear shapes of the Gemma 4 MTP drafters take the
+  parallel GEMV in place of the sequential one: int4 (group 32) `256 × 3072` and `256 × 1024` of the q4_0 QAT E2B / E4B
+  drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`
+  presets of `karume-gemma4-qat` is faster (on an RTX 3080 Ti its GPU time falls by 28 % on 12B and 8 % on E2B). The
+  drafts can differ inside the band of `linear`; the decoded tokens are those of plain decode either way. Sessions at
+  `exact` do not change.
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
   dropped the field before.
 - Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the

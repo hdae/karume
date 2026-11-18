@@ -328,11 +328,13 @@ export type BundleCensusRow = {
  */
 const GEMMA4_E2B_GEMV = { variant: 276, reference: 1 } as const;
 /**
- * The E2B QAT drafter: of its 68 linears (all i4 g32) only `post_projection` 1536×256 (twice) is in
- * the parallel GEMV table — the other 66 (256×{1024,2048,3072}, {1024,2048}×256, lm_head 262144×256)
- * fall to the sequential GEMV (the table has no drafter shapes; the census pins today's count).
+ * The E2B QAT drafter: of its 68 linears (all i4 g32), 14 take a parallel GEMV row —
+ * `post_projection` 1536×256 (twice, the model's per_layer_projection row) and, since the drafter
+ * rows of 2026-11-18, `pre_projection` 256×3072 (3) and the sliding o 256×1024 (9). The other 54
+ * (256×2048 15, {1024,2048}×256 36, lm_head 262144×256 3) fall to the sequential GEMV: the GEMV
+ * sweep's records give them no row (docs/research/2026-11-18-gemma4-gemv-census.md §4).
  */
-const GEMMA4_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
+const GEMMA4_E2B_DRAFTER_GEMV = { variant: 14, reference: 54 } as const;
 /**
  * gemma4-qat E2B (product graph): of the 277 linears, 275 take the parallel GEMV (i2 60 + i4 145 +
  * i8 70). The other 2 fall to the sequential path — the i2 lm_head 262144×1536 (a shape the
@@ -407,11 +409,12 @@ const GEMMA4_E4B_GEMV = { variant: 343, reference: 1 } as const;
 const GEMMA4_E4B_RMS_ADD = { variant: 127 } as const;
 /**
  * The E4B QAT drafter (the regular E4B shipped none, so these columns are new): of its 68 linears
- * (all i4 g32) only `post_projection` 2560×256 (twice) is in the parallel GEMV table — the other 66
- * (256×{1024,2048,5120}, {1024,2048}×256, lm_head 262144×256) fall to the sequential GEMV. RMS→add
- * folds 24 times and its 12 readonly attention nodes run ①' / ③' once each, as E2B's drafter.
+ * (all i4 g32), 11 take a parallel GEMV row — `post_projection` 2560×256 (twice) and, since the
+ * drafter rows of 2026-11-18, the sliding o 256×1024 (9). The other 57 (256×{2048,5120} 18,
+ * {1024,2048}×256 36, lm_head 262144×256 3) fall to the sequential GEMV. RMS→add folds 24 times and
+ * its 12 readonly attention nodes run ①' / ③' once each, as E2B's drafter.
  */
-const GEMMA4_E4B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
+const GEMMA4_E4B_DRAFTER_GEMV = { variant: 11, reference: 57 } as const;
 const GEMMA4_E4B_DRAFTER_RMS_ADD = { variant: 24 } as const;
 
 const E2B = ["e2b"] as const;

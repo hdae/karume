@@ -56,6 +56,8 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // the old `PARALLEL_SHAPES` (rows, order and flags), the old sequential variant and the old thread
 // target, and the functions below are the old lookups that read them. A later change of a value
 // edits the default profile (re-measuring as its comments require) and replaces this copy with it.
+// The copy follows the profile since: it holds the five MTP drafter rows added on 2026-11-18 (two
+// after the E4B rows, three after the 12B rows).
 // ---------------------------------------------------------------------------
 
 const OLD_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
@@ -162,6 +164,8 @@ const OLD_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
   { storage: "i4", n: 4096, k: 2560, group: 512, lanes: 4, packedActivations: false },
   { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
   { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+  { storage: "i4", n: 256, k: 3072, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 256, k: 1024, group: 32, lanes: 32, packedActivations: false },
   { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
@@ -195,6 +199,33 @@ const OLD_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     stagedActivations: true,
   },
   { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 7680,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 8192,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
   { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },

@@ -449,6 +449,15 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
     // E4B QAT i4 g4096: o (full) — lanes / packed from E2B QAT 1536×4096 g4096 (unmeasured)
     { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+    // ---- q4_0 QAT E2B / E4B MTP drafters (added 2026-11-18) — the rows the GEMV derivation adopts
+    // from GEMV sweep records of the RTX 3080 Ti: at least ×1.10 over the sequential GEMV at M = 1 in
+    // two steady records and not slower at M = 4 and 8 (docs/research/2026-11-18-gemma4-gemv-census.md
+    // §4). The drafters' other shapes keep the sequential GEMV: they gain less, lose at M = 4 or 8, or
+    // have fewer than two steady records.
+    // E2B drafter: pre_projection — parallel 32 (×5.9 at M = 1 in three records)
+    { storage: "i4", n: 256, k: 3072, group: 32, lanes: 32, packedActivations: false },
+    // E2B / E4B drafter: o (sliding) — parallel 32 (×3.3 in three records)
+    { storage: "i4", n: 256, k: 1024, group: 32, lanes: 32, packedActivations: false },
     // ---- 12B q4_0 QAT (added 2026-11-06) — lanes measured as whole-model decode on the RTX 3080 Ti
     // (ADR 0098 addendum 2026-11-06): 4 beats 16 and 32 on the rows that widen, staged 32 ties 16 and
     // beats plain 32 on the rows that narrow, and the output head takes 16 (32 does not build).
@@ -490,6 +499,37 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     },
     // lm_head (tied embedding)
     { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
+    // ---- 12B q4_0 QAT MTP drafter (added 2026-11-18) — derived as the E2B / E4B drafter rows above.
+    // pre_projection — staged 32 (×5.1–5.3 in three records)
+    {
+      storage: "i4",
+      n: 1024,
+      k: 7680,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // o (sliding) — staged 32 (×4.8 and ×10.3 in two records)
+    {
+      storage: "i4",
+      n: 1024,
+      k: 4096,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    // down, o (full) — staged 32 (×5.2–5.7 in two records)
+    {
+      storage: "i4",
+      n: 1024,
+      k: 8192,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
     // ---- 26B A4B q4_0 QAT (added 2026-11-10) — the dense linears of the mixture of experts (the
     // routed experts run on `expert_linear`, which has no parallel form). Lanes measured per kernel
     // as whole-model decode on the RTX 3080 Ti (ADR 0098 addendum 2026-11-10): on the rows that
