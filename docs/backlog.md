@@ -191,6 +191,20 @@ maintainer's ruling of 2026-11-06).
      - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
        hosted is the maintainer's decision.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
+     - The default profile's GEMV choices from several devices' records (the maintainer's ruling of 2026-11-18). The
+       default's `linearGemv` holds what one device measured (the RTX 3080 Ti), every device without a table of its
+       own runs with it, and on an RTX 5070 Ti 51 of 66 parallel rows derive to another choice (a median ×1.79 per
+       dispatch). Direction: the default keeps a row only where no measured device is slower with it than with the
+       sequential GEMV, chosen over the records of every measured device, and a device's own best stays in its
+       table. Needs: GEMV sweep records of the Apple M2 (none yet) and of the devices collaborators measure; the rule
+       itself (to be proposed with the three devices' overlap in numbers); the generator deriving the default from
+       records of several adapters. A reorder Session's numbers then follow the table of its device where one
+       carries rows of its own (inside the band, as today's rows are).
+     - A hosted benchmark page for collaborators (filed 2026-11-18; the maintainer has an AMD device in reach). The
+       workbench's public build (download only) with one short batch a collaborator runs, the record sent back by
+       hand. Open: the host (the page is cross-origin isolated through response headers, which the static host has to
+       send — where it is hosted is the maintainer's decision), which batch (how long a volunteer's run may take),
+       how a record comes back and what it tells about the device, and the build's commit named on the page.
      - Per-adapter generation of the hand-written GEMV shape tables. *(Landed 2026-11-17: the sequential variant,
        the row-block thread target and the parallel shapes are the geometry profile's `linearGemv`; every table still
        runs with the default's values.)* *(Landed 2026-11-17: the GEMV sweep on synthetic tensors that measures them —
