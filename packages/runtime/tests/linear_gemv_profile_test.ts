@@ -49,18 +49,20 @@ import { mergeGraph } from "./helpers/merged-graph.ts";
 const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 // ---------------------------------------------------------------------------
-// The old module constants and lookups, copied from src/kernels/linear-gemv.ts as it stood before
-// the move.
+// The pinned copy of the default profile's GEMV choices, and the lookups the kernel module had
+// before the choices moved into the profile (copied from src/kernels/linear-gemv.ts as it stood
+// then).
 //
-// Why this copy exists: the move must change nothing, and the old code is gone. These literals are
-// the old `PARALLEL_SHAPES` (rows, order and flags), the old sequential variant and the old thread
-// target, and the functions below are the old lookups that read them. A later change of a value
-// edits the default profile (re-measuring as its comments require) and replaces this copy with it.
-// The copy follows the profile since: it holds the five MTP drafter rows added on 2026-11-18 (two
-// after the E4B rows, three after the 12B rows).
+// Why this copy exists: the move had to change nothing, and the old code is gone. The literals
+// began as the kernel module's `PARALLEL_SHAPES` (rows, order and flags), its sequential variant and
+// its thread target, and the functions below are its lookups, reading the literals. A change of a
+// value edits the default profile (re-measuring as its comments require) and this copy with it, so
+// the table is the kernel module's 66 rows plus the rows added since: the five MTP drafter rows of
+// 2026-11-18 (two after the E4B rows, three after the 12B rows). The sequential variant and the
+// thread target are still the kernel module's.
 // ---------------------------------------------------------------------------
 
-const OLD_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
+const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
   { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
@@ -293,7 +295,7 @@ const oldParallelShapeFor = (
   group?: number,
 ): LinearGemvParallelShape | undefined => {
   if (m < 1 || m > 8) return undefined;
-  return OLD_PARALLEL_SHAPES.find(
+  return PINNED_PARALLEL_SHAPES.find(
     (shape) => shape.storage === storage && shape.n === n && shape.k === k && shape.group === group,
   );
 };
@@ -366,9 +368,9 @@ const parallelAnswers = (
 
 const STORAGES: readonly WeightStorage[] = ["i2", "i4", "i8", "f16", "bf16", "f32"];
 
-describe("the default profile holds the GEMV choices the kernel module held", () => {
-  it("holds the old table of parallel shapes (rows, order and flags), the old sequential variant and the old thread target", () => {
-    assertEquals(GEMV.parallelShapes, OLD_PARALLEL_SHAPES);
+describe("the default profile holds the pinned GEMV choices (the kernel module's, and the rows added since)", () => {
+  it("holds the pinned table of parallel shapes (rows, order and flags), the kernel module's sequential variant and its thread target", () => {
+    assertEquals(GEMV.parallelShapes, PINNED_PARALLEL_SHAPES);
     assertEquals(GEMV.rowsThreadTarget, OLD_ROWS_THREAD_TARGET);
     assertEquals(GEMV.sequential, {
       variant: { cols: 32, unroll: 4 },
@@ -376,8 +378,8 @@ describe("the default profile holds the GEMV choices the kernel module held", ()
     });
   });
 
-  it("answers every row of the old table as the old lookups did, inside and past the parallel range of M", () => {
-    for (const { storage, n, k, group } of OLD_PARALLEL_SHAPES) {
+  it("answers every row of the pinned table as the kernel module's lookups did, inside and past the parallel range of M", () => {
+    for (const { storage, n, k, group } of PINNED_PARALLEL_SHAPES) {
       for (const m of [0, 1, 2, 4, 8, 9, 64]) {
         assertEquals(
           parallelAnswers(GEMV, storage, m, n, k, group),

@@ -91,7 +91,10 @@ const G12B_DRAFTER = "Gemma 4 12B q4_0 QAT drafter, i4 g32";
 const E_DRAFTERS = "Gemma 4 E2B / E4B q4_0 QAT drafter, i4 g32";
 const G26B = "Gemma 4 26B A4B q4_0 QAT, i4 g32";
 
-/** The case table, in the order of the default profile's rows. */
+/**
+ * The case table, grouped by model in the order of the default profile's rows: within a group the
+ * profile's rows first, then the group's shapes that have none (the output heads, the MTP drafter).
+ */
 export const GEMV_CASES: readonly GemvCase[] = [
   // Gemma 4 E2B (regular, i4 g32 and the i8 output head).
   shape("i4", 32, 8960, 1536, `${E2B}: per_layer_model_projection (35 layers × 256)`),

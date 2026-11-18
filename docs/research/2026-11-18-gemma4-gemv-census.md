@@ -175,7 +175,7 @@ Kernel time of these 68 linears as they ran before this change: 3.28 ms per run,
 
 Kernel time of these 236 linears as they ran before this change: 4.26 ms per token, of it 0.00 ms on the sequential GEMV.
 
-**Mobile QAT E2B (`karume-gemma4-qat-mobile`)** — 277 linears per decode token
+**Mobile QAT E2B (`karume-gemma4-qat-mobile`)** — 276 integer linears per decode token (the 277th is the f32 `per_layer_model_projection`)
 
 | Role | Storage | n × k | Count | At `reorder` | µs per dispatch | ms per token |
 | --- | --- | --- | ---: | --- | ---: | ---: |
@@ -195,7 +195,7 @@ Kernel time of these 236 linears as they ran before this change: 4.26 ms per tok
 
 Kernel time of these 276 linears as they ran before this change: 3.39 ms per token, of it 0.29 ms on the sequential GEMV.
 
-**Mobile QAT E4B** — 344 linears per decode token
+**Mobile QAT E4B** — 343 integer linears per decode token (the 344th is the f32 `per_layer_model_projection`)
 
 | Role | Storage | n × k | Count | At `reorder` | µs per dispatch | ms per token |
 | --- | --- | --- | ---: | --- | ---: | ---: |
