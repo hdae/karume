@@ -7,8 +7,10 @@ held by the ADRs that decided it ([0083](../decisions/0083-generation-api-surfac
 [0096](../decisions/0096-speculative-decoding.md), [0142](../decisions/0142-decode-run-ahead.md)) until it has a spec
 here.
 
-Both rules below change where a decode token's time goes, and neither changes a token: the same request with the same
-seed generates the same token ids with and without them.
+Both rules below change where a decode token's time goes, and neither changes which token a step generates: a turn
+that runs to its end generates the same token ids, for the same request and seed, with and without them. Where a
+turn that is aborted ends does depend on the first rule — an abort can be seen one run later, with one more token
+delivered (the table below).
 
 ## Abort checks
 
