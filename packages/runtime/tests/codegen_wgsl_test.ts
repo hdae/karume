@@ -182,6 +182,7 @@ import {
   embeddingParams,
   embeddingWgsl,
 } from "../src/kernels/embedding.ts";
+import { expertLinearWgsl } from "../src/kernels/expert-linear.ts";
 import { GATHER_KEY, GATHER_OOB_BITS, GATHER_WGSL, gatherParams } from "../src/kernels/gather.ts";
 import {
   LAYER_NORM_AFFINE_WGSL,
@@ -1201,6 +1202,13 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["attention_state_pv_par_ro_kv16.wgsl", statePvParallelReadonlyWgsl(false, false, "f16")],
     ["attention_state_pv_par_ro_gqa_kv16.wgsl", statePvParallelReadonlyWgsl(false, true, "f16")],
     ["state_append_kv16.wgsl", stateAppendWgsl(false, "f16")],
+    // expert_linear at the storage Gemma 4 26B runs (i4 codes, f16 steps, group 32), resident and
+    // pooled. The one-row fixtures are the text the kernel had before the grouped form existed: a
+    // change to the grouped generator MUST NOT move them by a byte (the two forms share pieces).
+    ["expert_linear_i4f16.wgsl", expertLinearWgsl("i4f16", 32)],
+    ["expert_linear_i4f16_pool.wgsl", expertLinearWgsl("i4f16", 32, true)],
+    ["expert_linear_i4f16_rows8.wgsl", expertLinearWgsl("i4f16", 32, false, true)],
+    ["expert_linear_i4f16_rows8_pool.wgsl", expertLinearWgsl("i4f16", 32, true, true)],
   ];
   for (const [name, generated] of cases) {
     if (WRITE_SNAPSHOTS) await writeTextFile(fixtureUrl(name), generated);

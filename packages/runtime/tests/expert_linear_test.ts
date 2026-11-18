@@ -233,12 +233,12 @@ describe("the two forms of the expert_linear kernel", () => {
     }
   });
 
-  it("generates the grouped form without changing a byte of the one-row form", () => {
+  // The bytes of both forms are pinned by the WGSL snapshots (codegen_wgsl_test.ts: the one-row
+  // fixtures are the text the kernel had before the grouped form existed).
+  it("gives the grouped form the word function, the leader scan and one walk per listed row count, and the one-row form none of them", () => {
     for (const [storage, group, pooled] of KEYS) {
       const oneRow = expertLinearWgsl(storage, group, pooled);
       const grouped = expertLinearWgsl(storage, group, pooled, true);
-      assertEquals(expertLinearWgsl(storage, group, pooled, false), oneRow);
-      // The one-row form has no word function and no leader scan; the grouped form has both.
       assertEquals(oneRow.includes("expert_word"), false);
       assertEquals(oneRow.includes("leads"), false);
       assertEquals(grouped.includes("fn expert_word("), true);
@@ -248,8 +248,6 @@ describe("the two forms of the expert_linear kernel", () => {
         [...grouped.matchAll(/for \(; count - start >= (\d+)u;/g)].map((match) => Number(match[1])),
         [8, 4, 2, 1],
       );
-      // Same key → byte-identical WGSL.
-      assertEquals(expertLinearWgsl(storage, group, pooled, true), grouped);
     }
   });
 });

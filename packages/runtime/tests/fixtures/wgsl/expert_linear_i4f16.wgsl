@@ -1,0 +1,301 @@
+// karume expert_linear (y[t, j] = weight[index[t, j]] · x[t (, j)], f32, i4 weight storage with f16 steps, 32 cols / wg, 4 words prefetched)
+struct Dims {
+  rows: u32,
+  n: u32,
+  k: u32,
+  picks: u32,
+  shared_x: u32,
+  experts: u32,
+  oob: u32,
+  pad: u32,
+}
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> index: array<i32>;
+// Row starts are 16 B aligned because k % 32 == 0 (guaranteed by expertLinearParams)
+@group(0) @binding(3) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(5) var<storage, read> wscale: array<u32>;
+
+// step s of an f16 scale: half s % 2 of word s / 2, widened to f32 (exact)
+fn step_at(s: u32) -> f32 {
+  let pair = unpack2x16float(wscale[s >> 1u]);
+  return select(pair.x, pair.y, (s & 1u) == 1u);
+}
+
+@compute @workgroup_size(32)
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let col = gid.x;
+  // No shared memory and no barrier, so edge workgroups may return early
+  if (col >= dims.n) {
+    return;
+  }
+  let units = dims.k / 32u;
+  let quads = dims.k / 4u;
+  var row = gid.y;
+  while (row < dims.rows) {
+    let pick = index[row];
+    // an id outside [0, E) breaks the planner's invariant: NaN instead of another expert's row
+    if (pick < 0 || u32(pick) >= dims.experts) {
+      out[row * dims.n + col] = bitcast<f32>(dims.oob);
+    } else {
+      let wrow = u32(pick) * dims.n + col;
+      let row_base = wrow * units;
+      let scale_base = wrow * (dims.k >> 5u);
+      let x_base = select(row, row / dims.picks, dims.shared_x == 1u) * quads;
+      var acc = 0.0;
+      var unit = 0u;
+      // Issue the prefetched words first, then the multiply-adds; words stay in ascending order,
+      // so the addition order per output does not depend on the prefetch count
+      for (; unit + 4u <= units; unit = unit + 4u) {
+      let unit0 = unit + 0u;
+      let pw0 = w[row_base + unit0];
+      let ws0 = step_at(scale_base + ((unit0 * 32u) >> 5u));
+      let xq0 = x_base + unit0 * 8u;
+      let unit1 = unit + 1u;
+      let pw1 = w[row_base + unit1];
+      let ws1 = step_at(scale_base + ((unit1 * 32u) >> 5u));
+      let xq1 = x_base + unit1 * 8u;
+      let unit2 = unit + 2u;
+      let pw2 = w[row_base + unit2];
+      let ws2 = step_at(scale_base + ((unit2 * 32u) >> 5u));
+      let xq2 = x_base + unit2 * 8u;
+      let unit3 = unit + 3u;
+      let pw3 = w[row_base + unit3];
+      let ws3 = step_at(scale_base + ((unit3 * 32u) >> 5u));
+      let xq3 = x_base + unit3 * 8u;
+      let b0_0 = unpack4xU8(pw0.x);
+      let xa0_0 = x[xq0 + 0u];
+      let xb0_0 = x[xq0 + 1u];
+      acc = acc + xa0_0.x * (f32(i32(b0_0.x & 0xFu) - 8) * ws0);
+      acc = acc + xa0_0.y * (f32(i32(b0_0.x >> 4u) - 8) * ws0);
+      acc = acc + xa0_0.z * (f32(i32(b0_0.y & 0xFu) - 8) * ws0);
+      acc = acc + xa0_0.w * (f32(i32(b0_0.y >> 4u) - 8) * ws0);
+      acc = acc + xb0_0.x * (f32(i32(b0_0.z & 0xFu) - 8) * ws0);
+      acc = acc + xb0_0.y * (f32(i32(b0_0.z >> 4u) - 8) * ws0);
+      acc = acc + xb0_0.z * (f32(i32(b0_0.w & 0xFu) - 8) * ws0);
+      acc = acc + xb0_0.w * (f32(i32(b0_0.w >> 4u) - 8) * ws0);
+      let b0_1 = unpack4xU8(pw0.y);
+      let xa0_1 = x[xq0 + 2u];
+      let xb0_1 = x[xq0 + 3u];
+      acc = acc + xa0_1.x * (f32(i32(b0_1.x & 0xFu) - 8) * ws0);
+      acc = acc + xa0_1.y * (f32(i32(b0_1.x >> 4u) - 8) * ws0);
+      acc = acc + xa0_1.z * (f32(i32(b0_1.y & 0xFu) - 8) * ws0);
+      acc = acc + xa0_1.w * (f32(i32(b0_1.y >> 4u) - 8) * ws0);
+      acc = acc + xb0_1.x * (f32(i32(b0_1.z & 0xFu) - 8) * ws0);
+      acc = acc + xb0_1.y * (f32(i32(b0_1.z >> 4u) - 8) * ws0);
+      acc = acc + xb0_1.z * (f32(i32(b0_1.w & 0xFu) - 8) * ws0);
+      acc = acc + xb0_1.w * (f32(i32(b0_1.w >> 4u) - 8) * ws0);
+      let b0_2 = unpack4xU8(pw0.z);
+      let xa0_2 = x[xq0 + 4u];
+      let xb0_2 = x[xq0 + 5u];
+      acc = acc + xa0_2.x * (f32(i32(b0_2.x & 0xFu) - 8) * ws0);
+      acc = acc + xa0_2.y * (f32(i32(b0_2.x >> 4u) - 8) * ws0);
+      acc = acc + xa0_2.z * (f32(i32(b0_2.y & 0xFu) - 8) * ws0);
+      acc = acc + xa0_2.w * (f32(i32(b0_2.y >> 4u) - 8) * ws0);
+      acc = acc + xb0_2.x * (f32(i32(b0_2.z & 0xFu) - 8) * ws0);
+      acc = acc + xb0_2.y * (f32(i32(b0_2.z >> 4u) - 8) * ws0);
+      acc = acc + xb0_2.z * (f32(i32(b0_2.w & 0xFu) - 8) * ws0);
+      acc = acc + xb0_2.w * (f32(i32(b0_2.w >> 4u) - 8) * ws0);
+      let b0_3 = unpack4xU8(pw0.w);
+      let xa0_3 = x[xq0 + 6u];
+      let xb0_3 = x[xq0 + 7u];
+      acc = acc + xa0_3.x * (f32(i32(b0_3.x & 0xFu) - 8) * ws0);
+      acc = acc + xa0_3.y * (f32(i32(b0_3.x >> 4u) - 8) * ws0);
+      acc = acc + xa0_3.z * (f32(i32(b0_3.y & 0xFu) - 8) * ws0);
+      acc = acc + xa0_3.w * (f32(i32(b0_3.y >> 4u) - 8) * ws0);
+      acc = acc + xb0_3.x * (f32(i32(b0_3.z & 0xFu) - 8) * ws0);
+      acc = acc + xb0_3.y * (f32(i32(b0_3.z >> 4u) - 8) * ws0);
+      acc = acc + xb0_3.z * (f32(i32(b0_3.w & 0xFu) - 8) * ws0);
+      acc = acc + xb0_3.w * (f32(i32(b0_3.w >> 4u) - 8) * ws0);
+      let b1_0 = unpack4xU8(pw1.x);
+      let xa1_0 = x[xq1 + 0u];
+      let xb1_0 = x[xq1 + 1u];
+      acc = acc + xa1_0.x * (f32(i32(b1_0.x & 0xFu) - 8) * ws1);
+      acc = acc + xa1_0.y * (f32(i32(b1_0.x >> 4u) - 8) * ws1);
+      acc = acc + xa1_0.z * (f32(i32(b1_0.y & 0xFu) - 8) * ws1);
+      acc = acc + xa1_0.w * (f32(i32(b1_0.y >> 4u) - 8) * ws1);
+      acc = acc + xb1_0.x * (f32(i32(b1_0.z & 0xFu) - 8) * ws1);
+      acc = acc + xb1_0.y * (f32(i32(b1_0.z >> 4u) - 8) * ws1);
+      acc = acc + xb1_0.z * (f32(i32(b1_0.w & 0xFu) - 8) * ws1);
+      acc = acc + xb1_0.w * (f32(i32(b1_0.w >> 4u) - 8) * ws1);
+      let b1_1 = unpack4xU8(pw1.y);
+      let xa1_1 = x[xq1 + 2u];
+      let xb1_1 = x[xq1 + 3u];
+      acc = acc + xa1_1.x * (f32(i32(b1_1.x & 0xFu) - 8) * ws1);
+      acc = acc + xa1_1.y * (f32(i32(b1_1.x >> 4u) - 8) * ws1);
+      acc = acc + xa1_1.z * (f32(i32(b1_1.y & 0xFu) - 8) * ws1);
+      acc = acc + xa1_1.w * (f32(i32(b1_1.y >> 4u) - 8) * ws1);
+      acc = acc + xb1_1.x * (f32(i32(b1_1.z & 0xFu) - 8) * ws1);
+      acc = acc + xb1_1.y * (f32(i32(b1_1.z >> 4u) - 8) * ws1);
+      acc = acc + xb1_1.z * (f32(i32(b1_1.w & 0xFu) - 8) * ws1);
+      acc = acc + xb1_1.w * (f32(i32(b1_1.w >> 4u) - 8) * ws1);
+      let b1_2 = unpack4xU8(pw1.z);
+      let xa1_2 = x[xq1 + 4u];
+      let xb1_2 = x[xq1 + 5u];
+      acc = acc + xa1_2.x * (f32(i32(b1_2.x & 0xFu) - 8) * ws1);
+      acc = acc + xa1_2.y * (f32(i32(b1_2.x >> 4u) - 8) * ws1);
+      acc = acc + xa1_2.z * (f32(i32(b1_2.y & 0xFu) - 8) * ws1);
+      acc = acc + xa1_2.w * (f32(i32(b1_2.y >> 4u) - 8) * ws1);
+      acc = acc + xb1_2.x * (f32(i32(b1_2.z & 0xFu) - 8) * ws1);
+      acc = acc + xb1_2.y * (f32(i32(b1_2.z >> 4u) - 8) * ws1);
+      acc = acc + xb1_2.z * (f32(i32(b1_2.w & 0xFu) - 8) * ws1);
+      acc = acc + xb1_2.w * (f32(i32(b1_2.w >> 4u) - 8) * ws1);
+      let b1_3 = unpack4xU8(pw1.w);
+      let xa1_3 = x[xq1 + 6u];
+      let xb1_3 = x[xq1 + 7u];
+      acc = acc + xa1_3.x * (f32(i32(b1_3.x & 0xFu) - 8) * ws1);
+      acc = acc + xa1_3.y * (f32(i32(b1_3.x >> 4u) - 8) * ws1);
+      acc = acc + xa1_3.z * (f32(i32(b1_3.y & 0xFu) - 8) * ws1);
+      acc = acc + xa1_3.w * (f32(i32(b1_3.y >> 4u) - 8) * ws1);
+      acc = acc + xb1_3.x * (f32(i32(b1_3.z & 0xFu) - 8) * ws1);
+      acc = acc + xb1_3.y * (f32(i32(b1_3.z >> 4u) - 8) * ws1);
+      acc = acc + xb1_3.z * (f32(i32(b1_3.w & 0xFu) - 8) * ws1);
+      acc = acc + xb1_3.w * (f32(i32(b1_3.w >> 4u) - 8) * ws1);
+      let b2_0 = unpack4xU8(pw2.x);
+      let xa2_0 = x[xq2 + 0u];
+      let xb2_0 = x[xq2 + 1u];
+      acc = acc + xa2_0.x * (f32(i32(b2_0.x & 0xFu) - 8) * ws2);
+      acc = acc + xa2_0.y * (f32(i32(b2_0.x >> 4u) - 8) * ws2);
+      acc = acc + xa2_0.z * (f32(i32(b2_0.y & 0xFu) - 8) * ws2);
+      acc = acc + xa2_0.w * (f32(i32(b2_0.y >> 4u) - 8) * ws2);
+      acc = acc + xb2_0.x * (f32(i32(b2_0.z & 0xFu) - 8) * ws2);
+      acc = acc + xb2_0.y * (f32(i32(b2_0.z >> 4u) - 8) * ws2);
+      acc = acc + xb2_0.z * (f32(i32(b2_0.w & 0xFu) - 8) * ws2);
+      acc = acc + xb2_0.w * (f32(i32(b2_0.w >> 4u) - 8) * ws2);
+      let b2_1 = unpack4xU8(pw2.y);
+      let xa2_1 = x[xq2 + 2u];
+      let xb2_1 = x[xq2 + 3u];
+      acc = acc + xa2_1.x * (f32(i32(b2_1.x & 0xFu) - 8) * ws2);
+      acc = acc + xa2_1.y * (f32(i32(b2_1.x >> 4u) - 8) * ws2);
+      acc = acc + xa2_1.z * (f32(i32(b2_1.y & 0xFu) - 8) * ws2);
+      acc = acc + xa2_1.w * (f32(i32(b2_1.y >> 4u) - 8) * ws2);
+      acc = acc + xb2_1.x * (f32(i32(b2_1.z & 0xFu) - 8) * ws2);
+      acc = acc + xb2_1.y * (f32(i32(b2_1.z >> 4u) - 8) * ws2);
+      acc = acc + xb2_1.z * (f32(i32(b2_1.w & 0xFu) - 8) * ws2);
+      acc = acc + xb2_1.w * (f32(i32(b2_1.w >> 4u) - 8) * ws2);
+      let b2_2 = unpack4xU8(pw2.z);
+      let xa2_2 = x[xq2 + 4u];
+      let xb2_2 = x[xq2 + 5u];
+      acc = acc + xa2_2.x * (f32(i32(b2_2.x & 0xFu) - 8) * ws2);
+      acc = acc + xa2_2.y * (f32(i32(b2_2.x >> 4u) - 8) * ws2);
+      acc = acc + xa2_2.z * (f32(i32(b2_2.y & 0xFu) - 8) * ws2);
+      acc = acc + xa2_2.w * (f32(i32(b2_2.y >> 4u) - 8) * ws2);
+      acc = acc + xb2_2.x * (f32(i32(b2_2.z & 0xFu) - 8) * ws2);
+      acc = acc + xb2_2.y * (f32(i32(b2_2.z >> 4u) - 8) * ws2);
+      acc = acc + xb2_2.z * (f32(i32(b2_2.w & 0xFu) - 8) * ws2);
+      acc = acc + xb2_2.w * (f32(i32(b2_2.w >> 4u) - 8) * ws2);
+      let b2_3 = unpack4xU8(pw2.w);
+      let xa2_3 = x[xq2 + 6u];
+      let xb2_3 = x[xq2 + 7u];
+      acc = acc + xa2_3.x * (f32(i32(b2_3.x & 0xFu) - 8) * ws2);
+      acc = acc + xa2_3.y * (f32(i32(b2_3.x >> 4u) - 8) * ws2);
+      acc = acc + xa2_3.z * (f32(i32(b2_3.y & 0xFu) - 8) * ws2);
+      acc = acc + xa2_3.w * (f32(i32(b2_3.y >> 4u) - 8) * ws2);
+      acc = acc + xb2_3.x * (f32(i32(b2_3.z & 0xFu) - 8) * ws2);
+      acc = acc + xb2_3.y * (f32(i32(b2_3.z >> 4u) - 8) * ws2);
+      acc = acc + xb2_3.z * (f32(i32(b2_3.w & 0xFu) - 8) * ws2);
+      acc = acc + xb2_3.w * (f32(i32(b2_3.w >> 4u) - 8) * ws2);
+      let b3_0 = unpack4xU8(pw3.x);
+      let xa3_0 = x[xq3 + 0u];
+      let xb3_0 = x[xq3 + 1u];
+      acc = acc + xa3_0.x * (f32(i32(b3_0.x & 0xFu) - 8) * ws3);
+      acc = acc + xa3_0.y * (f32(i32(b3_0.x >> 4u) - 8) * ws3);
+      acc = acc + xa3_0.z * (f32(i32(b3_0.y & 0xFu) - 8) * ws3);
+      acc = acc + xa3_0.w * (f32(i32(b3_0.y >> 4u) - 8) * ws3);
+      acc = acc + xb3_0.x * (f32(i32(b3_0.z & 0xFu) - 8) * ws3);
+      acc = acc + xb3_0.y * (f32(i32(b3_0.z >> 4u) - 8) * ws3);
+      acc = acc + xb3_0.z * (f32(i32(b3_0.w & 0xFu) - 8) * ws3);
+      acc = acc + xb3_0.w * (f32(i32(b3_0.w >> 4u) - 8) * ws3);
+      let b3_1 = unpack4xU8(pw3.y);
+      let xa3_1 = x[xq3 + 2u];
+      let xb3_1 = x[xq3 + 3u];
+      acc = acc + xa3_1.x * (f32(i32(b3_1.x & 0xFu) - 8) * ws3);
+      acc = acc + xa3_1.y * (f32(i32(b3_1.x >> 4u) - 8) * ws3);
+      acc = acc + xa3_1.z * (f32(i32(b3_1.y & 0xFu) - 8) * ws3);
+      acc = acc + xa3_1.w * (f32(i32(b3_1.y >> 4u) - 8) * ws3);
+      acc = acc + xb3_1.x * (f32(i32(b3_1.z & 0xFu) - 8) * ws3);
+      acc = acc + xb3_1.y * (f32(i32(b3_1.z >> 4u) - 8) * ws3);
+      acc = acc + xb3_1.z * (f32(i32(b3_1.w & 0xFu) - 8) * ws3);
+      acc = acc + xb3_1.w * (f32(i32(b3_1.w >> 4u) - 8) * ws3);
+      let b3_2 = unpack4xU8(pw3.z);
+      let xa3_2 = x[xq3 + 4u];
+      let xb3_2 = x[xq3 + 5u];
+      acc = acc + xa3_2.x * (f32(i32(b3_2.x & 0xFu) - 8) * ws3);
+      acc = acc + xa3_2.y * (f32(i32(b3_2.x >> 4u) - 8) * ws3);
+      acc = acc + xa3_2.z * (f32(i32(b3_2.y & 0xFu) - 8) * ws3);
+      acc = acc + xa3_2.w * (f32(i32(b3_2.y >> 4u) - 8) * ws3);
+      acc = acc + xb3_2.x * (f32(i32(b3_2.z & 0xFu) - 8) * ws3);
+      acc = acc + xb3_2.y * (f32(i32(b3_2.z >> 4u) - 8) * ws3);
+      acc = acc + xb3_2.z * (f32(i32(b3_2.w & 0xFu) - 8) * ws3);
+      acc = acc + xb3_2.w * (f32(i32(b3_2.w >> 4u) - 8) * ws3);
+      let b3_3 = unpack4xU8(pw3.w);
+      let xa3_3 = x[xq3 + 6u];
+      let xb3_3 = x[xq3 + 7u];
+      acc = acc + xa3_3.x * (f32(i32(b3_3.x & 0xFu) - 8) * ws3);
+      acc = acc + xa3_3.y * (f32(i32(b3_3.x >> 4u) - 8) * ws3);
+      acc = acc + xa3_3.z * (f32(i32(b3_3.y & 0xFu) - 8) * ws3);
+      acc = acc + xa3_3.w * (f32(i32(b3_3.y >> 4u) - 8) * ws3);
+      acc = acc + xb3_3.x * (f32(i32(b3_3.z & 0xFu) - 8) * ws3);
+      acc = acc + xb3_3.y * (f32(i32(b3_3.z >> 4u) - 8) * ws3);
+      acc = acc + xb3_3.z * (f32(i32(b3_3.w & 0xFu) - 8) * ws3);
+      acc = acc + xb3_3.w * (f32(i32(b3_3.w >> 4u) - 8) * ws3);
+      }
+      for (; unit < units; unit = unit + 1u) {
+      let unitt = unit;
+      let pwt = w[row_base + unitt];
+      let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+      let xqt = x_base + unitt * 8u;
+      let bt_0 = unpack4xU8(pwt.x);
+      let xat_0 = x[xqt + 0u];
+      let xbt_0 = x[xqt + 1u];
+      acc = acc + xat_0.x * (f32(i32(bt_0.x & 0xFu) - 8) * wst);
+      acc = acc + xat_0.y * (f32(i32(bt_0.x >> 4u) - 8) * wst);
+      acc = acc + xat_0.z * (f32(i32(bt_0.y & 0xFu) - 8) * wst);
+      acc = acc + xat_0.w * (f32(i32(bt_0.y >> 4u) - 8) * wst);
+      acc = acc + xbt_0.x * (f32(i32(bt_0.z & 0xFu) - 8) * wst);
+      acc = acc + xbt_0.y * (f32(i32(bt_0.z >> 4u) - 8) * wst);
+      acc = acc + xbt_0.z * (f32(i32(bt_0.w & 0xFu) - 8) * wst);
+      acc = acc + xbt_0.w * (f32(i32(bt_0.w >> 4u) - 8) * wst);
+      let bt_1 = unpack4xU8(pwt.y);
+      let xat_1 = x[xqt + 2u];
+      let xbt_1 = x[xqt + 3u];
+      acc = acc + xat_1.x * (f32(i32(bt_1.x & 0xFu) - 8) * wst);
+      acc = acc + xat_1.y * (f32(i32(bt_1.x >> 4u) - 8) * wst);
+      acc = acc + xat_1.z * (f32(i32(bt_1.y & 0xFu) - 8) * wst);
+      acc = acc + xat_1.w * (f32(i32(bt_1.y >> 4u) - 8) * wst);
+      acc = acc + xbt_1.x * (f32(i32(bt_1.z & 0xFu) - 8) * wst);
+      acc = acc + xbt_1.y * (f32(i32(bt_1.z >> 4u) - 8) * wst);
+      acc = acc + xbt_1.z * (f32(i32(bt_1.w & 0xFu) - 8) * wst);
+      acc = acc + xbt_1.w * (f32(i32(bt_1.w >> 4u) - 8) * wst);
+      let bt_2 = unpack4xU8(pwt.z);
+      let xat_2 = x[xqt + 4u];
+      let xbt_2 = x[xqt + 5u];
+      acc = acc + xat_2.x * (f32(i32(bt_2.x & 0xFu) - 8) * wst);
+      acc = acc + xat_2.y * (f32(i32(bt_2.x >> 4u) - 8) * wst);
+      acc = acc + xat_2.z * (f32(i32(bt_2.y & 0xFu) - 8) * wst);
+      acc = acc + xat_2.w * (f32(i32(bt_2.y >> 4u) - 8) * wst);
+      acc = acc + xbt_2.x * (f32(i32(bt_2.z & 0xFu) - 8) * wst);
+      acc = acc + xbt_2.y * (f32(i32(bt_2.z >> 4u) - 8) * wst);
+      acc = acc + xbt_2.z * (f32(i32(bt_2.w & 0xFu) - 8) * wst);
+      acc = acc + xbt_2.w * (f32(i32(bt_2.w >> 4u) - 8) * wst);
+      let bt_3 = unpack4xU8(pwt.w);
+      let xat_3 = x[xqt + 6u];
+      let xbt_3 = x[xqt + 7u];
+      acc = acc + xat_3.x * (f32(i32(bt_3.x & 0xFu) - 8) * wst);
+      acc = acc + xat_3.y * (f32(i32(bt_3.x >> 4u) - 8) * wst);
+      acc = acc + xat_3.z * (f32(i32(bt_3.y & 0xFu) - 8) * wst);
+      acc = acc + xat_3.w * (f32(i32(bt_3.y >> 4u) - 8) * wst);
+      acc = acc + xbt_3.x * (f32(i32(bt_3.z & 0xFu) - 8) * wst);
+      acc = acc + xbt_3.y * (f32(i32(bt_3.z >> 4u) - 8) * wst);
+      acc = acc + xbt_3.z * (f32(i32(bt_3.w & 0xFu) - 8) * wst);
+      acc = acc + xbt_3.w * (f32(i32(bt_3.w >> 4u) - 8) * wst);
+      }
+      out[row * dims.n + col] = acc;
+    }
+    row = row + nwg.y;
+  }
+}
