@@ -38,6 +38,10 @@ Scripts, logs and tables: `outputs/diag/decode-optimization-2026-11-18/bf16-gemv
   look at its default margin, 10 s idle between cases. A kernel's time is the minimum of its rounds. Every timed
   parallel candidate is checked against the host's f64 oracle (the band of `linear`), every sequential variant against
   the baseline's words: 0 rows outside the band, 0 differing, in every record.
+- The GEMM of the rows past one is `linear:v2:f32:reg16x16r1x4w4v4:wbf16`. These records were taken while the sweep
+  built it with the default profile's tile geometry; the table this adapter selects (`nvidia-ampere`) keeps that
+  geometry up to 16 rows, so it is the kernel a Session on this device runs, and the records stay current under the
+  sweep that now builds the reference with the device's profile.
 - Records (`outputs/workbench/node-nvidia-geforce-rtx-3080-ti/`): `gemv-sweep_2026-11-18T04-12-00.json` (E2B's 13
   cases, 735 rows), `gemv-sweep_2026-11-18T04-39-54.json` (E4B's 12 cases, 678 rows),
   `gemv-sweep_2026-11-18T03-35-23.json` (three E2B cases at one row, the `quick` set with the quick look off).
