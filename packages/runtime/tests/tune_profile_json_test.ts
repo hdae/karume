@@ -622,6 +622,34 @@ describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearG
       "linearGemv.parallelShapes[0]: a row of f16 storage takes no group and no packedActivations",
     );
   });
+
+  it("reads a parallel row's rowBlock and rejects a value that is no row block, and one the runtime's check refuses, naming the path", () => {
+    const plain = { ...first, rowBlock: undefined };
+    for (const rowBlock of [2, 4, 8] as const) {
+      const parsed = parseGeometryProfileJson(withParallelRow({ ...plain, rowBlock }));
+      assertEquals(parsed.linearGemv?.parallelShapes[0], { ...plain, rowBlock });
+    }
+    assertEquals(
+      "rowBlock" in
+        (parseGeometryProfileJson(withParallelRow(plain)).linearGemv?.parallelShapes[0] ?? {}),
+      false,
+    );
+    for (const rowBlock of [3, 1, 16, "4", true, null]) {
+      rejects(
+        withParallelRow({ ...plain, rowBlock }),
+        "linearGemv.parallelShapes[0].rowBlock is not one of",
+      );
+    }
+    // A member of the list the row cannot take: the parser leaves these to the runtime's check
+    rejects(
+      withParallelRow({ ...plain, lanes: 32, rowBlock: 4 }),
+      "linearGemv.parallelShapes[0].rowBlock 4 has no kernel for",
+    );
+    rejects(
+      withParallelRow({ ...plain, packedActivations: true, rowBlock: 2 }),
+      "linearGemv.parallelShapes[0].rowBlock is set on a row that takes packed activations",
+    );
+  });
 });
 
 describe("parseGeometryProfileJson: the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {
