@@ -68,6 +68,28 @@ describe("measuring a chat", () => {
       });
     });
 
+    it("takes the median interval between two delivered tokens, which one slow token does not move", () => {
+      const { marks } = chat(6);
+      // The fourth token arrives 100 ms late, and every later one with it.
+      const tokens = marks.tokens.map((token, index) =>
+        index >= 3 ? { ...token, at: token.at + 100 } : token,
+      );
+      const measured = measureChat({
+        marks: { ...marks, tokens, endAt: marks.endAt + 100 },
+        promptTokens: 21,
+        tokens: 7,
+      });
+      expect(measured.tokenIntervalMsMedian).toBe(10);
+      // The mean over the window carries the slow token: 160 ms over 6 decode tokens.
+      expect(measured.decodeMsPerToken).toBeCloseTo(160 / 6, 3);
+    });
+
+    it("has no token interval for a chat that delivered a single token", () => {
+      expect(
+        measureChat({ marks: chat(1).marks, promptTokens: 21, tokens: 1 }).tokenIntervalMsMedian,
+      ).toBeUndefined();
+    });
+
     it("measures no decode for a chat that drew a single token", () => {
       const measured = measureChat({ marks: chat(1).marks, promptTokens: 21, tokens: 1 });
       expect(measured.decodeTokens).toBe(0);

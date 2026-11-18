@@ -24,7 +24,8 @@ const fixed = (value: number | undefined, digits: number): string =>
 
 /**
  * One arm and prompt in a line: the arm's label, the median decode rate (and the max), the median
- * decode ms per token, its ratio to arm 1's on the same prompt, the median GPU ms per token of a
+ * decode ms per token, the median over the chats (and the least) of the chat's median interval
+ * between two tokens, the ratio of the decode ms per token to arm 1's on the same prompt, the median GPU ms per token of a
  * tapped arm, whether its warm chats generated the same tokens, and — when a chat's stop reports
  * the candidate selection — where the sampled decode steps drew from. Rates at 0.1, times and
  * ratios at 0.001.
@@ -37,6 +38,11 @@ const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
     benchPrompt(entry.prompt).label,
     `decode ${rate === undefined ? "— tok/s" : `${rate.median.toFixed(1)} tok/s (max ${rate.max.toFixed(1)})`}`,
     `${fixed(spreads.decodeMsPerToken?.median, 3)} ms/token`,
+    ...(spreads.tokenIntervalMsMedian === undefined
+      ? []
+      : [
+          `token interval ${fixed(spreads.tokenIntervalMsMedian.median, 3)} ms (min ${fixed(spreads.tokenIntervalMsMedian.min, 3)})`,
+        ]),
     ...(entry.decodeVsFirstArm === undefined
       ? []
       : [`×${entry.decodeVsFirstArm.toFixed(3)} vs arm 1`]),

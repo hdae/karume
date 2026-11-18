@@ -59,6 +59,7 @@ export type CandidateCounts = {
 /** The figures summarized, in display order. */
 export const SUMMARY_METRICS = [
   "decodeMsPerToken",
+  "tokenIntervalMsMedian",
   "decodeTokensPerSecond",
   "ttftMs",
   "prefillTokensPerSecond",
@@ -76,6 +77,7 @@ export type SummaryMetric = (typeof SUMMARY_METRICS)[number];
 /** Where each figure comes from in a chat's measurement. */
 const READ_METRIC: Readonly<Record<SummaryMetric, (m: ChatMeasurement) => number | undefined>> = {
   decodeMsPerToken: (m: ChatMeasurement) => m.decodeMsPerToken,
+  tokenIntervalMsMedian: (m: ChatMeasurement) => m.tokenIntervalMsMedian,
   decodeTokensPerSecond: (m: ChatMeasurement) => m.decodeTokensPerSecond,
   ttftMs: (m: ChatMeasurement) => m.ttftMs,
   prefillTokensPerSecond: (m: ChatMeasurement) => m.prefillTokensPerSecond,

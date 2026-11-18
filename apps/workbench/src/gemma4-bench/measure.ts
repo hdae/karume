@@ -187,6 +187,13 @@ export type ChatMeasurement = {
   /** Unrounded figures, which the summary aggregates (absent when not measurable). */
   readonly decodeMsPerToken?: number;
   readonly decodeTokensPerSecond?: number;
+  /**
+   * The median of the intervals between consecutive delivered tokens (absent with fewer than two):
+   * what a token usually takes, unmoved by the few that hit a transiently slow kernel — the figure
+   * to compare two arms by when their difference is a few percent. Not a rate: tokens handed out of
+   * one run-ahead batch are no interval apart, so it says nothing about an arm that runs ahead.
+   */
+  readonly tokenIntervalMsMedian?: number;
   readonly ttftMs?: number;
   readonly prefillTokensPerSecond?: number;
   /** Absent with the tap off and in the host mode. */
@@ -459,6 +466,9 @@ export const measureChat = (input: {
   const prefillEnd = marks.prefillAt.at(-1) ?? firstTokenAt;
   const prefillMs = prefillEnd === undefined ? undefined : prefillEnd - marks.sentAt;
   const host = input.host === undefined ? undefined : hostFigures(input.host, marks, decodeTokens);
+  const intervalMedian = median(
+    marks.tokens.slice(1).map((token, index) => token.at - marks.tokens[index].at),
+  );
   return {
     timing,
     decodeTokens,
@@ -468,6 +478,7 @@ export const measureChat = (input: {
           decodeMsPerToken: round4(decodeMsPerToken),
           decodeTokensPerSecond: round4(1000 / decodeMsPerToken),
         }),
+    ...(intervalMedian === undefined ? {} : { tokenIntervalMsMedian: round4(intervalMedian) }),
     ...(firstTokenAt === undefined ? {} : { ttftMs: round4(firstTokenAt - marks.sentAt) }),
     ...(prefillMs === undefined || !(prefillMs > 0) || promptTokens === 0
       ? {}

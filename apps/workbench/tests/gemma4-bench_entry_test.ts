@@ -183,15 +183,15 @@ describe("the gemma4-bench entry", () => {
   });
 
   describe("its result", () => {
-    it("has no verdict for a bench that finished, and one line per arm and prompt: rates, ms/token, the ratio to arm 1, GPU time when tapped, identity", async () => {
+    it("has no verdict for a bench that finished, and one line per arm and prompt: rates, ms/token, the token interval, the ratio to arm 1, GPU time when tapped, identity", async () => {
       const { result } = await benchOf([REGULAR_ARM, QAT_ARM]);
       const finished = result();
       expect(Object.hasOwn(finished, "verdict")).toBe(false);
       // Each chat: 3 decode tokens over 3 ms, one 0.25 ms pass per decode step.
       expect(finished.summary).toEqual([
         "2 of 2 visits, 4 chats (cold ones included)",
-        "arm 1 Gemma 4 e2b bf16 · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · GPU 0.250 ms/token · outputs identical",
-        "arm 2 QAT q4_0 e2b i4 (tap off) · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · ×1.000 vs arm 1 · outputs identical",
+        "arm 1 Gemma 4 e2b bf16 · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · token interval 1.000 ms (min 1.000) · GPU 0.250 ms/token · outputs identical",
+        "arm 2 QAT q4_0 e2b i4 (tap off) · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · token interval 1.000 ms (min 1.000) · ×1.000 vs arm 1 · outputs identical",
       ]);
     });
 
@@ -252,7 +252,7 @@ describe("the gemma4-bench entry", () => {
       const { result } = await benchOf([{ ...REGULAR_ARM, split: true }]);
       expect(result().summary).toEqual([
         "1 of 1 visits, 2 chats (cold ones included)",
-        "arm 1 Gemma 4 e2b bf16 (split) · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · GPU 0.250 ms/token · outputs identical",
+        "arm 1 Gemma 4 e2b bf16 (split) · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · token interval 1.000 ms (min 1.000) · GPU 0.250 ms/token · outputs identical",
         "arm 1 Gemma 4 e2b bf16 (split) · Story request · 1 warm chats · GPU 0.250 ms/token (split)",
         "    ms/tok  share disp/tok  family / key",
         "     0.250 100.0%      1.0  linear",
@@ -265,7 +265,7 @@ describe("the gemma4-bench entry", () => {
       const { summary, data } = result();
       expect(summary.slice(0, 3)).toEqual([
         "1 of 1 visits, 2 chats (cold ones included)",
-        "arm 1 Gemma 4 e2b bf16 (host) · Story request · decode 100.0 tok/s (max 100.0) · 10.000 ms/token · outputs identical",
+        "arm 1 Gemma 4 e2b bf16 (host) · Story request · decode 100.0 tok/s (max 100.0) · 10.000 ms/token · token interval 10.000 ms (min 10.000) · outputs identical",
         "arm 1 Gemma 4 e2b bf16 (host) · Story request · 1 warm chats · host segments, ms per decode token",
       ]);
       expect(summary).toHaveLength(8);
