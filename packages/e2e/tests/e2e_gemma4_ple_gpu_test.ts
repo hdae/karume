@@ -345,9 +345,10 @@ test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
     // The only extra queue wait the GPU-resident path pays over the host path is the gather batch
     // of one prefill chunk; the 16 decode tokens pay none (they are read back by the map at the
     // end of the same batch). Before the path's open item ① each decode added one (= 16 + 1).
-    // The host path also pays one wait: its decode run builds a slot backing, and a run that builds
-    // one first waits for released memory (ADR 0095 addendum of 2026-10-24). The resident path
-    // builds its backings through enqueue, which never waits, so the two counts now match.
-    assertEquals(resident.fences - host.fences, 0, `host ${host.fences} / gpu ${resident.fences}`);
+    // Neither path pays the wait for released memory that a run building a slot backing starts
+    // with (ADR 0095 addendum of 2026-10-24): the sampler has a top-k, so both issue the decode
+    // through enqueue (the candidate selection), which never waits. A host path that read the whole
+    // row would issue a run and pay that wait once, and the two counts would match.
+    assertEquals(resident.fences - host.fences, 1, `host ${host.fences} / gpu ${resident.fences}`);
   },
 );
