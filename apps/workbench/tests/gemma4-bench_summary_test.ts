@@ -113,6 +113,36 @@ describe("the summary", () => {
   });
 });
 
+describe("the candidate selection in the summary", () => {
+  const sampled = (candidateSelection?: { count: number; steps: number; fallbacks: number }) => ({
+    ...run(0, 10),
+    ...(candidateSelection === undefined ? {} : { stop: { candidateSelection } }),
+  });
+
+  it("adds up the steps and the whole-row fallbacks of the warm chats, and keeps the largest count", () => {
+    const [entry] = summarizeRuns(
+      [
+        { ...sampled({ count: 65, steps: 500, fallbacks: 9 }), cold: true },
+        sampled({ count: 65, steps: 120, fallbacks: 7 }),
+        sampled({ count: 65, steps: 127, fallbacks: 0 }),
+      ],
+      1,
+      PROMPTS,
+    );
+    expect(entry.candidateSelection).toEqual({ count: 65, steps: 247, fallbacks: 7 });
+  });
+
+  it("is absent when no warm chat's stop reports it (a pipeline without the selection)", () => {
+    const [entry] = summarizeRuns([sampled(), sampled()], 1, PROMPTS);
+    expect(Object.hasOwn(entry, "candidateSelection")).toBe(false);
+  });
+
+  it("keeps a count of 0 for chats that had the selection and did not use it", () => {
+    const [entry] = summarizeRuns([sampled({ count: 0, steps: 0, fallbacks: 0 })], 1, PROMPTS);
+    expect(entry.candidateSelection).toEqual({ count: 0, steps: 0, fallbacks: 0 });
+  });
+});
+
 describe("a spread", () => {
   it("takes the mean of the middle two for an even count", () => {
     expect(spreadOf([4, 1, 3, 2])).toEqual({ count: 4, min: 1, median: 2.5, max: 4 });

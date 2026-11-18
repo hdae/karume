@@ -4,7 +4,12 @@
  * the workbench's decode bench. Pure, so `vp test` covers it.
  */
 
-import type { ChatStop, GenerationDecodeAhead, GenerationSpeculation } from "@karume/models/gemma";
+import type {
+  ChatStop,
+  GenerationCandidateCounts,
+  GenerationDecodeAhead,
+  GenerationSpeculation,
+} from "@karume/models/gemma";
 
 /** How a generation stopped (the stop of its stream, flattened for JSON). */
 export type StopRecord = {
@@ -21,6 +26,12 @@ export type StopRecord = {
    * the generation ran (0 = it decoded one step per batch) and the steps they computed.
    */
   readonly decodeAhead?: GenerationDecodeAhead;
+  /**
+   * Present on generations of a pipeline that has the candidate selection: the leading logits a
+   * sampled decode step read back in place of the whole row (0 = the generation did not use the
+   * selection), the steps drawn from them, and the steps that read the whole row after all.
+   */
+  readonly candidateSelection?: GenerationCandidateCounts;
 };
 
 export const stopRecordOf = (stop: ChatStop): StopRecord => ({
@@ -30,4 +41,5 @@ export const stopRecordOf = (stop: ChatStop): StopRecord => ({
   ...(stop.reason === "stop-string" ? { stopString: stop.stopString } : {}),
   ...(stop.speculation === undefined ? {} : { speculation: stop.speculation }),
   ...(stop.decodeAhead === undefined ? {} : { decodeAhead: stop.decodeAhead }),
+  ...(stop.candidateSelection === undefined ? {} : { candidateSelection: stop.candidateSelection }),
 });

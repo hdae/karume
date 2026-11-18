@@ -278,6 +278,21 @@ describe("the gemma4-bench entry", () => {
       expect(data.chats[1].measurement.host?.intervals).toBe(3);
     });
 
+    it("says where the decode steps of the warm chats drew from when the chats' stops report the candidate selection", async () => {
+      const drawn = await benchOf([REGULAR_ARM], {
+        candidateSelection: { count: 65, steps: 3, fallbacks: 0 },
+      });
+      expect(drawn.result().summary[1]).toMatch(
+        / · outputs identical · 65 candidates: 3 steps, 0 whole-row$/,
+      );
+      const unused = await benchOf([REGULAR_ARM], {
+        candidateSelection: { count: 0, steps: 0, fallbacks: 0 },
+      });
+      expect(unused.result().summary[1]).toMatch(/ · outputs identical · candidates not used$/);
+      const without = await benchOf([REGULAR_ARM]);
+      expect(without.result().summary[1]).toMatch(/ · outputs identical$/);
+    });
+
     it("records an arm sent without a signal as such", async () => {
       const { result } = await benchOf([{ ...REGULAR_ARM, noSignal: true }]);
       expect(result().data.arms[0]).toMatchObject({ signal: false, hostMarks: false });

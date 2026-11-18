@@ -55,4 +55,19 @@ describe("stopRecordOf", () => {
       false,
     );
   });
+
+  it("keeps the candidate selection counters of a generation that has them, and has none otherwise", () => {
+    const candidateSelection = { count: 65, steps: 120, fallbacks: 7 };
+    expect(stopRecordOf({ reason: "max-tokens", tokens: 128, candidateSelection })).toEqual({
+      reason: "max-tokens",
+      tokens: 128,
+      candidateSelection,
+    });
+    expect(
+      stopRecordOf({ reason: "stop-string", stopString: "END", tokens: 9, candidateSelection }),
+    ).toEqual({ reason: "stop-string", tokens: 9, stopString: "END", candidateSelection });
+    expect(
+      Object.hasOwn(stopRecordOf({ reason: "max-tokens", tokens: 4 }), "candidateSelection"),
+    ).toBe(false);
+  });
 });

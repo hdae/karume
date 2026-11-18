@@ -41,6 +41,19 @@ export type SummaryInput = {
   /** sha256 of the generated token ids (equal across runs of a greedy arm unless the output moved). */
   readonly tokenIdsSha256: string;
   readonly measurement: ChatMeasurement;
+  /** The chat's stop, for the counters of the path its decode steps took (absent = none reported). */
+  readonly stop?: { readonly candidateSelection?: CandidateCounts };
+};
+
+/**
+ * The candidate selection's counters (`StopRecord.candidateSelection`): the leading logits a sampled
+ * decode step read back in place of the whole row (0 = the chat did not use the selection), the
+ * steps drawn from them, and the steps that read the whole row after all.
+ */
+export type CandidateCounts = {
+  readonly count: number;
+  readonly steps: number;
+  readonly fallbacks: number;
 };
 
 /** The figures summarized, in display order. */
@@ -89,6 +102,12 @@ export type ArmPromptSummary = {
   readonly split?: SplitSummary;
   /** The host's segments of a decode token (present when a warm chat ran in the tap's host mode). */
   readonly host?: HostSummary;
+  /**
+   * The candidate selection over the warm chats (present when a warm chat's stop reports it): the
+   * largest count a chat asked for, and the steps and the whole-row fallbacks summed. A sampled arm
+   * without it read the whole row at every step.
+   */
+  readonly candidateSelection?: CandidateCounts;
 };
 
 /**
@@ -278,6 +297,9 @@ export const summarizeRuns = (
           measurement.host === undefined ? [] : [measurement.host],
         ),
       );
+      const selections = warm.flatMap(({ stop }) =>
+        stop?.candidateSelection === undefined ? [] : [stop.candidateSelection],
+      );
       entries.push({
         arm,
         prompt,
@@ -286,6 +308,15 @@ export const summarizeRuns = (
         distinctOutputs: new Set(warm.map(({ tokenIdsSha256 }) => tokenIdsSha256)).size,
         ...(split === undefined ? {} : { split }),
         ...(host === undefined ? {} : { host }),
+        ...(selections.length === 0
+          ? {}
+          : {
+              candidateSelection: {
+                count: Math.max(...selections.map(({ count }) => count)),
+                steps: selections.reduce((sum, { steps }) => sum + steps, 0),
+                fallbacks: selections.reduce((sum, { fallbacks }) => sum + fallbacks, 0),
+              },
+            }),
       });
     }
   }

@@ -16,6 +16,12 @@ export type BenchFakeOptions = {
   readonly failBuild?: boolean;
   readonly onPause?: () => void;
   readonly events?: string[];
+  /** The candidate selection counters every chat's stop reports (absent: none, as a pipeline without it). */
+  readonly candidateSelection?: {
+    readonly count: number;
+    readonly steps: number;
+    readonly fallbacks: number;
+  };
 };
 
 /** What the fakes saw over a run. */
@@ -148,7 +154,14 @@ export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
               chatOptions.signal?.throwIfAborted();
               chatOptions.signal?.throwIfAborted();
               record();
-              settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
+              settle({
+                reason: "eos",
+                tokens: maxNewTokens,
+                token: 1,
+                ...(options.candidateSelection === undefined
+                  ? {}
+                  : { candidateSelection: options.candidateSelection }),
+              });
               return "text";
             },
           };

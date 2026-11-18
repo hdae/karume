@@ -12,7 +12,12 @@ import { messageText } from "../record.ts";
 import { buildBenchData, type DecodeBenchData } from "./data.ts";
 import { armLabel, type BenchArm, type BenchSettings, benchPrompt } from "./plan.ts";
 import type { BenchOutcome, BenchStop, RunArm } from "./run.ts";
-import { type ArmPromptSummary, hostSummaryText, splitSummaryText } from "./summary.ts";
+import {
+  type ArmPromptSummary,
+  type CandidateCounts,
+  hostSummaryText,
+  splitSummaryText,
+} from "./summary.ts";
 
 const fixed = (value: number | undefined, digits: number): string =>
   value === undefined ? "—" : value.toFixed(digits);
@@ -20,8 +25,9 @@ const fixed = (value: number | undefined, digits: number): string =>
 /**
  * One arm and prompt in a line: the arm's label, the median decode rate (and the max), the median
  * decode ms per token, its ratio to arm 1's on the same prompt, the median GPU ms per token of a
- * tapped arm, and whether its warm chats generated the same tokens. Rates at 0.1, times and ratios
- * at 0.001.
+ * tapped arm, whether its warm chats generated the same tokens, and — when a chat's stop reports
+ * the candidate selection — where the sampled decode steps drew from. Rates at 0.1, times and
+ * ratios at 0.001.
  */
 const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
   const { spreads } = entry;
@@ -38,8 +44,19 @@ const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
       ? [`GPU ${fixed(spreads.gpuBusyMsPerToken?.median, 3)} ms/token`]
       : []),
     entry.distinctOutputs === 1 ? "outputs identical" : `outputs ${entry.distinctOutputs} distinct`,
+    ...(entry.candidateSelection === undefined ? [] : [candidateText(entry.candidateSelection)]),
   ].join(" · ");
 };
+
+/**
+ * Where the warm chats' sampled decode steps drew from: the GPU's candidates (how many were asked
+ * per step, the steps drawn from them and the steps that read the whole row after all), or the
+ * whole row throughout when the selection was there and not used.
+ */
+const candidateText = ({ count, steps, fallbacks }: CandidateCounts): string =>
+  count === 0
+    ? "candidates not used"
+    : `${count} candidates: ${steps} steps, ${fallbacks} whole-row`;
 
 const stopText = (stop: BenchStop): string | undefined => {
   switch (stop.kind) {
