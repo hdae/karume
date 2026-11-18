@@ -230,6 +230,12 @@ measurements in `docs/research/`.
   choice at 4 or 8 rows by its own kernel is now adopted when a row block of its lanes is not. Existing records keep
   their format (`karume-gemv-sweep/4`); their groups at 4 and 8 rows of the 25 shapes whose default row gained a row
   block are no longer current, and no record holds the row-blocked candidates.
+- The workbench's `gemma4-bench` entry has two switches that change the geometry profile an arm's devices are
+  acquired with: `default-gemv` (the adapter's table without GEMV choices of its own, so the default profile's) and
+  `general-sequential` (no per-shape exception of the sequential GEMV). One interleaved run then compares what a
+  table's GEMV choices buy on the host's GPU, in a browser as under Node. With either switch on any arm, every visit of
+  every arm takes a device of its own, and the record states per arm the choices it ran with
+  (`data.arms[].gemvChoices`); a bench without them runs on one device as before.
 - The workbench's `kernel-check` entry runs a thirteenth check, `gemv-parallel-rows`: the row-blocked parallel GEMV
   against the parallel GEMV at the same lanes, word for word, at every lane count and row block the kernel exists at.
 - `@karume/runtime`: `expert_linear` in a run of two or more tokens walks an expert's weight row once for the rows

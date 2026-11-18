@@ -11,6 +11,7 @@ import type { EntryResult } from "../entry.ts";
 import { messageText } from "../record.ts";
 import { buildBenchData, type DecodeBenchData } from "./data.ts";
 import { armLabel, type BenchArm, type BenchSettings, benchPrompt } from "./plan.ts";
+import { type ArmGemvChoices, gemvChoicesLine } from "./profile.ts";
 import type { BenchOutcome, BenchStop, RunArm } from "./run.ts";
 import {
   type ArmPromptSummary,
@@ -84,6 +85,11 @@ export const decodeBenchResult = (input: {
   readonly settings: BenchSettings;
   readonly arms: readonly RunArm[];
   readonly outcome: BenchOutcome;
+  /**
+   * Per arm, the GEMV choices its devices ran with, in a bench with a profile switch (`undefined`
+   * for an arm none of whose visits began); absent in a bench without one.
+   */
+  readonly gemvChoices?: readonly (ArmGemvChoices | undefined)[];
 }): DecodeBenchResult => {
   const { settings, arms, outcome } = input;
   const { stop } = outcome;
@@ -95,6 +101,7 @@ export const decodeBenchResult = (input: {
     arms,
     visits: outcome.visits,
     chats: outcome.chats,
+    ...(input.gemvChoices === undefined ? {} : { gemvChoices: input.gemvChoices }),
   });
   const stopped = stopText(stop);
   return {
@@ -102,6 +109,11 @@ export const decodeBenchResult = (input: {
     summary: [
       `${outcome.visits.length} of ${arms.length * settings.rounds} visits, ${outcome.chats.length} chats (cold ones included)${stopped === undefined ? "" : ` · ${stopped}`}`,
       ...data.summary.map((entry) => armPromptLine(entry, arms[entry.arm])),
+      ...(input.gemvChoices ?? []).flatMap((choices, index) =>
+        choices === undefined
+          ? []
+          : [gemvChoicesLine(`arm ${index + 1} ${armLabel(arms[index])}`, choices)],
+      ),
       ...splitSummaryText(data.summary, arms),
       ...hostSummaryText(data.summary, arms),
     ],

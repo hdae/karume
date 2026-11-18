@@ -73,7 +73,7 @@ The workbench is private (not published) and is not part of the lanes: its tests
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
 | `anima-single-file` (local) | A single Anima weights file through `anima.Pipeline.fromSingleFile` ([single-file](single-file.md)) against the `anima` mount: the pipeline is built and makes two images of one request (512², the model's default guidance and negative prompt), then, when `compare` is on, `fromPretrained` of the same model and quant does the same; each pipeline is disposed before the next. Parameters: `file` (a path under `inputs/`; default the upstream `anima-base-v1.0` single file), `model` (`anima-v1.0`), `quant` (empty: the model's default), `textConditioner` (`file`: the file's when it holds one; `distribution`: `components: { text_conditioner }` of the mount), `retainConverted` (off: `retainConverted` of `fromSingleFile`, which keeps the converted weights in memory — [single-file](single-file.md#keeping-the-converted-weights)), `compare` (on), `steps` (4), `seed` (42), `source`. No verdict; `data` is a `karume-anima-single-file/1` record ([below](#the-anima-single-file-record)). | The `anima` mount and a file under `inputs/` |
-| `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the integer GEMV × the PLE on the GPU × the decode run-ahead depth × a signal passed or not × the bench's sampler or the distribution's — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token, or in the tap's host mode [the host's segments of a decode token](#the-decode-benchs-host-segments). Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `host`, `linear-reorder` (the Session option `numerics: { ops: { linear: "reorder" } }` on a preset that does not declare linear at `reorder`; refused on one that does), `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`, `no-signal`, `sampled`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
+| `gemma4-bench` (local) | A decode A/B of Gemma 4 arms — a model × a preset × the GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the GEMV choices of the device's profile, of the default profile, or without the sequential variant's per-shape exceptions × the integer GEMV × the PLE on the GPU × the decode run-ahead depth × a signal passed or not × the bench's sampler or the distribution's — visited in A B B A rounds over two fixed prompts, one pipeline resident at a time, `chats` fresh chats per prompt and visit (the first is the cold one and is left out of the summary). It reports the decode tokens per second and ms per token and, through a tap around the host's GPU, the GPU time, dispatches, passes and submits per token, or in the tap's host mode [the host's segments of a decode token](#the-decode-benchs-host-segments). Parameters: `arms` (comma-separated, arm 1 the base: `<mount>/<model>[@<preset>][:<switch>]…` with the switches `tap-off`, `split`, `host`, `linear-reorder` (the Session option `numerics: { ops: { linear: "reorder" } }` on a preset that does not declare linear at `reorder`; refused on one that does), `default-gemv` and `general-sequential` ([the profile switches](#the-decode-benchs-profile-switches)), `integer`, `ple-gpu`, `ahead2` / `ahead4` / `ahead8`, `no-signal`, `sampled`; empty: one arm per Gemma 4 mount whose mirror is present), `chats`, `newTokens`, `rounds`, `sampler`, `prompts`, `subgroups`, `source`. No verdict; a run that a failure stopped after a chat keeps what finished and is `incomplete`. | The Gemma 4 mounts of its arms |
 
 ### The decode bench's host segments
 
@@ -113,6 +113,41 @@ per decode token the submits, queue writes, maps and mapped bytes (`measurement.
 table per arm and prompt: the median and the minimum over the chats of the chat's mean, and the median
 over the chats of the chat's per-token median. `wait` holds the GPU's time for the token; the GPU time
 itself is what a tapped arm of the same run reports.
+
+### The decode bench's profile switches
+
+Two switches of a `gemma4-bench` arm change the geometry profile the arm's devices are acquired with, so that one
+interleaved run compares what a profile's GEMV choices of linear
+([geometry-profiles.md](geometry-profiles.md#the-gemv-choices-of-linear)) buy on the host's GPU, in a browser or
+under Node:
+
+- `default-gemv` — the table the adapter selects, without GEMV choices of its own: the device runs with the default
+  profile's, as it would if its table carried none. On an adapter whose table carries none the arm runs what an arm
+  without the switch runs.
+- `general-sequential` — the GEMV choices without any per-shape exception of the sequential variant: every
+  sequential GEMV of one row runs the general variant.
+- Both on one arm apply in that order, whatever order the arm names them in: the default profile's choices without
+  its exceptions.
+- The tile geometry and every other field of the profile are the selected table's in every arm. The switches change
+  which kernel a linear runs; a sequential variant writes the same words, and the parallel rows of a table and of the
+  default profile can differ, so the outputs of two arms are compared as for any other pair of arms.
+
+The geometry profile is a property of the device:
+
+- A bench in which no arm carries a profile switch acquires one device and runs every visit on it.
+- A bench in which an arm carries one acquires a device for every visit of every arm — with its arm's profile, or
+  with none for an arm without a switch — and releases it with the visit's pipeline, so the arms are treated alike.
+  Its figures are not comparable with those of a bench on one device.
+- The device takes the profile through `acquireGpu({ geometryProfile })`. The bench builds it from the table the
+  runtime selects for the adapter and from the default profile's choices, which it imports from the runtime's source
+  (the runtime exports neither as a value).
+
+Such a bench states, per arm, the choices its devices ran with: `data.arms[].gemvChoices` holds the arm's switches
+in the order they applied, the id of the table the adapter selects (`table`), whether that table carries GEMV choices
+of its own (`tableCarriesGemv`) and the choices with the switches applied (`linearGemv`); the summary has one line
+per arm after the arms' lines (the table, whose choices, the sequential variant with the number of its exceptions,
+the number of parallel rows). An arm none of whose visits began has no `gemvChoices`, and a bench without a profile
+switch has none at all.
 
 ### How the GEMV sweep times a row count
 

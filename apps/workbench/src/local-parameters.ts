@@ -5,7 +5,7 @@
  */
 
 import type { SourceKind } from "@karume/local-distributions/browser";
-import { acquireGpu, type GpuContext } from "@karume/runtime";
+import { acquireGpu, type AcquireGpuOptions, type GpuContext } from "@karume/runtime";
 
 import type { BooleanParameter, ChoiceParameter, GpuOptions } from "./entry.ts";
 
@@ -38,10 +38,11 @@ export const SUBGROUPS_PARAMETER: BooleanParameter = {
  * The device the `subgroups` parameter asks for. With the subgroup features the device can run the
  * 32-lane kernel forms; without them the arms run on the device a plain `acquireGpu()` gives. Which
  * one fits can differ: the 26B model with 64 expert slots builds a second pipeline on a 12 GB GPU
- * only without them (docs/known-issues.md).
+ * only without them (docs/known-issues.md). `gpuOptions` may carry a geometry profile for the device
+ * (the decode bench's profile switches).
  */
 export const acquireWithSubgroups = (
-  gpuOptions: GpuOptions,
+  gpuOptions: GpuOptions & Pick<AcquireGpuOptions, "geometryProfile">,
   subgroups: boolean,
 ): Promise<GpuContext> =>
   acquireGpu({ ...gpuOptions, ...(subgroups ? { subgroups: "available" as const } : {}) });

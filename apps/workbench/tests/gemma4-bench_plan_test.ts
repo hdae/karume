@@ -6,9 +6,11 @@ import {
   armLabel,
   type ArmResolution,
   BENCH_PROMPTS,
+  benchHasProfileSwitch,
   defaultArmDrafts,
   integerGemvSession,
   meetsDistinctIdCondition,
+  PROFILE_SWITCHES,
   resolveArm,
   samplerOf,
   visitOrder,
@@ -269,6 +271,26 @@ describe("the arms", () => {
         { ...mobile, quant: "i4", tap: false, session: integer, pipeline: { pleResidency: "gpu" } },
         "mobile QAT e2b i4 (integer) (PLE GPU) (tap off)",
       ],
+      [
+        { mount: "gemma4", model: "e2b", quant: "bf16", tap: true, profile: ["default-gemv"] },
+        "Gemma 4 e2b bf16 (default GEMV)",
+      ],
+      [
+        { ...mobile, quant: "i4", tap: true, split: true, profile: ["general-sequential"] },
+        "mobile QAT e2b i4 (general sequential) (split)",
+      ],
+      // Both profile switches, after linear at reorder and before the integer GEMV
+      [
+        {
+          ...mobile,
+          quant: "i4",
+          tap: false,
+          linearReorder: true,
+          profile: ["default-gemv", "general-sequential"],
+          session: { ...integer, numerics: { ops: { linear: "reorder" } } },
+        },
+        "mobile QAT e2b i4 (linear reorder) (default GEMV) (general sequential) (integer) (tap off)",
+      ],
       [{ ...mobile, quant: "i4", tap: true, hostMarks: true }, "mobile QAT e2b i4 (host)"],
       [
         { ...mobile, quant: "i4", tap: true, hostMarks: true, noSignal: true },
@@ -281,6 +303,24 @@ describe("the arms", () => {
     ] as const) {
       expect(armLabel(arm)).toBe(label);
     }
+  });
+});
+
+describe("the profile switches", () => {
+  it("are carried from the draft to the arm, and an arm without one has no profile", () => {
+    const switched = resolveArm(draft({ profile: ["general-sequential"] }), MANIFESTS);
+    expect(armOf(switched).profile).toEqual(["general-sequential"]);
+    expect(armOf(resolveArm(draft(), MANIFESTS))).not.toHaveProperty("profile");
+  });
+
+  it("make the bench take a device per visit as soon as one arm carries one", () => {
+    expect(benchHasProfileSwitch([{}, {}])).toBe(false);
+    expect(benchHasProfileSwitch([])).toBe(false);
+    expect(benchHasProfileSwitch([{}, { profile: ["default-gemv"] }])).toBe(true);
+  });
+
+  it("apply default-gemv before general-sequential", () => {
+    expect(PROFILE_SWITCHES).toEqual(["default-gemv", "general-sequential"]);
   });
 });
 

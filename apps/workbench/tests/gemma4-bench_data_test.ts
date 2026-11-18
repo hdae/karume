@@ -48,4 +48,37 @@ describe("the bench's data", () => {
       },
     ]);
   });
+
+  it("records per arm the GEMV choices its devices ran with when the bench has them, and no such field otherwise", () => {
+    const input = {
+      timestampQuery: true,
+      complete: true,
+      settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
+      arms: [armOf(), armOf(), armOf()],
+      visits: [],
+      chats: [],
+    } as const;
+    const choices = {
+      switches: ["general-sequential"],
+      table: "nvidia-ampere",
+      tableCarriesGemv: true,
+      linearGemv: {
+        sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] },
+        rowsThreadTarget: 16384,
+        parallelShapes: [],
+      },
+    } as const;
+    // The third arm's first visit never began
+    const data = buildBenchData({
+      ...input,
+      gemvChoices: [{ ...choices, switches: [] }, choices, undefined],
+    });
+    expect(data.arms.map(({ gemvChoices }) => gemvChoices)).toEqual([
+      { ...choices, switches: [] },
+      choices,
+      undefined,
+    ]);
+    expect(data.arms[2]).not.toHaveProperty("gemvChoices");
+    for (const arm of buildBenchData(input).arms) expect(arm).not.toHaveProperty("gemvChoices");
+  });
 });

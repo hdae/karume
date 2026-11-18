@@ -80,6 +80,20 @@ export const meetsDistinctIdCondition = (prompt: BenchPrompt, distinctIds: numbe
     ? distinctIds < PLE_DISTINCT_ID_THRESHOLD
     : distinctIds >= PLE_DISTINCT_ID_THRESHOLD;
 
+/**
+ * The switches of an arm that change the geometry profile its devices are acquired with, in the
+ * order they apply (`armGeometryProfile` of `./profile.ts`):
+ *
+ * - `default-gemv` — the adapter's table without GEMV choices of its own, so the device runs with
+ *   the default profile's: what the adapter would run if its table carried none;
+ * - `general-sequential` — the GEMV choices without any per-shape exception of the sequential
+ *   variant, so every sequential GEMV of one row runs the general variant.
+ *
+ * Both together are the default profile's choices without its exceptions.
+ */
+export const PROFILE_SWITCHES = ["default-gemv", "general-sequential"] as const;
+export type ProfileSwitch = (typeof PROFILE_SWITCHES)[number];
+
 /** One arm as the `arms` parameter names it (`quant` absent = the model's default preset). */
 export type ArmDraft = {
   readonly key: ModelKey;
@@ -92,6 +106,8 @@ export type ArmDraft = {
    * that does not declare it: the arm against the same preset at `exact`.
    */
   readonly linearReorder?: boolean;
+  /** The profile switches of the arm, in the order of {@link PROFILE_SWITCHES} (absent = none). */
+  readonly profile?: readonly ProfileSwitch[];
   /** Run the tap in its host mode: wall-clock marks at the WebGPU calls, the passes untouched. */
   readonly hostMarks?: boolean;
   /** Send the chats without an `AbortSignal` (absent = with the run's signal). */
@@ -171,6 +187,12 @@ export type BenchArm = {
    */
   readonly linearReorder?: true;
   /**
+   * The profile switches of the arm ({@link PROFILE_SWITCHES}, in that order; absent = the profile
+   * the device resolves to). A bench with such an arm acquires a device per visit, for every arm
+   * ({@link benchHasProfileSwitch}).
+   */
+  readonly profile?: readonly ProfileSwitch[];
+  /**
    * Whether the tap runs in its host mode — wall-clock marks at the WebGPU calls and at the checks
    * of the chat's signal, no pass timing — for the host's segments of a decode token (only with the
    * tap on and not split).
@@ -192,6 +214,20 @@ export type BenchArm = {
   readonly declaredSampler?: DefaultSampler;
 };
 
+/** How an arm's label names a profile switch. */
+export const PROFILE_SWITCH_LABELS: Readonly<Record<ProfileSwitch, string>> = {
+  "default-gemv": "default GEMV",
+  "general-sequential": "general sequential",
+};
+
+/**
+ * Whether an arm of the bench carries a profile switch. The geometry profile is a property of the
+ * device, so such a bench acquires a device for every visit of every arm — the arms are treated
+ * alike —, where a bench without one runs every visit on one device.
+ */
+export const benchHasProfileSwitch = (arms: readonly Pick<BenchArm, "profile">[]): boolean =>
+  arms.some((arm) => arm.profile !== undefined);
+
 export const MOUNT_SHORT_LABELS: Readonly<Record<GemmaMount, string>> = {
   gemma4: "Gemma 4",
   "gemma4-qat": "QAT q4_0",
@@ -210,13 +246,16 @@ export const armLabel = (
     | "noSignal"
     | "samplerKind"
     | "linearReorder"
+    | "profile"
     | "session"
     | "pipeline"
   >,
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
     arm.linearReorder === true ? " (linear reorder)" : ""
-  }${arm.session?.integerGemv === true ? " (integer)" : ""}${
+  }${(arm.profile ?? []).map((name) => ` (${PROFILE_SWITCH_LABELS[name]})`).join("")}${
+    arm.session?.integerGemv === true ? " (integer)" : ""
+  }${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
   }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
     arm.samplerKind === "distribution" ? " (sampled)" : ""
@@ -319,6 +358,7 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       // (`parseArmsText`): it owns those rules.
       ...(draft.split === true ? { split: true } : {}),
       ...(draft.linearReorder === true ? { linearReorder: true } : {}),
+      ...(draft.profile === undefined ? {} : { profile: draft.profile }),
       ...(draft.hostMarks === true ? { hostMarks: true } : {}),
       ...(draft.noSignal === true ? { noSignal: true } : {}),
       ...(draft.sampled === true ? { samplerKind: "distribution" as const } : {}),

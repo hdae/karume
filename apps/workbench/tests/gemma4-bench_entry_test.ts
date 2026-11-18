@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import gemmaBench from "../src/entries/local/gemma4-bench.ts";
 import { ParameterError, parseParameters } from "../src/entry.ts";
 import type { BenchSettings } from "../src/gemma4-bench/plan.ts";
+import { armGemvChoices, gemvChoicesLine } from "../src/gemma4-bench/profile.ts";
 import { benchProgressLine } from "../src/gemma4-bench/progress.ts";
 import { decodeBenchResult } from "../src/gemma4-bench/result.ts";
 import { type RunArm, settleDecodeBench } from "../src/gemma4-bench/run.ts";
@@ -193,6 +194,33 @@ describe("the gemma4-bench entry", () => {
         "arm 1 Gemma 4 e2b bf16 · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · token interval 1.000 ms (min 1.000) · GPU 0.250 ms/token · outputs identical",
         "arm 2 QAT q4_0 e2b i4 (tap off) · Story request · decode 1000.0 tok/s (max 1000.0) · 1.000 ms/token · token interval 1.000 ms (min 1.000) · ×1.000 vs arm 1 · outputs identical",
       ]);
+    });
+
+    it("adds one line per arm with the GEMV choices it ran with in a bench with a profile switch, after the arms' lines, and states them in the data", async () => {
+      const switched: RunArm = { ...REGULAR_ARM, profile: ["default-gemv"] };
+      const arms = [REGULAR_ARM, switched];
+      const { outcome } = await benchOf(arms);
+      const ampere = { vendor: "nvidia", architecture: "ampere", description: "" };
+      const gemvChoices = [armGemvChoices(ampere, []), armGemvChoices(ampere, ["default-gemv"])];
+      const finished = decodeBenchResult({
+        timestampQuery: true,
+        settings: SETTINGS,
+        arms,
+        outcome,
+        gemvChoices,
+      });
+      expect(finished.summary.slice(1, 3).map((line) => line.split(" · ")[0])).toEqual([
+        "arm 1 Gemma 4 e2b bf16",
+        "arm 2 Gemma 4 e2b bf16 (default GEMV)",
+      ]);
+      expect(finished.summary.slice(3)).toEqual([
+        gemvChoicesLine("arm 1 Gemma 4 e2b bf16", gemvChoices[0]),
+        gemvChoicesLine("arm 2 Gemma 4 e2b bf16 (default GEMV)", gemvChoices[1]),
+      ]);
+      expect(finished.data.arms.map((arm) => arm.gemvChoices)).toEqual(gemvChoices);
+      // A bench without a switch says nothing of them
+      const plain = decodeBenchResult({ timestampQuery: true, settings: SETTINGS, arms, outcome });
+      expect(plain.summary).toHaveLength(3);
     });
 
     it("keeps the data body: the workload with its prompt texts, the arms with their distributions, every visit and chat, the summary", async () => {

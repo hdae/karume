@@ -12,7 +12,7 @@ const SIGNAL = new AbortController().signal;
 const FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 const MOUNTS = "gemma4, gemma4-qat, gemma4-qat-mobile";
 const SWITCHES =
-  "tap-off, split, host, linear-reorder, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled";
+  "tap-off, split, host, linear-reorder, default-gemv, general-sequential, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled";
 
 /** The drafts of `text` (the grammar alone; no distribution is read). */
 const draftsOf = (text: string) => parseArmsText(text).map(({ draft }) => draft);
@@ -34,6 +34,8 @@ describe("the arms text", () => {
     ["tap-off", { tap: false }],
     ["split", { tap: true, split: true }],
     ["linear-reorder", { tap: true, linearReorder: true }],
+    ["default-gemv", { tap: true, profile: ["default-gemv"] }],
+    ["general-sequential", { tap: true, profile: ["general-sequential"] }],
     ["host", { tap: true, hostMarks: true }],
     ["no-signal", { tap: true, noSignal: true }],
     ["sampled", { tap: true, sampled: true }],
@@ -65,6 +67,18 @@ describe("the arms text", () => {
     ]);
   });
 
+  it("reads both profile switches of an arm in the order they apply, whatever order the arm names them in", () => {
+    const both = {
+      key: { mount: "gemma4", model: "e2b" },
+      tap: true,
+      profile: ["default-gemv", "general-sequential"],
+    };
+    expect(draftsOf("gemma4/e2b:general-sequential:default-gemv")).toEqual([both]);
+    expect(draftsOf("gemma4/e2b:default-gemv:general-sequential")).toEqual([both]);
+    // An arm without one has no profile field: the bench then runs on one device, as before
+    expect(draftsOf("gemma4/e2b:split")[0]).not.toHaveProperty("profile");
+  });
+
   it("is no arm for an empty or blank text (the default arms)", () => {
     expect(parseArmsText("")).toEqual([]);
     expect(parseArmsText("  ")).toEqual([]);
@@ -90,6 +104,10 @@ describe("the arms text", () => {
     ],
     ["gemma4/e2b:", `arm 1 "gemma4/e2b:": has an empty switch; the switches are ${SWITCHES}`],
     ["gemma4/e2b:split:split", `arm 1 "gemma4/e2b:split:split": names the switch 'split' twice`],
+    [
+      "gemma4/e2b:default-gemv:default-gemv",
+      `arm 1 "gemma4/e2b:default-gemv:default-gemv": names the switch 'default-gemv' twice`,
+    ],
     [
       "gemma4/e2b:ple-gpu:ahead2:ahead4",
       `arm 1 "gemma4/e2b:ple-gpu:ahead2:ahead4": names more than one decode run-ahead depth`,

@@ -21,6 +21,7 @@ import {
   type BenchSettings,
   PLE_DISTINCT_ID_THRESHOLD,
 } from "./plan.ts";
+import type { ArmGemvChoices } from "./profile.ts";
 import type { ChatRecord, RunArm, VisitRecord } from "./run.ts";
 import { type ArmPromptSummary, summarizeRuns } from "./summary.ts";
 
@@ -54,6 +55,13 @@ export type ArmRecord = {
    */
   readonly pipelineOptions: ArmPipelineOptions;
   readonly sampler: SamplerSpec;
+  /**
+   * The GEMV choices the arm's devices ran with — the table the adapter selects, the arm's profile
+   * switches and the choices with the switches applied —, in a bench where an arm carries a profile
+   * switch and every visit has a device of its own. Absent in a bench without one (every visit ran
+   * on one device with the profile it resolves to), and for an arm none of whose visits began.
+   */
+  readonly gemvChoices?: ArmGemvChoices;
 };
 
 export type DecodeBenchData = {
@@ -83,6 +91,8 @@ export const buildBenchData = (input: {
   readonly arms: readonly RunArm[];
   readonly visits: readonly VisitRecord[];
   readonly chats: readonly ChatRecord[];
+  /** Per arm, in the arms' order ({@link ArmRecord.gemvChoices}); absent = no arm has any. */
+  readonly gemvChoices?: readonly (ArmGemvChoices | undefined)[];
 }): DecodeBenchData => {
   const { settings, arms } = input;
   return {
@@ -117,6 +127,9 @@ export const buildBenchData = (input: {
       sessionOptions: arm.session ?? {},
       pipelineOptions: arm.pipeline ?? {},
       sampler: arm.sampler,
+      ...(input.gemvChoices?.[index] === undefined
+        ? {}
+        : { gemvChoices: input.gemvChoices[index] }),
     })),
     visits: input.visits,
     chats: input.chats,

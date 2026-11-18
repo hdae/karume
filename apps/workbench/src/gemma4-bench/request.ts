@@ -31,6 +31,7 @@ import {
   type BenchSettings,
   type DecodeAhead,
   defaultArmDrafts,
+  PROFILE_SWITCHES,
   resolveArm,
   SAMPLER_KINDS,
 } from "./plan.ts";
@@ -42,7 +43,8 @@ const ARM_FORM = "<mount>/<model>[@<preset>][:<switch>]…";
  * The switches of an arm, after its model and preset: `tap-off` (a wall-clock control; the tap is on
  * otherwise), `split` (one timed pass per dispatch), `host` (the tap's host mode: wall-clock marks at
  * the WebGPU calls instead of pass timing), `linear-reorder` (linear at the level `reorder` on a
- * preset that does not declare it), `integer` (the integer GEMV), `ple-gpu` (the PLE on the GPU),
+ * preset that does not declare it), `default-gemv` and `general-sequential` (the profile switches —
+ * `PROFILE_SWITCHES` of `./plan.ts`), `integer` (the integer GEMV), `ple-gpu` (the PLE on the GPU),
  * `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise),
  * `no-signal` (the chats are sent without an `AbortSignal`) and `sampled` (the distribution's sampler
  * with seed 0, whatever the bench's `sampler` is).
@@ -52,6 +54,8 @@ const ARM_SWITCHES = [
   "split",
   "host",
   "linear-reorder",
+  "default-gemv",
+  "general-sequential",
   "integer",
   "ple-gpu",
   "ahead2",
@@ -126,6 +130,9 @@ const parseArm = (text: string, position: number): NamedArm => {
       case "linear-reorder":
         linearReorder = true;
         break;
+      case "default-gemv":
+      case "general-sequential":
+        break;
       case "host":
         hostMarks = true;
         break;
@@ -148,6 +155,7 @@ const parseArm = (text: string, position: number): NamedArm => {
         decodeAhead = AHEAD_DEPTHS[name];
     }
   }
+  const profile = PROFILE_SWITCHES.filter((name) => seen.has(name));
   // The split needs the tap (`resolveArm` drops it from a tap-off draft): text that asks for both
   // is refused rather than run without the split.
   if (split && !tap) {
@@ -181,6 +189,8 @@ const parseArm = (text: string, position: number): NamedArm => {
       tap,
       ...(split ? { split: true } : {}),
       ...(linearReorder ? { linearReorder: true } : {}),
+      // In the order the switches apply, whatever order the arm names them in
+      ...(profile.length === 0 ? {} : { profile }),
       ...(hostMarks ? { hostMarks: true } : {}),
       ...(noSignal ? { noSignal: true } : {}),
       ...(sampled ? { sampled: true } : {}),
