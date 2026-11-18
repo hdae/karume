@@ -658,14 +658,14 @@ test("parseManifest: reads a valid manifest as declared", () => {
 
   const turbo = manifest.models["anima-turbo"];
   assertEquals(turbo.pipeline, { name: "anima", major: 1 });
-  assertEquals(turbo.defaultQuant, "w8a8-s16");
-  assertEquals(turbo.available.quants, ["f16", "w8a8-s16", "f16-c16"]);
+  assertEquals(turbo.defaultQuant, "bf16+dit8-a8-attn8-s16");
+  assertEquals(turbo.available.quants, ["bf16", "bf16+dit8-a8-attn8-s16", "bf16-c16"]);
   assertEquals(turbo.pipelineConfig, { defaults: { steps: 8, guidanceScale: 1 } });
 
   // weights uses the uniform form with a required dtype key, and its content is one container (ADR
   // 0109 decision 3).
-  assertEquals(Object.keys(turbo.weights["transformer"]), ["f16", "i8"]);
-  assertEquals(Object.keys(turbo.weights["vae_decoder"]), ["f16"]);
+  assertEquals(Object.keys(turbo.weights["transformer"]), ["bf16", "i8"]);
+  assertEquals(Object.keys(turbo.weights["vae_decoder"]), ["bf16"]);
   const i8 = turbo.weights["transformer"]["i8"].container;
   assertEquals(i8.parts.length, 3, "the 3 of part 0 + part 1 + part 2");
   assertEquals(i8.parts[0].size, 24 + i8.descriptor.graph.length + i8.descriptor.model.length);
@@ -684,25 +684,25 @@ test("parseManifest: reads a valid manifest as declared", () => {
   // the selection list is built).
   assert(turbo.assets["style_alias"] === turbo.assets["style_vectors"]);
 
-  assertEquals(turbo.quants["w8a8-s16"].session, {
+  assertEquals(turbo.quants["bf16+dit8-a8-attn8-s16"].session, {
     linearCompute: "a8",
     attentionCompute: "a8",
     attentionScoreStorage: "f16",
   });
-  assertEquals(turbo.quants["f16-c16"].gpuFeatures, { shaderF16: true });
-  assertEquals(turbo.quants["f16"].gpuFeatures, undefined);
+  assertEquals(turbo.quants["bf16-c16"].gpuFeatures, { shaderF16: true });
+  assertEquals(turbo.quants["bf16"].gpuFeatures, undefined);
 
   // The second model has only its own quant / dtype surface.
   const lite = manifest.models["anima-lite"];
-  assertEquals(lite.defaultQuant, "w8");
-  assertEquals(lite.available.quants, ["w8"]);
-  assertEquals(lite.available.dtypes, { text_encoder: ["f16"], transformer: ["i8"] });
+  assertEquals(lite.defaultQuant, "bf16+dit8");
+  assertEquals(lite.available.quants, ["bf16+dit8"]);
+  assertEquals(lite.available.dtypes, { text_encoder: ["bf16"], transformer: ["i8"] });
 });
 
 test("parseManifest: sharing the same path across models works (ADR 0041 §5)", () => {
   const manifest = parseManifest(validManifestText);
-  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].container.parts[0];
-  const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].container.parts[0];
+  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["bf16"].container.parts[0];
+  const same = manifest.models["anima-lite"].weights["text_encoder"]["bf16"].container.parts[0];
   assertEquals(same.path, shared.path);
   assertEquals(same.sha256, shared.sha256);
   // There is one table, so the same path folds into the same FileRef instance (and is fetched

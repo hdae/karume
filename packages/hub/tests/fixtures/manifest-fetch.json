@@ -7,7 +7,7 @@
       "pipeline": "anima/1",
       "weights": {
         "text_encoder": {
-          "f16": {
+          "bf16": {
             "container": {
               "descriptor": {
                 "graph": {
@@ -40,7 +40,7 @@
           }
         },
         "text_conditioner": {
-          "f16": {
+          "bf16": {
             "container": {
               "descriptor": {
                 "graph": {
@@ -73,7 +73,7 @@
           }
         },
         "transformer": {
-          "f16": {
+          "bf16": {
             "container": {
               "descriptor": {
                 "graph": {
@@ -137,7 +137,7 @@
           }
         },
         "vae_decoder": {
-          "f16": {
+          "bf16": {
             "container": {
               "descriptor": {
                 "graph": {
@@ -188,21 +188,21 @@
         }
       },
       "quants": {
-        "f16": {
+        "bf16": {
           "weights": {
-            "text_encoder": "f16",
-            "text_conditioner": "f16",
-            "transformer": "f16",
-            "vae_decoder": "f16"
+            "text_encoder": "bf16",
+            "text_conditioner": "bf16",
+            "transformer": "bf16",
+            "vae_decoder": "bf16"
           },
           "session": {}
         },
-        "w8a8-s16": {
+        "bf16+dit8-a8-attn8-s16": {
           "weights": {
-            "text_encoder": "f16",
-            "text_conditioner": "f16",
+            "text_encoder": "bf16",
+            "text_conditioner": "bf16",
             "transformer": "i8",
-            "vae_decoder": "f16"
+            "vae_decoder": "bf16"
           },
           "session": {
             "linearCompute": "a8",
@@ -210,12 +210,12 @@
             "attentionScoreStorage": "f16"
           }
         },
-        "f16-c16": {
+        "bf16-c16": {
           "weights": {
-            "text_encoder": "f16",
-            "text_conditioner": "f16",
-            "transformer": "f16",
-            "vae_decoder": "f16"
+            "text_encoder": "bf16",
+            "text_conditioner": "bf16",
+            "transformer": "bf16",
+            "vae_decoder": "bf16"
           },
           "session": {
             "linearCompute": "f16",
@@ -226,7 +226,7 @@
           }
         }
       },
-      "defaultQuant": "w8a8-s16",
+      "defaultQuant": "bf16+dit8-a8-attn8-s16",
       "pipelineConfig": {
         "defaults": {
           "steps": 8,
@@ -238,7 +238,7 @@
       "pipeline": "anima/1",
       "weights": {
         "text_encoder": {
-          "f16": {
+          "bf16": {
             "container": {
               "descriptor": {
                 "graph": {
@@ -317,15 +317,15 @@
         }
       },
       "quants": {
-        "w8": {
+        "bf16+dit8": {
           "weights": {
-            "text_encoder": "f16",
+            "text_encoder": "bf16",
             "transformer": "i8"
           },
           "session": {}
         }
       },
-      "defaultQuant": "w8",
+      "defaultQuant": "bf16+dit8",
       "pipelineConfig": {}
     }
   }

@@ -31,20 +31,20 @@ const pathsOf = (model: string, weight: string, dtype: string): readonly string[
   partsOf(model, weight, dtype).map((ref) => ref.path);
 
 /** part 0 + part 1 + part 2 (every container in the fixture has 3). */
-export const TEXT_ENCODER_PARTS: readonly string[] = pathsOf("anima-turbo", "text_encoder", "f16");
+export const TEXT_ENCODER_PARTS: readonly string[] = pathsOf("anima-turbo", "text_encoder", "bf16");
 export const TEXT_CONDITIONER_PARTS: readonly string[] = pathsOf(
   "anima-turbo",
   "text_conditioner",
-  "f16",
+  "bf16",
 );
-export const TRANSFORMER_F16_PARTS: readonly string[] = pathsOf(
+export const TRANSFORMER_BF16_PARTS: readonly string[] = pathsOf(
   "anima-turbo",
   "transformer",
-  "f16",
+  "bf16",
 );
 /** Only the i8 container has a **zero-length part 1** (the shape of ADR 0109 decision 3). */
 export const TRANSFORMER_I8_PARTS: readonly string[] = pathsOf("anima-turbo", "transformer", "i8");
-export const VAE_DECODER_PARTS: readonly string[] = pathsOf("anima-turbo", "vae_decoder", "f16");
+export const VAE_DECODER_PARTS: readonly string[] = pathsOf("anima-turbo", "vae_decoder", "bf16");
 
 /** The i8 fetch targets without the zero-length part (these 2 are what the selection lists). */
 export const TRANSFORMER_I8_FETCHED: readonly string[] = partsOf("anima-turbo", "transformer", "i8")

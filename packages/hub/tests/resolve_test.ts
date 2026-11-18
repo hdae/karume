@@ -29,7 +29,7 @@ import {
   TEXT_CONDITIONER_PARTS,
   TEXT_ENCODER_PARTS,
   TOKENIZER,
-  TRANSFORMER_F16_PARTS,
+  TRANSFORMER_BF16_PARTS,
   TRANSFORMER_I8_EMPTY,
   TRANSFORMER_I8_FETCHED,
   TRANSFORMER_I8_PARTS,
@@ -41,7 +41,7 @@ const paths = (refs: readonly FileRef[]): string[] => refs.map((ref) => ref.path
 test("resolveSelection: when omitted, returns the defaultModel / defaultQuant pair by real name", () => {
   const selection = resolveSelection(manifest);
   assertEquals(selection.model, "anima-turbo");
-  assertEquals(selection.quant, "w8a8-s16");
+  assertEquals(selection.quant, "bf16+dit8-a8-attn8-s16");
   // Components in the declaration order of weights (no spelling convention for fetch keys — the
   // entry is the component name itself).
   assertEquals(Object.keys(selection.containers), [
@@ -51,14 +51,14 @@ test("resolveSelection: when omitted, returns the defaultModel / defaultQuant pa
     "vae_decoder",
   ]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
-  // defaultQuant = w8a8-s16 (the transformer is the i8 container).
+  // defaultQuant = bf16+dit8-a8-attn8-s16 (the transformer is the i8 container).
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
 });
 
 test("resolveSelection: specifying a quant switches the dtype selection", () => {
-  const selection = resolveSelection(manifest, { quant: "f16" });
-  assertEquals(selection.quant, "f16");
-  assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_F16_PARTS]);
+  const selection = resolveSelection(manifest, { quant: "bf16" });
+  assertEquals(selection.quant, "bf16");
+  assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_BF16_PARTS]);
   // Only the container switches, and its descriptor comes along (the expected values of the 2
   // documents belong to the container). The expected values are spelled from the fixture's actual
   // values — looking them up again from the same manifest would move both sides together and stay
@@ -70,19 +70,19 @@ test("resolveSelection: specifying a quant switches the dtype selection", () => 
 
 test("resolveSelection: assets do not change when the quant is switched", () => {
   const defaults = resolveSelection(manifest);
-  const f16 = resolveSelection(manifest, { quant: "f16" });
-  assertEquals(f16.assets, defaults.assets);
+  const bf16 = resolveSelection(manifest, { quant: "bf16" });
+  assertEquals(bf16.assets, defaults.assets);
   // Same content, but **the table itself is rebuilt every time** — exposing the parsed manifest's
   // table would let an assignment to the returned assets pollute every later selection, the
   // inventory accounting and evict (the lifetime is handled the same way as containers).
   assertNotStrictEquals(defaults.assets, manifest.models["anima-turbo"].assets);
-  assertNotStrictEquals(f16.assets, defaults.assets);
+  assertNotStrictEquals(bf16.assets, defaults.assets);
 });
 
 test("resolveSelection: specifying a model switches to that model's selection", () => {
   const selection = resolveSelection(manifest, { model: "anima-lite" });
   assertEquals(selection.model, "anima-lite");
-  assertEquals(selection.quant, "w8");
+  assertEquals(selection.quant, "bf16+dit8");
   assertEquals(Object.keys(selection.containers), ["text_encoder", "transformer"]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors"]);
   // A shared path is the same set of 3 across models (ADR 0041 §5, "shared by matching path").
@@ -209,22 +209,22 @@ test("resolveSelection: rejects a quant that does not exist, with the list of av
     () => resolveSelection(manifest, { quant: "q4" }),
     ManifestReferenceError,
   );
-  assertEquals(error.available.quants, ["f16", "w8a8-s16", "f16-c16"]);
+  assertEquals(error.available.quants, ["bf16", "bf16+dit8-a8-attn8-s16", "bf16-c16"]);
   assertEquals(error.available.dtypes, {
-    text_encoder: ["f16"],
-    text_conditioner: ["f16"],
-    transformer: ["f16", "i8"],
-    vae_decoder: ["f16"],
+    text_encoder: ["bf16"],
+    text_conditioner: ["bf16"],
+    transformer: ["bf16", "i8"],
+    vae_decoder: ["bf16"],
   });
 });
 
 test("resolveSelection: the list of quants is the one of the specified model", () => {
   const error = assertThrows(
-    () => resolveSelection(manifest, { model: "anima-lite", quant: "w8a8-s16" }),
+    () => resolveSelection(manifest, { model: "anima-lite", quant: "bf16+dit8-a8-attn8-s16" }),
     ManifestReferenceError,
   );
   // It does not suggest a quant that only another model (anima-turbo) has.
-  assertEquals(error.available.quants, ["w8"]);
+  assertEquals(error.available.quants, ["bf16+dit8"]);
 });
 
 // ---- Component names and asset names go into **separate fields**, so the failure shape of

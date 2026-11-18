@@ -10,7 +10,7 @@
  * complete in the inventory (= all of its refs are present), the files it uses are kept.
  *
  * However, **a selection with exactly the same ref set as the target is not counted as a
- * protector** (for example `f16` and `f16-c16`, same weights, differing only in the session's
+ * protector** (for example `bf16` and `bf16-c16`, same weights, differing only in the session's
  * compute knobs). The cache granularity cannot tell them apart and "delete only one of them" is
  * impossible by definition, so counting it as a protector would give a lying answer that claims
  * "protected" while nothing is deleted. {@link EvictedAssets.alsoEvicted} names which selections

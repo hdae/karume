@@ -37,7 +37,7 @@ import {
   TEXT_CONDITIONER_PARTS,
   TEXT_ENCODER_PARTS,
   TOKENIZER,
-  TRANSFORMER_F16_PARTS,
+  TRANSFORMER_BF16_PARTS,
   TRANSFORMER_I8_FETCHED,
   VAE_DECODER_PARTS,
 } from "./helpers/fixture.ts";
@@ -61,11 +61,11 @@ const MANIFEST_PATH = "karume.json";
 const ASSET_PATHS = declaredRefs(fetchManifest).map((ref) => ref.path);
 
 /**
- * The fixture's default selection (anima-turbo / w8a8-s16), and another model's selection that is a
- * subset of it.
+ * The fixture's default selection (anima-turbo / bf16+dit8-a8-attn8-s16), and another model's
+ * selection that is a subset of it.
  */
 const TURBO: ResolveOptions = {};
-const LITE: ResolveOptions = { model: "anima-lite", quant: "w8" };
+const LITE: ResolveOptions = { model: "anima-lite", quant: "bf16+dit8" };
 
 /**
  * The reference list of the default selection (the order of `selectionRefs` — containers in
@@ -79,7 +79,7 @@ const TURBO_PATHS = [
   TOKENIZER,
   STYLE_VECTORS,
 ];
-/** The reference list of anima-lite/w8 (a proper subset of the default selection). */
+/** The reference list of anima-lite/bf16+dit8 (a proper subset of the default selection). */
 const LITE_PATHS = [...TEXT_ENCODER_PARTS, ...TRANSFORMER_I8_FETCHED, TOKENIZER, STYLE_VECTORS];
 /** The references unique to the default selection (the ones anima-lite does not use). */
 const TURBO_ONLY = [...TEXT_CONDITIONER_PARTS, ...VAE_DECODER_PARTS];
@@ -167,7 +167,7 @@ test("listCachedAssets: a quant that does not exist is a ManifestReferenceError"
 test("evictCachedAssets: when another selection is fully cached, keeps the shared files and deletes only the unique ones", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
-  // Downloading the default selection makes anima-lite/w8, its subset, fully cached too.
+  // Downloading the default selection makes anima-lite/bf16+dit8, its subset, fully cached too.
   await prefetchAssets(loaded, refsOf(loaded, TURBO), { fetch: mock.fetch, caches });
   assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
 
@@ -177,10 +177,11 @@ test("evictCachedAssets: when another selection is fully cached, keeps the share
   assertEquals(paths(result.kept.map((entry) => entry.ref)), LITE_PATHS);
   for (const entry of result.kept) {
     assertEquals(entry.reason, "shared", `wrong reason for ${entry.ref.path}`);
-    // f16 / f16-c16 of anima-turbo lack the transformer's f16 container, so they are not protected.
+    // bf16 / bf16-c16 of anima-turbo lack the transformer's bf16 container, so they are not
+    // protected.
     assertEquals(
       entry.sharedWith,
-      ["anima-lite/w8"],
+      ["anima-lite/bf16+dit8"],
       `wrong protecting selection for ${entry.ref.path}`,
     );
   }
@@ -211,8 +212,8 @@ test("evictCachedAssets: a partly cached selection is not protected (shared file
   );
 });
 
-// ---- Selections with **exactly the same** reference set (the fixture's anima-turbo/f16 and
-// f16-c16 — the same weight files, only the session settings differ). Counting them as protecting
+// ---- Selections with **exactly the same** reference set (the fixture's anima-turbo/bf16 and
+// bf16-c16 — the same weight files, only the session settings differ). Counting them as protecting
 // each other means nothing is ever deleted, and evicted is 0 whichever selection is deleted in
 // whatever order (reported downstream by anima-web).
 
@@ -220,20 +221,20 @@ test("evictCachedAssets: a partly cached selection is not protected (shared file
  * The 2 selections that point at the same reference set, and the labels that appear in the
  * collateral report.
  */
-const F16: ResolveOptions = { quant: "f16" };
-const F16_C16: ResolveOptions = { quant: "f16-c16" };
-const F16_C16_LABEL = "anima-turbo/f16-c16";
-const W8A8_LABEL = "anima-turbo/w8a8-s16";
-const LITE_LABEL = "anima-lite/w8";
+const BF16: ResolveOptions = { quant: "bf16" };
+const BF16_C16: ResolveOptions = { quant: "bf16-c16" };
+const BF16_C16_LABEL = "anima-turbo/bf16-c16";
+const DEFAULT_LABEL = "anima-turbo/bf16+dit8-a8-attn8-s16";
+const LITE_LABEL = "anima-lite/bf16+dit8";
 
 /**
- * The reference list of anima-turbo/f16 (the order of `selectionRefs` — the transformer is the f16
+ * The reference list of anima-turbo/bf16 (the order of `selectionRefs` — the transformer is the bf16
  * container).
  */
-const F16_PATHS = [
+const BF16_PATHS = [
   ...TEXT_ENCODER_PARTS,
   ...TEXT_CONDITIONER_PARTS,
-  ...TRANSFORMER_F16_PARTS,
+  ...TRANSFORMER_BF16_PARTS,
   ...VAE_DECODER_PARTS,
   TOKENIZER,
   STYLE_VECTORS,
@@ -256,8 +257,8 @@ const sharedWithOf = (
 };
 
 /**
- * Warms both the default selection (w8a8-s16) and f16 = all 4 selections of the fixture are fully
- * cached.
+ * Warms both the default selection (bf16+dit8-a8-attn8-s16) and bf16 = all 4 selections of the
+ * fixture are fully cached.
  */
 const prefetchAll = async (
   loaded: LoadedManifest,
@@ -265,7 +266,7 @@ const prefetchAll = async (
   caches: MemoryCacheStorage,
 ): Promise<void> => {
   await prefetchAssets(loaded, refsOf(loaded, TURBO), { fetch: mock.fetch, caches });
-  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+  await prefetchAssets(loaded, refsOf(loaded, BF16), { fetch: mock.fetch, caches });
 };
 
 test("evictCachedAssets: selections with the same reference set do not count as protecting", async () => {
@@ -273,11 +274,11 @@ test("evictCachedAssets: selections with the same reference set do not count as 
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
 
-  const result = await evictCachedAssets(loaded, F16, { caches });
+  const result = await evictCachedAssets(loaded, BF16, { caches });
 
-  // Only the f16-specific container is deleted (if f16-c16 protected it, the result would be 0, and
-  // the siblings could not be untangled in any order).
-  assertEquals(paths(result.evicted), [...TRANSFORMER_F16_PARTS]);
+  // Only the bf16-specific container is deleted (if bf16-c16 protected it, the result would be 0,
+  // and the siblings could not be untangled in any order).
+  assertEquals(paths(result.evicted), [...TRANSFORMER_BF16_PARTS]);
   assertEquals(paths(result.kept.map((entry) => entry.ref)), [
     ...TEXT_ENCODER_PARTS,
     ...TEXT_CONDITIONER_PARTS,
@@ -288,7 +289,7 @@ test("evictCachedAssets: selections with the same reference set do not count as 
   for (const entry of result.kept) {
     assertEquals(entry.reason, "shared", `wrong reason for ${entry.ref.path}`);
     assert(
-      !entry.sharedWith.includes(F16_C16_LABEL),
+      !entry.sharedWith.includes(BF16_C16_LABEL),
       `${entry.ref.path} is protected by a sibling with the same set`,
     );
   }
@@ -296,20 +297,20 @@ test("evictCachedAssets: selections with the same reference set do not count as 
   // order).
   assertEquals(
     sharedWithOf(result.kept, TEXT_ENCODER_PARTS[0]),
-    [W8A8_LABEL, LITE_LABEL],
+    [DEFAULT_LABEL, LITE_LABEL],
     "the selections that protect text_encoder",
   );
   assertEquals(
     sharedWithOf(result.kept, TEXT_CONDITIONER_PARTS[0]),
-    [W8A8_LABEL],
+    [DEFAULT_LABEL],
     "the selections that protect text_conditioner",
   );
-  assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
+  assertEquals(result.alsoEvicted, [BF16_C16_LABEL]);
 
   // The collateral content — the sibling drops to partly cached (the next load fetches only the
   // missing containers again).
-  assertEquals(paths((await listCachedAssets(loaded, F16_C16, { caches })).missing), [
-    ...TRANSFORMER_F16_PARTS,
+  assertEquals(paths((await listCachedAssets(loaded, BF16_C16, { caches })).missing), [
+    ...TRANSFORMER_BF16_PARTS,
   ]);
   assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
 });
@@ -317,32 +318,33 @@ test("evictCachedAssets: selections with the same reference set do not count as 
 test("evictCachedAssets: with only siblings of the same set, everything is deleted", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
-  // Warm only f16 (w8a8-s16 and anima-lite lack the i8 containers, so they are partly cached).
-  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+  // Warm only bf16 (bf16+dit8-a8-attn8-s16 and anima-lite lack the i8 containers, so they are
+  // partly cached).
+  await prefetchAssets(loaded, refsOf(loaded, BF16), { fetch: mock.fetch, caches });
 
-  const result = await evictCachedAssets(loaded, F16, { caches });
+  const result = await evictCachedAssets(loaded, BF16, { caches });
 
-  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(paths(result.evicted), BF16_PATHS);
   assertEquals(result.kept, []);
   // The 2 partly cached selections do not count as collateral (they were never "downloaded" to
   // begin with).
-  assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
+  assertEquals(result.alsoEvicted, [BF16_C16_LABEL]);
 });
 
 test("evictCachedAssets: only the protect list protects (a sibling of the same set can be protected when named)", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
-  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+  await prefetchAssets(loaded, refsOf(loaded, BF16), { fetch: mock.fetch, caches });
 
-  const result = await evictCachedAssets(loaded, F16, { caches, protect: [F16_C16] });
+  const result = await evictCachedAssets(loaded, BF16, { caches, protect: [BF16_C16] });
 
   assertEquals(result.evicted, []);
-  assertEquals(paths(result.kept.map((entry) => entry.ref)), F16_PATHS);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), BF16_PATHS);
   for (const entry of result.kept) {
     assertEquals(entry.reason, "shared", `wrong reason for ${entry.ref.path}`);
     assertEquals(
       entry.sharedWith,
-      [F16_C16_LABEL],
+      [BF16_C16_LABEL],
       `wrong protecting selection for ${entry.ref.path}`,
     );
   }
@@ -354,13 +356,13 @@ test("evictCachedAssets: an empty protect does not protect other fully cached se
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
 
-  const result = await evictCachedAssets(loaded, F16, { caches, protect: [] });
+  const result = await evictCachedAssets(loaded, BF16, { caches, protect: [] });
 
-  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(paths(result.evicted), BF16_PATHS);
   assertEquals(result.kept, []);
   // The 3 fully cached selections that were not protected are collateral (in the manifest's
   // declaration order).
-  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
+  assertEquals(result.alsoEvicted, [DEFAULT_LABEL, BF16_C16_LABEL, LITE_LABEL]);
 });
 
 test("evictCachedAssets: the target itself mixed into protect is ignored", async () => {
@@ -369,11 +371,11 @@ test("evictCachedAssets: the target itself mixed into protect is ignored", async
   await prefetchAll(loaded, mock, caches);
 
   // The target cannot be protected from itself — the result is the same as `protect: []`.
-  const result = await evictCachedAssets(loaded, F16, { caches, protect: [F16, F16] });
+  const result = await evictCachedAssets(loaded, BF16, { caches, protect: [BF16, BF16] });
 
-  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(paths(result.evicted), BF16_PATHS);
   assertEquals(result.kept, []);
-  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
+  assertEquals(result.alsoEvicted, [DEFAULT_LABEL, BF16_C16_LABEL, LITE_LABEL]);
 });
 
 test("evictCachedAssets: a quant in protect that does not exist is a ManifestReferenceError", async () => {
@@ -381,7 +383,7 @@ test("evictCachedAssets: a quant in protect that does not exist is a ManifestRef
   const { loaded } = await load(caches);
 
   await assertRejects(
-    () => evictCachedAssets(loaded, F16, { caches, protect: [{ quant: "w4" }] }),
+    () => evictCachedAssets(loaded, BF16, { caches, protect: [{ quant: "w4" }] }),
     ManifestReferenceError,
     "w4",
   );
@@ -440,7 +442,7 @@ test("evictCachedAssets: narrowing weights does not delete the rest of the same 
   const result = await evictCachedAssets(loaded, TURBO_VAE, { caches });
 
   // Only the unique files of the narrowed role are deleted. The 2 assets are protected by the fully
-  // cached anima-lite/w8.
+  // cached anima-lite/bf16+dit8.
   assertEquals(paths(result.evicted), [...VAE_DECODER_PARTS]);
   assertEquals(paths(result.kept.map((entry) => entry.ref)), [TOKENIZER, STYLE_VECTORS]);
   for (const entry of result.kept) {
@@ -467,17 +469,17 @@ test("evictCachedAssets: protect protects both subsets with the same label", asy
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
 
-  // Protect the same selection (w8a8-s16) with 2 subsets. An implementation that folds by label
-  // keeps the last one and deletes text_encoder.
-  const result = await evictCachedAssets(loaded, F16, {
+  // Protect the same selection (bf16+dit8-a8-attn8-s16) with 2 subsets. An implementation that folds
+  // by label keeps the last one and deletes text_encoder.
+  const result = await evictCachedAssets(loaded, BF16, {
     caches,
     protect: [
-      { quant: "w8a8-s16", weights: ["text_encoder"] },
-      { quant: "w8a8-s16", weights: ["vae_decoder"] },
+      { quant: "bf16+dit8-a8-attn8-s16", weights: ["text_encoder"] },
+      { quant: "bf16+dit8-a8-attn8-s16", weights: ["vae_decoder"] },
     ],
   });
 
-  assertEquals(paths(result.evicted), [...TEXT_CONDITIONER_PARTS, ...TRANSFORMER_F16_PARTS]);
+  assertEquals(paths(result.evicted), [...TEXT_CONDITIONER_PARTS, ...TRANSFORMER_BF16_PARTS]);
   assertEquals(paths(result.kept.map((entry) => entry.ref)), [
     ...TEXT_ENCODER_PARTS,
     ...VAE_DECODER_PARTS,
@@ -488,11 +490,11 @@ test("evictCachedAssets: protect protects both subsets with the same label", asy
     // The same label does not appear twice (one name even when 2 subsets protect it).
     assertEquals(
       entry.sharedWith,
-      [W8A8_LABEL],
+      [DEFAULT_LABEL],
       `wrong protecting selection for ${entry.ref.path}`,
     );
   }
-  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL]);
+  assertEquals(result.alsoEvicted, [DEFAULT_LABEL, BF16_C16_LABEL]);
 });
 
 // ---- The dedupe key of the protecting side is **label + reference set** (so that two different
@@ -655,7 +657,7 @@ test("evictCachedAssets: evicted is only what the source claims it deleted", asy
   const result = await evictCachedAssets(loaded, TURBO, { caches });
 
   // The deletable candidates are the turbo-specific ones (the rest is protected by the fully cached
-  // anima-lite/w8). The source deletes only the first of them.
+  // anima-lite/bf16+dit8). The source deletes only the first of them.
   assertEquals(paths(result.evicted), [TURBO_ONLY[0]]);
   // Candidates that were not deleted (vae_decoder and others) appear in neither evicted nor kept —
   // kept is only what was protected.
@@ -687,9 +689,9 @@ test("evictCachedAssets: alsoEvicted is only the selections that use a reference
   const loaded = await loadManifest(firstOnlyEvictSource(), { fetch: mock.fetch, caches });
   await prefetchAll(loaded, mock, caches);
 
-  // Protect only anima-lite/w8 = the candidates are the parts of F16 that lite does not use. The
-  // source deletes only the first of them (part 0 of text_conditioner).
-  const result = await evictCachedAssets(loaded, F16, { caches, protect: [LITE] });
+  // Protect only anima-lite/bf16+dit8 = the candidates are the parts of BF16 that lite does not use.
+  // The source deletes only the first of them (part 0 of text_conditioner).
+  const result = await evictCachedAssets(loaded, BF16, { caches, protect: [LITE] });
 
   assertEquals(paths(result.evicted), [TEXT_CONDITIONER_PARTS[0]]);
   assertEquals(paths(result.kept.map((entry) => entry.ref)), [
@@ -697,9 +699,9 @@ test("evictCachedAssets: alsoEvicted is only the selections that use a reference
     TOKENIZER,
     STYLE_VECTORS,
   ]);
-  // anima-lite/w8 stays fully cached and shares text_encoder, but none of those files was deleted,
-  // so it does not appear as collateral (counting by candidates would list it).
-  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL]);
+  // anima-lite/bf16+dit8 stays fully cached and shares text_encoder, but none of those files was
+  // deleted, so it does not appear as collateral (counting by candidates would list it).
+  assertEquals(result.alsoEvicted, [DEFAULT_LABEL, BF16_C16_LABEL]);
   assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
   assert(
     hasEntry(hubCache(caches), payloadFor(VAE_DECODER_PARTS[0])),
@@ -711,11 +713,11 @@ test("evictCachedAssets: when nothing is deleted, alsoEvicted is empty", async (
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest(noEvictSource(), { fetch: mock.fetch, caches });
-  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+  await prefetchAssets(loaded, refsOf(loaded, BF16), { fetch: mock.fetch, caches });
 
-  const result = await evictCachedAssets(loaded, F16, { caches });
+  const result = await evictCachedAssets(loaded, BF16, { caches });
 
-  // The candidates are every reference of F16 (f16-c16 with the same set does not protect), but the
+  // The candidates are every reference of BF16 (bf16-c16 with the same set does not protect), but the
   // source claims to have deleted none.
   assertEquals(result.evicted, []);
   assertEquals(result.kept, []);
@@ -724,7 +726,7 @@ test("evictCachedAssets: when nothing is deleted, alsoEvicted is empty", async (
     [],
     "claims collateral although no one dropped to partly cached",
   );
-  assertEquals((await listCachedAssets(loaded, F16_C16, { caches })).missing, []);
+  assertEquals((await listCachedAssets(loaded, BF16_C16, { caches })).missing, []);
 });
 
 // ---- The identity of the content key. The inventory matches by the (path, sha256) pair — folding

@@ -27,7 +27,7 @@ import {
   TEXT_CONDITIONER_PARTS,
   TEXT_ENCODER_PARTS,
   TOKENIZER,
-  TRANSFORMER_F16_PARTS,
+  TRANSFORMER_BF16_PARTS,
   TRANSFORMER_I8_FETCHED,
   VAE_DECODER_PARTS,
 } from "./helpers/fixture.ts";
@@ -562,7 +562,7 @@ test("fetchAssets: returns every key and fetches the same path only once", async
   );
   assertEquals(assets["transformer[0]"], payloadFor(TRANSFORMER_I8_FETCHED[0]));
   // The containers of dtypes that were not chosen are not fetched, not even one part.
-  for (const path of TRANSFORMER_F16_PARTS) {
+  for (const path of TRANSFORMER_BF16_PARTS) {
     assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} is fetched`);
   }
   for (const bytes of Object.values(assets)) {
