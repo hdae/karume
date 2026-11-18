@@ -221,11 +221,21 @@ generation of a prompt gave the same token ids in both arms.
 
 ## 7. Checks
 
-- The GPU tests of the tree on the RTX 3080 Ti (`logs/job-tests-bench.log`, commit `47760d48`): 5 files, 25 tests
-  passed — the grouped form against the one-row form word for word, the expert-linear kernel check (both forms against
-  `linear`'s GEMV at the 26B shapes), the Session tests and the expert cache's. The same files pass on Mesa's llvmpipe.
-- The 26B cut model's product case (`KARUME_SERIES=1`, `e2e_gemma4_26b_cut_test.ts`, `logs/cut-test-product.log`):
-  the sha256 rows of this machine at the golden rows still hold with the grouped form in the teacher-forced chunks.
+- The GPU tests of the branch on the RTX 3080 Ti (`logs/final-tests-cut.log`): 5 files, 26 tests passed — the grouped
+  form against the one-row form word for word, the expert-linear kernel check (the one-row form, the grouped form and
+  the grouped form over a pool against `linear`'s GEMV at the 26B shapes, with experts picked by up to 16 rows), the
+  Session tests and the expert cache's, one of which runs the grouped form over the pool. The same files pass on
+  Mesa's llvmpipe.
+- The WGSL of both forms is pinned by snapshots; the one-row fixtures were generated from the kernel module of the
+  branch point.
+- The 26B cut model (`KARUME_SERIES=1`, `e2e_gemma4_26b_cut_test.ts`; the file takes longer than one GPU job of ten
+  minutes, so its cases ran by name in five jobs — `logs/cut-test-3456.log`, `cut-test-7a.log`, `cut-test-7bc.log`,
+  `cut-test-7d.log`, `cut-test-7e.log`; 13 cases passed, and the upstream-parity case is opt-in): the sha256 rows of
+  this machine at the golden rows still hold with the grouped form in the teacher-forced chunks (④); under the expert
+  cache the golden rows are the resident Session's bytes (⑦a, ⑦d) and the tokens are those without the cache, with and
+  without self-speculation (⑦b, ⑦c, ⑦d, ⑦e). In ⑦e, 130 verifies had several rows and ran one grouped dispatch per
+  gate_up and one one-row dispatch per down, and 6 verifies had no draft and ran every `expert_linear` on the one-row
+  kernel. One case the runner counts beside the 14 the file names was left out by the name filters and did not run.
 - Every generation of the A/Bs between the branch point's kernel and the tree gave the same token ids in both arms
   (depth 4, without self-speculation, and the look-ahead build without self-speculation).
 
@@ -233,10 +243,6 @@ generation of a prompt gave the same token ids in both arms.
 
 - A cool card, and any other device: Chrome on the RTX 5070 Ti (the `kernel-check` entry for the identity, the chat for
   the speed), Metal.
-- The cut model's cases under the expert cache (⑦a to ⑦e of `e2e_gemma4_26b_cut_test.ts`: the cache against a resident
-  Session, self-speculation, and the verify census that now expects gate_up grouped and down one-row). The whole file
-  does not fit the five minutes a GPU job was given that day; a run cut off at 285 s had passed its cases up to ⑥
-  (`logs/cut-test-all.log`).
 - The fitted slots, the preset `i4`, temperature 1, and the per-kernel times of a verify (queued, and withdrawn when the
   GPU queue was cut to one short job at a time).
 - The grouped walk with the look-ahead or 8 words to a round; walks of other row counts than 8 / 4 / 2 / 1 (the bench
