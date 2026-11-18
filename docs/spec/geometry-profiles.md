@@ -138,7 +138,10 @@ adapter's match and measures nothing at run time.
   activations, is refused.
 - M = 1, the level `exact`, row counts above 8, the subgroup form, a row that takes packed activations and the
   linear → static_quantize fusion run what they ran without the field.
-- No row of the default profile carries a row block.
+- The default profile's rows carry the row block the derivation adopts from two GEMV sweep records of the RTX
+  3080 Ti at M = 4 and 8 ([perf-ledger](../perf-ledger.md) K-108): rows of the Gemma 4 q4_0 QAT shapes. A row those
+  records did not support — below ×1.10 in a group, or a baseline that was unsteady in one record — and the rows that
+  were not measured (the mobile QAT shapes, the i8 output heads) carry none.
 
 ## Deriving the GEMV choices
 

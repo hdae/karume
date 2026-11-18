@@ -59,13 +59,15 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // value edits the default profile (re-measuring as its comments require) and this copy with it, so
 // the table is the kernel module's 66 rows plus the rows added since: the five MTP drafter rows of
 // 2026-11-18 (two after the E4B rows, three after the 12B rows). The sequential variant and the
-// thread target are still the kernel module's.
+// thread target are still the kernel module's. The `rowBlock` of a row is another change since
+// (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do not
+// read it.
 // ---------------------------------------------------------------------------
 
 const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
-  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
+  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
   {
     storage: "i4",
     n: 1536,
@@ -75,7 +77,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     packedActivations: false,
     stagedActivations: true,
   },
-  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
   {
     storage: "i4",
     n: 1536,
@@ -84,9 +86,10 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
   { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
   { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false },
   {
     storage: "i4",
@@ -97,7 +100,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     packedActivations: false,
     stagedActivations: true,
   },
-  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
   {
     storage: "i4",
     n: 1536,
@@ -106,6 +109,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
   { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false },
   { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4, packedActivations: false },
@@ -120,8 +124,8 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
   { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
   { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
   { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
-  { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
+  { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
   { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
   { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false },
   {
@@ -133,7 +137,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     packedActivations: false,
     stagedActivations: true,
   },
-  { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
   {
     storage: "i4",
     n: 2560,
@@ -142,10 +146,11 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
-  { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
   {
     storage: "i4",
     n: 2560,
@@ -154,6 +159,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
   { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
   { storage: "i4", n: 2048, k: 2560, group: 512, lanes: 4, packedActivations: false },
@@ -170,9 +176,9 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
   { storage: "i4", n: 256, k: 1024, group: 32, lanes: 32, packedActivations: false },
   { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
   { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
   {
     storage: "i4",
     n: 3840,
@@ -190,6 +196,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
   {
     storage: "i4",
@@ -228,10 +235,10 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     packedActivations: false,
     stagedActivations: true,
   },
-  { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },
-  { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
+  { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
   { storage: "i4", n: 1024, k: 2816, group: 32, lanes: 32, packedActivations: false },
   { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
   {
@@ -260,6 +267,7 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     lanes: 32,
     packedActivations: false,
     stagedActivations: true,
+    rowBlock: 2,
   },
   { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
 ];

@@ -118,7 +118,8 @@ describe("--gemv-records on a registered table", () => {
     );
     assertStringIncludes(
       text,
-      `  - i4 g32 n8960 k1536 (case ${PLE}): parallel-l4 -> staged-l8 (×1.300 [1], ×1.300 [2])`,
+      // The default's row carries a row block of 4; the records show none faster for 8 lanes
+      `  - i4 g32 n8960 k1536 (case ${PLE}): parallel-l4 with row blocks of 4 -> staged-l8 (×1.300 [1], ×1.300 [2])`,
     );
     assertStringIncludes(text, "linearGemv: written to the table");
     // The registered table has no field: the differences are against the default's choices
@@ -163,7 +164,7 @@ describe("--gemv-records on a registered table", () => {
     assertEquals(header.includes("Adoption: a geometry replaces"), false);
     assertStringIncludes(
       header,
-      " *   - i4 g32 n8960 k1536 (case i4g32-n8960-k1536): parallel-l4 -> staged-l8",
+      " *   - i4 g32 n8960 k1536 (case i4g32-n8960-k1536): parallel-l4 with row blocks of 4 -> staged-l8",
     );
   });
 

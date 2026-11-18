@@ -320,10 +320,16 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
   // DECIDED: only measured shapes are eligible for the parallel GEMV (linear at the level `reorder`).
   // Not an automatic selection by GPU name.
   // docs/decisions/0098-linear-gemv-parallel.md
+  //
+  // A row's `rowBlock` (the row-blocked kernel at M = 2..8) is set only where the GEMV derivation
+  // adopts it from two sweep records of the RTX 3080 Ti at M = 4 and 8 (2026-11-18): at least ×1.10
+  // faster than the row without one in every group, the baseline steady in both records
+  // (perf-ledger K-108). A row of the Gemma 4 q4_0 QAT shapes without it was below that, or had a
+  // record whose baseline was unsteady; the mobile QAT rows and the i8 heads were not measured.
   parallelShapes: [
-    { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
+    { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
+    { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+    { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
     {
       storage: "i4",
       n: 1536,
@@ -333,7 +339,7 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       packedActivations: false,
       stagedActivations: true,
     },
-    { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
     {
       storage: "i4",
       n: 1536,
@@ -342,9 +348,10 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
     { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false },
     {
       storage: "i4",
@@ -355,7 +362,15 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       packedActivations: false,
       stagedActivations: true,
     },
-    { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false },
+    {
+      storage: "i4",
+      n: 12288,
+      k: 1536,
+      group: 32,
+      lanes: 4,
+      packedActivations: false,
+      rowBlock: 4,
+    },
     {
       storage: "i4",
       n: 1536,
@@ -364,6 +379,7 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false },
     { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4, packedActivations: false },
@@ -384,9 +400,17 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // for regular E4B from the upstream config (hidden 2560, intermediate 10240, kv 2, 42 layers, PLE
     // 256) and for QAT E4B from the container descriptor of the distribution mirror.
     // E4B regular i4 g32: per_layer_model_projection (42×256) — lanes from E2B 8960×1536 (unmeasured)
-    { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    {
+      storage: "i4",
+      n: 10752,
+      k: 2560,
+      group: 32,
+      lanes: 4,
+      packedActivations: false,
+      rowBlock: 4,
+    },
     // E4B regular i4 g32: q (sliding) — lanes from E2B 2048×1536 (unmeasured)
-    { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
     // E4B regular i4 g32: k / v (sliding) — lanes from E2B 256×1536 (unmeasured)
     { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
     // E4B regular i4 g32: per_layer_input_gate — lanes from E2B 256×1536 (unmeasured)
@@ -402,7 +426,15 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       stagedActivations: true,
     },
     // E4B regular i4 g32: gate / up — lanes from E2B 6144×1536 (unmeasured)
-    { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    {
+      storage: "i4",
+      n: 10240,
+      k: 2560,
+      group: 32,
+      lanes: 4,
+      packedActivations: false,
+      rowBlock: 4,
+    },
     // E4B regular i4 g32: down — lanes from E2B 1536×6144 (unmeasured)
     {
       storage: "i4",
@@ -412,13 +444,22 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     // E4B regular i4 g32: per_layer_projection — lanes from E2B 1536×256 (unmeasured)
-    { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
     // E4B regular i4 g32: q (full) — lanes from E2B 4096×1536 (unmeasured)
-    { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
     // E4B regular i4 g32: k / v (full) — lanes from E2B 512×1536 (unmeasured)
-    { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
+    {
+      storage: "i4",
+      n: 1024,
+      k: 2560,
+      group: 32,
+      lanes: 32,
+      packedActivations: false,
+      rowBlock: 2,
+    },
     // E4B regular i4 g32: o (full) — lanes from E2B 1536×4096 (unmeasured)
     {
       storage: "i4",
@@ -428,6 +469,7 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     // E4B regular i8: lm_head (tied embedding) — lanes from E2B 262144×1536 (unmeasured)
     { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
@@ -467,10 +509,10 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
     // q (full), q (sliding), k / v (sliding)
     { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+    { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
     // k (full)
-    { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false },
+    { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
     // o (sliding), o (full), down
     {
       storage: "i4",
@@ -489,6 +531,7 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     {
       storage: "i4",
@@ -543,10 +586,10 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // 32; the rows that narrow take staged 32 (staged 16 ties, unstaged 32 and plain 4 lose); and
     // the output head takes 4, which beats 8 and 16 here (32 does not build).
     // q (full), q (sliding), k / v (sliding), gate / up
-    { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },
-    { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 4 },
+    { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+    { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+    { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
     // k (full), router
     { storage: "i4", n: 1024, k: 2816, group: 32, lanes: 32, packedActivations: false },
     { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
@@ -577,6 +620,7 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
       lanes: 32,
       packedActivations: false,
       stagedActivations: true,
+      rowBlock: 2,
     },
     // lm_head (tied embedding)
     { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },

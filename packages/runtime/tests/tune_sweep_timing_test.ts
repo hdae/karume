@@ -650,16 +650,18 @@ describe("the GEMV sweep's quick look", () => {
     }
   });
 
-  it("weighs the reorder class against the default's choice where the derivation only checks a regression (M = 4: parallel-l8 at ×2.25 the fastest but faster than parallel-l4 goes on; staged-l2 at ×1.3 parallel-l4 does not)", async () => {
-    const plan = namedPlan(PLE_CASE, 4, ["parallel-l4", "parallel-l8", "staged-l2", "staged-l32"]);
-    assertEquals(plan.profile.reorder, "parallel-l4");
+  it("weighs the reorder class against the default's choice where the derivation only checks a regression (M = 4: parallel-l8 at ×2.25 the fastest but faster than the default's choice goes on; staged-l2 at ×1.3 parallel-l4 does not)", async () => {
+    // The default's choice at M = 4: the row-blocked kernel of the case's row
+    const reference = "staged-l4r4";
+    const plan = namedPlan(PLE_CASE, 4, [reference, "parallel-l8", "staged-l2", "staged-l32"]);
+    assertEquals(plan.profile.reorder, reference);
     const key = (name: string): string => {
       const candidate = plan.candidates.find((one) => one.name === name);
       if (candidate === undefined) throw new Error(name);
       return keyAt(PLE_CASE, 4, candidate);
     };
     const times = new Map([
-      [key("parallel-l4"), 10_000],
+      [key(reference), 10_000],
       [key("parallel-l8"), 9_000],
       [key("staged-l2"), 13_000],
       [key("staged-l32"), 4_000],
@@ -706,7 +708,11 @@ describe("the GEMV sweep's quick look", () => {
 describe("the GEMV sweep's skipping at M = 4 and 8", () => {
   /** A band so wide that the fake device's zero outputs hold it: every check passes, times decide. */
   const WIDE = { atol: 1e30, rtol: 0 };
-  /** The default's choice at reorder (both row counts), and three candidates of the class. */
+  /**
+   * The default's choice at reorder at M = 1 and three candidates of the class. At M = 4 the row's
+   * choice is its row-blocked kernel, which these plans do not name; the kernel of M = 1 is measured
+   * there whatever its own row says.
+   */
   const REORDER = ["parallel-l4", "parallel-l8", "staged-l32", "staged-l2"];
   const identical = gemvCandidates(PLE_CASE, 4, "full", GATES).find(
     (candidate) => candidate.class === "identical",

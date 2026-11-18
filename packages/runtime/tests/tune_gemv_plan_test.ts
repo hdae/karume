@@ -170,7 +170,14 @@ describe("the baseline and the profile's choices", () => {
 
   it("reads the parallel row of the shape at reorder, and the baseline outside the parallel range", () => {
     assertEquals(gemvProfileChoice(PLE, 1, "reorder").name, "parallel-l4");
-    assertEquals(gemvProfileChoice(caseOf("i4g32-n1536-k6144"), 4, "reorder").name, "staged-l32");
+    // A row with a row block: its own kernel at M = 1, the row-blocked one at M = 4 and 8
+    const down = caseOf("i4g32-n1536-k6144");
+    assertEquals(gemvProfileChoice(down, 1, "reorder").name, "staged-l32");
+    assertEquals(gemvProfileChoice(down, 4, "reorder").name, "staged-l32r2");
+    assertEquals(gemvProfileChoice(PLE, 4, "reorder").name, "staged-l4r4");
+    assertEquals(gemvProfileChoice(PLE, 8, "reorder").name, "staged-l4r4");
+    // A row without one: the kernel of M = 1 at every row count
+    assertEquals(gemvProfileChoice(caseOf("i4g32-n1536-k2048"), 4, "reorder").name, "staged-l32");
     assertEquals(gemvProfileChoice(PLE, 16, "reorder").name, gemvBaseline(PLE, 16).name);
   });
 });
@@ -351,8 +358,9 @@ describe("the candidates", () => {
         plans.map(({ m }) => m),
         [4],
       );
-      // The default's choice at reorder is measured with them, the baseline is the plan's own
-      assertEquals(names(plans[0]?.candidates ?? []), ["c32u4r1", "parallel-l4", "staged-l8"]);
+      // The default's choice at reorder (the row's row-blocked kernel at M = 4) is measured with
+      // them, the baseline is the plan's own
+      assertEquals(names(plans[0]?.candidates ?? []), ["c32u4r1", "staged-l8", "staged-l4r4"]);
       assertEquals(plans[0]?.baseline.name, gemvBaseline(PLE, 4).name);
     });
 
@@ -449,8 +457,11 @@ describe("the candidates", () => {
 describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1)", () => {
   /** The default's choice at reorder at M = 1 and at M = 4 (PLE's parallel row). */
   const DEFAULT_REORDER = "parallel-l4";
-  /** The references at M = 4: PLE's baseline there and the default's choice at reorder. */
-  const REFERENCES = { exact: "c32u4r2", reorder: DEFAULT_REORDER } as const;
+  /**
+   * The references at M = 4: PLE's baseline there and the default's choice at reorder, which is the
+   * row-blocked kernel of the row (its row block is 4).
+   */
+  const REFERENCES = { exact: "c32u4r2", reorder: "staged-l4r4" } as const;
   const REFERENCE_TIME = 1000;
 
   /** A timed M = 1 row that held its check. */

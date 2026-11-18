@@ -199,7 +199,12 @@ measurements in `docs/research/`.
   lanes (a verify row still equals the decode row of the same input); the pipeline key of such a dispatch is the
   staged key with `:r<rows>`, and M = 1, the level `exact`, the subgroup form and packed-activation rows are
   unchanged. A table refuses a row block the kernel does not exist at (its staged activations must fit 16,384 B of
-  workgroup storage) or one on a packed-activation row.
+  workgroup storage) or one on a packed-activation row. 25 rows of the default profile — Gemma 4 q4_0 QAT shapes of
+  E2B, E4B, 12B and 26B — carry the row block the RTX 3080 Ti measured faster at 4 and at 8 rows in two sweeps
+  (×1.1 to ×3.4 per dispatch), and every table without GEMV choices of its own runs with them. On that card under
+  Node the verify run of a q4_0 QAT E2B `i4-fast` speculative decode takes 10.0 ms instead of 13.8 ms (1.36 instead
+  of 1.93 times a decode step), and a 128-token speculative turn 0.96 s instead of 1.20 s (1.02 to 1.05 s without
+  speculation).
 - `@karume/runtime/tune`: the GEMV sweep measures the row-blocked parallel GEMV at 4 and 8 rows (candidates
   `staged-l<lanes>r<rows>`; a row's `choice` gains `parallelRows`), for the lane counts M = 1 leaves adoptable and
   the default row's, and measures the default row's own kernel of M = 1 there as well. `deriveLinearGemvChoices`
@@ -208,7 +213,8 @@ measurements in `docs/research/`.
   when it is at least ×1.10 faster in every group there. `LinearGemvDecision` gains `defaultRowBlock`,
   `derivedRowBlock` and `rowGains` (the new type `LinearGemvRowGain`). A candidate that is slower than the default's
   choice at 4 or 8 rows by its own kernel is now adopted when a row block of its lanes is not. Existing records keep
-  their format (`karume-gemv-sweep/4`).
+  their format (`karume-gemv-sweep/4`); their groups at 4 and 8 rows of the 25 shapes whose default row gained a row
+  block are no longer current, and no record holds the row-blocked candidates.
 - The workbench's `kernel-check` entry runs a thirteenth check, `gemv-parallel-rows`: the row-blocked parallel GEMV
   against the parallel GEMV at the same lanes, word for word, at every lane count and row block the kernel exists at.
 - `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
