@@ -135,8 +135,8 @@ describe("boundary check of results.json", () => {
   it("reads comparisons (accepts a non-finite null and a run without a band, throws on a broken band)", () => {
     const banded = {
       output: "step1-latent",
-      reference: "f16+dit8",
-      practical: "f16+dit8-a8-attn8-s16",
+      reference: "bf16+dit8",
+      practical: "bf16+dit8-a8-attn8-s16",
       relRms: 0.012,
       maxAbs: 0.31,
       band: { metric: "relRms" as const, floor: 0.001, ceiling: 0.025 },
@@ -145,7 +145,7 @@ describe("boundary check of results.json", () => {
     const { band: _dropped, ...unbanded } = banded;
     const loaded = seat("deno-a", "2026-09-26", "anima-ab", [
       {
-        id: "f16+dit8-a8-attn8-s16-1024",
+        id: "bf16+dit8-a8-attn8-s16-1024",
         status: "fail",
         elapsedMs: 3,
         comparisons: [banded, { ...unbanded, output: "m_p", relRms: null }],

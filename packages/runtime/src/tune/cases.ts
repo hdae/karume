@@ -3,9 +3,10 @@
  *
  * The source is anima's op census (`scenarios[0].weights[]` of
  * `outputs/bench/karume-anima/2026-09-04_op-census/summary.json` — 1024px generation, patch tokens
- * S = 4096, quant `f16+dit8-a8-attn8-s16`). The values are **copied** from the census, and the
- * census is not read at run time (the tool does not depend on the census being present or on its
- * format — the shapes do not move unless anima's IR changes).
+ * S = 4096, the default quant then named `f16+dit8-a8-attn8-s16`, now `bf16+dit8-a8-attn8-s16`). The
+ * values are **copied** from the census, and the census is not read at run time (the tool does not
+ * depend on the census being present or on its format — the shapes do not move unless anima's IR
+ * changes).
  *
  * `censusCount` is the census's `count` (the number of nodes in one graph = one forward of each
  * component). Rows with M = 1024 (512²) are not in the census — they replace the M of the 1024px
@@ -66,9 +67,9 @@ export const SWEEP_OPS: readonly SweepOp[] = [
 ];
 
 /**
- * linear (`x[M,K] · Wᵀ[K,N] + b[N]`). `linear` is f16-stored weights × f32 compute (the same `wf16`
- * as the DiT and the text components of quant `f16`); `i8a8-linear` is the integer dot product of
- * i8 weights (per-channel scale) × per-token i8 activations.
+ * linear (`x[M,K] · Wᵀ[K,N] + b[N]`). `linear` is f16-stored weights × f32 compute (`wf16`, the
+ * storage of anima's float components when the census was taken; they are bf16 now); `i8a8-linear`
+ * is the integer dot product of i8 weights (per-channel scale) × per-token i8 activations.
  */
 export type LinearCase = {
   readonly id: string;
@@ -710,7 +711,8 @@ const K88_SQUARE_LINEAR = k88Linear({
  *   default preset stores it): the three 3×3 conv2d of a next chunk (the chunk's frames in the
  *   batch: 2 at 32², 4 at 64², 4 at 128²) and of a first chunk (1 frame each) — the three heaviest
  *   of each chunk's five (the other two are 1×1 at 16²).
- * - anima's VAE decoder (`karume-anima`, f16): c192 at 256² (6 nodes) and c384 at 128² (5).
+ * - anima's VAE decoder (`karume-anima`, f16 as it was stored when the cases were copied; it is
+ *   bf16 now, which these cases do not sweep): c192 at 256² (6 nodes) and c384 at 128² (5).
  *
  * `censusCount` counts the nodes in the unit its `censusGroup` names ({@link K88_CENSUS}).
  */

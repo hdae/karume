@@ -506,8 +506,8 @@ test("round trip: A/B measurements appended by runRecordedCase reach the reader 
     const results = openResults("anima-ab", { root, environment: ENVIRONMENT });
     const comparison: Comparison = {
       output: "step1-latent",
-      reference: "f16+dit8",
-      practical: "f16+dit8-a8-attn8-s16",
+      reference: "bf16+dit8",
+      practical: "bf16+dit8-a8-attn8-s16",
       relRms: 1.2e-2,
       maxAbs: 0.31,
       band: { metric: "relRms", floor: 1e-3, ceiling: 2.5e-2 },
