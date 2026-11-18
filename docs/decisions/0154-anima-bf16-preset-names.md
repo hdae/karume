@@ -16,8 +16,8 @@
 Every upstream component of Anima is BF16: the text encoder, the text conditioner and the VAE of the base checkpoint
 (310, 118 and 194 tensors, headers read), and the transformer of each of the five official checkpoints on Hugging Face
 (685 BF16 tensors each, headers read on 2026-11-18). The two community fine-tunes of the extra repository are not on
-disk, but in their f16 containers 99.65–99.96 % of the 16-bit words have the low three mantissa bits zero (a true F16
-file: 13 %), so their source values are bf16-representable.
+disk; the headers of their upstream files, read the same day, hold 685 BF16 tensors each, and in their f16 containers
+99.65–99.96 % of the 16-bit words have the low three mantissa bits zero (a true F16 file: 13 %).
 
 The distribution nevertheless stored the text stack (text encoder, text conditioner, VAE decoder) in f16 for six of its
 seven presets, and the transformer in f16 for two of them. Only the preset `bf16` (ADR 0131 decision 3) kept the upstream
@@ -114,4 +114,5 @@ distributions were built from are no longer on disk.
 - The item that re-exports the f16 containers made before the corrected f16 rounding rule loses its Anima part.
 - The unpublished 2.9B Anima distribution takes these names at its first publication, so it is renamed only once.
 - Families whose upstream is F32 (Irodori, Wan, Lucida) are not touched: whether bf16 storage avoids a loss there is not
-  known. MOSS-Image and the Gemma 4 E2B drafter, whose BF16 upstreams ship only as int8, may gain bf16 presets later.
+  known. MOSS-Image and the Gemma 4 E2B drafter have BF16 upstreams and ship only as int8. bf16 presets for any of the
+  five are probably not added: they run well quantized, and bf16 weights of their size are too heavy for a browser.
