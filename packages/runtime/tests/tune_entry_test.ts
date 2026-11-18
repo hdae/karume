@@ -282,6 +282,9 @@ describe("runGeometrySweep: real GPU", () => {
         candidateSet: "quick",
         cases: [id],
         rounds: 1,
+        // Every row is checked against the default's output below: without the quick look no row is
+        // screened, so none is left without its check whatever the device's timing does.
+        quickLookMargin: 0,
         onProgress: (progress) => {
           if (progress.kind !== "status") kinds.push(progress.kind);
           if (progress.kind === "row") notified.push(progress.row);
@@ -332,6 +335,8 @@ describe("runGeometrySweep: real GPU — the geometries option (ADR 0117 addendu
         cases: [id],
         geometries: names,
         rounds: 1,
+        // The named geometries are all timed and checked (no row screened by the quick look)
+        quickLookMargin: 0,
       });
       assertEquals(swept.settings.geometries, names);
       assertEquals(
