@@ -613,12 +613,15 @@ What explains the report (the first two are upstream's behaviour too):
 - At weight 1 a style changes the speech less than another seed does: 0.7–2.7 dB for the six styles against about 4.5 dB
   for a seed and 15 dB for another text. The effect grows about linearly with the weight and is plain from about 5.
 - `Neutral` is the mean row the formula mixes towards, so its weight changes nothing (the waveform is bit-identical).
-- The playground's weight control ends at 2 (`apps/playground/src/models/sbv2/request.ts`); upstream's goes to 20.
+- The playground's weight control ended at 2; upstream's goes to 20 (default 1, as the distribution's).
 
-Open, undecided:
+Closed (2026-11-19):
 
-- No test fails if the style stops having an effect: the sha256 rows and the export's golden use Neutral at weight 1.
-- Whether the playground's weight range follows upstream's.
+- The playground's weight control runs to 20 in steps of 0.1, as upstream's, and its hint says that `Neutral` ignores
+  the weight (`apps/playground/src/models/sbv2/request.ts`).
+- A test fails if the style stops reaching the audio (`packages/e2e/tests/e2e_sbv2_style_test.ts`: another style
+  differs from `Neutral`, `Neutral` is bit-identical at two weights, weight 0 is `Neutral`). Until then the sha256
+  rows and the export's golden, all at `Neutral` and weight 1, were the only checks.
 
 Record: `outputs/diag/sbv2-style-2026-11-18/` (`REPORT.md`, the scripts, the tables, and WAV files of the settings
 compared under `listen/`; local, untracked). Not covered: the other three models, and upstream's own text front end.
