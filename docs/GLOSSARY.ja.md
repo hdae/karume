@@ -27,17 +27,17 @@
 | strategy registry △ | 戦略の登録簿 | op ごとのカーネルの実装戦略の一覧。recipe・融合・見積もり・census・検証キャッシュが同じものを読む。`linear`（`linear-strategies.ts`）と states 系の attention（`state-attention-strategies.ts`）には有り・ほかの op は未実装 | — | ADR 0152 決定 8 |
 | split-K linear △ | split-K の linear | K 方向の積和をスライスに分けて部分和を出し、あとで足し合わせる `linear` の戦略（reorder）。内部オプションでだけ選べる | — | `linear-splitk.ts`・research 2026-11-15 |
 | regression corpus △ | 回帰コーパス | 実モデルのグラフを数層に切ったもの（幅は実寸）+ seed から生成した重みで、runtime が自分のテストとして回す集合。融合の同一性・決定性（u32）と環境ごとの sha256 行を確かめる。`exact` と `reorder` の距離は記録だけ | — | spec/verification.md |
-| kernel-set fingerprint △ | カーネルの集合の指紋 | テストケースがコンパイルした WGSL のハッシュ。sha の参照値に添え、検証キャッシュのキーにも使う。未実装 | — | ADR 0152 決定 4・6 |
-| verification cache △ | 検証キャッシュ | 環境・データ・コードのキーが変わっていないテストファイルの結果を再利用する仕組み。「cached（未実行）」と別の状態で表示。未実装 | — | ADR 0152 決定 6 |
+| kernel-set fingerprint △ | カーネルの集合の指紋 | テストファイルが dispatch した WGSL（ラベルと sha256）の集合。テストの setup が記録し、sha の参照値に一致した run ごとに `outputs/references/` に残すので、不一致のメッセージが変わったカーネルを示す。参照値の行への格納と集合による fail / warn の規則、検証キャッシュのキーとしての利用は未実装 | — | ADR 0152 決定 4・6・spec/verification.md |
+| verification cache △ | 検証キャッシュ | 環境・データ・コードのキーが変わっていないテストファイルの結果を再利用する仕組み。既定（`record`）は全部走らせて記録だけ、`KARUME_VERIFY_CACHE=reuse` で記録が有効なファイルを走らせず skip 1 件として表示する（pass としては数えない） | — | spec/verification.md |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
-| q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み）、各モデルに QAT の MTP drafter が付く。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
+| q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B / 26B A4B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み・26B の expert は step が f16 の `int4-sym-g-f16`）、E2B / E4B / 12B には QAT の MTP drafter が付く（26B には無い）。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
 | mobile QAT line △ | モバイル QAT 系 | Gemma 4 の配布 `karume-gemma4-qat-mobile`（旧 `karume-gemma4-qat`）。公式モバイル版の固定 INT2 / INT4 / INT8 と SRQ を保つ E2B / E4B。契約は `gemma4-qat/1` | 「QAT 版」だけで呼ぶ（2 系統あるので取り違える） | ADR 0097 追記 10 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
-| storage dtype | 格納型 | 容器に書いた重みの形（f32 / f16 / i8 / i4 / i2） | — | glossary.md |
+| storage dtype | 格納型 | コンテナに書いた重みの形（f32 / f16 / bf16 / i8 / i4 / i4f16 / i2 / i32） | — | glossary.md |
 | activation quantization | 活性量子化（a8） | 活性を int8 に量子化して計算する実行形。品質に効くのでプリセットの中身（明示） | — | ADR 0025 / 0030 |
 | oracle | オラクル | 正しさの物差しになる自前の参照実装（TS 鏡像・f64 参照） | — | ADR 0005 / 0147 |
 | tolerance band △ | 許容帯 | オラクルとの差の上限（`atol + rtol·\|ref\|`） | 帯 | op-tolerance.ts |
-| contract class (E / C / R / Q) | 契約クラス | 変種の主張の強さ（鏡像 / 合成 / 加算順 / 近似） | — | ADR 0147 決定 2 |
+| contract class (exact / composition / reorder / approximation) | 契約クラス（Exact・Composition・Reorder・近似） | 数値を変える変種がどの形で正しさを示すか: Exact = TS の鏡像と atol 0 / Composition = ホストで丸めた入力 + 既存の f32 カーネルと atol 0 / Reorder = 加算順だけが違う（帯は参照の op と同じ）/ 近似 = 誤差モデルから導いた広い帯 | E / C / R / Q の 1 文字 | ADR 0147 決定 2 |
 | variant | 変種 | あるノブの値 1 つに対応するカーネル経路 | 入居者 | ADR 0147 決定 6 |
 | option / knob △ | オプション（ノブ） | `SessionOptions` の個別の設定 | 席（実行の席） | ADR 0147 決定 6 |
 | fallback △ | フォールバック | 形や limit が適格でないとき参照の変種へ落ちること。診断のパイプラインキーに必ず出る | 縮退・沈黙縮退 | ADR 0147 決定 8 |
@@ -66,7 +66,7 @@
 | GPTQ | GPTQ | 校正データで丸めを補正する方式（出荷は格子が RTN と同じ版） | — | perf-ledger Q-6 |
 | fixed quantization (importing QAT) | 固定量子化 | 上流 checkpoint の整数と scale を再量子化せずに書く経路 | — | ADR 0097 追記 3 |
 | grid import (QAT) △ | 格子の取り込み | QAT のチェックポイントが持つ 4-bit の格子（32 要素ごとの整数 [-8, 7] と 1 つの step）を丸め直さずに取り込むこと。q4_0 QAT 系（`karume-gemma4-qat`）の E2B / E4B / 12B の重み、E2B / E4B の PLE（索引 schema 4）、QAT の drafter で使う | 丸め直し | glossary.md・ADR 0128 追記 2026-11-03 |
-| level (reference / practical / opt-in) △ | 参照レベル / 実用レベル / opt-in レベル | 経路の目的と受け入れの道筋（契約クラスとは別の軸） | 層・参照層・実用層 | ADR 0147 決定 1 |
+| level (reference / practical / opt-in / preset) △ | 参照レベル / 実用レベル / opt-in レベル / プリセット | 経路の目的と受け入れの道筋（契約クラスとは別の軸） | 層・参照層・実用層 | ADR 0147 決定 1 |
 | approximate reference / declared approximation △ | 宣言した近似（近似を含む参照） | 唯一の経路にある近似。オラクル・上流との距離・理由を記録する | — | ADR 0147 決定 10 |
 | default-on fusion △ | 既定オンの融合 | 融合前とビット同一で、オプションなしで走る融合 | — | ADR 0147 決定 5・9 |
 | Session canary △ | Session 構築時のカナリア | 融合と融合前を同じ入力で走らせ u32 で比べる。不一致なら警告して外す | — | ADR 0147 決定 9 |
@@ -76,6 +76,8 @@
 | applicability query △ | 適用可否の問い合わせ | 同じ判定を公開 API で返す（manifest と part 0 だけで） | — | ADR 0147 決定 7 |
 | device-capability switch △ | 機能不足による切り替え | adapter に機能が無いとき定めた経路へ移る（警告とパイプラインキー） | 縮退・沈黙縮退 | ADR 0147 決定 8 |
 | dominated configuration △ | 劣位の構成 | 同じ速さで明らかに品質が悪い、または同じ品質で遅い構成 | — | ADR 0147 決定 3 |
+| `int4-sym-g-f16` (`i4f16`) △ | i4f16 | int4 と同じ詰め方のバイトに、グループごとの step を f16 で持つ codec。`expert_linear` だけが読む（Gemma 4 26B の expert） | — | ADR 0145 決定 3 |
+| conv3d w8a8 / `conv8` △ | conv3d の w8a8（`conv8`） | conv3d の整数内積の経路。入力の画素ごとにチャネルにわたって int8 にした活性 × int8 の重み（`convCompute: "a8"`） | — | ADR 0133 |
 
 ## 配布と資産
 
@@ -123,11 +125,21 @@
 | three hash roles | ハッシュの役割 3 分離 | 期待ハッシュ・派生キャッシュキー・内容ハッシュを同じ欄で兼ねない規律 | — | ADR 0108 決定 8 |
 | piece | piece | 上限を超えるテンソルの行範囲分割（束縛表の `pieces[]`） | — | container-v1 §5 |
 | shard | shard（旧配布形の話に限る — 現行の話では part と言う） | 旧配布形のファイル分割単位 | — | ADR 0081 / 0090 |
-| manifest `karume/6` | manifest v6 / `karume/6` | コンテナ配布形の入口の manifest（`karume/5` に `nameMap` を足した形） | — | ADR 0109・ADR 0153 || cross-repository reference | 越境参照 | manifest の FileRef が別の HF リポの commit を指して部品を読む形 | — | ADR 0038 §7 追記・ADR 0109 決定 3 |
+| manifest `karume/6` | manifest v6 / `karume/6` | コンテナ配布形の入口の manifest（`karume/5` に `nameMap` を足した形） | — | ADR 0109・ADR 0153 |
+| cross-repository reference | 越境参照 | manifest の FileRef が別の HF リポの commit を指して部品を読む形 | — | ADR 0038 §7 追記・ADR 0109 決定 3 |
 | component replacement (`components`) | 部品の差し替え（`components`） | 別の `karume/6` リポの同じ役割の部品で差し替えること | 部品差し替え席 | ADR 0108 決定 19・ADR 0109 決定 10 |
 | PLE index schema 3 | PLE 索引 schema 3 | コンテナの資産に入れた PLE の索引。scale は行ごとに f32 が 1 つ | — | ADR 0085 追記 2026-09-22 |
 | PLE index schema 4 △ | PLE 索引 schema 4 | schema 3 に必須の `groupSize` を足し、`groupSize` 個の値ごとに f32 の scale を 1 つ持つ PLE の索引。q4_0 QAT 系の int4 の表（`groupSize` 32）の形 | — | ADR 0085 追記 2026-11-04（schema 4） |
 | PLE index schema 5 △ | PLE 索引 schema 5 | bf16 の表の PLE の索引。値はチェックポイントの bf16 のまま（1 値 2 バイト）で、scale の表を持たない。通常の gemma4 の `bf16` プリセットの形 | — | ADR 0085 追記 2026-11-04（schema 5） |
+| converting source △ | 変換しながら供給する取得元 | `@karume/convert` の `BlockSource`（`openConvertingSource`）。読まれる block ごとにテンソル一覧の重みをその場で符号化し、配布形のプリセットのコンテナとして渡す（`int8-sym` / `bf16` / `f32`・exporter とビット単位で同じ） | — | spec/convert.md |
+| plan (of a conversion) △ | 変換先の割り付け | 変換先プリセットの part 0 を「何を作るか」として読んだもの（初期化子ごとの codec・`rowAxis`・`groupSize`・scale・piece の行範囲・各 block の位置）。グラフからは導かない | 計画（作業の計画とは別の語） | spec/convert.md |
+| tensor list △ | テンソル一覧 | 変換の入力。テンソル名 → 要素型（`F32` / `F16` / `BF16`）・形状・バイトを読む関数 | — | spec/convert.md |
+| name map △ | 名前の対応表（name map） | 上流の重みファイルのキーが、どの部品のどの初期化子かを書いた JSON（`karume-name-map/1`）。配布形は `name-map.json` に持ち、manifest の `nameMap` が指す | — | spec/convert.md・ADR 0153 |
+| layout (of a name map) △ | 上流ファイルの構成 | 上流の重みがどの形で置かれているか（1 ファイルか、部品ごとのファイルか）。ファイルのキーから見分ける。codec の展開経路の layout とは別 | — | spec/convert.md |
+| ranged reader (safetensors) △ | 範囲読み出しのリーダー | `{ size, read(offset, length) }`。ヘッダだけで開き、テンソルごとにちょうどそのバイトを 1 回の範囲読み出しで読む | — | spec/safetensors.md |
+| single file (weights) △ | 単一ファイルの重み | 利用者が持つ上流形式の重みファイル（上流の公開版やファインチューン・1 ファイルに複数の部品）。`fromSingleFile` が配布形と組み合わせてパイプラインを作る | 単一形（コンテナを 1 ファイルにまとめた形とは別） | spec/single-file.md |
+| converted component △ | 変換して読む部品 | 重みがテンソル一覧から来る部品。part 0・const part・資産の part だけを取得し、残りの part は変換で作る | — | spec/single-file.md |
+| role table (single file) △ | 部品の役割の表 | ファミリーが `fromSingleFile` に宣言する、ファイルから取る部品・ファイルに必須かどうか・変換先のコンテナ | — | spec/single-file.md |
 
 ## 検証
 
@@ -194,6 +206,14 @@
 | workbench | workbench（訳さない） | チェックと計測を GPU 上で実行し、1 回の実行につき JSON の記録を 1 つ残す private のブラウザアプリ（`apps/workbench`）。ADR 0152 が harness と呼ぶもの | ハーネス | spec/workbench.md |
 | batch (workbench) | バッチ | workbench のエントリの実行（エントリの id とパラメータの値）を順に並べた JSON ファイル。シェルと Node のコマンドが 1 回の操作で順に実行し、ステップごとに `batch` 欄つきの通常の記録を 1 つ残す。追跡するものは `apps/workbench/batches/`・追跡しないものは `inputs/workbench/batches/`。条件・繰り返し・期待値は持たない | — | spec/workbench.md#batches |
 | per-GPU evidence record △ | GPU ごとの証拠の記録 | workbench の kernel-check エントリの記録を vendor / architecture / backend / browser ごとに残す | — | ADR 0147 決定 9 |
+| kernel identity check (`kernel-check`) △ | カーネルの同一性チェック | バックエンドのコンパイラが同じ式を同じに扱う前提のカーネル変種や書き換えが、元のカーネルと同じ出力の語（u32）を書くかをバックエンドごとに確かめる 13 項目。runtime の Node の GPU テストと workbench の `kernel-check` エントリが同じ実装（`@karume/kernel-checks`）を回す | — | packages/kernel-checks/README.md・spec/workbench.md |
+| reorder strategies key (`REORDER_STRATEGIES`) △ | reorder 戦略の非公開キー | adapter に依存する reorder の戦略（subgroup32 の GEMV と RMS・バイトプレーン GEMV・fold なしの並列 attention）を選ぶ private な Session キー。Session が自分で選ぶことはない | — | session-types.ts |
+| disabled fusion rules key (`DISABLED_FUSION_RULES`) △ | 融合を外すテスト用キー | 組み込みの融合ルールを名前で外すテスト専用の Session キー（融合なしの側を作る） | — | session-types.ts |
+| Session A/B △ | Session A/B | 速さのための融合を、run 全体の wall clock で採るか決めるチェック（A B B A の順・出力は u32 で比較）。判定は adopt / reject / inconclusive | — | ADR 0117 追記 2026-11-11 |
+| arm (session A/B) △ | アーム | Session A/B の片側（`open` / `run` / `report` / `close` を持つ値） | — | session-ab.ts |
+| noise floor (session A/B) △ | ノイズの下限 | 1 ラウンドの中でアームが自分自身に対して動く幅。差がこの中なら inconclusive | — | session-ab-judge.ts |
+| twin-graph test (fusion) △ | 融合の双子グラフのテスト | 融合した Session と、同じ値で融合しない Session を GPU で比べ、出力を u32 で比べるテスト | — | ADR 0040 追記 2026-09-12 |
+| contract set △ | 契約一式 | op を足すときに一緒に入れるもの（`OP_CONTRACTS`・exporter の `ops.py` / `shapes.py`・`op-contracts.json`・CPU 参照・golden の `COVERAGE`） | — | ADR 0059 決定 7 |
 
 ## op の語彙
 
@@ -211,6 +231,8 @@
 | blocked scan (GDN) △ | ブロック化スキャン | (a3)。逐次スキャンの状態を 8 / 16 token ずつ UT 変換で進める形。長い T で速いが丸めが逐次スキャンと違う。性能の候補に留める | — | ADR 0135 決定 3 |
 | chunked scan (WY / UT form) △ | チャンク形式（WY / UT 形式） | 上流の prefill の算法（64 token の chunk・3 dispatch）。RTX 3080 Ti ではどの T でも遅く不採用 | — | ADR 0135 決定 3 |
 | accurate exp △ | 高精度 exp | 組み込みの exp の代わりに使う、範囲縮小つき多項式の exp。組み込みの偏りが減衰の積で溜まるのを防ぐ。GDN の走査では MUST | — | ADR 0135 決定 3 |
+| `expert_linear` △ | expert_linear（MoE の射影の op） | routed MoE の射影をまとめた追加 op。`index` は E にわたる `topk` の出力 1 | — | ADR 0145 決定 2 |
+| grouped form (`expert_linear`) △ | expert ごとのまとめ読み | 2〜768 トークンの run で、同じ expert を選んだ行が重みの行の読み出しを共有する `expert_linear` の形。各行は自分の和を k の昇順で持つので、出力は 1 行の形と語単位で同じ | — | perf-ledger K-104・expert-linear.ts |
 
 ## 生成と文脈
 
@@ -242,6 +264,7 @@
 | key valid length / padded key axis (online attention) △ | キーの有効長 / 詰めたキー軸 | online の kernel が 4 の倍数でないキー長 N を回す形。int8 の Vᵀ の行を `ceil(N/4)` 語まで 0 で詰め、N 以降のキーは −3.0e38 で消すので詰め物は出力に入らない（③PV の i8a8 は今も N % 4 == 0 が要る） | — | ADR 0132 追記 2026-10-27 |
 | tiled key axis (online attention) △ | タイル順のキー軸 | online の kernel の int8 の Vᵀ を、kernel のキー tile の並び（64 キーずつ、4 列を交互に詰める）で書く形。kernel の Vᵀ の読み込みが 1 回の vec4 で済む。他の形とビット一致（検査で確認）。デバイスの geometry profile が `attentionOnline` を持つときだけ経路が選ぶ（組み込みの表は持たない） | — | ADR 0132 追記 2026-11-12・perf-ledger K-106 |
 | online-route device facts (`attentionDeviceFacts`) △ | online の経路の device の事実 | Session が online の kernel を選ぶかとその形を決める device の事実。見積もりが Session と同じ経路を数えるために公開した | — | ADR 0132 追記 2026-10-28 |
+| online attention (`attentionScoreStorage: "none"`) △ | online attention | S を保存せず、softmax と PV を 1 つのカーネルで進める int8 の attention。近似クラスの唯一の例 | — | ADR 0132 |
 | three-dispatch route (fused attention) △ | 3 dispatch の経路 | スコアを格納する融合 attention の形。①QK がスコア S を書き、② が行の統計（softmax）を取り、③PV が P × V を計算する — attention 1 つに kernel 3 本。online の kernel は同じ attention を 1 dispatch で回し、online が動かないところでは Session がこの経路に落ちる | — | ADR 0132・ADR 0138 Context |
 | P̃ / Vᵀ (int8 attention operands) △ | P̃ / Vᵀ | P̃ = softmax の重みを 1/127 の格子で int8 にしたもの。Vᵀ = V の転置（キーの方向 N が行の中に並ぶ）。どちらも N の方向に 4 キーずつ u32 の 1 語に詰めるので、③PV の i8a8 は N % 4 == 0 が要り、online の kernel はキー軸を詰める（キーの有効長） | — | ADR 0132・ADR 0138 Context |
 | rmsNormRope（rms_norm → pair RoPE fusion）△ | rms_norm と RoPE の融合 | Wan DiT の self-attention の q / k の前処理（トークン行の `rms_norm` → reshape 2 本 → ペア形の RoPE）を、正規化した行を格納しない f32 カーネル 1 本へ畳む融合（素の経路が 256 幅の workgroup の `rms_norm` を使うときだけ。`rmsNormRope` で数える） | — | ADR 0040 追記 2026-10-25 |
@@ -249,11 +272,23 @@
 | staged loop（rounding barrier）△ | 丸めバリアつきのループ | 融合前に格納されていた値のビット列を workgroup メモリに書き、barrier の後で読み直すループ。積と和が fma にまとまるのを防ぐ | — | `stagedLoopWgsl`・kernel-rules |
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
-| geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
+| geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | adapter ごとに選ぶ静的な表。GEMM の幾何（op × 行数バケット）と linear の GEMV の選択（`linearGemv`: 逐次 GEMV の変種と形状ごとの例外・行ブロックのスレッド数の目標・並列 GEMV の行）を持つ。どの表にも合わない adapter は既定プロファイル | — | ADR 0115・spec/geometry-profiles.md |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
 | kernel fingerprint (`provenance.families[family].kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ（op ファミリーごとに 1 つ） | — | ADR 0117 決定 4・追記 2026-11-12 |
 | case-set version (`provenance.families[family].caseSet`) | ケース集合の版 | 掃引ケース（gemm は行数バケットの境界も）から op ファミリーごとに導くハッシュ | — | ADR 0117 決定 4 / 8・追記 2026-11-12 |
 | op family (geometry sweep) △ | op ファミリー（掃引の） | 幾何プロファイルの根拠と照合のキーを分ける単位（gemm / attention / conv2d / i8a8-linear / i8a8-attention / i8a8-conv3d）。モデルの「ファミリー」とは別の語 | — | ADR 0117 追記 2026-11-12 |
+| GEMV sweep (`runGemvSweep`) △ | GEMV の掃引 | linear の GEMV の選択（逐次 GEMV の変種・行ブロック・並列 GEMV の行）を専用の GPU で測る掃引。workbench の `gemv-sweep` エントリ | — | spec/geometry-profiles.md・spec/workbench.md |
+| baseline (GEMV sweep) △ | ベースライン（掃引の） | `exact` の Session が既定プロファイルでその形状・行数に走らせるもの。候補はこれと比べる | 基準カーネル（op ごとに凍結したカーネルとは別） | spec/geometry-profiles.md |
+| warm start (sweeps) △ | ウォームアップ（掃引の） | ケースや行数の計測を始める前に、既定の幾何やベースラインを走らせて GPU を温めること | — | spec/workbench.md |
+| quick look (sweeps) △ | 予備計測 | ウォームアップの後にグループの全カーネルを短く 1 回測り、参照（既定の幾何・GEMV のベースラインと既定の選択）と、クラスの目安から既定 ×1.25 以内のカーネルだけを本計測に回す工程 | — | spec/workbench.md |
+| screened (sweep row) △ | 予備計測で外れた行 | 予備計測で本計測に進まなかった行。ラウンドの時間も出力のチェックも持たないので、採用の根拠にならない | — | spec/workbench.md |
+| skipped (GEMV sweep row) △ | 測らなかった行 | 同じ run の M = 1 の結果から採用できないと決まった reorder の候補を、M = 4 / 8 で測らずに残した行 | — | spec/geometry-profiles.md |
+| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る） | — | spec/geometry-profiles.md |
+| steadiness bound (GEMV derivation) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えたグループは、時間の根拠にしない | — | spec/geometry-profiles.md |
+| group (GEMV evidence) △ | 計測のグループ | 1 つの記録の、1 ケース × 1 行数の計測（要約と行） | — | spec/geometry-profiles.md |
+| current (row, case, group) △ | いまの runtime に合う（行・ケース・グループ） | 指紋が手元の runtime の作るカーネルと一致し、導出の根拠に使える状態 | — | spec/geometry-profiles.md |
+| GEMV measurement plan (`--gemv-plan`) △ | GEMV の計測の不足分（`--gemv-plan`） | 手元の記録で導出を完全にするために足りない計測を、workbench のバッチとして書き出したもの | 計画（作業の計画とは別の語） | spec/geometry-profiles.md |
+| identical class / reorder class (GEMV sweep) △ | ビット同一の候補 / reorder の候補 | 掃引の候補を加算順で 2 つに分けたもの。前者はベースラインと語単位で同じ、後者は linear の帯の中で加算順が違う | — | spec/geometry-profiles.md |
 | rounding-error bound (E) | 丸め誤差の上界 | 100 µs 丸めが既定比に与える相対誤差の上界 | — | ADR 0117 決定 3 |
 | rounding-error bound (E of the measurement check) | 丸め誤差の上界 / 計測のチェック | E ≤ 1% の観測だけを比の材料にする計測の検査 | 計測の門 | ADR 0117 決定 3 |
 | matching (`geometryProfileMismatch`) | 照合（表の） | 保存した表を今の adapter と runtime に当ててよいかを見る純関数 | — | ADR 0117 決定 5 |
@@ -277,6 +312,9 @@
 | prefetch form (rms_norm v2) △ | 先読み形（rms_norm v2） | 256 幅の rms_norm と RMS → add 融合で、weight を workgroup ごとに 1 回、行の x（と residual）を縮約の前にレジスタへ読み、出力ループの回数を定数にした形。縮約と値の式は v1 と同じ文字列でビット一致 | — | ADR 0017 追記 2・perf-ledger K-99 |
 | chat dialect △ | チャットの書式 | Gemma 4 のモデルが従うチャットテンプレートの種類（`gemma4` / `gemma4-unified`） | — | glossary.md |
 | suppressed tokens △ | 抑制トークン | モデルが生成しないトークン id（選択の前に logit を −∞ にする） | — | glossary.md |
+| candidate selection △ | GPU 上の候補の絞り込み | top-k から引く decode の 1 ステップで、logits を GPU に置いたまま先頭の候補だけを読み戻し、ホストで合わせて引く形 | — | spec/generation.md |
+| leading entries △ | 先頭の要素 | `topk` カーネルの順位（値の降順・同値なら id の小さい方が先）で並べた logits の行の先頭 n 個 | — | spec/generation.md |
+| abort lap △ | 中断チェックの区切り | run のループで、各境界が次の境界の `setTimeout(0)` を仕掛けて中断を確かめる仕組み（`createAbortLap`） | — | spec/generation.md |
 
 ## 動画生成
 
