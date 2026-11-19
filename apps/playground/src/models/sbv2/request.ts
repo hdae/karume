@@ -38,9 +38,13 @@ export const KNOBS: readonly {
     key: "styleWeight",
     label: "Style weight",
     min: 0,
-    max: 2,
-    step: 0.05,
-    hint: "1 = the chosen style itself, 0 = the mean style, above 1 exaggerates it.",
+    // The range and step of the upstream web UI: at 1 a style moves the speech less than another
+    // seed does, so a style is heard only well above it.
+    max: 20,
+    step: 0.1,
+    hint:
+      "1 = the chosen style itself, 0 = the mean style, above 1 exaggerates it; lower it when the " +
+      "voice breaks. Neutral is the mean style, so the weight does not change it.",
   },
   {
     key: "lengthScale",
