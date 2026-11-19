@@ -54,6 +54,17 @@ Node and Deno.
   0.22.0 as `karume-irodori-v4-large`, pinned as `irodori.SOURCES["irodori-v4-large"]`, which the Playground mount reads
   its repository name from; its goldens are in the test-asset dataset (the `dit` io goldens store the condition K/V
   once). Left: only the Playground page in a browser.
+- **Regular Gemma 4 `bf16-fast`** (the maintainer's approval of 2026-11-19 — perf-ledger K-110): the preset is in the
+  recipe (`gemma4/distribution.py`, `GEMMA4_PARALLEL_QUANTS`) and the local mirror `models/karume-gemma4/` (manifest
+  and card rewritten by the assembly, no weights file changed), with its e2e cases; `bf16` stays the default. Open:
+  - the decode measurement of `bf16` against `bf16-fast` per device (E2B and E4B, with and without E2B's drafter,
+    interleaved in one process), and from it the one sentence on speed per model (`GEMMA4_SPEED_NOTE` — a model
+    enters only with a measurement);
+  - the maintainer's review of the preset's label and description (drafts written 2026-11-19);
+  - the sha256 reference rows `e2b/bf16-fast` and `e4b/bf16-fast` of each environment (written only on the
+    maintainer's OK);
+  - publication with the next release, on the maintainer's explicit OK (manifest and card only — the containers are
+    the published ones).
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
