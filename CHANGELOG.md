@@ -195,8 +195,9 @@ measurements in `docs/research/`.
   E2B's 277 and 216 of E4B's 344, on an RTX 3080 Ti 207 and 258; the output heads and the other shapes keep the
   sequential GEMV), and the states-form
   attention runs its parallel reductions with the row statistics folded into PV. Its tokens can differ from those of
-  `bf16`, which stays the default and keeps the reference summation order. The recipe and the local mirror carry it;
-  the published repository does not yet.
+  `bf16`, which stays the default and keeps the reference summation order. A decode token took ×0.51 to ×0.78 of
+  `bf16`'s time on an RTX 3080 Ti and an RTX 5070 Ti and ×0.93 to ×0.95 on an Apple M2 (E2B and E4B, without E2B's
+  drafter; with it, not measured). The recipe and the local mirror carry it; the published repository does not yet.
 
 ### Changed
 

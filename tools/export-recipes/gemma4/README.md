@@ -838,8 +838,11 @@ table as the checkpoint's bf16 bits, PLE index schema 5:
   On the default profile's 17 bf16 rows that is 207 of E2B's 277 linears and 216 of E4B's 344, and
   2 of the 68 linears of E2B's int8 drafter; the others keep the sequential GEMV
   (`GEMMA4_PARALLEL_QUANTS` in `distribution.py` lists them). Tokens can differ from `bf16`. Its
-  description carries no sentence on speed until a measurement stands behind one
-  (`GEMMA4_SPEED_NOTE`).
+  description ends with one sentence on speed per model, each with a measurement behind it
+  (`GEMMA4_SPEED_NOTE`, which records the protocol and the numbers of the three devices): a decode
+  token of `bf16-fast` took less time than one of `bf16` on an RTX 3080 Ti, an RTX 5070 Ti and an
+  Apple M2 for both models. E2B's speculative decode (with the drafter) is not measured, and its
+  sentence says "without the drafter".
 
 E2B's presets also name the int8 drafter, which borrows the bf16 target's `model.lm_head.weight`.
 The int4 seats (`i4` and `i4-fast`) are the q4_0 QAT line's (`karume-gemma4-qat` —

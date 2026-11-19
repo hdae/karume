@@ -466,9 +466,20 @@ GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: Model → the one sentence on speed its parallel and fused preset carries, after the drafter
 #: sentence. MUST: a model enters only with a measurement behind the sentence (the rule of
 #: {@link GEMMA4_QAT_Q4_0_SPEED_NOTE}: decode ms/token of `bf16` / `bf16-fast` interleaved in one
-#: process, the protocol recorded beside the entry). No model has one yet: the preset's decode has
-#: not been measured.
-GEMMA4_SPEED_NOTE: Mapping[str, str] = {}
+#: process, the protocol recorded beside the entry). Measured 2026-11-19 with the workbench's
+#: `gemma4-bench` entry (greedy, one prompt, 96 new tokens, four rounds of the two presets
+#: interleaved, three chats per visit with the cold first one left out; the median decode ms/token
+#: of the eight warm chats; the same tokens in both presets and on every device), `bf16` →
+#: `bf16-fast`: RTX 3080 Ti (Node + Dawn, Vulkan; two runs) E2B 16.70 / 16.47 → 12.97 / 12.07 and
+#: E4B 32.23 / 29.68 → 18.28 / 21.35; RTX 5070 Ti (Chrome, D3D12) E2B 19.12 → 9.96 and E4B
+#: 32.71 → 16.57; Apple M2 (Chrome, Metal) E2B 65.36 → 60.77 and E4B 119.90 → 113.89 — the browser
+#: records with each adapter's own geometry table. E2B's speculative decode (with the drafter) is
+#: not measured, so its sentence names the decode that is; with the drafter sentence before it the
+#: E2B description is exactly at the manifest's limit of 200 characters.
+GEMMA4_SPEED_NOTE: Mapping[str, str] = {
+    "e2b": " Faster than bf16 on tested E2B devices without the drafter.",
+    "e4b": " Faster than bf16 on tested E4B devices.",
+}
 
 
 def gemma4_quants(model: str) -> dict[str, Any]:

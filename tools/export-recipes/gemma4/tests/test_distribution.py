@@ -1360,9 +1360,7 @@ class TestGemma4ParallelPreset:
     the reference preset `bf16`, which stays the default."""
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
-    def test_the_preset_declares_the_parallel_and_fused_session_settings(
-        self, model: str
-    ) -> None:
+    def test_the_preset_declares_the_parallel_and_fused_session_settings(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_quants(model)
 
         assert list(quants) == ["bf16", "bf16-fast"]
@@ -1376,30 +1374,39 @@ class TestGemma4ParallelPreset:
             )
 
     def test_the_drafter_sentence_goes_on_every_preset_of_the_model_that_ships_one(self) -> None:
+        reference = gemma4_distribution.GEMMA4_QUANTS["bf16"]["description"]
         declared = gemma4_distribution.GEMMA4_PARALLEL_QUANTS["bf16-fast"]["description"]
         note = gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE
+        speed = gemma4_distribution.GEMMA4_SPEED_NOTE
         e2b = gemma4_distribution.gemma4_quants("e2b")
         e4b = gemma4_distribution.gemma4_quants("e4b")
 
-        assert e2b["bf16-fast"]["description"] == declared + note
-        assert e4b["bf16-fast"]["description"] == declared
-        for quant in e2b.values():
-            assert quant["description"].endswith(note)
-        for quant in e4b.values():
-            assert "drafter" not in quant["description"].lower()
+        # The drafter sentence follows the preset's own text; the speed sentence comes last.
+        assert e2b["bf16"]["description"] == reference + note
+        assert e2b["bf16-fast"]["description"] == declared + note + speed["e2b"]
+        assert e4b["bf16"]["description"] == reference
+        assert e4b["bf16-fast"]["description"] == declared + speed["e4b"]
+        assert "drafter" not in speed["e4b"].lower()
 
     def test_no_preset_states_a_speed_without_a_measurement(self) -> None:
-        """The speed sentence enters per model with its measurement
-        (`GEMMA4_SPEED_NOTE`); until then the description says nothing about speed."""
+        """The speed sentence enters per model with its measurement (`GEMMA4_SPEED_NOTE`): the
+        parallel preset of a measured model ends with that model's sentence, and no other
+        description says anything about speed."""
         notes = gemma4_distribution.GEMMA4_SPEED_NOTE
+        assert set(notes) == {"e2b", "e4b"}
         assert set(notes) <= set(GEMMA4_REGULAR_MODELS)
         for model in GEMMA4_REGULAR_MODELS:
-            description = gemma4_distribution.gemma4_quants(model)["bf16-fast"]["description"]
+            quants = gemma4_distribution.gemma4_quants(model)
+            description = quants["bf16-fast"]["description"]
             if model in notes:
                 assert description.endswith(notes[model]), model
+                # The model's measured sentence, never another model's.
+                assert model.upper() in notes[model], model
             else:
                 assert "faster" not in description.lower(), model
                 assert "slower" not in description.lower(), model
+            assert "faster" not in quants["bf16"]["description"].lower(), model
+            assert "slower" not in quants["bf16"]["description"].lower(), model
 
     def test_the_presets_do_not_share_session_tables_with_the_declaration(self) -> None:
         """A manifest built for one model cannot alter the line's declaration (each table is a
