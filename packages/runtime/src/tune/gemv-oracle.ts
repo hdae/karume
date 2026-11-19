@@ -85,8 +85,21 @@ const f32Of = (): ((bits: number) => number) => {
   };
 };
 
-/** Waits for the next macrotask, so a long evaluation does not hold the page. */
-const nextTask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Waits for the next macrotask, so a long evaluation does not hold the page. The task is a message,
+ * not a timer: a page that is not shown has its timers throttled to one a second or one a minute,
+ * and the oracle of a large case pauses hundreds of times.
+ */
+const nextTask = (): Promise<void> =>
+  new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      // A port left open keeps a Node process alive
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(undefined);
+  });
 
 /** Elements (columns × k × rows) evaluated between two pauses. */
 const SLICE_ELEMENTS = 1 << 24;
