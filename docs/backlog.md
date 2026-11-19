@@ -400,7 +400,9 @@ maintainer's ruling of 2026-11-06).
     1. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
        decision 3 (2)) and of the new notice text and preset descriptions of both repositories. Before and after are not
        near-identical images: the text stack's small differences grow over the denoise steps into other details of the
-       same composition.
+       same composition. *(Done 2026-11-19: the maintainer read the `dit8` presets' images as differing among
+       themselves at the level of noise and the `bf16` preset's as sound, ran `bf16-c16` on the RTX 5070 Ti, and
+       approved the notice text and the preset labels and descriptions as they are.)*
     2. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
        `karume-anima-extra` rebuilt with `--resolve-refs hf` against the new main and uploaded with its f16 files deleted
        (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
