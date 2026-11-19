@@ -624,7 +624,8 @@ What explains the report (the first two are upstream's behaviour too):
 Closed (2026-11-19):
 
 - The playground's weight control runs to 20 in steps of 0.1, as upstream's, and its hint says that `Neutral` ignores
-  the weight (`apps/playground/src/models/sbv2/request.ts`).
+  the weight and that about 10 gives a strong style and 20 an extreme one — the maintainer's listening of 2026-11-19;
+  AivisSpeech's control of the same weight ends at 10 (`apps/playground/src/models/sbv2/request.ts`).
 - A test fails if the style stops reaching the audio (`packages/e2e/tests/e2e_sbv2_style_test.ts`: another style
   differs from `Neutral`, `Neutral` is bit-identical at two weights, weight 0 is `Neutral`). Until then the sha256
   rows and the export's golden, all at `Neutral` and weight 1, were the only checks.

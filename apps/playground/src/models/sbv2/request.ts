@@ -39,12 +39,15 @@ export const KNOBS: readonly {
     label: "Style weight",
     min: 0,
     // The range and step of the upstream web UI: at 1 a style moves the speech less than another
-    // seed does, so a style is heard only well above it.
+    // seed does, so a style is heard only well above it. The hint's "about 10" is the maintainer's
+    // listening of 2026-11-19 (a strong style at 10, an extreme one at 20); AivisSpeech's control
+    // of the same weight ends at 10.
     max: 20,
     step: 0.1,
     hint:
-      "1 = the chosen style itself, 0 = the mean style, above 1 exaggerates it; lower it when the " +
-      "voice breaks. Neutral is the mean style, so the weight does not change it.",
+      "1 = the chosen style itself, 0 = the mean style, above 1 exaggerates it. About 10 gives a " +
+      "strong style and 20 an extreme one; lower it when the voice breaks. Neutral is the mean " +
+      "style, so the weight does not change it.",
   },
   {
     key: "lengthScale",

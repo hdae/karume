@@ -859,7 +859,7 @@ Every list comes from the distribution:
 | Text (Japanese) | The text to synthesize. The hint gives its length and both limits of one synthesis: `maxTokens` (tokens and phonemes) and `maxFrames` (total predicted frames, which grow with the length scale). The pipeline rejects a request over either limit. |
 | Reading | Live: the moras the analyser reads, with high tones overlined, and the mora count. |
 | Style | `pipelineConfig.styles` in table-row order; the default is marked. |
-| Style weight / Length scale / SDP ratio / Noise scale / Noise scale W | Sliders for `styleWeight` (0–2), `lengthScale` (0.5–2, larger is slower), `sdpRatio` (0–1), and `noiseScale` and `noiseScaleW` (0–1.5). They start at `pipelineConfig.defaults`. |
+| Style weight / Length scale / SDP ratio / Noise scale / Noise scale W | Sliders for `styleWeight` (0–20 as upstream's web UI; its hint names about 10 as a strong style), `lengthScale` (0.5–2, larger is slower), `sdpRatio` (0–1), and `noiseScale` and `noiseScaleW` (0–1.5). They start at `pipelineConfig.defaults`. |
 | Seed | `seed` (default 0). The page refuses a seed that is not a number. An out-of-range seed is rejected by the pipeline with `sbv2.InputError`. |
 | Run | Analyses the text and synthesizes it. **Not cancellable**: `sbv2.Pipeline.generate` takes no AbortSignal, so the status card's Cancel stays disabled, with the reason under it. |
 | Reset options to the distribution's defaults | Sets speaker, style, every knob and the seed back to `pipelineConfig.defaults` / 0. The text stays. |
