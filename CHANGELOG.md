@@ -147,7 +147,14 @@ measurements in `docs/research/`.
   staged). A Session with linear at `"reorder"` then runs the parallel GEMV for 1 to 8 rows of that shape, inside the
   band of `linear`; at `"exact"` it keeps the sequential GEMV at one row and the GEMM above, bit for bit. A
   float-stored linear is never paired with packed activations or fused with a following `static_quantize`, and has
-  no subgroup form. No embedded table and not the default profile names a float shape yet, so no Session changes.
+  no subgroup form. The default profile names 17 bf16 linears of regular Gemma 4 E2B and E4B (`2048 × 1536`,
+  `256 × 1536`, `6144 × 1536`, `1536 × 6144`, `1536 × 256`, `4096 × 1536`, `512 × 1536`, `1536 × 4096`,
+  `1536 × 12288`; `2048 × 2560`, `512 × 2560`, `256 × 2560`, `2560 × 2048`, `2560 × 10240`, `4096 × 2560`,
+  `1024 × 2560`, `2560 × 4096`): a Session at linear `"reorder"` on such weights runs the parallel GEMV for 1 to 8
+  rows of those shapes on every adapter, in place of the sequential GEMV at one row and the GEMM above. They are
+  the shapes on which an RTX 3080 Ti (Node, Vulkan), an RTX 5070 Ti (Chrome, D3D12) and an Apple M2 (Chrome,
+  Metal) all measured it at least ×1.09 faster at 1, 4 and 8 rows. No shipped preset declares linear at
+  `"reorder"` on bf16 weights, so no Session of a shipped preset changes.
 - `@karume/runtime/tune`: the GEMV sweep measures float-stored shapes. Its case table gains the 25 linears of
   regular Gemma 4 E2B and E4B in bf16, at 1, 4 and 8 rows; past one row their baseline is the GEMM (candidate
   `gemm`), which is what an `exact` Session runs there, and `deriveLinearGemvChoices` reads a parallel row of such a
@@ -202,9 +209,8 @@ measurements in `docs/research/`.
     5070 Ti is slower with them (×0.89 to ×0.95), so they are not rows of the default.
   - On NVIDIA Blackwell adapters, 42 more shapes of int4 (33) and int8 (9) storage read 8 or 16 words ahead: rows
     of the embedded table `nvidia-blackwell`, derived from GEMV sweep records of an RTX 5070 Ti in Chrome (D3D12),
-    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each. Two of the 22
-    bf16 rows take another variant there: `1536 × 256` reads 8 words ahead in workgroups of 16 columns in place of
-    16 in workgroups of 32, and `4096 × 2560` 16 words in place of 8 (×1.20 and ×1.12 per dispatch).
+    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each. The 22 bf16
+    rows are the default's there.
   - In `SessionDiagnostics.lastRunPipelines` those dispatches read `linear_gemv:v1:f32:c16u8:wbf16`,
     `…:c16u16:wbf16` or `…:c32u16:wbf16`, and on Ampere `…:c16u2:wi4g32` and `…:c16u16:wi4g32`, in place of
     `…:c32u4:…`.
@@ -216,9 +222,9 @@ measurements in `docs/research/`.
 - `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
   choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
   `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
-  other lanes on 22 shapes, the staged form on 30, another row block on 7, and a row on 37 shapes that ran the
-  sequential GEMV or the GEMM — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT
-  line and 22 bf16 linears of regular Gemma 4 E2B and E4B. No preset of regular Gemma 4 declares linear at
+  other lanes on 22 shapes, the staged form on 30, another row block on 7, and a row on 20 shapes the default
+  profile has none for — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT line and
+  5 bf16 linears of regular Gemma 4 E2B and E4B (on its other 17 bf16 linears it runs the default's rows). No preset of regular Gemma 4 declares linear at
   `reorder`, so none of its presets runs the bf16 rows. Each is at least ×1.10 faster per dispatch than the default's choice in every
   record. On an RTX 5070 Ti in Chrome, with the choices of the table before its last derivation, a decode token of
   QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the default's choices (E2B and E4B by 1 to 3 %, which the

@@ -236,7 +236,7 @@ describe("the eligibility of a float-stored shape", () => {
     }
     assertEquals(linearGemvParallelEligible(WITH_ROWS, "bf16", 9, 1536, 2048), undefined);
     assertEquals(linearGemvParallelEligible(WITH_ROWS, "f16", 1, 1536, 2048), undefined);
-    assertEquals(linearGemvParallelEligible(WITH_ROWS, "bf16", 1, 1536, 4096), undefined);
+    assertEquals(linearGemvParallelEligible(WITH_ROWS, "bf16", 1, 1536, 2560), undefined);
     // An i4 linear of the row's shape names a group, which no float row has
     assertEquals(linearGemvParallelEligible(WITH_ROWS, "i4", 1, 1536, 2048, 64), undefined);
   });
@@ -373,8 +373,8 @@ describe("the selection of a float-stored linear", () => {
   it("leaves 9 rows and more on the GEMM, and a shape without a row on the exact kernels, at reorder too", () => {
     assertEquals(choose("bf16", 9, 1536, 2048, REORDER).id, "gemm-f32");
     assertEquals(choose("bf16", 64, 1536, 2048, REORDER).id, "gemm-f32");
-    assertEquals(choose("bf16", 1, 1536, 4096, REORDER).id, "gemv-m1");
-    assertEquals(choose("bf16", 4, 1536, 4096, REORDER).id, "gemm-f32");
+    assertEquals(choose("bf16", 1, 1536, 2560, REORDER).id, "gemv-m1");
+    assertEquals(choose("bf16", 4, 1536, 2560, REORDER).id, "gemm-f32");
     // The default profile's rows are the measured ones only
     assertEquals(choose("f32", 1, 300, 1536, REORDER, DEFAULTS).id, "gemv-m1");
   });

@@ -71,6 +71,8 @@ const idOf = (...args: Parameters<typeof facts>): string => selectLinearStrategy
 
 /** Rows of the measured tables of the kernels (the strategies that take measured shapes only). */
 const PARALLEL_I4 = { m: 1, n: 8960, k: 1536 } as const;
+/** A bf16 row of the default table (regular E2B's q projection): plain, 16 lanes. */
+const PARALLEL_BF16 = { m: 1, n: 2048, k: 1536 } as const;
 const INTEGER_I2 = { m: 1, n: 12288, k: 1536 } as const;
 const LM_HEAD_I2 = { m: 1, n: 262144, k: 1536 } as const;
 
@@ -110,6 +112,13 @@ describe("with every option omitted", () => {
       assertEquals(LINEAR_STRATEGIES[id].level, "exact");
     }
   });
+
+  it("keeps a bf16 shape the default table has a parallel row of on the sequential GEMV at one row and the GEMM above", () => {
+    assertEquals(idOf(PARALLEL_BF16, "bf16"), "gemv-m1");
+    for (const m of [4, 8]) {
+      assertEquals(idOf({ ...PARALLEL_BF16, m }, "bf16"), "gemm-f32", `M${m}`);
+    }
+  });
 });
 
 describe("with an option that asks for another kernel", () => {
@@ -117,6 +126,17 @@ describe("with an option that asks for another kernel", () => {
     const parallel = { knobs: { linearGemvReduce: "parallel" }, groupSize: 32 } as const;
     assertEquals(idOf(PARALLEL_I4, "i4", parallel), "gemv-parallel");
     assertEquals(idOf({ m: 1, n: 64, k: 64 }, "i4", parallel), "gemv-m1");
+  });
+
+  it('takes the parallel GEMV for a bf16 shape of the default table under linearGemvReduce "parallel", at 1 to 8 rows, with the row\'s lanes', () => {
+    const parallel = { knobs: { linearGemvReduce: "parallel" } } as const;
+    for (const m of [1, 4, 8]) {
+      const choice = selectLinearStrategy(facts({ ...PARALLEL_BF16, m }, "bf16", parallel));
+      assertEquals(choice.id, "gemv-parallel", `M${m}`);
+      assertEquals("lanes" in choice ? choice.lanes : undefined, 16, `M${m}`);
+      assertEquals(LINEAR_STRATEGIES[choice.id].level, "reorder");
+    }
+    assertEquals(idOf({ m: 1, n: 64, k: 64 }, "bf16", parallel), "gemv-m1");
   });
 
   it('takes the subgroup form under "parallel-subgroup32"', () => {

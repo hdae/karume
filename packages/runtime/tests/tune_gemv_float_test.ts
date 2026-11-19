@@ -55,10 +55,16 @@ const caseOf = (id: string): GemvCase => {
   return found;
 };
 
-/** Regular E2B's down of the 12288-wide MLP layers, in bf16. */
+/** Regular E2B's down of the 12288-wide MLP layers, in bf16 (the default profile has a parallel row of it). */
 const DOWN = caseOf("bf16-n1536-k12288");
 /** The default profile's sequential variant of {@link DOWN}'s shape (a per-shape exception). */
 const DOWN_SEQUENTIAL = "c16u16";
+/** The default profile's parallel row of {@link DOWN}'s shape: plain, 16 lanes. */
+const DOWN_PARALLEL = "parallel-l16";
+/** Regular E2B's gate / up of the 12288-wide MLP layers, in bf16: no parallel row of the default. */
+const UP = caseOf("bf16-n12288-k1536");
+/** The default profile's sequential variant of {@link UP}'s shape (a per-shape exception). */
+const UP_SEQUENTIAL = "c16u8";
 /** Regular E2B's output head in bf16: 262144 columns. */
 const HEAD = caseOf("bf16-n262144-k1536");
 
@@ -109,14 +115,13 @@ describe("the baseline of a float-stored case", () => {
     }
   });
 
-  it("is what the default profile chooses at reorder too: the default profile has no parallel row of a float shape", () => {
-    assertEquals(
-      DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.filter(({ storage }) =>
-        isFloatStorage(storage),
-      ),
-      [],
-    );
-    for (const gemvCase of [DOWN, HEAD]) {
+  it("is what the default profile chooses at reorder too on a shape it has no parallel row of; on a shape with one, the default's choice at reorder is the row's parallel GEMV at every row count", () => {
+    const rowOf = ({ n, k }: GemvCase) =>
+      DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.find(
+        (row) => row.storage === "bf16" && row.n === n && row.k === k,
+      );
+    for (const gemvCase of [UP, HEAD]) {
+      assertEquals(rowOf(gemvCase), undefined, gemvCase.id);
       for (const m of gemvCase.rows) {
         assertEquals(
           gemvProfileChoice(gemvCase, m, "reorder").name,
@@ -124,6 +129,17 @@ describe("the baseline of a float-stored case", () => {
           `${gemvCase.id} M=${m}`,
         );
       }
+    }
+    assertEquals(rowOf(DOWN), {
+      storage: "bf16",
+      n: DOWN.n,
+      k: DOWN.k,
+      lanes: 16,
+      packedActivations: false,
+    });
+    for (const m of DOWN.rows) {
+      assertEquals(gemvProfileChoice(DOWN, m, "reorder").name, DOWN_PARALLEL, `M=${m}`);
+      assertEquals(gemvProfileChoice(DOWN, m, "exact").name, gemvBaseline(DOWN, m).name, `M=${m}`);
     }
   });
 });
@@ -198,8 +214,9 @@ describe("the candidates of a float-stored case", () => {
   });
 
   it("name the GEMM as both references of a row count past one when the profile has no row", () => {
-    for (const plan of gemvMeasurementPlans(DOWN, "full", GATES)) {
-      assertEquals(plan.profile.exact, plan.m === 1 ? DOWN_SEQUENTIAL : "gemm", `M=${plan.m}`);
+    for (const plan of gemvMeasurementPlans(UP, "full", GATES)) {
+      assertEquals(plan.profile.exact, plan.m === 1 ? UP_SEQUENTIAL : "gemm", `M=${plan.m}`);
+      assertEquals(plan.profile.reorder, plan.profile.exact, `M=${plan.m}`);
       assert(!names(plan.candidates).includes(plan.baseline.name));
     }
   });
@@ -225,11 +242,11 @@ describe("the candidates of a float-stored case carried from M = 1 on to M = 4 a
     gemvCarriedFromM1(m, { name: candidate, class: "reorder" }, REFERENCES, group);
 
   it("names the GEMM as both references past one row, and the sequential GEMV as the default's choice at reorder at one row", () => {
-    const plans = gemvMeasurementPlans(DOWN, "full", GATES);
+    const plans = gemvMeasurementPlans(UP, "full", GATES);
     assertEquals(
       plans.map(({ m, profile }) => [m, profile.exact, profile.reorder]),
       [
-        [1, DOWN_SEQUENTIAL, DOWN_SEQUENTIAL],
+        [1, UP_SEQUENTIAL, UP_SEQUENTIAL],
         [4, "gemm", "gemm"],
         [8, "gemm", "gemm"],
       ],
@@ -416,14 +433,14 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
   const lanes = 8;
   const fast = { [name]: BASE_TIME / 2 };
   const measured = (times: GemvCaseSpec["times"]): readonly GemvCaseSpec[] => [
-    { caseId: DOWN.id, rows: [1, 4, 8], times },
+    { caseId: UP.id, rows: [1, 4, 8], times },
   ];
   const decisionOf = (specs: readonly GemvCaseSpec[], second = specs) => {
     const derivation = deriveLinearGemvChoices([input("a.json", specs), input("bb.json", second)], {
       table: TABLE,
     });
     const decision = derivation.decisions.find(
-      ({ field, cases }) => field === "parallelShapes" && cases.includes(DOWN.id),
+      ({ field, cases }) => field === "parallelShapes" && cases.includes(UP.id),
     );
     assert(decision !== undefined);
     return { derivation, decision };
@@ -432,14 +449,14 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
   it("adopts a parallel row ×1.10 or more faster at one row and not slower than the default's choice at 4 and 8 rows — the GEMM, without a row —, as a bf16 row", () => {
     const { derivation, decision } = decisionOf(measured({ 1: fast, 4: fast, 8: fast }));
     assertEquals([decision.outcome, decision.derivedChoice], ["adopted", name]);
-    assertEquals(decision.shape, "bf16 n1536 k12288");
+    assertEquals(decision.shape, "bf16 n12288 k1536");
     const row = derivation.linearGemv?.parallelShapes.findLast(
-      ({ storage, n, k }) => storage === "bf16" && n === DOWN.n && k === DOWN.k,
+      ({ storage, n, k }) => storage === "bf16" && n === UP.n && k === UP.k,
     );
     assertEquals(row, {
       storage: "bf16",
-      n: DOWN.n,
-      k: DOWN.k,
+      n: UP.n,
+      k: UP.k,
       lanes,
       packedActivations: false,
       stagedActivations: true,
@@ -448,7 +465,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
 
   it("gives the adopted float row no row block: a float case has no row-blocked candidate to measure or to read", () => {
     for (const m of [4, 8]) {
-      for (const { choice, name: candidate } of gemvCandidates(DOWN, m, "full", GATES)) {
+      for (const { choice, name: candidate } of gemvCandidates(UP, m, "full", GATES)) {
         assert(!("parallelRows" in choice) || choice.parallelRows === undefined, candidate);
       }
     }
@@ -474,7 +491,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
   });
 
   it("keeps the default when the records measured one row only: the row would serve 4 and 8 rows unmeasured", () => {
-    const { decision } = decisionOf([{ caseId: DOWN.id, rows: [1], times: { 1: fast } }]);
+    const { decision } = decisionOf([{ caseId: UP.id, rows: [1], times: { 1: fast } }]);
     assertEquals(decision.outcome, "kept");
     assertStringIncludes(decision.reason ?? "", "evidence at M=4 from fewer than 2 records");
   });
@@ -510,7 +527,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
         { table },
       );
       const decision = derivation.decisions.find(
-        ({ field, cases }) => field === "parallelShapes" && cases.includes(DOWN.id),
+        ({ field, cases }) => field === "parallelShapes" && cases.includes(UP.id),
       );
       assert(decision !== undefined);
       return { derivation, decision };
@@ -523,8 +540,8 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
       assertEquals(
         derivation.stale.map(({ caseId, m, cause }) => [caseId, m, cause]),
         ["a.json", "bb.json"].flatMap(() => [
-          [DOWN.id, 4, "references"],
-          [DOWN.id, 8, "references"],
+          [UP.id, 4, "references"],
+          [UP.id, 8, "references"],
         ]),
       );
       assertEquals(
@@ -578,7 +595,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
       const records = [input("a.json", specs), input("bb.json", specs)];
       const lacking = (table: GeometryProfile): number[] =>
         planGemvMeasurements(records, { table })
-          .missing.filter(({ caseId }) => caseId === DOWN.id)
+          .missing.filter(({ caseId }) => caseId === UP.id)
           .map(({ m }) => m);
       assertEquals(lacking(TABLE), []);
       assertEquals(lacking(OTHER_TABLE), [4, 8]);
@@ -610,7 +627,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
     ]);
     for (const m of [1, 4, 8]) {
       const missing = planning.missing.find(
-        (entry) => entry.caseId === DOWN.id && entry.m === m,
+        (entry) => entry.caseId === UP.id && entry.m === m,
       )?.candidates;
       assert(missing !== undefined, `M=${m}`);
       // The reference at reorder (the sequential GEMV, the GEMM) is no parallel form

@@ -59,7 +59,10 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // its thread target, and the functions below are its lookups, reading the literals. A change of a
 // value edits the default profile (re-measuring as its comments require) and this copy with it, so
 // the table is the kernel module's 66 rows plus the rows added since: the five MTP drafter rows of
-// 2026-11-18 (two after the E4B rows, three after the 12B rows). The general sequential variant
+// 2026-11-18 (two after the E4B rows, three after the 12B rows) and the 17 bf16 rows of regular
+// E2B / E4B of 2026-11-19 at the end (perf-ledger K-110). The kernel module held no row of a float
+// storage, so its lookups' gate on the storage answered nothing for one; the copy below answers a
+// float row like any other, as the selection does since. The general sequential variant
 // and the thread target are still the kernel module's. The `rowBlock` of a row is another change
 // since (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do
 // not read it. The kernel module's one per-shape exception of the sequential variant (the i8 output
@@ -276,6 +279,37 @@ const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
     rowBlock: 2,
   },
   { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  { storage: "bf16", n: 2048, k: 1536, lanes: 16, packedActivations: false },
+  { storage: "bf16", n: 256, k: 1536, lanes: 32, packedActivations: false },
+  { storage: "bf16", n: 6144, k: 1536, lanes: 8, packedActivations: false },
+  { storage: "bf16", n: 1536, k: 6144, lanes: 16, packedActivations: false },
+  { storage: "bf16", n: 1536, k: 256, lanes: 8, packedActivations: false },
+  { storage: "bf16", n: 4096, k: 1536, lanes: 8, packedActivations: false },
+  { storage: "bf16", n: 512, k: 1536, lanes: 16, packedActivations: false },
+  {
+    storage: "bf16",
+    n: 1536,
+    k: 4096,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  { storage: "bf16", n: 1536, k: 12288, lanes: 16, packedActivations: false },
+  {
+    storage: "bf16",
+    n: 2048,
+    k: 2560,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  { storage: "bf16", n: 512, k: 2560, lanes: 32, packedActivations: false },
+  { storage: "bf16", n: 256, k: 2560, lanes: 32, packedActivations: false },
+  { storage: "bf16", n: 2560, k: 2048, lanes: 8, packedActivations: false },
+  { storage: "bf16", n: 2560, k: 10240, lanes: 16, packedActivations: false },
+  { storage: "bf16", n: 4096, k: 2560, lanes: 8, packedActivations: false },
+  { storage: "bf16", n: 1024, k: 2560, lanes: 16, packedActivations: false },
+  { storage: "bf16", n: 2560, k: 4096, lanes: 16, packedActivations: false },
 ];
 
 const OLD_ROWS_THREAD_TARGET = 16384;
@@ -363,7 +397,6 @@ const oldParallelEligible = (
   k: number,
   group?: number,
 ): LinearGemvParallelLanes | undefined => {
-  if (storage !== "i2" && storage !== "i4" && storage !== "i8") return undefined;
   if (!gemmUsesVec4(k, n)) return undefined;
   if (k <= 0 || k % linearGemvUnit(storage) !== 0) return undefined;
   if (storage === "i4") {
@@ -885,34 +918,19 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     });
   });
 
-  it("nvidia-blackwell's are the default's with what its own records adopt in place: two of the default's exceptions with another variant, 42 more sequential exceptions, and 78 parallel rows changed or added", () => {
+  it("nvidia-blackwell's are the default's with what its own records adopt in place: the default's exceptions as they are, 42 more sequential exceptions, and 61 parallel rows changed or added", () => {
     const blackwell = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-blackwell");
     assert(blackwell?.linearGemv !== undefined);
     const own = blackwell.linearGemv;
     // What the derivation never writes is the default's of today
     assertEquals(own.sequential.variant, GEMV.sequential.variant);
     assertEquals(own.rowsThreadTarget, GEMV.rowsThreadTarget);
-    // Every exception of the default is there, in the default's order, two of them with the variant
-    // the device's own records adopt over the default's; the table's own follow
-    const ownVariant = new Map([
-      ["bf16 1536 256", { cols: 16, unroll: 8 }],
-      ["bf16 4096 2560", { cols: 16, unroll: 16 }],
-    ]);
-    const shapeKey = ({ storage, n, k }: { storage: string; n: number; k: number }): string =>
-      [storage, n, k].join(" ");
-    const replaced = GEMV.sequential.shapes.filter((row) => ownVariant.has(shapeKey(row)));
-    assertEquals(replaced.length, ownVariant.size);
-    for (const row of replaced) {
-      assert(JSON.stringify(row.variant) !== JSON.stringify(ownVariant.get(shapeKey(row))));
-    }
+    // Every exception of the default is there, in the default's order and with the default's
+    // variant; the table's own follow. The device's records of the default's bf16 shapes were taken
+    // while the default had no parallel row of them, so they are evidence for neither class there
+    // until the device is measured again (docs/limitations.md, the device tables' GEMV choices).
     const inherited = GEMV.sequential.shapes.length;
-    assertEquals(
-      own.sequential.shapes.slice(0, inherited),
-      GEMV.sequential.shapes.map((row) => {
-        const variant = ownVariant.get(shapeKey(row));
-        return variant === undefined ? row : { ...row, variant };
-      }),
-    );
+    assertEquals(own.sequential.shapes.slice(0, inherited), GEMV.sequential.shapes);
     assertEquals(own.sequential.shapes.length - inherited, 42);
     // Every parallel row of the default is there, in the default's order, with the rows added after
     const key = (row: LinearGemvParallelShape): string =>
@@ -925,7 +943,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       (row, index) => JSON.stringify(row) !== JSON.stringify(own.parallelShapes[index]),
     ).length;
     const added = own.parallelShapes.length - GEMV.parallelShapes.length;
-    assertEquals([changed, added], [41, 37]);
+    assertEquals([changed, added], [41, 20]);
   });
 
   it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {

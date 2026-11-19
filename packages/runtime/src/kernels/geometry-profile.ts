@@ -668,6 +668,51 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     },
     // lm_head (tied embedding)
     { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
+    // ---- regular Gemma 4 E2B / E4B, bf16 — the bf16 linears that no measured device is slower with
+    // on the parallel GEMV (docs/spec/geometry-profiles.md, "The GEMV choices of linear"). The
+    // evidence is GEMV sweep records of the RTX 3080 Ti (Node, Vulkan; four records of 2026-11-19),
+    // the RTX 5070 Ti (Chrome, D3D12; two of 2026-11-18) and an Apple M2 (Chrome, Metal; two of
+    // 2026-11-19), each with the full candidate set. Read conservatively per device (its fastest
+    // baseline over its records against the row's slowest time), a row's kernel is slower than the
+    // default's choice — the sequential GEMV at 1 row, the GEMM at 4 and 8 — on none of the three;
+    // its smallest gain over the devices and row counts is ×1.09 to ×3.37. The other bf16 linears
+    // keep the default's choice: 8960 × 1536, 10752 × 2560 and 10240 × 2560 are slower than the GEMM
+    // at 8 rows on the RTX 3080 Ti (×0.69 to ×0.89), and 1536 × 2048, 12288 × 1536, 2560 × 256 and
+    // the two output heads have no candidate measured at all three row counts on all three devices.
+    // A float-stored row carries no row block: the row-blocked kernel is built for integer storage.
+    // E2B
+    { storage: "bf16", n: 2048, k: 1536, lanes: 16, packedActivations: false },
+    { storage: "bf16", n: 256, k: 1536, lanes: 32, packedActivations: false },
+    { storage: "bf16", n: 6144, k: 1536, lanes: 8, packedActivations: false },
+    { storage: "bf16", n: 1536, k: 6144, lanes: 16, packedActivations: false },
+    { storage: "bf16", n: 1536, k: 256, lanes: 8, packedActivations: false },
+    { storage: "bf16", n: 4096, k: 1536, lanes: 8, packedActivations: false },
+    { storage: "bf16", n: 512, k: 1536, lanes: 16, packedActivations: false },
+    {
+      storage: "bf16",
+      n: 1536,
+      k: 4096,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "bf16", n: 1536, k: 12288, lanes: 16, packedActivations: false },
+    // E4B
+    {
+      storage: "bf16",
+      n: 2048,
+      k: 2560,
+      lanes: 32,
+      packedActivations: false,
+      stagedActivations: true,
+    },
+    { storage: "bf16", n: 512, k: 2560, lanes: 32, packedActivations: false },
+    { storage: "bf16", n: 256, k: 2560, lanes: 32, packedActivations: false },
+    { storage: "bf16", n: 2560, k: 2048, lanes: 8, packedActivations: false },
+    { storage: "bf16", n: 2560, k: 10240, lanes: 16, packedActivations: false },
+    { storage: "bf16", n: 4096, k: 2560, lanes: 8, packedActivations: false },
+    { storage: "bf16", n: 1024, k: 2560, lanes: 16, packedActivations: false },
+    { storage: "bf16", n: 2560, k: 4096, lanes: 16, packedActivations: false },
   ],
 };
 

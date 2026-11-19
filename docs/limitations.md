@@ -711,17 +711,19 @@ planned at the runtime default, and the windows it folds are counted unfused. It
 it plans its fusions with the default geometry profile's GEMV choices, and a Session plans them with
 those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
 a linear whose shape has a parallel row, and `nvidia-blackwell` (the RTX 5070 Ti's table) has rows on
-37 shapes the default has none for (22 of them the bf16 linears of regular Gemma 4 E2B and E4B); no
+20 shapes the default has none for (5 of them bf16 linears of regular Gemma 4 E2B and E4B); no
 registered table removes a row of the default or changes which
 rows read packed activations (a core-lane test). On that adapter a linear of one of those shapes that
 feeds a `static_quantize`, with linear at `reorder` and at most 8 rows, is one fused step in the
 Session and two nodes in the estimate: the estimate then counts the linear's f32 output (4 · rows · N
-bytes: at most 393,216 for the 34 shapes that are not an output head, 8,388,608 for the three that
+bytes: at most 393,216 for the 17 shapes that are not an output head, 8,388,608 for the three that
 are) where the Session has none, and may count the `static_quantize`'s output as packed int8 where
-the Session keeps it f32. No graph of a
+the Session keeps it f32 (a bf16 linear is never fused with a following `static_quantize`, so only
+the integer-stored shapes can be). No graph of a
 Gemma 4 distribution has such a linear (2026-11-18): over every model and drafter graph of the three
-distributions, 2,072 of the 7,556 linears taken at 1, 4 and 8 rows are on one of the 37 shapes —
-drafter linears, the bf16 linears of regular E2B and E4B and the int2 output heads of the mobile line —
+distributions, 2,072 of the 7,556 linears taken at 1, 4 and 8 rows are on one of the 37 shapes the
+table then had rows on and the default had none for — these 20 among them; drafter linears, the bf16
+linears of regular E2B and E4B and the int2 output heads of the mobile line —
 and none feeds a `static_quantize` (only linears of the mobile line feed one); the fusion plans of the mobile line's `i4`, `i4-gemvpar` and `i4-fast`
 at 1, 4 and 8 rows are the same step for step under both sets of choices, and so is every byte
 (resident, peak and each scenario's workspace) of 23 estimates: the models and drafters of the three
@@ -893,22 +895,28 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   measured device is slower with is not in the default but in the table of the device that gains from it
   (`nvidia-ampere`: the int4 output heads of the q4_0 QAT E2B / E4B models, bf16 `10240 × 2560` and the drafter shape
   int4 `256 × 2048`, which the RTX 5070 Ti reads ×0.89 to ×0.95 — [perf-ledger](perf-ledger.md) K-101, K-112;
-  `nvidia-blackwell`: 42 int4 and int8 shapes, and another variant on two of the 22 bf16 rows, from the RTX 5070
-  Ti's own records). No
+  `nvidia-blackwell`: 42 int4 and int8 shapes, from the RTX 5070 Ti's own records). No
   Apple device has measured any of them: `apple-metal-3` runs the default's rows unmeasured, and on Metal their
   words were not compared with the general variant's (on Vulkan and on D3D12 they were). A table derived from a
   device's own GEMV sweep records starts from the default's exceptions: it keeps the ones its records give no
   evidence about, and removes one only when its records adopt the general variant over it, which takes ×1.10 in
   every group — a device on which an inherited exception is slower by less keeps it. `nvidia-blackwell` is such a
-  table: of the 22 bf16 rows, measured against them in
-  two records each, it keeps 20 (no variant is ×1.10 faster) and takes another variant on two (`1536 × 256`:
-  `c16u8`, `4096 × 2560`: `c16u16`).
-- **On NVIDIA Blackwell adapters the parallel rows are that table's own**: `nvidia-blackwell` holds 78 parallel rows
-  apart from the default's (other lanes on 22 of the default's rows, 37 rows on shapes the default has none for —
-  22 of them bf16 —, the staged form or another row block on the rest), derived from GEMV sweep records of one RTX
+  table, and it keeps all 22 bf16 rows: on 5 of their shapes its records, two each, show no variant ×1.10 faster;
+  on the other 17, which are also the default's bf16 parallel rows, its records name the sequential GEMV as the
+  default's choice at `reorder` and are no evidence while the default's choice there is the parallel row. **On
+  two of those shapes an `exact` Session on the RTX 5070 Ti is slower than its own records allow**: bf16
+  `1536 × 256` runs `c32u16` where its records read `c16u8` ×1.20 to ×1.21 faster, and bf16 `4096 × 2560` `c16u8`
+  where they read `c16u16` ×1.12 to ×1.13 faster. A `reorder` Session there runs the default's lanes on the 17
+  parallel rows, where its records had chosen other lanes or the staged form on 8 of them. Both last until the
+  device's bf16 cases are measured again against the current default and the table is derived again
+  ([backlog](backlog.md), the default profile's GEMV choices from several devices' records).
+- **On NVIDIA Blackwell adapters the parallel rows are that table's own**: `nvidia-blackwell` holds 61 parallel rows
+  apart from the default's (other lanes on 22 of the default's rows, 20 rows on shapes the default has none for —
+  5 of them bf16 —, the staged form or another row block on the rest; its 17 bf16 rows on the default's bf16 shapes
+  are the default's), derived from GEMV sweep records of one RTX
   5070 Ti in Chrome on D3D12. A Session with linear at `reorder` there gives other bits than the same Session on
-  another adapter on the 59 shapes whose lanes differ or whose row is new, inside the band of `linear`. Each row is
-  at least ×1.10 faster per dispatch than the default's choice in every record. A decode token was measured with
+  another adapter on the 42 shapes whose lanes differ or whose row is new, inside the band of `linear`. Each row of
+  its own is at least ×1.10 faster per dispatch than the default's choice in every record. A decode token was measured with
   the table as it was before its last derivation (QAT `i4-fast` E2B, E4B and 12B, the same tokens —
   [research](research/2026-11-18-blackwell-gemv-table-decode.md)), not with these rows; no test runs them on their own shapes on the development machine — the
   records hold their band readings. A parallel row is reached only by a Session that runs linear at `reorder`, and no preset of regular
@@ -2663,7 +2671,7 @@ It covers the shapes of its table and physical M=1..8, with f32 arithmetic only;
 M>8 and shapes outside the targets use the former path, and the diagnostic keys show the range it applies to. It does not mean an across-the-board speed-up of E4B or other models.
 The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when linear is at `reorder`. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
 [The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
-The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares the level `reorder` and packed int8 activations; the RMS→add and linear→SRQ fusions apply wherever they match, without a declaration ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) ship one preset, `bf16`, since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there (the kernel takes bf16 / f16 / f32 words since 2026-11-18, but the table names no float shape and no preset declares `reorder` on these weights: the measured candidates are in [research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)); their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its `i4-fast` (it declares the level `reorder`) is chosen by name.
+The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares the level `reorder` and packed int8 activations; the RMS→add and linear→SRQ fusions apply wherever they match, without a declaration ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) ship one preset, `bf16`, since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there (the kernel takes bf16 / f16 / f32 words since 2026-11-18 and the default table names 17 of their bf16 shapes since 2026-11-19 — [spec](spec/geometry-profiles.md#the-gemv-choices-of-linear) —, but no preset declares `reorder` on these weights: the measured candidates are in [research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)); their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its `i4-fast` (it declares the level `reorder`) is chosen by name.
 The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
 The MTP drafters take a row only for the shapes the RTX 3080 Ti's GEMV sweep supports one for (2026-11-18, [research](research/2026-11-18-gemma4-gemv-census.md) §4): with `i4-fast`, 54 of the 68 linears of the q4_0 QAT E2B drafter, 57 of the E4B drafter's and 41 of the 12B drafter's still run sequentially (the bundle's census table pins 54 and 57 for the reference), and the regular E2B's int8 drafter runs 66 of its 68 linears sequentially — none of its own shapes has a row (its two `post_projection` linears take the row of the mobile line's int8 `per_layer_projection`), they were measured once, and no preset of `karume-gemma4` reaches `reorder`. The output heads of the E2B / E4B QAT lines stay sequential too — int4 on `karume-gemma4-qat`, int2 on `karume-gemma4-qat-mobile`: the parallel GEMV is slower than the sequential row blocks at the four rows a verify run gives the head, or gains nothing at one row (the same research §5; perf-ledger K-59, K-101). On the RTX 3080 Ti's table (`nvidia-ampere`) the int4 heads run another variant of the sequential kernel at one row (16 columns per workgroup, 2 words read ahead: the same words — perf-ledger K-101); on every other adapter they run the general one. A row is matched by shape, not by model, so "the drafter rows" describes the shipped pipelines: int4 g32 `1024 × 4096`, the 12B drafter's sliding o, is also the shape of the 22 FFN-down linears of the SBV2 text encoder's int4 graph. The sbv2 pipeline does not accept `numerics`, so those linears take the row only in a Session created directly with linear at `reorder` and at most 8 rows; the row was not measured there.
 

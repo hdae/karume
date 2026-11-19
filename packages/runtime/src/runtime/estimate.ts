@@ -1242,7 +1242,7 @@ export type EstimateFusionFacts = Omit<
  * linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing), and no
  * size reads the rest (the sequential variants, a row's lanes, staged flag and row block: the
  * kernels they select hold no temporary). `nvidia-ampere`'s parallel rows are the default's.
- * `nvidia-blackwell` adds rows on 37 shapes (22 of them bf16), removes none and keeps every packed
+ * `nvidia-blackwell` adds rows on 20 shapes (5 of them bf16), removes none and keeps every packed
  * flag (tests/linear_gemv_profile_test.ts pins both tables): on that adapter a linear of one of
  * those shapes that feeds a `static_quantize`, at `reorder` and up to 8 rows, folds in the Session
  * and not here. No graph of a Gemma 4 distribution has one, so their plans are the Session's
