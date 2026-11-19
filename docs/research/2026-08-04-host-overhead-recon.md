@@ -465,9 +465,9 @@ run 境界（`executor.ts:717-760`）:
 `src/gpu/arena.ts:11-22,101-117,119-133,250-267` / `src/gpu/pipeline-cache.ts:43-52` /
 `src/gpu/device.ts:155-174,352-370,558,658-687` / `examples/anima/main.ts:583,639-700,743`。
 
-**ADR / doc**: [0004 実行モデル](/home/developer/workspace/karume/docs/decisions/0004-execution-model.md) /
-[0021 GPU 時間診断](/home/developer/workspace/karume/docs/decisions/0021-gpu-timing-diagnostics.md) /
-[0031 attention score f16 格納](/home/developer/workspace/karume/docs/decisions/0031-attention-score-f16-storage.md) /
+**ADR / doc**: [0004 実行モデル](../decisions/0004-execution-model.md) /
+[0021 GPU 時間診断](../decisions/0021-gpu-timing-diagnostics.md) /
+[0031 attention score f16 格納](../decisions/0031-attention-score-f16-storage.md) /
 `docs/research/2026-08-04-intermediate-f16-design.md` §2.3・§3.4 ③・§10-2。
 
 **本日の実測ログ（scratchpad）**: `timedfull1.log` / `timedfull2.log` / `timedoff1024.log` /
