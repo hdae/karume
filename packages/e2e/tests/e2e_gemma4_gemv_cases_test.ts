@@ -210,7 +210,7 @@ const FLOAT_LINEARS: Readonly<Record<string, number>> = {
  */
 const CASES_WITHOUT_A_GRAPH: Readonly<Record<string, string>> = {
   "i8-n262144-k1536":
-    "the regular E2B's int8 output head: the line ships bf16 alone since 2026-11-04, but the default " +
+    "the regular E2B's int8 output head: the line's presets are bf16 since 2026-11-04, but the default " +
     "profile still holds this shape's parallel row, and every row of the profile has a case",
   "i8-n262144-k2560":
     "the regular E4B's int8 output head: as E2B's — the default profile still holds its parallel row",

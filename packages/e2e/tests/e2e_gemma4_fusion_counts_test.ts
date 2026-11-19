@@ -12,6 +12,8 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { parseManifest } from "@karume/hub";
+import { resolveGemmaSessionOptions } from "../../models/src/gemma/session-options.ts";
 import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/executor.ts";
 import {
   type ContainerManifest,
@@ -124,6 +126,45 @@ test.skipIf(!available)(
           { ...NONE, rope: 50, rmsNormAdd: 106 },
           `${family} ${label} M=${rows}`,
         );
+      }
+    }
+  },
+);
+
+/**
+ * Per (model, component, storage): RoPE and RMS→add of the graph (the same at every M). The
+ * distribution's two presets map the same containers, and these fusions apply in both.
+ */
+const PRESET_FUSIONS = [
+  ["e2b", "model", "bf16", { rope: 50, rmsNormAdd: 106 }],
+  ["e2b", "drafter", "i8", { rope: 12, rmsNormAdd: 24 }],
+  ["e4b", "model", "bf16", { rope: 66, rmsNormAdd: 127 }],
+] as const;
+
+test.skipIf(!available)(
+  `the real ${family} distribution plans the same fusions at bf16 and bf16-fast (E2B, its drafter, E4B)`,
+  async () => {
+    const text = await readTextFile(manifestUrl);
+    const manifest: ContainerManifest = JSON.parse(text);
+    const parsed = parseManifest(text);
+    for (const [model, component, storage, expected] of PRESET_FUSIONS) {
+      const head = containerPart0(manifest, model, component, storage);
+      if (head.repo !== undefined) {
+        throw new Error("the Gemma real-asset fusion test requires a self-contained distribution");
+      }
+      const graph = await readContainerGraph(new URL(head.path, root), component);
+      for (const preset of ["bf16", "bf16-fast"]) {
+        const quant = parsed.models[model].quants[preset];
+        assertEquals(quant.weights[component], storage, `${model} ${preset}: ${component}`);
+        // The Session options the preset resolves to (`bf16-fast`: the level `reorder`).
+        const options = resolveGemmaSessionOptions(quant.session, {}, `${model} ${preset}`);
+        for (const rows of [1, 4, 8, 32]) {
+          assertEquals(
+            decodeFusionCounts(graph, rows, options),
+            { ...NONE, ...expected },
+            `${model} ${component} ${preset} M=${rows}`,
+          );
+        }
       }
     }
   },

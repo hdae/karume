@@ -158,7 +158,12 @@ for (const [quant, session] of [["i4-fast", { numerics: { level: "reorder" } }]]
   test.skipIf(!PRESENT || !GPU_AVAILABLE)(
     `12B ${quant}: the planned kernels equal the census table's row (real GPU)`,
     async () => {
-      const row = censusRowOf("gemma4", "12b", effectiveSessionOptions("gemma4", session));
+      const row = censusRowOf(
+        "gemma4",
+        "12b",
+        effectiveSessionOptions("gemma4", session),
+        "karume-gemma4-qat",
+      );
       assert(row !== undefined, `no census row for 12b ${quant}`);
       const byPhase = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
       const pipeline = await Pipeline.fromPretrained(nodeDirectory(ROOT), {

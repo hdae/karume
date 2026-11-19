@@ -253,7 +253,7 @@ export type PipelineOptions = {
    * NOTE: taken in bytes, not as a count — the block width changes with the asset generation, so
    * "N blocks" would mean different RAM per generation (ADR 0085 addendum 2026-09-02).
    * NOTE: the budget bounds whole blocks only. On top of it sits a row cache of at most 256 rows
-   * (256 rows of regular E2B: 4,587,520 B with its one preset `bf16`; q4_0 QAT E2B 1,433,600 B;
+   * (256 rows of regular E2B: 4,587,520 B with its bf16 table; q4_0 QAT E2B 1,433,600 B;
    * mobile QAT E2B 1,182,720 B), kept only while the budget is above 0, so the host RAM PLE holds is
    * at most the budget plus that headroom (ADR 0085 addendum 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
    *

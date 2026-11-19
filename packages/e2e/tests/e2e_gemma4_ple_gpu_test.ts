@@ -25,7 +25,7 @@
  * probe from the test-asset root (`goldens/gemma4-qat-e2b-product/ple.probe.safetensors` —
  * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat-mobile/` and
  * `models/karume-gemma4-qat/` (the q4_0 line — the regular gemma pipeline's int4 seats since the
- * regular line ships `bf16` alone, 2026-11-04). Where they are missing the cases **SKIP
+ * regular line went bf16, 2026-11-04). Where they are missing the cases **SKIP
  * explicitly** (ADR 0005).
  * The probe follows ADR 0139's fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
  * dataset at the pin lacks it); without a complete fetch ①② SKIP with the reason in the title.

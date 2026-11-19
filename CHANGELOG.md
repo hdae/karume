@@ -189,6 +189,13 @@ measurements in `docs/research/`.
   `@karume/convert` and `@karume/safetensors`.
 - `@karume/convert` (private): `float16Codec` on `openConvertingSource` and `readPlanCodecs` stores every f16 and bf16
   initializer of a plan as the given 16-bit codec (the same blocks, a part 0 of its own).
+- `karume-gemma4` (regular Gemma 4 E2B / E4B): the preset `bf16-fast`, the same weights as `bf16` (E2B's int8 drafter
+  included), declaring `numerics: { level: "reorder" }` — the declaration of the q4_0 QAT line's `i4-fast`. The linears
+  whose bf16 shape has a parallel row in the geometry profile run the parallel GEMV (on the default profile 207 of
+  E2B's 277 and 216 of E4B's 344; the output heads and the other shapes keep the sequential GEMV), and the states-form
+  attention runs its parallel reductions with the row statistics folded into PV. Its tokens can differ from those of
+  `bf16`, which stays the default and keeps the reference summation order. The recipe and the local mirror carry it;
+  the published repository does not yet.
 
 ### Changed
 

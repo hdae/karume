@@ -1,15 +1,17 @@
-// Real-weight Gemma 4 E2B / E4B of the regular line's preset `bf16` — the original weights, the
-// distribution's one preset and default — through the distribution mirror (`models/karume-gemma4/`
-// — `dist.py --pipeline gemma4`).
+// Real-weight Gemma 4 E2B / E4B of the regular line's presets — `bf16`, the original weights in the
+// reference summation order and the default, and `bf16-fast`, the same weights at the numeric level
+// `reorder` — through the distribution mirror (`models/karume-gemma4/` — `dist.py --pipeline
+// gemma4`).
 //
 // The preset's `model` container stores Google's BF16 checkpoint as it is, the per-layer embeddings
 // included (PLE index schema 5: a bf16 `values` table and no `scales` — ADR 0085 addendum
 // 2026-11-04). E2B's drafter is the regular int8 one, borrowing the bf16 target's
 // `model.lm_head.weight`. The cases, per model:
 //
-// ① the manifest entry (no GPU): `defaultQuant` is `bf16`, the one preset; it names the bf16
-//    container (and E2B's int8 drafter) with the reference summation order (`session` {}), the
-//    `model` role's one storage; its container's PLE index is schema 5 with 2 bytes per value
+// ① the manifest entry (no GPU): `defaultQuant` is `bf16`; both presets name the bf16 container
+//    (and E2B's int8 drafter), the `model` role's one storage — `bf16` with the reference summation
+//    order (`session` {}), `bf16-fast` with `numerics: { level: "reorder" }`; the container's PLE
+//    index is schema 5 with 2 bytes per value
 // ② greedy parity (real GPU): `fromPretrained` with no `quant` (the default, so it is the bf16
 //    preset that runs), PLE gathered on the host: the greedy chain of each golden case of the bf16
 //    series equals the torch golden token for token — for E2B both without and with speculation.
@@ -18,11 +20,20 @@
 //    numeric noise (token identity, not a tolerance band)
 // ③ E2B speculation (real GPU): a greedy chat turn with `speculative: "always"` gives the same
 //    text, stop and token count as the turn without it, with at least one draft accepted (the int8
-//    drafter really ran on the borrowed bf16 table)
+//    drafter really ran on the borrowed bf16 table) — on `bf16-fast` too (the q4_0 QAT line's check
+//    of its `i4-fast` seat: the verify rows M = k + 1 and the decode row M = 1 take the same
+//    summation order)
 // ④ the PLE resident on the GPU (real GPU): the bf16 values (E2B 4.70 GB, E4B 5.64 GB) need one
 //    binding; on a device whose binding limit is smaller, `pleResidency: "gpu"` fails loudly with
 //    the shortfall instead of falling back to the host; on a larger one the greedy chain of the
 //    first golden case equals the golden
+// ⑤ the census of `bf16-fast` (real GPU): the kernels a greedy chat turn plans in each phase — decode,
+//    and for E2B verify and draft — equal the census table's `karume-gemma4` row exactly (the
+//    linears with a bf16 row on the parallel GEMV, the rest on the sequential path; RMS→add). The
+//    plan of the same rows without a GPU is `e2e_gemma4_bf16_parallel_gemv_plan_test.ts`
+//
+// The parity cases ② and ④ run `bf16` alone: `bf16-fast` sums in another order, so its tokens can
+// differ from the torch goldens.
 //
 // ## Assets
 //
@@ -36,13 +47,14 @@
 //
 // One pipeline at a time. The bf16 weights the GPU holds are about 4.6 GB (E2B) and 9.3 GB (E4B);
 // the PLE (4.70 / 5.64 GB) stays on the host, read whole into RAM here (`maxResidentPleBytes` from
-// the index), so no row is read twice.
+// the index), so no row is read twice. ⑤ keeps none of it resident (`maxResidentPleBytes: 0`): its
+// turns are short, and the census does not depend on where a row comes from.
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { type Manifest, MANIFEST_FILENAME, parseManifest } from "@karume/hub";
-import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
+import { parseSafetensors, type SafetensorsFile, type SessionDiagnostics } from "@karume/runtime";
 import { type ChatMessage, type GenerationSequence, Pipeline } from "../../models/gemma.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import { openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -50,13 +62,21 @@ import { mirrorDirectory, mirrorHasModel, mirrorRoot } from "../../models/tests/
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentBytes } from "../../models/tests/helpers/ple-budget.ts";
 import {
+  assertRowCensus,
+  censusRowOf,
+  effectiveSessionOptions,
+  gemmaComponentOf,
+} from "../../models/tests/helpers/census-table.ts";
+import {
   goldenDir,
   TEST_ASSETS,
   TEST_ASSETS_ROOT,
   testAssetsFetched,
 } from "@karume/test-support/test-assets";
 
-const MIRROR = mirrorRoot("karume-gemma4");
+/** The mirror's directory under `models/` (also the census table's `distribution`). */
+const MIRROR_NAME = "karume-gemma4";
+const MIRROR = mirrorRoot(MIRROR_NAME);
 const ASSEMBLE =
   "cd tools/export-recipes && uv run python dist.py --pipeline gemma4 --model e2b --model e4b" +
   " --out ../../models/karume-gemma4";
@@ -66,10 +86,26 @@ const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 const MODELS = ["e2b", "e4b"] as const;
 type Model = (typeof MODELS)[number];
 
-/** The roles and the preset (`gemma4/distribution.py`). */
+/** The roles and the presets (`gemma4/distribution.py`). */
 const MODEL = "model";
 const DRAFTER = "drafter";
+/** The reference preset, the default, and the `model` role's one storage label. */
 const PRESET = "bf16";
+/** The parallel and fused preset over the same containers (`GEMMA4_PARALLEL_QUANTS`). */
+const FAST = "bf16-fast";
+/** The presets of every model, in the manifest's order, with the session and label each declares. */
+const PRESETS: readonly {
+  readonly name: string;
+  readonly session: object;
+  readonly label: string;
+}[] = [
+  { name: PRESET, session: {}, label: "Original weights (bf16)" },
+  {
+    name: FAST,
+    session: { numerics: { level: "reorder" } },
+    label: "Original weights (bf16) with parallel GEMV and attention",
+  },
+];
 /** The bf16 preset's choice of the mirror. */
 const choiceOf = (model: Model) => ({ model, quant: PRESET }) as const;
 
@@ -175,20 +211,26 @@ const bindingLimit = async (): Promise<number> => {
 
 for (const model of MODELS) {
   test.skipIf(!PRESENT[model])(
-    `gemma4 ${model}: bf16 is the one preset and the default, the original weights (no GPU)`,
+    `gemma4 ${model}: bf16 (the default) and bf16-fast name the original weights (no GPU)`,
     async () => {
       const entry = entryOf(model);
       assertEquals(entry.defaultQuant, PRESET, "default preset");
-      assertEquals(Object.keys(entry.quants), [PRESET], "presets");
-      assertEquals(Object.keys(entry.weights[MODEL]), [PRESET], "model's storages");
-      const preset = entry.quants[PRESET];
       assertEquals(
-        preset.weights,
-        HAS_DRAFTER[model] ? { [MODEL]: PRESET, [DRAFTER]: "i8" } : { [MODEL]: PRESET },
-        "the preset's weights",
+        Object.keys(entry.quants),
+        PRESETS.map(({ name }) => name),
+        "presets",
       );
-      assertEquals(preset.session ?? {}, {}, "the reference summation order (session {})");
-      assertEquals(preset.label, "Original weights (bf16)", "label");
+      assertEquals(Object.keys(entry.weights[MODEL]), [PRESET], "model's storages");
+      for (const { name, session, label } of PRESETS) {
+        const preset = entry.quants[name];
+        assertEquals(
+          preset.weights,
+          HAS_DRAFTER[model] ? { [MODEL]: PRESET, [DRAFTER]: "i8" } : { [MODEL]: PRESET },
+          `${name}: the same containers`,
+        );
+        assertEquals(preset.session ?? {}, session, `${name}: session`);
+        assertEquals(preset.label, label, `${name}: label`);
+      }
 
       const index = await bf16PleOf(model);
       assert(index.storage === "bf16", `PLE storage ${index.storage} (bf16 is needed)`);
@@ -288,6 +330,40 @@ const greedyChain = async (
   return ids;
 };
 
+/**
+ * ③'s check on one opened pipeline: a greedy chat turn with `speculative: "always"` gives the same
+ * text, stop and token count as the plain turn, with at least one draft accepted.
+ */
+const assertSpeculativeTurn = async (opened: Pipeline, label: string): Promise<void> => {
+  const turn = async (speculative: "always" | false) => {
+    const started = performance.now();
+    const stream = opened.chat(CHAT, {
+      maxNewTokens: CHAT_TOKENS,
+      sampler: { temperature: 0 },
+      speculative,
+    });
+    const text = await stream.text();
+    return { text, stop: await stream.done, ms: performance.now() - started };
+  };
+  const speculative = await turn("always");
+  const plain = await turn(false);
+  assertEquals(speculative.text, plain.text, "the text");
+  assertEquals(speculative.stop.reason, plain.stop.reason, "the stop reason");
+  assertEquals(speculative.stop.tokens, plain.stop.tokens, "the token count");
+  assertEquals(plain.stop.speculation, undefined, "a plain turn carries no speculation");
+  const speculation = speculative.stop.speculation;
+  assert(speculation !== undefined, "the speculative turn did not speculate");
+  assert(
+    speculation.accepted > 0,
+    `no draft accepted (${speculation.cycles} cycles, ${speculation.drafted} drafted)`,
+  );
+  console.log(
+    `[e2e] gemma4 ${label} chat: ${speculative.stop.tokens} tokens /` +
+      ` ${speculation.cycles} cycles / accepted ${speculation.accepted}/${speculation.drafted}` +
+      ` / speculative ${speculative.ms.toFixed(0)} ms vs plain ${plain.ms.toFixed(0)} ms`,
+  );
+};
+
 /** Checks the golden's margin gate and returns it. */
 const gatedGolden = async (root: URL, name: string) => {
   const golden = await readGreedy(root, name);
@@ -377,34 +453,7 @@ for (const model of MODELS) {
 
       it("③ a speculative greedy chat turn equals the plain one, with drafts accepted", async () => {
         assert(pipeline !== undefined, "the pipeline was not built in beforeAll");
-        const opened = pipeline;
-        const turn = async (speculative: "always" | false) => {
-          const started = performance.now();
-          const stream = opened.chat(CHAT, {
-            maxNewTokens: CHAT_TOKENS,
-            sampler: { temperature: 0 },
-            speculative,
-          });
-          const text = await stream.text();
-          return { text, stop: await stream.done, ms: performance.now() - started };
-        };
-        const speculative = await turn("always");
-        const plain = await turn(false);
-        assertEquals(speculative.text, plain.text, "the text");
-        assertEquals(speculative.stop.reason, plain.stop.reason, "the stop reason");
-        assertEquals(speculative.stop.tokens, plain.stop.tokens, "the token count");
-        assertEquals(plain.stop.speculation, undefined, "a plain turn carries no speculation");
-        const speculation = speculative.stop.speculation;
-        assert(speculation !== undefined, "the speculative turn did not speculate");
-        assert(
-          speculation.accepted > 0,
-          `no draft accepted (${speculation.cycles} cycles, ${speculation.drafted} drafted)`,
-        );
-        console.log(
-          `[e2e] gemma4 ${model} bf16 chat: ${speculative.stop.tokens} tokens /` +
-            ` ${speculation.cycles} cycles / accepted ${speculation.accepted}/${speculation.drafted}` +
-            ` / speculative ${speculative.ms.toFixed(0)} ms vs plain ${plain.ms.toFixed(0)} ms`,
-        );
+        await assertSpeculativeTurn(pipeline, `${model} ${PRESET}`);
       });
     },
   );
@@ -463,6 +512,87 @@ for (const model of MODELS) {
           await pipeline.dispose();
         }
       });
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ③ speculation on bf16-fast (real GPU)
+// ---------------------------------------------------------------------------
+
+for (const model of MODELS) {
+  describe.skipIf(!HAS_DRAFTER[model] || !PRESENT[model] || !GPU_AVAILABLE)(
+    `gemma4 ${model} ${FAST}: a speculative greedy chat turn equals the plain one (real GPU)`,
+    () => {
+      let pipeline: Pipeline | undefined;
+      beforeAll(async () => {
+        pipeline = await Pipeline.fromPretrained(mirrorDirectory(MIRROR), {
+          ...(await loadOptions(model)),
+          quant: FAST,
+          speculative: { k: GEMMA4_DRAFT_STEPS },
+        });
+      });
+      afterAll(async () => {
+        await pipeline?.dispose();
+      });
+
+      it(`③ ${FAST}: the same text, stop and token count, with drafts accepted`, async () => {
+        assert(pipeline !== undefined, "the pipeline was not built in beforeAll");
+        await assertSpeculativeTurn(pipeline, `${model} ${FAST}`);
+      });
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ⑤ the census of bf16-fast (real GPU)
+// ---------------------------------------------------------------------------
+
+for (const model of MODELS) {
+  test.skipIf(!PRESENT[model] || !GPU_AVAILABLE)(
+    `gemma4 ${model} ${FAST}: the planned kernels of each phase equal the census table's row (real GPU)`,
+    async () => {
+      const row = censusRowOf(
+        "gemma4",
+        model,
+        effectiveSessionOptions("gemma4", entryOf(model).quants[FAST].session, {}, model),
+        MIRROR_NAME,
+      );
+      assert(row !== undefined, `no census row for ${MIRROR_NAME} ${model} ${FAST}`);
+      const byPhase = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
+      const pipeline = await Pipeline.fromPretrained(mirrorDirectory(MIRROR), {
+        model,
+        quant: FAST,
+        maxResidentPleBytes: 0,
+        ...(HAS_DRAFTER[model] ? { speculative: { k: GEMMA4_DRAFT_STEPS } } : {}),
+        onRunDiagnostics: (diagnostics, phase) => {
+          byPhase.set(phase.kind, [
+            ...(byPhase.get(phase.kind) ?? []),
+            diagnostics.lastRunPipelines,
+          ]);
+        },
+      });
+      try {
+        // A plain turn decodes; with the drafter, a speculative one verifies and drafts.
+        for (const speculative of HAS_DRAFTER[model] ? ([false, "always"] as const) : [false]) {
+          const stream = pipeline.chat(CHAT, {
+            maxNewTokens: 8,
+            sampler: { temperature: 0 },
+            ...(HAS_DRAFTER[model] ? { speculative } : {}),
+          });
+          await stream.text();
+          await stream.done;
+        }
+      } finally {
+        await pipeline.dispose();
+      }
+      for (const phase of HAS_DRAFTER[model] ? ["decode", "verify", "draft"] : ["decode"]) {
+        assert(byPhase.has(phase), `${model} ${FAST}: no ${phase} run`);
+      }
+      assert(
+        assertRowCensus(row, byPhase, gemmaComponentOf, `${model} ${FAST}`) > 0,
+        "nothing was compared",
+      );
     },
   );
 }

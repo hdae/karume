@@ -53,7 +53,7 @@
 // ## Assets
 //
 // The q4_0 QAT line's mirror `models/karume-gemma4-qat/` (E2B with its int4 QAT drafter — the
-// `gemma4` pipeline's int4 seats since the regular line ships `bf16` alone, 2026-11-04) and the QAT
+// `gemma4` pipeline's int4 seats since the regular line went bf16, 2026-11-04) and the QAT
 // drafter goldens in the test-asset root, `goldens/gemma4-e2b-qat-drafter/` (the prompts and the
 // torch continuations — ADR 0139 decision 2). Both are
 // outside the repository, and without the mirror every case SKIPs explicitly. The goldens follow ADR 0139's
@@ -106,7 +106,7 @@ const MIRROR_DIR = GEMMA4_QAT_MIRROR;
 /**
  * The seat these cases read: the q4_0 line's fused-parallel `i4-fast` over its E2B (the mirror's
  * default model) and its QAT drafter — the seat the regular line's `i4-fast` was before the regular
- * line went `bf16`-only (2026-11-04). Named because the line's default is the reference `i4`.
+ * line went bf16 (2026-11-04). Named because the line's default is the reference `i4`.
  */
 const INT4_SEAT = { quant: "i4-fast" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-qat-drafter");

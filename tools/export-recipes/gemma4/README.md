@@ -742,9 +742,9 @@ so an E4B-only build should name its own `--out`.
 The regular distribution folds **three series** per E2B into one HF repository (two per E4B). The
 product container (`gemma4-e2b-product-bf16`) holds the checkpoint's bf16 weights and the bf16 PLE
 assets (index schema 5) in one `krm`, split into parts of the default 256 MiB length, with every PLE
-block in a part of its own; it is the `model` role's one dtype, `bf16`, the one preset. The MTP
-drafter container (`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a pipeline
-asks for `speculative`; the E2B preset names it. The last is the compiled tokenizer asset
+block in a part of its own; it is the `model` role's one dtype, `bf16`, which both presets map. The
+MTP drafter container (`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a
+pipeline asks for `speculative`; both E2B presets name it. The last is the compiled tokenizer asset
 (`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the containers
 (`ple.probe.safetensors`, `greedy.*.safetensors`, `reference.json`, `drafter-golden.*.safetensors`)
 are not in the placement table and therefore never reach the output. An `e4b` entry reads
@@ -826,12 +826,24 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 
 ## Quant execution variants
 
-Both models carry one quant, `bf16`, their default (the maintainer's ruling of 2026-11-04): the
-`model` weights' one container — every weight and the PLE table as the checkpoint's bf16 bits, PLE
-index schema 5 — in the reference summation order (`session` empty: GEMV and attention run the
-runtime's reference path). E2B's `bf16` also names the int8 drafter, which borrows the bf16
-target's `model.lm_head.weight`. The int4 seat at the numeric level `reorder` (`i4-fast`,
-`numerics: { level: "reorder" }`) is the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
+Both models carry two quants over the `model` weights' one container — every weight and the PLE
+table as the checkpoint's bf16 bits, PLE index schema 5:
+
+- `bf16`, the default (the maintainer's ruling of 2026-11-04): the reference summation order
+  (`session` empty: GEMV and attention run the runtime's reference path).
+- `bf16-fast` (2026-11-19): the same weights at the numeric level `reorder`
+  (`numerics: { level: "reorder" }`, the declaration of the q4_0 QAT line's `i4-fast`). The GEMVs
+  of the shapes the geometry profile has a parallel row for sum in parallel at 1 to 8 rows, and
+  the states-form attention runs its parallel reductions with the row statistics folded into PV.
+  On the default profile's 17 bf16 rows that is 207 of E2B's 277 linears and 216 of E4B's 344, and
+  2 of the 68 linears of E2B's int8 drafter; the others keep the sequential GEMV
+  (`GEMMA4_PARALLEL_QUANTS` in `distribution.py` lists them). Tokens can differ from `bf16`. Its
+  description carries no sentence on speed until a measurement stands behind one
+  (`GEMMA4_SPEED_NOTE`).
+
+E2B's presets also name the int8 drafter, which borrows the bf16 target's `model.lm_head.weight`.
+The int4 seats (`i4` and `i4-fast`) are the q4_0 QAT line's (`karume-gemma4-qat` —
+`distribution.py`, "The q4_0 QAT line").
 
 Explicit runtime options override each quant setting. Reassembling into a new output directory
 updates the metadata without requantizing weights. Existing distributions and pinned public

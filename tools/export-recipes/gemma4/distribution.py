@@ -12,7 +12,9 @@ ships two graphs, E4B one, as it has no drafter ({@link gemma4_has_drafter}):
 
 - `model` — the product graph's container (the `.krm` part sequence `gemma4/export_product.py`
   writes: the PLE out of the graph, the exit the selected rows' logits and hidden states). Every
-  weight is the checkpoint's own bf16 bits, its one preset `bf16` (ADR 0128 addendum 2026-11-04).
+  weight is the checkpoint's own bf16 bits, under two presets over the one storage: `bf16` (the
+  default, the reference summation order — ADR 0128 addendum 2026-11-04) and `bf16-fast` (the
+  numeric level `reorder` — {@link gemma4_quants}).
   **The PLE is an asset of this container** (ADR 0109 decision 4), not weights — the index
   `ple_index` (schema 5: a bf16 `values` table and no `scales`) and the `ple.values.<k>` block
   sequence, the table the host builds `per_layer_inputs` from. The reader is
@@ -423,7 +425,7 @@ def gemma4_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
 #: drafter not distributed does not have its storage stated).
 GEMMA4_DRAFTER_QUANT_NOTE = " The drafter head is int8 throughout."
 
-#: The one preset, `bf16`: the original weights (ADR 0128 decision 4; the default by ADR 0128
+#: The reference preset, `bf16`: the original weights (ADR 0128 decision 4; the default by ADR 0128
 #: addendum 2026-11-04) — the checkpoint's own bf16 values with f32 compute, in the reference
 #: summation order (`session` empty — ADR 0104). {@link gemma4_quants} adds the drafter sentence
 #: per model.
@@ -437,19 +439,61 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
     },
 }
 
+#: The parallel and fused preset over the same bf16 weights (the maintainer's approval of
+#: 2026-11-19; the q4_0 QAT line's `i4-fast` is the same declaration —
+#: {@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}): it declares the numeric level `reorder` for the whole
+#: model, which sums the GEMVs of the shapes the geometry profile has a parallel row for in parallel
+#: and runs the states-form attention's parallel reductions with the row statistics folded into PV
+#: (`parallel-fused`). The RMS→add fusion is bit-identical and applies in both presets.
+#: What applies (the plan of the mirror's graphs on the default profile's 17 bf16 rows, at 1, 4 and
+#: 8 rows, 2026-11-19): 207 of the 277 linears of the E2B product and 216 of the 344 of E4B take the
+#: parallel GEMV; the rest have no row and keep the sequential GEMV at one row and the GEMM above it
+#: (E2B: `12288 × 1536` 40, `1536 × 2048` 28, the output head and `8960 × 1536`; E4B:
+#: `10240 × 2560` 84, `2560 × 256` 42, the output head and `10752 × 2560`). E2B's int8 drafter has
+#: two eligible linears of its 68. RMS→add folds 106 (E2B), 127 (E4B) and 24 (the drafter) pairs in
+#: both presets. An adapter whose table has bf16 rows of its own takes more (`nvidia-blackwell`:
+#: five of the shapes above — `docs/spec/geometry-profiles.md`).
+GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
+    "bf16-fast": {
+        "weights": {},
+        "session": {"numerics": {"level": "reorder"}},
+        "label": "Original weights (bf16) with parallel GEMV and attention",
+        "description": "Same weights as bf16; parallel GEMV and attention."
+        " Tokens can differ; use bf16 for the reference order.",
+    },
+}
+
+#: Model → the one sentence on speed its parallel and fused preset carries, after the drafter
+#: sentence. MUST: a model enters only with a measurement behind the sentence (the rule of
+#: {@link GEMMA4_QAT_Q4_0_SPEED_NOTE}: decode ms/token of `bf16` / `bf16-fast` interleaved in one
+#: process, the protocol recorded beside the entry). No model has one yet: the preset's decode has
+#: not been measured.
+GEMMA4_SPEED_NOTE: Mapping[str, str] = {}
+
 
 def gemma4_quants(model: str) -> dict[str, Any]:
-    """The model's quant table ({@link GEMMA4_QUANTS}), the drafter sentence added to the
-    description for a model that ships a drafter ({@link GEMMA4_DRAFTER_QUANT_NOTE})."""
+    """The model's quant table: the reference preset `bf16` ({@link GEMMA4_QUANTS}) and the parallel
+    and fused preset over the same weights ({@link GEMMA4_PARALLEL_QUANTS}). A model that ships a
+    drafter has the drafter sentence ({@link GEMMA4_DRAFTER_QUANT_NOTE}) added to every
+    description, and a model with a measured speed note ({@link GEMMA4_SPEED_NOTE}) has it added
+    to the parallel preset's last."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
+    for name, quant in GEMMA4_PARALLEL_QUANTS.items():
+        quants[name] = {**quant, "session": copy.deepcopy(quant["session"])}
     if gemma4_has_drafter(model):
-        quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
+        for quant in quants.values():
+            quant["description"] += GEMMA4_DRAFTER_QUANT_NOTE
+    note = GEMMA4_SPEED_NOTE.get(model)
+    if note is not None:
+        for name in GEMMA4_PARALLEL_QUANTS:
+            quants[name]["description"] += note
     return quants
 
 
 #: The default quant per model. The key set MUST equal the regular line's models
-#: ({@link GEMMA4_REGULAR_MODELS}; the tests pin it). Both default to the line's one preset, `bf16`
-#: (the maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04).
+#: ({@link GEMMA4_REGULAR_MODELS}; the tests pin it). Both default to the reference preset, `bf16`
+#: (the maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04; kept when `bf16-fast`
+#: was added, 2026-11-19).
 GEMMA4_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(GEMMA4_REGULAR_MODELS, GEMMA4_DTYPE)
 
 #: The row count of a fixed-length prefill chunk (ADR 0066 decision 4 — a context planning

@@ -233,16 +233,18 @@ class TestGemma4Layout:
         # The one storage of the main model: the checkpoint's bf16 values.
         assert list(model["weights"][GEMMA4_ROLE]) == ["bf16"]
         assert list(model["weights"][GEMMA4_DRAFTER_ROLE]) == ["i8"]
-        assert list(model["quants"]) == ["bf16"]
+        assert list(model["quants"]) == ["bf16", "bf16-fast"]
         assert model["defaultQuant"] == "bf16"
         # The base storage differs per role (the drafter is i8 down to the linears), so the
         # auto-completion fills both entries with their own single dtype label (in the declaration
-        # order of the weights).
-        assert list(model["quants"]["bf16"]["weights"].items()) == [
-            (GEMMA4_ROLE, "bf16"),
-            (GEMMA4_DRAFTER_ROLE, "i8"),
-        ]
+        # order of the weights) — the same containers in both presets.
+        for name in ("bf16", "bf16-fast"):
+            assert list(model["quants"][name]["weights"].items()) == [
+                (GEMMA4_ROLE, "bf16"),
+                (GEMMA4_DRAFTER_ROLE, "i8"),
+            ], name
         assert model["quants"]["bf16"]["session"] == {}
+        assert model["quants"]["bf16-fast"]["session"] == {"numerics": {"level": "reorder"}}
 
     def test_it_never_carries_the_drafter_goldens(self, gemma4_assembled) -> None:
         """The drafter series' goldens are for acceptance only — like `ple.probe`, they do not go
@@ -1012,15 +1014,12 @@ class TestGemma4Card:
         assert "maxStorageBufferBindingSize" in card
         assert "134,217,728" in card
 
-    #: A second seat beside the line's one (`bf16`), so the folding across seats has two to fold —
-    #: the q4_0 QAT line's card renders the same section over three.
-    _TWIN = "bf16-twin"
-
     @classmethod
     def _device_limits_line(cls, manifest: Mapping[str, Any], limits_by_quant: Callable) -> str:
         other = json.loads(json.dumps(manifest))
         quants = other["models"][GEMMA4_DEFAULT_MODEL]["quants"]
-        quants[cls._TWIN] = json.loads(json.dumps(quants["bf16"]))
+        # The line's two presets (`bf16` and `bf16-fast`) give the folding across presets two to
+        # fold.
         assert len(quants) >= 2
         for quant_name, quant in quants.items():
             quant["requiredLimits"] = limits_by_quant(quant_name)
@@ -1055,7 +1054,7 @@ class TestGemma4Card:
 
         assert line.count("`maxBufferSize`") == 1
         assert "≥ 536,870,912 B for `bf16`" in line
-        assert f"≥ 402,653,184 B for `{self._TWIN}`" in line
+        assert "≥ 402,653,184 B for `bf16-fast`" in line
 
     def test_it_omits_the_device_limits_line_when_no_quant_declares_one(
         self, gemma4_assembled
@@ -1204,7 +1203,7 @@ def _assemble_e4b(root: Path) -> tuple[Path, dict[str, Any]]:
 
 
 class TestGemma4E4B:
-    """E4B's model entry — no drafter, and the same single quant `bf16` as E2B (default)."""
+    """E4B's model entry — no drafter, and the same presets as E2B (`bf16` the default)."""
 
     def test_the_upstream_and_the_series_names_follow_the_model(self, tmp_path: Path) -> None:
         assert GEMMA4_UPSTREAM["e4b"] == "google/gemma-4-E4B-it"
@@ -1243,11 +1242,11 @@ class TestGemma4E4B:
             assert quant["weights"] == {GEMMA4_ROLE: "bf16"}, name
             assert "drafter" not in quant["description"].lower()
 
-    def test_the_entry_carries_the_one_quant_bf16_as_the_default(self, tmp_path: Path) -> None:
+    def test_the_entry_carries_both_presets_with_bf16_as_the_default(self, tmp_path: Path) -> None:
         _, manifest = _assemble_e4b(tmp_path)
         entry = manifest["models"]["e4b"]
 
-        assert list(entry["quants"]) == ["bf16"]
+        assert list(entry["quants"]) == ["bf16", "bf16-fast"]
         assert entry["defaultQuant"] == "bf16"
         assert list(entry["weights"][GEMMA4_ROLE]) == ["bf16"]
         # Both models default to the original weights (the maintainer's ruling of 2026-11-04).
@@ -1347,6 +1346,91 @@ class TestGemma4E4B:
 
         with pytest.raises(DistError, match="the drafter series is"):
             gemma4_plan(sources, "e2b")
+
+
+#: The session settings of the parallel and fused preset (the q4_0 QAT line's `i4-fast` declares
+#: the same).
+PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
+    "bf16-fast": {"numerics": {"level": "reorder"}},
+}
+
+
+class TestGemma4ParallelPreset:
+    """Both models carry the parallel and fused preset `bf16-fast` over the same bf16 weights as
+    the reference preset `bf16`, which stays the default."""
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_the_preset_declares_the_parallel_and_fused_session_settings(
+        self, model: str
+    ) -> None:
+        quants = gemma4_distribution.gemma4_quants(model)
+
+        assert list(quants) == ["bf16", "bf16-fast"]
+        assert quants["bf16"]["session"] == {}
+        for name, session in PARALLEL_SESSIONS.items():
+            # The order too: the manifest serialises the table as it is.
+            assert list(quants[name]["session"].items()) == list(session.items()), name
+            assert quants[name]["weights"] == {}, name  # filled with the one storage per role
+            assert (
+                quants[name]["label"] == "Original weights (bf16) with parallel GEMV and attention"
+            )
+
+    def test_the_drafter_sentence_goes_on_every_preset_of_the_model_that_ships_one(self) -> None:
+        declared = gemma4_distribution.GEMMA4_PARALLEL_QUANTS["bf16-fast"]["description"]
+        note = gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE
+        e2b = gemma4_distribution.gemma4_quants("e2b")
+        e4b = gemma4_distribution.gemma4_quants("e4b")
+
+        assert e2b["bf16-fast"]["description"] == declared + note
+        assert e4b["bf16-fast"]["description"] == declared
+        for quant in e2b.values():
+            assert quant["description"].endswith(note)
+        for quant in e4b.values():
+            assert "drafter" not in quant["description"].lower()
+
+    def test_no_preset_states_a_speed_without_a_measurement(self) -> None:
+        """The speed sentence enters per model with its measurement
+        (`GEMMA4_SPEED_NOTE`); until then the description says nothing about speed."""
+        notes = gemma4_distribution.GEMMA4_SPEED_NOTE
+        assert set(notes) <= set(GEMMA4_REGULAR_MODELS)
+        for model in GEMMA4_REGULAR_MODELS:
+            description = gemma4_distribution.gemma4_quants(model)["bf16-fast"]["description"]
+            if model in notes:
+                assert description.endswith(notes[model]), model
+            else:
+                assert "faster" not in description.lower(), model
+                assert "slower" not in description.lower(), model
+
+    def test_the_presets_do_not_share_session_tables_with_the_declaration(self) -> None:
+        """A manifest built for one model cannot alter the line's declaration (each table is a
+        copy)."""
+        quants = gemma4_distribution.gemma4_quants("e2b")
+        quants["bf16-fast"]["session"]["numerics"]["level"] = "exact"
+
+        declared = gemma4_distribution.GEMMA4_PARALLEL_QUANTS["bf16-fast"]["session"]
+        assert declared["numerics"]["level"] == "reorder"
+        again = gemma4_distribution.gemma4_quants("e4b")
+        assert again["bf16-fast"]["session"] == PARALLEL_SESSIONS["bf16-fast"]
+
+    def test_the_default_stays_the_reference_preset(self, gemma4_assembled) -> None:
+        _, manifest = gemma4_assembled
+        model = _model(manifest)
+
+        assert model["defaultQuant"] == "bf16"
+        assert model["quants"]["bf16"]["session"] == {}
+
+    def test_the_card_lists_both_presets_and_spells_the_session_as_the_manifest(
+        self, gemma4_assembled
+    ) -> None:
+        """The card's quant table is derived from the manifest: the preset appears with its
+        session in the manifest's JSON notation, and the usage names it as available."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        fast = next(line for line in card.splitlines() if line.startswith("| `bf16-fast`"))
+        assert '`numerics` = `{"level": "reorder"}`' in fast
+        assert "'level'" not in fast
+        assert '// quant: "bf16", // default — available: bf16 / bf16-fast' in card
 
 
 def _assemble_models(root: Path, plans: list[Any], default: str) -> tuple[Path, dict[str, Any]]:

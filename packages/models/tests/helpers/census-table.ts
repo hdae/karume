@@ -297,9 +297,18 @@ type ComponentCensus<Family extends CensusFamily> = {
   };
 };
 
-/** One table row (family × models × bundle). */
+/** One table row (family × models × bundle, and the distribution where the family has two). */
 type FamilyBundleRow<Family extends CensusFamily> = {
   readonly family: Family;
+  /**
+   * The distribution mirror the counts were derived from (its directory under `models/`), for a
+   * family that two distributions share with the same model names: pipeline `gemma4` is both the
+   * regular line (`karume-gemma4`, bf16) and the q4_0 QAT line (`karume-gemma4-qat`, int4), whose
+   * presets resolve to the same bundles on different linears. Absent for a family with one
+   * distribution. MUST: a family with one row that names it names it on every row — a row without
+   * it would be read for either distribution ({@link censusRowOf} refuses a lookup without one).
+   */
+  readonly distribution?: string;
   /** The models with the same graph (the same counts) (keys of the manifest's models). */
   readonly models: readonly string[];
   /** The bundle (the seats of the effective SessionOptions — the key is {@link bundleKey}). */
@@ -314,9 +323,36 @@ export type BundleCensusRow = {
 // --------------------------------------------------------------------------- Table
 // ---------------------------------------------------------------------------
 
+/** The two distributions of pipeline `gemma4` (the rows' `distribution`). */
+const GEMMA4_QAT_Q4_0_MIRROR = "karume-gemma4-qat";
+const GEMMA4_REGULAR_MIRROR = "karume-gemma4";
+
+/**
+ * Pipeline `gemma4` rows of the regular line's mirror (`models/karume-gemma4`, bf16 — its preset
+ * `bf16-fast` declares `level: "reorder"`). Derived 2026-11-19 from the mirror's E2B / E4B `model`
+ * and E2B `drafter` part 0 with the procedure of the file header on the default profile's 17 bf16
+ * parallel rows (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows).
+ *
+ * E2B (product graph): of the 277 bf16 linears, 207 take a parallel GEMV row at M ≤ 8; the other 70
+ * (`12288 × 1536` 40, `1536 × 2048` 28, the output head 262144×1536 and `8960 × 1536`) have no
+ * row and keep the sequential GEMV at M = 1 and the GEMM above it.
+ */
+const GEMMA4_BF16_E2B_GEMV = { variant: 207, reference: 70 } as const;
+/**
+ * The regular E2B int8 drafter: of its 68 linears, the two `post_projection` 1536×256 take a
+ * parallel GEMV row; the other 66 have none in the default profile.
+ */
+const GEMMA4_BF16_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
+/**
+ * E4B (product graph): of the 344 bf16 linears, 216 take a parallel GEMV row at M ≤ 8; the other
+ * 128 (`10240 × 2560` 84, `2560 × 256` 42, the output head 262144×2560 and `10752 × 2560`) have
+ * none.
+ */
+const GEMMA4_BF16_E4B_GEMV = { variant: 216, reference: 128 } as const;
+
 /**
  * Pipeline `gemma4` rows: the q4_0 QAT line's mirror (`models/karume-gemma4-qat`) — the line that
- * keeps the int4 presets once the regular line ships `bf16` alone. Re-derived 2026-11-04 from that
+ * keeps the int4 presets, where the regular line's storage is bf16. Re-derived 2026-11-04 from that
  * mirror's E2B / E4B `model` and `drafter` part 0 with the procedure of the file header, after the
  * same computation reproduced the regular i4 mirror's former rows (E2B 277 / 0, RMS→add 106,
  * 35 attention nodes, drafter 2 / 66 / 24 / 12; E4B 344 / 0, 127, 42). The values moved because the
@@ -500,12 +536,49 @@ const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
  * written — see the file header).
  */
 export const CENSUS_TABLE: readonly BundleCensusRow[] = [
+  // --- gemma4 E2B / E4B (the regular bf16 mirror; E2B with its int8 drafter) -
+  {
+    // The distribution mirror's `bf16-fast` (it declares `level: "reorder"`; ③'s parallel-fused is
+    // not derived — file header). RMS→add folds as many pairs as on the q4_0 graphs.
+    family: "gemma4",
+    distribution: GEMMA4_REGULAR_MIRROR,
+    models: E2B,
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
+    census: {
+      target: {
+        prefill: { rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_BF16_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_BF16_E2B_GEMV, rmsNormAdd: GEMMA4_E2B_RMS_ADD },
+      },
+      drafter: {
+        draft: {
+          linearGemvReduce: GEMMA4_BF16_E2B_DRAFTER_GEMV,
+          rmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
+        },
+      },
+    },
+  },
+  {
+    // The distribution mirror's `bf16-fast` (as E2B's; E4B ships no drafter).
+    family: "gemma4",
+    distribution: GEMMA4_REGULAR_MIRROR,
+    models: E4B,
+    seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
+    census: {
+      target: {
+        prefill: { rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_BF16_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_BF16_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+      },
+    },
+  },
   // --- gemma4 E2B (the q4_0 mirror, with its QAT drafter) -------------------
   {
     // Linear at `reorder`, attention at `exact`: the `i4-gemvpar` / `i4-fast` override presets of
     // e2e_gemma4_quant_test (its speculation check included) and the mirror's presets with attention
     // set back to `exact`.
     family: "gemma4",
+    distribution: GEMMA4_QAT_Q4_0_MIRROR,
     models: E2B,
     seats: { linearGemvReduce: "parallel" },
     census: {
@@ -526,6 +599,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     // The distribution mirror's `i4-fast` (it declares `level: "reorder"`; ③'s parallel-fused is
     // not derived — file header).
     family: "gemma4",
+    distribution: GEMMA4_QAT_Q4_0_MIRROR,
     models: E2B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
@@ -546,6 +620,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
+    distribution: GEMMA4_QAT_Q4_0_MIRROR,
     models: E4B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
@@ -566,6 +641,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
+    distribution: GEMMA4_QAT_Q4_0_MIRROR,
     models: TWELVE_B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
@@ -579,6 +655,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   {
     // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
+    distribution: GEMMA4_QAT_Q4_0_MIRROR,
     models: TWENTY_SIX_B,
     seats: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel-fused" },
     census: {
@@ -874,17 +951,33 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * The row of (family, model, effective SessionOptions). `undefined` when there is none (= the
- * census is at least one / zero).
+ * The row of (family, model, effective SessionOptions) in `distribution` (the mirror's directory
+ * under `models/`). `undefined` when there is none (= the census is at least one / zero).
+ *
+ * MUST: a family whose rows name their distribution (pipeline `gemma4`) is looked up with one, or
+ * this throws — without it the lookup would pick one line's counts for the other's run.
  */
 export const censusRowOf = (
   family: string,
   model: string,
   effective: SessionOptions,
+  distribution?: string,
 ): BundleCensusRow | undefined => {
+  if (
+    distribution === undefined &&
+    CENSUS_TABLE.some((row) => row.family === family && row.distribution !== undefined)
+  ) {
+    throw new Error(
+      `census table: the rows of ${family} name their distribution — pass the mirror the run reads`,
+    );
+  }
   const key = bundleKey(censusSeats(effective));
   return CENSUS_TABLE.find(
-    (row) => row.family === family && row.models.includes(model) && bundleKey(row.seats) === key,
+    (row) =>
+      row.family === family &&
+      (row.distribution === undefined || row.distribution === distribution) &&
+      row.models.includes(model) &&
+      bundleKey(row.seats) === key,
   );
 };
 

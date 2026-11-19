@@ -169,8 +169,9 @@ adapter's match and measures nothing at run time.
     rows with other lanes and on the 20 added ones, inside the band of `linear`. On the other 19 changed rows it
     writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
     at the same lanes.
-  - A parallel row is reached only by a Session that runs linear at `reorder`. No preset of regular (bf16) Gemma 4
-    declares that level, so no Session of a shipped preset runs the bf16 rows.
+  - A parallel row is reached only by a Session that runs linear at `reorder`. Of regular (bf16) Gemma 4's presets,
+    `bf16-fast` declares that level and `bf16`, the default, does not, so a Session of `bf16-fast` runs the bf16 rows
+    and one of `bf16` does not. `bf16-fast` is in the recipe and the local mirror, not yet in the published repository.
 - An exception names a storage and a shape, has no group length, and applies at one row: a row block takes the
   general variant. Its words are the general variant's, so a Session runs it at `exact` too.
 - A table carries the field only as a whole: the default's choices with the derived ones in place. Its provenance has

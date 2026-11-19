@@ -30,7 +30,7 @@
 // `--source <local path>`). The mirror is outside the repository, so where it is missing the cases
 // **SKIP explicitly**.
 //
-// The seat is the regular line's `bf16` preset (its one preset since 2026-11-04). The census of the
+// The seat is the regular line's `bf16` preset (its default since 2026-11-04). The census of the
 // summation-order seats reads the q4_0 QAT line's mirror (`models/karume-gemma4-qat/`) instead —
 // the same `gemma4` pipeline with the same `i4` / `i4-fast` declarations, the line that keeps
 // them.
@@ -78,7 +78,8 @@ import {
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /**
  * The seat the chat goldens below were taken on: the regular line's `bf16` preset (its default
- * and, since 2026-11-04, its one preset). Named so a later default does not move the goldens.
+ * since 2026-11-04, in the reference summation order). Named so a later default does not move the
+ * goldens.
  */
 const BF16_SEAT = { quant: "bf16" } as const;
 
@@ -370,6 +371,7 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
           "gemma4",
           "e2b",
           effectiveSessionOptions("gemma4", entry.quants[quant].session, overrides, one.name),
+          "karume-gemma4-qat",
         );
         const gpu = await acquireGpu();
         const runs: SessionDiagnostics["lastRunPipelines"][] = [];

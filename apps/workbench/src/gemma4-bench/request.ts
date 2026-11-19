@@ -5,8 +5,8 @@
  * an arm's names the arm and says what exists or why.
  *
  * An arm is `<mount>/<model>[@<preset>][:<switch>]…`, and the arms are comma-separated. None of the
- * three Gemma 4 manifests' model or preset names (`e2b`, `e4b`, `12b`, `26b`; `bf16`, `i4`,
- * `i4-fast`, `i4-gemvpar`) holds `,`, `@` or `:`, and none of the three needs quoting in a shell or
+ * three Gemma 4 manifests' model or preset names (`e2b`, `e4b`, `12b`, `26b`; `bf16`, `bf16-fast`,
+ * `i4`, `i4-fast`, `i4-gemvpar`) holds `,`, `@` or `:`, and none of the three needs quoting in a shell or
  * escaping in a URL query (unlike `+`, which a query reads as a space).
  */
 

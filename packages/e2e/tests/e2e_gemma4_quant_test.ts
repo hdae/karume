@@ -58,7 +58,7 @@ const DECODE_PACKED = 70;
 /**
  * The mirror each family (= manifest pipeline name) is read from. Pipeline `gemma4`'s int4 presets
  * are the q4_0 QAT line's (`karume-gemma4-qat` — same pipeline, an `i4` E2B with its QAT drafter):
- * the regular line ships `bf16` alone (2026-11-04), so it has no quant seat left to swap here.
+ * the regular line's presets are bf16 since 2026-11-04, so it has no int4 seat to swap here.
  */
 const MIRRORS = { gemma4: "karume-gemma4-qat", "gemma4-qat": "karume-gemma4-qat-mobile" } as const;
 
@@ -193,6 +193,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               family,
               "e2b",
               effectiveSessionOptions(family, quantSessions[quant], overrides, mode.name),
+              MIRRORS[family],
             );
             const gpu = await acquireGpu();
             const census: SessionDiagnostics["lastRunPipelines"][] = [];
@@ -347,6 +348,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     },
                     "speculative",
                   ),
+                  MIRRORS[family],
                 );
                 if (row !== undefined) {
                   const checked = assertRowCensus(

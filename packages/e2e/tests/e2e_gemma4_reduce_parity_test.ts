@@ -22,7 +22,7 @@
 // ## Asset and path
 //
 // The q4_0 QAT line's mirror `models/karume-gemma4-qat/` (E2B, its `i4-fast` seat — the `gemma4`
-// pipeline's int4 seats since the regular line ships `bf16` alone, 2026-11-04), read directly
+// pipeline's int4 seats since the regular line went bf16, 2026-11-04), read directly
 // through `nodeDirectory` (no HTTP, no persistent cache — ADR 0086). Without the mirror the cases
 // SKIP explicitly.
 

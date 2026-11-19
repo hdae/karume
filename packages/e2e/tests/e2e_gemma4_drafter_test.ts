@@ -105,8 +105,9 @@ import {
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /**
- * The seat these cases read: the regular line's `bf16` preset (its default and, since 2026-11-04,
- * its one preset — the int8 drafter's only target). Named so a later default does not move them.
+ * The seat these cases read: the regular line's `bf16` preset (its default since 2026-11-04, in the
+ * reference summation order — the int8 drafter's only target storage). Named so a later default
+ * does not move them.
  */
 const BF16_SEAT = { quant: "bf16" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");

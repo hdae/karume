@@ -35,6 +35,10 @@ import {
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
+/** The two distributions of pipeline `gemma4` (the rows' `distribution`). */
+const QAT_Q4_0 = "karume-gemma4-qat";
+const REGULAR = "karume-gemma4";
+
 /**
  * The seats a level of `numerics` resolves to (the rest are approximation options, each its own key
  * of the manifest vocabulary).
@@ -77,7 +81,7 @@ describe("consistency of the census table rows (no GPU, no assets)", () => {
     const seen = new Set<string>();
     for (const row of CENSUS_TABLE) {
       for (const model of row.models) {
-        const key = `${row.family} / ${model} / ${bundleKey(row.seats)}`;
+        const key = `${row.family} / ${row.distribution ?? ""} / ${model} / ${bundleKey(row.seats)}`;
         assert(!seen.has(key), `the census table has a duplicate row: ${key}`);
         seen.add(key);
       }
@@ -116,7 +120,7 @@ describe("consistency of the census table rows (no GPU, no assets)", () => {
   });
 
   it("an unfilled phase returns no expectation (it does not turn into an assertion of 0)", () => {
-    const row = censusRowOf("gemma4", "12b", { numerics: { level: "reorder" } });
+    const row = censusRowOf("gemma4", "12b", { numerics: { level: "reorder" } }, QAT_Q4_0);
     assert(row !== undefined);
     assertEquals(phaseExpectations(row, "target", "verify"), undefined);
   });
@@ -148,13 +152,40 @@ describe("the table's key is determined by the effective settings obtained by pa
       where,
     );
     assertEquals(bundleKey(censusSeats(reverted)), "linearGemvReduce=parallel");
-    assertEquals(censusRowOf("gemma4", "e2b", reverted)?.seats, { linearGemvReduce: "parallel" });
+    assertEquals(censusRowOf("gemma4", "e2b", reverted, QAT_Q4_0)?.seats, {
+      linearGemvReduce: "parallel",
+    });
+  });
+
+  it("the same bundle of pipeline gemma4 resolves to each distribution's own row, and a lookup without the distribution is refused", () => {
+    const where = "census: gemma4 e2b";
+    // `bf16-fast` of the regular line and `i4-fast` of the q4_0 QAT line declare the same session.
+    const effective = effectiveSessionOptions(
+      "gemma4",
+      { numerics: { level: "reorder" } },
+      {},
+      where,
+    );
+    const regular = censusRowOf("gemma4", "e2b", effective, REGULAR);
+    const qat = censusRowOf("gemma4", "e2b", effective, QAT_Q4_0);
+    assert(regular?.family === "gemma4" && qat?.family === "gemma4");
+    assertEquals(regular.distribution, REGULAR);
+    assertEquals(qat.distribution, QAT_Q4_0);
+    // The linears differ (bf16 rows against int4 rows), so the counts do.
+    assertEquals(regular.census.target?.decode?.linearGemvReduce, { variant: 207, reference: 70 });
+    assertEquals(qat.census.target?.decode?.linearGemvReduce, { variant: 276, reference: 1 });
+    assertThrows(() => censusRowOf("gemma4", "e2b", effective), Error, "name their distribution");
+    // A family with one distribution names none and is looked up with or without it.
+    const a8 = { linearCompute: "a8" } as const;
+    const sbv2 = censusRowOf("sbv2", "F1", a8);
+    assert(sbv2 !== undefined);
+    assertEquals(censusRowOf("sbv2", "F1", a8, "karume-sbv2"), sbv2);
   });
 
   it("a bundle without a row and an unknown series cannot be looked up", () => {
     assertEquals(censusRowOf("irodori", "v4-small", { linearCompute: "f16" }), undefined);
     assertEquals(
-      censusRowOf("gemma4", "e4b", { numerics: { ops: { linear: "reorder" } } }),
+      censusRowOf("gemma4", "e4b", { numerics: { ops: { linear: "reorder" } } }, QAT_Q4_0),
       undefined,
     );
     assertThrows(() => effectiveSessionOptions("unknown-family", {}), Error, "unknown-family");
@@ -213,7 +244,7 @@ describe.skipIf(MIRRORS.length === 0)(
             const key = bundleKey(censusSeats(effective));
             if (key === "") continue;
             bundles++;
-            if (censusRowOf(family, modelName, effective) === undefined) {
+            if (censusRowOf(family, modelName, effective, mirror) === undefined) {
               missing.push(`${where}: ${family} [${key}]`);
             }
           }

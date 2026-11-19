@@ -80,8 +80,9 @@ import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budg
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /**
- * The seat the goldens below were taken on: the regular line's `bf16` preset (its default and,
- * since 2026-11-04, its one preset). Named so a later default does not move the goldens.
+ * The seat the goldens below were taken on: the regular line's `bf16` preset (its default since
+ * 2026-11-04, in the reference summation order). Named so a later default does not move the
+ * goldens.
  */
 const BF16_SEAT = { quant: "bf16" } as const;
 
