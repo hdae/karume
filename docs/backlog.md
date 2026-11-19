@@ -56,11 +56,15 @@ Node and Deno.
   once). Left: only the Playground page in a browser.
 - **Regular Gemma 4 `bf16-fast`** (the maintainer's approval of 2026-11-19 — perf-ledger K-110): the preset is in the
   recipe (`gemma4/distribution.py`, `GEMMA4_PARALLEL_QUANTS`) and the local mirror `models/karume-gemma4/` (manifest
-  and card rewritten by the assembly, no weights file changed), with its e2e cases; `bf16` stays the default. Open:
-  - the decode measurement of `bf16` against `bf16-fast` per device (E2B and E4B, with and without E2B's drafter,
-    interleaved in one process), and from it the one sentence on speed per model (`GEMMA4_SPEED_NOTE` — a model
-    enters only with a measurement);
-  - the maintainer's review of the preset's label and description (drafts written 2026-11-19);
+  and card rewritten by the assembly, no weights file changed), with its e2e cases; `bf16` stays the default. Its
+  decode is measured on three devices (2026-11-19, `bf16` and `bf16-fast` interleaved in one process, decode
+  ms/token): RTX 3080 Ti (Node) E2B ×0.73 to ×0.78 and E4B ×0.57 to ×0.72, RTX 5070 Ti (Chrome) ×0.52 and ×0.51,
+  Apple M2 (Chrome) ×0.93 and ×0.95, the same tokens in both presets; each model's description carries its sentence
+  on speed (`GEMMA4_SPEED_NOTE`). Open:
+  - E2B's speculative decode (with the drafter) under `bf16-fast` against `bf16`: not measured (the workbench's
+    `gemma4-bench` entry has no drafter arm), so E2B's sentence says "without the drafter";
+  - the maintainer's review of the preset's label and description (drafts written 2026-11-19, the speed sentences
+    included);
   - the sha256 reference rows `e2b/bf16-fast` and `e4b/bf16-fast` of each environment (written only on the
     maintainer's OK);
   - publication with the next release, on the maintainer's explicit OK (manifest and card only — the containers are
