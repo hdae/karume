@@ -55,10 +55,9 @@ is the umT5 and Wan2.2 items of "First publication of a family" below. For the a
    `defaultModel`). The borrowed roles are the table's (the role name is the artifact key, and the bf16 text stack is a separate role — bf16
    was extended to every model on 2026-10-17. `text_conditioner` is not referenced across repositories because both extra models have
    their own — every model but the base reads its own series, `text_conditioner_series` in `distribution.py`).
-   **0.15.0**: the published main of `karume-anima` (the `anima.SOURCES["anima"]` pin) has no bf16 text stack, so
-   `--resolve-refs hf` refuses extra until `karume-anima` has been uploaded again (10 of the 22 borrowed files are not in that commit —
-   checked 2026-10-28). **Build extra with `--resolve-refs hf`, never with `--ref-revision`**: an explicit SHA is not checked against
-   the Hub, so `--ref-revision karume-anima=<that pin>` would build a distribution that references 10 files its commit does not hold.
+   **Build extra with `--resolve-refs hf`, never with `--ref-revision`**: an explicit SHA is not checked against the Hub,
+   so `--ref-revision karume-anima=<a commit>` builds a distribution that may reference files that commit does not hold
+   (in 0.15.0 the pinned commit lacked 10 of the 22 borrowed files — checked 2026-10-28).
    **The repo name in the card's Usage example is derived from the pipeline's declaration (`Pipeline.repo_name`); the
    directory name of `--out` is not looked at** (the real damage of 0.5.0, where the staging name with `-release` was copied into the public card, disappeared
    structurally with this derivation). For extra the declared `karume-anima-extra` appears as is, so `--repo` is not needed.
@@ -69,10 +68,9 @@ is the umT5 and Wan2.2 items of "First publication of a family" below. For the a
    2026-09-24).
    Put `--out` at `models/<repo>` (the same name as the repository) — the script of §2 uploads `models/<repo>` as is
 4. **Upload `karume-anima-extra`**
-   - [ ] After generating the extra mirror, **bring back the cross-repository real-asset check** — put the entries back into
-         `CROSS_REPO_MIRRORS` of `packages/e2e/tests/e2e_anima_test.ts` and `MIRRORS` of
-         `packages/e2e/tests/e2e_*_fusion_counts_test.ts`, and freeze the fusion counts and reference sha of the extra variants anew
-         (the check that was emptied once when the official repository became self-contained — the table and the distribution mechanism are kept)
+   - [ ] After building the extra mirror, run its cross-repository real-asset checks (`CROSS_REPO_MIRRORS` of
+         `packages/e2e/tests/e2e_anima_test.ts` and `MIRRORS` of `packages/e2e/tests/e2e_anima_fusion_counts_test.ts` serve
+         the borrowed roles from the `karume-anima` mirror) — `vp test --project models:anima`
 
 For the irodori repositories (v4.1-small references v4-small — upstream v4.1 retrained only the duration predictor;
 v4.1-small-mf references both; v4-small stays self-contained). **No irodori build exports a published container again**:
@@ -130,10 +128,7 @@ If the referenced repository is uploaded again later, its SHA changes, and the r
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
 **when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
 `karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` and
-`karume-irodori-v4-large` for `karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`). **0.15.0: `karume-wan2.2` must be
-re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online`, `i8` and `i8-a8-attn8-online-conv8` presets
-(ADRs 0132 / 0133), the default moved to `i8-a8-attn8-online-conv8`, and it gained the `vae_decoder_first_32` / `vae_decoder_next_32`
-containers (ADR 0134) — check the new containers in the fragmentation check of §2 too.**
+`karume-irodori-v4-large` for `karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`).
 
 **The placeholder-SHA check**: a development mirror for the time the referenced repository is unpublished is built with
 `--allow-placeholder-ref`, which pins every reference at a placeholder SHA (40 zeros — `PLACEHOLDER_REVISION` in
@@ -144,8 +139,8 @@ fails before writing a single byte. The rebuild after the bump of §4 is always 
 right before uploading, confirm that `rg -c '"revision": "0{40}"' models/<repo>/karume.json` prints nothing (no placeholder SHA
 remains)).
 
-NOTE (for the next release only): the old `hdae/karume-anima-turbo` was retired by ADR 0087 — do not upload it again.
-How to handle the published repository (deprecation notice, replacing the README, etc.) is the maintainer's ruling at upload time.
+NOTE: the old `hdae/karume-anima-turbo` was retired by ADR 0087 — never upload it again. What to do with the published
+repository (deprecation notice, replacing the README) is the maintainer's ruling.
 
 ### The release after the manifest moved to `karume/6` (ADR [0153](decisions/0153-manifest-v6-name-map.md) — that release only)
 
@@ -155,12 +150,17 @@ above still holds (bump → mirrors → upload → pins → JSR).
 
 1. **Upgrade every mirror in place**, in `tools/exporter`. The upgrade rewrites `karume.json` in the new format, the
    card where it states the format (`` `karume.json` (`karume/5`) ``) and, given a name map, adds `name-map.json`; it
-   keeps `generator` and every cross-repository reference as they are and touches no weights file. A mirror already
-   upgraded reports "nothing to do".
-   - The Anima pair carries the recipe's name map:
-     `uv run karume upgrade ../../models/karume-anima --name-map ../export-recipes/anima/name-map.json` and the same
-     for `../../models/karume-anima-extra`.
-   - Every other repository: `uv run karume upgrade ../../models/<repo>`.
+   keeps `generator`, every quant and every cross-repository reference as they are and touches no weights file. A
+   mirror already upgraded reports "nothing to do".
+   - Every repository whose presets did not change in the same release: `uv run karume upgrade ../../models/<repo>`.
+   - **0.23.0**: five repositories are not upgrades but builds. The three Gemma 4 repositories (`karume-gemma4` gains
+     `bf16-fast`; the presets of `karume-gemma4-qat` and `karume-gemma4-qat-mobile` declare `numerics` instead of the
+     removed `session` keys, and `karume-gemma4-qat` loses `i4-gemvpar`) are built with `dist.py`
+     (`--pipeline gemma4` / `gemma4-qat` / `gemma4-qat-mobile`; for `karume-gemma4-qat` with `--model 26b` included, as
+     in `tools/export-recipes/gemma4/README.md`): the upgrade would keep the removed keys, and the hub rejects a
+     manifest that declares one. The Anima pair is the bf16 build of ADR
+     [0154](decisions/0154-anima-bf16-preset-names.md) (`dist.py --pipeline anima` / `anima-extra`, which write
+     `karume/6` and the name map themselves). Every such build is made again after the bump (§0).
 2. **Upload the referenced repositories first** — `karume-anima`, `karume-umt5-xxl`, `karume-irodori-v4-small`, then
    `karume-irodori-v4.1-small` (which `karume-irodori-v4.1-small-mf` references) — and the self-contained ones in any
    order. Before each upload, compare HF's main with the mirror as in §2: the files that differ must be among
@@ -169,6 +169,11 @@ above still holds (bump → mirrors → upload → pins → JSR).
    (`tools/release/hf-upload.zsh upload <repo> --include karume.json --include README.md`, plus
    `--include name-map.json` for the Anima pair — check `tools/.venv/bin/hf upload --help` for the option before the
    first use).
+   **0.23.0, the Anima pair**: the f16 containers leave both repositories (ADR
+   [0154](decisions/0154-anima-bf16-preset-names.md) decision 1), so the paths only HF holds must all be f16 files —
+   pass each as `--delete` in the same upload, together with the `--include` patterns above, and confirm after the
+   upload that the difference is `.gitattributes` alone; a non-f16 path only on HF means the mirror is not the bf16
+   build — stop.
 3. **Then the referencing repositories** (the table above): their upgraded manifests still reference the previous
    commit of the repository they borrow from, which holds the same bytes; per the rule above, build each one again
    against the referenced repository's new main after that one is uploaded (`dist.py … --resolve-refs hf`, as in the
@@ -215,8 +220,10 @@ after changing to the repository root, so the pin applies to it too.
       The node lanes run the same checks only on Dawn / Vulkan, and a device without the subgroup features SKIPs the subgroup ones; there is no check
       that turns that SKIP red (the "The real-execution checks of the subgroup variants do not run automatically" section of limitations).
       "not available" on the page is not a PASS, and neither is a page where a check was not run (the overall verdict then reads INCOMPLETE).
-      The MUST reads the product verdict (`productVerdict` in the record): a known FAIL outside the paths the product selects is recorded with its
-      perf-ledger id and does not block — until K-95 lands, the states-attention check FAILs on D3D12 in the e4b-full classes only (shown as
+      The MUST reads each check's verdict, and for a check that has known classes its product verdict
+      (`productVerdict` of that check in `data.checks` — the record's top-level `verdict` counts the known FAILs too):
+      a known FAIL outside the paths the product selects is recorded with its perf-ledger id and does not block —
+      until K-95 lands, the states-attention check FAILs on D3D12 in the e4b-full classes only (shown as
       "kept for K-95"; the product does not fold them), so its verdict "outside the K-95 classes" must read PASS; a new FAIL blocks — it is a
       regression on that backend.
       On Chrome / Metal the page FAILs by known differences (the table of the "In Chrome on Metal, kernel rewrites …" section of
@@ -493,17 +500,12 @@ needed).
       directory of `publish.yml` — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum of 2026-10-28); do not cut the Release while it is red
 - [ ] Create a GitHub Release from the main commit with green CI → published (fires)
 - [ ] Confirm the new version of the 5 packages on JSR
-- [ ] **0.15.0 only — card-only re-upload of the published repositories not rebuilt in this release** (ADR
-      [0136](decisions/0136-models-public-naming.md)): their Usage snippets import the 0.14 names from `jsr:@karume/models` without a
-      version, so they stop compiling once 0.15.0 is the latest. Regenerate the cards with this release's recipes and upload
-      `README.md` alone (manifests, containers and the `SOURCES` pins do not move), right after the JSR publish and in the same session
-      (the backlog release section holds the item)
 
 PyPI `karume` (tools/exporter) is **unreleased**. Add the procedure to this section when publication starts.
 
 ## 5. After the release
 
-- [ ] Docs sync: ACTIVE_DESIGN's Now, backlog (the now heading and the progress of the release section),
+- [ ] Docs sync: ACTIVE_DESIGN's Now, backlog (the `now` section: what the release left open),
       the release record, the project memory. **The release is not "done" until this item is done** —
       treat this one place as the only check for syncing the ledgers (in 0.9.0 only backlog was updated and
       ACTIVE_DESIGN stayed at "the maintainer publishes". The second miss of the same shape)
