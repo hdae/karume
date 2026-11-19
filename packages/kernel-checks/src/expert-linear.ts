@@ -5,14 +5,17 @@
  * is `linear`'s own sequential GEMV (`linearGemvWgsl`, i4) on the picked expert's rows with the
  * steps widened to f32 (exact — ADR 0069 decision 3): every output word of every pick MUST equal
  * that GEMV's word. A word that differs is a different expert row, x row, step or summation order.
- * Three kernels are held to it at both shapes: the one-row form, the grouped form (the rows that
+ * Three kernels are held to it at every shape: the one-row form, the grouped form (the rows that
  * picked one expert share the walk of its weight row, which a run of two or more tokens takes for
  * gate_up's long rows), and the grouped form over a pool (the form the expert cache runs). The
  * grouped form calls a word function where the one-row form and `linear`'s GEMV have the same text
  * inline, so that a backend's compiler rounds both alike is what this check shows per backend.
  *
  * The two 26B projections: gate_up (n 1408, k 2816, x shared by the picks) and down (n 2816, k 704,
- * one x row per pick), each over E = 8 experts, T = 9 tokens of k = 8 picks. The experts are picked
+ * one x row per pick), and a third shape that is no model's (n 1408, k 2880, x shared): a weight row
+ * a Session groups whose word count is not a multiple of the unrolled loop's four, so the grouped
+ * form's loops over the words left are compared where a Session would run them. Each is over
+ * E = 8 experts, T = 9 tokens of k = 8 picks. The experts are picked
  * 9, 16, 12, 7, 10, 6, 3 and 9 times ({@link SHARERS}), so the grouped form takes every walk it
  * generates, alone and after another: 8 + 1, two scans of 8, 8 + 4, 4 + 2 + 1, 8 + 2, 4 + 2 and
  * 2 + 1 rows; an id repeats within a token too. In the pool the experts sit in another order than
@@ -76,6 +79,9 @@ type Shape = {
 const SHAPES: readonly Shape[] = [
   { name: "26b gate_up n1408 k2816 shared x", n: 1408, k: 2816, sharedX: true },
   { name: "26b down n2816 k704 per-pick x", n: 2816, k: 704, sharedX: false },
+  // No model's shape: a weight row long enough for a Session to group it (90 words) that leaves
+  // words after the unrolled loop (90 = 22 × 4 + 2), which neither projection above does in a Session
+  { name: "left words n1408 k2880 shared x", n: 1408, k: 2880, sharedX: true },
 ];
 
 export const EXPERT_LINEAR_CASES = {
@@ -231,7 +237,7 @@ export const checkExpertLinear = async (
           });
           return pool;
         };
-        // An expert's f16 steps are a whole number of u32 words (n · k / 32 is even at both shapes).
+        // An expert's f16 steps are a whole number of u32 words (n · k / 32 is even at every shape).
         const stepWordsPerExpert = (n * k) / GROUP / 2;
         if (!Number.isInteger(stepWordsPerExpert)) {
           throw new Error("expert-linear: an expert's f16 steps do not fill whole words");

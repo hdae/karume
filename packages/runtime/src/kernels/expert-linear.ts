@@ -260,15 +260,15 @@ const groupedLoads = (
               let xo${slot} = unit${slot} * ${unit / 4}u;`;
 };
 
+/** One word onto one of the walk's rows. */
+const groupedMac = (storage: ExpertLinearStorage, slot: string, row: number): string =>
+  `              acc${row} = expert_word(pw${slot}, xr${row} + xo${slot}${
+    isI4(storage) ? `, ws${slot}` : ""
+  }, acc${row});`;
+
 /** One word onto each of the walk's rows, row by row (each row's sum stays in ascending k). */
 const groupedMacs = (storage: ExpertLinearStorage, slot: string, rows: number): string =>
-  Array.from(
-    { length: rows },
-    (_, row) =>
-      `              acc${row} = expert_word(pw${slot}, xr${row} + xo${slot}${
-        isI4(storage) ? `, ws${slot}` : ""
-      }, acc${row});`,
-  ).join("\n");
+  Array.from({ length: rows }, (_, row) => groupedMac(storage, slot, row)).join("\n");
 
 /**
  * A walk of the weight row for `rows` rows of the expert, `members[start .. start + rows)`, taken
@@ -294,10 +294,17 @@ ${each((row) => `            var acc${row} = 0.0;`)}
 ${slots.map((slot) => groupedLoads(storage, slot, `unit + ${slot}u`, shift)).join("\n")}
 ${slots.map((slot) => groupedMacs(storage, slot, rows)).join("\n")}
             }
-            for (; unit < units; unit = unit + 1u) {
-${groupedLoads(storage, "t", "unit", shift)}
-${groupedMacs(storage, "t", rows)}
-            }
+${each(
+  // MUST: one loop per row over the words the unrolled loop leaves. With every row's word in one
+  // loop body, Metal (Apple M2, Chrome) rounds the rows after the first unlike the one-row form
+  // (docs/known-issues.md, the Chrome-on-Metal section)
+  (
+    row,
+  ) => `            for (var left${row} = unit; left${row} < units; left${row} = left${row} + 1u) {
+${groupedLoads(storage, "t", `left${row}`, shift)}
+${groupedMac(storage, "t", row)}
+            }`,
+)}
 ${each((row) => `            out[m${row} * dims.n + col] = acc${row};`)}
           }`;
 };
