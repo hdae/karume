@@ -192,18 +192,60 @@ fn main(
               acc6 = expert_word(pw3, xr6 + xo3, ws3, acc6);
               acc7 = expert_word(pw3, xr7 + xo3, ws3, acc7);
             }
-            for (; unit < units; unit = unit + 1u) {
-              let unitt = unit;
+            for (var left0 = unit; left0 < units; left0 = left0 + 1u) {
+              let unitt = left0;
               let pwt = w[row_base + unitt];
               let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
               let xot = unitt * 8u;
               acc0 = expert_word(pwt, xr0 + xot, wst, acc0);
+            }
+            for (var left1 = unit; left1 < units; left1 = left1 + 1u) {
+              let unitt = left1;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc1 = expert_word(pwt, xr1 + xot, wst, acc1);
+            }
+            for (var left2 = unit; left2 < units; left2 = left2 + 1u) {
+              let unitt = left2;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc2 = expert_word(pwt, xr2 + xot, wst, acc2);
+            }
+            for (var left3 = unit; left3 < units; left3 = left3 + 1u) {
+              let unitt = left3;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc3 = expert_word(pwt, xr3 + xot, wst, acc3);
+            }
+            for (var left4 = unit; left4 < units; left4 = left4 + 1u) {
+              let unitt = left4;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc4 = expert_word(pwt, xr4 + xot, wst, acc4);
+            }
+            for (var left5 = unit; left5 < units; left5 = left5 + 1u) {
+              let unitt = left5;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc5 = expert_word(pwt, xr5 + xot, wst, acc5);
+            }
+            for (var left6 = unit; left6 < units; left6 = left6 + 1u) {
+              let unitt = left6;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc6 = expert_word(pwt, xr6 + xot, wst, acc6);
+            }
+            for (var left7 = unit; left7 < units; left7 = left7 + 1u) {
+              let unitt = left7;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc7 = expert_word(pwt, xr7 + xot, wst, acc7);
             }
             out[m0 * dims.n + col] = acc0;
@@ -263,14 +305,32 @@ fn main(
               acc2 = expert_word(pw3, xr2 + xo3, ws3, acc2);
               acc3 = expert_word(pw3, xr3 + xo3, ws3, acc3);
             }
-            for (; unit < units; unit = unit + 1u) {
-              let unitt = unit;
+            for (var left0 = unit; left0 < units; left0 = left0 + 1u) {
+              let unitt = left0;
               let pwt = w[row_base + unitt];
               let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
               let xot = unitt * 8u;
               acc0 = expert_word(pwt, xr0 + xot, wst, acc0);
+            }
+            for (var left1 = unit; left1 < units; left1 = left1 + 1u) {
+              let unitt = left1;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc1 = expert_word(pwt, xr1 + xot, wst, acc1);
+            }
+            for (var left2 = unit; left2 < units; left2 = left2 + 1u) {
+              let unitt = left2;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc2 = expert_word(pwt, xr2 + xot, wst, acc2);
+            }
+            for (var left3 = unit; left3 < units; left3 = left3 + 1u) {
+              let unitt = left3;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc3 = expert_word(pwt, xr3 + xot, wst, acc3);
             }
             out[m0 * dims.n + col] = acc0;
@@ -312,12 +372,18 @@ fn main(
               acc0 = expert_word(pw3, xr0 + xo3, ws3, acc0);
               acc1 = expert_word(pw3, xr1 + xo3, ws3, acc1);
             }
-            for (; unit < units; unit = unit + 1u) {
-              let unitt = unit;
+            for (var left0 = unit; left0 < units; left0 = left0 + 1u) {
+              let unitt = left0;
               let pwt = w[row_base + unitt];
               let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
               let xot = unitt * 8u;
               acc0 = expert_word(pwt, xr0 + xot, wst, acc0);
+            }
+            for (var left1 = unit; left1 < units; left1 = left1 + 1u) {
+              let unitt = left1;
+              let pwt = w[row_base + unitt];
+              let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
+              let xot = unitt * 8u;
               acc1 = expert_word(pwt, xr1 + xot, wst, acc1);
             }
             out[m0 * dims.n + col] = acc0;
@@ -350,8 +416,8 @@ fn main(
               acc0 = expert_word(pw2, xr0 + xo2, ws2, acc0);
               acc0 = expert_word(pw3, xr0 + xo3, ws3, acc0);
             }
-            for (; unit < units; unit = unit + 1u) {
-              let unitt = unit;
+            for (var left0 = unit; left0 < units; left0 = left0 + 1u) {
+              let unitt = left0;
               let pwt = w[row_base + unitt];
               let wst = step_at(scale_base + ((unitt * 32u) >> 5u));
               let xot = unitt * 8u;
