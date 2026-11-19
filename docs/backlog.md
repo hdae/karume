@@ -197,15 +197,23 @@ maintainer's ruling of 2026-11-06).
        own runs with it, and on an RTX 5070 Ti 51 of 66 parallel rows derive to another choice (a median ×1.79 per
        dispatch). Direction: the default keeps a row only where no measured device is slower with it than with the
        sequential GEMV, chosen over the records of every measured device, and a device's own best stays in its
-       table. Needs: GEMV sweep records of the Apple M2 (none yet) and of the devices collaborators measure; the rule
+       table. Needs: GEMV sweep records of the Apple M2 (of the bf16 cases only so far) and of the devices collaborators measure; the rule
        itself (to be proposed with the three devices' overlap in numbers); the generator deriving the default from
        records of several adapters. A reorder Session's numbers then follow the table of its device where one
        carries rows of its own (inside the band, as today's rows are). *(2026-11-18: the sequential variant's
        per-shape exceptions follow the direction by hand — 22 bf16 rows that the RTX 3080 Ti and the RTX 5070 Ti
        are both faster with stay in the default, and the four rows the RTX 5070 Ti is slower with are in
        `nvidia-ampere`, the first table to carry `linearGemv`. The RTX 5070 Ti's own choices are in
-       `nvidia-blackwell` since the same day, from 82 of its records: 42 sequential exceptions of its own, another
-       variant on two of the default's, and 78 parallel rows apart from the default's.)* Also open under this item:
+       `nvidia-blackwell` since the same day, from 82 of its records: 42 sequential exceptions of its own and 61
+       parallel rows apart from the default's. 2026-11-19: the default's 17 bf16 parallel rows follow the direction
+       by hand, over the records of the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2 — perf-ledger K-110.)* Also
+       open under this item:
+       - **MUST before the next release**: GEMV sweep records of the bf16 cases on the RTX 5070 Ti against the
+         current default (two `full` records; `--gemv-plan` on `nvidia-blackwell` writes the batch), then
+         `nvidia-blackwell` regenerated from them. Its records of the default's 17 bf16 parallel shapes are not
+         current, so it holds the default's rows and exceptions there, and an `exact` Session on that device is
+         slower on bf16 `1536 × 256` and `4096 × 2560` than its own variants ([limitations](limitations.md), the
+         section on the linear GEMV family);
        - the derivation judges a candidate against the default profile's choice for the shape, so where that
          choice is an exception another device drops the inherited row only when its records show the general
          variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
@@ -221,7 +229,7 @@ maintainer's ruling of 2026-11-06).
        - `nvidia-blackwell`'s choices have one end-to-end measurement, of the table before its derivation from 82
          records ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a token with the default's choices,
          E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); the table derived from 82 records, a speculative decode and the
-         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists one group to measure against the current default: the int8 `262144 × 1536` case at one row (35 candidates), which its two records of that case measured against another default;
+         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists 52 groups to measure against the current default: the 17 bf16 parallel shapes of the default at 1, 4 and 8 rows (the first item above) and the int8 `262144 × 1536` case at one row (35 candidates), which its two records of that case measured against another default;
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
          would allow it): their evidence is the device's sweep records;
        - the default's 22 rows on Metal, where nothing was measured and their words were not compared;
