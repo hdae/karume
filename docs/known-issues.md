@@ -176,7 +176,10 @@ no `c16` variant, no `u4` variant and no variant over a bf16 weight differs. So 
 verdict of such a record is `fail` (8 of the 12), and the derivation refuses a candidate that is not identical to its
 baseline, so no table holds one: none of the 86 sequential exceptions of `apple-metal-3` and none of the default
 profile's 22 differs in those records. What it costs is the verdict of a sweep on Metal and the candidates the
-derivation can choose from there, not an output.
+derivation can choose from there, not an output. On the Apple M5 (eight records of 2026-11-19 under the default
+profile) more variants differ: 1,165 of the 2,749 rows compared at one row, every one over an integer weight and with
+an unroll that is not 4, 238 of them 16-column variants, which never differ on the M2
+([research](research/2026-11-19-gemv-tables-across-devices.md) §7).
 
 - **Impact**: what does not hold on Metal is the statement "this rewrite changed no word", not the output. The
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B

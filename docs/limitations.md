@@ -896,7 +896,8 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   one general variant (32 columns per workgroup, 4 words read ahead) and 22 per-shape exceptions
   (`linearGemv.sequential`), bf16 linears of regular Gemma 4 E2B / E4B, and an adapter whose table carries no GEMV
   choices of its own runs them — one no embedded table matches, such as an Apple adapter that reports no description
-  (the M5's), which no record of its own measured. Every exception a table holds writes the general variant's words
+  (the M5's; its own records of 2026-11-19 read a decode token faster with the exceptions than without —
+  [research](research/2026-11-19-gemv-tables-across-devices.md) §4). Every exception a table holds writes the general variant's words
   (on Vulkan a GPU test compares each; on D3D12 and on Metal the device's records do — below), so the choice is speed
   alone.
   The 22 bf16 rows were adopted from GEMV sweeps of the RTX 3080 Ti (×1.17 to ×1.89 per dispatch) and are faster on
@@ -939,9 +940,10 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   differ or whose row is new (1, 44 and 47 of them), inside the band of `linear`. Each row of a table's own met the
   adoption rule in every record that is evidence ([spec](spec/geometry-profiles.md#deriving-the-gemv-choices)).
   A decode token was measured with `nvidia-blackwell` as it was before its derivation from 82 records (QAT `i4-fast`
-  E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); no table has
-  been measured end to end since its rows were derived from the current records, and no test runs a table's rows
-  on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
+  E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); with the rows
+  derived from the current records, `nvidia-blackwell` and `apple-metal-3` were measured end to end on E2B alone
+  and `nvidia-ampere` was not ([research](research/2026-11-19-gemv-tables-across-devices.md) §3), and no test runs a
+  table's rows on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
   only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's presets only `bf16-fast` declares
   that level (in the recipe and the local mirror, not published yet), so only its Sessions run the bf16 rows.
 - **The first turn pays the shader parsing cost**: a row-block variant is WGSL unrolled over its rows,
