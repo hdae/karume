@@ -7,273 +7,218 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.22.0 release (released 2026-11-14)
+## now — the 0.23.0 release (not released; every outward step on the maintainer's explicit OK for that step)
 
-0.22.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.22.0 — Irodori v4-Large: the Irodori pipeline
-reads a tokenizer asset in the shared Gemma format (ADR 0151)). On HF: `karume-irodori-v4-large` published for the first
-time (no FAILED row, the large parts at 31.7 MiB per term or more, 0 CAS lookups), pinned as
-`irodori.SOURCES["irodori-v4-large"]`; its goldens are in the test-asset dataset. No breaking change. By the maintainer's
-rulings of 2026-11-14 the full verify was not run for this model-only release (nothing under `packages/runtime`,
-`packages/hub` or `packages/kernel-checks` changed since 0.21.0): the core lane, the Irodori lane with the upstream-parity
-cases, the CPU tests of the shared Gemma tokenizer, the Playground suite and both pytest suites ran green, and no other
-family's e2e ran; the kernel-check page was not run either, and the record of 0.21.0 stands.
-Published-smoke is green on Node and Deno (17 manifests and the sbv2 `fromPretrained`).
+The release follows [release-runbook](release-runbook.md) from the top: the order of its §0 (version bump → rebuild of
+the distributions → HF upload → baking the pins → JSR publish) and, this once, its section "The release after the
+manifest moved to `karume/6`". JSR takes five packages from this release: `@karume/runtime`, `@karume/hub`,
+`@karume/safetensors`, `@karume/convert` and `@karume/models` (the maintainer's ruling of 2026-11-19). What it ships is
+the CHANGELOG's `[Unreleased]`. Left, in the runbook's order:
 
-Before it: 0.21.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.21.0 — fusion rules written outside the runtime
-and the per-family geometry profiles; Irodori's rare-token split (ADR 0149) and its MeanFlow model v4.1-small-mf (ADR
-0150); acquisition that falls back when a device cannot run 32-lane subgroups). On HF: `karume-irodori-v4-small` with the
-split table in its tokenizer asset, `karume-irodori-v4.1-small` rebuilt against it, `karume-irodori-v4.1-small-mf`
-published for the first time (no FAILED row, the large parts at 32.9 MiB per term or more), and a card-only upload of
-`karume-anima` / `karume-anima-extra` for the corrected license text; the three `irodori.SOURCES` entries moved or were
-added. The breaking changes are the geometry-profile ones listed in the CHANGELOG. The kernel-check page on Chrome / D3D12
-(RTX 5070 Ti) reads as on 2026-11-12: the product verdict passes, the states-attention check FAILs in the K-95 classes
-only, and the online-attention check is incomplete because its `wg` form needs more workgroup storage than the device
-grants (its `sg32` form passes); the page was not run on Dawn / Vulkan, where the core lane ran the same checks.
-Published-smoke is green on Node and Deno (16 manifests and the sbv2 `fromPretrained`).
+1. **Bump** (runbook §4, cut before §1 to §3): the lockstep version of the five packages and their `^` pins, then the
+   venv sync.
+2. **Checks** (runbook §1): every item there, among them the full verify, the workbench's `kernel-check` entry on each
+   GPU at hand (MUST on Dawn / Vulkan on the RTX 3080 Ti and on Chrome / D3D12 on the RTX 5070 Ti) and the licence check
+   (the `release` section below); and a read-through of the CHANGELOG's `[Unreleased]`.
+3. **Distributions**, built again after the bump; each upload on the maintainer's go-ahead (runbook §0 and §2):
+   - every published repository's manifest and card again as `karume/6`; the Gemma 4 QAT pair with the presets that
+     declare `numerics` (`karume-gemma4-qat` without `i4-gemvpar`; both local mirrors are regenerated);
+   - `karume-anima` uploaded with its f16 files deleted from `main`, then `karume-anima-extra` built with
+     `--resolve-refs hf` against the new main and uploaded with its f16 files deleted (the sizes are in ADR
+     [0154](decisions/0154-anima-bf16-preset-names.md)) — the bf16 builds of "Keep bf16 where the upstream is bf16"
+     (`later`);
+   - `karume-gemma4` with the `bf16-fast` preset: manifest and card only, the containers are the published ones;
+   - the Irodori repositories with their f16 containers exported again (the first item below).
+4. **Pins** (runbook §3): every `SOURCES` entry, Anima's included.
+5. **JSR** (runbook §4): before the first publish the maintainer creates `@karume/convert` and `@karume/safetensors` in
+   the `@karume` scope and links this repository (the tokenless publish needs it); the publish runs hub, runtime and
+   safetensors, then convert, then models.
+6. **Published-smoke** (runbook §5).
 
-Before it: 0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
-its host tier, self-speculation and per-layer slots; the parallel-GEMV rows and the RMS→add width for 26B, with the 26B
-presets `i4-gemvpar` / `i4-fast`). `hdae/karume-gemma4-qat` was re-uploaded with them (no FAILED row, the large parts at
-51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking. Published-smoke is green on
-Node and Deno.
-
-- **Irodori v4.1-small-mf** (upstream's MeanFlow student — ADR [0150](decisions/0150-irodori-meanflow.md), proposed):
-  the recipe, the MeanFlow sampler of the TS pipeline, the local mirror and its e2e checks are in place (2026-11-14).
-  The default preset is `i8` and the tokenizer is referenced from v4-small (rulings of 2026-11-14 after listening); its
-  goldens are in the test-asset dataset and the pin moved. Published 2026-11-14 with 0.21.0 (after the re-uploads of
-  v4-small and v4.1-small), pinned as `irodori.SOURCES["irodori-v4.1-small-mf"]`, which the Playground mount reads its
-  repository name from. Left: only a self A/B band for its `i8-a8`.
-- **Irodori v4-Large** (upstream's 3.3 B model with the T5Gemma 2 text encoder, under the Gemma Terms of Use — ADR
-  [0151](decisions/0151-irodori-v4-large.md), proposed): done 2026-11-14 — the recipe exports the seven text-side
-  graphs (the sliding window folded into a constant), the Gemma-format tokenizer asset, the full-loop goldens, the f16
-  / i8 series, and assembles the distribution (`dist.py --pipeline irodori-large`, presets `f16` / `i8` / `i8-a8` /
-  `i8+dit4` with no `f32`, the codec pair borrowed from v4-small); the TS pipeline reads the tokenizer asset; the i4
-  series (GPTQ), the local mirror, the real-GPU e2e (tolerances from measurement, sha256 rows, the `i8-a8` census) and
-  the Node measurement of the presets (ADR 0151, Consequences). The default preset is `i8-a8` (the
-  maintainer's ruling of 2026-11-14). The maintainer reviewed the licence wording on 2026-11-14; published 2026-11-14 with
-  0.22.0 as `karume-irodori-v4-large`, pinned as `irodori.SOURCES["irodori-v4-large"]`, which the Playground mount reads
-  its repository name from; its goldens are in the test-asset dataset (the `dit` io goldens store the condition K/V
-  once). Left: only the Playground page in a browser.
-- **Regular Gemma 4 `bf16-fast`** (the maintainer's approval of 2026-11-19 — perf-ledger K-110): the preset is in the
-  recipe (`gemma4/distribution.py`, `GEMMA4_PARALLEL_QUANTS`) and the local mirror `models/karume-gemma4/` (manifest
-  and card rewritten by the assembly, no weights file changed), with its e2e cases; `bf16` stays the default. Its
-  decode is measured on three devices (2026-11-19, `bf16` and `bf16-fast` interleaved in one process, decode
-  ms/token): RTX 3080 Ti (Node) E2B ×0.73 to ×0.78 and E4B ×0.57 to ×0.72, RTX 5070 Ti (Chrome) ×0.52 and ×0.51,
-  Apple M2 (Chrome) ×0.93 and ×0.95, the same tokens in both presets; each model's description carries its sentence
-  on speed (`GEMMA4_SPEED_NOTE`). The maintainer reviewed the label and the descriptions, the speed sentences
-  included, on 2026-11-19. Open:
-  - E2B's speculative decode (with the drafter) under `bf16-fast` against `bf16`: not measured (the workbench's
-    `gemma4-bench` entry has no drafter arm), so E2B's sentence says "without the drafter";
-  - the sha256 reference rows `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's,
-    which has them (written only on the maintainer's OK);
-  - publication with the next release, on the maintainer's explicit OK (manifest and card only — the containers are
-    the published ones).
+- **Export again the f16 containers made under the earlier rounding rule (filed 2026-11-18; the maintainer's ruling: with
+  the next release (0.23.0), in one pass)**. `round_weights_to_f16` now rounds only what the checkpoint carries, so a
+  non-persistent buffer computed at init (RoPE's `inv_freq`, T5Gemma2's `embed_scale`) keeps its f32 value; the
+  distributed f16 containers below were exported while it rounded those buffers too, and they keep the earlier constants
+  until they are exported again. On the small Irodori model the maintainer heard no difference between the two
+  (2026-11-18). Anima's f16 containers leave the distribution instead (ADR
+  [0154](decisions/0154-anima-bf16-preset-names.md)), so the item has no Anima part.
+  - Irodori v4-Small, v4.1-Small and v4.1-Small-MF: the f16 container of the text backbone (measured on v4-Small: the
+    new graph is the one the f32 and i8 series already carry). The sha256 rows of v4-Small and v4.1-Small-MF are of the
+    `f32` preset and do not move; v4.1-Small has none.
+  - Irodori v4-Large: the f16 container of the T5Gemma2 text backbone — expected, not measured. Its three sha256 rows are
+    of the `f16` preset and move with it.
+  - What it touches: the export, the local mirrors, the sha256 rows named above (rewritten only on the maintainer's
+    approval, after a diff is shown) and the Hugging Face repositories (each on the maintainer's go-ahead).
+- **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; the label and the descriptions, the speed sentences included,
+  reviewed by the maintainer on 2026-11-19): besides its publication above, the sha256 rows `e2b/bf16-fast` and
+  `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on the maintainer's OK;
+  whether before the release is not ruled). E2B's speculative decode is in the first item of `later`.
+- **Irodori**: v4.1-small-mf has no self A/B band for its `i8-a8` (ADR [0150](decisions/0150-irodori-meanflow.md)), and
+  v4-Large's Playground page has not been run in a browser (ADR [0151](decisions/0151-irodori-v4-large.md)). Neither
+  blocks the release; their order is not ruled.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **26B A4B (MoE)** (maintainer 2026-11-08): every expert resident ✅ 2026-11-08 (ADR
-   [0145](decisions/0145-gemma4-26b-moe-resident.md) and its addendum; in the local mirror, ran in Chrome on the RTX 5070 Ti
-   with about 0.8 GB of 16 GB left; released in 0.19.0). The grouped form of `expert_linear` for runs of several rows ✅ 2026-11-18 (perf-ledger K-104). Left: the drafter and vision of 26B. The dense parts'
-   fusion and parallel-GEMV rows at width 2816 ✅ 2026-11-10 (`i4-gemvpar` / `i4-fast` for 26B, a decode forward ×0.70 on the
-   RTX 3080 Ti, and 30.1 against 22.8 tokens per second under the expert cache in Chrome on the RTX 5070 Ti —
-   [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md)). Then see whether a MoE cache that loads the
-   needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
-   paid it with one fence). Pre-research done 2026-11-08: the maintainer prefers an exact cache (bit-identical to
-   full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of
-   decode routing on all 30 layers, the re-run count of the exact cache and the approximate modes' KL ✅ 2026-11-09
-   ([research](research/2026-11-08-gemma4-26b-moe-cache.md)); the Chrome check of the fence and the per-expert upload ✅
-   2026-11-09 (RTX 5070 Ti: about 2.5 ms per fence, about 0.43 ms per expert by a staging ring).
-   Resuming a retry at the first missed layer stays exact but saves only about a fifth of the retry layers (the early layers
-   miss most); a K that differs per layer and self-speculation over the cache each cut the time at K = 64 by about 12–13%,
-   together about 15%, still about 2.3 times full residency. Ruling 2026-11-09: build it even if slow (a model whose experts
-   do not fit in VRAM becomes possible in principle) — ADR [0146](decisions/0146-exact-expert-cache.md) (proposed): stage 0 the
-   cached-read measurement, then the whole-token re-run, then self-speculation over the cache. The cached read ✅ 2026-11-09
-   (about 2.9 ms per expert in Chrome, so a RAM tier comes after a real chat's counters). The whole-token re-run ✅
-   2026-11-09 (runtime, Gemma pipeline, Playground; the cut model at 16 and 64 slots is bit-identical on the RTX 3080 Ti).
-   The maintainer's chat with the full model in Chrome on the RTX 5070 Ti ✅ 2026-11-09 (32 slots: 264 ms per decode token,
-   77% of the time in Blob reads — research §6.2). The host tier in RAM ✅ 2026-11-10 (`hostBytes`, plain `ArrayBuffer`s
-   and the staging ring — ADR 0146 addendum 2026-11-10; the cut model is bit-identical with it). The maintainer's
-   chat with the tier in Chrome on the RTX 5070 Ti ✅ 2026-11-09 (every expert in RAM: 9.7 tokens per second at 32 slots,
-   18.1 at 64, 52.3 resident; the same tokens — research §6.3). Self-speculation over the cache ✅ 2026-11-10 (`expertCache.depth` — ADR 0146 addendum
-   "scheme B as built"; the cut model gives the tokens without the cache at temperature 0 and 1). The maintainer's
-   Chrome chat at 64 slots depth 4 ✅ 2026-11-10 (the same tokens as resident; 17.4 → 20.8 tokens per second, 1.6 runs
-   per decode token — research §6.4). A K per layer ✅ 2026-11-10 (`slots` as an array, the Playground preset `fitted` —
-   ADR 0146 addendum "per-layer slots"; the cut model gives the tokens without the cache). The maintainer's Chrome A/B ✅
-   2026-11-10 (the same tokens; `fitted` at depth 4 decodes 22.6 tokens per second against 20.5 at 64 — research §6.5).
-   The cost per run ✅ 2026-11-10 (the drafts' whole forwards and the verify padded to 8 rows — research §6.6); the
-   verify in a bucket of `depth + 1` rows ✅ 2026-11-10. `expert_linear` reading each distinct expert once in a run of
-   several rows ✅ 2026-11-18 (the grouped form, for gate_up's long weight rows — perf-ledger K-104; pad rows are not
-   skipped, their picks share walks like any other rows'). Next: the grouped form checked in Chrome on the RTX 5070 Ti
-   (the `kernel-check` entry and the chat's decode), a depth sweep in Chrome, drafts chained on the GPU, and the load
-   after a cut for its last row alone.
-2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
-   2026-11-07). 12B's vision shipped with 0.18.0.
+1. **26B A4B (MoE)** (maintainer 2026-11-08): every expert resident (ADR
+   [0145](decisions/0145-gemma4-26b-moe-resident.md), released in 0.19.0) and the exact expert cache with its host tier,
+   self-speculation and per-layer slots (ADR [0146](decisions/0146-exact-expert-cache.md) and its addenda, released in
+   0.20.0) are built; the measurements are [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md) and
+   [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md), the grouped `expert_linear` is perf-ledger K-104. The
+   cache is built even if slow (the maintainer's ruling of 2026-11-09: a model whose experts do not fit in VRAM becomes
+   possible in principle). Left:
+   - the drafter and vision of 26B;
+   - the grouped `expert_linear` in a chat's decode in Chrome on the RTX 5070 Ti (its `kernel-check` identity passed
+     there on 2026-11-19);
+   - a depth sweep of self-speculation in Chrome (the Node sweep is research 2026-11-10 §7);
+   - drafts chained on the GPU;
+   - the load after a cut for its last row alone;
+   - paying a miss as a transfer rather than a re-run (the PoC of
+     [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md) paid it with one fence; the `later`
+     item "MoE page-fault").
+2. **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07; ADR
+   [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real vision tower and causal attention, and
+   need the product graph's input for image vectors but not the marking of which rows are one image). 12B's vision
+   shipped with 0.18.0.
 
 ## later
 
+- **After the 0.23.0 release (filed together on 2026-11-19; the order among them is not ruled)**:
+  - Put after the release by the maintainer's rulings of 2026-11-19: the design of the GEMV derivation's evidence rules
+    (perf-ledger K-113), which the next derivation of `nvidia-ampere` waits for, and the bf16 shapes that could take a
+    parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
+    publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
+    and EmbeddingGemma 2, which has no item or design yet.
+  - Here without a ruling on their timing: whether `apple-metal-3` matches Apple adapters other than the M2, which the
+    maintainer decides from the Apple M5's records (item 6 of "The move to maintained specs (ADR 0152)"); and the two
+    items below.
+  - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
+    workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
+    (`GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`); it needs a drafter arm in that entry. The
+    maintainer's Playground chats with the drafter on the RTX 5070 Ti (2026-11-19) gave sound replies; they are not an
+    A/B.
+  - **Small checks found while preparing 0.23.0 (filed 2026-11-19; none approved yet)**:
+    - Nothing compares the versions of the five JSR packages with one another or with the `^` pins between them
+      (`packages/models/deno.json`, `packages/convert/deno.json`): `verify_package_manifests_test.ts` compares each
+      package's `deno.json` with its own `package.json` only.
+    - `packages/runtime/tests/verify_test_imports_test.ts` names the packages in a hand-written pattern
+      (`runtime|hub|safetensors|convert|models`), so a new package is added there by hand.
+    - `tools/published-smoke` imports only `@karume/hub` and `@karume/models`; the other three packages are not imported
+      by it directly.
+    - The public-surface helper (`packages/runtime/tests/helpers/public-surface.ts`) writes
+      `tests/fixtures/public-surface.json` under `KARUME_SURFACE=write` without creating `tests/fixtures/` when it is
+      missing.
+    - `tools/lang/check-doc-links.ts` accepts an absolute filesystem path as a link target when the file exists on the
+      machine that runs it; such a link resolves nowhere else (CI went red on one, 2026-11-19). Proposed: reject
+      absolute targets.
+
 - **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
-  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted; each item states what
-  has landed; the maintainer confirmed this order on 2026-11-15)**. Each item is its own commit with its behaviour tests:
-  1. *(Landed 2026-11-15: the link check in the core lane with the `SPEC:` marker, the approved deletions, `CLAUDE.md`,
-     the `deno-*` rows; the sections of `known-issues.md` for the Intel Arc B570, Deno's `GPUDevice.destroy()` and the
-     Pixel load failure, once the comments and the items that cited them said what they need themselves.)*
-  2. *(Landed 2026-11-15: the record of the WGSL a test dispatches; `outputs/references/`, which keeps the artifact and
-     the kernels of each matching run and adds them to a mismatch's message; the verification cache's recording stage
-     under `outputs/verify-cache/`; Wan2.2's seed-path cases at 9 frames.)* Left from it:
-     - Wan2.1's pipeline file (`e2e_wan_pipeline_test.ts`, 687 s in the last full verify) is not shortened: its case IDs
-       carry no frame count and its cases run the default 33 frames.
+  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted; the maintainer confirmed this
+  order on 2026-11-15)**. Each item is its own commit with its behaviour tests. Item 1 has landed; what has landed of
+  items 2 to 7 is described by the specs it cites. Left:
+  2. **Records of a run** (the WGSL a test dispatches, `outputs/references/`, the verification cache's records):
+     - Wan2.1's pipeline file (`e2e_wan_pipeline_test.ts`) is not shortened: its case IDs carry no frame count and its
+       cases run the default 33 frames.
      - A mismatch reports the differing bytes of the two artifacts; a distance per artifact type (pixels, samples,
        tensor values) is not built.
-     - (The reuse mode has landed — item 5.)
-     - Inputs the record does not see: files read outside the repository (`/sys`, temporary directories), the clock and
-       randomness. A file whose every case is skipped writes no record.
-  3. *(Landed 2026-11-15: the per-op tolerance table beside the reference ops; the selection of a linear's kernel as one
-     ordered table that the recipe builder, the fusion pass and the estimate all ask
-     (`packages/runtime/src/runtime/linear-strategies.ts`); the split-K linear, a `reorder` strategy behind a private
-     option and the first strategy written as a dispatch program
-     ([research 2026-11-15](research/2026-11-15-linear-splitk.md)).)* Left from it:
+  3. **Kernel selection as one table per op and dispatch programs**
+     (`packages/runtime/src/runtime/linear-strategies.ts`, `state-attention-strategies.ts`, `linear-program.ts`;
+     [research 2026-11-15](research/2026-11-15-linear-splitk.md) for the split-K linear):
      - No op spec object was made: nothing would read it yet.
-     - Attention: the states-form attention's stage forms are selected in one place
-       (`packages/runtime/src/runtime/state-attention-strategies.ts`, with their levels). The fused attention was not
-       reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies` are already the single
-       decisions its consumers call; its levels are recorded when item 4 selects by them.
-     - Every strategy of `linear` is a dispatch program (`packages/runtime/src/runtime/linear-program.ts`); the
-       linear→static_quantize rule keeps its own conditions and its own builder. The memory estimate and the
-       verification cache do not read programs yet.
+     - The fused attention was not reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies`
+       are already the single decisions its consumers call. Its kernels are not selected by level; its levels are
+       recorded when item 4 selects by them.
+     - The linear→static_quantize rule keeps its own conditions and its own builder; the memory estimate and the
+       verification cache do not read dispatch programs yet.
      - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`
        (so no browser check); slower than the reference kernel at K = 1536. A fast form would reuse the GEMM skeleton.
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
-  4. **Requirement levels.** *(Landed 2026-11-15: `SessionOptions.numerics` — a level for the whole model and per op
-     kind (`linear`, `attention`, `rms_norm`), the narrower scope winning — in the runtime, the manifest's `session`
-     and the Gemma 4 pipeline options, composed per field between a preset and an explicit value; the seven options that
-     named a reduction form or a fusion left the public surface (breaking); the three bit-identical fusions always
-     apply; the Gemma 4 QAT presets declare `numerics`; the spec is [spec/numerics.md](spec/numerics.md).)* Left from it:
-     - The runtime's regression corpus: the mechanism and seven entries have landed (Gemma 4 QAT E2B; its mobile line
-       with the packed activations and the integer GEMV; the Irodori v4-small DiT with int8 linear activations; the
-       Wan2.2 DiT with int8 linear and attention; the Wan2.2 VAE decoder with int8 conv activations; the MOSS-Image
-       VAE decoder; the Style-Bert-VITS2 text encoder with i32 inputs —
-       [spec/verification.md](spec/verification.md#the-regression-corpus)). Left: the entries for the f16 compute
-       paths and the 26B MoE graph (388 MiB per layer); rows for environments other than the development machine's;
-       the kernel keys that only other step shapes select. Checking a
-       `reorder` strategy inside its op band on the corpus's activations (replaying one op on values taken from an
-       `exact` run) is not built; it is built when a defect shows that the kernel checks' own inputs miss something
-       (the maintainer's ruling of 2026-11-16).
-     - The derived applicability check that replaces the `FamilySessionPolicy` tables (ADR 0147 follow-ups, code item 4).
-     - No per-adapter table: the subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder`
-       strategies with no end-to-end gain measured on any adapter, so no Session selects them; they run through the
-       private key `REORDER_STRATEGIES` (the kernel checks and tests). A measured gain lists a strategy in a table.
+  4. **Requirement levels** ([spec/numerics.md](spec/numerics.md)):
+     - The regression corpus ([spec/verification.md](spec/verification.md#the-regression-corpus)): entries for the f16
+       compute paths and the 26B MoE graph (388 MiB per layer); rows for environments other than the development
+       machine's; the kernel keys that only other step shapes select. Checking a `reorder` strategy inside its op band
+       on the corpus's activations (replaying one op on values taken from an `exact` run) is built when a defect shows
+       that the kernel checks' own inputs miss something (the maintainer's ruling of 2026-11-16).
+     - The derived applicability check that replaces the `FamilySessionPolicy` tables (ADR 0147 follow-ups, code item
+       4).
+     - The subgroup GEMV, the subgroup RMS reduction and the byte-plane GEMV are `reorder` strategies with no
+       end-to-end gain measured on any adapter, so no geometry profile lists them and no Session selects them; they run
+       through the private key `REORDER_STRATEGIES` (the kernel checks and tests). A measured gain lists a strategy in
+       a table.
      - `reorder` beside `linearCompute: "a8"` / `"f16"` is accepted and leaves linear on the approximation's kernels.
-     - The fused attention's kernels are not selected by level (item 3's note).
-     - The distribution mirrors of `gemma4-qat` and `gemma4-qat-mobile` are regenerated locally; the re-upload, the
-       source pins and the published smoke wait for the maintainer's explicit go-ahead.
      - The fusions at `exact` on a backend where a fused kernel does not give the unfused bits: recorded and accepted
        (the Metal ruling of 2026-11-11/12); no run-time check drops a rule.
-  5. **Verification, second part.** *(Landed 2026-11-16: the cache's reuse mode, `KARUME_VERIFY_CACHE=reuse`, with
-     today's key — [spec/verification.md](spec/verification.md#the-verification-cache); the default stays `record`.
-     Over the last 120 commits it would re-run 2,210 s on average of a 6,893 s full run; 18 recorded runs judged 2,560
-     predictions, 544 of them a reuse, none wrong.)* Left from it:
-     - Making `reuse` the default, after it has been used on the long end-to-end files (the predictions judged so far
-       are mostly of short files), and the release rule "an uncached full run when the environment changed".
+  5. **Verification, second part** ([spec/verification.md](spec/verification.md#the-verification-cache); the default
+     mode stays `record`):
+     - Making `reuse` the default, after it has been used on the long end-to-end files (by 2026-11-16, 18 recorded runs
+       had judged 2,560 predictions, 544 of them a reuse and none wrong, mostly of short files — counted only here), and
+       the release rule "an uncached full run when the environment changed".
      - Leaving the runtime's host code out of the key of the models' e2e files (ADR 0152 decision 6) is put off (the
-       maintainer's ruling of 2026-11-16): measured on the same 120 commits it changes the mean re-run of a commit
-       that touches the runtime from 4,816 s to 4,813 s, since such commits touch kernels, tuning tables, strategy
-       selection and fusion, rarely the executor alone; a wrong classification would reuse a stale result.
+       maintainer's ruling of 2026-11-16): commits that touch the runtime touch kernels, tuning tables, strategy
+       selection and fusion, rarely the executor alone, so it barely moves their re-run time (measured in commit
+       `feaed7b6`), and a wrong classification would reuse a stale result.
      - Kernel changes re-running only the files that compile them: the one lever for commits that touch the runtime.
        It needs the WGSL a file compiles derived without running it (an open point of ADR 0152).
-     - What the key does not see (the spec lists it); a file whose every case is skipped runs each time.
-  6. **The workbench** (ADR 0152 calls it the harness). *(Landed 2026-11-16: the app `apps/workbench` — entries as files
-     without UI code, the record `karume-workbench/1`, the dev server's write-back under `outputs/workbench/`, the Node
-     command — and the entries `kernel-check`, `geometry-sweep` and `attention-bench`, whose pages left the Playground;
-     [spec/workbench.md](spec/workbench.md).)* Left, in this order:
-     - *(Landed 2026-11-16: the generator of the geometry profile tables, `tools/geometry-profiles/generate.ts` — the
-       registered table as base plus new workbench records; [spec/geometry-profiles.md](spec/geometry-profiles.md).)*
-       Left from it: the tile geometry of `apple-metal-3` cites only records of the old sweep format, so its families
-       are derived again from a new sweep on M2 (every registered table's header is the generator's since 2026-11-19).
-     - *(Landed 2026-11-16: what an entry needs to read a local distribution — the private package
-       `@karume/local-distributions` shared with the Playground, the same routes on the workbench's dev server,
-       `openDistribution` for both hosts, entries under `src/entries/local/` left out of a production build, the
-       parameter kinds `text` and `number`. The Playground's expert transfer page was removed without an entry: its
-       measurements are in [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md), no open item waits
-       for another, and its cached-read part would measure something else under the workbench's origin.)*
-     - *(Landed 2026-11-16: the Session A/B as the entries `session-ab` (the MOSS-Image DiT, the Wan2.2 VAE next chunk,
-       the anima VAE tile) and `gemma4-session-ab`; its Playground page and the opt-in e2e copies of its code went.)*
-     - *(Landed 2026-11-16: the Gemma 4 decode bench as the entry `gemma4-bench`; its page went. The Playground now
-       holds model pages only.)*
-     - The workbench stays a local application for tests and measurements on the maintainer's machines (the
-       maintainer's ruling of 2026-11-19): no public build of it is hosted. Its production build keeps working as the
-       spec describes.
-     - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
-     - The default profile's GEMV choices from several devices' records (the maintainer's ruling of 2026-11-18). The
-       default's `linearGemv` holds what one device measured (the RTX 3080 Ti), every device without a table of its
-       own runs with it, and on an RTX 5070 Ti 51 of 66 parallel rows derive to another choice (a median ×1.79 per
-       dispatch). Direction: the default keeps a row only where no measured device is slower with it than with the
-       sequential GEMV, chosen over the records of every measured device, and a device's own best stays in its
-       table. Needs: GEMV sweep records of the devices collaborators measure (the three devices' records are at hand,
-       and each device's table is derived from its own); the rule
-       itself (to be proposed with the three devices' overlap in numbers); the generator deriving the default from
-       records of several adapters. A reorder Session's numbers then follow the table of its device where one
-       carries rows of its own (inside the band, as today's rows are). *(2026-11-18: the sequential variant's
-       per-shape exceptions follow the direction by hand — 22 bf16 rows that the RTX 3080 Ti and the RTX 5070 Ti
-       are both faster with stay in the default, and the four rows the RTX 5070 Ti is slower with are in
-       `nvidia-ampere`, the first table to carry `linearGemv`. The RTX 5070 Ti's own choices are in
-       `nvidia-blackwell` since the same day, from 82 of its records: 42 sequential exceptions of its own and 61
-       parallel rows apart from the default's. 2026-11-19: the default's 17 bf16 parallel rows follow the direction
-       by hand, over the records of the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2 — perf-ledger K-110. The same
-       day the three devices' tables are derived from their records against the current default: `nvidia-ampere`
-       from 21, `nvidia-blackwell` from 84 and `apple-metal-3` from 12, the Apple M2's first GEMV choices of its
-       own.)* Also open under this item:
-       - the derivation judges a candidate against the default profile's choice for the shape, so where that
-         choice is an exception another device drops the inherited row only when its records show the general
-         variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
-         several devices has to say what removes a row of the default from a device's table;
+     - What the key does not see ([spec](spec/verification.md#what-the-key-does-not-see)); a file whose every case is
+       skipped writes no record, so it runs each time.
+  6. **The workbench** (ADR 0152 calls it the harness; [spec/workbench.md](spec/workbench.md)). It stays a local
+     application for tests and measurements on the maintainer's machines (the maintainer's ruling of 2026-11-19): no
+     public build of it is hosted, and its production build keeps working as the spec describes. Left, in this order:
+     - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git; ADR 0147 follow-ups, code
+       item 8, decides it).
+     - The GEMV choices of the default profile and of the device tables
+       ([spec/geometry-profiles.md](spec/geometry-profiles.md#the-gemv-choices-of-linear); perf-ledger K-110, K-112,
+       K-113). Direction (the maintainer's ruling of 2026-11-18): the default keeps a row only where no measured device
+       is slower with it than with the sequential GEMV, chosen over the records of every measured device, and a
+       device's own best stays in its table. The ruling answered the RTX 5070 Ti, on which 51 of the default's 66
+       parallel rows then derived to another choice (a median ×1.79 per dispatch — counted only here). The default's 22
+       bf16 sequential exceptions (2026-11-18) and 17 bf16 parallel rows (2026-11-19) follow it by hand, and the three
+       device tables are derived from their records against the current default (2026-11-19). Open:
+       - the rule itself (to be proposed with the three devices' overlap in numbers), the generator deriving the default
+         from records of several adapters, and GEMV sweep records of the devices collaborators measure. The rule has to
+         say what removes a row of the default from a device's table: the derivation judges a candidate against the
+         default's choice for the shape, so a device drops an inherited exception only when its records show the
+         general variant ×1.10 faster in every group, and a device on which the row is slower by less keeps it;
+       - **after the 0.23.0 release, not before** (the maintainer's ruling of 2026-11-19): the design of the
+         derivation's evidence rules (perf-ledger K-113), and with it the bf16 shapes that could take a parallel row of
+         the default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080
+         Ti) — a row added to the default before that discards the other devices' records of the shape. `nvidia-ampere`
+         is derived again after K-113, not before;
+       - where a table's choice at `reorder` is slower than its choice at `exact` (the three devices' GEMV sweep records
+         since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured; perf-ledger
+         K-113): on `nvidia-ampere` 37 groups at 4 and 8 rows (×1.01 to ×5.06), shapes the two other tables hold
+         row-blocked rows of their own for; on `nvidia-blackwell` only the output heads at 4 and 8 rows (int4 g32
+         `262144 × 3840` of 12B ×1.44 and ×1.57, `262144 × 2816` of 26B ×1.48 and ×1.68, and the int8
+         `262144 × 2560` no distribution ships), which a speculative decode's verify run reaches; on `apple-metal-3` 11
+         groups, ×1.00 to ×1.12;
+       - `apple-metal-3` matches only the Apple M2's description. The maintainer's ruling of 2026-11-19: an Apple M5,
+         which matches no table, runs the kernel checks, the decodes and the full GEMV sweep twice, and whether
+         `apple-metal-3` matches other Apple adapters is decided from those records. On the M2 the default's 22
+         exceptions stay although per dispatch its records time the general variant faster on most of the shapes they
+         time, because end to end they were faster (perf-ledger K-112); the per-dispatch comparison, the five
+         exceptions `apple-metal-3` keeps and the shapes compared word for word on Metal are in
+         [limitations](limitations.md) (the section on the linear GEMV family);
        - a table holds the field as a whole, so every table holds a copy of the default's thread target and general
-         variant and of the rows its records do not replace (`nvidia-ampere`: every parallel row of the default): a
-         change of those in the default regenerates every table that carries the field (a core-lane test catches
-         the drift);
-       - the memory estimate plans its fusions with the default profile's choices, so a table with parallel rows
-         on more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
-         `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An
-         estimate that takes the adapter's table, or its GEMV choices, would remove it;
-       - the end-to-end decode of a table since its derivation of 2026-11-19 is measured on E2B only (the same
-         day, the table's choices against the default profile's, ms a token): `nvidia-blackwell` 10.03 against 11.57
-         with `bf16-fast` and 5.74 against 5.76 with the QAT `i4-fast`; `apple-metal-3` 60.41 against 60.47 and
-         24.88 against 27.34; `nvidia-ampere` not at all. `nvidia-blackwell`'s earlier measurement is of the table
-         before its derivation from 82 records
-         ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a
-         token with the default's choices, E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); a
-         speculative decode and the 26B model are measured with none. What the planner (`--gemv-plan`) still lists
-         against the current default on the records the tables were derived from: on `nvidia-blackwell`'s 84 the
-         int8 `262144 × 1536` case at one row (35 candidates); on `apple-metal-3`'s 12 three cases at one row (int8
-         `262144 × 1536` and `1024 × 256`, int4 `3840 × 4096`); on `nvidia-ampere`'s 21, 290 of the full set's 345
-         groups (365 groups of those records are not current against the current default);
-       - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
-         would allow it): their evidence is the device's sweep records;
-       - the default's 22 exceptions as the default: the Apple M2's records time the general variant against them
-         on 12 of their shapes and read it ×1.01 to ×1.26 faster on 11 (`apple-metal-3` keeps 5 of the 22 because
-         no variant reaches ×1.10 over them), and on Metal they have been compared with the general variant word
-         for word on those 12 shapes only ([limitations](limitations.md), the section on the linear GEMV family).
-         End to end the M2 read them faster before it had a table (E2B `bf16`, 68.24 against 71.05 ms a token with
-         the general variant, 2026-11-19), so the default keeps them. The maintainer's ruling of 2026-11-19: an
-         Apple M5, which matches no table (`apple-metal-3` matches the M2's description), runs the kernel checks,
-         the decodes and the full GEMV sweep twice, and whether `apple-metal-3` matches other Apple adapters is
-         decided from those records;
-       - where a table's choice at `reorder` is slower than the choice at `exact` (the three devices' GEMV sweep
-         records since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured):
-         on `nvidia-blackwell` only the output heads at 4 and 8 rows (int4 g32 `262144 × 3840` of 12B ×1.44 and
-         ×1.57, `262144 × 2816` of 26B ×1.48 and ×1.68, and the int8 `262144 × 2560` no distribution ships), which
-         a speculative decode's verify run reaches; on `nvidia-ampere` 37 groups at 4 and 8 rows (×1.01 to ×5.06),
-         shapes the two other tables hold row-blocked rows of their own for; on `apple-metal-3` 11 groups, ×1.00 to
-         ×1.12. The default's rows that are faster on the RTX 3080 Ti and slower on the RTX 5070 Ti (10 groups,
-         ×1.00 to ×2.22) are all replaced in `nvidia-blackwell`;
-       - the maintainer's ruling of 2026-11-19 puts after the 0.23.0 release: the design of the derivation's
-         evidence rules (perf-ledger K-113), and with it the bf16 shapes that could take a parallel row of the
-         default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080
-         Ti) — a row added to the default before that discards the other devices' records of the shape;
-       - the choice between sequential variants a few percent apart moves with the records given, and the
-         narrowed sweeps measured four hand-picked variants (the planner still lists the others).
+         variant and of the rows its records do not replace: a change of those in the default regenerates every table
+         that carries the field (a core-lane test catches the drift);
+       - the memory estimate plans its fusions with the default profile's choices, so a table with parallel rows on
+         more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
+         `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An estimate that
+         takes the adapter's table, or its GEMV choices, would remove it;
+       - the end-to-end decode with a device table since its derivation of 2026-11-19 is measured on E2B only, on
+         `nvidia-blackwell` and `apple-metal-3` (perf-ledger K-110); `nvidia-ampere`, E4B, 12B, 26B and a speculative
+         decode are measured with no table's choices since then
+         ([research 2026-11-18](research/2026-11-18-blackwell-gemv-table-decode.md) is of `nvidia-blackwell` before
+         that derivation). What the planner (`--gemv-plan`) still lists against the current default on the records the
+         tables were derived from: on `nvidia-blackwell` the int8 `262144 × 1536` case at one row; on `apple-metal-3`
+         three cases at one row (int8 `262144 × 1536` and `1024 × 256`, int4 `3840 × 4096`); on `nvidia-ampere` 290 of
+         the full set's 345 groups (counted only here);
+       - no test runs a table's parallel rows on their own shapes on the development machine (an injected table would
+         allow it): their evidence is the device's sweep records;
+       - the choice between sequential variants a few percent apart moves with the records given, and the narrowed
+         sweeps measured four hand-picked variants (the planner still lists the others).
      - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
        the maintainer has an AMD device in reach). A collaborator opens it, runs one short measurement and sends the
        result from the page itself — to a form (for example a Google Form) whose address the build reads from the
@@ -283,171 +228,71 @@ maintainer's ruling of 2026-11-06).
        and its size (a form field does not take a sweep record of megabytes), whether sending from a cross-origin
        isolated page works with the form's endpoint, what it tells about the device, where it is hosted and the
        build's commit named on the page.
-     - Per-adapter generation of the hand-written GEMV shape tables. *(Landed 2026-11-17: the sequential variant,
-       the row-block thread target and the parallel shapes are the geometry profile's `linearGemv`; every table still
-       runs with the default's values.)* *(Landed 2026-11-17: the GEMV sweep on synthetic tensors that measures them —
-       `runGemvSweep` and the workbench entry `gemv-sweep`, at the LLM decode shapes of the default profile's rows;
-       the bit-identical and the reordering candidates are both measured, each held to its own check, and recorded as
-       `karume-gemv-sweep/2`.)* *(Landed 2026-11-17: the derivation of the field from two or more of those records,
-       `deriveLinearGemvChoices`, and the generator's `--gemv-records` — the bit-identical and the reordering choices
-       derived and reported separately (the maintainer, 2026-11-17); ×1.10 in every record, a shape with a record whose
-       baseline spread exceeds 1.25 kept, a parallel row changed only by records of the `full` set. No table is
-       regenerated with it yet.)* *(Landed 2026-11-17: sweeps that take minutes — a quick look before the timing in
-       both sweeps (one short timed pass per kernel; only the references and the kernels within ×1.25 of their
-       class's bar are timed in full), evidence per row and per case (`karume-gemv-sweep/3`, `karume-geometry-sweep/4`;
-       the GEMV derivation reads any number of records group by group and reports what is not current instead of
-       refusing it), the GEMV sweep narrowed by row count and candidate, the `full` set reduced to M = 1, 4 and 8
-       with M = 16 and 64 in the `row-blocks` set, and the generator's `--gemv-plan`, which writes the workbench
-       batch that measures, twice, what the records at hand lack.)* *(Landed 2026-11-18: the skeleton forms of the f32
-       GEMM and conv2d's counter decode (perf-ledger K-88) are candidates of the geometry sweep's `quick+` and `full`
-       sets on every tile, and the derivation adopts a tile with them by its one rule and writes it into the table;
-       no case set, default kernel or table changed —
-       [spec/geometry-profiles.md](spec/geometry-profiles.md#the-skeleton-form-and-the-counter-decode).)* *(Landed
-       2026-11-18: the GEMV sweep's case table also holds the Gemma 4 output heads and MTP drafter shapes, 24 integer
-       cases, and five drafter shapes take a default row —
-       [research](research/2026-11-18-gemma4-gemv-census.md).)* Open: the
-       registered tables' `gemm` and `conv2d` families derived from a sweep that measured those fields, and the K-88
-       2026-11-18: `nvidia-blackwell` derived again from a `quick+` sweep of the RTX 5070 Ti with those fields; it
-       carries a form in its `gemmRows` rules above 64 rows and a form with the decode in both `conv2d` fields.)*
-       Open: the `gemm` and `conv2d` families of `nvidia-ampere` and `apple-metal-3` derived from a sweep that
-       measured those fields (on the RTX 3080 Ti a case of that sweep heats the card: in chunks), and the K-88
-       shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case sets, which
-       moves those families' case-set versions; regenerating the registered
-       tables from GEMV sweeps; the two drafter shapes with a large gain whose row-block baseline was unsteady
-       (`256 × 2048`, `256 × 5120`) and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101; their sequential variant landed 2026-11-18 as rows of `nvidia-ampere`, and the bf16 linears' as exceptions of the default profile, K-112); the RTX 5070 Ti's own sequential choices, derived from its own records (one record of each shape exists; the RTX 3080 Ti's rows it is slower with are not in the default); the bf16 output heads, whose general variant ran at two speeds from record to record on the RTX 3080 Ti; a rule for the row-block thread target from the `row-blocks` set; the shared
-       sequential keys whose cases disagree (the key has no group length); the packed rows (not measured); the
-       integer and byte-plane GEMV tables, which are still in the kernel source; the geometry sweep's rounds taken
-       geometry after geometry (interleaving them as the GEMV sweep does needs a steadiness rule from evidence to
-       replace the drift ratio its derivation reads); its derivation accepting or refusing a record per op family
-       (the record's measured-candidate fingerprint is one value per record); the quick look on the geometry sweep's
-       evaluation set `k88`, whose summary compares every candidate with the table's (run it at margin 0); and the
-       registered tables' records, which are `karume-geometry-sweep/3` and no longer regenerate a table until their
-       family is swept again.
-  7. **Weights from outside the exporter.** `fromSingleFile` on the pipelines, the counterpart of diffusers'
+     - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
+       `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
+       [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
+       - the tile families of `nvidia-ampere` and `apple-metal-3` are carried over from records of
+         `karume-geometry-sweep/3`, which no longer derive a table: each is derived again from a new sweep on its
+         device, the `gemm` and `conv2d` families from one that measures the K-88 forms (on the RTX 3080 Ti a case of
+         that sweep heats the card: in chunks);
+       - the K-88 shapes (the Gemma 4 prefill linears, the Wan2.2 and anima VAE conv2d) as cases of the sweep's case
+         sets, which moves those families' case-set versions;
+       - the two drafter shapes with a large gain whose row-block baseline was unsteady (`256 × 2048`, `256 × 5120`),
+         and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101);
+       - the bf16 output heads, whose general variant ran at two speeds from record to record on the RTX 3080 Ti (the
+         steadiness half of K-113);
+       - a rule for the row-block thread target from the `row-blocks` set; the shared sequential keys whose cases
+         disagree (the key has no group length); the packed rows (not measured); the integer and byte-plane GEMV
+         tables, which are still in the kernel source;
+       - the geometry sweep's rounds taken geometry after geometry (interleaving them as the GEMV sweep does needs a
+         steadiness rule from evidence to replace the drift ratio its derivation reads); its derivation accepting or
+         refusing a record per op family (the record's measured-candidate fingerprint is one value per record); the
+         quick look on the geometry sweep's evaluation set `k88`, whose summary compares every candidate with the
+         table's (run it at margin 0).
+  7. **Weights from outside the exporter** ([spec/single-file.md](spec/single-file.md),
+     [spec/convert.md](spec/convert.md), [spec/safetensors.md](spec/safetensors.md); manifest `karume/6` — ADR
+     [0153](decisions/0153-manifest-v6-name-map.md)). `fromSingleFile` on the pipelines, the counterpart of diffusers'
      `from_single_file`: a single file is converted while it loads, against the plan of a preset of a distribution's
-     manifest, and keeping the result as a `krm` is optional (the maintainer, 2026-11-17). The format readers are
-     their own packages (`@karume/safetensors`, later `@karume/gguf`) and the shared part is `@karume/convert` (the
-     plan, the encoders with the block sha256 test, name maps); hub and models hold no reader. Once the reader package
-     exists the runtime's `parseSafetensors` moves into it, early, so that one parser reads the header (a breaking
-     change of the runtime's surface). LoRA merged before quantization (Anima, then Wan2.2); example apps per model on
-     request. GGUF is
-     deferred ([research 2026-11-16](research/2026-11-16-gguf-and-quantized-kernel-generation.md): what its types
-     need from storage and kernels); the ledger's symmetric-only rule (no zero point) is re-evaluated when a format
-     that needs a minimum is taken up (the maintainer, 2026-11-16).
-     *(Landed 2026-11-17, stage 1: the private package `@karume/convert` — the tensor list, the plan read from a
-     target preset's part 0, the `int8-sym` / `bf16` / `f32` encoders against fixtures from the exporter's Python, the
-     converting `BlockSource` and the optional writer — and the runtime's subpath `@karume/runtime/container`;
-     [spec/convert.md](spec/convert.md). The Anima transformer's `bf16` tensors written against the `i8` plan give
-     the 11 `i8` files byte for byte.)* *(Landed 2026-11-17, stage 2: the private package `@karume/safetensors` — a
-     `Blob` or ranged reader opened from its header alone, one ranged read per tensor, the runtime reader's checks
-     plus the 100 MB header bound; [spec/safetensors.md](spec/safetensors.md) — and the name map in `@karume/convert`
-     — the JSON format `karume-name-map/1` and `placeTensors`; [spec/convert.md](spec/convert.md#the-name-map) — with
-     Anima's map beside its recipe, `tools/export-recipes/anima/name-map.json` (the single file and the diffusers
-     files). The upstream `anima-base-v1.0` and `anima-turbo-v1.1` single files give the distributed `i8` and `bf16`
-     transformer files and `bf16` text conditioner files byte for byte.)* *(Landed 2026-11-17: manifest `karume/6`
-     — ADR [0153](decisions/0153-manifest-v6-name-map.md). The optional `nameMap` references the repository's name
-     map (`name-map.json` at the root), checked like every file reference; the hub reads `karume/6` only; a recipe
-     declares its map (`Pipeline.name_map`) and the assembly copies and references it — Anima's two repositories;
-     `karume upgrade` rewrites a `karume/5` repository in place. Every repository's manifest is re-uploaded at the next
-     release — [release-runbook](release-runbook.md) §0.)* *(Landed 2026-11-17, stage 3, for loading:
-     `anima.Pipeline.fromSingleFile` — the distribution's name map read through the hub (`parseNameMap`), the file's
-     header, the placement and the shared loader with converting sources, the transformer against the quant's plan
-     and the text conditioner against the `bf16` plan; the converted parts are neither fetched nor counted, and every
-     refusal that needs no tensor byte comes before a weight part; [spec/single-file.md](spec/single-file.md). The
-     workbench entry `anima-single-file` compares it with `fromPretrained` on a GPU.)* *(Landed 2026-11-17: the `f16`
-     target of `@karume/convert` — a value stored as it is, never rounded, against the exporter's fixtures — and the
-     dtype rule of `fromSingleFile`: a preset decides what is quantized, and a float component from the file is
-     converted against the container of the file's dtype, a bit copy (Anima: BF16 → `bf16`, F16 → `f16`, for the text
-     conditioner always and for the transformer under the float quants; a mix of dtypes and F32 are refused, and so is
-     a BF16 transformer under f16 linear compute, which nothing checks); [spec/single-file.md](spec/single-file.md),
-     [spec/convert.md](spec/convert.md#the-encodings). Not run on a GPU with an F16 file yet: none with the base's 28
-     blocks is at hand.)* *(2026-11-18: a float component from a file is converted against the plan of the model's
-     `bf16` container with its 16-bit weights stored as the file's dtype (`float16Codec` of `@karume/convert`), so F16
-     files need no f16 container; the graph comparison between containers is gone. Not run on a GPU with an F16 file
-     yet.)* *(2026-11-18: a BF16 transformer under f16 linear compute is no longer refused — the f16-compute checks
-     cover bf16 storage, and `bf16-c16` runs that pair through `fromPretrained`.)* *(2026-11-19: `@karume/safetensors`
-     and `@karume/convert` are JSR packages of the workspace, versioned in lockstep and published with the next
-     release beside the other three (the maintainer's ruling of the same day); `deno publish --dry-run` takes all
-     five.)* Left from it: keeping the converted container (designed next), `fromSingleFile` on the other families,
-     int4 targets, LoRA, and the runtime's `parseSafetensors` moved into the reader package.
-  - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
-    `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
-  - **To decide**: the open points of ADR 0152.
+     manifest, and keeping the result as a `krm` is optional (the maintainer, 2026-11-17). The format readers are their
+     own packages (`@karume/safetensors`, later `@karume/gguf`) and the shared part is `@karume/convert`; hub and models
+     hold no reader. GGUF is deferred ([research 2026-11-16](research/2026-11-16-gguf-and-quantized-kernel-generation.md):
+     what its types need from storage and kernels); the ledger's symmetric-only rule (no zero point) is re-evaluated when
+     a format that needs a minimum is taken up (the maintainer, 2026-11-16). Built for Anima. Left: writing the
+     converted container as a `krm` from a pipeline (designed next; `retainConverted` keeps it in host memory only);
+     `fromSingleFile` on the other families; int4 targets; LoRA merged before quantization (Anima, then Wan2.2); the
+     runtime's `parseSafetensors` moved into `@karume/safetensors`, early, so that one parser reads the header (a
+     breaking change of the runtime's surface); a GPU run with an F16 file of the base's 28 blocks (none is at hand);
+     example apps per model on request.
+  - **Specs** are written as each part lands; the existing `ir-v2.md`, `container-v1.md` and `quantization.md` move
+    under `docs/spec/`, one move per commit.
+  - **To decide**: the open points of ADR 0152 (its section "Open").
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
   preset does not quantize to integers is stored as bf16, the upstream bits, instead of being rounded to f16: what a
-  preset does not ask to quantize follows the precision of the source. The f16 storage of those components predates
-  bf16 execution (ADR [0131](decisions/0131-bf16-weight-execution.md), 2026-10-17), and bf16 costs the same bytes in the
-  download and in VRAM.
-  - *(Landed 2026-11-18 in the export recipe: every float component of the seven Anima models is bf16; the presets are
-    `bf16`, `bf16+dit8`, `bf16+dit8-a8`, `bf16+dit8-a8-attn8`, `bf16+dit8-a8-attn8-s16` (the default) and `bf16-c16`,
-    and `f16` is dropped (ADR [0074](decisions/0074-quant-seat-naming.md)'s grammar as written; no alias); neither
-    notice names an f16 series; the build takes the published containers from the local mirrors, pinned by part 0, so
-    nothing is re-exported. Both distributions were built from the mirrors into
-    `outputs/local-distributions/bf16-migration/`: every weight file is byte-identical to the mirror's of the same path,
-    and no f16 file is present or referenced.)*
-  - *(Landed 2026-11-18 on the TypeScript side and locally: `fromSingleFile` converts a float component against the
-    plan of the model's `bf16` container with its 16-bit weights stored as the file's dtype, and runs a BF16 transformer
-    under f16 linear compute as the preset does; the numerics check of bf16 storage computed in f16 is in
-    `packages/runtime/tests/gpu_f16_compute_test.ts` (identical words on the RTX 3080 Ti; not run on D3D12 or Metal);
-    the preset names in the e2e tests, the playground and the comments follow; the local mirrors
-    `models/karume-anima` / `models/karume-anima-extra` are the new builds (a rebuild from them is byte-identical).
-    The sha256 rows of Anima's reference file on the RTX 3080 Ti follow (2026-11-19: seven rewritten under their case
-    IDs, three new under the renamed preset, the four of the removed presets deleted, the two of the `bf16` preset
-    unmoved), and the `models:anima` lane is green; the A/B bands and the fusion counts hold unchanged.)*
-  - Left, in order (each step on the maintainer's go-ahead):
-    1. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
-       decision 3 (2)) and of the new notice text and preset descriptions of both repositories. Before and after are not
-       near-identical images: the text stack's small differences grow over the denoise steps into other details of the
-       same composition. *(Done 2026-11-19: the maintainer read the `dit8` presets' images as differing among
-       themselves at the level of noise and the `bf16` preset's as sound, ran `bf16-c16` on the RTX 5070 Ti, and
-       approved the notice text and the preset labels and descriptions as they are.)*
-    2. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
-       `karume-anima-extra` rebuilt with `--resolve-refs hf` against the new main and uploaded with its f16 files deleted
-       (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
-       that republishes every manifest as `karume/6`.
-    3. The unpublished 2.9B Anima distribution takes the new names before its first publication.
+  preset does not ask to quantize follows the precision of the source (bf16 execution: ADR
+  [0131](decisions/0131-bf16-weight-execution.md)). Anima follows it in the recipe, the TypeScript side, the local mirrors
+  and the RTX 3080 Ti's sha256 rows (CHANGELOG, Unreleased); the maintainer approved the default preset's images, the
+  notice text and the preset labels and descriptions on 2026-11-19. The numerics check of bf16 storage computed in f16
+  (`packages/runtime/tests/gpu_f16_compute_test.ts`) has not run on D3D12 or Metal.
+  - Left, in order (each step on the maintainer's go-ahead): the publication of Anima's two repositories as the bf16
+    builds, with the 0.23.0 release (`now`); then the unpublished 2.9B Anima distribution takes the new names before its
+    first publication, which comes after the 0.23.0 release (the maintainer's ruling of 2026-11-19; its order among the
+    post-release items is not ruled).
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
   - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice),
-    and whether the `:wbf16` kernels have their geometry per adapter.
-
-- **Export again the f16 containers made under the earlier rounding rule (filed 2026-11-18; the maintainer's ruling: with
-  the next release, in one pass)**. `round_weights_to_f16` now rounds only what the checkpoint carries, so a
-  non-persistent buffer computed at init (RoPE's `inv_freq`, T5Gemma2's `embed_scale`) keeps its f32 value; the
-  distributed f16 containers below were exported while it rounded those buffers too, and they keep the earlier constants
-  until they are exported again. On the small Irodori model the maintainer heard no difference between the two
-  (2026-11-18). Anima's f16 containers leave the distribution instead (ADR
-  [0154](decisions/0154-anima-bf16-preset-names.md)), so the item has no Anima part.
-  - Irodori v4-Small, v4.1-Small and v4.1-Small-MF: the f16 container of the text backbone (measured on v4-Small: the
-    new graph is the one the f32 and i8 series already carry). Their sha256 rows are of the `f32` preset and do not move.
-  - Irodori v4-Large: the f16 container of the T5Gemma2 text backbone — expected, not measured. Its three sha256 rows are
-    of the `f16` preset and move with it.
-  - What it touches: the export, the local mirrors, the sha256 rows named above and the Hugging Face repositories (each
-    on the maintainer's go-ahead).
+    and whether the `:wbf16` GEMM kernels (M > 1) have their geometry per adapter: the geometry sweep's linear cases
+    measure f16 storage only (`CaseWeight` in `packages/runtime/src/tune/cases.ts`); the GEMV side has bf16 rows.
 
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
-  accepted; code items 1 and 2 are built, the rest is not; the order among them and against the other items is the maintainer's)**. Each code item is its
-  own commit with its behaviour tests and states its blast radius:
+  accepted; the order among them and against the other items is the maintainer's)**. Code items 1 and 2 (the three
+  fusion keys out of `SessionOptions` and out of the manifest vocabulary) landed on 2026-11-15; their re-upload, source
+  pins and published smoke are part of the 0.23.0 release (`now`). Code item 3, the Session canary, is not built (ADR
+  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) decision 3). The remaining items keep
+  their numbers. Each code item is its own commit with its behaviour tests and states its blast radius:
   - **Code** (the decisions name what each changes):
-    1. *(Landed 2026-11-15 with item 4 of the restructuring above.)* The three fusion keys leave `SessionOptions`, the
-       type checks and the combination rule; the fusions run by default (decision 5). The test-only switch that disables the fusion rules has landed (`DISABLED_FUSION_RULES`, with
-       `checkFusionTwin` in `packages/kernel-checks` as the comparison — 2026-11-11); the tests that obtain the unfused
-       plan by omitting the option (the Session baseline of `gpu_linear_static_quantize_session_test.ts`, the references
-       of `gpu_rms_norm_add_fusion_test.ts` and `gpu_gelu_mul_static_quantize_fusion_test.ts`, and the grid-stride
-       reference of the RMS→add kernel check) move to it in this change. The reference sha rows stay; the fusion-count
-       tests, `EXPECTED_FUSIONS` and the census rows that pin fused counts change. Breaking (surface snapshot, CHANGELOG); a
-       cross-cutting change, so the full `vp test`.
-    2. *(Landed 2026-11-15 in the code and the recipes.)* The same keys leave the manifest vocabulary (`SESSION_KEYS`,
-       `SessionSpec`, `parseSession`) and the recipes' quant tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`).
-       Left: the re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead
-       (decision 5).
-    3. *(Not built — ADR 0152 decision 3 limits device probes to capabilities the adapter's report cannot settle.)* The
-       Session canary for every default-on fusion: fused against unfused on a canary input as u32, a mismatch warns and
-       drops the rule on that device, memoised per device, with a fault-injection test (decision 9). The input size is
-       decided and the start-up cost measured at implementation, and the cost is reported to the maintainer.
     4. The derived applicability check at admission replaces the twelve `FamilySessionPolicy` tables: one pure runtime
        function shared with the recipe builders' predicates; the structurally impossible combinations of decision 7 move
        from the first run to admission (tested with a fetch spy); the linear rejections become one shared violation function
@@ -464,20 +309,11 @@ maintainer's ruling of 2026-11-06).
        since 2026-11-15, so their fallback is decided when a per-adapter table lists one.
     7. Run-time canaries for linear and conv3d a8's dp4a choice and for online attention's `sg32` / `wg` choice on devices
        where the path is requested (decisions 6 and 9).
-    8. `/kernel-check` covers the fusions (fused against unfused, u32) and the default kernels; the tune sweep record and
-       the `/kernel-check` record gain a backend field (how it is filled is an implementation-time item); where the per-GPU
-       evidence records live is decided with it (decision 9). (Updated 2026-11-11: the fusions landed — the page's
-       "Fusion rules: fused vs unfused" runs the built-in fusion twins from `packages/kernel-checks/src/fusion-twins/`, the
-       cases the runtime's twin-graph tests run; so far run on Dawn only. The default kernels, the backend field and where
-       the records live remain. Updated 2026-11-11: the page also runs "rms_norm: prefetch form vs runtime-trip form"
-       (`checkRmsNormPrefetch`, the cases of `gpu_rms_norm_prefetch_test.ts`), and the rmsNormRope twin runs at five more
-       row widths, to tell a backend difference of the prefetch form from one of long rows. Updated 2026-11-16: the checks moved to the
-       workbench's `kernel-check` entry; its record carries the backend — declared by a person in a browser, read from
-       the Dawn flags under Node — and lands under `outputs/workbench/`. The default kernels and where the records are
-       kept for good remain.)
+    8. `/kernel-check` (the workbench's `kernel-check` entry) covers the default kernels; where the per-GPU evidence
+       records are kept for good is decided with it (decision 9).
     9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
        (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
-    10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).
+    10. `packedStaticQuantize` passes NaN through (so it becomes exact) (decisions 2 and 5).
     11. `packedStaticQuantize` and `integerGemv` assessed against decision 6's test (certainly on / off);
         each that fails becomes a string union at the next breaking change of this area or at 1.0, whichever comes first.
     12. GPU checks: no grid-stride kernel's numbers depend on the workgroup count (a `LIMIT_CAPS` Uint32 test); bit identity
@@ -504,33 +340,28 @@ maintainer's ruling of 2026-11-06).
     restated.
   - **Stale statements found on 2026-11-09 (report only, not yet fixed)**: the `DECIDED` comment above the parallel shapes of the default profile (`linearGemv.parallelShapes`, then `PARALLEL_SHAPES`)
     ("only measured shapes are eligible") against its 22 rows marked unmeasured (ADR 0098 decision 4 was re-graded to SHOULD);
-    ADR 0111 decision 2's list of tables; the table comments of gemma (`session-options.ts`) and anima (`pipeline.ts`); the
-    rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
+    ADR 0111 decision 2's list of tables; the table comments of gemma (`session-options.ts`) and anima (`pipeline.ts`);
+    `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
     cite; ADR 0132 decision 5's v1 workgroup-storage figures (the v2 figures are in its later addendum); the unreachable w4a8 `k % group`
     check; the online kernel's `:emu` against `:dp4aEmu` in the other i8a8 pipeline keys.
 - **Fusion-rule mechanisms — the rule list, rules from outside the runtime, comparisons in tune (design approved
-  2026-11-11: `.claude/reviews/2026-11-11_extension-mechanisms/DESIGN.md`, not tracked by git)**. The rule list as an input
-  with its test-only switch and the shared twin check, the fusion candidate search, and fusion rules from outside the
-  runtime (ADR [0148](decisions/0148-external-fusion-rules.md): `@karume/runtime/kernel`, `SessionOptions.fusionRules`) are
-  built. The session A/B is built too (P3): `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`
-  with `wordIdentity`, the gemma pipeline's experimental `fusionRules` (gemma only, as an experiment — maintainer
-  2026-11-11; the details are decided later), the private `packages/candidate-rules` (the candidate `candidate/gelu_mul`),
-  the workbench's `session-ab` and `gemma4-session-ab` entries (until 2026-11-16 the Playground's `/session-ab` page and
-  three opt-in e2e copies of its code). The page ran in Chrome / D3D12 on the RTX 5070 Ti on every target (the Gemma 4
-  target on 2026-11-11, the MOSS-Image and VAE targets on 2026-11-12 — [perf-ledger](perf-ledger.md) K-105, F-13, V-10),
-  and the experimental `fusionRules` option reached the MOSS-Image, Wan and anima pipelines. Left: a run on Metal; a
-  public way to switch a built-in rule off for a measurement (today only the test-only `DISABLED_FUSION_RULES`).
-  Generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13) are adopted
-  (2026-11-12): `models/ew_chain`, the first rule a pipeline passes by default (ADR 0148 addendum of 2026-11-12);
-  left: the research note, a run on Metal, and — not decided — whether the runtime should bind borrowed weights for an
-  external rule, which keeps `dit_skip22`'s 42 gates unfused today. The VAE's channel RMS norm + SiLU
-  ([perf-ledger](perf-ledger.md) V-10) is adopted too (2026-11-12): `models/vae_rms_silu`, which the Wan and anima
-  pipelines pass by default to their VAE decoder Sessions (ADR 0148 addendum of 2026-11-12 on it); left: a run on Metal
-  (it runs there unmeasured, by the maintainer's ruling — [known issues](known-issues.md)), Wan2.2's VAE encoder (its
-  sites are planned, not measured), and the same borrowed-weight question, which keeps the tile-32 pair unfused.
-  The estimate plans every fused step, external rules included, and counts the i8a8 linear's temporaries (P4, 2026-11-11 — ADR
-  [0093](decisions/0093-transient-liveness-packing.md) addendum). The Session
-  canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
+  2026-11-11: `.claude/reviews/2026-11-11_extension-mechanisms/DESIGN.md`, not tracked by git)**. Built: the rule list
+  with its test-only switch, the fusion candidate search, fusion rules from outside the runtime (ADR
+  [0148](decisions/0148-external-fusion-rules.md) and its addenda), the session A/B of `@karume/runtime/tune` with the
+  workbench's `session-ab` and `gemma4-session-ab` entries, and two rules the pipelines pass by default:
+  `models/ew_chain` on the MOSS-Image DiT ([perf-ledger](perf-ledger.md) F-13) and `models/vae_rms_silu` on the Wan
+  and anima VAE decoders (V-10). The gemma pipeline's `fusionRules` stays an experiment (gemma only — maintainer
+  2026-11-11; the details are decided later). Left:
+  - Runs on Metal of the session A/B's other targets: `models/ew_chain` on the MOSS-Image DiT, `models/vae_rms_silu`
+    on Wan's VAE, and the Gemma 4 target. On the anima VAE decode the M2 measured `models/vae_rms_silu` on 2026-11-17:
+    it does not give the unfused plan's words there, and it runs there by the ruling of 2026-11-12, which the maintainer
+    kept on 2026-11-17 ([known issues](known-issues.md)).
+  - `models/vae_rms_silu` on Wan2.2's VAE encoder (its sites are planned, not measured).
+  - Not decided: whether the runtime should bind borrowed weights for an external rule, which keeps `dit_skip22`'s 42
+    gates and the tile-32 pair unfused today.
+  - A public way to switch a built-in rule off for a measurement (today only the test-only `DISABLED_FUSION_RULES`).
+    ADR 0147 decision 5 says no public switch replaces the removed fusion keys; whether this departs from it is not
+    ruled.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple
@@ -555,9 +386,9 @@ maintainer's ruling of 2026-11-06).
   Rest of E1 (BiRefNet's f16 series — ADR [0113](decisions/0113-birefnet-weight-series.md)) = derivation of the Lucida f16 2048² synthetic tolerance (`LUCIDA_F16_2048_SYNTHETIC_TOLERANCE` in `packages/e2e/tests/e2e_birefnet_test.ts` is still a placeholder taken from the f32 series; the RTX 3080 Ti can run it) and phase 2 (the i8 plan + i8 series).
 - **Remainder of geometry profiles (K-71 — ADR [0115](decisions/0115-geometry-profiles.md) / [0116](decisions/0116-geometry-profile-row-buckets.md) / [0117](decisions/0117-app-geometry-tuning.md)) (filed 2026-09-27 to 10-03)**:
   The finished records (registration of `nvidia-blackwell`, the 7 row-count buckets, integration into applications (ADR 0117, all 7 stages ✅), the Codex review follow-up, 4 small items) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-  ② Regenerating `apple-metal-3` from the sweeps of one Chrome version (the table mixes Chrome 153 and 154) happens the next time a sweep is taken on M2, with the workbench's `geometry-sweep` entry (ruling 2026-10-02)
+  ② Regenerating the families `apple-metal-3` carries over from its earlier table (gemm, attention, conv2d, i8a8-linear, i8a8-attention — they mix Chrome 153 and 154; its GEMV rows are from Chrome 157) from the sweeps of one Chrome version happens the next time a sweep is taken on M2, with the workbench's `geometry-sweep` entry (ruling 2026-10-02)
   ③ The Pixel 10a (Mali-G715) table is not registered; the re-run on the new version has not been done (research K-70 §15)
-  ④ The `i8a8-linear` family of `apple-metal-3` (perf-ledger K-85, ADR [0115](decisions/0115-geometry-profiles.md) addendum decision 14): its buckets ≤ 256 and 257〜512 run the default geometry until a `full` sweep of that family alone is taken on an M2 (about 20,000 s; on hold) and derived with the table as `base`. A table for Apple adapters whose `description` Chrome leaves empty is decided after that sweep (an Apple M5 record of the family is kept as a record only). `nvidia-blackwell` and `nvidia-ampere` are registered (2026-11-13)
+  ④ The `i8a8-linear` family of `apple-metal-3` (perf-ledger K-85, ADR [0115](decisions/0115-geometry-profiles.md) addendum decision 14): its buckets ≤ 256 and 257〜512 run the default geometry until a `full` sweep of that family alone is taken on an M2 (about 20,000 s; on hold) and derived with the table as `base`. A table for Apple adapters whose `description` Chrome leaves empty is decided after that sweep (an Apple M5 record of the family is kept as a record only). Whether `apple-metal-3`'s match widens beyond the M2 is decided from the Apple M5's records (item 6 of "The move to maintained specs (ADR 0152)")
 - **Remainder of the container-format wave (ADR [0108](decisions/0108-container-format.md)) = stages 4 to 6** (upstream intake of the anima transformer f16 / LoRA runtime A/B / new bit widths, Range fetching and so on —
   the staged-decomposition table of ADR 0108 is the source of truth for what is built and how it is accepted). The records of stages 0 to 3 and up to the 0.13.0 publication (2026-09-25) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
@@ -590,8 +421,8 @@ maintainer's ruling of 2026-11-06).
   [research 2026-09-24](research/2026-09-24-part-length-ram-peak.md)).
 - Collecting performance information from users' environments: a feature in the TS packages that collects it, and the
   results of users running a sample collection on several environments (**filed only** — the items collected, the
-  location and the opt-in form are not designed; the per-run JSON records of `apps/playground` are the nearest existing
-  piece).
+  location and the opt-in form are not designed; the per-run JSON records of `apps/workbench` and `apps/playground` are
+  the nearest existing pieces).
 - Re-assessing `err.cause` on Pixel (8 GB class Android Chrome): loading anima turbo `i4` failed there and the true
   cause is not identified. The reported "BodyStreamBuffer was aborted" is the text Chrome substitutes for a collateral
   abort; the hub has surfaced the true cause since 0.7.0, and the distribution has since moved to block-level fetching.
@@ -599,19 +430,19 @@ maintainer's ruling of 2026-11-06).
   app-side abort cannot be told from until `err.cause` is read on the hardware. Left: that one observation.
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
   2026-10-29)**.
-  - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority).
+  - Geometry sweep identity check for a bf16-stored linear at M > 1 (ADR 0131 open point 2, low priority; the GEMV sweep
+    measures bf16 already, the GEMM sweep's `linear` cases do not).
   - Move the Node read-strategy default into `@hdae/fetch-cache` (ADR 0127 open point, after 0.15); hub's probe in
     `packages/hub/src/sources/hf.ts` can then go.
   - Deno's resource / op sanitizers have no replacement under Vitest (ADRs 0127 / [0129](decisions/0129-test-layout-and-lanes.md) open
     point 5): record the loss in [limitations](limitations.md); file a GPU resource-leak check only if a leak shows up.
-  - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground`
-    pages (ADR 0127 decision 5): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`, `llm-speed`,
-    `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`, `vowel-detector` and `wan`
-    (Wan2.1). `fusion-hints`' search itself is back (2026-11-11) as the fusion candidate search of `packages/e2e`
-    (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
-    `e2e_fusion_candidates_report_test.ts`); its window limit widens by itself (from 12, doubled until the table stops
-    changing, ceiling 384 — every local mirror stabilises by then), so no table needs a second search by hand. Only its
-    page is still to come.
+  - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
+    0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
+    [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`,
+    `vowel-detector` and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
+    `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
+    `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
   - Small doc edits: `packages/e2e/README.md` names `outputs/series/` but not `outputs/test-assets/` (ADR
@@ -627,7 +458,7 @@ maintainer's ruling of 2026-11-06).
 
 - **MOSS-Image (the subpath `@karume/models/moss`, published on Hugging Face as `hdae/karume-moss-image` with 0.15.1 — ADRs [0138](decisions/0138-moss-image-dit-vae.md) and [0137](decisions/0137-qwen3_5-text-encoder.md), accepted)**: what remains is other GPUs' sha rows (this family's rows exist for `node-nvidia-geforce-rtx-3080-ti` only — ADR 0106) and the text encoder at T = 4,096 (ADR 0137 open point 2). Its speed candidates are perf-ledger F-10 to F-12.
 
-- **gemma4 prefill in w4a8 (perf-ledger K-60, maintainer 2026-10-17 "in the backlog")**: design of an acceptance table that keeps decode on the M=1 GEMV and puts only prefill (chunks of M=768) on `linearCompute: "a8"` × i4 (switching by M). Today's a8 falls to the GEMM skeleton even at M=1 and is 8.45 times slower than the GEMV ([research 2026-09-19](research/2026-09-19-qat-speed-recon.md)), so opening the acceptance table is not enough.
+- **gemma4 prefill in w4a8 (perf-ledger K-60, maintainer 2026-10-17 "in the backlog")**: design of an acceptance table that keeps decode on the M=1 GEMV and puts only prefill (chunks of M=768) on `linearCompute: "a8"` × i4 (switching by M). Today's a8 falls to the GEMM skeleton even at M=1 and is several times slower than the GEMV ([research 2026-09-19](research/2026-09-19-qat-speed-recon.md); perf-ledger K-60), so opening the acceptance table is not enough.
 
 - **Root fix for the rows that collapse under umT5's a8 (perf-ledger K-81, filed 2026-10-18, maintainer: "root fix first, not even opt-in")**: per-token int8 crushes the remaining components in the rows of function words (spaces, commas, articles, suffixes) ([research 2026-10-18](research/2026-10-18-a8-umt5-sbv2.md) §6; the main cause is token-specific outliers in the input of the FFN exit `wo`; mixing a8 per linear or layer does not remove it). Candidate = per-row mixing (only rows whose crest exceeds a threshold take the f32 path — row routing in the runtime's `linear-i8a8`). An equivalent transform on the export side only helps fixed channels. Once this is closed, re-evaluate umt5's `i8-a8` (the adoption line and the work needed are in K-81).
 
@@ -710,9 +541,9 @@ maintainer's ruling of 2026-11-06).
   Deciding in an ADR how to handle a local file being replaced during reading (TOCTOU) comes first.
 - **Fence count of PLE's in-memory container (filed 2026-09-24)**: the PLE of the GPU-resident preset hands one piece = one part to
   the in-memory container, so Session construction raises one fence per piece
-  (the part split in `packages/runtime/src/format/container/memory.ts`). Measured (QAT E2B / E4B —
-  [research record](research/2026-09-24-prerelease-gpu-measurements.md) item 2): bundling pieces into parts brings E2B's fences from
-  37 to 6 and PLE construction about −0.2 s, at the cost of +192 MiB of VRAM during construction. **Ruling 2026-09-24 = do not bundle for now**
+  (the part split in `packages/runtime/src/format/container/memory.ts`). Bundling pieces into parts cuts the fences and
+  PLE construction a little at a temporary cost in VRAM during construction (QAT E2B / E4B —
+  [research record](research/2026-09-24-prerelease-gpu-measurements.md) item 2). **Ruling 2026-09-24 = do not bundle for now**
   (re-confirmed in the pre-release review of 0.13.0; the implementation size is the conclusion of item 2 of the research record).
   Alternative (filed 2026-09-25, not started): without bundling, let the fences run **one ahead** (start supplying the next piece before the previous fence completes).
   Staging then holds two parts alive at once, so running ahead is allowed only when the total bytes are within the limit (ADR 0108 decision 9:
@@ -741,19 +572,18 @@ maintainer's ruling of 2026-11-06).
   is not in hit runs, as corrected in the addendum of 2026-09-25). The adoption of candidates and the kill criteria are
   in [perf-ledger](perf-ledger.md), the attribution in [research 2026-09-19](research/2026-09-19-qat-speed-recon.md).
 
-- **Host side of a Gemma 4 decode token (2026-11-18)**: built — the abort yield taken while a decode run is awaited
-  (H-31) and the candidate selection on the GPU for a sampler with a top-k (H-32); measured and not adopted — the
-  first-chunk ramp of submit (H-29, slower under Node). Left: the browser measurements (H-31 by the decode bench's
-  `no-signal` switch; H-32 has no whole-row arm in the bench, because the key that turns the selection off is test-only;
-  H-29's ramp was not measured there), E4B and 12B after the changes, the measurement of K-49, and the sampler without
-  a top-k (H-45). The numbers are in [research 2026-11-18](research/2026-11-18-decode-host.md), the rows in
-  [perf-ledger](perf-ledger.md).
+- **Host side of a Gemma 4 decode token (2026-11-18)**: H-31 and H-32 are built, and H-29 is measured and not adopted
+  ([perf-ledger](perf-ledger.md)). Left: the browser measurements (H-31 by the decode bench's `no-signal` switch; H-32
+  has no whole-row arm in the bench, because the key that turns the selection off is test-only; H-29's ramp was not
+  measured there), E4B and 12B after the changes, the measurement of K-49, and the sampler without a top-k (H-45). The
+  numbers are in [research 2026-11-18](research/2026-11-18-decode-host.md).
 
 - **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
   stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
   would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
-  umT5, BiRefNet, Depth Anything, SigLIP2, vowel-detector, Qwen3.5 (MOSS-Image's text encoder), Gemma 4 26B and the q4_0 QAT
-  line, and Irodori v4.1-small. The opt-in candidate report already binds and plans those with a local mirror.
+  umT5, BiRefNet, Depth Anything, SigLIP2, vowel-detector, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
+  Gemma 4 26B and the q4_0 QAT line, and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report
+  already binds and plans those with a local mirror.
 
 - **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
   blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
@@ -764,9 +594,8 @@ maintainer's ruling of 2026-11-06).
 - **Remaining items of the video-generation foundation (investigation 2026-09-10; ADRs [0118](decisions/0118-wan21-video-generation.md) /
   [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) / [0120](decisions/0120-wan-dit-w8a8-seat.md))**:
   - MiniMax H3 (the maintainer's final goal, 2026-10-02): H3 stays at a structural study + per-component candidates
-    ([research](research/2026-10-02-video-gen-recon.md)). H3 exists and is open-weight (HF MiniMaxAI/MiniMax-H3; by the letter of the terms Japan is a licensed region (not legal advice)),
-    but with 33B dense + Qwen3-VL-32B + VAE 2.6B it is about 144 GB per task and assumes offload even natively (a measured example of 112 s on an RTX 5090);
-    there is no browser WebGPU case.
+    ([research](research/2026-10-02-video-gen-recon.md) — the size, the offload premise and the licence reading are
+    there); there is no browser WebGPU case.
   - Wan small items (filed 2026-10-03, diff review of the ADR 0118 wave — the IDs in parentheses are items of `.claude/reviews/2026-10-03_diff-review-wan/` and `2026-10-03_codex-review-wan/` (not tracked by git)):
     ① measuring the GPU time per submit with the submit layout of normal execution (M8) (the "1 submit ≤ 1 s" check and its recorded values come from timing mode (`gpuTiming`, 1 dispatch = 1 pass), and the chunk boundaries after backing can differ from normal execution — ADR 0118 stage 8 result "scope of the submit check"; needs a GPU)
     ③ a fourth case in golden `conv3d_block` that exercises the v4 and m-tile 64 variants (F4) (the current 3 cases are Wout 5 / 5 / 6 and Cout 6 / 3 / 2 and hit only the scalar variant and m 32. v4 and m 64 are exercised only by the GPU parity tests; needs golden regeneration and confirmation on the GPU)
@@ -782,13 +611,13 @@ maintainer's ruling of 2026-11-06).
   (c) the existing 5 DiT inputs have no dtype check (only the 2 inputs added for 2.2 check the dtype)
   (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts` and `e2e_wan_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
   (e) the messages of the `pipelineConfig` reader have no owner prefix (the message cannot tell whether the 2.1 or the 2.2 class failed)
-  (f) the 2.1, 2.2 T2V and 2.2 I2V end-to-end e2e tests (`e2e_wan_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`), and the 2.1 test keeps its own verbatim copy of the contact sheet that the two 2.2 tests import from `helpers/wan-video-artifacts.ts`
+  (f) the 2.1, 2.2 T2V and 2.2 I2V end-to-end e2e tests (`e2e_wan_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`), and the 2.1 test keeps its own verbatim copy of the contact sheet that the two 2.2 tests import from `packages/models/tests/helpers/wan-video-artifacts.ts`
   (g) there is no host test combining the admission of the gpu path (`admitWanText`) with the 48 ch, 7-input DiT (stage 6 results)
   (h) `video_size` in `tools/export-recipes/wan/pipeline_ref.py` hard-codes 16 ch and compression 8 (unusable for 2.2 — stage 6 results)
   (i) `planWanRequest` checks only the element count of the injected `latents`, not the shape (stage 6 results)
   **Adjacent small items of stage 4 (filed 2026-10-05, deferred in review)**:
-  (a) move `filePresent` into a neutral test helper (today the VAE helper `wan-ti2v-vae.ts` imports it from the DiT helper `wan-ti2v-dit.ts` — the VAE tests depend on importing the DiT helper)
-  (b) make the drop-cache fault injection of the shared helper `wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run both the 2.1 and the 2.2 lane)
+  (a) move `filePresent` into a neutral test helper (today the VAE helper `packages/models/tests/helpers/wan-ti2v-vae.ts` imports it from the DiT helper `wan-ti2v-dit.ts` in the same directory — the VAE tests depend on importing the DiT helper)
+  (b) make the drop-cache fault injection of the shared helper `packages/models/tests/helpers/wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run both the 2.1 and the 2.2 lane)
   (c) a closed form of DupUp3D (put up0 / up1 on the fused upsample2x) — perf-ledger K-77
   (d) in the step "the fault-injection loop matches the product path at Uint32 when there is no fault" of the 2.1 VAE chunk e2e (`e2e_wan_vae_tiles_test.ts`), refill the frames with poison values before `decodeWithFault(none)` as well and assert 0 non-finite (the 2.2 e2e was fixed in stage 4 — after the fix, run the 2.1 VAE chunk e2e for real)
   **Adjacent small items of stage 3 (filed 2026-10-04, proposals)**:
@@ -816,26 +645,28 @@ maintainer's ruling of 2026-11-06).
   attaches "the anima DiT i4 line is on hold for a while". The calibrated `*-i4-dyn` series are no longer under
   `outputs/` on the development machine, so a revival starts from a new calibrated export (source of truth for the
   measurements = [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5).
-- **irodori adaLN i8 A/B on the shipping rig (filed 2026-08-24)**: whether adaLN i8 (+13.1 MiB), which helped in the sim,
-  also improves the reading on the shipping rig is unverified (the transfer limit sim → shipping — same research §2).
-  Revival = dissatisfaction with the quality of the `i8+dit4` preset (formerly `w4`), or real demand for size optimization.
+- **irodori adaLN i8 A/B on the shipping rig (filed 2026-08-24)**: whether adaLN i8, which helped in the sim, also improves
+  the reading on the shipping rig is unverified ([research 2026-08-24](research/2026-08-24-gptq-expansion-quality.md) §1 /
+  §2 — the cost and the sim → shipping transfer limit). Revival = dissatisfaction with the quality of the `i8+dit4` preset (formerly `w4`), or real demand for size optimization.
 - **Bring measure_quant's distribution estimate up to J-5b** (found during J-3, 2026-08-22): sbv2's
   `project_distribution` still rests on the pre-J-5b premise "only linear weight slots; conv / embedding i4 has neither a storage form
   nor an execution path" (in fact shipped — ADR 0069 addenda 6/7). Harmless for relative
   comparison, but the estimate is too low and the docstring is stale. Update the target set and the description in one item.
-- **Continuing model expansion**: Kokoro-82M (waiting for the exporter's multi-output `getitem` wiring + the ruling to add `lstm_scan`
-  (ADR 0056 decision 8) — node-level multiple outputs themselves were allowed by ADR 0068), MobileSAM / SAM 2
-  (conv_transpose2d), DA-V2 variable resolution (upsample_bicubic2d). The latter two need ops outside the vocabulary.
-  The point-in-time record of the candidate survey is [recon-2](research/2026-08-14-model-expansion-recon-2.md).
+- **Continuing model expansion**: Kokoro-82M (waiting for the ruling to add `lstm_scan` (ADR 0056 decision 8 — its
+  three outputs are the open conflict there) and an exporter handler for it; the exporter already wires `getitem` to the
+  outputs of a multi-output op with a handler (ADR 0068 addendum 11, 2026-11-08), and node-level multiple outputs were
+  allowed by ADR 0068), MobileSAM / SAM 2 (conv_transpose2d), DA-V2 variable resolution (upsample_bicubic2d). The latter
+  two need ops outside the vocabulary. The point-in-time record of the candidate survey is
+  [recon-2](research/2026-08-14-model-expansion-recon-2.md).
 - **Performance candidates**: the 🚧 rows of [perf-ledger](perf-ledger.md) are the source of truth for filing, adoption and order.
-- Completing EmbeddingGemma (models pipeline / distribution, batch>1 export, runtime attention_mask wiring).
-  **The implementation of the tokenizer (Gemma SPM BPE + byte_fallback) and the EG asset compile rode along with stage 1a
-  of the generation API wave** (ruling 9 of 2026-08-31 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6. The implementation is
-  shared; the assets are compiled separately). The wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md).
+- **Completing EmbeddingGemma** (models pipeline / distribution, batch>1 export, runtime attention_mask wiring) — after
+  the 0.23.0 release (the maintainer's ruling of 2026-11-19; the first item of `later`). The tokenizer is shared with
+  Gemma 4 and its assets are compiled separately (ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The
+  wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
-  no ORT comparison harness exists today (the Playground's Gemma 4 bench compares Karume's own arms), so resuming needs
+  no ORT comparison harness exists today (the workbench's `gemma4-bench` entry compares Karume's own arms), so resuming needs
   one as a browser application (ADR 0127). Remaining targets = EmbeddingGemma (requires completion on the models side)
   and **KokoroTTS** (corrected 2026-08-16 — the original Irodori was a typo. Kokoro runs on the Transformers stack, so
   it is easy to compare; requires Kokoro-82M support on the karume side = the model expansion candidate above, waiting
@@ -878,21 +709,21 @@ maintainer's ruling of 2026-11-06).
   and sha rows do not change, measure the Gemma 4 decode speed (drop it if it costs speed), and run the workbench's `kernel-check` entry
   on the M2 and the RTX 5070 Ti. The folded side's Metal form is unknown, so it may still differ. If D3D12's F = 4
   difference (perf-ledger K-95) has the same cause, E4B could take the folded form.
-- **MoE page-fault**: PoC done in a spike outside the repository (2026-09-01) — the mechanism works (the readback of a miss
-  can ride on the round trip that decode already pays, with zero extra synchronization; output bit-identical to direct binding), but **practical
-  viability is uncertain** (the PoC's miss cost was dominated by one re-execution fence of about 11 ms, which came from Deno's 10 ms
-  sleep; Chrome's floor is expected near 1.5–3 ms but is unmeasured. On all 30 layers of 26B A4B the CPU measurement of
-  [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md) found the cost is set by re-runs: 2.41 forwards per decode token
-  at 64 experts per layer with whole-token re-runs). The start condition is
+- **MoE page-fault**: PoC done in a spike outside the repository (2026-09-01) — the readback of a miss can ride on the
+  round trip that decode already pays, with zero extra synchronization, and the output is bit-identical to direct
+  binding; the PoC's miss cost was dominated by one re-execution fence of about 11 ms from Deno's 10 ms sleep. Since then
+  the opt-in exact expert cache (ADR [0146](decisions/0146-exact-expert-cache.md)) pays a miss with a re-run, and
+  Chrome's fence and upload costs are measured there ([research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md)
+  §6.1). Whether the spike's mechanism still adds anything next to it is not ruled. The start condition is
   subordinate to parked "value-dependent execution selection in the IR". The first unit stops at transcribing the spike's measurements into
   [research](research/) as a point-in-time snapshot.
 - The MoE seam (fixed-k routing can be expressed with static shapes — do not bake the absence of experts into the dense API).
 
-- **Remaining items of GEMV row blocks (filed 2026-09-07, consequence of K-21)**: ① the parallelism target 16384 is the saturation point of the RTX 3080 Ti (limitations) —
-  the M2 re-sweep is done (the default 16384 is best); what remains is a sweep on integrated GPUs. The override is the static Session option
-  `linearGemvRowsThreadTarget` ② the shader analysis cost on Tint (Chrome, and Dawn under Node) is unmeasured; the only
-  measurement is on naga ([research 2026-09-07](research/2026-09-07-gemv-rows-k21.md)) ③ the Metal u32 check is also
-  unmeasured for the 13 row-block shapes (known-issues).
+- **Remaining items of GEMV row blocks (filed 2026-09-07, consequence of K-21)**: ① a sweep of the parallelism target
+  (16384, the saturation point of the RTX 3080 Ti — limitations; the M2 kept the default) on integrated GPUs; the
+  override is the static Session option `linearGemvRowsThreadTarget` ② the shader analysis cost on Tint (Chrome, and
+  Dawn under Node) is unmeasured; the only measurement is on naga ([research 2026-09-07](research/2026-09-07-gemv-rows-k21.md))
+  ③ the Metal u32 check is also unmeasured for the 13 row-block shapes (known-issues).
 
 - **Anima: iteration residency inside the DiT stage only** (filed 2026-09-07 — Codex performance investigation 04 §Anima): keeping the current design that creates and returns a Session per stage
   (a VRAM invariant), patchify the initial latent once inside the DiT stage, reuse the RoPE / cond and uncond embeddings /
@@ -949,18 +780,20 @@ maintainer's ruling of 2026-11-06).
   ③PV in f32 too (ADR [0138](decisions/0138-moss-image-dit-vae.md) decision 10).
   Kill criterion: measured VRAM and speed on those shapes show no difference against today's path that falls back to f32.
 
-
-## release — the release preparation wave (some way off)
+## release — standing release gates and gates of a first publication
 
 - Real-asset CI gate (GitHub CI does not exercise local assets; the all-skip guard covers the empty case): decide on promoting goldens to fixtures / fetching assets in the release gate
 - Writing up the repository root README; verifying sideEffects of the JSR npm compatibility layer. **Out of scope for 0.8.0
   (ruling 2026-09-03 — replaced with a form whose Status line alone says it is a stub). Revival condition = 1.0 or
   a public announcement**, and starting requires re-measuring the bundle size (the gzip measurement of 2026-08-16
   is outdated by the additions of the gemma4 generation API, the GEMV family and the tokenizer)
-- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open:
+- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open (the per-family ledgers,
+  `tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`, hold more `Unverified` rows than this list — for example
+  vowel_detector's and Irodori v4-Large's):
   rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
-  **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF, so it cannot be published** (until this is clarified).
+  **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF** — its publication is held in
+  parked "HF publication of karume-sbv2-fn".
   The Code license of the code-dependency block is still Unverified in the deberta, minicpm5 and embeddinggemma ledgers
   (deberta's Attribution too).
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
@@ -976,8 +809,10 @@ maintainer's ruling of 2026-11-06).
   keeps the op's schema and fake only, and the qwen3_5 recipe (which already depends on transformers) registers the
   eager kernel by importing upstream's function — no copy anywhere, and the "verbatim copy" MUST disappears with it.
   ADR 0065 itself stays: core does not take a transformers dependency
-- Re-ruling on the policy of "separating the semantic surface from the implemented subset" (attention / deform_conv2d /
-  gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
+- Re-ruling on the policy of "separating the semantic surface from the implemented subset" for the ops that predate it
+  (attention / deform_conv2d / gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the
+  observed subset into op semantics; filed 2026-08-15, ADR [0064](decisions/0064-entry-door-generality-axes.md) decision 1
+  and its withdrawal of 2026-10-18). Order not ruled
 
 ## parked (with revival conditions)
 
@@ -993,8 +828,11 @@ maintainer's ruling of 2026-11-06).
 - **Value-dependent execution selection in the IR (prerequisite for dynamic MoE expert residency)** (ruling 2026-08-31 — not adopted).
   Per-expert load / eviction is a triple conflict among ① the container's merge layer (`bindDeclarations` — the krm entry `bindGraphs` also delegates to it; the binding table's
   full comparison is `validateAgainstGraph`), a check over all entries that matches the bindings of every initializer before the weights are fetched, ② the immutable Map of resident weights, and ③ the absence of value-dependent execution selection in the IR, so it is not a feature addition but a redesign across 3 modules (measurement record =
-  [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)). The official
-  stance for now = **MoE keeps all experts resident in VRAM and budgets by total parameters** ([limitations](limitations.md)).
+  [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)). The default keeps every expert resident
+  in VRAM and budgets by total parameters unless the opt-in exact expert cache is chosen ([limitations](limitations.md)):
+  since then `expert_linear` (ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 2) removed ③ for fixed-k
+  compute, and the exact expert cache (ADR [0146](decisions/0146-exact-expert-cache.md), the maintainer's ruling of
+  2026-11-09) removed ② for experts only, without touching ①.
   Adding a "not-yet-arrived initializer" slot is also deferred as subordinate to this item (same ruling). Revival = real shipping demand for an MoE
   that does not fit in VRAM. The first homework then = a close first-hand reading of predictive offloading (SiDA arXiv:2310.18859 / HOBBIT
   arXiv:2411.01433) (the current reading: the readback can be removed, but the wall of keeping the host-side pool resident remains).
