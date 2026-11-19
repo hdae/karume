@@ -75,8 +75,10 @@ const caseOf = (id: string): GemvCase => {
 
 /** E2B's per_layer_model_projection: i4 g32, a profile row at 4 lanes. */
 const PLE = caseOf("i4g32-n8960-k1536");
-/** E2B's i8 output head: the sequential variant's per-shape exception (c16u4). */
+/** E2B's i8 output head: the general sequential variant and a profile row at 16 lanes. */
 const HEAD_I8 = caseOf("i8-n262144-k1536");
+/** Regular E2B's per_layer_model_projection in bf16: the sequential variant's per-shape exception (c16u8). */
+const PLE_BF16 = caseOf("bf16-n8960-k1536");
 /** 12B's output head: 262144 columns, so 32 lanes need 65536 workgroups. */
 const HEAD_12B = caseOf("i4g32-n262144-k3840");
 
@@ -184,7 +186,7 @@ describe("the case table", () => {
 describe("the baseline and the profile's choices", () => {
   it("is the selection at exact: the column form at M = 1, the profile's per-shape exception included", () => {
     assertEquals(gemvBaseline(PLE, 1).name, "c32u4");
-    assertEquals(gemvBaseline(HEAD_I8, 1).name, "c16u4");
+    assertEquals(gemvBaseline(PLE_BF16, 1).name, "c16u8");
   });
 
   it("is the row block at M ≥ 2, its height from the profile's thread target", () => {
@@ -232,11 +234,11 @@ describe("the candidates", () => {
       ]);
     });
 
-    it("stop the grid at its edge around a baseline at the edge (c16u4)", () => {
-      const identical = gemvCandidates(HEAD_I8, 1, "quick", GATES).filter(
+    it("stop the grid at its edge around a baseline at the edge (c16u8)", () => {
+      const identical = gemvCandidates(PLE_BF16, 1, "quick", GATES).filter(
         (candidate) => candidate.class === "identical",
       );
-      assertEquals(names(identical), ["c16u2", "c16u8", "c32u2", "c32u4", "c32u8"]);
+      assertEquals(names(identical), ["c16u4", "c16u16", "c32u4", "c32u8", "c32u16"]);
     });
 
     it("take the reorder class in full: every lane count, plain, staged and subgroup", () => {

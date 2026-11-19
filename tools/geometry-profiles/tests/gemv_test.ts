@@ -123,10 +123,10 @@ describe("--gemv-records on a registered table", () => {
     );
     assertStringIncludes(text, "linearGemv: written to the table");
     // The registered table has no field: the differences are against the default's choices, whose
-    // 23 per-shape exceptions the adopted one follows
+    // 22 per-shape exceptions the adopted one follows
     assertStringIncludes(
       text,
-      '  linearGemv.sequential.shapes[23]: (absent) -> { storage: "i4", n: 8960, k: 1536, variant: { cols: 64, unroll: 8 } }',
+      '  linearGemv.sequential.shapes[22]: (absent) -> { storage: "i4", n: 8960, k: 1536, variant: { cols: 64, unroll: 8 } }',
     );
     assertStringIncludes(text, "].lanes: 4 -> 8");
     assertEquals(text.includes("gemmRows["), false, "no tile geometry differs");

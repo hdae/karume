@@ -35,6 +35,7 @@ import {
   defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
+  type LinearGemvChoices,
   linearGemvKey,
   linearGemvParallelKey,
   linearGemvParallelLanes,
@@ -419,8 +420,19 @@ test("the INT4 and INT8 row blocks keep the shader under 12 KB at every default 
 // generated text apart, and fail-loudly rejection before codegen.
 
 describe("M=1 GEMV shape selection", () => {
-  it("selects c16 for the measured large-vocabulary INT8 and tells the WGSL apart by a separate key", () => {
-    const selected = defaultLinearGemvVariant(GEMV, { storage: "i8", n: 262144, k: 1536 });
+  /** The default's choices with one per-shape exception: 16 columns on the int8 262144 × 1536 linear. */
+  const I8_EXCEPTION: LinearGemvChoices = {
+    ...GEMV,
+    sequential: {
+      variant: GEMV.sequential.variant,
+      shapes: [{ storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } }],
+    },
+  };
+
+  it("selects a table's c16 exception for the int8 262144 × 1536 linear, which the default profile leaves on the general variant, and tells the WGSL apart by a separate key", () => {
+    const shape = { storage: "i8", n: 262144, k: 1536 } as const;
+    assertEquals(defaultLinearGemvVariant(GEMV, shape), { cols: 32, unroll: 4 });
+    const selected = defaultLinearGemvVariant(I8_EXCEPTION, shape);
     assertEquals(selected, { cols: 16, unroll: 4 });
     assertEquals(linearGemvKey("i8", undefined, selected), "linear_gemv:v1:f32:c16u4:wi8");
     assertNotEquals(
@@ -475,25 +487,28 @@ describe("M=1 GEMV shape selection", () => {
 
   it("keeps the former variant for a different storage type or matrix shape and for generation without a shape", () => {
     assertEquals(defaultLinearGemvVariant(GEMV), { cols: 32, unroll: 4 });
-    // i4 of this shape is the q4_0 QAT E2B output head, which has a row of its own (the case above)
+    // i4 of this shape is the q4_0 QAT E2B output head, which has a row of its own (the case above).
+    // A table's int8 exception is its storage and shape: the neighbours keep the general variant.
     const storageTypes: readonly WeightStorage[] = ["i2", "f16", "f32"];
-    for (const storage of storageTypes) {
-      assertEquals(defaultLinearGemvVariant(GEMV, { storage, n: 262144, k: 1536 }), {
-        cols: 32,
-        unroll: 4,
-      });
-    }
-    for (const [n, k] of [
-      [262140, 1536],
-      [262148, 1536],
-      [262144, 1520],
-      [262144, 1552],
-      [6144, 1536],
-    ]) {
-      assertEquals(defaultLinearGemvVariant(GEMV, { storage: "i8", n, k }), {
-        cols: 32,
-        unroll: 4,
-      });
+    for (const choices of [GEMV, I8_EXCEPTION]) {
+      for (const storage of storageTypes) {
+        assertEquals(defaultLinearGemvVariant(choices, { storage, n: 262144, k: 1536 }), {
+          cols: 32,
+          unroll: 4,
+        });
+      }
+      for (const [n, k] of [
+        [262140, 1536],
+        [262148, 1536],
+        [262144, 1520],
+        [262144, 1552],
+        [6144, 1536],
+      ]) {
+        assertEquals(defaultLinearGemvVariant(choices, { storage: "i8", n, k }), {
+          cols: 32,
+          unroll: 4,
+        });
+      }
     }
   });
 });

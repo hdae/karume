@@ -118,20 +118,15 @@ adapter's match and measures nothing at run time.
   with linear at `reorder` and at most 8 rows. No graph of a Gemma 4 distribution has such a linear: their plans and
   estimates are the same under both ([limitations](../limitations.md), the section on `workspaceBytes`).
 - The default profile's sequential variant is 32 columns per workgroup and 4 weight words read ahead (`c32u4`). Its
-  per-shape exceptions are 23 rows:
-  - the int8 output head `262144 × 1536`: `c16u4`. The row predates the derivation
-    ([ADR 0082](../decisions/0082-linear-gemv-decode.md), addendum 10); the derivation did not adopt it, and keeps
-    it where records hold its case. No shipped model has a linear of this shape and storage;
-  - 22 bf16 linears of regular Gemma 4 E2B and E4B, which read 8 or 16 words ahead: `c16u8` on 11 shapes, `c16u16`
-    on 10 and `c32u16` on `1536 × 256`. A bf16 word holds 8 elements where an int4 word holds 32, so 4 words ahead
-    keep a quarter of the bytes in flight. The derivation adopts them from GEMV sweep records of the RTX 3080 Ti
-    ([perf-ledger](../perf-ledger.md) K-112), and the RTX 5070 Ti in Chrome reads each of them faster than `c32u4`
-    as well.
+  per-shape exceptions are 22 bf16 linears of regular Gemma 4 E2B and E4B, which read 8 or 16 words ahead: `c16u8`
+  on 11 shapes, `c16u16` on 10 and `c32u16` on `1536 × 256`. A bf16 word holds 8 elements where an int4 word holds
+  32, so 4 words ahead keep a quarter of the bytes in flight. The derivation adopts them from GEMV sweep records of
+  the RTX 3080 Ti ([perf-ledger](../perf-ledger.md) K-112), and the RTX 5070 Ti in Chrome reads each of them faster
+  than `c32u4` as well. No integer-stored shape has a row there.
 - A row is added to the default profile only where no measured device is slower with it: every adapter whose table
   has no GEMV choices of its own runs it. A row that one device gains from and another loses with is a row of the
   first one's table. The devices measured are the RTX 3080 Ti and the RTX 5070 Ti; no Apple device is, and
-  `apple-metal-3` runs the default's rows. The 22 bf16 rows meet this. The int8 head's row, which predates it, does
-  not: the RTX 5070 Ti reads `c32u4` ×1.04 faster than the row's `c16u4`.
+  `apple-metal-3` runs the default's rows. The 22 bf16 rows meet this.
 - `nvidia-ampere`'s field is the default profile's choices with four more per-shape exceptions, what the derivation
   adopts from the RTX 3080 Ti's records beyond the default's rows: the int4 output heads of the Gemma 4 q4_0 QAT E2B
   and E4B models, `262144 × 1536` and `262144 × 2560` (`c16u2`), bf16 `10240 × 2560` (`c16u8`) and the MTP drafter
@@ -139,16 +134,16 @@ adapter's match and measures nothing at run time.
   bf16 output heads on the general variant: no candidate gained in every record.
 - `nvidia-blackwell`'s field is the default profile's choices with what the derivation adopts from 82 GEMV sweep
   records of the RTX 5070 Ti in Chrome (D3D12) in place:
-  - The default's 23 exceptions, in the default's order, two of them with another variant: bf16 `1536 × 256` takes
+  - The default's 22 exceptions, in the default's order, two of them with another variant: bf16 `1536 × 256` takes
     `c16u8` in place of `c32u16` (×1.20 to ×1.21 in two records) and bf16 `4096 × 2560` `c16u16` in place of `c16u8`
-    (×1.12 to ×1.13). The other 21 are inherited as they are: on the other 20 bf16 shapes no variant reaches the ×1.10
-    that replaces an exception (the nearest gain ×0.95 to ×1.08), and the records give `c32u4` ×1.04 over the int8
-    head's `c16u4`, less than the ×1.10 that removes a row.
+    (×1.12 to ×1.13). The other 20 are inherited as they are: on those shapes no variant reaches the ×1.10 that
+    replaces an exception (the nearest gain ×0.95 to ×1.08).
   - 42 per-shape exceptions after them, on int4 (33) and int8 (9) shapes, which read 8 or 16 words ahead: `c16u8` on
     16 shapes, `c32u8` on 16, `c16u16` on 9 and `c32u16` on one. None of `nvidia-ampere`'s four rows is adopted
     there.
   - 78 parallel rows apart from the default's. 41 of the default's 71 rows are changed: other lanes on 22, the
-    staged flag set on 31, another row block on 6 (three lose theirs, two go from 4 to 8 and one from 2 to 4). 37
+    staged flag set on 30, another row block on 7 (three lose theirs, one without a row block takes 4, two go from 4
+    to 8 and one from 2 to 4). 37
     rows are on shapes the default has none for: int4 8 and int8 5 (shapes of the MTP drafters), the int2 output
     heads `262144 × 1536` and `262144 × 2560`, and bf16 22 — every bf16 linear of regular Gemma 4 E2B (12) and E4B
     (10) but the two output heads and E4B's `10752 × 2560`, which is slower than the GEMM at 8 rows. Of the bf16
@@ -334,9 +329,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
-  they moved into the profile and the rows added since —; `nvidia-ampere`'s equal the default's with its four pinned
-  exceptions after them; `nvidia-blackwell`'s hold the default's general variant and thread target, the default's 23
-  exceptions in the default's order with two pinned variants of their own, 42 exceptions of their own after them,
+  they moved into the profile, without its one per-shape exception, and the rows added since —; `nvidia-ampere`'s
+  equal the default's with its four pinned exceptions after them; `nvidia-blackwell`'s hold the default's general
+  variant and thread target, the default's 22 exceptions in the default's order with two pinned variants of their own, 42 exceptions of their own after them,
   and every parallel row of the default in the default's order, 41 of them changed, with 37 added; no registered
   table removes a parallel row of the default, moves a packed flag or adds a packed
   row; `apple-metal-3` carries no field; a profile with other choices changes the selection and the pipeline key

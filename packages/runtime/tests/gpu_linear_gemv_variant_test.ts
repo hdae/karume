@@ -8,6 +8,7 @@ import {
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import {
   defaultLinearGemvVariant,
+  type LinearGemvChoices,
   linearGemvParams,
   type LinearGemvShapeVariant,
   linearGemvUnit,
@@ -18,17 +19,24 @@ import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 
-// The WGSL chosen for the large-vocabulary shape does not bake N. The edge columns and the edge of
-// the prefetched words are checked at a small shape; the real shape 262144×1536 is verified by the
-// Chrome real-weight comparison and Gemma's existing logits / golden checks.
+// A table's int8 exception of 16 columns per workgroup on the large-vocabulary shape. Its WGSL does
+// not bake N, so the edge columns and the edge of the prefetched words are checked at small shapes.
 test.skipIf(!GPU_AVAILABLE)(
-  "the INT8 c16 variant is bit-identical to c32 and writes the column and prefetch edges correctly (real GPU)",
+  "an INT8 c16 variant is bit-identical to c32 and writes the column and prefetch edges correctly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const device = gpu.device;
-    // The kernels are built without a Session: the default profile's variants are the subject.
+    // The kernels are built without a Session: the general variant of the default profile and a
+    // table that names the c16 variant for the shape are the subject.
     const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
-    const selected = defaultLinearGemvVariant(gemv, { storage: "i8", n: 262144, k: 1536 });
+    const table: LinearGemvChoices = {
+      ...gemv,
+      sequential: {
+        variant: gemv.sequential.variant,
+        shapes: [{ storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } }],
+      },
+    };
+    const selected = defaultLinearGemvVariant(table, { storage: "i8", n: 262144, k: 1536 });
     assertEquals(selected.cols, 16);
     try {
       for (const [n, k] of [

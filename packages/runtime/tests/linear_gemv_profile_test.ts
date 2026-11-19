@@ -62,8 +62,9 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // 2026-11-18 (two after the E4B rows, three after the 12B rows). The general sequential variant
 // and the thread target are still the kernel module's. The `rowBlock` of a row is another change
 // since (2026-11-18, perf-ledger K-108): the kernel module never held it, and the lookups below do
-// not read it. The per-shape exceptions of the sequential variant are the kernel module's one (the
-// i8 output head, in `oldDefaultVariant`) plus the 22 rows added since
+// not read it. The kernel module's one per-shape exception of the sequential variant (the i8 output
+// head) is no row of the default profile, so the copy holds the module's general variant alone
+// (`OLD_DEFAULT_VARIANT`). The per-shape exceptions are the 22 rows added since
 // (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-112: bf16 linears of regular E2B / E4B that
 // no measured device is slower with). The exceptions one device gains from and another loses with
 // are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES`: `nvidia-ampere`).
@@ -281,10 +282,7 @@ const OLD_ROWS_THREAD_TARGET = 16384;
 
 type Shape = { readonly storage: WeightStorage; readonly n: number; readonly k: number };
 
-const oldDefaultVariant = (shape?: Shape): LinearGemvVariant => ({
-  cols: shape?.storage === "i8" && shape.n === 262144 && shape.k === 1536 ? 16 : 32,
-  unroll: 4,
-});
+const OLD_DEFAULT_VARIANT: LinearGemvVariant = { cols: 32, unroll: 4 };
 
 /** The sequential exceptions added since the kernel module's one (the default profile's order). */
 const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
@@ -329,7 +327,7 @@ const AMPERE_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
 const pinnedDefaultVariant = (shape: Shape): LinearGemvVariant =>
   ADDED_SEQUENTIAL_SHAPES.find(
     (row) => row.storage === shape.storage && row.n === shape.n && row.k === shape.k,
-  )?.variant ?? oldDefaultVariant(shape);
+  )?.variant ?? OLD_DEFAULT_VARIANT;
 
 /** The old row-block height (the ceiling of 256 elements per word stayed in the kernel). */
 const oldRowsForShape = (
@@ -432,10 +430,7 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
     assertEquals(GEMV.rowsThreadTarget, OLD_ROWS_THREAD_TARGET);
     assertEquals(GEMV.sequential, {
       variant: { cols: 32, unroll: 4 },
-      shapes: [
-        { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
-        ...ADDED_SEQUENTIAL_SHAPES,
-      ],
+      shapes: ADDED_SEQUENTIAL_SHAPES,
     });
   });
 
@@ -473,7 +468,7 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
   });
 
   it("chooses the old sequential variant, the variant of a row added since on that row's shape alone, and the old row-block height", () => {
-    assertEquals(defaultLinearGemvVariant(GEMV), oldDefaultVariant());
+    assertEquals(defaultLinearGemvVariant(GEMV), OLD_DEFAULT_VARIANT);
     let added = 0;
     for (const storage of STORAGES) {
       for (const [n, k] of [
@@ -490,12 +485,16 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
           pinned,
           `${storage} ${n}×${k}`,
         );
-        const old = oldDefaultVariant({ storage, n, k });
-        if (pinned.cols !== old.cols || pinned.unroll !== old.unroll) added += 1;
+        if (
+          pinned.cols !== OLD_DEFAULT_VARIANT.cols ||
+          pinned.unroll !== OLD_DEFAULT_VARIANT.unroll
+        ) {
+          added += 1;
+        }
       }
     }
-    // bf16 6144 × 1536 and 1536 × 256: the grid meets rows added since. The int4 output heads of
-    // the grid are no row of the default profile.
+    // bf16 6144 × 1536 and 1536 × 256: the grid meets rows added since. The int4 and int8 output
+    // heads of the grid are no row of the default profile.
     assertEquals(added, 2);
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const n of [1, 256, 2048, 4096, 12288, 262144]) {
@@ -507,7 +506,7 @@ describe("the default profile holds the pinned GEMV choices (the kernel module's
           );
           assertEquals(
             defaultLinearGemvRowsVariant(GEMV, storage, m, n),
-            { ...oldDefaultVariant(), rows: oldRowsForShape(storage, m, n) },
+            { ...OLD_DEFAULT_VARIANT, rows: oldRowsForShape(storage, m, n) },
             `${storage} n=${n} m=${m}: the row-block variant`,
           );
         }
@@ -648,9 +647,9 @@ describe("a profile with other GEMV choices changes the selection and the pipeli
     const named: Linear = { m: 1, n: 64, k: 64, storage: "i4", group: 32 };
     assertEquals(keyOf(other, named), "linear_gemv:v1:f32:c16u4:wi4g32");
     assertEquals(keyOf(other, { ...named, n: 128 }), "linear_gemv:v1:f32:c32u4:wi4g32");
-    const head: Linear = { m: 1, n: 262144, k: 1536, storage: "i8" };
-    assertEquals(keyOf(GEMV, head), "linear_gemv:v1:f32:c16u4:wi8");
-    assertEquals(keyOf(other, head), "linear_gemv:v1:f32:c32u4:wi8");
+    const exception: Linear = { m: 1, n: 8960, k: 1536, storage: "bf16" };
+    assertEquals(keyOf(GEMV, exception), "linear_gemv:v1:f32:c16u8:wbf16");
+    assertEquals(keyOf(other, exception), "linear_gemv:v1:f32:c32u4:wbf16");
   });
 
   it("the row-block thread target: the table's moves the row count, and SessionOptions.linearGemvRowsThreadTarget replaces it", () => {

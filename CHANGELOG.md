@@ -189,9 +189,12 @@ measurements in `docs/research/`.
   changes which columns a workgroup takes and how many weight words it reads before it multiply-adds them, not the
   order of the additions: outputs do not change by a bit, so a Session at `exact` runs it.
   - On every adapter, 22 bf16 linears of regular Gemma 4 E2B and E4B read 8 or 16 words ahead where they read 4
-    (rows of the default geometry profile, `GeometryProfile.linearGemv.sequential.shapes`). They are the rows two
+    (the rows of the default geometry profile, `GeometryProfile.linearGemv.sequential.shapes`). They are the rows two
     measured devices are both faster with: ×1.17 to ×1.89 per dispatch on an RTX 3080 Ti (Node, Vulkan) and ×1.015
     to ×1.495 on an RTX 5070 Ti (Chrome, D3D12), the words compared on both. No Apple device has measured them.
+  - On every adapter an int8 `262144 × 1536` linear runs the general variant in place of 16 columns per workgroup,
+    so its dispatch reads `linear_gemv:v1:f32:c32u4:wi8` in `SessionDiagnostics.lastRunPipelines` in place of
+    `…:c16u4:wi8`; no shipped model has a linear of that shape stored as int8.
   - On NVIDIA Ampere adapters, four more shapes: the embedded table `nvidia-ampere` now carries GEMV choices of its
     own (`linearGemv`) — the default profile's with 16 columns per workgroup on the int4 output heads of the Gemma 4
     q4_0 QAT E2B and E4B models (`262144 × 1536`, `262144 × 2560`), 8 words ahead on bf16 `10240 × 2560` and 16 on
@@ -213,7 +216,7 @@ measurements in `docs/research/`.
 - `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
   choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
   `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
-  other lanes on 22 shapes, the staged form on 31, another row block on 6, and a row on 37 shapes that ran the
+  other lanes on 22 shapes, the staged form on 30, another row block on 7, and a row on 37 shapes that ran the
   sequential GEMV or the GEMM — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT
   line and 22 bf16 linears of regular Gemma 4 E2B and E4B. No preset of regular Gemma 4 declares linear at
   `reorder`, so none of its presets runs the bf16 rows. Each is at least ×1.10 faster per dispatch than the default's choice in every

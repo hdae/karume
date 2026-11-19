@@ -64,8 +64,10 @@ const DEFAULTS: LinearGemvChoices = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 /** E2B's per_layer_model_projection: i4 g32, a parallel row at 4 lanes, no sequential exception. */
 const PLE = "i4g32-n8960-k1536";
-/** E2B's i8 output head: the sequential exception c16u4 and a parallel row at 16 lanes. */
+/** E2B's i8 output head: no sequential exception, and a parallel row at 16 lanes. */
 const HEAD_I8 = "i8-n262144-k1536";
+/** Regular E2B's per_layer_model_projection in bf16: the default's first sequential exception (c16u8). */
+const PLE_BF16 = "bf16-n8960-k1536";
 /** QAT E2B's o (sliding): its default row takes packed activations. */
 const PACKED = "i4g2048-n1536-k2048";
 /** Two cases of one sequential key (i4 n2048 k1536): g32 and g512. */
@@ -187,15 +189,15 @@ describe("deriveLinearGemvChoices: the identical class (sequential.shapes)", () 
   it("replaces a key's exception row, and removes it when the general variant wins", () => {
     // The default's exceptions of the other keys, which these records hold no case of, stay in place
     const [head, ...others] = DEFAULTS.sequential.shapes;
-    assertEquals(head, { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } });
-    const replaced = derive([{ caseId: HEAD_I8, times: at1({ c16u8: faster(1.2) }) }]);
+    assertEquals(head, { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } });
+    const replaced = derive([{ caseId: PLE_BF16, times: at1({ c16u16: faster(1.2) }) }]);
     assertEquals(replaced.linearGemv?.sequential.shapes, [
-      { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 8 } },
+      { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 16 } },
       ...others,
     ]);
-    const removed = derive([{ caseId: HEAD_I8, times: at1({ c32u4: faster(1.2) }) }]);
-    const decision = decisionOf(removed, "sequential.shapes", HEAD_I8);
-    assertEquals([decision.defaultChoice, decision.derivedChoice], ["c16u4", "c32u4"]);
+    const removed = derive([{ caseId: PLE_BF16, times: at1({ c32u4: faster(1.2) }) }]);
+    const decision = decisionOf(removed, "sequential.shapes", PLE_BF16);
+    assertEquals([decision.defaultChoice, decision.derivedChoice], ["c16u8", "c32u4"]);
     assertEquals(removed.linearGemv?.sequential.shapes, others);
   });
 
@@ -941,7 +943,7 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
       })),
     }));
     const baseline = input("dddd.json", [
-      { caseId: HEAD_I8, fields: { 1: { c16u4: { kernel: "fedcba9876543210" } } } },
+      { caseId: HEAD_I8, fields: { 1: { c32u4: { kernel: "fedcba9876543210" } } } },
     ]);
     const derivation = deriveLinearGemvChoices(
       [input("a.json", [{ caseId: PLE }]), changedCase, renamed, baseline],
@@ -960,7 +962,7 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
       derivation.stale[1]?.reason ?? "",
       "is parallel-l8 in the record, parallel-l4 now",
     );
-    assertStringIncludes(derivation.stale[2]?.reason ?? "", "the reference c16u4 is not current");
+    assertStringIncludes(derivation.stale[2]?.reason ?? "", "the reference c32u4 is not current");
     assertEquals(
       derivation.provenance.records.map(({ groups }) => [groups.current, groups.stale]),
       [

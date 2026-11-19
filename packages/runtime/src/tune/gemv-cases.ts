@@ -110,13 +110,7 @@ export const GEMV_CASES: readonly GemvCase[] = [
   shape("i4", 32, 1536, 4096, `${E2B}: o (full)`),
   shape("i4", 32, 12288, 1536, `${E2B}: gate / up of the 12288-wide MLP layers`),
   shape("i4", 32, 1536, 12288, `${E2B}: down of the 12288-wide MLP layers`),
-  shape(
-    "i8",
-    undefined,
-    262144,
-    1536,
-    "Gemma 4 E2B, i8: lm_head (tied embedding); also the sequential variant's per-shape exception",
-  ),
+  shape("i8", undefined, 262144, 1536, "Gemma 4 E2B, i8: lm_head (tied embedding)"),
   shape("i4", 32, 262144, 1536, "Gemma 4 E2B q4_0 QAT, i4 g32: lm_head (tied embedding)"),
   // The MTP drafter of the q4_0 QAT E2B (one run drafts three tokens; post_projection 1536×256 is
   // the per_layer_projection case above).

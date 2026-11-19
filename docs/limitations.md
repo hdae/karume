@@ -885,9 +885,9 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   with `SessionOptions.linearGemvRowsThreadTarget` (static, fixed at Session creation).
   There is no automatic selection per device.
 - **The variant of the sequential M=1 kernel is chosen from two measured devices**: the default geometry profile
-  holds one general variant (32 columns per workgroup, 4 words read ahead) and 23 per-shape exceptions
-  (`linearGemv.sequential`) — the int8 output head `262144 × 1536` of Gemma 4 E2B and 22 bf16 linears of regular
-  Gemma 4 E2B / E4B — and every adapter whose table carries no GEMV choices runs them. Every variant writes the same
+  holds one general variant (32 columns per workgroup, 4 words read ahead) and 22 per-shape exceptions
+  (`linearGemv.sequential`), bf16 linears of regular Gemma 4 E2B / E4B, and every adapter whose table carries no
+  GEMV choices runs them. Every variant writes the same
   words, so the choice is speed alone. The 22 bf16 rows were adopted from GEMV sweeps of the RTX 3080 Ti (×1.17 to
   ×1.89 per dispatch) and are faster on the RTX 5070 Ti in Chrome too (×1.015 to ×1.495, 2026-11-18); a row a
   measured device is slower with is not in the default but in the table of the device that gains from it
@@ -896,13 +896,11 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   `nvidia-blackwell`: 42 int4 and int8 shapes, and another variant on two of the 22 bf16 rows, from the RTX 5070
   Ti's own records). No
   Apple device has measured any of them: `apple-metal-3` runs the default's rows unmeasured, and on Metal their
-  words were not compared with the general variant's (on Vulkan and on D3D12 they were). The int8 head's row is
-  older than this rule and is slower than the general variant on the RTX 5070 Ti (×0.96); no shipped model has a
-  linear of its shape and storage. A table derived from a
+  words were not compared with the general variant's (on Vulkan and on D3D12 they were). A table derived from a
   device's own GEMV sweep records starts from the default's exceptions: it keeps the ones its records give no
   evidence about, and removes one only when its records adopt the general variant over it, which takes ×1.10 in
   every group — a device on which an inherited exception is slower by less keeps it. `nvidia-blackwell` is such a
-  table: it keeps the int8 head's row (`c32u4` reads ×1.04 faster); of the 22 bf16 rows, measured against them in
+  table: of the 22 bf16 rows, measured against them in
   two records each, it keeps 20 (no variant is ×1.10 faster) and takes another variant on two (`1536 × 256`:
   `c16u8`, `4096 × 2560`: `c16u16`).
 - **On NVIDIA Blackwell adapters the parallel rows are that table's own**: `nvidia-blackwell` holds 78 parallel rows

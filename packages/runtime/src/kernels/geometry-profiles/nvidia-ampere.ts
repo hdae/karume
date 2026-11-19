@@ -41,8 +41,8 @@
  * - outputs/workbench/node-nvidia-geforce-rtx-3080-ti/gemv-sweep_2026-11-18T12-03-07.json (sha256 8d03e1ddaf52513236bed7ca9157583370674bf97a23bad011e6a1e73a1fab14, 2026-11-18T12:03:07.560Z)
  *   workbench; Node; backend vulkan (dawn-default); timestamps not quantised; checkout 72f2ada9186d7613faafd8c99d36d04197e8a110
  *
- * Carried over from the registered table at commit e0a403bb6b89bc1bc36790c1d616b7c8b41cb9f4: gemm, attention, conv2d, i8a8-linear, i8a8-attention, i8a8-conv3d.
- * Their adoption lines are in `git show e0a403bb6b89bc1bc36790c1d616b7c8b41cb9f4:packages/runtime/src/kernels/geometry-profiles/nvidia-ampere.ts`.
+ * Carried over from the registered table at commit 6216ec7cd270c98deb946e4aea286b6b3143e1c7: gemm, attention, conv2d, i8a8-linear, i8a8-attention, i8a8-conv3d.
+ * Their adoption lines are in `git show 6216ec7cd270c98deb946e4aea286b6b3143e1c7:packages/runtime/src/kernels/geometry-profiles/nvidia-ampere.ts`.
  *
  * GEMV choices: a candidate replaces the default profile's choice for a shape only when it is at
  * least ×1.100 faster than that choice in every GEMV sweep record, with its words equal to
@@ -194,7 +194,6 @@ export const NVIDIA_AMPERE: GeometryProfile = {
     sequential: {
       variant: { cols: 32, unroll: 4 },
       shapes: [
-        { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
         { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
         { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
         { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },

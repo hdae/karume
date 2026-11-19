@@ -290,16 +290,12 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     /**
      * The default variant. Census-weighted best in **the sweep of the 12 real shapes + 4 remainder
      * shapes of gemma4 E2B decode on an RTX 3080 Ti** (`c32 u4`, ×8.45 over the default — ADR 0082 /
-     * docs/research/2026-08-30-gemma4-decode-wallclock.md §7). The large-vocabulary INT8 shape
-     * measured at M=1 (addendum 10) selects c16 (`shapes`).
+     * docs/research/2026-08-30-gemma4-decode-wallclock.md §7).
      * MUST: a change of the default goes together with re-measuring the bit-identity check
      * (tests/gpu_linear_gemv_test.ts).
      */
     variant: { cols: 32, unroll: 4 },
-    // DECIDED: the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
-    // docs/decisions/0082-linear-gemv-decode.md
-    //
-    // The rows after it are bf16 linears of regular Gemma 4 E2B / E4B: a bf16 word holds 8 elements
+    // The rows are bf16 linears of regular Gemma 4 E2B / E4B: a bf16 word holds 8 elements
     // where an int4 word holds 32, so the general read-ahead of 4 words keeps a quarter of the bytes
     // in flight. They are the exceptions that the derivation adopts from GEMV sweep records of the
     // RTX 3080 Ti (docs/spec/geometry-profiles.md, "Deriving the GEMV choices": every word the general
@@ -311,15 +307,13 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // the device that gains from it (`nvidia-ampere` carries the int4 output heads of the q4_0 QAT
     // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95;
     // `nvidia-blackwell` carries 42 int4 and int8 rows of its own, and another variant on two of
-    // the bf16 rows, at least ×1.12 and ×1.20 faster in its records). The INT8 row above predates
-    // this: the RTX 5070 Ti reads the general variant ×1.04 faster on its shape.
+    // the bf16 rows, at least ×1.12 and ×1.20 faster in its records).
     // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
     // the general variant.
     // MUST: a row added or changed, here or in a registered table, goes together with
     // tests/gpu_linear_gemv_variant_test.ts, which compares every row's words with the general
     // variant's on the row's own shape.
     shapes: [
-      { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
       { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
       { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
       { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
