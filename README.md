@@ -3,9 +3,10 @@
 A general-purpose NN inference stack running on WebGPU (browsers and Node — Deno as a secondary
 runtime — pure TypeScript + WGSL;
 `@karume/runtime` itself has zero external dependencies, and the other packages depend only on
-packages built from Web-standard APIs). Composed of three JSR packages — `@karume/runtime`
-(IR execution) / `@karume/hub` (model resolution, fetch, and caching) / `@karume/models`
-(pipelines and tokenizer) — plus the PyPI package `karume` that lowers PyTorch models to IR and
+packages built from Web-standard APIs). Composed of five JSR packages — `@karume/runtime`
+(IR execution) / `@karume/hub` (model resolution, fetch, and caching) / `@karume/safetensors` (a
+safetensors reader that reads one tensor at a time) / `@karume/convert` (weights converted while a
+Session reads them) / `@karume/models` (pipelines and tokenizer) — plus the PyPI package `karume` that lowers PyTorch models to IR and
 writes them as Karume containers (`krm`) (the installed CLI ships `dist` / `migrate` / `verify` —
 see `karume --help`; per-model exports are recipes run from the repository work tree as
 `python -m <family>.export`, see [tools/export-recipes/](tools/export-recipes/README.md)).

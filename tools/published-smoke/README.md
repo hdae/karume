@@ -23,9 +23,11 @@ deno run -A main.ts --manifests-only
 The same commands are available as package scripts in this directory:
 `pnpm smoke [--manifests-only]` and `pnpm smoke:deno [--manifests-only]`.
 
-The version under test is read from `packages/models/package.json` (the three
+The version under test is read from `packages/models/package.json` (the JSR
 packages are released in lockstep). The run fails if `@karume/hub` or
-`@karume/models` resolves to any other version. On Node, the GPU path installs
+`@karume/models` resolves to any other version; `@karume/runtime`,
+`@karume/safetensors` and `@karume/convert` are not named here and come in as
+dependencies of the published `@karume/models`. On Node, the GPU path installs
 Dawn (npm `webgpu`) as `navigator.gpu`, which the published `fromPretrained`
 reads.
 

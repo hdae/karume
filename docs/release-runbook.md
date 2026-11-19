@@ -455,18 +455,25 @@ to `wan.SOURCES`, and do not upload `karume-wan2.1`.
 ## 4. JSR publish
 
 Mechanism: **publishing a GitHub Release fires `publish.yml`**, and `deno publish` at the workspace root
-publishes the 3 packages (hub / runtime → models) together in dependency order
+publishes the 5 packages of the root `deno.json` `workspace` together in dependency order: hub, runtime and
+safetensors (no workspace dependency), then convert (→ runtime), then models (→ hub, runtime, safetensors, convert)
 (already-published versions are skipped idempotently; OIDC, tokenless).
 
+- [ ] **Before the first publish of a package** (a package the `@karume` scope on jsr.io does not have yet): create it
+      in the scope and link this GitHub repository in its settings, as for the others — the tokenless publish of
+      `publish.yml` authenticates per package through that link
+
 NOTE: the package README / LICENSE are part of what is published (`packages/*/README.md` and
-`packages/*/LICENSE` — confirmed on 2026-09-20 that they appear for all 3 packages in the output of `deno publish --dry-run --allow-dirty`;
-re-confirmed on 2026-10-28 with `"nodeModulesDir": "none"` in the root `deno.json`, on a clean `git archive` copy.
+`packages/*/LICENSE` — confirmed on 2026-09-20 that they appear for runtime, hub and models in the output of `deno publish --dry-run --allow-dirty`;
+re-confirmed on 2026-10-28 with `"nodeModulesDir": "none"` in the root `deno.json`, on a clean `git archive` copy; confirmed for
+safetensors and convert on 2026-11-19.
 The `publish` of each `deno.json` is only `exclude: ["tests/"]`; no explicit `include` is
 needed).
 
-- [ ] Lockstep bump commit: the `version` of the 3 JSR packages in both their `deno.json` (what JSR publishes) and their
+- [ ] Lockstep bump commit: the `version` of the 5 JSR packages in both their `deno.json` (what JSR publishes) and their
       `package.json` (`tools/published-smoke` reads the expected version from `packages/models/package.json`), the root `package.json`,
-      the exporter, the `^` dependencies such as models → hub in `packages/models/deno.json`, the specifiers in `deno.lock` (run
+      the exporter, the `^` pins of the workspace packages in the `imports` of `packages/models/deno.json` (hub, runtime, safetensors,
+      convert) and `packages/convert/deno.json` (runtime), the specifiers in `deno.lock` (run
       `deno install` at the repository root after editing the `deno.json` files — with `"nodeModulesDir": "none"` it rewrites only
       `deno.lock`), and **regenerating `tools/uv.lock` (`uv lock` — MUST. CI
       checks freshness with `uv run --locked`, so missing it turns both the exporter and recipes jobs red.
@@ -485,7 +492,7 @@ needed).
 - [ ] push (the maintainer) → confirm CI is green, **including the `publish-dry-run` job** (`deno publish --dry-run` with the Deno version and
       directory of `publish.yml` — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum of 2026-10-28); do not cut the Release while it is red
 - [ ] Create a GitHub Release from the main commit with green CI → published (fires)
-- [ ] Confirm the new version of the 3 packages on JSR
+- [ ] Confirm the new version of the 5 packages on JSR
 - [ ] **0.15.0 only — card-only re-upload of the published repositories not rebuilt in this release** (ADR
       [0136](decisions/0136-models-public-naming.md)): their Usage snippets import the 0.14 names from `jsr:@karume/models` without a
       version, so they stop compiling once 0.15.0 is the latest. Regenerate the cards with this release's recipes and upload
@@ -508,7 +515,9 @@ PyPI `karume` (tools/exporter) is **unreleased**. Add the procedure to this sect
       import check): `deno run -A main.ts` **inside `tools/published-smoke`** — under the root workspace `@karume/*` resolves to the local
       members, so the Deno run starts in that directory to read its own `deno.json` (the one-line "ignoring the parent workspace" warning
       is expected). With `@karume/hub` it resolves the manifest of every entry of `KARUME_SOURCES` and takes sbv2 through
-      `fromPretrained` (on a machine without a GPU, `--manifests-only`).
+      `fromPretrained` (on a machine without a GPU, `--manifests-only`). It checks the versions of `@karume/hub` and
+      `@karume/models` by name; `@karume/runtime`, `@karume/safetensors` and `@karume/convert` come in as dependencies of
+      the published `@karume/models` (the `^` pins of its `deno.json`).
       **Freshly published dependencies get caught by the minimum release age** — on Deno, `jsr:@karume/*` and `jsr:@hdae/fetch-cache`, which
       hub pulls in, are listed in the `exclude` of `minimumDependencyAge` in `tools/published-smoke/deno.json` (the example of 0.11.0, where
       fetch-cache 0.7.0, published one day earlier, was stopped — 2026-09-06); when a new `@hdae/*` dependency is added, add it there too.

@@ -2,8 +2,10 @@
 
 Monorepo of a general-purpose WebGPU NN inference stack (development on Node 24 + Dawn; the primary target is the browser;
 Deno is secondary (ADR 0127); pure TS + WGSL; zero runtime dependencies). JSR `@karume/runtime` (IR execution) /
-`@karume/hub` (HF revision resolve, download, cache, model / quant resolution) / `@karume/models` (pipelines, tokenizers) +
-PyPI `karume` (tools/exporter — torch.export → container `krm` (IR v2), managed by uv). pnpm workspace + Vite+ (`vp`). What
+`@karume/hub` (HF revision resolve, download, cache, model / quant resolution) / `@karume/safetensors` (the ranged
+safetensors reader) / `@karume/convert` (weights converted while a Session reads them) / `@karume/models` (pipelines,
+tokenizers) + PyPI `karume` (tools/exporter — torch.export → container `krm` (IR v2), managed by uv). pnpm workspace +
+Vite+ (`vp`). What
 the system does now is specified under `docs/spec/`, which is being built up (ADR 0152); until a rule has a spec there, the
 ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current focus and pitfalls are in
 [.claude/ACTIVE_DESIGN.md](.claude/ACTIVE_DESIGN.md) (required reading for review and planning tasks).
@@ -51,10 +53,10 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
 - `packages/local-distributions/` (private) — the local mirrors under `models/` as the two apps read them: the dev-server
   plugin, the mount table, the page side and the Node side
-- `packages/convert/` (private for now) — weights converted while a Session reads them: a tensor list encoded against
+- `packages/convert/` (JSR `@karume/convert`) — weights converted while a Session reads them: a tensor list encoded against
   the plan of a distributed preset (its part 0) and served as that preset's container, optionally written as a `krm`
   ([docs/spec/convert.md](docs/spec/convert.md)); depends on `@karume/runtime` and its `./container` subpath only
-- `packages/safetensors/` (private for now) — the safetensors reader for files too large to hold: a `Blob` or a ranged
+- `packages/safetensors/` (JSR `@karume/safetensors`) — the safetensors reader for files too large to hold: a `Blob` or a ranged
   reader opened from its header alone, each tensor read with one ranged read
   ([docs/spec/safetensors.md](docs/spec/safetensors.md)); no dependency, not even the runtime
 - `packages/gemma4-app-support/` (private) — the Gemma 4 helpers the playground's chat page and the workbench's Gemma

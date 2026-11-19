@@ -1,6 +1,6 @@
 # Conversion: weights converted while they are read
 
-What `@karume/convert` (`packages/convert`, private) does now. The direction is item 7 of the ADR
+What `@karume/convert` (`packages/convert`, published on JSR) does now. The direction is item 7 of the ADR
 [0152](../decisions/0152-maintained-specs-and-declared-numeric-requirements.md) list in the [backlog](../backlog.md);
 the container format is [container-v1](../container-v1.md).
 

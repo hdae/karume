@@ -13,9 +13,10 @@ Status: pre-1.0. Every pipeline has the same shape: a `fromPretrained` (fetches 
 The Anima pipeline also builds from a single weights file you hold — an upstream release or a
 fine-tune, as a `File` / `Blob` or a ranged reader — with a distribution (`fromSingleFile`, the
 counterpart of diffusers' `from_single_file`). The file's tensors are placed with the
-distribution's name map and converted against its presets while each session reads them; the
-pipeline reads the file for as long as it lives. `retainConverted: true` keeps the converted
-weights in host memory (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as bf16), so only the
+distribution's name map and converted against its presets while each session reads them (with
+`@karume/safetensors` and `@karume/convert`, which this package depends on); the pipeline reads
+the file for as long as it lives. `retainConverted: true` keeps the converted weights in host
+memory (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as bf16), so only the
 first session build reads and converts the file
 ([spec](https://github.com/hdae/karume/blob/main/docs/spec/single-file.md)):
 

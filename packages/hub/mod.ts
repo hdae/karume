@@ -29,7 +29,7 @@
  * ## Versions and manifests
  *
  * **Manifests of older versions are not read** (a different major fails as an unsupported format —
- * ADR 0109 decision 1). The three JSR packages and PyPI `karume` (the side that writes manifests)
+ * ADR 0109 decision 1). The JSR packages and PyPI `karume` (the side that writes manifests)
  * move in lockstep, so the table below applies as is to `@karume/runtime` / `@karume/models` / the
  * exporter. A table for planning ahead when a distribution (`karume.json` of a Hugging Face
  * repository) has to be rebuilt:

@@ -6,7 +6,9 @@ manifest (`karume.json`, format `karume/6`), picks one model and one quantizatio
 fetches the referenced containers (`krm`) and assets with integrity checking, and caches them. Sources are Hugging Face
 repositories (pinned to a resolved revision) or a local directory. It depends only on packages
 built from Web-standard APIs, so the same code runs in the browser, on Node and on Deno. The other packages
-of the stack are `@karume/runtime` (IR execution) and `@karume/models` (pipelines and tokenizers).
+of the stack are `@karume/runtime` (IR execution), `@karume/safetensors` (a safetensors reader that reads one tensor
+at a time), `@karume/convert` (weights converted while a Session reads them) and `@karume/models` (pipelines and
+tokenizers).
 
 A manifest may also reference the repository's name map (`nameMap` — which tensor of an upstream weights file is
 which initializer of which component). The reference is checked like every file reference; this package does not

@@ -365,10 +365,11 @@ maintainer's ruling of 2026-11-06).
      `bf16` container with its 16-bit weights stored as the file's dtype (`float16Codec` of `@karume/convert`), so F16
      files need no f16 container; the graph comparison between containers is gone. Not run on a GPU with an F16 file
      yet.)* *(2026-11-18: a BF16 transformer under f16 linear compute is no longer refused — the f16-compute checks
-     cover bf16 storage, and `bf16-c16` runs that pair through `fromPretrained`.)* Left from it: keeping the
-     converted container (designed next), `fromSingleFile` on the other families, int4 targets, LoRA, the
-     runtime's `parseSafetensors` moved into the reader package, and the published-package setup (`@karume/models`
-     depends on the private `@karume/convert` and `@karume/safetensors`, which JSR does not have).
+     cover bf16 storage, and `bf16-c16` runs that pair through `fromPretrained`.)* *(2026-11-19: `@karume/safetensors`
+     and `@karume/convert` are JSR packages of the workspace, versioned in lockstep and published with the next
+     release beside the other three (the maintainer's ruling of the same day); `deno publish --dry-run` takes all
+     five.)* Left from it: keeping the converted container (designed next), `fromSingleFile` on the other families,
+     int4 targets, LoRA, and the runtime's `parseSafetensors` moved into the reader package.
   - **Specs** are written as each part lands (numerics and verification after items 4 and 5; the existing `ir-v2.md`,
     `container-v1.md` and `quantization.md` move under `docs/spec/`, one move per commit).
   - **To decide**: the open points of ADR 0152.

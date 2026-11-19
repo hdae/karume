@@ -1,6 +1,6 @@
 # The safetensors reader: a file read one tensor at a time
 
-What `@karume/safetensors` (`packages/safetensors`, private) does now. It is the format reader of item 7 of the ADR
+What `@karume/safetensors` (`packages/safetensors`, published on JSR) does now. It is the format reader of item 7 of the ADR
 [0152](../decisions/0152-maintained-specs-and-declared-numeric-requirements.md) list in the [backlog](../backlog.md):
 it reads a user's weights file for [the conversion](convert.md). The format is upstream's
 (<https://github.com/huggingface/safetensors>): an unsigned 64-bit little-endian header length N, N bytes of UTF-8 JSON,

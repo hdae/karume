@@ -1,9 +1,10 @@
 name: Publish
 
 # Publish to JSR. Fires only when a GitHub Release is published (guards against accidental publishes).
-# `deno publish` at the workspace root publishes the 3 packages (hub / runtime → models) in dependency
-# order and skips idempotently when the version is already published. Authentication is OIDC, tokenless
-# (no secret) — link the GitHub repository in each package's settings beforehand.
+# `deno publish` at the workspace root publishes the 5 packages (hub / runtime / safetensors → convert →
+# models) in dependency order and skips idempotently when the version is already published. Authentication
+# is OIDC, tokenless (no secret) — create each package in the scope and link the GitHub repository in its
+# settings beforehand.
 #
 # Precondition: a Release is cut from a main commit with green CI (the test gate lives in ci.yml). deno publish
 # itself also checks slow types etc. and does not publish when they fail.

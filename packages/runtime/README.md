@@ -5,8 +5,9 @@ inference stack that runs on WebGPU. This package opens a Karume container (`krm
 the binding table and the weight blocks), generates WGSL for it, uploads the weights block by block,
 and executes the graph on a GPU device. It is written in pure TypeScript and WGSL, has zero external
 dependencies, and takes the same code path in the browser, on Node and on Deno. The other packages
-of the stack are `@karume/hub` (manifest resolution, download, cache) and `@karume/models`
-(pipelines and tokenizers).
+of the stack are `@karume/hub` (manifest resolution, download, cache), `@karume/safetensors` (a
+safetensors reader that reads one tensor at a time), `@karume/convert` (weights converted while a
+Session reads them) and `@karume/models` (pipelines and tokenizers).
 
 Status: pre-1.0. The public surface is a deliberately thin, explicitly designed API — internal
 modules are never re-exported. Unsupported operators, contract violations and missing device
