@@ -187,8 +187,8 @@ maintainer's ruling of 2026-11-06).
      [spec/workbench.md](spec/workbench.md).)* Left, in this order:
      - *(Landed 2026-11-16: the generator of the geometry profile tables, `tools/geometry-profiles/generate.ts` — the
        registered table as base plus new workbench records; [spec/geometry-profiles.md](spec/geometry-profiles.md).)*
-       Left from it: `apple-metal-3` cites only records of the old sweep format, so it is regenerated from a new sweep
-       on M2 (its header and the two NVIDIA tables' headers are replaced when each table is regenerated).
+       Left from it: the tile geometry of `apple-metal-3` cites only records of the old sweep format, so its families
+       are derived again from a new sweep on M2 (every registered table's header is the generator's since 2026-11-19).
      - *(Landed 2026-11-16: what an entry needs to read a local distribution — the private package
        `@karume/local-distributions` shared with the Playground, the same routes on the workbench's dev server,
        `openDistribution` for both hosts, entries under `src/entries/local/` left out of a production build, the
@@ -208,7 +208,8 @@ maintainer's ruling of 2026-11-06).
        own runs with it, and on an RTX 5070 Ti 51 of 66 parallel rows derive to another choice (a median ×1.79 per
        dispatch). Direction: the default keeps a row only where no measured device is slower with it than with the
        sequential GEMV, chosen over the records of every measured device, and a device's own best stays in its
-       table. Needs: GEMV sweep records of the Apple M2 (of the bf16 cases only so far) and of the devices collaborators measure; the rule
+       table. Needs: GEMV sweep records of the devices collaborators measure (the three devices' records are at hand,
+       and each device's table is derived from its own); the rule
        itself (to be proposed with the three devices' overlap in numbers); the generator deriving the default from
        records of several adapters. A reorder Session's numbers then follow the table of its device where one
        carries rows of its own (inside the band, as today's rows are). *(2026-11-18: the sequential variant's
@@ -217,33 +218,37 @@ maintainer's ruling of 2026-11-06).
        `nvidia-ampere`, the first table to carry `linearGemv`. The RTX 5070 Ti's own choices are in
        `nvidia-blackwell` since the same day, from 82 of its records: 42 sequential exceptions of its own and 61
        parallel rows apart from the default's. 2026-11-19: the default's 17 bf16 parallel rows follow the direction
-       by hand, over the records of the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2 — perf-ledger K-110.)* Also
-       open under this item:
-       - **MUST before the next release**: GEMV sweep records of the bf16 cases on the RTX 5070 Ti against the
-         current default (two `full` records; `--gemv-plan` on `nvidia-blackwell` writes the batch), then
-         `nvidia-blackwell` regenerated from them. Its records of the default's 17 bf16 parallel shapes are not
-         current, so it holds the default's rows and exceptions there, and an `exact` Session on that device is
-         slower on bf16 `1536 × 256` and `4096 × 2560` than its own variants ([limitations](limitations.md), the
-         section on the linear GEMV family);
+       by hand, over the records of the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2 — perf-ledger K-110. The same
+       day the three devices' tables are derived from their records against the current default: `nvidia-ampere`
+       from 21, `nvidia-blackwell` from 84 and `apple-metal-3` from 12, the Apple M2's first GEMV choices of its
+       own.)* Also open under this item:
        - the derivation judges a candidate against the default profile's choice for the shape, so where that
          choice is an exception another device drops the inherited row only when its records show the general
          variant ×1.10 faster in every group; a device on which the row is slower by less keeps it. The rule for
          several devices has to say what removes a row of the default from a device's table;
-       - a table holds the field as a whole, so `nvidia-ampere` holds a copy of the default's parallel rows and
-         thread target, and `nvidia-blackwell` of the default's thread target and of the rows its records do not
-         replace: a change of those in the default regenerates every table that carries the field (a core-lane
-         test catches the drift);
+       - a table holds the field as a whole, so every table holds a copy of the default's thread target and general
+         variant and of the rows its records do not replace (`nvidia-ampere`: every parallel row of the default): a
+         change of those in the default regenerates every table that carries the field (a core-lane test catches
+         the drift);
        - the memory estimate plans its fusions with the default profile's choices, so a table with parallel rows
          on more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
          `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An
          estimate that takes the adapter's table, or its GEMV choices, would remove it;
-       - `nvidia-blackwell`'s choices have one end-to-end measurement, of the table before its derivation from 82
-         records ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a token with the default's choices,
-         E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); the table derived from 82 records, a speculative decode and the
-         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists 52 groups to measure against the current default: the 17 bf16 parallel shapes of the default at 1, 4 and 8 rows (the first item above) and the int8 `262144 × 1536` case at one row (35 candidates), which its two records of that case measured against another default;
+       - no table has an end-to-end decode measurement since its derivation of 2026-11-19. `nvidia-blackwell`'s one
+         measurement is of the table before its derivation from 82 records
+         ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a
+         token with the default's choices, E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); a
+         speculative decode and the 26B model are measured with none. What the planner (`--gemv-plan`) still lists
+         against the current default on the records the tables were derived from: on `nvidia-blackwell`'s 84 the
+         int8 `262144 × 1536` case at one row (35 candidates); on `apple-metal-3`'s 12 three cases at one row (int8
+         `262144 × 1536` and `1024 × 256`, int4 `3840 × 4096`); on `nvidia-ampere`'s 21, 290 of the full set's 345
+         groups (365 groups of those records are not current against the current default);
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
          would allow it): their evidence is the device's sweep records;
-       - the default's 22 rows on Metal, where nothing was measured and their words were not compared;
+       - the default's 22 exceptions as the default: the Apple M2's records time the general variant against them
+         on 12 of their shapes and read it ×1.01 to ×1.26 faster on 11 (`apple-metal-3` keeps 5 of the 22 because
+         no variant reaches ×1.10 over them), and on Metal they have been compared with the general variant word
+         for word on those 12 shapes only ([limitations](limitations.md), the section on the linear GEMV family);
        - the choice between sequential variants a few percent apart moves with the records given, and the
          narrowed sweeps measured four hand-picked variants (the planner still lists the others).
      - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
