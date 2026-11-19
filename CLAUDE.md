@@ -40,17 +40,21 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 
 ## Layout
 
-- `packages/runtime/` — the public API is **only the thin surface** of mod.ts (ADR 0008). `src/` is the body
-  (gpu / codegen / kernels / format / ops / reference / runtime / tune). When it is used from Node, pass a WebGPU
-  implementation (Dawn) to `acquireGpu({ gpu })`
+- `packages/runtime/` — the public API is **only the thin surface** of mod.ts (ADR 0008) plus the subpaths `./tune`
+  (sweeps, derivation, Session A/B — ADR 0117), `./kernel` (external fusion rules, experimental — ADR 0148) and
+  `./container` (the format rules `@karume/convert` needs). `src/` is the body (gpu / codegen / kernels / format / ops /
+  reference / runtime / tune). When it is used from Node, pass a WebGPU implementation (Dawn) to `acquireGpu({ gpu })`
 - `packages/hub/` — manifest resolution, fetch, cache (the spec's source of truth is ADR 0038 §4 + 0041 +
   0075 (display names of quants) + 0109 (container entries) + 0153 (manifest is `karume/6`, with the name map's
   reference) + 0080 (fetch layer) + 0086 (source abstraction)).
-  The only runtime-specific subpaths are `hub/node` (`nodeDirectory`) and `hub/deno` (`denoDirectory`)
+  The only runtime-specific subpaths are `hub/node` (`nodeDirectory`, `nodeCacheStorage`) and `hub/deno` (`denoDirectory`)
 - `packages/models/` — **both a barrel (mod.ts) and per-family subpath exports**
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)
-- `packages/kernel-checks/` (private) — the kernel identity checks (subgroup GEMV / RMS, the state-attention rewrites) shared by
-  the runtime GPU tests and the workbench's `kernel-check` entry; it drives runtime internals, so only those two may import it
+- `packages/kernel-checks/` (private) — the thirteen kernel identity checks (the subgroup GEMV / RMS, the state-attention
+  rewrites, the GEMV forms, the fusion twins and others) shared by the runtime GPU tests and the workbench's `kernel-check`
+  entry; it drives runtime internals, so only those two may import it
+- `packages/candidate-rules/` (private) — candidate fusion rules written against `@karume/runtime/kernel`, measured (the
+  Session A/B, the class's evidence) before one is adopted; never published
 - `packages/local-distributions/` (private) — the local mirrors under `models/` as the two apps read them: the dev-server
   plugin, the mount table, the page side and the Node side
 - `packages/convert/` (JSR `@karume/convert`) — weights converted while a Session reads them: a tensor list encoded against
@@ -70,7 +74,9 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `tools/exporter/` — PyPI `karume` = **the general-purpose core only** (src layout; the boundary is a machine gate —
   ADR 0065) / `tools/export-recipes/` — per-model recipes (outside the wheel; shared venv of the uv workspace;
   launched with `python -m <family>.<mod>`; dist is `export-recipes/dist.py`).
-  `tools/{lang,lint,published-smoke,verify-diff,release,geometry-profiles}` are process tools (workspace packages).
+  `tools/{lang,lint,published-smoke,verify-diff,release,geometry-profiles,test-assets}` are process tools (workspace
+  packages); `tools/llm-baseline/` is the PyTorch quality baseline of Gemma 4 (Python, the exporter's venv) and
+  `tools/diag/` holds the GPU-busy check scripts.
   The measurement tools and CLI examples (`tools/*` / `examples/*` of 0.14.0) have been removed and are rebuilt as
   browser apps (ADR 0127)
 
@@ -142,14 +148,15 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   rule and not edited to follow one; a new ADR only for a choice among alternatives. The target of inline `DECIDED:`
   (reasons). Error messages and diagnostics do not cite ADR numbers
 - `docs/backlog.md` — **the source of truth for the order of phases, work items and their status** (now / next / later / release / parked)
-- `docs/ir-v2.md` — IR format spec / `docs/op-vocabulary.md` — op vocabulary ledger
+- `docs/ir-v2.md` — IR format spec / `docs/op-vocabulary.md` — op vocabulary ledger / `docs/container-v1.md` — the
+  container format (`krm` / `krg`)
 - `docs/glossary.md` — term → meaning → source (the meaning lives at the source; add a row when a new term enters docs) /
   `docs/GLOSSARY.ja.md` — the Japanese terms of the conversation
 - `docs/quantization.md` — index of quantization methods (storage dtypes / execution knobs / quant presets / exporter-side
   methods and their status. Numbers and semantics are not duplicated; it points to the source of truth)
 - `docs/kernel-rules.md` — rules index for adding a kernel, a fusion rule, an IR op or a path that changes numbers
-  (decision flow, contract classes, checklists, per-device evidence; the source of truth is the cited ADRs — numerics:
-  ADR 0147)
+  (decision flow, contract classes, checklists, per-device evidence; the sources are the cited specs and ADRs — numerics:
+  `docs/spec/numerics.md` for what runs now, ADR 0147 for the decisions)
 - `docs/assets-layout.md` — conventions for the three local asset roots (models / outputs / inputs — all outside git)
 - `docs/release-runbook.md` — the standing procedure for releases and HF publishing (writing the pins, countermeasures against fragmentation, publish order)
 - `docs/research/` — investigation and measurement records (**point-in-time snapshots** — one opening line states their nature)
