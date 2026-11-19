@@ -342,21 +342,19 @@ maintainer's ruling of 2026-11-06).
     `packages/runtime/tests/gpu_f16_compute_test.ts` (identical words on the RTX 3080 Ti; not run on D3D12 or Metal);
     the preset names in the e2e tests, the playground and the comments follow; the local mirrors
     `models/karume-anima` / `models/karume-anima-extra` are the new builds (a rebuild from them is byte-identical).
-    The `models:anima` lane is green except for the reference rows below; the A/B bands and the fusion counts hold
-    unchanged.)*
+    The sha256 rows of Anima's reference file on the RTX 3080 Ti follow (2026-11-19: seven rewritten under their case
+    IDs, three new under the renamed preset, the four of the removed presets deleted, the two of the `bf16` preset
+    unmoved), and the `models:anima` lane is green; the A/B bands and the fusion counts hold unchanged.)*
   - Left, in order (each step on the maintainer's go-ahead):
-    1. The sha256 rows of Anima's reference file on the RTX 3080 Ti: of its 16 rows the two of the `bf16` preset match;
-       seven with unchanged case IDs take new values (the default preset's text stack is bf16 now), three case IDs that
-       hold the preset's name are new, and the four rows of the old IDs are removed by hand.
-    2. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
+    1. The human review of the default preset's images (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
        decision 3 (2)) and of the new notice text and preset descriptions of both repositories. Before and after are not
        near-identical images: the text stack's small differences grow over the denoise steps into other details of the
        same composition.
-    3. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
+    2. Publication: `karume-anima` uploaded with its f16 files deleted from `main` (20.64 GiB), then
        `karume-anima-extra` rebuilt with `--resolve-refs hf` against the new main and uploaded with its f16 files deleted
        (7.79 GiB), then the `anima.SOURCES` pins ([release-runbook](release-runbook.md) §0). It can ride on the release
        that republishes every manifest as `karume/6`.
-    4. The unpublished 2.9B Anima distribution takes the new names before its first publication.
+    3. The unpublished 2.9B Anima distribution takes the new names before its first publication.
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
