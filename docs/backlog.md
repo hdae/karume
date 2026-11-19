@@ -188,8 +188,9 @@ maintainer's ruling of 2026-11-06).
        the anima VAE tile) and `gemma4-session-ab`; its Playground page and the opt-in e2e copies of its code went.)*
      - *(Landed 2026-11-16: the Gemma 4 decode bench as the entry `gemma4-bench`; its page went. The Playground now
        holds model pages only.)*
-     - The public build: download only; a static host must send the cross-origin isolation headers itself. Where it is
-       hosted is the maintainer's decision.
+     - The workbench stays a local application for tests and measurements on the maintainer's machines (the
+       maintainer's ruling of 2026-11-19): no public build of it is hosted. Its production build keeps working as the
+       spec describes.
      - Where per-GPU evidence records are kept for good (`outputs/workbench/` is outside git).
      - The default profile's GEMV choices from several devices' records (the maintainer's ruling of 2026-11-18). The
        default's `linearGemv` holds what one device measured (the RTX 3080 Ti), every device without a table of its
@@ -228,11 +229,15 @@ maintainer's ruling of 2026-11-06).
          5070 Ti reads the general variant ×1.04 faster, and no shipped model has that shape in int8;
        - the choice between sequential variants a few percent apart moves with the records given, and the
          narrowed sweeps measured four hand-picked variants (the planner still lists the others).
-     - A hosted benchmark page for collaborators (filed 2026-11-18; the maintainer has an AMD device in reach). The
-       workbench's public build (download only) with one short batch a collaborator runs, the record sent back by
-       hand. Open: the host (the page is cross-origin isolated through response headers, which the static host has to
-       send — where it is hosted is the maintainer's decision), which batch (how long a volunteer's run may take),
-       how a record comes back and what it tells about the device, and the build's commit named on the page.
+     - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
+       the maintainer has an AMD device in reach). A collaborator opens it, runs one short measurement and sends the
+       result from the page itself — to a form (for example a Google Form) whose address the build reads from the
+       environment (`.env`), so that no record travels by hand and the repository carries no address. Not designed
+       yet. Open: what it measures and for how long (an exploratory run in place of the full sweeps — the analysis of
+       the records at hand is `outputs/diag/sweep-exploration-2026-11-19/`, untracked), what the sent result holds
+       and its size (a form field does not take a sweep record of megabytes), whether sending from a cross-origin
+       isolated page works with the form's endpoint, what it tells about the device, where it is hosted and the
+       build's commit named on the page.
      - Per-adapter generation of the hand-written GEMV shape tables. *(Landed 2026-11-17: the sequential variant,
        the row-block thread target and the parallel shapes are the geometry profile's `linearGemv`; every table still
        runs with the default's values.)* *(Landed 2026-11-17: the GEMV sweep on synthetic tensors that measures them —
