@@ -42,13 +42,18 @@ the CHANGELOG's `[Unreleased]`. Left, in the runbook's order:
   until they are exported again. On the small Irodori model the maintainer heard no difference between the two
   (2026-11-18). Anima's f16 containers leave the distribution instead (ADR
   [0154](decisions/0154-anima-bf16-preset-names.md)), so the item has no Anima part.
-  - Irodori v4-Small, v4.1-Small and v4.1-Small-MF: the f16 container of the text backbone (measured on v4-Small: the
-    new graph is the one the f32 and i8 series already carry). The sha256 rows of v4-Small and v4.1-Small-MF are of the
-    `f32` preset and do not move; v4.1-Small has none.
-  - Irodori v4-Large: the f16 container of the T5Gemma2 text backbone — expected, not measured. Its three sha256 rows are
-    of the `f16` preset and move with it.
-  - What it touches: the export, the local mirrors, the sha256 rows named above (rewritten only on the maintainer's
-    approval, after a diff is shown) and the Hugging Face repositories (each on the maintainer's go-ahead).
+  - Irodori v4-Small: the f16 container of its text backbone (measured: the new graph is the one the f32 and i8 series
+    already carry), which v4.1-Small and v4.1-Small-MF reference and do not hold. The sha256 rows of v4-Small and
+    v4.1-Small-MF are of the `f32` preset and do not move; v4.1-Small has none. The f16 full-loop goldens of v4-Small
+    and v4.1-Small-MF in the test-asset dataset were baked under the earlier rule and are baked again with it.
+  - Irodori v4-Large has no part: its f16 text backbone, exported again on 2026-11-19, is byte-identical to the
+    distributed one in all ten parts (the recipe already kept T5Gemma2's buffers at f32 when it was exported), so its
+    three `f16` sha256 rows stay.
+  - Open before it starts: the recipe takes every graph role of v4-Small as published (`IRODORI_PUBLISHED` and
+    `IRODORI_PUBLISHED_PART0` in `tools/export-recipes/irodori/distribution.py`, pinned by a test), so the export needs
+    a change of those tables whose form the maintainer decides.
+  - What it touches: the export, v4-Small's local mirror and the manifests that reference it, the goldens named above
+    (a dataset upload and its pin) and the Hugging Face repositories (each on the maintainer's go-ahead).
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; the label and the descriptions, the speed sentences included,
   reviewed by the maintainer on 2026-11-19): besides its publication above, the sha256 rows `e2b/bf16-fast` and
   `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on the maintainer's OK;
