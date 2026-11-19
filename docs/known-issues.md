@@ -175,15 +175,19 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
   (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
   seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
-  The grouped form of `expert_linear` is the exception to "one form on every device": a Session runs the one-row form
-  for a one-token run and the grouped form for a run of 2 to 768 tokens (`expertLinearGrouped`), at every numerics
-  level, on the statement that the two write the same words. On Metal they do not for the `down` projection (the
-  first failing word differs by 4 ULP), so on an Apple GPU the MoE output of Gemma 4 26B A4B for a token depends in
-  the last bits on whether the token was computed in a run of one or of several: a prefill and the rows a
-  speculative decode verifies are not the words one-token decode gives. The grouped form calls a word function
-  where the one-row form has the same multiply-add text inline; why `gate_up` (shared x) stays identical and `down`
-  does not is not analysed. Not measured: whether any token id changes. What to do is undecided (the record is
-  `outputs/workbench/browser-apple-m2/kernel-check_2026-11-18T19-23-24.json`, untracked; checkout `453921bc`).
+  The grouped form of `expert_linear` — which a Session runs for a run of 2 to 768 tokens over weight rows of 64
+  words or more (`expertLinearGrouped`), at every numerics level, on the statement that it writes the one-row form's
+  words — does not hold that statement on Metal at one of the two shapes the check runs it at. At `down` (weight
+  rows of 22 words), in every walk of two or more rows the first row's words are the oracle's and every other
+  row's differ (the 55 failing cases; the 17 passing ones are the first rows of the walks and the one-row walks;
+  the first failing word differs by 4 ULP). A Session does not run that case: `down`'s rows are shorter than 64
+  words, so it takes the one-row form, and `gate_up` (88 words), which is grouped, is identical in all 72 cases.
+  So no word of Gemma 4 26B A4B is known to depend on an Apple GPU on whether a token was computed in a run of one
+  or of several; what is open is the form itself at other shapes. The two shapes differ in two ways the record
+  does not tell apart: `down` leaves 2 words after the 4-word unrolled loop (22 = 5 × 4 + 2; 88 leaves none), and
+  it has one x row per pick. Which of them it is, and a form that is identical on Metal, is being isolated on the
+  M2 (the record is `outputs/workbench/browser-apple-m2/kernel-check_2026-11-18T19-23-24.json`, untracked;
+  checkout `453921bc`).
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
   Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above). Analysis of the table's
