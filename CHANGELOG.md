@@ -15,77 +15,16 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
-### Breaking
-
-- `@karume/runtime`: a Session's numerics are declared as a requirement level instead of by options that name a
-  kernel. `SessionOptions.numerics` is `{ level?, ops? }`: `level` is `"exact"` (the reference kernel's bits on this
-  device — the default) or `"reorder"` (another summation order, inside the op's band) for the whole model, and `ops`
-  overrides it per op kind (`linear`, `attention`, `rms_norm`). The options `linearGemvReduce`, `stateAttentionReduce`,
-  `rmsNormReduce` and `linearGemvPlanes` are removed, from `SessionOptions` and from the memory estimate's options:
-  - `linearGemvReduce: "parallel"` is `numerics: { ops: { linear: "reorder" } }`;
-  - `stateAttentionReduce: "parallel"` and `"parallel-fused"` are `numerics: { ops: { attention: "reorder" } }`, which
-    folds the row statistics into PV wherever the shape admits it (the fold is checked to give the bits of the
-    unfolded form);
-  - both together are `numerics: { level: "reorder" }`;
-  - the subgroup forms (`linearGemvReduce: "parallel-subgroup32"`, `rmsNormReduce: "subgroup32"`) and the byte-plane
-    GEMV (`linearGemvPlanes`) are no longer selectable through the public surface: no adapter is measured to gain from
-    them end to end, and a level does not select a kernel that was not.
-  `packedStaticQuantize` now requires linear at `"reorder"` (it required `linearGemvReduce: "parallel"`). `"reorder"`
-  together with `linearCompute: "a8"` or `"f16"` is accepted and leaves linear on that approximation's kernels. The
-  types `LinearGemvReduce`, `StateAttentionReduce` and `RmsNormReduce` are no longer exported.
-- `@karume/runtime`: the three fusions that keep the unfused plan's bits — rms_norm→add, linear→static_quantize (on the
-  parallel GEMV) and gelu_tanh→mul→static_quantize — always apply, and their options `fuseRmsNormAdd`,
-  `fuseLinearStaticQuantize` and `fuseGeluMulStaticQuantize` are removed. Outputs do not change; the fusion counts of
-  `SessionDiagnostics.lastRunFusions` and the pipeline keys of Sessions that did not set the options do.
-- `@karume/hub`: the manifest's `session` vocabulary follows: `numerics` is added, and `linearGemvReduce`,
-  `stateAttentionReduce`, `fuseRmsNormAdd`, `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize` and
-  `linearGemvPlanes` are removed. A manifest that declares a removed key is rejected.
-- `@karume/models` (Gemma 4): the pipeline options `linearGemvReduce`, `stateAttentionReduce`, `fuseRmsNormAdd`,
-  `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `linearGemvPlanes` and `rmsNormReduce` are removed, and
-  `numerics` is added. An explicit `numerics` composes with the selected preset's per field: an explicit
-  `{ ops: { attention: "exact" } }` keeps the levels the preset declares for the other op kinds.
-- `karume-gemma4-qat` (Gemma 4 E2B / E4B / 12B / 26B): the `i4-gemvpar` preset is removed, because it declares the same
-  numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
-  `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
-- `@karume/hub`: the distribution manifest is `karume/6` and the hub reads only `karume/6`. A `karume/5` manifest is
-  refused as an unsupported format, with a message that names the exporter's upgrade command. `karume/6` is `karume/5`
-  plus one optional top-level member, `nameMap` (`Manifest.nameMap`): the reference (`path`, `size`, `sha256`) of the
-  repository's name map, a `karume-name-map/1` file that says which tensor of an upstream weights file is which
-  initializer of which component. It is checked like every file reference and names a file of the repository itself;
-  the hub does not read it, and no selection includes it. Every distribution repository's manifest is published again as
-  `karume/6` (with its card); the weights do not change, and `karume-anima` / `karume-anima-extra` gain `name-map.json`.
-  Published versions pin their repositories' revisions and keep working.
-- Exporter: `karume dist` writes `karume/6`. A recipe declares its family's name map (`Pipeline.name_map`); the assembly
-  checks its format tag, copies it to `name-map.json` at the repository root and references it. `karume upgrade
-  <repository directory> [--name-map <file>]` rewrites a `karume/5` repository's manifest in place (the same content,
-  the new format, the card's statement of the format; no weights file is touched).
-
-- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a quick look: after the case's warm start every
-  geometry gets one short timed pass, and only the default geometry and the candidates whose quick time is at most
-  `GeometrySweepOptions.quickLookMargin` (×1.25, `QUICK_LOOK_MARGIN`) times the default's are timed in full; the others
-  are rows marked `screened` with their quick time (`quickPerDispatch`) and no rounds, digest or comparison. A margin
-  of 0 times every geometry. The record is `karume-geometry-sweep/4` (`settings.quickLookMargin`, the rows'
-  `quickPerDispatch` and `screened`, each case's `screened` count), and `deriveGeometryProfile` reads `/4` only: a
-  `/3` record is refused, naming its format, and a screened row is no observation (a geometry screened out in a case no
-  record timed it in is not adopted for that case's class). The records the registered tables cite are `/3` and no
-  longer derive them; a family regenerates from a new sweep.
-- `karume-anima` / `karume-anima-extra` (Anima, all seven models): every float-stored component is bf16, the upstream
-  checkpoints' own values, and the presets are named from that base. `f16+dit8` → `bf16+dit8`,
-  `f16+dit8-a8` → `bf16+dit8-a8`, `f16+dit8-a8-attn8` → `bf16+dit8-a8-attn8`, `f16+dit8-a8-attn8-s16` →
-  `bf16+dit8-a8-attn8-s16` (the default), `f16-c16` → `bf16-c16` (the original weights, the transformer computed in
-  f16); `bf16` is unchanged, and `f16` is removed — with a bf16 transformer it is `bf16`. There is no alias: against a
-  revision with the new manifest, an old name is refused as an unknown preset, with the available names listed (`bf16`
-  replaces `f16`). A caller that omits `quant` gets `bf16+dit8-a8-attn8-s16`, whose text encoder, text conditioner and
-  VAE decoder are now bf16, so its images differ from the earlier default's. The f16 files leave both repositories;
-  the revisions published versions pin keep them and keep working.
-
 ### Added
 
 - Two packages published on JSR from this release, in lockstep with the others: `@karume/safetensors` (a safetensors
-  reader that opens a file from its header alone and reads one tensor at a time with ranged reads; no dependency) and
-  `@karume/convert` (weights converted while a Session reads them: a tensor list encoded against the plan of a
-  distributed preset, served as that preset's container and optionally written as one; depends on `@karume/runtime`
-  only). `@karume/models` depends on both.
+  reader that opens a file from its header alone and reads one tensor at a time with ranged reads —
+  `openSafetensors`; no dependency) and `@karume/convert` (weights converted while a Session reads them: a tensor
+  list encoded against the plan of a distributed preset, served as that preset's container and optionally written
+  as one — `openConvertingSource`, `readPlanCodecs`, `writeContainer`, and the name-map reader `parseNameMap` /
+  `placeTensors`; `float16Codec`, an option of `openConvertingSource` and `readPlanCodecs`, stores every f16 and
+  bf16 initializer of a plan as the given 16-bit codec, the same blocks with a part 0 of its own; depends on
+  `@karume/runtime` only). `@karume/models` depends on both.
 - `@karume/models/gemma`: a decode step that samples from the top-k reads back the leading logits of the row,
   selected on the GPU, instead of the whole row (16 KiB in place of 1 MiB), and the sampler draws from them. The token
   ids are the ones the whole row gives for the same seed: the sampler ranks, normalizes and draws on the host as
@@ -117,16 +56,18 @@ measurements in `docs/research/`.
   case, row count (`rows`; a run without M = 1 skips nothing) and candidate (`candidates`; the references are measured
   either way). It returns a `karume-gemv-sweep/4` record (`GemvSweepReport`): each row carries the fingerprint of its
   kernel and its quick time, each case its own fingerprint, each case and row count the spread of the baseline's
-  rounds (`baselineSpread`) and the counts of kernels screened and skipped; it changes no choice. Also `gemvSweepCases` (the case
-  table), `gemvSweepCandidateNames` (every candidate name), `QUICK_LOOK_MARGIN` (the quick look's default margin of
-  both sweeps), and the types `GemvSweepOptions`, `GemvSweepProgress`, `GemvSweepCandidateSet`, `GemvSweepCase`,
-  `GemvSweepCaseEntry`, `GemvSweepCaseSummary`, `GemvSweepChoice`, `GemvSweepGates` and `GemvSweepRow`.
+  rounds (`baselineSpread`) and the counts of kernels screened and skipped; it changes no choice. Also
+  `gemvSweepCases` (the case table), `gemvSweepCandidateNames` (every candidate name), `QUICK_LOOK_MARGIN` (the
+  quick look's default margin of both sweeps), and the types `GemvSweepOptions`, `GemvSweepProgress`,
+  `GemvSweepCandidateSet`, `GemvSweepCase`, `GemvSweepCaseEntry`, `GemvSweepCaseSummary`, `GemvSweepChoice`,
+  `GemvSweepGates` and `GemvSweepRow`.
 - `@karume/runtime`: `GeometryProfile.linearGemv`, an optional field of a geometry profile that holds the GEMV
   choices of `linear` (1 to 64 rows over i2 / i4 / i8 weights): the sequential variant and its per-shape exceptions,
   the thread target of the row-block height, and the shapes that take the parallel GEMV with their lane count and
   their packed and staged flags. These values were constants of the kernel; they are now the default profile's, and
-  a table without the field runs with them, so no Session changes. `acquireGpu({ geometryProfile })` and
-  `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field.
+  a table without the field runs with them (the choices that changed are listed under Changed).
+  `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept the field, and
+  `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is.
   `SessionOptions.linearGemvRowsThreadTarget` still replaces the thread target when given.
 - `@karume/runtime/tune`: `deriveLinearGemvChoices`, which derives a table's `linearGemv` from GEMV sweep records of
   its adapter, read group by group (a record's case at one row count): a group is evidence where its rows and its case
@@ -142,11 +83,12 @@ measurements in `docs/research/`.
   lines that state them and the records used with how much of each is current, and refuses another format, adapter,
   wall-clock or quantized timing, the same record twice and no record. `planGemvMeasurements` reads the same records
   and lists, per case and row count, the candidates the derivation reads that fewer than two records hold a current
-  group of (a screened or skipped row counts as looked at). Also the types `DeriveLinearGemvOptions`, `GemvMeasurementPlanning`, `GemvMissingMeasurement`,
-  `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation`, `LinearGemvGain`, `LinearGemvRecordGroups`,
-  `LinearGemvStaleGroup` and `PlanGemvMeasurementsOptions`. The generator of the embedded tables
-  (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for a registered table, and with
-  `--gemv-plan` writes the workbench batch that measures, twice, what they lack; no embedded table changes.
+  group of (a screened or skipped row counts as looked at). Also the types `DeriveLinearGemvOptions`,
+  `GemvMeasurementPlanning`, `GemvMissingMeasurement`, `GemvSweepInput`, `LinearGemvDecision`, `LinearGemvDerivation`,
+  `LinearGemvGain`, `LinearGemvRecordGroups`, `LinearGemvStaleGroup` and `PlanGemvMeasurementsOptions`. The generator
+  of the embedded tables (`tools/geometry-profiles`) takes such records as `--gemv-records`, alone for a registered
+  table, and with `--gemv-plan` writes the workbench batch that measures, twice, what they lack; no embedded table
+  changes.
 - `@karume/runtime`: the parallel GEMV takes float-stored weights. A row of a geometry profile's
   `linearGemv.parallelShapes` may name a `bf16`, `f16` or `f32` shape (no group, no packed activations; plain or
   staged). A Session with linear at `"reorder"` then runs the parallel GEMV for 1 to 8 rows of that shape, inside the
@@ -158,16 +100,26 @@ measurements in `docs/research/`.
   `1024 × 2560`, `2560 × 4096`): a Session at linear `"reorder"` on such weights runs the parallel GEMV for 1 to 8
   rows of those shapes on every adapter, in place of the sequential GEMV at one row and the GEMM above. They are
   the shapes on which an RTX 3080 Ti (Node, Vulkan), an RTX 5070 Ti (Chrome, D3D12) and an Apple M2 (Chrome,
-  Metal) all measured it at least ×1.09 faster at 1, 4 and 8 rows. No shipped preset declares linear at
-  `"reorder"` on bf16 weights, so no Session of a shipped preset changes.
+  Metal) all measured it at least ×1.09 faster at 1, 4 and 8 rows. Regular Gemma 4's `bf16-fast` (below) declares
+  linear at `"reorder"` on bf16 weights, so its Sessions run these rows.
 - `@karume/runtime/tune`: the GEMV sweep measures float-stored shapes. Its case table gains the 25 linears of
   regular Gemma 4 E2B and E4B in bf16, at 1, 4 and 8 rows; past one row their baseline is the GEMM (candidate
   `gemm`), which is what an `exact` Session runs there, and `deriveLinearGemvChoices` reads a parallel row of such a
-  shape against it. `GemvSweepChoice` is now a union of two exported types: `GemvSweepFamilyChoice`, a member of the GEMV family, and
-  `GemvSweepGemmChoice`, `{ id: "gemm-f32", storage, v4 }`, for that baseline. That GEMM is built with the tile geometry of the profile the
-  sweep's device resolves to — what a Session there runs —, the record names the profile (`geometryProfile`), and the
-  derivation reads such a group as current only when its GEMM is the kernel the table it derives for builds. Records
-  taken before lack the bf16 cases; none of their groups becomes stale.
+  shape against it. `GemvSweepChoice` is a union of two exported types: `GemvSweepFamilyChoice`, a member of the GEMV
+  family, and `GemvSweepGemmChoice`, `{ id: "gemm-f32", storage, v4 }`, for that baseline. That GEMM is built with the
+  tile geometry of the profile the sweep's device resolves to — what a Session there runs —, the record names the
+  profile (`geometryProfile`), and the derivation reads such a group as current only when its GEMM is the kernel the
+  table it derives for builds.
+- `@karume/runtime/tune`: the GEMV sweep measures the row-blocked parallel GEMV at 4 and 8 rows (candidates
+  `staged-l<lanes>r<rows>`; a row's `choice` carries `parallelRows`), for the lane counts M = 1 leaves adoptable and
+  the default row's, and measures the default row's own kernel of M = 1 there as well. `deriveLinearGemvChoices`
+  derives the row block of a parallel row with its lanes, by one rule against a reference row — the default's row
+  where M = 1 keeps it, an adopted candidate without a row block: a row block (or none) replaces the reference's
+  only when, at the row counts where the two run different kernels, it is slower in no group and at least ×1.10
+  faster in every group of one row count or more. A candidate is held against the default's choice at 4 and 8 rows
+  with the row block the derivation gives it, so one that is slower there with its own kernel is adopted when its
+  row-blocked form is not. `LinearGemvDecision` carries `defaultRowBlock`, `derivedRowBlock` and `rowGains` (the
+  type `LinearGemvRowGain`).
 - `@karume/runtime`: the subpath `@karume/runtime/container`, for a package that produces container bytes: the
   canonical serializer of the model descriptor (`serializeModelDescriptor`), the format's sha256 (`sha256Hex`,
   `asSha256Hex`), the f16 and bf16 decoders (`decodeF16`, `decodeBf16`) and the types of the model descriptor and
@@ -186,14 +138,11 @@ measurements in `docs/research/`.
   is read. The text encoder and the VAE decoder come from the distribution, and a component named in `components`
   from its replacement. The converted parts are neither downloaded nor counted in the progress, and everything that
   needs no tensor byte is refused before a weight part is downloaded — among it a component stored as a float whose
-  tensors mix dtypes or are F32. The pipeline reads the file for as long as it lives. Every Session build of a component from
-  the file converts it again (in the default per-stage residency, every generate); the option `retainConverted: true`
-  (`FromSingleFileOptions`, which `fromPretrained` does not take) keeps the converted weights in host memory so that
-  only the first build reads the file, at their converted size (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as
-  bf16) until the pipeline is released. `@karume/models` now depends on the packages `@karume/convert` and
-  `@karume/safetensors`.
-- `@karume/convert`: `float16Codec` on `openConvertingSource` and `readPlanCodecs` stores every f16 and bf16
-  initializer of a plan as the given 16-bit codec (the same blocks, a part 0 of its own).
+  tensors mix dtypes or are F32. The pipeline reads the file for as long as it lives. Every Session build of a
+  component from the file converts it again (in the default per-stage residency, every generate); the option
+  `retainConverted: true` (`FromSingleFileOptions`, which `fromPretrained` does not take) keeps the converted weights
+  in host memory so that only the first build reads the file, at their converted size (Anima's transformer: about
+  1.8 GiB as int8, 3.6 GiB as bf16) until the pipeline is released.
 - `karume-gemma4` (regular Gemma 4 E2B / E4B): the preset `bf16-fast`, the same weights as `bf16` (E2B's int8 drafter
   included), declaring `numerics: { level: "reorder" }` — the declaration of the q4_0 QAT line's `i4-fast`. The linears
   whose bf16 shape has a parallel row in the geometry profile run the parallel GEMV (on the default profile 207 of
@@ -265,11 +214,14 @@ measurements in `docs/research/`.
   Of regular Gemma 4's presets only `bf16-fast` (above; not published yet) declares linear at `reorder`, so only
   its Sessions run the bf16 rows. On an RTX 5070 Ti in Chrome, with the choices of `nvidia-blackwell` before its
   derivation from 82 records, a decode token of QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the
-  default's choices (E2B and E4B by 1 to 3 %, which the measurement does not resolve); none of the tables as they
-  are now has been measured end to end. On such an adapter the outputs of a `reorder` Session change inside the
-  band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every Session on an
-  adapter no table matches, write what they wrote. The memory estimate plans with the default profile's choices as
-  before; for the Gemma 4 distributions it gives the same numbers ([limitations](docs/limitations.md)).
+  default's choices (E2B and E4B by 1 to 3 %, which the measurement does not resolve). With the tables as they are
+  now only E2B is measured end to end, the table's choices against the default's: on the RTX 5070 Ti 10.03 against
+  11.57 ms a token with `bf16-fast` and 5.74 against 5.76 ms with the QAT `i4-fast`, on an Apple M2 60.41 against
+  60.47 and 24.88 against 27.34 ms; `nvidia-ampere`'s table is not measured end to end. On such an adapter the
+  outputs of a `reorder` Session change inside the band of `linear` where the lanes changed or a row was added.
+  Sessions at `exact` there, and every Session on an adapter no table matches, write what they wrote. The memory
+  estimate plans with the default profile's choices as before; for the Gemma 4 distributions it gives the same
+  numbers ([limitations](docs/limitations.md)).
 - `@karume/runtime`: with linear at the level `reorder`, five linear shapes of the Gemma 4 MTP drafters take the
   parallel GEMV in place of the sequential one: int4 (group 32) `256 × 3072` and `256 × 1024` of the q4_0 QAT E2B / E4B
   drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`
@@ -297,23 +249,13 @@ measurements in `docs/research/`.
   staged key with `:r<rows>`, and M = 1, the level `exact`, the subgroup form and packed-activation rows are
   unchanged. A table refuses a row block the kernel does not exist at (its staged activations must fit 16,384 B of
   workgroup storage), one on a packed-activation row, and one on a float-stored row (bf16, f16, f32: the row-blocked
-  kernel exists for i2, i4 and i8 storage, and a float-stored parallel row runs its kernel of one row at 2 to 8 rows). 25 rows of the default profile — Gemma 4 q4_0 QAT shapes of
-  E2B, E4B, 12B and 26B — carry the row block the RTX 3080 Ti measured faster at 4 and at 8 rows in two sweeps
-  (×1.1 to ×3.4 per dispatch), and every table without GEMV choices of its own runs with them. On that card under
-  Node the verify run of a q4_0 QAT E2B `i4-fast` speculative decode takes 10.0 ms instead of 13.8 ms (1.36 instead
-  of 1.93 times a decode step), and a 128-token speculative turn 0.96 s instead of 1.20 s (1.02 to 1.05 s without
-  speculation).
-- `@karume/runtime/tune`: the GEMV sweep measures the row-blocked parallel GEMV at 4 and 8 rows (candidates
-  `staged-l<lanes>r<rows>`; a row's `choice` gains `parallelRows`), for the lane counts M = 1 leaves adoptable and
-  the default row's, and measures the default row's own kernel of M = 1 there as well. `deriveLinearGemvChoices`
-  derives the row block of a parallel row with its lanes, by one rule against a reference row — the default's row
-  where M = 1 keeps it, an adopted candidate without a row block: a row block (or none) replaces the reference's
-  only when, at the row counts where the two run different kernels, it is slower in no group and at least ×1.10
-  faster in every group of one row count or more. `LinearGemvDecision` gains `defaultRowBlock`,
-  `derivedRowBlock` and `rowGains` (the new type `LinearGemvRowGain`). A candidate that is slower than the default's
-  choice at 4 or 8 rows by its own kernel is now adopted when a row block of its lanes is not. Existing records keep
-  their format (`karume-gemv-sweep/4`); their groups at 4 and 8 rows of the 25 shapes whose default row gained a row
-  block are no longer current, and no record holds the row-blocked candidates.
+  kernel exists for i2, i4 and i8 storage, and a float-stored parallel row runs its kernel of one row at 2 to 8
+  rows). 25 rows of the default profile — Gemma 4 q4_0 QAT shapes of E2B, E4B, 12B and 26B — carry the row block the
+  RTX 3080 Ti measured faster at 4 and at 8 rows in two sweeps (×1.1 to ×3.4 per dispatch); `nvidia-ampere` runs
+  them as they are, and `nvidia-blackwell` and `apple-metal-3` carry row blocks of their own (above). On the
+  RTX 3080 Ti under Node the verify run of a q4_0 QAT E2B `i4-fast` speculative decode takes 10.0 ms instead of
+  13.8 ms (1.36 instead of 1.93 times a decode step), and a 128-token speculative turn 0.96 s instead of 1.20 s
+  (1.02 to 1.05 s without speculation).
 - The workbench's `gemma4-bench` entry has two switches that change the geometry profile an arm's devices are
   acquired with: `default-gemv` (the adapter's table without GEMV choices of its own, so the default profile's) and
   `general-sequential` (no per-shape exception of the sequential GEMV). One interleaved run then compares what a
@@ -325,19 +267,18 @@ measurements in `docs/research/`.
 - `@karume/runtime`: `expert_linear` in a run of 2 to 768 tokens walks an expert's weight row once for the rows
   that picked it (up to 8 rows to a walk) where the weight row has 64 words or more — of Gemma 4 26B A4B's two
   projections, gate_up. Outputs do not change by a bit; in `SessionDiagnostics.lastRunPipelines` the key of such a
-  dispatch gains `:rows8` (the name of the form). Under the expert cache with self-speculation at depth 4 a 26B decode token took ×0.85 of
-  the time on an RTX 3080 Ti that was throttling (the verify of 5 rows is such a run), and the prefill's chunks of 8
-  rows ×0.68 to ×0.90; a run of one token is unchanged.
-- `@karume/runtime/tune`: `deriveGeometryProfile` with a `base` carries the base's `linearGemv` as it is; it
-  dropped the field before.
-- Error messages and diagnostics of the three packages no longer cite a decision record by number; each states the
-  cause and, where the caller can act, what to do. Code that matched on such a citation in a message needs another
-  substring.
-- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a warm start on its default geometry (passes under
-  load until three in a row agree within 2 %, at least 1 s and at most 5 s of load or 125 passes), so the case's first calibration
-  no longer reads a device still on its idle clocks. In `runGeometrySweep` and in the single-dispatch timings of
-  `runAttentionRouteBench`, a calibration whose pass comes out below a quarter of the 80 ms target is done again after
-  a warm start, up to three calibrations in all. The records' formats do not change; a sweep takes a few seconds longer per case.
+  dispatch gains `:rows8` (the name of the form). Under the expert cache with self-speculation at depth 4 a 26B
+  decode token took ×0.85 of the time on an RTX 3080 Ti that was throttling (the verify of 5 rows is such a run),
+  and the prefill's chunks of 8 rows ×0.68 to ×0.90; a run of one token is unchanged.
+- Error messages and diagnostics of `@karume/runtime`, `@karume/hub` and `@karume/models` no longer cite a decision
+  record by number; each states the cause and, where the caller can act, what to do. Code that matched on such a
+  citation in a message needs another substring.
+- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a warm start on its default geometry (passes
+  under load until three in a row agree within 2 %, at least 1 s and at most 5 s of load or 125 passes), so the
+  case's first calibration no longer reads a device still on its idle clocks. In `runGeometrySweep` and in the
+  single-dispatch timings of `runAttentionRouteBench`, a calibration whose pass comes out below a quarter of the
+  80 ms target is done again after a warm start, up to three calibrations in all. The warm start adds no field to
+  either record; a sweep takes a few seconds longer per case.
 - `@karume/runtime/tune`: the candidate sets `"quick+"` (the default) and `"full"` of `runGeometrySweep` measure the
   skeleton forms of the f32 GEMM and conv2d's counter decode (`GemmGeometry.form` / `decode`, perf-ledger K-88) on
   every tile: a linear / matmul / bmm case each tile and the tile with each form, a conv2d case each tile, with each
@@ -353,7 +294,8 @@ measurements in `docs/research/`.
   bmm cases) and both `conv2d` fields a form with the decode (×1.20 and ×1.26); the tiles of two rules of 129 to 512
   rows, of `conv2d.rows64`, of the i8a8 linear above 512 rows and of the i8a8 attention's ①QK move with it. Speed
   only: every timed row of the sweep is identical to the default geometry's output, and the pipeline keys of those
-  kernels now end in `:tb-un`, `:tas-tb-un` and, for conv2d, `:dec`. The other embedded tables are unchanged.
+  kernels now end in `:tb-un`, `:tas-tb-un` and, for conv2d, `:dec`. The other embedded tables' geometries are
+  unchanged.
 - Exporter: `karume.quantize.round_weights_to_f16` follows the rule `round_weights_to_bf16` follows — it rounds only
   what the checkpoint carries (every parameter and the persistent buffers) and leaves non-persistent buffers computed
   at init, such as RoPE's `inv_freq`, at their f32 values. Before, it rounded every f32 buffer, so the constants an f16
@@ -361,6 +303,81 @@ measurements in `docs/research/`.
   text backbone of the small Irodori models) came from a rounded seed, and a component exported with f16 storage was
   a different graph from the same component exported with bf16 storage. From the next export on, those constants are
   computed from the f32 seed; distributed files are unchanged until they are exported again.
+
+### Breaking
+
+- `@karume/runtime`: a Session's numerics are declared as a requirement level instead of by options that name a
+  kernel. `SessionOptions.numerics` is `{ level?, ops? }`: `level` is `"exact"` (the reference kernel's bits on this
+  device — the default) or `"reorder"` (another summation order, inside the op's band) for the whole model, and `ops`
+  overrides it per op kind (`linear`, `attention`, `rms_norm`). The options `linearGemvReduce`, `stateAttentionReduce`,
+  `rmsNormReduce` and `linearGemvPlanes` are removed, from `SessionOptions` and from the memory estimate's options:
+  - `linearGemvReduce: "parallel"` is `numerics: { ops: { linear: "reorder" } }`;
+  - `stateAttentionReduce: "parallel"` and `"parallel-fused"` are `numerics: { ops: { attention: "reorder" } }`, which
+    folds the row statistics into PV wherever the shape admits it (the fold is checked to give the bits of the
+    unfolded form);
+  - both together are `numerics: { level: "reorder" }`;
+  - the subgroup forms (`linearGemvReduce: "parallel-subgroup32"`, `rmsNormReduce: "subgroup32"`) and the byte-plane
+    GEMV (`linearGemvPlanes`) are no longer selectable through the public surface: no adapter is measured to gain from
+    them end to end, and a level does not select a kernel that was not.
+  `packedStaticQuantize` now requires linear at `"reorder"` (it required `linearGemvReduce: "parallel"`). `"reorder"`
+  together with `linearCompute: "a8"` or `"f16"` is accepted and leaves linear on that approximation's kernels. The
+  types `LinearGemvReduce`, `StateAttentionReduce` and `RmsNormReduce` are no longer exported; `NumericLevel`,
+  `NumericOpKind` and `Numerics` (the type of `SessionOptions.numerics`) are. The memory estimate takes the same
+  declaration as `EstimateOptions.numerics` (omitted, it estimates the reference kernels).
+- `@karume/runtime`: the three fusions that keep the unfused plan's bits — rms_norm→add, linear→static_quantize (on the
+  parallel GEMV) and gelu_tanh→mul→static_quantize — always apply, and their options `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize` and `fuseGeluMulStaticQuantize` are removed, from `SessionOptions` and from the memory
+  estimate's options: a caller drops them. Outputs do not change; the fusion counts of
+  `SessionDiagnostics.lastRunFusions` and the pipeline keys of Sessions that did not set the options do.
+- `@karume/hub`: the manifest's `session` vocabulary follows: `numerics` is added (`SessionSpec.numerics`, with the
+  exported types `NumericsSpec` and `NumericLevel`), and `linearGemvReduce`, `stateAttentionReduce`, `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize` and `linearGemvPlanes` are removed. A manifest that
+  declares a removed key is rejected.
+- `@karume/models` (Gemma 4): the pipeline options `linearGemvReduce`, `stateAttentionReduce`, `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `linearGemvPlanes` and `rmsNormReduce` are removed, and
+  `numerics` is added, on `gemma.PipelineOptions` and on the mobile QAT pipeline's options, which share them; the
+  removed values map to `numerics` as in the `@karume/runtime` entry above. An explicit `numerics` composes with the
+  selected preset's per field: an explicit `{ ops: { attention: "exact" } }` keeps the levels the preset declares for
+  the other op kinds.
+- `karume-gemma4-qat` (Gemma 4 E2B / E4B / 12B / 26B): the `i4-gemvpar` preset is removed, because it declares the same
+  numeric requirement as `i4-fast` over the same weights. A caller that selected `i4-gemvpar` selects `i4-fast`.
+  `karume-gemma4-qat-mobile` keeps its `i4-gemvpar`.
+- `@karume/hub`: the distribution manifest is `karume/6` and the hub reads only `karume/6`. A `karume/5` manifest is
+  refused as an unsupported format, with a message that names the exporter's upgrade command. `karume/6` is `karume/5`
+  plus one optional top-level member, `nameMap` (`Manifest.nameMap`): the reference (`path`, `size`, `sha256`) of the
+  repository's name map, a `karume-name-map/1` file that says which tensor of an upstream weights file is which
+  initializer of which component. It is checked like every file reference and names a file of the repository itself;
+  no selection of the hub includes it (`anima.Pipeline.fromSingleFile` fetches it). Every distribution repository's
+  manifest is published again as `karume/6` (with its card). Most repositories keep their weights; `karume-anima` /
+  `karume-anima-extra` gain `name-map.json` and move to bf16 (below), and the three Gemma 4 repositories declare
+  `numerics` in place of the removed session keys (`karume-gemma4` gains `bf16-fast`, `karume-gemma4-qat` loses
+  `i4-gemvpar`). Published versions pin their repositories' revisions and keep working.
+- Exporter: `karume dist` writes `karume/6`. A recipe declares its family's name map (`Pipeline.name_map`); the assembly
+  checks its format tag, copies it to `name-map.json` at the repository root and references it. `karume upgrade
+  <repository directory> [--name-map <file>]` rewrites a `karume/5` repository's manifest in place (the same content,
+  the new format, the card's statement of the format; no weights file is touched).
+  The upgrade does not rewrite a preset's `session`: a `karume/5` repository whose presets declare one of the removed
+  session keys (above) is built again from its recipe, or its declarations rewritten to `numerics`, before the hub
+  reads it. The exporter is not published on PyPI yet; the command runs from a checkout of the repository.
+- `@karume/runtime/tune`: `runGeometrySweep` starts every case with a quick look: after the case's warm start every
+  geometry gets one short timed pass, and only the default geometry and the candidates whose quick time is at most
+  `GeometrySweepOptions.quickLookMargin` (×1.25, `QUICK_LOOK_MARGIN`) times the default's are timed in full; the others
+  are rows marked `screened` with their quick time (`quickPerDispatch`) and no rounds, digest or comparison. A margin
+  of 0 times every geometry. The record is `karume-geometry-sweep/4` (`settings.quickLookMargin`, the rows'
+  `quickPerDispatch` and `screened`, each case's `screened` count), and `deriveGeometryProfile` reads `/4` only: a
+  `/3` record is refused, naming its format, and a screened row is no observation (a geometry screened out in a case no
+  record timed it in is not adopted for that case's class). A saved `/3` record no longer derives a table: a family
+  regenerates from a new sweep. Of the embedded tables, `nvidia-blackwell`'s geometries are derived from a `/4`
+  record (under Changed); those of `nvidia-ampere` and `apple-metal-3` stay as they are.
+- `karume-anima` / `karume-anima-extra` (Anima, all seven models): every float-stored component is bf16, the upstream
+  checkpoints' own values, and the presets are named from that base. `f16+dit8` → `bf16+dit8`,
+  `f16+dit8-a8` → `bf16+dit8-a8`, `f16+dit8-a8-attn8` → `bf16+dit8-a8-attn8`, `f16+dit8-a8-attn8-s16` →
+  `bf16+dit8-a8-attn8-s16` (the default), `f16-c16` → `bf16-c16` (the original weights, the transformer computed in
+  f16); `bf16` is unchanged, and `f16` is removed — with a bf16 transformer it is `bf16`. There is no alias: against a
+  revision with the new manifest, an old name is refused as an unknown preset, with the available names listed (`bf16`
+  replaces `f16`). A caller that omits `quant` gets `bf16+dit8-a8-attn8-s16`, whose text encoder, text conditioner and
+  VAE decoder are now bf16, so its images differ from the earlier default's. The f16 files leave both repositories;
+  the revisions published versions pin keep them and keep working.
 
 ## [0.22.0] - 2026-11-14
 
