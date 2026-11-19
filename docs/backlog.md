@@ -221,12 +221,10 @@ maintainer's ruling of 2026-11-06).
        - `nvidia-blackwell`'s choices have one end-to-end measurement, of the table before its derivation from 82
          records ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a token with the default's choices,
          E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); the table derived from 82 records, a speculative decode and the
-         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists nothing to measure against the current default;
+         26B model are not measured. On its 82 records the planner (`--gemv-plan`) lists one group to measure against the current default: the int8 `262144 × 1536` case at one row (35 candidates), which its two records of that case measured against another default;
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table
          would allow it): their evidence is the device's sweep records;
        - the default's 22 rows on Metal, where nothing was measured and their words were not compared;
-       - the default's int8 output-head row (`262144 × 1536`, `c16u4`), which predates the direction: the RTX
-         5070 Ti reads the general variant ×1.04 faster, and no shipped model has that shape in int8;
        - the choice between sequential variants a few percent apart moves with the records given, and the
          narrowed sweeps measured four hand-picked variants (the planner still lists the others).
      - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
