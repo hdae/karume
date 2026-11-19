@@ -10,8 +10,9 @@
  * skipped explicitly with one console line naming the missing files. Each file's sha256 is checked
  * against the one the table cites.
  *
- * apple-metal-3 has no such case: every record it cites has the format `karume-geometry-sweep/2`.
- * This ends when that table is regenerated from a new sweep. No GPU.
+ * apple-metal-3 has no such case: every record its tile geometry's provenance cites has the format
+ * `karume-geometry-sweep/2` (its GEMV choices come from GEMV sweep records, which this case does not
+ * read). This ends when its tile geometry is swept again. No GPU.
  */
 
 import { existsSync, readFileSync } from "node:fs";

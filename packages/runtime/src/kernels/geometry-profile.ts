@@ -302,12 +302,15 @@ const DEFAULT_LINEAR_GEMV: LinearGemvChoices = {
     // variant's, and at least ×1.10 over it at M = 1 in every steady group, from two records or
     // more — ×1.17 to ×1.89 per dispatch in three to five records each, perf-ledger K-112) and
     // that no measured device is slower with: the RTX 5070 Ti in Chrome reads them ×1.015 to ×1.495
-    // over the general variant (2026-11-18).
+    // over the general variant (2026-11-18). The Apple M2's records, taken since, time the general
+    // variant against 12 of them and read it ×1.01 to ×1.26 faster on 11; `apple-metal-3` runs
+    // another variant on 17 of the 22 (docs/limitations.md, the linear GEMV family).
     // A row a measured device is slower with is not added to the default; it lives in the table of
     // the device that gains from it (`nvidia-ampere` carries the int4 output heads of the q4_0 QAT
-    // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95;
-    // `nvidia-blackwell` carries 42 int4 and int8 rows of its own, and another variant on two of
-    // the bf16 rows, at least ×1.12 and ×1.20 faster in its records).
+    // E2B / E4B models and bf16 10240 × 2560, which the RTX 5070 Ti reads ×0.89 to ×0.95, and the
+    // bf16 output head 262144 × 2560; `nvidia-blackwell` carries 42 int4 and int8 rows of its own,
+    // and another variant on two of the bf16 rows, at least ×1.12 and ×1.20 faster in its records;
+    // `apple-metal-3` carries 64 int4 and int8 rows of its own).
     // A row names a storage and a shape (no group length) and applies at M = 1: a row block takes
     // the general variant.
     // MUST: a row added or changed, here or in a registered table, goes together with

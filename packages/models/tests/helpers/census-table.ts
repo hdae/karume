@@ -330,8 +330,11 @@ const GEMMA4_REGULAR_MIRROR = "karume-gemma4";
 /**
  * Pipeline `gemma4` rows of the regular line's mirror (`models/karume-gemma4`, bf16 — its preset
  * `bf16-fast` declares `level: "reorder"`). Derived 2026-11-19 from the mirror's E2B / E4B `model`
- * and E2B `drafter` part 0 with the procedure of the file header on the default profile's 17 bf16
- * parallel rows (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows).
+ * and E2B `drafter` part 0 with the procedure of the file header, on the parallel rows of the table
+ * the development machine's RTX 3080 Ti selects (`nvidia-ampere`: the default profile's 17 bf16
+ * rows and its own bf16 `2560 × 256`), where the real-GPU runs compare them with the dispatched
+ * kernels (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows, and
+ * the default profile's plan with that table's).
  *
  * E2B (product graph): of the 277 bf16 linears, 207 take a parallel GEMV row at M ≤ 8; the other 70
  * (`12288 × 1536` 40, `1536 × 2048` 28, the output head 262144×1536 and `8960 × 1536`) have no
@@ -344,11 +347,12 @@ const GEMMA4_BF16_E2B_GEMV = { variant: 207, reference: 70 } as const;
  */
 const GEMMA4_BF16_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
 /**
- * E4B (product graph): of the 344 bf16 linears, 216 take a parallel GEMV row at M ≤ 8; the other
- * 128 (`10240 × 2560` 84, `2560 × 256` 42, the output head 262144×2560 and `10752 × 2560`) have
- * none.
+ * E4B (product graph): of the 344 bf16 linears, 258 take a parallel GEMV row at M ≤ 8 — the 216
+ * the default profile's rows reach and the 42 `2560 × 256` of `nvidia-ampere`'s own row; the other
+ * 86 (`10240 × 2560` 84, the output head 262144×2560 and `10752 × 2560`) have none. Under the
+ * default profile `2560 × 256` has no row either (216 / 128).
  */
-const GEMMA4_BF16_E4B_GEMV = { variant: 216, reference: 128 } as const;
+const GEMMA4_BF16_E4B_GEMV = { variant: 258, reference: 86 } as const;
 
 /**
  * Pipeline `gemma4` rows: the q4_0 QAT line's mirror (`models/karume-gemma4-qat`) — the line that

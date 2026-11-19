@@ -1241,12 +1241,12 @@ export type EstimateFusionFacts = Omit<
  * place. Of the choices, the fusion pass reads which shapes have a parallel row (the
  * linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing), and no
  * size reads the rest (the sequential variants, a row's lanes, staged flag and row block: the
- * kernels they select hold no temporary). `nvidia-ampere`'s parallel rows are the default's.
- * `nvidia-blackwell` adds rows on 20 shapes (5 of them bf16), removes none and keeps every packed
- * flag (tests/linear_gemv_profile_test.ts pins both tables): on that adapter a linear of one of
- * those shapes that feeds a `static_quantize`, at `reorder` and up to 8 rows, folds in the Session
- * and not here. No graph of a Gemma 4 distribution has one, so their plans are the Session's
- * (docs/limitations.md, the `workspaceBytes` section).
+ * kernels they select hold no temporary). Every embedded table adds parallel rows — `nvidia-ampere`
+ * on one shape (bf16), `nvidia-blackwell` on 20 (5 of them bf16), `apple-metal-3` on 13 (3 of them
+ * bf16) —, removes none and keeps every packed flag (tests/linear_gemv_profile_test.ts pins every
+ * table): on such an adapter a linear of one of those shapes that feeds a `static_quantize`, at
+ * `reorder` and up to 8 rows, folds in the Session and not here. No graph of a Gemma 4 distribution
+ * has one, so their plans are the Session's (docs/limitations.md, the `workspaceBytes` section).
  *
  * `options` are checked values (the entry of {@link estimateGraphMemory} ran
  * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the

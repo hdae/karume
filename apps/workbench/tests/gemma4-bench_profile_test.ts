@@ -23,7 +23,7 @@ import { createVisitProbe, type VisitDeviceProbe } from "../src/gemma4-bench/vis
 const AMPERE: BenchAdapter = { vendor: "nvidia", architecture: "ampere", description: "" };
 /** Another one, whose own parallel rows differ from the default profile's (the RTX 5070 Ti's). */
 const BLACKWELL: BenchAdapter = { vendor: "nvidia", architecture: "blackwell", description: "" };
-/** An adapter whose table carries none (the Apple M2's). */
+/** A third one, whose sequential exceptions and parallel rows are its own too (the Apple M2's). */
 const APPLE: BenchAdapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
 /** An adapter no embedded table matches. */
 const UNKNOWN: BenchAdapter = { vendor: "acme", architecture: "anvil", description: "" };
@@ -37,7 +37,7 @@ const tableOf = (id: string) => {
 const DEFAULT_GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 
 describe("the profile of a bench arm", () => {
-  it("is left to the runtime for an arm without a switch, whose choices are the table's own or, without them, the default profile's", () => {
+  it("is left to the runtime for an arm without a switch, whose choices are the table's own", () => {
     expect(armGeometryProfile(AMPERE, [])).toBeUndefined();
     const own = tableOf("nvidia-ampere").linearGemv;
     expect(own).toBeDefined();
@@ -47,12 +47,13 @@ describe("the profile of a bench arm", () => {
       tableCarriesGemv: true,
       linearGemv: own,
     });
-    expect(tableOf("apple-metal-3").linearGemv).toBeUndefined();
+    const apple = tableOf("apple-metal-3").linearGemv;
+    expect(apple).toBeDefined();
     expect(armGemvChoices(APPLE, [])).toEqual({
       switches: [],
       table: "apple-metal-3",
-      tableCarriesGemv: false,
-      linearGemv: DEFAULT_GEMV,
+      tableCarriesGemv: true,
+      linearGemv: apple,
     });
   });
 
@@ -65,8 +66,10 @@ describe("the profile of a bench arm", () => {
     expect(tableOf("nvidia-ampere").linearGemv?.sequential.shapes.length).toBeGreaterThan(
       DEFAULT_GEMV.sequential.shapes.length,
     );
-    // A table without the field is itself under the switch
-    expect(armGeometryProfile(APPLE, ["default-gemv"])).toEqual(tableOf("apple-metal-3"));
+    // Every table loses its own field under the switch
+    const { linearGemv: _apple, ...apple } = tableOf("apple-metal-3");
+    expect(armGeometryProfile(APPLE, ["default-gemv"])).toEqual(apple);
+    expect(armGemvChoices(APPLE, ["default-gemv"]).linearGemv).toBe(DEFAULT_GEMV);
     // A table whose parallel rows are its own runs the default profile's rows under the switch
     expect(tableOf("nvidia-blackwell").linearGemv?.parallelShapes).not.toEqual(
       DEFAULT_GEMV.parallelShapes,
@@ -131,14 +134,28 @@ describe("the profile of a bench arm", () => {
   it("is named in one summary line: the table, whose choices, and how many exceptions and parallel rows", () => {
     const rows = DEFAULT_GEMV.parallelShapes.length;
     const own = tableOf("nvidia-ampere").linearGemv?.sequential.shapes.length;
+    const ownRows = tableOf("nvidia-ampere").linearGemv?.parallelShapes.length;
     expect(gemvChoicesLine("arm 1 X", armGemvChoices(AMPERE, []))).toBe(
-      `arm 1 X · table nvidia-ampere · the table's own GEMV choices · sequential c32u4 with ${own} per-shape exceptions · ${rows} parallel rows`,
+      `arm 1 X · table nvidia-ampere · the table's own GEMV choices · sequential c32u4 with ${own} per-shape exceptions · ${ownRows} parallel rows`,
     );
     expect(gemvChoicesLine("arm 2 X", armGemvChoices(AMPERE, ["default-gemv"]))).toBe(
       `arm 2 X · table nvidia-ampere · the default profile's GEMV choices · sequential c32u4 with ${DEFAULT_GEMV.sequential.shapes.length} per-shape exceptions · ${rows} parallel rows`,
     );
+    const appleRows = tableOf("apple-metal-3").linearGemv?.parallelShapes.length;
     expect(gemvChoicesLine("arm 2 X", armGemvChoices(APPLE, ["general-sequential"]))).toBe(
-      `arm 2 X · table apple-metal-3 · the default profile's GEMV choices, the sequential exceptions removed · sequential c32u4 with 0 per-shape exceptions · ${rows} parallel rows`,
+      `arm 2 X · table apple-metal-3 · the table's own GEMV choices, the sequential exceptions removed · sequential c32u4 with 0 per-shape exceptions · ${appleRows} parallel rows`,
+    );
+    // A table without choices of its own runs with the default profile's (every embedded table
+    // carries its own, so the choices are written out here)
+    expect(
+      gemvChoicesLine("arm 3 X", {
+        switches: [],
+        table: "a-table-without-gemv",
+        tableCarriesGemv: false,
+        linearGemv: DEFAULT_GEMV,
+      }),
+    ).toBe(
+      `arm 3 X · table a-table-without-gemv · the default profile's GEMV choices · sequential c32u4 with ${DEFAULT_GEMV.sequential.shapes.length} per-shape exceptions · ${rows} parallel rows`,
     );
     // A table's own parallel rows are counted as they are
     const blackwell = tableOf("nvidia-blackwell").linearGemv;

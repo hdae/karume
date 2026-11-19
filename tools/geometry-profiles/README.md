@@ -118,9 +118,9 @@ inputs give the same bytes):
   rule when GEMV records were given, then the derivations' verdict lines. The GEMV choices are named among the things
   derived or carried over like an op family.
 
-The headers of the three tables registered before this tool existed (`apple-metal-3`, `nvidia-ampere`,
-`nvidia-blackwell`) are hand-edited prose; they stay until a table is regenerated, which replaces its header with the
-generated one. The rest of each file is already what this command writes (the tests check it).
+Every registered table's header is the generated one, and the rest of each file is what this command writes (the
+tests check it). The tile geometry of `apple-metal-3` was written by a tool that no longer exists; its header's
+"Carried over" line names the commit whose file holds that tool's adoption lines.
 
 ## Registering a new table
 

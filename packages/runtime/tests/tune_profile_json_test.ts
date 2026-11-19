@@ -550,6 +550,8 @@ describe("parseGeometryProfileJson: the optional key-axis form of the online att
 describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearGemv)", () => {
   const gemv = DEFAULT_GEOMETRY_PROFILE.linearGemv;
   const withGemv: GeometryProfile = { ...BASE, linearGemv: gemv };
+  /** BASE without the field (the built-in table carries its own). */
+  const { linearGemv: _own, ...withoutGemv } = BASE;
   /** BASE carrying `linearGemv` with its first parallel row replaced by `row` (any shape). */
   const withParallelRow = (row: unknown): string =>
     json({
@@ -560,7 +562,7 @@ describe("parseGeometryProfileJson: the optional GEMV choices of linear (linearG
 
   it("a table with linearGemv comes back with it (every parallel row in its order, with its flags), and a table without it comes back without the field", () => {
     assertEquals(parseGeometryProfileJson(geometryProfileJson(withGemv)), withGemv);
-    assertEquals("linearGemv" in parseGeometryProfileJson(geometryProfileJson(BASE)), false);
+    assertEquals("linearGemv" in parseGeometryProfileJson(geometryProfileJson(withoutGemv)), false);
   });
 
   it("reads parallel rows of the float storages: bf16, f16 staged and f32, without a group", () => {

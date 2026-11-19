@@ -710,10 +710,12 @@ for the options it is given: a fusion or compute option the Session gets and the
 planned at the runtime default, and the windows it folds are counted unfused. It also has no adapter:
 it plans its fusions with the default geometry profile's GEMV choices, and a Session plans them with
 those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
-a linear whose shape has a parallel row, and `nvidia-blackwell` (the RTX 5070 Ti's table) has rows on
-20 shapes the default has none for (5 of them bf16 linears of regular Gemma 4 E2B and E4B); no
+a linear whose shape has a parallel row, and each embedded table has rows on shapes the default has
+none for: `nvidia-blackwell` (the RTX 5070 Ti's table) on 20 (5 of them bf16 linears of regular
+Gemma 4 E2B and E4B), `apple-metal-3` (the Apple M2's) on 13 (3 bf16; its 10 integer shapes are
+among `nvidia-blackwell`'s) and `nvidia-ampere` (the RTX 3080 Ti's) on one, bf16 `2560 × 256`; no
 registered table removes a row of the default or changes which
-rows read packed activations (a core-lane test). On that adapter a linear of one of those shapes that
+rows read packed activations (a core-lane test). On such an adapter a linear of one of those shapes that
 feeds a `static_quantize`, with linear at `reorder` and at most 8 rows, is one fused step in the
 Session and two nodes in the estimate: the estimate then counts the linear's f32 output (4 · rows · N
 bytes: at most 393,216 for the 17 shapes that are not an output head, 8,388,608 for the three that
@@ -727,7 +729,9 @@ linears of regular E2B and E4B and the int2 output heads of the mobile line —
 and none feeds a `static_quantize` (only linears of the mobile line feed one); the fusion plans of the mobile line's `i4`, `i4-gemvpar` and `i4-fast`
 at 1, 4 and 8 rows are the same step for step under both sets of choices, and so is every byte
 (resident, peak and each scenario's workspace) of 23 estimates: the models and drafters of the three
-distributions at their `bf16`, `i4`, `i4-gemvpar` and `i4-fast` presets. A table
+distributions at their `bf16`, `i4`, `i4-gemvpar` and `i4-fast` presets. That comparison was made with
+`nvidia-blackwell`'s choices; the shapes the other two tables add are bf16 ones or among those, so no
+Gemma 4 linear of theirs feeds a `static_quantize` either. A table
 injected with `acquireGpu({ geometryProfile })` that names other parallel shapes is in the same
 position, and nothing checks it. The `unaccounted` field
 lists what is not counted, verbatim — ① fusion the options passed do not describe ② the quantization
@@ -886,42 +890,58 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   byte-identical WGSL" and of the ban on run-time autotuning (ADR 0022). For other devices, replace it
   with `SessionOptions.linearGemvRowsThreadTarget` (static, fixed at Session creation).
   There is no automatic selection per device.
-- **The variant of the sequential M=1 kernel is chosen from two measured devices**: the default geometry profile
-  holds one general variant (32 columns per workgroup, 4 words read ahead) and 22 per-shape exceptions
-  (`linearGemv.sequential`), bf16 linears of regular Gemma 4 E2B / E4B, and every adapter whose table carries no
-  GEMV choices runs them. Every variant writes the same
-  words, so the choice is speed alone. The 22 bf16 rows were adopted from GEMV sweeps of the RTX 3080 Ti (×1.17 to
-  ×1.89 per dispatch) and are faster on the RTX 5070 Ti in Chrome too (×1.015 to ×1.495, 2026-11-18); a row a
-  measured device is slower with is not in the default but in the table of the device that gains from it
-  (`nvidia-ampere`: the int4 output heads of the q4_0 QAT E2B / E4B models, bf16 `10240 × 2560` and the drafter shape
-  int4 `256 × 2048`, which the RTX 5070 Ti reads ×0.89 to ×0.95 — [perf-ledger](perf-ledger.md) K-101, K-112;
-  `nvidia-blackwell`: 42 int4 and int8 shapes, from the RTX 5070 Ti's own records). No
-  Apple device has measured any of them: `apple-metal-3` runs the default's rows unmeasured, and on Metal their
-  words were not compared with the general variant's (on Vulkan and on D3D12 they were). A table derived from a
-  device's own GEMV sweep records starts from the default's exceptions: it keeps the ones its records give no
-  evidence about, and removes one only when its records adopt the general variant over it, which takes ×1.10 in
-  every group — a device on which an inherited exception is slower by less keeps it. `nvidia-blackwell` is such a
-  table, and it keeps all 22 bf16 rows: on 5 of their shapes its records, two each, show no variant ×1.10 faster;
-  on the other 17, which are also the default's bf16 parallel rows, its records name the sequential GEMV as the
-  default's choice at `reorder` and are no evidence while the default's choice there is the parallel row. **On
-  two of those shapes an `exact` Session on the RTX 5070 Ti is slower than its own records allow**: bf16
-  `1536 × 256` runs `c32u16` where its records read `c16u8` ×1.20 to ×1.21 faster, and bf16 `4096 × 2560` `c16u8`
-  where they read `c16u16` ×1.12 to ×1.13 faster. A `reorder` Session there runs the default's lanes on the 17
-  parallel rows, where its records had chosen other lanes or the staged form on 8 of them. Both last until the
-  device's bf16 cases are measured again against the current default and the table is derived again
-  ([backlog](backlog.md), the default profile's GEMV choices from several devices' records).
-- **On NVIDIA Blackwell adapters the parallel rows are that table's own**: `nvidia-blackwell` holds 61 parallel rows
-  apart from the default's (other lanes on 22 of the default's rows, 20 rows on shapes the default has none for —
-  5 of them bf16 —, the staged form or another row block on the rest; its 17 bf16 rows on the default's bf16 shapes
-  are the default's), derived from GEMV sweep records of one RTX
-  5070 Ti in Chrome on D3D12. A Session with linear at `reorder` there gives other bits than the same Session on
-  another adapter on the 42 shapes whose lanes differ or whose row is new, inside the band of `linear`. Each row of
-  its own is at least ×1.10 faster per dispatch than the default's choice in every record. A decode token was measured with
-  the table as it was before its last derivation (QAT `i4-fast` E2B, E4B and 12B, the same tokens —
-  [research](research/2026-11-18-blackwell-gemv-table-decode.md)), not with these rows; no test runs them on their own shapes on the development machine — the
-  records hold their band readings. A parallel row is reached only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's
-  presets only `bf16-fast` declares that level (in the recipe and the local mirror, not published yet), so only its
-  Sessions run the bf16 rows.
+- **The variant of the sequential M=1 kernel is chosen per measured device**: the default geometry profile holds
+  one general variant (32 columns per workgroup, 4 words read ahead) and 22 per-shape exceptions
+  (`linearGemv.sequential`), bf16 linears of regular Gemma 4 E2B / E4B, and an adapter whose table carries no GEMV
+  choices of its own runs them — one no embedded table matches, such as an Apple adapter that reports no description
+  (the M5's), which no record of its own measured. Every exception a table holds writes the general variant's words
+  (on Vulkan a GPU test compares each; on D3D12 and on Metal the device's records do — below), so the choice is speed
+  alone.
+  The 22 bf16 rows were adopted from GEMV sweeps of the RTX 3080 Ti (×1.17 to ×1.89 per dispatch) and are faster on
+  the RTX 5070 Ti in Chrome too (×1.015 to ×1.495, 2026-11-18); a row a measured device is slower with is not in the
+  default but in the table of the device that gains from it. Each of the three measured devices has a table derived
+  from its own GEMV sweep records. Such a table starts from the default's exceptions: it keeps the ones its records
+  give no evidence about, and replaces one only when its records adopt another variant over it, which takes ×1.10
+  in every group — a device on which an inherited exception is slower by less keeps it.
+  - `nvidia-ampere` (RTX 3080 Ti, Node, Vulkan): the default's 22, and five of its own — the int4 output heads of the
+    q4_0 QAT E2B / E4B models, bf16 `10240 × 2560` and the drafter shape int4 `256 × 2048`, which the RTX 5070 Ti
+    reads ×0.89 to ×0.95 ([perf-ledger](perf-ledger.md) K-101, K-112), and the bf16 output head of regular E4B,
+    `262144 × 2560`, which neither of the other devices' records adopt.
+  - `nvidia-blackwell` (RTX 5070 Ti, Chrome, D3D12): the default's 22, two of them with its own variant (bf16
+    `1536 × 256` and `4096 × 2560`, both `c16u16`, ×1.12 to ×1.21), and 42 int4 and int8 shapes of its own.
+  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 17 of them with its own variant of 32 to 256
+    columns per workgroup (×1.10 to ×1.54), and 64 int4 and int8 shapes of its own. The M2's records compare every
+    sequential variant they time with the baseline (what an `exact` Session runs with the default profile) word for
+    word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So each of
+    the table's 81 adopted exceptions writes the baseline's words on Metal in every record that timed it (224
+    groups): the general variant's on its 64 own shapes, the default's exception's on the 17 others. Not every
+    variant does: 423 of the 2,737 sequential-variant rows the records time at one row besides the baseline — all of
+    int2, int4 and int8 cases and all of read-ahead depths other than 4; no bf16 row — write other words than the
+    baseline there, and none of them is adopted. On 12 of the default's 22 shapes the records also time the general
+    variant against the default's exception, with the same words; on the other 10 the quick look left it untimed, so
+    on those shapes the default's exception has not been compared with the general variant on Metal. **The 5 exceptions of the default that the
+    table keeps are not thereby shown faster on the M2**: they stay because no variant reaches ×1.10 over them, and
+    the general variant reads ×1.02 to ×1.04 faster than the default's exception on `6144 × 1536` and
+    `12288 × 1536`, ×0.995 to ×1.03 on `10752 × 2560` and ×0.94 to ×0.99 on `2048 × 2560` (`256 × 1536`: not
+    timed). Over the 12 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
+    11 on the M2: there the default's exceptions do not meet the default's rule that no measured device is slower
+    with a row.
+- **On each embedded table's adapter the parallel rows are that table's**: `nvidia-ampere` holds the default's 88
+  and one of its own, bf16 `2560 × 256` at 16 lanes; `nvidia-blackwell` 63 apart from the default's (other lanes on
+  24 of the default's rows, 2 of them bf16; 20 rows on shapes the default has none for, 5 of them bf16; the staged
+  form or another row block on the rest); `apple-metal-3` 65 apart from the default's (other lanes on 34 of the
+  default's rows, 4 of them bf16; 13 rows on shapes the default has none for, 3 of them bf16; the staged form
+  cleared or another row block on the rest). Each table is derived from GEMV sweep records of one device: the RTX
+  3080 Ti under Node on Vulkan, the RTX 5070 Ti in Chrome on D3D12, the Apple M2 in Chrome on Metal. A Session with
+  linear at `reorder` there gives other bits than the same Session on another adapter on the shapes whose lanes
+  differ or whose row is new (1, 44 and 47 of them), inside the band of `linear`. Each row of a table's own met the
+  adoption rule in every record that is evidence ([spec](spec/geometry-profiles.md#deriving-the-gemv-choices)).
+  A decode token was measured with `nvidia-blackwell` as it was before its derivation from 82 records (QAT `i4-fast`
+  E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); no table has
+  been measured end to end since its rows were derived from the current records, and no test runs a table's rows
+  on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
+  only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's presets only `bf16-fast` declares
+  that level (in the recipe and the local mirror, not published yet), so only its Sessions run the bf16 rows.
 - **The first turn pays the shader parsing cost**: a row-block variant is WGSL unrolled over its rows,
   and the parse and validation cost is superlinear in the amount of text. Even at the ceiling
   (256 elements/word), i4 with 8 rows / i8 with 16 rows cost ≈ 55–60 ms each, and the 5 pipelines that

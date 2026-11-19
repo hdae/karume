@@ -70,7 +70,8 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // (`OLD_DEFAULT_VARIANT`). The per-shape exceptions are the 22 rows added since
 // (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-112: bf16 linears of regular E2B / E4B that
 // no measured device is slower with). The exceptions one device gains from and another loses with
-// are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES`: `nvidia-ampere`).
+// are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES` and `AMPERE_PARALLEL_SHAPES`:
+// `nvidia-ampere`).
 // ---------------------------------------------------------------------------
 
 const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
@@ -348,13 +349,24 @@ const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
  * The sequential exceptions `nvidia-ampere` carries after the default profile's (the generator's
  * order: the order of the sweep's case table): what the RTX 3080 Ti's GEMV sweep records adopt and
  * the default profile does not hold — the int4 output heads of the q4_0 QAT E2B / E4B models and
- * bf16 10240 × 2560, which the RTX 5070 Ti is slower with, and the drafter shape int4 256 × 2048.
+ * bf16 10240 × 2560, which the RTX 5070 Ti is slower with, the drafter shape int4 256 × 2048, and
+ * the bf16 output head of regular E4B, 262144 × 2560, which neither the RTX 5070 Ti's nor the Apple
+ * M2's records adopt.
  */
 const AMPERE_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
   { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
   { storage: "i4", n: 256, k: 2048, variant: { cols: 16, unroll: 16 } },
   { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
   { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
+  { storage: "bf16", n: 262144, k: 2560, variant: { cols: 16, unroll: 4 } },
+];
+
+/**
+ * The parallel row `nvidia-ampere` adds after the default profile's: bf16 2560 × 256 of regular
+ * E4B, which the default has no row for (the three devices' records adopt three lane counts there).
+ */
+const AMPERE_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
+  { storage: "bf16", n: 2560, k: 256, lanes: 16, packedActivations: false },
 ];
 
 /** The pinned sequential variant of a shape: a row added since, otherwise the kernel module's lookup. */
@@ -895,7 +907,7 @@ const OWN: GeometryProfile = {
 };
 
 describe("a table without the GEMV choices runs with the default profile's, resolved where a Session selects its profile", () => {
-  it("an embedded table without the field runs with the default profile's choices, and the two NVIDIA tables carry their own; nvidia-ampere's are the default's with its four sequential exceptions after them", () => {
+  it("an embedded table without the field runs with the default profile's choices, and every embedded table carries its own; nvidia-ampere's are the default's with its five sequential exceptions and its one parallel row after them", () => {
     const carrying: string[] = [];
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       if ("linearGemv" in profile) {
@@ -904,7 +916,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       }
       assertStrictEquals(resolveGeometryProfile(profile).linearGemv, GEMV, profile.id);
     }
-    assertEquals(carrying, ["nvidia-ampere", "nvidia-blackwell"]);
+    assertEquals(carrying, ["apple-metal-3", "nvidia-ampere", "nvidia-blackwell"]);
     const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere");
     assert(ampere !== undefined);
     // A table holds the field as a whole, so this also pins that its parallel rows, thread target
@@ -915,35 +927,96 @@ describe("a table without the GEMV choices runs with the default profile's, reso
         variant: GEMV.sequential.variant,
         shapes: [...GEMV.sequential.shapes, ...AMPERE_SEQUENTIAL_SHAPES],
       },
+      parallelShapes: [...GEMV.parallelShapes, ...AMPERE_PARALLEL_SHAPES],
     });
   });
 
-  it("nvidia-blackwell's are the default's with what its own records adopt in place: the default's exceptions as they are, 42 more sequential exceptions, and 61 parallel rows changed or added", () => {
-    const blackwell = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-blackwell");
-    assert(blackwell?.linearGemv !== undefined);
-    const own = blackwell.linearGemv;
-    // What the derivation never writes is the default's of today
+  /** `[storage, n, k]` of a sequential exception, which has no group length. */
+  const shapeKey = ({ storage, n, k }: { storage: string; n: number; k: number }): string =>
+    [storage, n, k].join(" ");
+
+  /** A parallel row's shape: `[storage, n, k, group]`. */
+  const rowKey = (row: LinearGemvParallelShape): string =>
+    [row.storage, row.n, row.k, row.group ?? "-"].join(" ");
+
+  /**
+   * Pins a table's field against the default's: the general variant and the thread target are the
+   * default's of today (the derivation never writes them); every exception of the default is there,
+   * in the default's order, with the default's variant except on the shapes `ownVariant` names
+   * (each of which the default holds with another variant); `ownExceptions` of the table's own
+   * follow; every parallel row of the default is there, in the default's order, `changed` of them
+   * other than the default's, and `added` rows follow.
+   */
+  const assertDerivedFrom = (
+    id: string,
+    ownVariant: ReadonlyMap<string, LinearGemvVariant>,
+    counts: { ownExceptions: number; changed: number; added: number },
+  ): void => {
+    const table = BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.id === id);
+    assert(table?.linearGemv !== undefined, id);
+    const own = table.linearGemv;
     assertEquals(own.sequential.variant, GEMV.sequential.variant);
     assertEquals(own.rowsThreadTarget, GEMV.rowsThreadTarget);
-    // Every exception of the default is there, in the default's order and with the default's
-    // variant; the table's own follow. The device's records of the default's bf16 shapes were taken
-    // while the default had no parallel row of them, so they are evidence for neither class there
-    // until the device is measured again (docs/limitations.md, the device tables' GEMV choices).
+    const replaced = GEMV.sequential.shapes.filter((row) => ownVariant.has(shapeKey(row)));
+    assertEquals(replaced.length, ownVariant.size);
+    for (const row of replaced) {
+      assert(JSON.stringify(row.variant) !== JSON.stringify(ownVariant.get(shapeKey(row))));
+    }
     const inherited = GEMV.sequential.shapes.length;
-    assertEquals(own.sequential.shapes.slice(0, inherited), GEMV.sequential.shapes);
-    assertEquals(own.sequential.shapes.length - inherited, 42);
-    // Every parallel row of the default is there, in the default's order, with the rows added after
-    const key = (row: LinearGemvParallelShape): string =>
-      [row.storage, row.n, row.k, row.group ?? "-"].join(" ");
     assertEquals(
-      own.parallelShapes.slice(0, GEMV.parallelShapes.length).map(key),
-      GEMV.parallelShapes.map(key),
+      own.sequential.shapes.slice(0, inherited),
+      GEMV.sequential.shapes.map((row) => {
+        const variant = ownVariant.get(shapeKey(row));
+        return variant === undefined ? row : { ...row, variant };
+      }),
+    );
+    assertEquals(own.sequential.shapes.length - inherited, counts.ownExceptions);
+    assertEquals(
+      own.parallelShapes.slice(0, GEMV.parallelShapes.length).map(rowKey),
+      GEMV.parallelShapes.map(rowKey),
     );
     const changed = GEMV.parallelShapes.filter(
       (row, index) => JSON.stringify(row) !== JSON.stringify(own.parallelShapes[index]),
     ).length;
     const added = own.parallelShapes.length - GEMV.parallelShapes.length;
-    assertEquals([changed, added], [41, 20]);
+    assertEquals([changed, added], [counts.changed, counts.added]);
+  };
+
+  it("nvidia-blackwell's are the default's with what its own records adopt in place: two of the default's exceptions with another variant, 42 more sequential exceptions, and 63 parallel rows changed or added", () => {
+    assertDerivedFrom(
+      "nvidia-blackwell",
+      new Map([
+        ["bf16 1536 256", { cols: 16, unroll: 16 }],
+        ["bf16 4096 2560", { cols: 16, unroll: 16 }],
+      ]),
+      { ownExceptions: 42, changed: 43, added: 20 },
+    );
+  });
+
+  it("apple-metal-3's are the default's with what the Apple M2's records adopt in place: 17 of the default's exceptions with another variant, 64 more sequential exceptions, and 65 parallel rows changed or added", () => {
+    assertDerivedFrom(
+      "apple-metal-3",
+      new Map([
+        ["bf16 8960 1536", { cols: 128, unroll: 16 }],
+        ["bf16 2048 1536", { cols: 256, unroll: 8 }],
+        ["bf16 1536 2048", { cols: 256, unroll: 8 }],
+        ["bf16 1536 6144", { cols: 256, unroll: 8 }],
+        ["bf16 1536 256", { cols: 64, unroll: 2 }],
+        ["bf16 4096 1536", { cols: 128, unroll: 16 }],
+        ["bf16 512 1536", { cols: 128, unroll: 8 }],
+        ["bf16 1536 4096", { cols: 256, unroll: 8 }],
+        ["bf16 1536 12288", { cols: 128, unroll: 8 }],
+        ["bf16 512 2560", { cols: 128, unroll: 8 }],
+        ["bf16 256 2560", { cols: 128, unroll: 8 }],
+        ["bf16 2560 2048", { cols: 128, unroll: 16 }],
+        ["bf16 2560 10240", { cols: 128, unroll: 16 }],
+        ["bf16 2560 256", { cols: 32, unroll: 2 }],
+        ["bf16 4096 2560", { cols: 128, unroll: 16 }],
+        ["bf16 1024 2560", { cols: 256, unroll: 8 }],
+        ["bf16 2560 4096", { cols: 128, unroll: 16 }],
+      ]),
+      { ownExceptions: 64, changed: 52, added: 13 },
+    );
   });
 
   it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {
@@ -985,7 +1058,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       );
       assertEquals(packedAdded, [], `${profile.id}: an added row with packed activations`);
     }
-    assertEquals(tables, 2);
+    assertEquals(tables, 3);
   });
 
   it("resolveGeometryProfile fills in the default's choices and keeps every other field of the table, and keeps a table's own", () => {

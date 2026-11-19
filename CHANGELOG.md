@@ -192,7 +192,8 @@ measurements in `docs/research/`.
 - `karume-gemma4` (regular Gemma 4 E2B / E4B): the preset `bf16-fast`, the same weights as `bf16` (E2B's int8 drafter
   included), declaring `numerics: { level: "reorder" }` — the declaration of the q4_0 QAT line's `i4-fast`. The linears
   whose bf16 shape has a parallel row in the geometry profile run the parallel GEMV (on the default profile 207 of
-  E2B's 277 and 216 of E4B's 344; the output heads and the other shapes keep the sequential GEMV), and the states-form
+  E2B's 277 and 216 of E4B's 344, on an RTX 3080 Ti 207 and 258; the output heads and the other shapes keep the
+  sequential GEMV), and the states-form
   attention runs its parallel reductions with the row statistics folded into PV. Its tokens can differ from those of
   `bf16`, which stays the default and keeps the reference summation order. The recipe and the local mirror carry it;
   the published repository does not yet.
@@ -203,42 +204,66 @@ measurements in `docs/research/`.
   changes which columns a workgroup takes and how many weight words it reads before it multiply-adds them, not the
   order of the additions: outputs do not change by a bit, so a Session at `exact` runs it.
   - On every adapter, 22 bf16 linears of regular Gemma 4 E2B and E4B read 8 or 16 words ahead where they read 4
-    (the rows of the default geometry profile, `GeometryProfile.linearGemv.sequential.shapes`). They are the rows two
-    measured devices are both faster with: ×1.17 to ×1.89 per dispatch on an RTX 3080 Ti (Node, Vulkan) and ×1.015
-    to ×1.495 on an RTX 5070 Ti (Chrome, D3D12), the words compared on both. No Apple device has measured them.
+    (the rows of the default geometry profile, `GeometryProfile.linearGemv.sequential.shapes`), unless the adapter's
+    table names another variant for one of them (below). They are the rows two measured devices are both faster
+    with: ×1.17 to ×1.89 per dispatch on an RTX 3080 Ti (Node, Vulkan) and ×1.015 to ×1.495 on an RTX 5070 Ti
+    (Chrome, D3D12), the words compared on both.
   - On every adapter an int8 `262144 × 1536` linear runs the general variant in place of 16 columns per workgroup,
     so its dispatch reads `linear_gemv:v1:f32:c32u4:wi8` in `SessionDiagnostics.lastRunPipelines` in place of
     `…:c16u4:wi8`; no shipped model has a linear of that shape stored as int8.
-  - On NVIDIA Ampere adapters, four more shapes: the embedded table `nvidia-ampere` now carries GEMV choices of its
+  - On NVIDIA Ampere adapters, five more shapes: the embedded table `nvidia-ampere` now carries GEMV choices of its
     own (`linearGemv`) — the default profile's with 16 columns per workgroup on the int4 output heads of the Gemma 4
-    q4_0 QAT E2B and E4B models (`262144 × 1536`, `262144 × 2560`), 8 words ahead on bf16 `10240 × 2560` and 16 on
-    the MTP drafter shape int4 `256 × 2048`. An RTX 3080 Ti gains from them (×1.18 to ×1.87 per dispatch); an RTX
-    5070 Ti is slower with them (×0.89 to ×0.95), so they are not rows of the default.
+    q4_0 QAT E2B and E4B models (`262144 × 1536`, `262144 × 2560`), 8 words ahead on bf16 `10240 × 2560`, 16 on
+    the MTP drafter shape int4 `256 × 2048`, and 16 columns per workgroup on bf16 `262144 × 2560`, the output head
+    of regular E4B. An RTX 3080 Ti gains from them (×1.18 to ×1.87 per dispatch on the first four, ×1.62 to ×2.14 on
+    the last); an RTX 5070 Ti is slower with the first four (×0.89 to ×0.95), so they are not rows of the default,
+    and neither its records nor an Apple M2's adopt the fifth.
   - On NVIDIA Blackwell adapters, 42 more shapes of int4 (33) and int8 (9) storage read 8 or 16 words ahead: rows
     of the embedded table `nvidia-blackwell`, derived from GEMV sweep records of an RTX 5070 Ti in Chrome (D3D12),
-    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each. The 22 bf16
-    rows are the default's there.
+    each at least ×1.10 faster per dispatch than `c32u4` in every record, the words compared in each. Of the 22 bf16
+    rows, two read 16 words ahead with 16 columns per workgroup there, `1536 × 256` and `4096 × 2560` (×1.20 to
+    ×1.21 and ×1.12 to ×1.13 faster than the default's variant); the other 20 are the default's.
+  - On an Apple M2 (the adapter `apple` / `metal-3` / `Apple M2`), the embedded table `apple-metal-3` now carries
+    GEMV choices of its own, derived from GEMV sweep records of an M2 in Chrome (Metal): 17 of the 22 bf16 rows run
+    another variant of 32 to 256 columns per workgroup (×1.10 to ×1.54 faster per dispatch than the default's), and
+    64 more shapes of int4 (55) and int8 (9) storage of the Gemma 4 lines run 128 or 256 columns per workgroup
+    (`c128u4`, `c256u4`, `c128u8`; ×1.11 to ×2.56 over `c32u4`). The records compare every variant's words with
+    the baseline's on Metal, and the table holds only variants whose words were equal in every record, so a Session
+    at `exact` on an M2 runs them. An Apple adapter that reports no description (Chrome on an M5) matches no table
+    and runs the default's rows.
   - In `SessionDiagnostics.lastRunPipelines` those dispatches read `linear_gemv:v1:f32:c16u8:wbf16`,
-    `…:c16u16:wbf16` or `…:c32u16:wbf16`, and on Ampere `…:c16u2:wi4g32` and `…:c16u16:wi4g32`, in place of
-    `…:c32u4:…`.
+    `…:c16u16:wbf16` or `…:c32u16:wbf16`, on Ampere also `…:c16u2:wi4g32`, `…:c16u16:wi4g32` and
+    `…:c16u4:wbf16`, and on an M2 keys of 32 to 256 columns such as `…:c128u4:wi4g32` or `…:c256u8:wbf16`, in place
+    of `…:c32u4:…`.
   - On an RTX 3080 Ti under Node a decode token of regular Gemma 4 `bf16` takes 18.8 ms in place of 23.4 ms (E2B)
     and 27.7 ms in place of 36.1 ms (E4B). Of the QAT line, E4B `i4` takes 23.6 in place of 24.4 ms and E4B
     `i4-fast` 11.1 in place of 11.9 ms; E2B `i4-fast` read 6.4 in place of 6.7 ms once and 6.49 in place of 6.53 ms
     when repeated, and E2B `i4` shows no difference the measurement resolves. On an RTX 5070 Ti in Chrome a decode
     token of regular E2B `bf16` takes 19.1 ms in place of 22.9 ms.
-- `@karume/runtime`: on NVIDIA Blackwell adapters the parallel GEMV of linear at the level `reorder` runs the
-  choices derived from that device's own GEMV sweep records (an RTX 5070 Ti in Chrome, D3D12; the embedded table
-  `nvidia-blackwell` now carries `linearGemv`) in place of the default profile's, which an RTX 3080 Ti measured:
-  other lanes on 22 shapes, the staged form on 30, another row block on 7, and a row on 20 shapes the default
-  profile has none for — int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT line and
-  5 bf16 linears of regular Gemma 4 E2B and E4B (on its other 17 bf16 linears it runs the default's rows). No preset of regular Gemma 4 declares linear at
-  `reorder`, so none of its presets runs the bf16 rows. Each is at least ×1.10 faster per dispatch than the default's choice in every
-  record. On an RTX 5070 Ti in Chrome, with the choices of the table before its last derivation, a decode token of
-  QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the default's choices (E2B and E4B by 1 to 3 %, which the
-  measurement does not resolve); the bf16 parallel rows were not measured. On such an adapter the outputs of a `reorder` Session change
-  inside the band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every
-  Session on another adapter, write what they wrote. The memory estimate plans with the default profile's choices
-  as before; for the Gemma 4 distributions it gives the same numbers ([limitations](docs/limitations.md)).
+- `@karume/runtime`: on the adapters of the three embedded tables the parallel GEMV of linear at the level
+  `reorder` runs the choices derived from that device's own GEMV sweep records in place of the default profile's,
+  which an RTX 3080 Ti measured (every embedded table now carries `linearGemv`):
+  - NVIDIA Blackwell (`nvidia-blackwell`, an RTX 5070 Ti in Chrome, D3D12): other lanes on 24 of the default's
+    rows, the staged form on 32, another row block on 7, and a row on 20 shapes the default profile has none for —
+    int4 and int8 shapes of the MTP drafters, the int2 output heads of the mobile QAT line and 5 bf16 linears of
+    regular Gemma 4 E2B and E4B. Of the default's 17 bf16 rows, `2560 × 10240` and `2560 × 4096` take 32 lanes,
+    staged, in place of 16.
+  - Apple M2 (`apple-metal-3`, Chrome, Metal): other lanes on 34 of the default's rows (4 of them bf16, at half
+    the lanes), the plain form in place of the staged one on 15, another row block on 42, and a row on 13 shapes the
+    default profile has none for — int4 and int8 shapes of the MTP drafters and 3 bf16 linears of regular E2B and
+    E4B (`8960 × 1536`, `1536 × 2048`, `2560 × 256`).
+  - NVIDIA Ampere (`nvidia-ampere`, an RTX 3080 Ti under Node, Vulkan): a row on bf16 `2560 × 256` of regular E4B
+    (16 lanes); every other row is the default's.
+
+  Each row of a table's own met the derivation's ×1.10 over the default's choice in every record that is evidence.
+  Of regular Gemma 4's presets only `bf16-fast` (above; not published yet) declares linear at `reorder`, so only
+  its Sessions run the bf16 rows. On an RTX 5070 Ti in Chrome, with the choices of `nvidia-blackwell` before its
+  derivation from 82 records, a decode token of QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the
+  default's choices (E2B and E4B by 1 to 3 %, which the measurement does not resolve); none of the tables as they
+  are now has been measured end to end. On such an adapter the outputs of a `reorder` Session change inside the
+  band of `linear` where the lanes changed or a row was added. Sessions at `exact` there, and every Session on an
+  adapter no table matches, write what they wrote. The memory estimate plans with the default profile's choices as
+  before; for the Gemma 4 distributions it gives the same numbers ([limitations](docs/limitations.md)).
 - `@karume/runtime`: with linear at the level `reorder`, five linear shapes of the Gemma 4 MTP drafters take the
   parallel GEMV in place of the sequential one: int4 (group 32) `256 × 3072` and `256 × 1024` of the q4_0 QAT E2B / E4B
   drafters, and `1024 × 7680`, `1024 × 4096` and `1024 × 8192` of the 12B drafter. A drafter run of the `i4-fast`

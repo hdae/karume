@@ -1,756 +1,320 @@
 /**
  * Geometry profile `apple-metal-3` (**generated — do not edit by hand**).
  *
- * A static table of tile geometries for adapter `apple / metal-3 / Apple M2`, written from the
- * sweep records by the `profile` command of tools/geometry-sweep (removed in 0.15) (perf-ledger
- * K-71); its `i8a8.linear` part was regenerated on 2026-11-12 with `deriveGeometryProfile` of the
- * public surface `@karume/runtime/tune` (the last paragraph of this comment). The runtime only
- * selects this table by the adapter's `match` (exact match on vendor / architecture / description).
- * Nothing is measured at run time (no autotuning — the MUST NOT of the ADR 0022 addendum of
- * 2026-08-10 (later), reaffirmed by ADR 0115 decision 8 and ADR 0117 decision 9). To change a value, take the
- * sweep again and regenerate the table.
+ * A static table of tile geometries for the adapter match: vendor apple, architecture metal-3, description Apple M2.
+ * The runtime only selects the table by the adapter's match; nothing is measured at run time.
+ * To change a value, take a sweep with the workbench's `geometry-sweep` entry and regenerate the
+ * table with `node tools/geometry-profiles/generate.ts apple-metal-3 --records=<path>[,<path>…]`.
+ * The GEMV choices of linear (`linearGemv`) come from records of the `gemv-sweep` entry
+ * (`--gemv-records=<path>,<path>[,…]`).
  *
- * Regeneration: the generator (tools/geometry-sweep) was removed in 0.15 (ADR 0127 decision 5); a
- * table is now derived from sweep records with `deriveGeometryProfile` (ADR 0117 decision 2), which
- * regenerated the `i8a8.linear` part on 2026-11-12. Everything else keeps the text and the data the
- * removed CLI wrote, and the data must not be edited without a new sweep. The command that first
- * generated it (from the repository root; adding `--check` only checked that regeneration is
- * byte-identical):
+ * Derived in this generation: the GEMV choices of linear (GEMV sweep records).
  *
- *   deno run -A tools/geometry-sweep/main.ts profile \
- *     --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json \
- *     --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json \
- *     --from outputs/bench-browser/geometry-sweep-browser-2026-09-29T13-08-11.329Z.json \
- *     --from outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json \
- *     --from outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json \
- *     --id apple-metal-3 --vendor apple --architecture metal-3 --description 'Apple M2' \
- *     --out packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts --min-speedup 1.05
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-18T23-15-21.json (sha256 05287881e296ba3073c037043a2ad790267da11fdb3e7f998cac74985f233a7f, 2026-11-18T23:15:21.277Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T02-48-31.json (sha256 b2d853d20991c6ed27790cbe825c5e27c7f3bc767bea83fd6891fb32b94a1929, 2026-11-19T02:48:31.513Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-12-40.json (sha256 88fc71575de3034263750e8a3baeb2d5f229cbeb05e1a38b3774a3ee216bd23a, 2026-11-19T03:12:40.044Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-25-41.json (sha256 6eda1bf8d52ba0f7f8d67758286c1b8170421319dda2bae31eedd45392bcf140, 2026-11-19T03:25:40.991Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-51-51.json (sha256 1bbbe932d7ef351298af20dc71d107883f08e907180db326bac7c5bbf9e61dfb, 2026-11-19T03:51:51.650Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T04-17-20.json (sha256 81c9513c8fdc5036625d6f7c93f61792d6275648baf62e01888a060b9826ccdb, 2026-11-19T04:17:20.696Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-12-50.json (sha256 3ea4e42ed215c3263f78fc9abd48727f671c745ad2ec3b9e76e64fff9e058589, 2026-11-19T06:12:50.159Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-24-14.json (sha256 a7210d217a8f383a83c674876a99db951ae81d71a137db2adbb8c5400c138eb9, 2026-11-19T06:24:14.620Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-35-19.json (sha256 85fd1d3f56bf905710813dbc939f29dbfac16cd7d1846aedf8bc32d232126642, 2026-11-19T06:35:18.894Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-52-24.json (sha256 6bb4ccae78e8b1ce50a582c21a25b2f773e31529b7ea828280b516f62e5c153a, 2026-11-19T06:52:24.809Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout 453921bcde14648096d7fd843c1a2d1759a84859
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T12-43-35.json (sha256 507e3eb42ec8ad3fb6f6542065a082f7fe1fd03de993c49f0a003e815df98764, 2026-11-19T12:43:35.046Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout b527f471d990d0f5b216b8aba20f2888749e86cd
+ * - outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T12-58-40.json (sha256 3522eac3a10e06cece28590188f1c0bdba1af7f6f767d585e9c7da215fa44777, 2026-11-19T12:58:40.694Z)
+ *   workbench; Chrome 157 on macOS; backend metal (declared); timestamps not quantised; checkout b527f471d990d0f5b216b8aba20f2888749e86cd
  *
- * Sweeps (adapter apple / metal-3 / 0x0000 / Apple M2):
+ * Carried over from the registered table at commit 18a60a8b1236c21d87c772651c58972b854710eb: gemm, attention, conv2d, i8a8-linear, i8a8-attention.
+ * Their adoption lines are in `git show 18a60a8b1236c21d87c772651c58972b854710eb:packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts`.
  *
- * - outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json (sha256 921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, 2026-09-27T16:28:00.787Z)
- * - outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json (sha256 f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, 2026-09-27T18:31:46.471Z)
- * - outputs/bench-browser/geometry-sweep-browser-2026-09-29T13-08-11.329Z.json (sha256 38d97dac5f04a7e80fb6591ab437da7dd2b3cee66b0d03e40cd1475c0f398550, 2026-09-29T13:08:11.329Z)
- * - outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json (sha256 d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 2026-09-29T21:04:14.586Z)
- * - outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json (sha256 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd, 2026-10-01T12:28:47.052Z)
+ * GEMV choices: a candidate replaces the default profile's choice for a shape only when it is at
+ * least ×1.100 faster than that choice in every GEMV sweep record, with its words equal to
+ * the baseline's (identical class: the sequential variant's per-shape exceptions) or inside the
+ * band (reorder class: the parallel rows, measured at every row count of the parallel range and
+ * not slower at any) in every record; among those, the one whose smallest gain is largest. A shape
+ * that a record measured while the baseline's rounds spread beyond ×1.250 keeps the default,
+ * and so do the shared sequential keys whose cases disagree and the rows with packed activations.
  *
- * Adoption criteria: among the geometries whose output matches the default on every case of the class
- * and whose ratio to the default is ×1.050 or more, the one with the largest geometric mean across the
- * cases. If there is none, the default (the geometry of the sweep's default row). When several sweeps
- * measured the same case, the ratio is the geometric mean of those observations. gemmRows is decided
- * from the sweep's linear / matmul / bmm cases, and the same table applies to all three paths.
- * Input check: per sweep, a case whose default re-measurement ratio
- * (cases[].defaultRepeat.driftRatio) is outside 0.9–1.1, or whose re-measurement failed / is missing,
- * is dropped from that sweep's ratio material (output match and failures are still checked — a
- * geometry that mismatches / fails in the dropped sweep is not adopted. The ratio is judged from
- * another sweep if one measured the same case; if none remains, the case counts as unmeasured).
- * Dropped cases are shown per adoption entry by a "sweep …" line.
- * Rounding check: for a sweep with rounded timestamps (Chrome's 100 µs without the flag), each
- * observation (one row within one sweep) gets an upper bound on the ratio's rounding error,
- * E = e(row) + e(default row) (e = tick ÷ the smallest round), and an observation with E above 1% is
- * dropped from that sweep's ratio material (output match and failures are still checked). For a case
- * whose default row's e exceeds the bound (or cannot be computed), every observation is dropped.
- * Dropped observations are shown by a "sweep …: <geometry> … rounding-error upper bound E …" line.
- *
- * Adoption:
- *
- * - gemmRows ≤ 16 (linear / matmul / bmm with row count ≤ 16, 4 cases): default reg16x16r1x4w4 kept (no geometry matches the output and reaches ×1.050 on every case)
- *   - reg128x128r8x8w16: ×0.077 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg128x16r8x4w4: ×0.159 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg128x32r8x4w8: ×0.206 < ×1.050 on matmul-m16-n3072-k1024
- *   - reg128x32r8x8w4: ×0.168 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg128x64r8x4w16: ×0.186 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg128x64r8x8w8: ×0.143 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x128r4x8w16: ×0.336 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x16r2x4w4: ×0.796 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x16r4x4w4: ×0.463 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x32r1x8w4: ×0.730 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x32r2x4w8: ×0.895 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x32r2x8w4: ×0.542 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x32r4x4w8: ×0.552 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x32r4x8w4: ×0.350 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x64r2x8w8: ×0.582 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x64r4x4w16: ×0.588 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg16x64r4x8w8: ×0.362 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x128r4x8w16: ×0.304 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x128r8x8w16: ×0.198 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x16r2x4w4: ×0.685 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x16r4x4w4: ×0.494 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x16r8x4w4: ×0.297 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r2x4w8: ×0.763 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r2x8w4: ×0.542 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r4x4w8: ×0.585 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r4x8w4: ×0.408 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r8x4w8: ×0.337 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x32r8x8w4: ×0.198 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x64r2x8w8: ×0.481 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x64r4x4w16: ×0.504 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x64r4x8w8: ×0.391 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x64r8x4w16: ×0.362 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg32x64r8x8w8: ×0.204 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg4x16r1x4w4: ×0.201 < ×1.050 on linear-m16-n3072-k1024
- *   - reg4x32r1x8w4: ×0.123 < ×1.050 on linear-m16-n3072-k1024
- *   - reg64x128r4x8w16: ×0.154 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x128r8x8w16: ×0.141 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x16r4x4w4: ×0.365 < ×1.050 on matmul-m16-n3072-k1024
- *   - reg64x16r8x4w4: ×0.261 < ×1.050 on matmul-m16-n3072-k1024
- *   - reg64x32r4x4w8: ×0.424 < ×1.050 on matmul-m16-n3072-k1024
- *   - reg64x32r4x8w4: ×0.340 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x32r8x4w8: ×0.314 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x32r8x8w4: ×0.199 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x64r4x4w16: ×0.312 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x64r4x8w8: ×0.294 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x64r8x4w16: ×0.268 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg64x64r8x8w8: ×0.200 < ×1.050 on bmm-b16-m16-n64-k128
- *   - reg8x16r1x4w4: ×0.594 < ×1.050 on linear-m16-n3072-k1024
- *   - reg8x16r2x4w4: ×0.316 < ×1.050 on linear-m16-n3072-k1024
- *   - reg8x32r1x8w4: ×0.429 < ×1.050 on linear-m16-n3072-k1024
- *   - reg8x32r2x4w8: ×0.450 < ×1.050 on linear-m16-n3072-k1024
- *   - reg8x32r2x8w4: ×0.233 < ×1.050 on linear-m16-n3072-k1024
- *   - reg8x64r2x8w8: ×0.237 < ×1.050 on linear-m16-n3072-k1024
- * - gemmRows 17–32 (linear / matmul / bmm with row count 17–32, 4 cases): adopted reg32x32r2x4w8 ×1.308 (×1.153–×1.633)
- *   - reg128x128r8x8w16: ×0.118 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg128x16r8x4w4: ×0.249 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg128x32r8x4w8: ×0.340 < ×1.050 on matmul-m32-n3072-k1024
- *   - reg128x32r8x8w4: ×0.253 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg128x64r8x4w16: ×0.280 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg128x64r8x8w8: ×0.220 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg16x128r4x8w16: ×0.458 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg16x16r2x4w4: ×0.983 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg16x16r4x4w4: ×0.493 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x32r1x8w4: ×0.872 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg16x32r2x4w8: geometric mean ×1.098 (short of the adopted ×1.308)
- *   - reg16x32r2x8w4: ×0.695 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x32r4x4w8: ×0.708 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x32r4x8w4: ×0.380 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x64r2x8w8: ×0.704 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x64r4x4w16: ×0.719 < ×1.050 on linear-m32-n3072-k1024
- *   - reg16x64r4x8w8: ×0.396 < ×1.050 on linear-m32-n3072-k1024
- *   - reg32x128r4x8w16: ×0.462 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x128r8x8w16: ×0.310 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x16r2x4w4: ×1.020 < ×1.050 on bmm-b16-m32-n64-k64
- *   - reg32x16r4x4w4: ×0.717 < ×1.050 on bmm-b16-m32-n64-k64
- *   - reg32x16r8x4w4: ×0.413 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x32r2x8w4: ×0.808 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x32r4x4w8: ×0.840 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x32r4x8w4: ×0.601 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x32r8x4w8: ×0.526 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x32r8x8w4: ×0.286 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x64r2x8w8: ×0.725 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x64r4x4w16: ×0.774 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x64r4x8w8: ×0.616 < ×1.050 on bmm-b16-m32-n64-k64
- *   - reg32x64r8x4w16: ×0.545 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg32x64r8x8w8: ×0.318 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg4x16r1x4w4: ×0.185 < ×1.050 on linear-m32-n3072-k1024
- *   - reg4x32r1x8w4: ×0.124 < ×1.050 on linear-m32-n3072-k1024
- *   - reg64x128r4x8w16: ×0.235 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x128r8x8w16: ×0.217 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x16r4x4w4: ×0.583 < ×1.050 on matmul-m32-n3072-k1024
- *   - reg64x16r8x4w4: ×0.385 < ×1.050 on matmul-m32-n3072-k1024
- *   - reg64x32r4x4w8: ×0.636 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x32r4x8w4: ×0.538 < ×1.050 on bmm-b16-m32-n64-k64
- *   - reg64x32r8x4w8: ×0.489 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x32r8x8w4: ×0.301 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x64r4x4w16: ×0.478 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x64r4x8w8: ×0.448 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x64r8x4w16: ×0.410 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg64x64r8x8w8: ×0.305 < ×1.050 on bmm-b16-m32-n64-k128
- *   - reg8x16r1x4w4: ×0.559 < ×1.050 on linear-m32-n3072-k1024
- *   - reg8x16r2x4w4: ×0.317 < ×1.050 on linear-m32-n3072-k1024
- *   - reg8x32r1x8w4: ×0.386 < ×1.050 on linear-m32-n3072-k1024
- *   - reg8x32r2x4w8: ×0.406 < ×1.050 on linear-m32-n3072-k1024
- *   - reg8x32r2x8w4: ×0.209 < ×1.050 on linear-m32-n3072-k1024
- *   - reg8x64r2x8w8: ×0.281 < ×1.050 on linear-m32-n3072-k1024
- * - gemmRows 33–64 (linear / matmul / bmm with row count 33–64, 4 cases): adopted reg64x32r4x4w8 ×1.412 (×1.142–×2.236)
- *   - sweep outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json: bmm-b16-m64-n128-k64 excluded from the ratio material because the default's re-measurement ratio ×0.800 is out of range (output match and failures are still checked)
- *   - reg128x128r8x8w16: ×0.198 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg128x16r8x4w4: ×0.455 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg128x32r8x4w8: ×0.677 < ×1.050 on matmul-m64-n3072-k1024
- *   - reg128x32r8x8w4: ×0.468 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg128x64r8x4w16: ×0.490 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg128x64r8x8w8: ×0.410 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg16x128r4x8w16: ×0.505 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg16x16r2x4w4: ×0.814 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg16x16r4x4w4: ×0.529 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x32r1x8w4: ×0.880 < ×1.050 on bmm-b16-m64-n128-k64
- *   - reg16x32r2x4w8: geometric mean ×1.144 (short of the adopted ×1.412)
- *   - reg16x32r2x8w4: ×0.686 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x32r4x4w8: ×0.701 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x32r4x8w4: ×0.377 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x64r2x8w8: ×0.879 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x64r4x4w16: ×0.903 < ×1.050 on linear-m64-n3072-k1024
- *   - reg16x64r4x8w8: ×0.516 < ×1.050 on linear-m64-n3072-k1024
- *   - reg32x128r4x8w16: ×0.653 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x128r8x8w16: ×0.494 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x16r2x4w4: geometric mean ×1.201 (short of the adopted ×1.412)
- *   - reg32x16r4x4w4: ×0.834 < ×1.050 on bmm-b16-m64-n128-k64
- *   - reg32x16r8x4w4: ×0.477 < ×1.050 on matmul-m64-n3072-k1024
- *   - reg32x32r2x4w8: geometric mean ×1.360 (short of the adopted ×1.412)
- *   - reg32x32r2x8w4: geometric mean ×1.228 (short of the adopted ×1.412)
- *   - reg32x32r4x4w8: geometric mean ×1.282 (short of the adopted ×1.412)
- *   - reg32x32r4x8w4: ×0.905 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x32r8x4w8: ×0.819 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x32r8x8w4: ×0.395 < ×1.050 on linear-m64-n3072-k1024
- *   - reg32x64r2x8w8: geometric mean ×1.305 (short of the adopted ×1.412)
- *   - reg32x64r4x4w16: geometric mean ×1.350 (short of the adopted ×1.412)
- *   - reg32x64r4x8w8: ×0.948 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x64r8x4w16: ×0.899 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg32x64r8x8w8: ×0.568 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg4x16r1x4w4: ×0.189 < ×1.050 on linear-m64-n3072-k1024
- *   - reg4x32r1x8w4: ×0.130 < ×1.050 on linear-m64-n3072-k1024
- *   - reg64x128r4x8w16: ×0.453 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x128r8x8w16: ×0.411 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x16r4x4w4: ×1.023 < ×1.050 on bmm-b16-m64-n128-k64
- *   - reg64x16r8x4w4: ×0.624 < ×1.050 on matmul-m64-n3072-k1024
- *   - reg64x32r4x8w4: ×0.929 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x32r8x4w8: ×0.882 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x32r8x8w4: ×0.546 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x64r4x4w16: ×0.906 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x64r4x8w8: ×0.824 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x64r8x4w16: ×0.781 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg64x64r8x8w8: ×0.572 < ×1.050 on bmm-b16-m64-n64-k128
- *   - reg8x16r1x4w4: ×0.601 < ×1.050 on linear-m64-n3072-k1024
- *   - reg8x16r2x4w4: ×0.327 < ×1.050 on linear-m64-n3072-k1024
- *   - reg8x32r1x8w4: ×0.428 < ×1.050 on linear-m64-n3072-k1024
- *   - reg8x32r2x4w8: ×0.453 < ×1.050 on linear-m64-n3072-k1024
- *   - reg8x32r2x8w4: ×0.233 < ×1.050 on linear-m64-n3072-k1024
- *   - reg8x64r2x8w8: ×0.312 < ×1.050 on linear-m64-n3072-k1024
- * - gemmRows 65–128 (linear / matmul / bmm with row count 65–128, 4 cases): default reg64x32r4x4w8 kept (no geometry matches the output and reaches ×1.050 on every case)
- *   - reg128x128r8x8w16: ×0.322 < ×1.050 on bmm-b16-m128-n64-k128
- *   - reg128x16r8x4w4: ×0.596 < ×1.050 on bmm-b16-m128-n64-k64
- *   - reg128x32r8x4w8: ×0.910 < ×1.050 on matmul-m128-n2048-k1024
- *   - reg128x32r8x8w4: ×0.627 < ×1.050 on matmul-m128-n2048-k1024
- *   - reg128x64r8x4w16: ×0.759 < ×1.050 on bmm-b16-m128-n64-k64
- *   - reg128x64r8x8w8: ×0.609 < ×1.050 on bmm-b16-m128-n64-k128
- *   - reg16x128r4x8w16: ×0.299 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x16r1x4w4: ×0.442 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x16r2x4w4: ×0.453 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x16r4x4w4: ×0.230 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x32r1x8w4: ×0.435 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x32r2x4w8: ×0.484 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x32r2x8w4: ×0.320 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x32r4x4w8: ×0.330 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x32r4x8w4: ×0.177 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x64r2x8w8: ×0.392 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x64r4x4w16: ×0.405 < ×1.050 on linear-m128-n2048-k1024
- *   - reg16x64r4x8w8: ×0.230 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x128r4x8w16: ×0.553 < ×1.050 on bmm-b16-m128-n64-k128
- *   - reg32x128r8x8w16: ×0.376 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x16r2x4w4: ×0.652 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x16r4x4w4: ×0.479 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x16r8x4w4: ×0.267 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r2x4w8: ×0.743 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r2x8w4: ×0.680 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r4x4w8: ×0.729 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r4x8w4: ×0.470 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r8x4w8: ×0.464 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x32r8x8w4: ×0.225 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x64r2x8w8: ×0.739 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x64r4x4w16: ×0.783 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x64r4x8w8: ×0.560 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x64r8x4w16: ×0.660 < ×1.050 on linear-m128-n2048-k1024
- *   - reg32x64r8x8w8: ×0.362 < ×1.050 on linear-m128-n2048-k1024
- *   - reg4x16r1x4w4: ×0.084 < ×1.050 on linear-m128-n2048-k1024
- *   - reg4x32r1x8w4: ×0.059 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x128r4x8w16: ×0.507 < ×1.050 on bmm-b16-m128-n64-k64
- *   - reg64x128r8x8w16: ×0.486 < ×1.050 on bmm-b16-m128-n64-k128
- *   - reg64x16r4x4w4: ×0.743 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x16r8x4w4: ×0.459 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x32r4x8w4: ×0.889 < ×1.050 on matmul-m128-n2048-k1024
- *   - reg64x32r8x4w8: ×0.896 < ×1.050 on bmm-b16-m128-n64-k64
- *   - reg64x32r8x8w4: ×0.507 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x64r4x4w16: ×1.004 < ×1.050 on matmul-m128-n2048-k1024
- *   - reg64x64r4x8w8: ×0.930 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x64r8x4w16: ×0.938 < ×1.050 on linear-m128-n2048-k1024
- *   - reg64x64r8x8w8: ×0.555 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x16r1x4w4: ×0.271 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x16r2x4w4: ×0.149 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x32r1x8w4: ×0.196 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x32r2x4w8: ×0.208 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x32r2x8w4: ×0.107 < ×1.050 on linear-m128-n2048-k1024
- *   - reg8x64r2x8w8: ×0.141 < ×1.050 on linear-m128-n2048-k1024
- * - gemmRows 129–256 (linear / matmul / bmm with row count 129–256, 4 cases): default reg64x32r4x4w8 kept (no geometry matches the output and reaches ×1.050 on every case)
- *   - reg128x128r8x8w16: ×0.468 < ×1.050 on bmm-b16-m256-n64-k64
- *   - reg128x16r8x4w4: ×0.588 < ×1.050 on matmul-m256-n2048-k1024
- *   - reg128x32r8x4w8: ×0.911 < ×1.050 on matmul-m256-n2048-k1024
- *   - reg128x32r8x8w4: ×0.644 < ×1.050 on bmm-b16-m256-n64-k64
- *   - reg128x64r8x4w16: ×0.987 < ×1.050 on bmm-b16-m256-n64-k64
- *   - reg128x64r8x8w8: ×0.702 < ×1.050 on bmm-b16-m256-n64-k64
- *   - reg16x128r4x8w16: ×0.288 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x16r1x4w4: ×0.425 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x16r2x4w4: ×0.450 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x16r4x4w4: ×0.235 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x32r1x8w4: ×0.443 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x32r2x4w8: ×0.480 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x32r2x8w4: ×0.335 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x32r4x4w8: ×0.346 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x32r4x8w4: ×0.175 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x64r2x8w8: ×0.414 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x64r4x4w16: ×0.431 < ×1.050 on linear-m256-n2048-k1024
- *   - reg16x64r4x8w8: ×0.249 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x128r4x8w16: ×0.543 < ×1.050 on bmm-b16-m256-n64-k128
- *   - reg32x128r8x8w16: ×0.424 < ×1.050 on bmm-b16-m256-n64-k128
- *   - reg32x16r2x4w4: ×0.651 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x16r4x4w4: ×0.498 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x16r8x4w4: ×0.278 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r2x4w8: ×0.735 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r2x8w4: ×0.706 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r4x4w8: ×0.762 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r4x8w4: ×0.524 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r8x4w8: ×0.514 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x32r8x8w4: ×0.218 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x64r2x8w8: ×0.716 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x64r4x4w16: ×0.799 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x64r4x8w8: ×0.587 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x64r8x4w16: ×0.638 < ×1.050 on linear-m256-n2048-k1024
- *   - reg32x64r8x8w8: ×0.348 < ×1.050 on linear-m256-n2048-k1024
- *   - reg4x16r1x4w4: ×0.081 < ×1.050 on linear-m256-n2048-k1024
- *   - reg4x32r1x8w4: ×0.057 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x128r4x8w16: ×0.485 < ×1.050 on bmm-b16-m256-n64-k128
- *   - reg64x128r8x8w16: ×0.469 < ×1.050 on bmm-b16-m256-n64-k128
- *   - reg64x16r4x4w4: ×0.769 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x16r8x4w4: ×0.493 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x32r4x8w4: ×0.852 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x32r8x4w8: ×0.862 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x32r8x8w4: ×0.489 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x64r4x4w16: ×0.984 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x64r4x8w8: ×0.897 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x64r8x4w16: ×0.907 < ×1.050 on linear-m256-n2048-k1024
- *   - reg64x64r8x8w8: ×0.669 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x16r1x4w4: ×0.262 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x16r2x4w4: ×0.142 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x32r1x8w4: ×0.196 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x32r2x4w8: ×0.208 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x32r2x8w4: ×0.107 < ×1.050 on linear-m256-n2048-k1024
- *   - reg8x64r2x8w8: ×0.141 < ×1.050 on linear-m256-n2048-k1024
- * - gemmRows 257–512 (linear / matmul / bmm with row count 257–512, 5 cases): default reg64x32r4x4w8 kept (no geometry matches the output and reaches ×1.050 on every case)
- *   - sweep outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json: bmm-b16-m512-n512-k64 excluded from the ratio material because the default's re-measurement ratio ×1.176 is out of range (output match and failures are still checked)
- *   - reg128x128r8x8w16: ×0.383 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg128x16r8x4w4: ×0.661 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg128x32r8x4w8: ×0.974 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg128x32r8x8w4: ×0.748 < ×1.050 on bmm-b16-m512-n64-k64
- *   - reg128x64r8x4w16: ×0.987 < ×1.050 on matmul-m512-n2048-k1024
- *   - reg128x64r8x8w8: ×0.799 < ×1.050 on bmm-b16-m512-n512-k64
- *   - reg16x128r4x8w16: ×0.307 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x16r1x4w4: ×0.426 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x16r2x4w4: ×0.447 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x16r4x4w4: ×0.231 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x32r1x8w4: ×0.452 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x32r2x4w8: ×0.480 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x32r2x8w4: ×0.347 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x32r4x4w8: ×0.361 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x32r4x8w4: ×0.180 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x64r2x8w8: ×0.429 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x64r4x4w16: ×0.447 < ×1.050 on linear-m512-n2048-k1024
- *   - reg16x64r4x8w8: ×0.264 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x128r4x8w16: ×0.504 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg32x128r8x8w16: ×0.421 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg32x16r2x4w4: ×0.653 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x16r4x4w4: ×0.518 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x16r8x4w4: ×0.290 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r2x4w8: ×0.738 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r2x8w4: ×0.704 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r4x4w8: ×0.759 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r4x8w4: ×0.565 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r8x4w8: ×0.565 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x32r8x8w4: ×0.229 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x64r2x8w8: ×0.737 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x64r4x4w16: ×0.795 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x64r4x8w8: ×0.613 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x64r8x4w16: ×0.656 < ×1.050 on linear-m512-n2048-k1024
- *   - reg32x64r8x8w8: ×0.387 < ×1.050 on linear-m512-n2048-k1024
- *   - reg4x16r1x4w4: ×0.080 < ×1.050 on linear-m512-n2048-k1024
- *   - reg4x32r1x8w4: ×0.057 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x128r4x8w16: ×0.476 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg64x128r8x8w16: ×0.438 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg64x16r4x4w4: ×0.724 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg64x16r8x4w4: ×0.508 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x32r4x8w4: ×0.868 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x32r8x4w8: ×0.883 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x32r8x8w4: ×0.540 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x64r4x4w16: ×0.929 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg64x64r4x8w8: ×0.908 < ×1.050 on linear-m512-n2048-k1024
- *   - reg64x64r8x4w16: ×0.952 < ×1.050 on bmm-b16-m512-n64-k512
- *   - reg64x64r8x8w8: ×0.694 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x16r1x4w4: ×0.264 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x16r2x4w4: ×0.141 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x32r1x8w4: ×0.198 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x32r2x4w8: ×0.210 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x32r2x8w4: ×0.108 < ×1.050 on linear-m512-n2048-k1024
- *   - reg8x64r2x8w8: ×0.142 < ×1.050 on linear-m512-n2048-k1024
- * - gemmRows > 512 (linear / matmul / bmm with row count > 512, 7 cases): adopted reg128x32r8x4w8 ×1.513 (×1.145–×1.600)
- *   - sweep outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json: matmul-m4096-n2048-k2048 excluded from the ratio material because the default's re-measurement ratio ×1.160 is out of range (output match and failures are still checked)
- *   - reg128x16r8x4w4: ×0.704 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg128x32r8x8w4: ×0.917 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg128x64r8x4w16: geometric mean ×1.389 (short of the adopted ×1.513)
- *   - reg128x64r8x8w8: ×1.002 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg16x128r4x8w16: ×0.435 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x16r1x4w4: ×0.607 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x16r2x4w4: ×0.635 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x16r4x4w4: ×0.319 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x32r1x8w4: ×0.649 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x32r2x4w8: ×0.682 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x32r2x8w4: ×0.498 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x32r4x4w8: ×0.512 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x32r4x8w4: ×0.254 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x64r2x8w8: ×0.614 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x64r4x4w16: ×0.624 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg16x64r4x8w8: ×0.373 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x128r4x8w16: ×0.913 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x128r8x8w16: ×0.702 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x16r2x4w4: ×0.923 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x16r4x4w4: ×0.723 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x16r8x4w4: ×0.400 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x32r2x4w8: geometric mean ×1.073 (short of the adopted ×1.513)
- *   - reg32x32r2x8w4: ×1.002 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x32r4x4w8: geometric mean ×1.114 (short of the adopted ×1.513)
- *   - reg32x32r4x8w4: ×0.827 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x32r8x4w8: ×0.824 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x32r8x8w4: ×0.320 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x64r2x8w8: ×1.007 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg32x64r4x4w16: geometric mean ×1.153 (short of the adopted ×1.513)
- *   - reg32x64r4x8w8: ×0.898 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x64r8x4w16: ×0.963 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg32x64r8x8w8: ×0.584 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg4x16r1x4w4: ×0.113 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg4x32r1x8w4: ×0.080 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg64x128r4x8w16: geometric mean ×1.180 (short of the adopted ×1.513)
- *   - reg64x128r8x8w16: ×0.995 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg64x16r4x4w4: ×0.986 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg64x16r8x4w4: ×0.621 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg64x32r4x4w8: geometric mean ×1.426 (short of the adopted ×1.513)
- *   - reg64x32r4x8w4: geometric mean ×1.261 (short of the adopted ×1.513)
- *   - reg64x32r8x4w8: geometric mean ×1.293 (short of the adopted ×1.513)
- *   - reg64x32r8x8w4: ×0.793 < ×1.050 on matmul-m4096-n2048-k2048
- *   - reg64x64r4x4w16: geometric mean ×1.399 (short of the adopted ×1.513)
- *   - reg64x64r4x8w8: geometric mean ×1.282 (short of the adopted ×1.513)
- *   - reg64x64r8x4w16: geometric mean ×1.410 (short of the adopted ×1.513)
- *   - reg64x64r8x8w8: ×1.008 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg8x16r1x4w4: ×0.367 < ×1.050 on linear-m1024-n2048-k2048
- *   - reg8x16r2x4w4: ×0.196 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg8x32r1x8w4: ×0.280 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg8x32r2x4w8: ×0.300 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg8x32r2x8w4: ×0.153 < ×1.050 on linear-m1024-n2048-k8192
- *   - reg8x64r2x8w8: ×0.197 < ×1.050 on linear-m1024-n2048-k8192
- * - attention.qk (fused attention f32 ①QK, 4 cases): adopted reg128x32r8x4w8 ×1.527 (×1.470–×1.564)
- *   - reg128x16r8x4w4: ×0.999 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg128x32r8x8w4: geometric mean ×1.145 (short of the adopted ×1.527)
- *   - reg128x64r8x4w16: geometric mean ×1.394 (short of the adopted ×1.527)
- *   - reg128x64r8x8w8: geometric mean ×1.207 (short of the adopted ×1.527)
- *   - reg16x128r4x8w16: ×0.434 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x16r1x4w4: ×0.574 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x16r2x4w4: ×0.621 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg16x16r4x4w4: ×0.340 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x32r1x8w4: ×0.639 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg16x32r2x4w8: ×0.679 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg16x32r2x8w4: ×0.507 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x32r4x4w8: ×0.530 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x32r4x8w4: ×0.255 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x64r2x8w8: ×0.617 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg16x64r4x4w16: ×0.623 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg16x64r4x8w8: ×0.370 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x128r4x8w16: ×0.933 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x128r8x8w16: ×0.691 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x16r2x4w4: ×0.887 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x16r4x4w4: ×0.730 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x16r8x4w4: ×0.409 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x32r2x4w8: ×0.997 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x32r2x8w4: ×0.975 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x32r4x4w8: geometric mean ×1.091 (short of the adopted ×1.527)
- *   - reg32x32r4x8w4: ×0.833 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x32r8x4w8: ×0.852 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x32r8x8w4: ×0.329 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x64r2x8w8: ×1.008 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x64r4x4w16: geometric mean ×1.108 (short of the adopted ×1.527)
- *   - reg32x64r4x8w8: ×0.948 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg32x64r8x4w16: ×0.952 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg32x64r8x8w8: ×0.595 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg4x16r1x4w4: ×0.115 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg4x32r1x8w4: ×0.081 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg64x128r4x8w16: geometric mean ×1.137 (short of the adopted ×1.527)
- *   - reg64x128r8x8w16: ×1.005 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg64x16r4x4w4: ×1.042 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg64x16r8x4w4: ×0.723 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg64x32r4x4w8: geometric mean ×1.420 (short of the adopted ×1.527)
- *   - reg64x32r4x8w4: geometric mean ×1.233 (short of the adopted ×1.527)
- *   - reg64x32r8x4w8: geometric mean ×1.273 (short of the adopted ×1.527)
- *   - reg64x32r8x8w4: ×0.812 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg64x64r4x4w16: geometric mean ×1.387 (short of the adopted ×1.527)
- *   - reg64x64r4x8w8: geometric mean ×1.271 (short of the adopted ×1.527)
- *   - reg64x64r8x4w16: geometric mean ×1.408 (short of the adopted ×1.527)
- *   - reg64x64r8x8w8: geometric mean ×1.112 (short of the adopted ×1.527)
- *   - reg8x16r1x4w4: ×0.363 < ×1.050 on attention-qk-cross-m4096-n512
- *   - reg8x16r2x4w4: ×0.199 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg8x32r1x8w4: ×0.289 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg8x32r2x4w8: ×0.304 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg8x32r2x8w4: ×0.156 < ×1.050 on attention-qk-self-m4096-n4096
- *   - reg8x64r2x8w8: ×0.202 < ×1.050 on attention-qk-self-m4096-n4096
- * - attention.pv (fused attention f32 ③PV, 4 cases): adopted reg64x64r4x8w8 ×1.661 (×1.542–×1.712)
- *   - sweep outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json: attention-pv-cross-m1024-n512 excluded from the ratio material because the default's re-measurement ratio ×1.126 is out of range (output match and failures are still checked)
- *   - sweep outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json: attention-pv-self-m1024-n1024 excluded from the ratio material because the default's re-measurement ratio ×1.228 is out of range (output match and failures are still checked)
- *   - reg128x16r8x4w4: ×0.959 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg128x32r8x4w8: geometric mean ×1.504 (short of the adopted ×1.661)
- *   - reg128x32r8x8w4: geometric mean ×1.165 (short of the adopted ×1.661)
- *   - reg128x64r8x4w16: geometric mean ×1.523 (short of the adopted ×1.661)
- *   - reg128x64r8x8w8: geometric mean ×1.290 (short of the adopted ×1.661)
- *   - reg16x128r4x8w16: geometric mean ×1.196 (short of the adopted ×1.661)
- *   - reg16x16r1x4w4: ×1.050 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg16x16r2x4w4: geometric mean ×1.324 (short of the adopted ×1.661)
- *   - reg16x16r4x4w4: ×0.673 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg16x32r1x8w4: geometric mean ×1.161 (short of the adopted ×1.661)
- *   - reg16x32r2x4w8: geometric mean ×1.495 (short of the adopted ×1.661)
- *   - reg16x32r2x8w4: geometric mean ×1.153 (short of the adopted ×1.661)
- *   - reg16x32r4x4w8: geometric mean ×1.199 (short of the adopted ×1.661)
- *   - reg16x32r4x8w4: ×0.640 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg16x64r2x8w8: geometric mean ×1.352 (short of the adopted ×1.661)
- *   - reg16x64r4x4w16: geometric mean ×1.379 (short of the adopted ×1.661)
- *   - reg16x64r4x8w8: ×0.948 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg32x128r4x8w16: geometric mean ×1.612 (short of the adopted ×1.661)
- *   - reg32x128r8x8w16: geometric mean ×1.300 (short of the adopted ×1.661)
- *   - reg32x16r2x4w4: geometric mean ×1.373 (short of the adopted ×1.661)
- *   - reg32x16r4x4w4: geometric mean ×1.135 (short of the adopted ×1.661)
- *   - reg32x16r8x4w4: ×0.591 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg32x32r2x4w8: geometric mean ×1.547 (short of the adopted ×1.661)
- *   - reg32x32r2x8w4: geometric mean ×1.452 (short of the adopted ×1.661)
- *   - reg32x32r4x4w8: geometric mean ×1.524 (short of the adopted ×1.661)
- *   - reg32x32r4x8w4: geometric mean ×1.466 (short of the adopted ×1.661)
- *   - reg32x32r8x4w8: geometric mean ×1.412 (short of the adopted ×1.661)
- *   - reg32x32r8x8w4: ×0.542 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg32x64r2x8w8: geometric mean ×1.490 (short of the adopted ×1.661)
- *   - reg32x64r4x4w16: geometric mean ×1.583 (short of the adopted ×1.661)
- *   - reg32x64r4x8w8: geometric mean ×1.633 (short of the adopted ×1.661)
- *   - reg32x64r8x4w16: geometric mean ×1.582 (short of the adopted ×1.661)
- *   - reg32x64r8x8w8: geometric mean ×1.153 (short of the adopted ×1.661)
- *   - reg4x16r1x4w4: ×0.473 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg4x32r1x8w4: ×0.302 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg64x128r4x8w16: geometric mean ×1.549 (short of the adopted ×1.661)
- *   - reg64x128r8x8w16: geometric mean ×1.309 (short of the adopted ×1.661)
- *   - reg64x16r4x4w4: geometric mean ×1.270 (short of the adopted ×1.661)
- *   - reg64x16r8x4w4: ×0.856 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg64x32r4x4w8: geometric mean ×1.519 (short of the adopted ×1.661)
- *   - reg64x32r4x8w4: geometric mean ×1.597 (short of the adopted ×1.661)
- *   - reg64x32r8x4w8: geometric mean ×1.471 (short of the adopted ×1.661)
- *   - reg64x32r8x8w4: ×0.994 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg64x64r4x4w16: geometric mean ×1.556 (short of the adopted ×1.661)
- *   - reg64x64r8x4w16: geometric mean ×1.621 (short of the adopted ×1.661)
- *   - reg64x64r8x8w8: geometric mean ×1.337 (short of the adopted ×1.661)
- *   - reg8x16r1x4w4: ×0.947 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg8x16r2x4w4: ×0.644 < ×1.050 on attention-pv-cross-m4096-n512
- *   - reg8x32r1x8w4: ×0.730 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg8x32r2x4w8: ×0.853 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg8x32r2x8w4: ×0.457 < ×1.050 on attention-pv-self-m4096-n4096
- *   - reg8x64r2x8w8: ×0.612 < ×1.050 on attention-pv-self-m4096-n4096
- * - conv2d.rows64 (conv2d implicit GEMM, m tile of 64 rows, 2 cases): adopted igemm128x64:wg16x16 ×1.398 (×1.172–×1.666)
- *   - igemm128x128:wg16x16: ×0.796 < ×1.050 on conv2d-c192-256x256
- *   - igemm128x64:wg8x16: ×1.015 < ×1.050 on conv2d-c192-256x256
- *   - igemm16x128:wg16x4: ×0.413 < ×1.050 on conv2d-c384-128x128
- *   - igemm16x64:wg16x4: ×0.552 < ×1.050 on conv2d-c384-128x128
- *   - igemm16x64:wg8x4: ×0.368 < ×1.050 on conv2d-c384-128x128
- *   - igemm16x64:wg8x8: ×0.538 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x128:wg16x4: ×0.648 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x128:wg16x8: ×0.808 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x64:wg16x4: ×0.861 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x64:wg16x8: ×0.961 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x64:wg8x16: ×0.965 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x64:wg8x4: ×0.591 < ×1.050 on conv2d-c384-128x128
- *   - igemm32x64:wg8x8: ×0.869 < ×1.050 on conv2d-c384-128x128
- *   - igemm64x128:wg16x16: geometric mean ×1.243 (short of the adopted ×1.398)
- *   - igemm64x64:wg16x16: geometric mean ×1.372 (short of the adopted ×1.398)
- *   - igemm64x64:wg16x8: geometric mean ×1.292 (short of the adopted ×1.398)
- *   - igemm64x64:wg8x16: geometric mean ×1.295 (short of the adopted ×1.398)
- *   - igemm64x64:wg8x8: ×1.048 < ×1.050 on conv2d-c384-128x128
- *   - igemm8x64:wg8x4: ×0.195 < ×1.050 on conv2d-c384-128x128
- * - conv2d.rows32 (conv2d implicit GEMM, m tile of 32 rows, 1 case): adopted igemm128x64:wg16x16 ×1.600 (×1.600–×1.600)
- *   - igemm128x128:wg16x16: geometric mean ×1.139 (short of the adopted ×1.600)
- *   - igemm128x64:wg8x16: geometric mean ×1.427 (short of the adopted ×1.600)
- *   - igemm16x128:wg16x4: ×0.655 < ×1.050 on conv2d-c96-512x512
- *   - igemm16x64:wg16x4: ×0.885 < ×1.050 on conv2d-c96-512x512
- *   - igemm16x64:wg8x4: ×0.579 < ×1.050 on conv2d-c96-512x512
- *   - igemm16x64:wg8x8: ×0.872 < ×1.050 on conv2d-c96-512x512
- *   - igemm32x128:wg16x8: geometric mean ×1.291 (short of the adopted ×1.600)
- *   - igemm32x64:wg16x4: geometric mean ×1.369 (short of the adopted ×1.600)
- *   - igemm32x64:wg16x8: geometric mean ×1.420 (short of the adopted ×1.600)
- *   - igemm32x64:wg8x16: geometric mean ×1.401 (short of the adopted ×1.600)
- *   - igemm32x64:wg8x4: ×0.908 < ×1.050 on conv2d-c96-512x512
- *   - igemm32x64:wg8x8: geometric mean ×1.395 (short of the adopted ×1.600)
- *   - igemm64x128:wg16x16: geometric mean ×1.355 (short of the adopted ×1.600)
- *   - igemm64x128:wg16x8: geometric mean ×1.136 (short of the adopted ×1.600)
- *   - igemm64x64:wg16x16: geometric mean ×1.382 (short of the adopted ×1.600)
- *   - igemm64x64:wg16x8: geometric mean ×1.417 (short of the adopted ×1.600)
- *   - igemm64x64:wg8x16: geometric mean ×1.395 (short of the adopted ×1.600)
- *   - igemm64x64:wg8x8: geometric mean ×1.186 (short of the adopted ×1.600)
- *   - igemm8x64:wg8x4: ×0.316 < ×1.050 on conv2d-c96-512x512
- * - i8a8.linear ≤ 256 (i8a8 linear row count ≤ 256, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
- * - i8a8.linear 257〜512 (i8a8 linear row count 257〜512, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
- * - i8a8.linear > 512 (i8a8 linear row count > 512, 6 cases): adopted tile64x64r4x8w8x16k16 ×1.116 (×1.104–×1.134)
- *   - tile128x128r8x8w16x16k16: i8a8-linear-m4096-n2048-k8192: ×0.769 < ×1.050
- *   - tile128x128r8x8w16x16k32: i8a8-linear-m4096-n2048-k8192: ×0.813 < ×1.050
- *   - tile128x32r8x4w8x16k16: geometric mean ×1.110 (below the adopted ×1.116)
- *   - tile128x32r8x4w8x16k32: geometric mean ×1.091 (below the adopted ×1.116)
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.086 (below the adopted ×1.116)
- *   - tile128x64r8x4w16x16k32: i8a8-linear-m4096-n2048-k8192: ×1.001 < ×1.050
- *   - tile128x64r8x8w8x16k32: i8a8-linear-m4096-n2048-k8192: ×1.029 < ×1.050
- *   - tile16x128r4x8w16x4k16: geometric mean ×1.106 (below the adopted ×1.116)
- *   - tile16x128r4x8w16x4k32: geometric mean ×1.091 (below the adopted ×1.116)
- *   - tile16x32r4x4w8x4k16: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-linear-m4096-n8192-k2048: ×0.987 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
- *   - tile16x64r4x8w8x4k16: geometric mean ×1.105 (below the adopted ×1.116)
- *   - tile16x64r4x8w8x4k32: geometric mean ×1.089 (below the adopted ×1.116)
- *   - tile32x128r4x8w16x8k16: geometric mean ×1.110 (below the adopted ×1.116)
- *   - tile32x128r4x8w16x8k32: geometric mean ×1.088 (below the adopted ×1.116)
- *   - tile32x128r8x8w16x4k16: i8a8-linear-m1024-n2048-k8192: ×0.964 < ×1.050
- *   - tile32x128r8x8w16x4k32: i8a8-linear-m1024-n2048-k8192: ×0.997 < ×1.050
- *   - tile32x32r4x4w8x8k16: i8a8-linear-m4096-n8192-k2048: ×0.993 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
- *   - tile32x32r8x4w8x4k16: geometric mean ×1.111 (below the adopted ×1.116)
- *   - tile32x32r8x4w8x4k32: geometric mean ×1.103 (below the adopted ×1.116)
- *   - tile32x64r4x4w16x8k16: i8a8-linear-m4096-n8192-k2048: ×0.984 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-linear-m4096-n8192-k2048: ×0.989 < ×1.050
- *   - tile32x64r4x8w8x8k16: geometric mean ×1.114 (below the adopted ×1.116)
- *   - tile32x64r4x8w8x8k32: geometric mean ×1.111 (below the adopted ×1.116)
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.113 (below the adopted ×1.116)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.109 (below the adopted ×1.116)
- *   - tile32x64r8x8w8x4k16: i8a8-linear-m1024-n2048-k8192: ×0.958 < ×1.050
- *   - tile32x64r8x8w8x4k32: i8a8-linear-m4096-n2048-k8192: ×0.922 < ×1.050
- *   - tile64x128r4x8w16x16k16: geometric mean ×1.086 (below the adopted ×1.116)
- *   - tile64x128r4x8w16x16k32: i8a8-linear-m4096-n2048-k8192: ×0.997 < ×1.050
- *   - tile64x128r8x8w16x8k16: i8a8-linear-m1024-n2048-k8192: ×0.982 < ×1.050
- *   - tile64x128r8x8w16x8k32: i8a8-linear-m4096-n2048-k8192: ×1.017 < ×1.050
- *   - tile64x32r4x4w8x16k16: i8a8-linear-m4096-n8192-k2048: ×0.990 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-linear-m4096-n8192-k2048: ×0.990 < ×1.050
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.113 (below the adopted ×1.116)
- *   - tile64x32r8x4w8x8k32: geometric mean ×1.110 (below the adopted ×1.116)
- *   - tile64x64r4x4w16x16k16: i8a8-linear-m4096-n8192-k2048: ×0.958 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-linear-m4096-n8192-k2048: ×0.967 < ×1.050
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.110 (below the adopted ×1.116)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.113 (below the adopted ×1.116)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.107 (below the adopted ×1.116)
- *   - tile64x64r8x8w8x8k16: i8a8-linear-m1024-n2048-k8192: ×1.013 < ×1.050
- *   - tile64x64r8x8w8x8k32: i8a8-linear-m1024-n2048-k8192: ×1.025 < ×1.050
- * - i8a8.attentionQk (i8a8 attention ①QK, 4 cases): adopted tile32x64r4x8w8x8k16 ×1.157 (×1.156–×1.158)
- *   - tile128x128r8x8w16x16k16: ×0.757 < ×1.050 on i8a8-attention-qk-cross-m1024-n512
- *   - tile128x128r8x8w16x16k32: ×0.819 < ×1.050 on i8a8-attention-qk-self-m1024-n1024
- *   - tile128x32r8x4w8x16k16: geometric mean ×1.132 (short of the adopted ×1.157)
- *   - tile128x32r8x4w8x16k32: geometric mean ×1.120 (short of the adopted ×1.157)
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.119 (short of the adopted ×1.157)
- *   - tile128x64r8x4w16x16k32: ×1.029 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile128x64r8x8w8x16k32: ×1.009 < ×1.050 on i8a8-attention-qk-cross-m1024-n512
- *   - tile16x128r4x8w16x4k16: geometric mean ×1.147 (short of the adopted ×1.157)
- *   - tile16x128r4x8w16x4k32: geometric mean ×1.122 (short of the adopted ×1.157)
- *   - tile16x32r4x4w8x4k16: ×1.027 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile16x32r4x4w8x4k32: ×1.014 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile16x64r4x4w16x4k16: ×1.033 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile16x64r4x4w16x4k32: ×1.026 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile16x64r4x8w8x4k16: geometric mean ×1.140 (short of the adopted ×1.157)
- *   - tile16x64r4x8w8x4k32: geometric mean ×1.113 (short of the adopted ×1.157)
- *   - tile32x128r4x8w16x8k16: geometric mean ×1.132 (short of the adopted ×1.157)
- *   - tile32x128r4x8w16x8k32: geometric mean ×1.121 (short of the adopted ×1.157)
- *   - tile32x128r8x8w16x4k16: ×0.967 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x128r8x8w16x4k32: ×0.953 < ×1.050 on i8a8-attention-qk-self-m4096-n4096
- *   - tile32x32r4x4w8x8k16: ×1.033 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x32r4x4w8x8k32: ×1.031 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x32r8x4w8x4k16: geometric mean ×1.153 (short of the adopted ×1.157)
- *   - tile32x32r8x4w8x4k32: geometric mean ×1.141 (short of the adopted ×1.157)
- *   - tile32x64r4x4w16x8k16: ×1.024 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x64r4x4w16x8k32: ×1.012 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x64r4x8w8x8k32: geometric mean ×1.150 (short of the adopted ×1.157)
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.155 (short of the adopted ×1.157)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.147 (short of the adopted ×1.157)
- *   - tile32x64r8x8w8x4k16: ×0.953 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile32x64r8x8w8x4k32: ×0.929 < ×1.050 on i8a8-attention-qk-self-m4096-n4096
- *   - tile64x128r4x8w16x16k16: geometric mean ×1.118 (short of the adopted ×1.157)
- *   - tile64x128r4x8w16x16k32: ×1.039 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile64x128r8x8w16x8k16: ×1.004 < ×1.050 on i8a8-attention-qk-cross-m1024-n512
- *   - tile64x128r8x8w16x8k32: ×1.009 < ×1.050 on i8a8-attention-qk-cross-m1024-n512
- *   - tile64x32r4x4w8x16k16: ×1.025 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile64x32r4x4w8x16k32: ×1.012 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.155 (short of the adopted ×1.157)
- *   - tile64x32r8x4w8x8k32: geometric mean ×1.147 (short of the adopted ×1.157)
- *   - tile64x64r4x4w16x16k16: ×0.989 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile64x64r4x4w16x16k32: ×0.992 < ×1.050 on i8a8-attention-qk-cross-m4096-n512
- *   - tile64x64r4x8w8x16k16: geometric mean ×1.142 (short of the adopted ×1.157)
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.148 (short of the adopted ×1.157)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.136 (short of the adopted ×1.157)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.147 (short of the adopted ×1.157)
- *   - tile64x64r8x8w8x8k16: ×1.020 < ×1.050 on i8a8-attention-qk-self-m4096-n4096
- *   - tile64x64r8x8w8x8k32: geometric mean ×1.072 (short of the adopted ×1.157)
- * - i8a8.attentionPv (i8a8 attention ③PV, 4 cases): adopted tile16x128r4x8w16x4k16 ×1.131 (×1.119–×1.142)
- *   - tile128x128r8x8w16x16k16: ×0.769 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile128x128r8x8w16x16k32: ×0.814 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile128x32r8x4w8x16k16: ×1.038 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile128x32r8x4w8x16k32: ×1.026 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.084 (short of the adopted ×1.131)
- *   - tile128x64r8x4w16x16k32: ×0.985 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile128x64r8x8w8x16k16: ×0.983 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile128x64r8x8w8x16k32: ×1.025 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile16x128r4x8w16x4k32: geometric mean ×1.116 (short of the adopted ×1.131)
- *   - tile16x32r4x4w8x4k16: ×0.949 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile16x32r4x4w8x4k32: ×0.943 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile16x64r4x4w16x4k16: ×0.992 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile16x64r4x4w16x4k32: ×0.991 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile16x64r4x8w8x4k16: geometric mean ×1.101 (short of the adopted ×1.131)
- *   - tile16x64r4x8w8x4k32: geometric mean ×1.083 (short of the adopted ×1.131)
- *   - tile32x128r4x8w16x8k16: geometric mean ×1.124 (short of the adopted ×1.131)
- *   - tile32x128r4x8w16x8k32: geometric mean ×1.112 (short of the adopted ×1.131)
- *   - tile32x128r8x8w16x4k16: ×0.990 < ×1.050 on i8a8-attention-pv-cross-m1024-n512
- *   - tile32x128r8x8w16x4k32: ×1.003 < ×1.050 on i8a8-attention-pv-cross-m1024-n512
- *   - tile32x32r4x4w8x8k16: ×0.955 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x32r4x4w8x8k32: ×0.951 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x32r8x4w8x4k16: ×1.046 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x32r8x4w8x4k32: ×1.036 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x64r4x4w16x8k16: ×0.986 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x64r4x4w16x8k32: ×0.979 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile32x64r4x8w8x8k16: geometric mean ×1.116 (short of the adopted ×1.131)
- *   - tile32x64r4x8w8x8k32: geometric mean ×1.111 (short of the adopted ×1.131)
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.114 (short of the adopted ×1.131)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.108 (short of the adopted ×1.131)
- *   - tile32x64r8x8w8x4k16: ×0.965 < ×1.050 on i8a8-attention-pv-cross-m1024-n512
- *   - tile32x64r8x8w8x4k32: ×0.939 < ×1.050 on i8a8-attention-pv-cross-m1024-n512
- *   - tile64x128r4x8w16x16k16: ×1.015 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x128r4x8w16x16k32: ×1.019 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x128r8x8w16x8k32: ×1.043 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- *   - tile64x32r4x4w8x16k16: ×0.950 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x32r4x4w8x16k32: ×0.939 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.065 (short of the adopted ×1.131)
- *   - tile64x32r8x4w8x8k32: ×1.043 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x64r4x4w16x16k16: ×0.961 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x64r4x4w16x16k32: ×0.966 < ×1.050 on i8a8-attention-pv-self-m4096-n4096
- *   - tile64x64r4x8w8x16k16: geometric mean ×1.106 (short of the adopted ×1.131)
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.097 (short of the adopted ×1.131)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.102 (short of the adopted ×1.131)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.094 (short of the adopted ×1.131)
- *   - tile64x64r8x8w8x8k16: ×1.003 < ×1.050 on i8a8-attention-pv-self-m1024-n1024
- *   - tile64x64r8x8w8x8k32: ×1.020 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
- * - i8a8.conv3d (i8a8 conv3d (w8a8 implicit GEMM), 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
- *
- * Re-derived on 2026-10-26 from the same records with `deriveGeometryProfile` when the profile gained
- * `i8a8.conv3d` (ADR 0115 addendum 2026-10-26; the scripts are kept, untracked, in
- * `outputs/diag/wave-b-2026-10-26/v5/`). Every other field is unchanged; `i8a8.conv3d` keeps the default
- * because no record has a conv3d case, and the provenance's kernel fingerprint and case-set version were
- * the current runtime's.
- *
- * Provenance converted on 2026-11-12 to one entry per op family (ADR 0117 addendum 2026-11-12), no field
- * value changed: each family's entry names the records above that have a row of the family, and its
- * `kernels` / `caseSet` are the current runtime's keys over the family's cases. `i8a8-conv3d` has no entry
- * (no record has a conv3d case; its field is the default).
- *
- * `i8a8.linear` re-derived on 2026-11-12 when the field became row-count rules and the `i8a8-linear`
- * family got new cases and the bounds 256 / 512 / ∞ (ADR 0115 addendum decision 14): `deriveGeometryProfile`
- * (no base) over the records above, read through a script that lifts them in memory to the current record
- * format (`karume-geometry-sweep/3` with the current runtime's `caseSets` / `defaultKernels` for the
- * families of their rows; the rows untouched).
- * That rests on the rows having been measured on the same kernels; these records were written before
- * `candidateKernels` existed, so the evidence is the table's own fingerprint of the family (its geometry
- * and the default's on the family's cases), which re-derived equal with the current runtime before
- * the cases changed — the other measured candidates' kernels have no recorded key.
- * The records hold i8a8 linear cases at M = 1024 / 4096 only, so the buckets ≤ 256 and 257〜512 keep the
- * default geometry — a speed difference not measured on this adapter (no K-85 evaluation record exists for the
- * Apple M2) for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
- * of the family is registered; outputs do not change (the geometries are bit-identical by contract). The
- * bucket > 512 keeps the geometry the field held. Every other field and provenance entry is unchanged;
- * the `i8a8-linear` entry has the current `kernels` / `caseSet`.
+ * - linearGemv (the GEMV choices of linear), from 12 GEMV sweep records:
+ *   - [1] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-18T23-15-21.json (2026-11-18T23:15:21.277Z, set full): 87 groups — 87 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [2] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T02-48-31.json (2026-11-19T02:48:31.513Z, set full): 87 groups — 87 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [3] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-12-40.json (2026-11-19T03:12:40.044Z, set full): 48 groups — 47 current and steady, 0 unsteady, 1 not current; 0 rows of current groups not current
+ *     - 1 not current: the default profile's choices moved
+ *   - [4] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-25-41.json (2026-11-19T03:25:40.991Z, set full): 48 groups — 48 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [5] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T03-51-51.json (2026-11-19T03:51:51.650Z, set full): 75 groups — 24 current and steady, 0 unsteady, 51 not current; 0 rows of current groups not current
+ *     - 51 not current: the default profile's choices moved
+ *   - [6] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T04-17-20.json (2026-11-19T04:17:20.696Z, set full): 87 groups — 87 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [7] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-12-50.json (2026-11-19T06:12:50.159Z, set full): 87 groups — 86 current and steady, 1 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [8] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-24-14.json (2026-11-19T06:24:14.620Z, set full): 48 groups — 46 current and steady, 1 unsteady, 1 not current; 0 rows of current groups not current
+ *     - 1 not current: the default profile's choices moved
+ *   - [9] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-35-19.json (2026-11-19T06:35:18.894Z, set full): 48 groups — 48 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [10] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T06-52-24.json (2026-11-19T06:52:24.809Z, set full): 75 groups — 24 current and steady, 0 unsteady, 51 not current; 0 rows of current groups not current
+ *     - 51 not current: the default profile's choices moved
+ *   - [11] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T12-43-35.json (2026-11-19T12:43:35.046Z, set full): 75 groups — 75 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ *   - [12] outputs/workbench/browser-apple-m2/gemv-sweep_2026-11-19T12-58-40.json (2026-11-19T12:58:40.694Z, set full): 75 groups — 75 current and steady, 0 unsteady, 0 not current; 0 rows of current groups not current
+ * - identical class (sequential.shapes, M = 1): 81 adopted, 18 kept
+ *   - i4 n8960 k1536 (case i4g32-n8960-k1536): c32u4 -> c128u4 (×1.247 [1], ×1.207 [6])
+ *   - i4 n2048 k1536 (cases i4g32-n2048-k1536, i4g512-n2048-k1536): c32u4 -> c256u4 (×1.347 [1] i4g32-n2048-k1536, ×1.322 [6] i4g32-n2048-k1536, ×1.205 [4] i4g512-n2048-k1536, ×1.190 [9] i4g512-n2048-k1536)
+ *   - i4 n256 k1536 (cases i4g32-n256-k1536, i4g512-n256-k1536): c32u4 -> c128u4 (×1.470 [1] i4g32-n256-k1536, ×1.472 [6] i4g32-n256-k1536, ×1.237 [4] i4g512-n256-k1536, ×1.227 [9] i4g512-n256-k1536)
+ *   - i4 n1536 k2048 (cases i4g32-n1536-k2048, i4g2048-n1536-k2048): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1536-k2048 adopts c128u4; i4g2048-n1536-k2048 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u4: ×1.082 < ×1.100 in [4])))
+ *   - i4 n6144 k1536 (cases i4g32-n6144-k1536, i4g512-n6144-k1536): c32u4 -> c128u4 (×1.302 [1] i4g32-n6144-k1536, ×1.279 [6] i4g32-n6144-k1536, ×1.277 [4] i4g512-n6144-k1536, ×1.271 [9] i4g512-n6144-k1536)
+ *   - i4 n1536 k6144 (cases i4g32-n1536-k6144, i4g2048-n1536-k6144): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1536-k6144 adopts c256u4; i4g2048-n1536-k6144 adopts c128u4))
+ *   - i4 n1536 k256 (case i4g32-n1536-k256): c32u4 -> c128u4 (×1.187 [1], ×1.185 [6])
+ *   - i4 n4096 k1536 (cases i4g32-n4096-k1536, i4g512-n4096-k1536): c32u4 -> c128u4 (×1.366 [1] i4g32-n4096-k1536, ×1.413 [6] i4g32-n4096-k1536, ×1.189 [4] i4g512-n4096-k1536, ×1.384 [9] i4g512-n4096-k1536)
+ *   - i4 n512 k1536 (cases i4g32-n512-k1536, i4g512-n512-k1536): c32u4 -> c128u4 (×1.531 [1] i4g32-n512-k1536, ×1.504 [6] i4g32-n512-k1536, ×1.268 [4] i4g512-n512-k1536, ×1.258 [9] i4g512-n512-k1536)
+ *   - i4 n1536 k4096 (cases i4g32-n1536-k4096, i4g4096-n1536-k4096): c32u4 -> c128u4 (×1.312 [1] i4g32-n1536-k4096, ×1.303 [6] i4g32-n1536-k4096, ×1.233 [4] i4g4096-n1536-k4096, ×1.206 [9] i4g4096-n1536-k4096)
+ *   - i4 n12288 k1536 (case i4g32-n12288-k1536): c32u4 -> c256u4 (×1.238 [1], ×1.243 [6])
+ *   - i4 n1536 k12288 (case i4g32-n1536-k12288): c32u4 -> c128u4 (×1.397 [1], ×1.389 [6])
+ *   - i8 n262144 k1536 (case i8-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u1: evidence at M=1 from fewer than 2 records (M=1 is not measured in [1]; M=1 is not measured in [2]; M=1 is not current in [3] (the default profile's choice at exact is c16u4 in the record, c32u4 now); M=1 is not measured in [4]; M=1 is not measured in [5]; M=1 is not measured in [6]; M=1 is not measured in [7]; M=1 is not current in [8] (the default profile's choice at exact is c16u4 in the record, c32u4 now); M=1 is not measured in [9]; M=1 is not measured in [10]; M=1 is not measured in [11]; M=1 is not measured in [12])))
+ *   - i4 n262144 k1536 (case i4g32-n262144-k1536): c32u4 -> c128u4 (×1.126 [1], ×1.128 [6])
+ *   - i4 n256 k3072 (case i4g32-n256-k3072): c32u4 -> c128u4 (×1.479 [1], ×1.498 [6])
+ *   - i4 n1024 k256 (case i4g32-n1024-k256): c32u4 -> c128u4 (×1.454 [1], ×1.442 [6])
+ *   - i4 n256 k1024 (case i4g32-n256-k1024): c32u4 -> c128u4 (×1.403 [1], ×1.436 [6])
+ *   - i4 n2048 k256 (case i4g32-n2048-k256): c32u4 -> c256u4 (×1.310 [1], ×1.299 [6])
+ *   - i4 n256 k2048 (case i4g32-n256-k2048): c32u4 -> c128u4 (×1.457 [1], ×1.490 [6])
+ *   - i4 n262144 k256 (case i4g32-n262144-k256): c32u4 -> c128u4 (×1.158 [1], ×1.161 [6])
+ *   - i8 n256 k3072 (case i8-n256-k3072): c32u4 -> c128u4 (×2.582 [3], ×2.563 [8])
+ *   - i8 n1024 k256 (case i8-n1024-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: evidence at M=1 from fewer than 2 records (M=1 is not measured in [1]; M=1 is not measured in [2]; M=1 is not measured in [4]; M=1 is not measured in [5]; M=1 is not measured in [6]; M=1 is not measured in [7]; unsteady in [8] at M=1 (baseline spread ×1.313 > ×1.250); M=1 is not measured in [9]; M=1 is not measured in [10]; M=1 is not measured in [11]; M=1 is not measured in [12]))); c128u4: ×2.065 [3]
+ *   - i8 n256 k1024 (case i8-n256-k1024): c32u4 -> c128u4 (×2.444 [3], ×2.436 [8])
+ *   - i8 n2048 k256 (case i8-n2048-k256): c32u4 -> c256u4 (×1.793 [3], ×1.826 [8])
+ *   - i8 n256 k2048 (case i8-n256-k2048): c32u4 -> c128u4 (×2.537 [3], ×2.608 [8])
+ *   - i8 n262144 k256 (case i8-n262144-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×1.092 < ×1.100 in [3])); c128u4: ×1.092 [3], ×1.097 [8]
+ *   - i8 n256 k1536 (case i8-n256-k1536): c32u4 -> c128u4 (×2.559 [3], ×2.531 [8])
+ *   - i8 n1536 k256 (case i8-n1536-k256): c32u4 -> c256u4 (×1.722 [3], ×1.756 [8])
+ *   - i2 n12288 k1536 (case i2-n12288-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×1.072 < ×1.100 in [3])); c128u4: ×1.072 [3], ×1.099 [8]
+ *   - i2 n1536 k12288 (case i2-n1536-k12288): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×1.053 < ×1.100 in [3])); c128u4: ×1.053 [3], ×1.083 [8]
+ *   - i2 n262144 k1536 (case i2-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u4: ×1.047 < ×1.100 in [3])); c256u4: ×1.047 [3], ×1.047 [8]
+ *   - i4 n10752 k2560 (case i4g32-n10752-k2560): c32u4 -> c128u4 (×1.162 [1], ×1.159 [6])
+ *   - i4 n2048 k2560 (cases i4g32-n2048-k2560, i4g512-n2048-k2560): c32u4 -> c256u4 (×1.388 [1] i4g32-n2048-k2560, ×1.361 [6] i4g32-n2048-k2560, ×1.175 [4] i4g512-n2048-k2560, ×1.207 [9] i4g512-n2048-k2560)
+ *   - i4 n512 k2560 (cases i4g32-n512-k2560, i4g512-n512-k2560): c32u4 -> c128u4 (×1.513 [1] i4g32-n512-k2560, ×1.497 [6] i4g32-n512-k2560, ×1.277 [4] i4g512-n512-k2560, ×1.284 [9] i4g512-n512-k2560)
+ *   - i4 n256 k2560 (case i4g32-n256-k2560): c32u4 -> c128u4 (×1.469 [1], ×1.452 [6])
+ *   - i4 n2560 k2048 (cases i4g32-n2560-k2048, i4g2048-n2560-k2048): c32u4 -> c128u4 (×1.191 [1] i4g32-n2560-k2048, ×1.224 [6] i4g32-n2560-k2048, ×1.146 [4] i4g2048-n2560-k2048, ×1.177 [9] i4g2048-n2560-k2048)
+ *   - i4 n10240 k2560 (cases i4g32-n10240-k2560, i4g512-n10240-k2560): c32u4 -> c256u4 (×1.213 [1] i4g32-n10240-k2560, ×1.216 [6] i4g32-n10240-k2560, ×1.310 [4] i4g512-n10240-k2560, ×1.385 [9] i4g512-n10240-k2560)
+ *   - i4 n2560 k10240 (cases i4g32-n2560-k10240, i4g2048-n2560-k10240): c32u4 -> c128u4 (×1.278 [1] i4g32-n2560-k10240, ×1.288 [6] i4g32-n2560-k10240, ×1.321 [4] i4g2048-n2560-k10240, ×1.333 [9] i4g2048-n2560-k10240)
+ *   - i4 n2560 k256 (case i4g32-n2560-k256): c32u4 -> c128u4 (×1.179 [1], ×1.173 [6])
+ *   - i4 n4096 k2560 (cases i4g32-n4096-k2560, i4g512-n4096-k2560): c32u4 -> c128u4 (×1.316 [1] i4g32-n4096-k2560, ×1.395 [6] i4g32-n4096-k2560, ×1.409 [4] i4g512-n4096-k2560, ×1.415 [9] i4g512-n4096-k2560)
+ *   - i4 n1024 k2560 (cases i4g32-n1024-k2560, i4g512-n1024-k2560): c32u4 -> c128u4 (×1.577 [1] i4g32-n1024-k2560, ×1.570 [6] i4g32-n1024-k2560, ×1.344 [4] i4g512-n1024-k2560, ×1.314 [9] i4g512-n1024-k2560)
+ *   - i4 n2560 k4096 (cases i4g32-n2560-k4096, i4g4096-n2560-k4096): c32u4 -> c128u4 (×1.211 [2] i4g32-n2560-k4096, ×1.208 [7] i4g32-n2560-k4096, ×1.171 [4] i4g4096-n2560-k4096, ×1.151 [9] i4g4096-n2560-k4096)
+ *   - i8 n262144 k2560 (case i8-n262144-k2560): c32u4 -> c128u4 (×1.112 [3], ×1.112 [8])
+ *   - i4 n262144 k2560 (case i4g32-n262144-k2560): c32u4 -> c128u8 (×1.122 [2], ×1.127 [7])
+ *   - i4 n256 k5120 (case i4g32-n256-k5120): c32u4 -> c128u4 (×1.503 [2], ×1.488 [7])
+ *   - i8 n256 k2560 (case i8-n256-k2560): c32u4 -> c128u4 (×2.544 [3], ×2.545 [8])
+ *   - i8 n2560 k256 (case i8-n2560-k256): c32u4 -> c128u4 (×1.450 [3], ×1.435 [8])
+ *   - i2 n262144 k2560 (case i2-n262144-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u4: ×1.046 < ×1.100 in [3])); c256u4: ×1.046 [3], ×1.044 [8]
+ *   - i4 n15360 k3840 (case i4g32-n15360-k3840): c32u4 -> c128u4 (×1.244 [2], ×1.230 [7])
+ *   - i4 n8192 k3840 (case i4g32-n8192-k3840): c32u4 -> c128u4 (×1.372 [2], ×1.392 [7])
+ *   - i4 n4096 k3840 (case i4g32-n4096-k3840): c32u4 -> c128u4 (×1.430 [2], ×1.422 [7])
+ *   - i4 n2048 k3840 (case i4g32-n2048-k3840): c32u4 -> c256u4 (×1.392 [2], ×1.393 [7])
+ *   - i4 n512 k3840 (case i4g32-n512-k3840): c32u4 -> c128u4 (×1.530 [2], ×1.533 [7])
+ *   - i4 n3840 k4096 (case i4g32-n3840-k4096): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u4: evidence at M=1 from fewer than 2 records (M=1 is not measured in [1]; M=1 is not measured in [3]; M=1 is not measured in [4]; M=1 is not measured in [5]; M=1 is not measured in [6]; unsteady in [7] at M=1 (baseline spread ×1.276 > ×1.250); M=1 is not measured in [8]; M=1 is not measured in [9]; M=1 is not measured in [10]; M=1 is not measured in [11]; M=1 is not measured in [12]))); c256u4: ×1.319 [2]
+ *   - i4 n3840 k8192 (case i4g32-n3840-k8192): c32u4 -> c256u4 (×1.322 [2], ×1.310 [7])
+ *   - i4 n3840 k15360 (case i4g32-n3840-k15360): c32u4 -> c256u4 (×1.222 [2], ×1.242 [7])
+ *   - i4 n262144 k3840 (case i4g32-n262144-k3840): c32u4 -> c128u8 (×1.200 [2], ×1.171 [7])
+ *   - i4 n1024 k7680 (case i4g32-n1024-k7680): c32u4 -> c128u4 (×1.515 [2], ×1.510 [7])
+ *   - i4 n4096 k1024 (case i4g32-n4096-k1024): c32u4 -> c128u4 (×1.468 [2], ×1.412 [7])
+ *   - i4 n1024 k4096 (case i4g32-n1024-k4096): c32u4 -> c128u4 (×1.497 [2], ×1.439 [7])
+ *   - i4 n8192 k1024 (case i4g32-n8192-k1024): c32u4 -> c128u4 (×1.358 [2], ×1.360 [7])
+ *   - i4 n1024 k8192 (case i4g32-n1024-k8192): c32u4 -> c128u4 (×1.463 [2], ×1.485 [7])
+ *   - i4 n3840 k1024 (case i4g32-n3840-k1024): c32u4 -> c128u4 (×1.167 [2], ×1.177 [7])
+ *   - i4 n262144 k1024 (case i4g32-n262144-k1024): c32u4 -> c128u4 (×1.124 [2], ×1.128 [7])
+ *   - i4 n8192 k2816 (case i4g32-n8192-k2816): c32u4 -> c256u4 (×1.392 [2], ×1.369 [7])
+ *   - i4 n4096 k2816 (case i4g32-n4096-k2816): c32u4 -> c128u4 (×1.473 [2], ×1.486 [7])
+ *   - i4 n2048 k2816 (case i4g32-n2048-k2816): c32u4 -> c256u4 (×1.390 [2], ×1.417 [7])
+ *   - i4 n2112 k2816 (case i4g32-n2112-k2816): c32u4 -> c256u4 (×1.271 [2], ×1.265 [7])
+ *   - i4 n1024 k2816 (case i4g32-n1024-k2816): c32u4 -> c128u4 (×1.585 [2], ×1.587 [7])
+ *   - i4 n128 k2816 (case i4g32-n128-k2816): c32u4 -> c128u4 (×1.503 [2], ×1.489 [7])
+ *   - i4 n2816 k4096 (case i4g32-n2816-k4096): c32u4 -> c128u4 (×1.241 [2], ×1.228 [7])
+ *   - i4 n2816 k8192 (case i4g32-n2816-k8192): c32u4 -> c128u4 (×1.287 [2], ×1.286 [7])
+ *   - i4 n2816 k2112 (case i4g32-n2816-k2112): c32u4 -> c128u4 (×1.219 [2], ×1.223 [7])
+ *   - i4 n262144 k2816 (case i4g32-n262144-k2816): c32u4 -> c128u8 (×1.243 [2], ×1.218 [7])
+ *   - bf16 n8960 k1536 (case bf16-n8960-k1536): c16u8 -> c128u16 (×1.118 [5], ×1.124 [10], ×1.110 [11], ×1.108 [12])
+ *   - bf16 n2048 k1536 (case bf16-n2048-k1536): c16u16 -> c256u8 (×1.169 [11], ×1.165 [12])
+ *   - bf16 n256 k1536 (case bf16-n256-k1536): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u8: ×1.098 < ×1.100 in [11])); c128u8: ×1.098 [11], ×1.085 [12]
+ *   - bf16 n1536 k2048 (case bf16-n1536-k2048): c16u8 -> c256u8 (×1.164 [5], ×1.102 [10], ×1.148 [11], ×1.190 [12])
+ *   - bf16 n6144 k1536 (case bf16-n6144-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u16: ×1.070 < ×1.100 in [11])); c128u16: ×1.070 [11], ×1.079 [12]
+ *   - bf16 n1536 k6144 (case bf16-n1536-k6144): c16u16 -> c256u8 (×1.220 [11], ×1.225 [12])
+ *   - bf16 n1536 k256 (case bf16-n1536-k256): c32u16 -> c64u2 (×1.132 [11], ×1.131 [12])
+ *   - bf16 n4096 k1536 (case bf16-n4096-k1536): c16u8 -> c128u16 (×1.133 [11], ×1.112 [12])
+ *   - bf16 n512 k1536 (case bf16-n512-k1536): c16u16 -> c128u8 (×1.190 [11], ×1.189 [12])
+ *   - bf16 n1536 k4096 (case bf16-n1536-k4096): c16u16 -> c256u8 (×1.277 [11], ×1.261 [12])
+ *   - bf16 n12288 k1536 (case bf16-n12288-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u16: ×1.069 < ×1.100 in [5])); c256u16: ×1.069 [5], ×1.070 [10], ×1.069 [11], ×1.059 [12]
+ *   - bf16 n1536 k12288 (case bf16-n1536-k12288): c16u16 -> c128u8 (×1.197 [11], ×1.195 [12])
+ *   - bf16 n262144 k1536 (case bf16-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×1.028 < ×1.100 in [5])); c16u16: ×1.028 [5], ×1.030 [10], ×1.029 [11], ×1.027 [12]
+ *   - bf16 n10752 k2560 (case bf16-n10752-k2560): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u16: ×1.056 < ×1.100 in [5])); c128u16: ×1.056 [5], ×1.046 [10], ×1.051 [11], ×1.048 [12]
+ *   - bf16 n2048 k2560 (case bf16-n2048-k2560): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u8: ×1.074 < ×1.100 in [12])); c256u8: ×1.131 [11], ×1.074 [12]
+ *   - bf16 n512 k2560 (case bf16-n512-k2560): c16u16 -> c128u8 (×1.377 [11], ×1.386 [12])
+ *   - bf16 n256 k2560 (case bf16-n256-k2560): c16u16 -> c128u8 (×1.112 [11], ×1.117 [12])
+ *   - bf16 n2560 k2048 (case bf16-n2560-k2048): c16u8 -> c128u16 (×1.257 [11], ×1.277 [12])
+ *   - bf16 n10240 k2560 (case bf16-n10240-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u16: ×1.049 < ×1.100 in [5])); c128u16: ×1.049 [5], ×1.069 [10], ×1.037 [11], ×1.040 [12]
+ *   - bf16 n2560 k10240 (case bf16-n2560-k10240): c16u8 -> c128u16 (×1.509 [11], ×1.503 [12])
+ *   - bf16 n2560 k256 (case bf16-n2560-k256): c16u16 -> c32u2 (×1.545 [5], ×1.564 [10], ×1.544 [11], ×1.548 [12])
+ *   - bf16 n4096 k2560 (case bf16-n4096-k2560): c16u8 -> c128u16 (×1.104 [11], ×1.105 [12])
+ *   - bf16 n1024 k2560 (case bf16-n1024-k2560): c16u16 -> c256u8 (×1.443 [11], ×1.455 [12])
+ *   - bf16 n2560 k4096 (case bf16-n2560-k4096): c16u8 -> c128u16 (×1.276 [11], ×1.264 [12])
+ *   - bf16 n262144 k2560 (case bf16-n262144-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u16: ×1.047 < ×1.100 in [5])); c256u16: ×1.047 [5], ×1.041 [10], ×1.046 [11], ×1.028 [12]
+ * - reorder class (parallelShapes, M = 1 to 8): 65 adopted, 50 kept
+ *   - i4 g32 n8960 k1536 (case i4g32-n8960-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×0.987 < ×1.100 in [1])); parallel-l2: ×0.987 [1], ×0.991 [6]
+ *   - i4 g32 n2048 k1536 (case i4g32-n2048-k1536): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.989 < ×1.100 in [1])); parallel-l8: ×0.989 [1], ×0.970 [6]
+ *   - i4 g32 n256 k1536 (case i4g32-n256-k1536): parallel-l32 with row blocks of 2 -> parallel-l16 with row blocks of 4 (×1.594 [1], ×1.542 [6]); at the other row counts: ×1.869 [1] M=4, ×1.889 [6] M=4, ×1.844 [1] M=8, ×1.825 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.311 [1], ×1.307 [6]): a Session option, not a row
+ *   - i4 g32 n1536 k2048 (case i4g32-n1536-k2048): staged-l32 -> parallel-l4 with row blocks of 2 (×1.676 [1], ×1.631 [6]); at the other row counts: ×2.298 [1] M=4, ×2.342 [6] M=4, ×2.494 [1] M=8, ×2.511 [6] M=8
+ *     - subgroup32-l4 meets the rule too (×1.366 [1], ×1.341 [6]): a Session option, not a row
+ *   - i4 g32 n6144 k1536 (case i4g32-n6144-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×0.986 < ×1.100 in [1])); parallel-l2: ×0.986 [1], ×0.995 [6]
+ *   - i4 g32 n1536 k6144 (case i4g32-n1536-k6144): staged-l32 with row blocks of 2 -> parallel-l4 with row blocks of 2 (×1.393 [1], ×1.403 [6]); at the other row counts: ×1.498 [1] M=4, ×1.536 [6] M=4, ×1.608 [1] M=8, ×1.623 [6] M=8
+ *   - i4 g32 n1536 k256 (case i4g32-n1536-k256): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.214 [1] M=4, ×1.191 [6] M=4, ×1.270 [1] M=8, ×1.262 [6] M=8
+ *   - i4 g32 n4096 k1536 (case i4g32-n4096-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.942 < ×1.100 in [1])); parallel-l8: ×0.942 [1], ×0.938 [6]
+ *   - i4 g32 n512 k1536 (case i4g32-n512-k1536): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.699 [1], ×1.724 [6]); at the other row counts: ×2.532 [1] M=4, ×2.516 [6] M=4, ×2.481 [1] M=8, ×2.465 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.492 [1], ×1.494 [6]): a Session option, not a row
+ *   - i4 g32 n1536 k4096 (case i4g32-n1536-k4096): staged-l32 -> parallel-l4 with row blocks of 2 (×1.433 [1], ×1.414 [6]); at the other row counts: ×2.133 [1] M=4, ×2.107 [6] M=4, ×2.200 [1] M=8, ×2.211 [6] M=8
+ *     - subgroup32-l4 meets the rule too (×1.176 [1], ×1.187 [6]): a Session option, not a row
+ *   - i4 g32 n12288 k1536 (case i4g32-n12288-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.006 < ×1.100 in [1])); parallel-l8: ×1.006 [1], ×1.011 [6]
+ *   - i4 g32 n1536 k12288 (case i4g32-n1536-k12288): staged-l32 with row blocks of 2 -> parallel-l16 with row blocks of 2 (×1.236 [1], ×1.262 [6]); at the other row counts: ×1.403 [1] M=4, ×1.405 [6] M=4, ×1.433 [1] M=8, ×1.436 [6] M=8
+ *   - i8 n262144 k1536 (case i8-n262144-k1536): parallel-l16 -> parallel-l16 with row blocks of 4; at the other row counts: ×1.198 [3] M=4, ×1.196 [8] M=4, ×1.225 [3] M=8, ×1.226 [8] M=8
+ *   - i4 g32 n262144 k1536 (case i4g32-n262144-k1536): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; M=4 is not measured in [2]; M=4 is not measured in [3]; M=4 is not measured in [4]; M=4 is not measured in [5]; screened out by the quick look in [6] at M=4; M=4 is not measured in [7]; M=4 is not measured in [8]; M=4 is not measured in [9]; M=4 is not measured in [10]; M=4 is not measured in [11]; M=4 is not measured in [12]))); parallel-l4: ×1.176 [1], ×1.177 [6]
+ *   - i4 g32 n256 k3072 (case i4g32-n256-k3072): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.402 [1], ×1.365 [6]); at the other row counts: ×2.014 [1] M=4, ×2.021 [6] M=4, ×2.039 [1] M=8, ×1.994 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.131 [1], ×1.134 [6]): a Session option, not a row
+ *   - i4 g32 n1024 k256 (case i4g32-n1024-k256): no row (c32u4) -> parallel-l4 with row blocks of 4 (×1.662 [1], ×1.675 [6]); at the other row counts: ×1.322 [1] M=4, ×1.389 [6] M=4, ×1.398 [1] M=8, ×1.379 [6] M=8
+ *   - i4 g32 n256 k1024 (case i4g32-n256-k1024): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.388 [1], ×1.450 [6]); at the other row counts: ×1.858 [1] M=4, ×1.912 [6] M=4, ×1.848 [1] M=8, ×1.890 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.225 [1], ×1.252 [6]): a Session option, not a row
+ *   - i4 g32 n2048 k256 (case i4g32-n2048-k256): no row (c32u4) -> parallel-l2 with row blocks of 4 (×1.349 [1], ×1.359 [6]); at the other row counts: ×1.672 [1] M=4, ×1.711 [6] M=4, ×1.550 [1] M=8, ×1.541 [6] M=8
+ *     - subgroup32-l2 meets the rule too (×1.140 [1], ×1.141 [6]): a Session option, not a row
+ *   - i4 g32 n256 k2048 (case i4g32-n256-k2048): no row (c32u4) -> parallel-l16 with row blocks of 4 (×5.601 [1], ×5.581 [6]); at the other row counts: ×2.826 [1] M=4, ×2.813 [6] M=4, ×1.678 [1] M=8, ×1.718 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×4.786 [1], ×4.732 [6]): a Session option, not a row
+ *   - i4 g32 n262144 k256 (case i4g32-n262144-k256): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; M=4 is not measured in [2]; M=4 is not measured in [3]; M=4 is not measured in [4]; M=4 is not measured in [5]; screened out by the quick look in [6] at M=4; M=4 is not measured in [7]; M=4 is not measured in [8]; M=4 is not measured in [9]; M=4 is not measured in [10]; M=4 is not measured in [11]; M=4 is not measured in [12]))); parallel-l2: ×1.155 [1], ×1.158 [6]
+ *   - i8 n256 k3072 (case i8-n256-k3072): no row (c32u4) -> parallel-l16 with row blocks of 8 (×11.178 [3], ×11.873 [8]); at the other row counts: ×5.411 [3] M=4, ×5.472 [8] M=4, ×3.425 [3] M=8, ×3.476 [8] M=8
+ *     - subgroup32-l16 meets the rule too (×11.151 [3], ×11.168 [8]): a Session option, not a row
+ *   - i8 n1024 k256 (case i8-n1024-k256): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: evidence at M=1 from fewer than 2 records (M=1 is not measured in [1]; M=1 is not measured in [2]; M=1 is not measured in [4]; M=1 is not measured in [5]; M=1 is not measured in [6]; M=1 is not measured in [7]; unsteady in [8] at M=1 (baseline spread ×1.313 > ×1.250); M=1 is not measured in [9]; M=1 is not measured in [10]; M=1 is not measured in [11]; M=1 is not measured in [12]))); parallel-l4: ×2.749 [3]
+ *   - i8 n256 k1024 (case i8-n256-k1024): no row (c32u4) -> parallel-l16 with row blocks of 8 (×8.142 [3], ×8.089 [8]); at the other row counts: ×4.085 [3] M=4, ×4.113 [8] M=4, ×2.567 [3] M=8, ×2.602 [8] M=8
+ *     - subgroup32-l16 meets the rule too (×8.350 [3], ×8.394 [8]): a Session option, not a row
+ *   - i8 n2048 k256 (case i8-n2048-k256): no row (c32u4) -> parallel-l2 with row blocks of 8 (×1.930 [3], ×1.924 [8]); at the other row counts: ×2.534 [3] M=4, ×2.478 [8] M=4, ×2.552 [3] M=8, ×2.580 [8] M=8
+ *     - subgroup32-l4 meets the rule too (×1.815 [3], ×1.832 [8]): a Session option, not a row
+ *   - i8 n256 k2048 (case i8-n256-k2048): no row (c32u4) -> parallel-l16 with row blocks of 8 (×10.176 [3], ×10.188 [8]); at the other row counts: ×4.898 [3] M=4, ×4.970 [8] M=4, ×3.164 [3] M=8, ×3.126 [8] M=8
+ *     - subgroup32-l16 meets the rule too (×10.674 [3], ×10.350 [8]): a Session option, not a row
+ *   - i8 n262144 k256 (case i8-n262144-k256): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: M=4 is not measured in [1]; M=4 is not measured in [2]; screened out by the quick look in [3] at M=4; M=4 is not measured in [4]; M=4 is not measured in [5]; M=4 is not measured in [6]; M=4 is not measured in [7]; screened out by the quick look in [8] at M=4; M=4 is not measured in [9]; M=4 is not measured in [10]; M=4 is not measured in [11]; M=4 is not measured in [12]))); parallel-l8: ×1.124 [3], ×1.127 [8]
+ *   - i4 g512 n2048 k1536 (case i4g512-n2048-k1536): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.402 [4] M=4, ×1.428 [9] M=4, ×1.391 [4] M=8, ×1.404 [9] M=8
+ *   - i4 g512 n256 k1536 (case i4g512-n256-k1536): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.527 [4], ×1.459 [9]); at the other row counts: ×2.159 [4] M=4, ×2.140 [9] M=4, ×2.109 [4] M=8, ×2.084 [9] M=8
+ *     - subgroup32-l16 meets the rule too (×1.274 [4], ×1.220 [9]): a Session option, not a row
+ *   - i4 g2048 n1536 k2048 (case i4g2048-n1536-k2048): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l4 meets the rule too (×1.474 [4], ×1.459 [9]): a Session option, not a row
+ *   - i4 g512 n6144 k1536 (case i4g512-n6144-k1536): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.454 [4] M=4, ×1.462 [9] M=4, ×1.489 [4] M=8, ×1.491 [9] M=8
+ *   - i4 g2048 n1536 k6144 (case i4g2048-n1536-k6144): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l4 meets the rule too (×1.372 [4], ×1.326 [9]): a Session option, not a row
+ *   - i8 n256 k1536 (case i8-n256-k1536): parallel-l32 -> parallel-l16 with row blocks of 8 (×1.277 [3], ×1.264 [8]); at the other row counts: ×1.576 [3] M=4, ×1.591 [8] M=4, ×1.769 [3] M=8, ×1.776 [8] M=8
+ *     - subgroup32-l16 meets the rule too (×1.289 [3], ×1.286 [8]): a Session option, not a row
+ *   - i8 n1536 k256 (case i8-n1536-k256): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.146 [3] M=4, ×1.156 [8] M=4, ×1.138 [3] M=8, ×1.176 [8] M=8
+ *   - i4 g512 n4096 k1536 (case i4g512-n4096-k1536): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.453 [4] M=4, ×1.438 [9] M=4, ×1.490 [4] M=8, ×1.486 [9] M=8
+ *   - i4 g512 n512 k1536 (case i4g512-n512-k1536): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.755 [4], ×1.666 [9]); at the other row counts: ×2.540 [4] M=4, ×2.503 [9] M=4, ×2.522 [4] M=8, ×2.464 [9] M=8
+ *   - i4 g4096 n1536 k4096 (case i4g4096-n1536-k4096): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l4 meets the rule too (×1.381 [4], ×1.368 [9]): a Session option, not a row
+ *   - i2 n12288 k1536 (case i2-n12288-k1536): parallel-l2 -> parallel-l2 with row blocks of 2; at the other row counts: ×1.538 [3] M=4, ×1.532 [8] M=4, ×1.560 [3] M=8, ×1.557 [8] M=8
+ *   - i2 n1536 k12288 (case i2-n1536-k12288): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l4 meets the rule too (×1.429 [3], ×1.443 [8]): a Session option, not a row
+ *   - i2 n262144 k1536 (case i2-n262144-k1536): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×1.014 < ×1.100 in [3])); parallel-l2: ×1.014 [3], ×1.013 [8]
+ *   - i4 g32 n10752 k2560 (case i4g32-n10752-k2560): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.059 < ×1.100 in [1])); parallel-l8: ×1.059 [1], ×1.066 [6]
+ *   - i4 g32 n2048 k2560 (case i4g32-n2048-k2560): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.032 < ×1.100 in [1])); parallel-l8: ×1.032 [1], ×1.017 [6]
+ *   - i4 g32 n512 k2560 (case i4g32-n512-k2560): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.646 [1], ×1.606 [6]); at the other row counts: ×2.311 [1] M=4, ×2.328 [6] M=4, ×2.367 [1] M=8, ×2.309 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.353 [1], ×1.323 [6]): a Session option, not a row
+ *   - i4 g32 n256 k2560 (case i4g32-n256-k2560): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.393 [1], ×1.440 [6]); at the other row counts: ×2.031 [1] M=4, ×2.100 [6] M=4, ×2.009 [1] M=8, ×2.026 [6] M=8
+ *     - subgroup32-l16 meets the rule too (×1.159 [1], ×1.195 [6]): a Session option, not a row
+ *   - i4 g32 n2560 k2048 (case i4g32-n2560-k2048): staged-l32 -> parallel-l4 with row blocks of 2 (×1.711 [1], ×1.648 [6]); at the other row counts: ×2.517 [1] M=4, ×2.548 [6] M=4, ×2.603 [1] M=8, ×2.599 [6] M=8
+ *     - subgroup32-l8 meets the rule too (×1.374 [1], ×1.380 [6]): a Session option, not a row
+ *   - i4 g32 n10240 k2560 (case i4g32-n10240-k2560): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.059 < ×1.100 in [1])); parallel-l8: ×1.059 [1], ×1.059 [6]
+ *   - i4 g32 n2560 k10240 (case i4g32-n2560-k10240): staged-l32 with row blocks of 2 -> parallel-l8 with row blocks of 2 (×1.252 [1], ×1.250 [6]); at the other row counts: ×1.506 [1] M=4, ×1.506 [6] M=4, ×1.557 [1] M=8, ×1.558 [6] M=8
+ *   - i4 g32 n2560 k256 (case i4g32-n2560-k256): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×1.083 < ×1.100 in [1])); parallel-l2: ×1.083 [1], ×1.082 [6]
+ *   - i4 g32 n4096 k2560 (case i4g32-n4096-k2560): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.958 < ×1.100 in [1])); parallel-l8: ×0.958 [1], ×0.970 [6]
+ *   - i4 g32 n1024 k2560 (case i4g32-n1024-k2560): parallel-l32 with row blocks of 2 -> parallel-l4 with row blocks of 4 (×1.682 [1], ×1.762 [6]); at the other row counts: ×2.118 [1] M=4, ×2.094 [6] M=4, ×2.105 [1] M=8, ×2.128 [6] M=8
+ *     - subgroup32-l8 meets the rule too (×1.511 [1], ×1.539 [6]): a Session option, not a row
+ *   - i4 g32 n2560 k4096 (case i4g32-n2560-k4096): staged-l32 with row blocks of 2 -> parallel-l4 with row blocks of 2 (×1.476 [2], ×1.474 [7]); at the other row counts: ×1.758 [2] M=4, ×1.753 [7] M=4, ×1.798 [2] M=8, ×1.800 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.225 [2], ×1.217 [7]): a Session option, not a row
+ *   - i8 n262144 k2560 (case i8-n262144-k2560): parallel-l16 -> parallel-l16 with row blocks of 4; at the other row counts: ×1.242 [3] M=4, ×1.241 [8] M=4, ×1.288 [3] M=8, ×1.288 [8] M=8
+ *   - i4 g32 n262144 k2560 (case i4g32-n262144-k2560): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: M=4 is not measured in [1]; screened out by the quick look in [2] at M=4; M=4 is not measured in [3]; M=4 is not measured in [4]; M=4 is not measured in [5]; M=4 is not measured in [6]; screened out by the quick look in [7] at M=4; M=4 is not measured in [8]; M=4 is not measured in [9]; M=4 is not measured in [10]; M=4 is not measured in [11]; M=4 is not measured in [12]))); parallel-l8: ×1.250 [2], ×1.253 [7]
+ *   - i4 g32 n256 k5120 (case i4g32-n256-k5120): no row (c32u4) -> parallel-l16 with row blocks of 4 (×7.032 [2], ×6.985 [7]); at the other row counts: ×3.430 [2] M=4, ×3.372 [7] M=4, ×2.087 [2] M=8, ×2.084 [7] M=8
+ *   - i4 g512 n2048 k2560 (case i4g512-n2048-k2560): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.425 [4] M=4, ×1.404 [9] M=4, ×1.409 [4] M=8, ×1.408 [9] M=8
+ *   - i4 g512 n512 k2560 (case i4g512-n512-k2560): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.659 [4], ×1.647 [9]); at the other row counts: ×2.439 [4] M=4, ×2.344 [9] M=4, ×2.435 [4] M=8, ×2.391 [9] M=8
+ *   - i4 g2048 n2560 k2048 (case i4g2048-n2560-k2048): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l8 meets the rule too (×1.415 [4], ×1.406 [9]): a Session option, not a row
+ *   - i4 g512 n10240 k2560 (case i4g512-n10240-k2560): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.471 [4] M=4, ×1.473 [9] M=4, ×1.504 [4] M=8, ×1.504 [9] M=8
+ *   - i4 g2048 n2560 k10240 (case i4g2048-n2560-k10240): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l8 meets the rule too (×1.310 [4], ×1.316 [9]): a Session option, not a row
+ *   - i8 n256 k2560 (case i8-n256-k2560): parallel-l32 -> parallel-l16 with row blocks of 8 (×1.247 [3], ×1.237 [8]); at the other row counts: ×1.681 [3] M=4, ×1.688 [8] M=4, ×1.886 [3] M=8, ×1.869 [8] M=8
+ *     - subgroup32-l16 meets the rule too (×1.259 [3], ×1.260 [8]): a Session option, not a row
+ *   - i8 n2560 k256 (case i8-n2560-k256): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.146 [3] M=4, ×1.172 [8] M=4, ×1.199 [3] M=8, ×1.161 [8] M=8
+ *   - i4 g512 n4096 k2560 (case i4g512-n4096-k2560): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.466 [4] M=4, ×1.461 [9] M=4, ×1.501 [4] M=8, ×1.495 [9] M=8
+ *   - i4 g512 n1024 k2560 (case i4g512-n1024-k2560): parallel-l32 -> parallel-l4 with row blocks of 4 (×1.719 [4], ×1.727 [9]); at the other row counts: ×2.590 [4] M=4, ×2.539 [9] M=4, ×2.638 [4] M=8, ×2.640 [9] M=8
+ *   - i4 g4096 n2560 k4096 (case i4g4096-n2560-k4096): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l8 meets the rule too (×1.354 [4], ×1.399 [9]): a Session option, not a row
+ *   - i2 n262144 k2560 (case i2-n262144-k2560): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l2: ×1.022 < ×1.100 in [3])); staged-l2: ×1.022 [3], ×1.020 [8]
+ *   - i4 g32 n15360 k3840 (case i4g32-n15360-k3840): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.450 [2] M=4, ×1.451 [7] M=4, ×1.492 [2] M=8, ×1.492 [7] M=8
+ *   - i4 g32 n8192 k3840 (case i4g32-n8192-k3840): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.433 [2] M=4, ×1.432 [7] M=4, ×1.485 [2] M=8, ×1.485 [7] M=8
+ *   - i4 g32 n4096 k3840 (case i4g32-n4096-k3840): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.053 < ×1.100 in [2])); parallel-l8: ×1.053 [2], ×1.037 [7]
+ *   - i4 g32 n2048 k3840 (case i4g32-n2048-k3840): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.011 < ×1.100 in [2])); parallel-l8: ×1.011 [2], ×1.020 [7]
+ *   - i4 g32 n512 k3840 (case i4g32-n512-k3840): parallel-l32 with row blocks of 2 -> parallel-l8 with row blocks of 4 (×1.545 [2], ×1.531 [7]); at the other row counts: ×1.694 [2] M=4, ×1.720 [7] M=4, ×1.686 [2] M=8, ×1.702 [7] M=8
+ *   - i4 g32 n3840 k4096 (case i4g32-n3840-k4096): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.296 [2] M=4, ×1.291 [7] M=4, ×1.298 [2] M=8, ×1.293 [7] M=8
+ *   - i4 g32 n3840 k8192 (case i4g32-n3840-k8192): staged-l32 with row blocks of 2 -> parallel-l8 with row blocks of 2 (×1.318 [2], ×1.308 [7]); at the other row counts: ×1.569 [2] M=4, ×1.570 [7] M=4, ×1.609 [2] M=8, ×1.597 [7] M=8
+ *   - i4 g32 n3840 k15360 (case i4g32-n3840-k15360): staged-l32 -> parallel-l8 with row blocks of 2 (×1.220 [2], ×1.211 [7]); at the other row counts: ×1.946 [2] M=4, ×1.946 [7] M=4, ×2.003 [2] M=8, ×2.006 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.131 [2], ×1.127 [7]): a Session option, not a row
+ *   - i4 g32 n262144 k3840 (case i4g32-n262144-k3840): parallel-l16 -> parallel-l16 with row blocks of 2; at the other row counts: ×1.413 [2] M=4, ×1.412 [7] M=4, ×1.416 [2] M=8, ×1.416 [7] M=8
+ *   - i4 g32 n1024 k7680 (case i4g32-n1024-k7680): staged-l32 -> parallel-l16 with row blocks of 2 (×1.463 [2], ×1.423 [7]); at the other row counts: ×1.952 [2] M=4, ×1.950 [7] M=4, ×1.984 [2] M=8, ×1.980 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.264 [2], ×1.284 [7]): a Session option, not a row
+ *   - i4 g32 n4096 k1024 (case i4g32-n4096-k1024): no row (c32u4) -> parallel-l4 with row blocks of 2 (×1.449 [2], ×1.457 [7]); at the other row counts: ×1.693 [2] M=4, ×1.696 [7] M=4, ×1.307 [2] M=8, ×1.316 [7] M=8
+ *   - i4 g32 n1024 k4096 (case i4g32-n1024-k4096): staged-l32 -> parallel-l4 with row blocks of 4 (×1.418 [2], ×1.427 [7]); at the other row counts: ×2.147 [2] M=4, ×2.144 [7] M=4, ×2.185 [2] M=8, ×2.202 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.258 [2], ×1.255 [7]): a Session option, not a row
+ *   - i4 g32 n8192 k1024 (case i4g32-n8192-k1024): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: slower than the default's choice in [2] at M=4 (×0.927))); parallel-l4: ×1.385 [2], ×1.385 [7]
+ *   - i4 g32 n1024 k8192 (case i4g32-n1024-k8192): staged-l32 -> parallel-l4 with row blocks of 4 (×1.363 [2], ×1.344 [7]); at the other row counts: ×2.010 [2] M=4, ×1.894 [7] M=4, ×2.053 [2] M=8, ×1.998 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.213 [2], ×1.210 [7]): a Session option, not a row
+ *   - i4 g32 n3840 k1024 (case i4g32-n3840-k1024): no row (c32u4) -> parallel-l4 with row blocks of 2 (×1.171 [2], ×1.193 [7]); at the other row counts: ×1.597 [2] M=4, ×1.602 [7] M=4, ×1.600 [2] M=8, ×1.607 [7] M=8
+ *   - i4 g32 n262144 k1024 (case i4g32-n262144-k1024): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: M=4 is not measured in [1]; screened out by the quick look in [2] at M=4; M=4 is not measured in [3]; M=4 is not measured in [4]; M=4 is not measured in [5]; M=4 is not measured in [6]; screened out by the quick look in [7] at M=4; M=4 is not measured in [8]; M=4 is not measured in [9]; M=4 is not measured in [10]; M=4 is not measured in [11]; M=4 is not measured in [12]))); parallel-l2: ×1.146 [2], ×1.149 [7]
+ *   - i4 g32 n8192 k2816 (case i4g32-n8192-k2816): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.073 < ×1.100 in [2])); parallel-l8: ×1.073 [2], ×1.075 [7]
+ *   - i4 g32 n4096 k2816 (case i4g32-n4096-k2816): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.991 < ×1.100 in [2])); parallel-l8: ×0.991 [2], ×0.988 [7]
+ *   - i4 g32 n2048 k2816 (case i4g32-n2048-k2816): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.034 < ×1.100 in [2])); parallel-l8: ×1.034 [2], ×1.006 [7]
+ *   - i4 g32 n2112 k2816 (case i4g32-n2112-k2816): keeps parallel-l4 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.029 < ×1.100 in [2])); parallel-l8: ×1.029 [2], ×1.017 [7]
+ *   - i4 g32 n1024 k2816 (case i4g32-n1024-k2816): parallel-l32 -> parallel-l4 with row blocks of 4 (×1.688 [2], ×1.656 [7]); at the other row counts: ×2.538 [2] M=4, ×2.551 [7] M=4, ×2.591 [2] M=8, ×2.568 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.479 [2], ×1.446 [7]): a Session option, not a row
+ *   - i4 g32 n128 k2816 (case i4g32-n128-k2816): parallel-l32 -> parallel-l32 with row blocks of 2; at the other row counts: ×1.135 [2] M=4, ×1.136 [7] M=4, ×1.227 [2] M=8, ×1.258 [7] M=8
+ *   - i4 g32 n2816 k4096 (case i4g32-n2816-k4096): staged-l32 -> parallel-l8 with row blocks of 2 (×1.490 [2], ×1.504 [7]); at the other row counts: ×2.191 [2] M=4, ×2.157 [7] M=4, ×2.243 [2] M=8, ×2.213 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.242 [2], ×1.243 [7]): a Session option, not a row
+ *   - i4 g32 n2816 k8192 (case i4g32-n2816-k8192): staged-l32 -> parallel-l8 with row blocks of 2 (×1.343 [2], ×1.331 [7]); at the other row counts: ×2.016 [2] M=4, ×2.026 [7] M=4, ×2.108 [2] M=8, ×2.094 [7] M=8
+ *     - subgroup32-l8 meets the rule too (×1.172 [2], ×1.171 [7]): a Session option, not a row
+ *   - i4 g32 n2816 k2112 (case i4g32-n2816-k2112): staged-l32 with row blocks of 2 -> parallel-l4 with row blocks of 2 (×2.048 [2], ×2.021 [7]); at the other row counts: ×2.374 [2] M=4, ×2.373 [7] M=4, ×2.517 [2] M=8, ×2.499 [7] M=8
+ *     - subgroup32-l2 meets the rule too (×1.723 [2], ×1.757 [7]): a Session option, not a row
+ *   - i4 g32 n262144 k2816 (case i4g32-n262144-k2816): parallel-l4 -> parallel-l4 with row blocks of 2; at the other row counts: ×1.463 [2] M=4, ×1.459 [7] M=4, ×1.493 [2] M=8, ×1.490 [7] M=8
+ *   - bf16 n8960 k1536 (case bf16-n8960-k1536): no row (c16u8) -> parallel-l8 (×1.162 [5], ×1.165 [10], ×1.148 [11], ×1.150 [12]); at the other row counts: ×4.164 [5] M=4, ×4.168 [10] M=4, ×4.173 [11] M=4, ×4.169 [12] M=4, ×2.683 [5] M=8, ×2.683 [10] M=8, ×2.686 [11] M=8, ×2.696 [12] M=8
+ *   - bf16 n2048 k1536 (case bf16-n2048-k1536): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×0.992 < ×1.100 in [11])); parallel-l2: ×0.992 [11], ×0.996 [12]
+ *   - bf16 n256 k1536 (case bf16-n256-k1536): parallel-l32 -> parallel-l16 (×1.270 [11], ×1.192 [12]); at the other row counts: ×1.313 [11] M=4, ×1.255 [12] M=4, ×1.341 [11] M=8, ×1.335 [12] M=8
+ *   - bf16 n1536 k2048 (case bf16-n1536-k2048): no row (c16u8) -> parallel-l4 (×1.162 [5], ×1.110 [10], ×1.130 [11], ×1.228 [12]); at the other row counts: ×5.682 [5] M=4, ×5.886 [10] M=4, ×5.686 [11] M=4, ×5.568 [12] M=4, ×3.321 [5] M=8, ×3.329 [10] M=8, ×3.304 [11] M=8, ×3.277 [12] M=8
+ *   - bf16 n6144 k1536 (case bf16-n6144-k1536): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×0.986 < ×1.100 in [11])); parallel-l32: ×0.986 [11], ×0.984 [12]
+ *   - bf16 n1536 k6144 (case bf16-n1536-k6144): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l8: ×1.021 < ×1.100 in [11])); staged-l8: ×1.021 [11], ×1.011 [12]
+ *   - bf16 n1536 k256 (case bf16-n1536-k256): parallel-l8 -> parallel-l4 (×1.134 [11], ×1.143 [12]); at the other row counts: ×1.272 [11] M=4, ×1.310 [12] M=4, ×1.305 [11] M=8, ×1.300 [12] M=8
+ *   - bf16 n4096 k1536 (case bf16-n4096-k1536): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×0.987 < ×1.100 in [11])); parallel-l32: ×0.987 [11], ×0.979 [12]
+ *   - bf16 n512 k1536 (case bf16-n512-k1536): parallel-l16 -> parallel-l8 (×1.109 [11], ×1.109 [12]); at the other row counts: ×1.177 [11] M=4, ×1.199 [12] M=4, ×1.268 [11] M=8, ×1.301 [12] M=8
+ *   - bf16 n1536 k4096 (case bf16-n1536-k4096): keeps staged-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l8: ×1.030 < ×1.100 in [11])); staged-l8: ×1.030 [11], ×1.018 [12]
+ *   - bf16 n12288 k1536 (case bf16-n12288-k1536): keeps no row (c16u8) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.097 < ×1.100 in [12])); parallel-l8: ×1.107 [5], ×1.102 [10], ×1.101 [11], ×1.097 [12]
+ *   - bf16 n1536 k12288 (case bf16-n1536-k12288): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l8: ×1.009 < ×1.100 in [11])); staged-l8: ×1.009 [11], ×1.021 [12]
+ *   - bf16 n262144 k1536 (case bf16-n262144-k1536): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l8: ×1.056 < ×1.100 in [5])); staged-l8: ×1.056 [5], ×1.057 [10], ×1.056 [11], ×1.053 [12]
+ *   - bf16 n10752 k2560 (case bf16-n10752-k2560): keeps no row (c16u8) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.099 < ×1.100 in [10])); parallel-l8: ×1.112 [5], ×1.099 [10], ×1.101 [11], ×1.099 [12]
+ *   - bf16 n2048 k2560 (case bf16-n2048-k2560): keeps staged-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.010 < ×1.100 in [11])); parallel-l32: ×1.010 [11], ×1.003 [12]
+ *   - bf16 n512 k2560 (case bf16-n512-k2560): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.021 < ×1.100 in [11])); parallel-l8: ×1.021 [11], ×1.032 [12]
+ *   - bf16 n256 k2560 (case bf16-n256-k2560): parallel-l32 -> parallel-l16 (×1.254 [11], ×1.249 [12]); at the other row counts: ×1.330 [11] M=4, ×1.332 [12] M=4, ×1.345 [11] M=8, ×1.348 [12] M=8
+ *   - bf16 n2560 k2048 (case bf16-n2560-k2048): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×0.999 < ×1.100 in [11])); parallel-l16: ×0.999 [11], ×0.993 [12]
+ *   - bf16 n10240 k2560 (case bf16-n10240-k2560): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.086 < ×1.100 in [5])); parallel-l8: ×1.086 [5], ×1.111 [10], ×1.071 [11], ×1.081 [12]
+ *   - bf16 n2560 k10240 (case bf16-n2560-k10240): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.011 < ×1.100 in [11])); parallel-l32: ×1.011 [11], ×1.009 [12]
+ *   - bf16 n2560 k256 (case bf16-n2560-k256): no row (c16u16) -> parallel-l4 (×2.143 [5], ×2.207 [10], ×2.091 [11], ×2.105 [12]); at the other row counts: ×6.318 [5] M=4, ×6.251 [10] M=4, ×6.202 [11] M=4, ×6.200 [12] M=4, ×3.508 [5] M=8, ×3.531 [10] M=8, ×3.497 [11] M=8, ×3.459 [12] M=8
+ *   - bf16 n4096 k2560 (case bf16-n4096-k2560): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.002 < ×1.100 in [11])); parallel-l32: ×1.002 [11], ×0.995 [12]
+ *   - bf16 n1024 k2560 (case bf16-n1024-k2560): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.015 < ×1.100 in [11])); parallel-l8: ×1.015 [11], ×0.996 [12]
+ *   - bf16 n2560 k4096 (case bf16-n2560-k4096): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.997 < ×1.100 in [11])); parallel-l8: ×0.997 [11], ×1.011 [12]
+ *   - bf16 n262144 k2560 (case bf16-n262144-k2560): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.085 < ×1.100 in [5])); parallel-l8: ×1.085 [5], ×1.077 [10], ×1.082 [11], ×1.065 [12]
+ * - rowsThreadTarget: keeps 16384 (the full and row-blocks sets measure the row-block heights per case and row count, but the field is one thread target for every shape, and no rule turns the heights into it)
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -786,6 +350,722 @@ export const APPLE_METAL_3: GeometryProfile = {
     attentionQk: { regM: 4, regN: 8, wgX: 8, wgY: 8, tileK: 16 },
     attentionPv: { regM: 4, regN: 8, wgX: 16, wgY: 4, tileK: 16 },
     conv3d: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
+  },
+  linearGemv: {
+    sequential: {
+      variant: { cols: 32, unroll: 4 },
+      shapes: [
+        { storage: "bf16", n: 8960, k: 1536, variant: { cols: 128, unroll: 16 } },
+        { storage: "bf16", n: 2048, k: 1536, variant: { cols: 256, unroll: 8 } },
+        { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 1536, k: 2048, variant: { cols: 256, unroll: 8 } },
+        { storage: "bf16", n: 6144, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 6144, variant: { cols: 256, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 256, variant: { cols: 64, unroll: 2 } },
+        { storage: "bf16", n: 4096, k: 1536, variant: { cols: 128, unroll: 16 } },
+        { storage: "bf16", n: 512, k: 1536, variant: { cols: 128, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 4096, variant: { cols: 256, unroll: 8 } },
+        { storage: "bf16", n: 12288, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 12288, variant: { cols: 128, unroll: 8 } },
+        { storage: "bf16", n: 10752, k: 2560, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 2048, k: 2560, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 512, k: 2560, variant: { cols: 128, unroll: 8 } },
+        { storage: "bf16", n: 256, k: 2560, variant: { cols: 128, unroll: 8 } },
+        { storage: "bf16", n: 2560, k: 2048, variant: { cols: 128, unroll: 16 } },
+        { storage: "bf16", n: 2560, k: 10240, variant: { cols: 128, unroll: 16 } },
+        { storage: "bf16", n: 2560, k: 256, variant: { cols: 32, unroll: 2 } },
+        { storage: "bf16", n: 4096, k: 2560, variant: { cols: 128, unroll: 16 } },
+        { storage: "bf16", n: 1024, k: 2560, variant: { cols: 256, unroll: 8 } },
+        { storage: "bf16", n: 2560, k: 4096, variant: { cols: 128, unroll: 16 } },
+        { storage: "i4", n: 8960, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2048, k: 1536, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 256, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 6144, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1536, k: 256, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 4096, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 512, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1536, k: 4096, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 12288, k: 1536, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 1536, k: 12288, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 256, k: 3072, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1024, k: 256, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 256, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2048, k: 256, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 256, k: 2048, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 256, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 256, k: 3072, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 256, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 2048, k: 256, variant: { cols: 256, unroll: 4 } },
+        { storage: "i8", n: 256, k: 2048, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 256, k: 1536, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 1536, k: 256, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 10752, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2048, k: 2560, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 512, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 256, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2560, k: 2048, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 10240, k: 2560, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 2560, k: 10240, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2560, k: 256, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 4096, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1024, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2560, k: 4096, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 262144, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 2560, variant: { cols: 128, unroll: 8 } },
+        { storage: "i4", n: 256, k: 5120, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 256, k: 2560, variant: { cols: 128, unroll: 4 } },
+        { storage: "i8", n: 2560, k: 256, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 15360, k: 3840, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 8192, k: 3840, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 4096, k: 3840, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2048, k: 3840, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 512, k: 3840, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 3840, k: 8192, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 3840, k: 15360, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 3840, variant: { cols: 128, unroll: 8 } },
+        { storage: "i4", n: 1024, k: 7680, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 4096, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1024, k: 4096, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 8192, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 1024, k: 8192, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 3840, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 1024, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 8192, k: 2816, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 4096, k: 2816, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2048, k: 2816, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 2112, k: 2816, variant: { cols: 256, unroll: 4 } },
+        { storage: "i4", n: 1024, k: 2816, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 128, k: 2816, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2816, k: 4096, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2816, k: 8192, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 2816, k: 2112, variant: { cols: 128, unroll: 4 } },
+        { storage: "i4", n: 262144, k: 2816, variant: { cols: 128, unroll: 8 } },
+      ],
+    },
+    rowsThreadTarget: 16384,
+    parallelShapes: [
+      {
+        storage: "i4",
+        n: 8960,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 1536,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 2048,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 6144,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 6144,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 1536,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 4096,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 12288,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 12288,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 1536,
+        group: 512,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 6144,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32, packedActivations: true },
+      { storage: "i8", n: 256, k: 1536, lanes: 16, packedActivations: false, rowBlock: 8 },
+      { storage: "i8", n: 1536, k: 256, lanes: 4, packedActivations: false, rowBlock: 2 },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 1536,
+        group: 512,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+      { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false, rowBlock: 2 },
+      { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 10752,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 2560,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 2560,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 2048,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 10240,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 10240,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 4096,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 2560,
+        group: 512,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 10240,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
+      { storage: "i8", n: 256, k: 2560, lanes: 16, packedActivations: false, rowBlock: 8 },
+      { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false, rowBlock: 2 },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 256,
+        k: 3072,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 1024,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 15360,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 8192,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 3840,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 8192,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 15360,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 262144,
+        k: 3840,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 7680,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 4096,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 8192,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 8192,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2112,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 128,
+        k: 2816,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 4096,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 8192,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 2112,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 262144,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "bf16", n: 2048, k: 1536, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 256, k: 1536, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 6144, k: 1536, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 1536, k: 6144, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 1536, k: 256, lanes: 4, packedActivations: false },
+      { storage: "bf16", n: 4096, k: 1536, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 512, k: 1536, lanes: 8, packedActivations: false },
+      {
+        storage: "bf16",
+        n: 1536,
+        k: 4096,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "bf16", n: 1536, k: 12288, lanes: 16, packedActivations: false },
+      {
+        storage: "bf16",
+        n: 2048,
+        k: 2560,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "bf16", n: 512, k: 2560, lanes: 32, packedActivations: false },
+      { storage: "bf16", n: 256, k: 2560, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 2048, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 10240, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 4096, k: 2560, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 1024, k: 2560, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 4096, lanes: 16, packedActivations: false },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 256,
+        group: 32,
+        lanes: 2,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 2048,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i8", n: 256, k: 3072, lanes: 16, packedActivations: false, rowBlock: 8 },
+      { storage: "i8", n: 256, k: 1024, lanes: 16, packedActivations: false, rowBlock: 8 },
+      { storage: "i8", n: 2048, k: 256, lanes: 2, packedActivations: false, rowBlock: 8 },
+      { storage: "i8", n: 256, k: 2048, lanes: 16, packedActivations: false, rowBlock: 8 },
+      {
+        storage: "i4",
+        n: 256,
+        k: 5120,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 1024,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 1024,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      { storage: "bf16", n: 8960, k: 1536, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 1536, k: 2048, lanes: 4, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 256, lanes: 4, packedActivations: false },
+    ],
   },
   provenance: {
     adapter: {

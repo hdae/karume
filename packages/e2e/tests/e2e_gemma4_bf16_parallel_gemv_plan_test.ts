@@ -7,9 +7,11 @@
  * only where the geometry profile's table has a row for its storage and shape (the default
  * profile's 17 bf16 rows — docs/spec/geometry-profiles.md); every other linear keeps the
  * sequential GEMV at one row and the GEMM above it. This pins, on the mirror's actual graphs and
- * with the same predicate as the recipe builder, which linear lands where, and that the totals are
- * the census table's `karume-gemma4` rows (`models/tests/helpers/census-table.ts`), which the
- * real-GPU runs compare with the dispatched kernels.
+ * with the same predicate as the recipe builder, which linear lands where under the default profile;
+ * which lands elsewhere under `nvidia-ampere`, the table of the development machine's RTX 3080 Ti
+ * (its own parallel row, bf16 `2560 × 256`); and that the totals under that table are the census
+ * table's `karume-gemma4` rows (`models/tests/helpers/census-table.ts`), which the real-GPU runs on
+ * that machine compare with the dispatched kernels.
  *
  * Where the mirror is missing the cases SKIP explicitly.
  */
@@ -18,7 +20,11 @@ import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../runtime/src/kernels/geometry-profile.ts";
-import { linearGemvParallelEligible } from "../../runtime/src/kernels/linear-gemv.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../../runtime/src/kernels/geometry-profiles/index.ts";
+import {
+  type LinearGemvChoices,
+  linearGemvParallelEligible,
+} from "../../runtime/src/kernels/linear-gemv.ts";
 import type { WeightStorage } from "../../runtime/src/kernels/weight-storage.ts";
 import { bindSymbols, planGraph } from "../../runtime/src/runtime/plan.ts";
 import { planWeightResidency } from "../../runtime/src/runtime/weight-residency.ts";
@@ -61,11 +67,19 @@ const storageOf = (seat: string | undefined, where: string): WeightStorage => {
   }
 };
 
+/** The GEMV choices of `nvidia-ampere`, the table the census rows were counted on. */
+const AMPERE_GEMV = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere")?.linearGemv;
+
 /**
  * Folds the linears of a plan at `rows` physical rows into `<storage> <n>×<k> l<lanes>` (the
- * parallel GEMV and its lanes) or `<storage> <n>×<k> sequential` → count.
+ * parallel GEMV and its lanes) or `<storage> <n>×<k> sequential` → count, under `choices` (the
+ * default profile's when absent).
  */
-const planGemv = (graph: IrGraph, rows: number): Record<string, number> => {
+const planGemv = (
+  graph: IrGraph,
+  rows: number,
+  choices: LinearGemvChoices = DEFAULT_GEOMETRY_PROFILE.linearGemv,
+): Record<string, number> => {
   const residency = planWeightResidency(graph);
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
@@ -88,14 +102,7 @@ const planGemv = (graph: IrGraph, rows: number): Record<string, number> => {
     const seat = residency.get(step.node.ins[1]);
     const storage = storageOf(seat?.seat, step.node.ins[1]);
     const group = seat?.seat === "i4" ? seat.groupSize : undefined;
-    const lanes = linearGemvParallelEligible(
-      DEFAULT_GEOMETRY_PROFILE.linearGemv,
-      storage,
-      m,
-      weight[0],
-      weight[1],
-      group,
-    );
+    const lanes = linearGemvParallelEligible(choices, storage, m, weight[0], weight[1], group);
     const key = `${storage} ${weight[0]}×${weight[1]} ${lanes === undefined ? "sequential" : `l${lanes}`}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
@@ -167,11 +174,36 @@ const EXPECTED = {
   },
 } as const;
 
+/**
+ * Per component: the linears that `nvidia-ampere`'s own parallel row takes off the sequential path
+ * of the default profile's fold, `<storage> <n>×<k>` → lanes. The rest of its fold is the default's.
+ */
+const AMPERE_MOVED: Record<keyof typeof EXPECTED, Record<string, Record<string, number>>> = {
+  e2b: { model: {}, drafter: {} },
+  e4b: { model: { "bf16 2560×256": 16 } },
+};
+
+/** The default profile's fold with the linears `moved` names on the parallel GEMV at its lanes. */
+const movedFold = (
+  counts: Record<string, number>,
+  moved: Record<string, number>,
+): Record<string, number> =>
+  sorted(
+    Object.fromEntries(
+      Object.entries(counts).map(([key, count]) => {
+        const shape = key.slice(0, key.lastIndexOf(" "));
+        const lanes = key.endsWith(" sequential") ? moved[shape] : undefined;
+        return [lanes === undefined ? key : `${shape} l${lanes}`, count];
+      }),
+    ),
+  );
+
 describe.skipIf(!AVAILABLE)(
   "parallel GEMV on the regular Gemma 4 bf16 graphs at bf16-fast (plan, no GPU needed)",
   () => {
     for (const model of ["e2b", "e4b"] as const) {
-      it(`${model}: the linears with a bf16 row take the parallel GEMV at 1 to 8 rows, and the totals are the census table's row`, async () => {
+      it(`${model}: the linears with a bf16 row take the parallel GEMV at 1 to 8 rows, and the totals under nvidia-ampere are the census table's row`, async () => {
+        assert(AMPERE_GEMV !== undefined, "nvidia-ampere carries no GEMV choices");
         const text = await readTextFile(new URL("karume.json", MIRROR));
         const entry = parseManifest(text).models[model];
         const effective = resolveGemmaSessionOptions(entry.quants[PRESET].session, {}, model);
@@ -195,16 +227,20 @@ describe.skipIf(!AVAILABLE)(
           "model",
         );
         const fold = EXPECTED[model];
+        const moved = AMPERE_MOVED[model];
         const expected = sorted(fold.model);
+        const ampere = movedFold(expected, moved.model ?? {});
         for (const rows of [1, 4, 8]) {
           assertEquals(planGemv(product, rows), expected, `${model} M=${rows}`);
+          assertEquals(planGemv(product, rows, AMPERE_GEMV), ampere, `${model} M=${rows} ampere`);
         }
         // M > 8 is outside the parallel GEMV (the rows' range).
         assertEquals(totals(planGemv(product, 9)).variant, 0, `${model} M=9`);
+        assertEquals(totals(planGemv(product, 9, AMPERE_GEMV)).variant, 0, `${model} M=9 ampere`);
         for (const phase of ["decode", "verify"] as const) {
           assertEquals(
             row.census.target?.[phase]?.linearGemvReduce,
-            totals(expected),
+            totals(ampere),
             `${model} ${phase}: the census row`,
           );
         }
@@ -219,10 +255,13 @@ describe.skipIf(!AVAILABLE)(
           new URL(containerPart0(manifest, model, "drafter", drafterStorage).path, MIRROR),
           "drafter",
         );
-        assertEquals(planGemv(drafter, 1), sorted(fold.drafter), `${model} drafter`);
+        const drafterExpected = sorted(fold.drafter);
+        const drafterAmpere = movedFold(drafterExpected, moved.drafter ?? {});
+        assertEquals(planGemv(drafter, 1), drafterExpected, `${model} drafter`);
+        assertEquals(planGemv(drafter, 1, AMPERE_GEMV), drafterAmpere, `${model} drafter ampere`);
         assertEquals(
           row.census.drafter?.draft?.linearGemvReduce,
-          totals(fold.drafter),
+          totals(drafterAmpere),
           `${model} draft: the census row`,
         );
       });

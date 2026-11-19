@@ -55,15 +55,19 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
         profile.id,
       );
     }
-    // Both kinds are registered: the two NVIDIA tables carry the field, apple-metal-3 does not
+    // Every registered table carries the field; one taken out of a table prints nothing of it
     assertEquals(
       BUILTIN_GEOMETRY_PROFILES.map(({ id, linearGemv }) => [id, linearGemv !== undefined]),
       [
-        ["apple-metal-3", false],
+        ["apple-metal-3", true],
         ["nvidia-ampere", true],
         ["nvidia-blackwell", true],
       ],
     );
+    const registered = BUILTIN_GEOMETRY_PROFILES[0];
+    assert(registered !== undefined);
+    const { linearGemv: _own, ...table } = registered;
+    assertEquals(profileModule(table).includes("linearGemv"), false);
     const linearGemv = {
       sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] },
       rowsThreadTarget: 16384,
@@ -71,8 +75,6 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
         { storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false },
       ],
     } as const;
-    const table = BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.linearGemv === undefined);
-    assert(table !== undefined);
     assertEquals(
       profileModule({ ...table, linearGemv }).includes(
         'linearGemv: { sequential: { variant: { cols: 32, unroll: 4 }, shapes: [] }, rowsThreadTarget: 16384, parallelShapes: [{ storage: "i4", n: 64, k: 1536, group: 32, lanes: 8, packedActivations: false }] }',
