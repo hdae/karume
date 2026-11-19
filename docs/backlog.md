@@ -237,8 +237,11 @@ maintainer's ruling of 2026-11-06).
          on more shapes makes it an approximation of that adapter's plan where a linear of such a shape feeds a
          `static_quantize` ([limitations](limitations.md); no graph of a Gemma 4 distribution has one). An
          estimate that takes the adapter's table, or its GEMV choices, would remove it;
-       - no table has an end-to-end decode measurement since its derivation of 2026-11-19. `nvidia-blackwell`'s one
-         measurement is of the table before its derivation from 82 records
+       - the end-to-end decode of a table since its derivation of 2026-11-19 is measured on E2B only (the same
+         day, the table's choices against the default profile's, ms a token): `nvidia-blackwell` 10.03 against 11.57
+         with `bf16-fast` and 5.74 against 5.76 with the QAT `i4-fast`; `apple-metal-3` 60.41 against 60.47 and
+         24.88 against 27.34; `nvidia-ampere` not at all. `nvidia-blackwell`'s earlier measurement is of the table
+         before its derivation from 82 records
          ([research](research/2026-11-18-blackwell-gemv-table-decode.md): QAT 12B `i4-fast` 15.3 against 18.9 ms a
          token with the default's choices, E2B and E4B ×1.01 to ×1.03, which 4 rounds do not resolve); a
          speculative decode and the 26B model are measured with none. What the planner (`--gemv-plan`) still lists
@@ -251,7 +254,24 @@ maintainer's ruling of 2026-11-06).
        - the default's 22 exceptions as the default: the Apple M2's records time the general variant against them
          on 12 of their shapes and read it ×1.01 to ×1.26 faster on 11 (`apple-metal-3` keeps 5 of the 22 because
          no variant reaches ×1.10 over them), and on Metal they have been compared with the general variant word
-         for word on those 12 shapes only ([limitations](limitations.md), the section on the linear GEMV family);
+         for word on those 12 shapes only ([limitations](limitations.md), the section on the linear GEMV family).
+         End to end the M2 read them faster before it had a table (E2B `bf16`, 68.24 against 71.05 ms a token with
+         the general variant, 2026-11-19), so the default keeps them. The maintainer's ruling of 2026-11-19: an
+         Apple M5, which matches no table (`apple-metal-3` matches the M2's description), runs the kernel checks,
+         the decodes and the full GEMV sweep twice, and whether `apple-metal-3` matches other Apple adapters is
+         decided from those records;
+       - where a table's choice at `reorder` is slower than the choice at `exact` (the three devices' GEMV sweep
+         records since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured):
+         on `nvidia-blackwell` only the output heads at 4 and 8 rows (int4 g32 `262144 × 3840` of 12B ×1.44 and
+         ×1.57, `262144 × 2816` of 26B ×1.48 and ×1.68, and the int8 `262144 × 2560` no distribution ships), which
+         a speculative decode's verify run reaches; on `nvidia-ampere` 37 groups at 4 and 8 rows (×1.01 to ×5.06),
+         shapes the two other tables hold row-blocked rows of their own for; on `apple-metal-3` 11 groups, ×1.00 to
+         ×1.12. The default's rows that are faster on the RTX 3080 Ti and slower on the RTX 5070 Ti (10 groups,
+         ×1.00 to ×2.22) are all replaced in `nvidia-blackwell`;
+       - the maintainer's ruling of 2026-11-19 puts after the 0.23.0 release: the design of the derivation's
+         evidence rules (perf-ledger K-113), and with it the bf16 shapes that could take a parallel row of the
+         default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080
+         Ti) — a row added to the default before that discards the other devices' records of the shape;
        - the choice between sequential variants a few percent apart moves with the records given, and the
          narrowed sweeps measured four hand-picked variants (the planner still lists the others).
      - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
