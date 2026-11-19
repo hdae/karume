@@ -180,7 +180,8 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   the three shapes with words left, first difference 4 ULP; none at the three shapes without), and with a loop per
   row all 432 cases are identical (record `outputs/workbench/browser-apple-m2/kernel-check_2026-11-19T09-39-19.json`,
   untracked, checkout `184fd433`). No shipped model was affected: Gemma 4 26B A4B's grouped projection, gate_up,
-  has 88 words and leaves none. Not yet measured on Metal: the pooled grouped form with the loop per row.
+  has 88 words and leaves none. The kernel as it is now, its pooled grouped form included, is identical on the M2
+  in all 216 cases of the check (`kernel-check_2026-11-19T09-55-15.json` in the same folder, checkout `b2a66718`).
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
   Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above). Analysis of the table's
