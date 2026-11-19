@@ -275,7 +275,6 @@ measurements in `docs/research/`.
   (`data.arms[].gemvChoices`); a bench without them runs on one device as before.
 - The workbench's `kernel-check` entry runs a thirteenth check, `gemv-parallel-rows`: the row-blocked parallel GEMV
   against the parallel GEMV at the same lanes, word for word, at every lane count and row block the kernel exists at.
-- `@karume/runtime`: `expert_linear` in a run of two or more tokens walks an expert's weight row once for the rows
 - `@karume/runtime`: `expert_linear` in a run of 2 to 768 tokens walks an expert's weight row once for the rows
   that picked it (up to 8 rows to a walk) where the weight row has 64 words or more — of Gemma 4 26B A4B's two
   projections, gate_up. Outputs do not change by a bit; in `SessionDiagnostics.lastRunPipelines` the key of such a
