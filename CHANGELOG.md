@@ -5,10 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The three JSR packages (`@karume/runtime`, `@karume/hub`, `@karume/models`) and the exporter are
-versioned in lockstep: one version number covers all of them. While the project is at `0.x`,
-breaking changes may land in a minor or patch release; every one of them is listed under
-**Breaking** below.
+The JSR packages (`@karume/runtime`, `@karume/hub`, `@karume/safetensors`, `@karume/convert`,
+`@karume/models`) and the exporter are versioned in lockstep: one version number covers all of
+them. While the project is at `0.x`, breaking changes may land in a minor or patch release; every
+one of them is listed under **Breaking** below.
 
 Entries describe user-visible changes only. Design rationale lives in `docs/decisions/`,
 measurements in `docs/research/`.
@@ -81,6 +81,11 @@ measurements in `docs/research/`.
 
 ### Added
 
+- Two packages published on JSR from this release, in lockstep with the others: `@karume/safetensors` (a safetensors
+  reader that opens a file from its header alone and reads one tensor at a time with ranged reads; no dependency) and
+  `@karume/convert` (weights converted while a Session reads them: a tensor list encoded against the plan of a
+  distributed preset, served as that preset's container and optionally written as one; depends on `@karume/runtime`
+  only). `@karume/models` depends on both.
 - `@karume/models/gemma`: a decode step that samples from the top-k reads back the leading logits of the row,
   selected on the GPU, instead of the whole row (16 KiB in place of 1 MiB), and the sampler draws from them. The token
   ids are the ones the whole row gives for the same seed: the sampler ranks, normalizes and draws on the host as
@@ -185,9 +190,9 @@ measurements in `docs/research/`.
   the file converts it again (in the default per-stage residency, every generate); the option `retainConverted: true`
   (`FromSingleFileOptions`, which `fromPretrained` does not take) keeps the converted weights in host memory so that
   only the first build reads the file, at their converted size (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as
-  bf16) until the pipeline is released. `@karume/models` now depends on the private workspace packages
-  `@karume/convert` and `@karume/safetensors`.
-- `@karume/convert` (private): `float16Codec` on `openConvertingSource` and `readPlanCodecs` stores every f16 and bf16
+  bf16) until the pipeline is released. `@karume/models` now depends on the packages `@karume/convert` and
+  `@karume/safetensors`.
+- `@karume/convert`: `float16Codec` on `openConvertingSource` and `readPlanCodecs` stores every f16 and bf16
   initializer of a plan as the given 16-bit codec (the same blocks, a part 0 of its own).
 - `karume-gemma4` (regular Gemma 4 E2B / E4B): the preset `bf16-fast`, the same weights as `bf16` (E2B's int8 drafter
   included), declaring `numerics: { level: "reorder" }` — the declaration of the q4_0 QAT line's `i4-fast`. The linears

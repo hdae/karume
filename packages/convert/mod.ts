@@ -1,5 +1,5 @@
 /**
- * Weights converted while a Session reads them (`@karume/convert`; private for now).
+ * Weights converted while a Session reads them (`@karume/convert`).
  *
  * The input is a weights file read as a tensor list — format-neutral: per tensor name, its element
  * type (`F32` / `F16` / `BF16`), its shape and a function that reads its bytes — and a distributed
@@ -26,7 +26,16 @@
  *   codec instead — the plan of the same container exported with that 16-bit float type, since
  *   both take two bytes an element and no block moves.
  *
- * Web standard APIs only; no side effects at import.
+ * Depends on `@karume/runtime` only; Web standard APIs only; no side effects at import.
+ *
+ * ```ts ignore
+ * import { openContainer } from "@karume/runtime";
+ * import { openConvertingSource } from "@karume/convert";
+ *
+ * // target: a BlockSource over the distributed preset's container; tensors: a TensorList.
+ * const converting = await openConvertingSource({ target, tensors });
+ * const container = await openContainer({ kind: "source", source: converting.source });
+ * ```
  *
  * @module
  */

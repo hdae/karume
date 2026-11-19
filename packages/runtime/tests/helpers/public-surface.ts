@@ -1,6 +1,6 @@
 // Implementation of the public-surface snapshot check (ADR
 // [0008](../../../../docs/decisions/0008-public-api.md) addendum 2026-09-20). Shared by the
-// `tests/public_surface_test.ts` of the 3 packages.
+// `tests/public_surface_test.ts` of the five published packages.
 //
 // Division of roles with the by-name check (`packages/models/tests/models_barrel_surface_test.ts`):
 //
@@ -109,7 +109,7 @@ const labelOf = (symbol: PublicSymbol): string => `${symbol.name} (${symbol.kind
  * Normalizes the `exports` of `package.json` to "entry spelling → path relative to the package
  * root".
  *
- * All 3 packages use the map form today, each value a single string. The single-string form
+ * All five published packages use the map form today, each value a single string. The single-string form
  * (`"exports": "./mod.ts"`) has no key, so it gets `"."` as its spelling, the same as the default
  * entry of the map form (so the fixture keys are not split between two forms). Conditional exports
  * (an object value) throw unread — which condition's entry counts as the surface is not for this

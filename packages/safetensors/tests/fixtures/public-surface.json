@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "entries": {
+    ".": [
+      {
+        "name": "RangedReader",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsDtype",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsError",
+        "kind": "class"
+      },
+      {
+        "name": "SafetensorsFile",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsTensor",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "openSafetensors",
+        "kind": "function"
+      }
+    ]
+  }
+}

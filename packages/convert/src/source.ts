@@ -30,7 +30,7 @@ import { type Float16Codec, type PlannedInitializer, readPlan } from "./plan.ts"
 import { tensorByteLength, type TensorList, tensorValues } from "./tensors.ts";
 
 /** The sha256 a served part 0 states for what is converted here (not the digest of any bytes). */
-export const INVALID_SHA256 = "0".repeat(64);
+export const INVALID_SHA256: string = "0".repeat(64);
 
 export type ConvertingSourceInput = {
   /**

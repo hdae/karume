@@ -1,5 +1,11 @@
 {
-  "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
+  "workspace": [
+    "./packages/runtime",
+    "./packages/hub",
+    "./packages/safetensors",
+    "./packages/convert",
+    "./packages/models"
+  ],
   "exclude": ["inputs/", "outputs/", "models/", ".claude/reviews/"],
   "nodeModulesDir": "none",
   "minimumDependencyAge": {

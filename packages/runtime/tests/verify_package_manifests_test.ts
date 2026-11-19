@@ -11,7 +11,7 @@
 //
 // The published set is the root `deno.json` `workspace` — the same list `deno publish` reads, so a
 // new package is covered the day it becomes publishable. It runs in the core lane like
-// `verify_lanes_test.ts` (no GPU, no assets; it reads seven small JSON files).
+// `verify_lanes_test.ts` (no GPU, no assets; it reads eleven small JSON files).
 //
 // MUST: an unreadable shape throws instead of counting as agreement (a missing file, an `exports`
 // with conditions or a non-string target) — reading "could not compare" as "equal" hides a drift.

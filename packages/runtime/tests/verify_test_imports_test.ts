@@ -1,9 +1,10 @@
 // The test import rules of ADR 0129 (open point 4, settled by the addendum of 2026-10-29). The
 // private test packages may reach into the published packages, never the other way round:
 //
-// - **No runtime, hub or models test reaches `packages/e2e`.** The e2e package holds the
-//   real-weight tests that run only in the family lanes; a published package's test that imports
-//   one of its helpers drags local assets and a GPU into the core lane.
+// - **No test of a published package (runtime, hub, safetensors, convert, models) reaches
+//   `packages/e2e`.** The e2e package holds the real-weight tests that run only in the family
+//   lanes; a published package's test that imports one of its helpers drags local assets and a GPU
+//   into the core lane.
 // - **Only the runtime GPU tests (`packages/runtime/tests/gpu_*_test.ts`, through their helpers)
 //   and the workbench (`apps/workbench`) reach `@karume/kernel-checks`.** The kernel identity
 //   checks drive runtime internals; ADR 0129 names exactly two consumers: the runtime GPU tests
@@ -158,7 +159,8 @@ const judgeTestImports = async (workspace: Workspace): Promise<Verdict> => {
   const edges = await walkModuleGraph(roots.map(href), resolverOf(members), readSource);
 
   const e2eDirectory = href("packages/e2e/");
-  const publishedTest = /^packages\/(runtime|hub|models)\/tests\/.*_test\.(ts|tsx|mts|cts)$/;
+  const publishedTest =
+    /^packages\/(runtime|hub|safetensors|convert|models)\/tests\/.*_test\.(ts|tsx|mts|cts)$/;
   const e2eRoots = roots.filter((path) => publishedTest.test(path)).map(href);
   const e2e = [
     ...reachingRoots(
@@ -255,7 +257,7 @@ const repositoryWorkspace = (): Workspace => {
   };
 };
 
-test("no runtime, hub or models test reaches packages/e2e, and only the runtime GPU tests and the workbench reach @karume/kernel-checks (ADR 0129)", async () => {
+test("no test of a published package reaches packages/e2e, and only the runtime GPU tests and the workbench reach @karume/kernel-checks (ADR 0129)", async () => {
   const verdict = await judgeTestImports(repositoryWorkspace());
   assertEquals(verdict.e2e, [], "move the shared code out of packages/e2e (ADR 0129 open point 4)");
   assertEquals(verdict.kernelChecks, [], "ADR 0129 open point 4 names the two consumers");
@@ -333,6 +335,17 @@ describe("test import gate (fabricated workspaces)", () => {
     assertEquals(verdict.e2e, [
       `packages/models/tests/pipeline_test.ts → packages/models/tests/helpers/shared.ts → "@karume/e2e" — a published package's test reaches packages/e2e`,
     ]);
+  });
+
+  it("flags a convert test that imports an e2e helper (every published package is covered)", async () => {
+    const verdict = await judge({
+      "packages/convert/tests/encoders_test.ts": `import { assets } from "../../e2e/tests/helpers/assets.ts";`,
+    });
+    assertEquals(verdict.e2e.length, 1, verdict.e2e.join("\n"));
+    assertStringIncludes(
+      verdict.e2e[0]!,
+      "packages/convert/tests/encoders_test.ts → packages/e2e/tests/helpers/assets.ts",
+    );
   });
 
   it("does not apply the e2e rule to the e2e tests themselves", async () => {

@@ -1,9 +1,14 @@
 # @karume/convert
 
-Private workspace package (not published yet): weights converted **while a Session reads them**. A weights file read as
-a tensor list is encoded against the plan of a distributed preset — that preset's part 0, which says how every
-initializer is stored and where — and served as that preset's container; writing the result as a `krm` is optional.
-The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md).
+Weights converted **while a Session reads them**, for [Karume](https://github.com/hdae/karume), a general-purpose
+neural-network inference stack that runs on WebGPU. A weights file read as a tensor list is encoded against the plan of
+a distributed preset — that preset's part 0, which says how every initializer is stored and where — and served as that
+preset's container; writing the result as a `krm` is optional. The behaviour is specified in
+[docs/spec/convert.md](https://github.com/hdae/karume/blob/main/docs/spec/convert.md). The other packages of the stack
+are `@karume/runtime` (IR execution), `@karume/hub` (manifest resolution, download, cache), `@karume/safetensors` (the
+safetensors reader) and `@karume/models` (pipelines and tokenizers; its `fromSingleFile` uses this package).
+
+Status: pre-1.0, versioned in lockstep with the other `@karume/*` packages.
 
 - **Depends on `@karume/runtime` only** (`openContainer` and the types of the main entry, and the format parts of
   `@karume/runtime/container`: the model descriptor's canonical serializer, the sha256, the f16 / bf16 decoders and
@@ -26,6 +31,36 @@ The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md)
 | `INVALID_SHA256` | The 64 `0` characters the served part 0 states for converted blocks and their parts |
 | `ConvertError` | Every refusal: a tensor missing or of another shape, a codec not encoded here, a value the codec cannot store as given, a file a name map cannot place |
 
+## Install
+
+```sh
+deno add jsr:@karume/convert
+```
+
+```sh
+npx jsr add @karume/convert
+pnpm dlx jsr add @karume/convert
+bunx jsr add @karume/convert
+```
+
+## Minimal usage
+
+Serve a distributed preset's container with its weights encoded from a tensor list, open it like any other source,
+and optionally write it out.
+
+```ts
+import { openContainer } from "@karume/runtime";
+import { openConvertingSource, writeContainer } from "@karume/convert";
+
+// target: a BlockSource over the distributed preset's container (for example `openContainerSource` of @karume/hub).
+// tensors: the weights as a TensorList — name → { dtype: "F32" | "F16" | "BF16", shape, read() }.
+const converting = await openConvertingSource({ target, tensors });
+const container = await openContainer({ kind: "source", source: converting.source });
+
+// Optional: write the converted container, part by part, to a sink of your own.
+const written = await writeContainer(converting.source, sink);
+```
+
 ## Tests
 
 - `tests/encoders_test.ts` — the encoders against `tests/fixtures/encoders.json`, which the exporter's Python writes
@@ -35,8 +70,21 @@ The behaviour is specified in [docs/spec/convert.md](../../docs/spec/convert.md)
   runtime's test writer (`packages/runtime/tests/helpers/container-write.ts`).
 - `tests/name_map_test.ts` — the name map's interpreter on small synthetic maps: each rule kind, the rule order, the
   routing and each refusal; `parseNameMap` on each kind of problem and on the Anima map of the recipe.
+- `tests/public_surface_test.ts` — the names the entry exports, types included, against
+  `tests/fixtures/public-surface.json` (`KARUME_SURFACE=write` rewrites it).
 - `packages/e2e/tests/e2e_anima_convert_test.ts` (lane `models:anima`, needs `models/karume-anima/`) — the Anima
   transformer's `bf16` tensors written against the `i8` plan give the `i8` files, byte for byte.
 - `packages/e2e/tests/e2e_anima_single_file_test.ts` (lane `models:anima`, also needs the upstream files under
   `inputs/anima/upstream-single-file/`) — the upstream single files read with `@karume/safetensors`, placed with
   `tools/export-recipes/anima/name-map.json` and converted give the distributed files, byte for byte.
+
+## Documentation
+
+- [Repository](https://github.com/hdae/karume) — overview and examples
+- [docs/spec/convert.md](https://github.com/hdae/karume/blob/main/docs/spec/convert.md) — what this package does
+- [docs/container-v1.md](https://github.com/hdae/karume/blob/main/docs/container-v1.md) — the container format it
+  serves and writes
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

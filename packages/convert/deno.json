@@ -1,0 +1,14 @@
+{
+  "name": "@karume/convert",
+  "version": "0.22.0",
+  "license": "MIT",
+  "exports": {
+    ".": "./mod.ts"
+  },
+  "imports": {
+    "@karume/runtime": "jsr:@karume/runtime@^0.22.0"
+  },
+  "publish": {
+    "exclude": ["tests/"]
+  }
+}

@@ -69,6 +69,11 @@
       "npm:jpeg-js@~0.4.4"
     ],
     "members": {
+      "packages/convert": {
+        "dependencies": [
+          "jsr:@karume/runtime@0.22"
+        ]
+      },
       "packages/hub": {
         "dependencies": [
           "jsr:@hdae/fetch-cache@0.8"
@@ -77,8 +82,10 @@
       "packages/models": {
         "dependencies": [
           "jsr:@hdae/yomi@~0.4.2",
+          "jsr:@karume/convert@0.22",
           "jsr:@karume/hub@0.22",
-          "jsr:@karume/runtime@0.22"
+          "jsr:@karume/runtime@0.22",
+          "jsr:@karume/safetensors@0.22"
         ]
       }
     }

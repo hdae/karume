@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "entries": {
+    ".": [
+      {
+        "name": "ContainerSink",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ConvertError",
+        "kind": "class"
+      },
+      {
+        "name": "ConvertingSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ConvertingSourceInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Digest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ENCODED_CODECS",
+        "kind": "variable"
+      },
+      {
+        "name": "Float16Codec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "INVALID_SHA256",
+        "kind": "variable"
+      },
+      {
+        "name": "NAME_MAP_FORMAT",
+        "kind": "variable"
+      },
+      {
+        "name": "NameMap",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NameMapComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NameMapLayout",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NameMapRule",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PlanOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PlannedCodec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SourceTensor",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "TensorDtype",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "TensorList",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "TensorPlacement",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WrittenContainer",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "openConvertingSource",
+        "kind": "function"
+      },
+      {
+        "name": "parseNameMap",
+        "kind": "function"
+      },
+      {
+        "name": "placeTensors",
+        "kind": "function"
+      },
+      {
+        "name": "readPlanCodecs",
+        "kind": "function"
+      },
+      {
+        "name": "writeContainer",
+        "kind": "function"
+      }
+    ]
+  }
+}

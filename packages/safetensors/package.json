@@ -1,9 +1,12 @@
 {
   "name": "@karume/safetensors",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.22.0",
   "description": "A safetensors reader that opens a file from its header alone and reads one tensor at a time with ranged reads, for files too large to hold in memory.",
   "license": "MIT",
+  "files": [
+    "mod.ts",
+    "src"
+  ],
   "type": "module",
   "exports": {
     ".": "./mod.ts"
