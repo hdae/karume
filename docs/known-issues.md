@@ -38,11 +38,16 @@ phase A on Deno 2.9.4 = 12 tests in total reproduce with the same signature, 0 n
 HEAD `b7e32c1` after the review-fix phase on macOS 26 = the same 12 reproduce with the same signature. The full verify is
 1856 passed / 13 failed / 139 ignored, and the 13th is not a target of this section but of the `--diagnostics` section
 below**), 4 attention i8a8 tests
-(3 in `gpu_attention_pv_i8a8_test.ts` + 1 in `gpu_attention_pv_i8a8_test.ts`) +
+(all in `gpu_attention_pv_i8a8_test.ts` today; three of them were in `gpu_attention_i8a8_test.ts` until it was merged there on 2026-10-17) +
 **2 conv1d parity + 2 conv2d parity tests**
 (the old text listed conv2d only — the 2 conv1d tests were missing from the record; same symptom) +
 **2 decomposition parity tests of gru_scan / gru_scan_reverse** (below) + 1 GEMV u32 check + 1 OOM check
 (next section) are red (Linux / Vulkan are all green).
+
+Every measurement in this section was taken under Deno (wgpu, naga → MSL). Since 0.15 the test lanes run under
+Node + Dawn (Tint), and no lane has been run on an Apple machine under Node yet, so whether these tests are red there
+is not known. What Chrome on Metal (Dawn / Tint) does with the kernel rewrites is the next section.
+
 **The canary hardware verification of 2026-08-29 updated the understanding of the mechanism**:
 
 - **The dp4a and emulation variants are bit-identical on M2 too** (both canary arms equal; the PV mutual-agreement
@@ -119,17 +124,10 @@ below**), 4 attention i8a8 tests
   **Behaviour has been confirmed on M2 (user run on 2026-09-07 — the latest main including the K-21 row-block variant +
   the budgeted backing of H-15)**. Red / green of the exact u32 check has not been reported (still expected within the
   1-ULP band above).
-- **The sha256 comparisons (anima PNG 9 / sbv2 WAV 6 / irodori WAV 2 (no-ref / voice-clone)) are explicitly SKIPped on
-  Metal + 3 reference guards are red**:
-  the reference-value fixtures have no row for Metal's environment key, so the 17 cases are SKIPped without comparison,
-  and the per-family reference guards (anima / sbv2 / irodori) go red with "there is not a single row for this
-  environment" (as specified by ADR [0106](decisions/0106-device-keyed-references.md) and the limitations section
-  "The sha256 reference check is for the reference environment only"). Not counted among this section's targets. The rows
-  can be created by running the same lane with `KARUME_REFERENCE=write`, but that operation takes the run's measurement as
-  correct, so soundness is confirmed separately before creating them. Measured sha values agree across different paths
-  (the base CFG with fromPretrained vs the split fromAssets form, 512 euler vs fromPretrained-512, 1024 vs
-  onEvent-1024) = deterministic on Metal, and the load path does not change the output bytes. The user has confirmed by
-  eye / ear that the outputs are sound.
+- **The sha256 comparisons SKIP on Metal and the reference guards are red there** — by design: the fixtures have no
+  row for a Metal environment key (the limitations section "The sha256 reference check is for the reference
+  environment only"). Not counted among this section's targets. Measured on the M2 under Deno (2026-09): the sha values
+  agree across load paths (deterministic on Metal), and the user confirmed by eye / ear that the outputs are sound.
 
 Deno 2.9.5 / 2.9.6 contain no Metal / naga / wgpu updates (denoland/deno#36257 = mapped range
 only). Root-cause candidate = an explicit `fma()` was found effective as a means of fixing the rounding on the WGSL side
@@ -162,12 +160,10 @@ Identical on Metal: every fusion twin part, the prefetch form of `rms_norm` (bel
 reductions, the integer and byte-plane GEMVs, the row-blocked parallel GEMV, the f16 score store, the bidirectional
 block and the one-row form of the expert linear.
 
-Fixed (2026-11-13): `rms-norm-prefetch` (96 of 118 cases in each of its 3 parts) and `fusion-rms-norm-rope` (4 of
-8) failed here until then. With x and the weight in registers before `inv` exists, Metal computed the prefetch form's
-`x · inv · weight` as `(x · weight) · inv`: recomputing both orders in f32 reproduces the M2 record exactly (92 and
-168 failing words at dim 256 and 512 × 8 rows, with the first index and both words), and the check's ±f32-max weights
-made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds `x · inv` through the XOR barrier
-(ADR [0017](decisions/0017-rms-norm-conv2d-clamp-min.md) addendum 3); both checks pass on the M2 and the M5
+The prefetch form of `rms_norm` and `fusion-rms-norm-rope` failed here until 2026-11-13: with x and the weight in
+registers before `inv` existed, Metal computed `x · inv · weight` as `(x · weight) · inv` (recomputing both orders in
+f32 reproduces the M2 record exactly). Since the key's v3 rounds `x · inv` through the XOR barrier (ADR
+[0017](decisions/0017-rms-norm-conv2d-clamp-min.md) addendum 3) both pass on the M2 and the M5
 (`outputs/bench-browser/kernel-check_2026-11-13T21-22-18.json` / `…T20-59-22.json`, untracked).
 
 The sequential GEMV's candidates in the workbench's `gemv-sweep` entry (Apple M2, the 12 records of 2026-11-18 and
@@ -223,9 +219,10 @@ Sessions on every backend (ADR [0148](decisions/0148-external-fusion-rules.md) a
 identity with the unfused plan rests on a rounding barrier: each value the unfused plan stores passes an XOR with a mask
 that is 0 at run time, which keeps the compiler from contracting a multiply-add across it. That form is measured to hold
 on Vulkan and D3D12 on NVIDIA (the rule's u32 check, `packages/e2e/tests/e2e_vae_rms_silu_rule_test.ts`, and the
-Chrome / D3D12 runs of [perf-ledger](perf-ledger.md) V-10). On Metal the same XOR form was measured not to act as a
-barrier in other kernels (the attention i8a8 section above: the bitcast round trip with an XOR of 0 was ineffective
-on the M2 — ADR [0105](decisions/0105-packed-static-quantize-activations.md) addendum 4).
+Chrome / D3D12 runs of [perf-ledger](perf-ledger.md) V-10). On Metal the XOR form is not settled: under Deno
+(naga → MSL) the bitcast round trip with an XOR of 0 was ineffective on the M2
+(ADR [0105](decisions/0105-packed-static-quantize-activations.md) addendum 4), while in Chrome (Dawn / Tint) the XOR
+barrier of `rms_norm`'s prefetch form holds on the M2 and the M5 (the section above).
 
 - **Measured (2026-11-17, the maintainer's M2 / Chrome 157 / metal-3, runtime 0.22.0)**: the workbench's `session-ab`
   entry on the anima VAE decode found 749,031 of the forward's 786,432 output words different from the unfused plan (the
@@ -239,8 +236,8 @@ on the M2 — ADR [0105](decisions/0105-packed-static-quantize-activations.md) a
 
 ## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
 
-On real **M2 (24GB / maxBufferSize 14.3GB)** hardware, the test in `gpu_generation_context_test.ts`
-"state allocation failure fails loudly via the out-of-memory errorScope" is
+On real **M2 (24GB / maxBufferSize 14.3GB)** hardware under Deno (wgpu), the test in `gpu_generation_context_test.ts`
+"a failed state allocation is fail loudly through an out-of-memory errorScope (real GPU)" is
 red with **Expected function to reject** (2026-09-01) = **the allocation of a 64GiB state slot silently
 succeeds** (Metal's lazy allocation — wgpu's Metal backend has no total budget, and `newBufferWithLength:` does not
 return nil even when physical memory is exceeded). The buffer layer itself is sound as measured on M2
@@ -263,11 +260,13 @@ false rejection for the distribution mirrors of gemma4 (declared 384MiB) / anima
 adapter values (maxBufferSize 14,302,248,960 / maxStorageBufferBindingSize 4,294,967,292), and generation ran to
 completion.
 
-## On Metal, `--diagnostics` (`gpuTiming: true`) takes the device down — the isolation experiment has not been started (needs real M2 hardware)
+## On Metal under Deno (wgpu), `gpuTiming: true` takes the device down — the isolation experiment has not been started (needs real M2 hardware)
 
-On real **Apple M2 / macOS 26 / Deno 2.9.x** hardware, running `examples/gemma4` (removed in 0.15) with
-`--diagnostics` loses the device on the first turn and fails. The mechanism and the established facts are written in
-the [limitations](limitations.md) section "On Metal (Apple GPU), GPU-side timestamp measurement is not practical"
+On real **Apple M2 / macOS 26 / Deno 2.9.x** hardware, a run with `gpuTiming: true` (then `examples/gemma4
+--diagnostics`, removed in 0.15) loses the device on the first turn and fails. In Chrome on the same M2 (Dawn) the
+timestamps work (the workbench's decode bench reads GPU time per token there). The mechanism and the established facts
+are written in the [limitations](limitations.md) section "On Metal under Deno (wgpu), GPU-side timestamp measurement is
+not practical"
 (`createQuerySet` fails → `DeviceError::Unexpected` → device lost; it does not enter the errorScope).
 **What is unconfirmed is the resource axis**: it has not been isolated which dominates, ① the number of query sets alive
 at the same time in the first run (one chunk is fixed at 16 dispatches, so about 100 for gemma4 prefill ≈1,500
@@ -278,9 +277,9 @@ separate unfixed problem where timestamps are all zero even when allocation succ
 not become readable on this machine.
 
 **The full verify also has 1 red in the same form (2026-09-03, measured on M2 / macOS 26)**: even in
-`deno task verify`, which does not pass `--diagnostics`, the census check at
-`packages/models/tests/e2e_gemma4_pretrained_test.ts:208` ("gemma4 distribution: the pipeline default runs with ③'
-parallel reduction…") runs the real-weight gemma4 prefill with `acquireGpu({ gpuTiming:
+`deno task verify`, which does not pass `--diagnostics`, the census check of
+`packages/e2e/tests/e2e_gemma4_pretrained_test.ts` (then under `packages/models/tests/`; "gemma4 distribution: the
+pipeline default runs with ③' parallel reduction…") ran the real-weight gemma4 prefill with `acquireGpu({ gpuTiming:
 true })`, so both the parallel and the sequential steps are red
 (the **13th** of full verify 1856 passed / 13 failed / 139 ignored — a different class from the 12 counted by the
 1 ULP section above). On Metal too, it **does not fall under the `ignore` condition**: the decision is only the
@@ -319,11 +318,12 @@ to drop to a form that waits on the host per chunk (`resolveBuffer` / `readBuffe
 does not change and only the count grows.
 
 **Current state**: neither the isolation experiment (① ②) nor the fix candidate above **has been started** (the
-experiment needs real M2 hardware — backlog now section "Isolation experiment for Metal `--diagnostics`"). Since the
-hardware is confirmed to be macOS 26 and timestamps may be all zero due to wgpu#9414 even if reusing the query set makes
-allocation succeed, the experiment comes before the change (ruling of 2026-09-03). For the release decision, **it is
-accepted that 1 census check of verify stays red on M2** (Linux / Vulkan green; the equivalence of parallel and
-sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does not require timing).
+experiment needs real M2 hardware — backlog `later` item "Isolation experiment for `gpuTiming: true` on Metal through
+Deno's wgpu"). Since the hardware is confirmed to be macOS 26 and timestamps may be all zero due to wgpu#9414 even if
+reusing the query set makes allocation succeed, the experiment comes before the change (ruling of 2026-09-03). For the
+release decision, **it is accepted that 1 census check of verify stays red on M2** (Linux / Vulkan green; the
+equivalence of parallel and sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does
+not require timing).
 
 ## EmbeddingGemma batch>1 export does not pass the conversion stage
 
@@ -379,19 +379,20 @@ and succeeds, and the first `generate()` (for Wan, the construction of the text 
 no actual case yet). When a component is replaced through `components` of `fromPretrained`, the replacement preset's
 `session` / `gpuFeatures` / `requiredLimits` are not used, and **the pre-check uses the values of the original
 manifest's preset**, so it passes the check before fetching weights (the `requiredLimits` comparison). Construction
-creates no Session at all (`packages/models/src/wan/family.ts:493`), and the text stage creates a Session per generate
-(inside `encodeWanPrompts` — `packages/models/src/wan/text-stage.ts:369`), so the failure comes after construction.
+creates no Session at all, and the text stage creates a Session per generate
+(inside `encodeWanPrompts` — `packages/models/src/wan/text-stage.ts:393`), so the failure comes after construction.
 This is a state that lacks the check of "consistency between the quant preset and the execution settings" that ADR
 [0108](decisions/0108-container-format.md) decision 19 requires of admission, and it is not by design.
 
 - Mechanism: the replaced component takes only the container from the replacement's manifest
-  (`packages/models/src/hub/components.ts:471-478` — of the return of `resolveSelection` only `containers[key]` is
-  used). Wan's family check reads the preset of the original manifest (`packages/models/src/wan/family.ts:407-414`),
-  and makes the pre-fetch check with its `requiredLimits` (same file `:320-324`).
+  (`packages/models/src/hub/components.ts:565-585` — of the return of `resolveSelection` only `containers[key]` is
+  used). Wan's family check reads the preset of the original manifest (`admitWan`, `packages/models/src/wan/family.ts:481`),
+  and makes the pre-fetch check with its `requiredLimits` (called before the weight parts are fetched, same file
+  `:413-421`).
 - Current impact: the recipe writer (`umt5_export` — including `--intake`) writes the vocabulary embedding as i8, so a
   replacement with a compatible umT5 made by the recipe does not trigger it (if the graph descriptor is the same, the
   buffer sizes are the same too). However, the shared check of `umt5Contract`
-  (`umt5GraphContract` — `packages/models/src/umt5/graph-contract.ts:129-151`) only requires "storage is i8 or f32,
+  (`umt5GraphContract` — `packages/models/src/umt5/graph-contract.ts:134-155`) only requires "storage is i8 or f32,
   with at least one i8", so a component that holds the vocabulary embedding in
   f32 (the embedding buffer about 4×) passes the check and can fail in this way.
 - Fix candidates (ruling needed): check the replacement preset's `requiredLimits` / `gpuFeatures` together with the
@@ -409,10 +410,11 @@ The acquisition of the actual run is not matched.
   section "The GPU fit check before download"). On a multi-GPU machine, if only the actual run picks a different adapter,
   that adapter's output is compared with the row of the matched key (a false mismatch), or writing with
   `KARUME_REFERENCE` can record another adapter's output into that row. It does not happen on single-GPU machines.
-- Of the e2e tests with sha256 rows, those that acquire the GPU themselves (the 4 Wan pipeline / swap files, the
-  runtime-side real-asset e2e, the real-asset e2e of depth_anything / birefnet / vowel_detector in `packages/e2e`) match
-  the actual GPU itself right after acquisition (`verifyRunningGpu` / `assertAdapterMatchesEnvironment`). The Wan e2e
-  tests without sha256 rows (the dit / umt5 / ab / vae files) match it too.
+- Of the e2e tests with sha256 rows, those that acquire the GPU themselves (the Wan pipeline / swap files, MOSS-Image's
+  pipeline and generate files, the Qwen3.5 encoder, the Gemma 4 26B cut model, the runtime-side real-asset e2e, the
+  real-asset e2e of depth_anything / birefnet / vowel_detector in `packages/e2e`) match the actual GPU itself right after
+  acquisition (`verifyRunningGpu` / `assertAdapterMatchesEnvironment`). The Wan e2e tests without sha256 rows (the dit /
+  umt5 / ab / vae files) match it too.
 - Fix candidates: inject the GPU from the test (it must be acquired with the same features the pipeline requests
   itself), or make the adapter actually used by the pipeline readable (a change to the public surface).
 - **User ruling (2026-10-11): filed, not fixed** (the remainder of Codex deep review R8-003). Reasons: it happens only on
@@ -421,9 +423,9 @@ The acquisition of the actual run is not matched.
 
 ## `gpu_full_write_test.ts`: the linear i8a8 case never puts its poison into `xq` / `xs` (filed 2026-10-27; tests only)
 
-The full-write case for linear i8a8's temporaries (`packages/runtime/tests/gpu_full_write_test.ts:594-663`) sizes its
-poison buffer to the temporary under test (`poisonCount` = m·k/4 for `xq`, m for `xs` — `:602-605`); its comment
-(`:563-564`) reasons in size classes, which the liveness packer (ADR [0093](decisions/0093-transient-liveness-packing.md),
+The full-write case for linear i8a8's temporaries (`packages/runtime/tests/gpu_full_write_test.ts:673-791`) sizes its
+poison buffer to the temporary under test (`poisonCount` = m·k/4 for `xq`, m for `xs` — `:724-726`); its comment
+(`:683-685`, `:718-720`) reasons in size classes, which the liveness packer (ADR [0093](decisions/0093-transient-liveness-packing.md),
 least region growth since its addendum of 2026-10-26) does not place by. The packer takes slots largest first: the node
 output `y` (80 B) opens region 0; the poison (32 B or 16 B) shares `y`'s bytes there (their lifetimes do not overlap, so
 the growth is 0); `xq` (32 B) and `xs` (16 B) are kept out of `y`'s region (the GEMM reads them and writes `y`) and open
@@ -431,20 +433,32 @@ fresh regions. Replaying the case's allocation program through `planTransients` 
 at region 0 offset 0, `xq` and `xs` alone in regions 1 and 2, and one shared slot.
 
 - So the GEMM's full write of `y` covers the poison, and the temporaries the case names start zeroed; `reuseCount >= 1`
-  (`:650-651`) passes on the poison sharing `y`. A word the quantiser left unwritten would still read as 0 (an int8 0 or
+  (`:774-775`) passes on the poison sharing `y`. A word the quantiser left unwritten would still read as 0 (an int8 0 or
   a zero scale), which the atol = 0 match catches unless the reference has a 0 there too, but the poisoned-temporary check
   the case describes does not happen.
 - The conv3d case below it had the same gap and was rebuilt in `21ec9fa8` (a poison larger than every slot, `y` smaller
   than `xq`, `reuseCount` asserted to be exactly 2); the same construction fits here.
 - Impact: tests only (the runtime is unchanged).
 
+## The link check accepts absolute filesystem paths (filed 2026-11-19; tooling only)
+
+`tools/lang/check-doc-links.ts` resolves a Markdown link target against the linking file's directory with `resolve`,
+which leaves an absolute path unchanged, and then checks only that the path exists. A link written as an absolute path
+of the development machine therefore passes there and fails on every other checkout, CI included: three such links in
+a research snapshot turned CI red on 2026-11-19 (fixed in the snapshot the same day; the check was not changed).
+
+- Impact: the core lane's link test (`tools/lang/tests/repository_links_test.ts`) passes on the machine that wrote the
+  link and fails elsewhere; no runtime code.
+- Fix candidate (not approved): report a target that starts with `/` (or a drive letter) as broken, with the reason
+  "absolute path".
+
 ## The memory estimate does not count conv3d w8a8's in-node temporaries (filed 2026-10-27; listed as unaccounted since 2026-11-11; estimate callers on conv8 Sessions)
 
 With `convCompute: "a8"` an eligible conv3d node allocates two temporaries between its two dispatches
 (`buildConv3dI8a8`, `packages/runtime/src/runtime/recipe-builders/conv.ts:622-623`): `xq` = P·Cin bytes (the per-pixel
 int8 words) and `xs` = 4·P bytes (the per-pixel scales), P = T·H·W of the conv input, alive from the quantiser to the
-GEMM. `EstimateOptions` has no `convCompute` (`packages/runtime/src/runtime/estimate.ts:354`) and the estimate counts
-neither. Its `UNACCOUNTED` list (`estimate.ts:596-602`) names them since 2026-11-11, when linear i8a8's pair became
+GEMM. `EstimateOptions` has no `convCompute` (`packages/runtime/src/runtime/estimate.ts:360`) and the estimate counts
+neither. Its `UNACCOUNTED` list (`estimate.ts:625-631`) names them since 2026-11-11, when linear i8a8's pair became
 counted (ADR [0093](decisions/0093-transient-liveness-packing.md) addendum 2026-11-11). ADR
 [0133](decisions/0133-conv3d-w8a8.md)'s addendum of 2026-10-26 (channel-major quantiser) notes the gap as pre-existing.
 
@@ -560,19 +574,19 @@ A review of `GenerationRun.bidirectionalRows` (ADR [0144](decisions/0144-gemma4-
 cases where the block's behavior differs from its contract. Gemma 4 12B's image chat cannot reach any of them: it runs
 the block on its own immediate chunk of a context the Session made, on sliding slots, far below 2³² rows.
 
-- **A context from outside the type.** `assertBidirectionalRows` (`packages/runtime/src/runtime/executor.ts:428`) reads
+- **A context from outside the type.** `assertBidirectionalRows` (`packages/runtime/src/runtime/executor.ts:439`) reads
   `run.context[RUNTIME_INTERNAL]` before the context check that runs later in issue. A run with a block on an object that
   is not a `GenerationContext` rejects with a `TypeError`, not the `ExecutionError` the same run without a block gets.
   No state is touched.
 - **The CPU reference on a full slot.** `referenceStateAttention`
-  (`packages/runtime/src/reference/state-attention.ts:194`) applies the block whatever the window, so with window 0 (a
+  (`packages/runtime/src/reference/state-attention.ts:192`) applies the block whatever the window, so with window 0 (a
   full slot) it ORs the block in. The runtime keeps full layers causal and the kernel builder refuses a block without a
   window. The reference describes a behavior the GPU path refuses; no test passes a block to a full slot.
-- **The u32 bound of the block words.** `#writeLengths` (`packages/runtime/src/runtime/generation-context.ts:1531-1533`)
+- **The u32 bound of the block words.** `#writeLengths` (`packages/runtime/src/runtime/generation-context.ts:1539-1542`)
   writes `pastLength + start` and `pastLength + end` into the lengths uniform without a bound check. When
   `pastLength + end` is 2³², the upper word wraps to 0 and the block becomes empty, so the run is silently causal.
 - **A second slot backing for block runs.** The prepared key gains `|bidir`
-  (`packages/runtime/src/runtime/executor.ts:1699`), and the slot backings are keyed by it, so an image chunk and a text
+  (`packages/runtime/src/runtime/executor.ts:1786`), and the slot backings are keyed by it, so an image chunk and a text
   chunk of the same 768-row signature hold two backings. Under a backing budget sized for one, alternating chunks could
   evict and rebuild one per chunk. Performance and memory only; not measured.
 
@@ -604,31 +618,18 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
 - Records: `outputs/diag/restructure-2026-11-15/` (`wan-ti2v-write.log`, `wan-5f-alone.log`, `wan-9f-alone.log`; local,
   untracked).
 
-## Style-Bert-VITS2: the style setting seems to have no effect (reported and investigated 2026-11-18; no defect found)
+## On the RTX 3080 Ti development machine, two slowdowns distort measurements (filed 2026-11-19; the machine, not a product bug)
 
-Reported by the maintainer: choosing another style, or another style weight, does not seem to change the speech. The
-investigation found the style path intact and its effect equal to upstream's: for model F1, one text and zero noise,
-`f16+bert8` gives the upstream `net_g`'s numbers at every style and weight tried (the prior means differ by a relative
-3.4e-4, the durations are equal), and the change from Neutral to another style is the same in both (Angry at weight 1:
-4.1 % of the prior means, 2.4 dB of log-mel distance along a DTW path). The table of the distribution is upstream's
-`style_vectors.npy` bit for bit, the formula and its mean row are upstream's, and the exported graph keeps the style
-vector as an input that 811 of its 899 nodes depend on.
-
-What explains the report (the first two are upstream's behaviour too):
-
-- At weight 1 a style changes the speech less than another seed does: 0.7–2.7 dB for the six styles against about 4.5 dB
-  for a seed and 15 dB for another text. The effect grows about linearly with the weight and is plain from about 5.
-- `Neutral` is the mean row the formula mixes towards, so its weight changes nothing (the waveform is bit-identical).
-- The playground's weight control ended at 2; upstream's goes to 20 (default 1, as the distribution's).
-
-Closed (2026-11-19):
-
-- The playground's weight control runs to 20 in steps of 0.1, as upstream's, and its hint says that `Neutral` ignores
-  the weight and that about 10 gives a strong style and 20 an extreme one — the maintainer's listening of 2026-11-19;
-  AivisSpeech's control of the same weight ends at 10 (`apps/playground/src/models/sbv2/request.ts`).
-- A test fails if the style stops reaching the audio (`packages/e2e/tests/e2e_sbv2_style_test.ts`: another style
-  differs from `Neutral`, `Neutral` is bit-identical at two weights, weight 0 is `Neutral`). Until then the sha256
-  rows and the export's golden, all at `Neutral` and weight 1, were the only checks.
-
-Record: `outputs/diag/sbv2-style-2026-11-18/` (`REPORT.md`, the scripts, the tables, and WAV files of the settings
-compared under `listen/`; local, untracked). Not covered: the other three models, and upstream's own text front end.
+- **The slow mode** ([research 2026-10-25](research/2026-10-25-speed-recon-3080ti.md) §9.3): tiled GEMM-class kernels
+  run ×15–42 slower for whole submits, in episodes of 5–8 submits (about 14 s) that recur under sustained gap-free load
+  and once after a wake from idle; other kernels in the same submits are unaffected. The memory controller reads
+  96–100% busy while clocks and power stay at P0, and no thermal or power-brake counter fires. It attaches to the
+  pipeline object: a fresh pipeline from the same WGSL runs at normal speed. Not seen on the RTX 5070 Ti. The mechanism
+  is open; the display was detached from the card on 2026-11-19 to see whether it stops (no result yet). The sequential
+  GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
+  §6), which makes GEMV sweep groups unsteady (perf-ledger K-113).
+- **Thermal throttling** (identified 2026-11-17, not mitigated): under long or shared load the card runs at 77–96 °C
+  with its thermal slowdown flag set, and a long run after a quiet spell is slower than the same run warm.
+- Impact: wall-clock and per-dispatch numbers on this machine, and the sweep records the device tables are derived
+  from. Outputs are not affected. Compare arms interleaved in one process, at the same thermal state, and read a
+  median beside a minimum.

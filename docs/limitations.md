@@ -230,7 +230,7 @@ compensate for the dropped mass (the contract family of [decisions/0044](decisio
 an opt-in option). The CPU reference uses the same grid, so comparison does not detect this cut-off —
 the ruling on the accuracy impact rests on the measured tolerance of the E2E tests.
 
-## The online attention (`attentionScoreStorage: "none"`) runs only for head widths 64 and 128, and needs 31 KiB of workgroup storage
+## The online attention (`attentionScoreStorage: "none"`) runs only for head widths 64 and 128, and needs 31 KiB (subgroup form) or 35 KiB (portable form) of workgroup storage
 
 The online kernel (ADR [0132](decisions/0132-online-int8-attention.md)) holds its q, k, Vᵀ and P̃
 tiles in workgroup storage: 31,232 B in the subgroup form and 35,328 B in the portable form at
@@ -245,6 +245,12 @@ full-eligibility check of the census turns red. On those three dispatches ③PV'
 `N % 4 == 0` (the next section). The mask and GQA are rejected as for a8. The weights are quantised
 against a running row maximum, so the output is not the three-pass a8 output bit for bit (class Q:
 within the P̃-lattice error model — the same 1/127 grid as the ③PV above).
+
+In Chrome the device grants 32 KiB (32,768 B), so the portable form cannot run there; Chrome on the RTX 5070 Ti and on
+the Apple M5 takes the `sg32` form. The workbench's `kernel-check` entry therefore reads `attention-online-tiled` as
+incomplete on such a device: its `wg` part comes back not run, with no cases ("the wg form at D = 128 declares 35328 B
+of workgroup storage, the device grants 32768 B"), while its producer and `sg32` parts pass (records of 2026-11-19).
+That is the device's limit, not a failure.
 
 ## Gemma 4 images: 12B only, 280 soft tokens, measured on one machine
 
@@ -501,15 +507,12 @@ even with 1 dispatch = 1 submit (splitting submits by time budget (ADR 0004) doe
 1024² (output `[1,256,512,512]`), so 2048² with 4 times the elements is expected at ≈ 6.6 s. The two
 1024² series (birefnet-hr / lucida) are all green even on the B570. Deno does not turn this device
 lost into an exception but panics, stopping the following tests along with the whole process
-(Deno 2.9.6's ext/webgpu unwraps the result of the device poll). For this reason, `HELD_SERIES` in
-`packages/e2e/tests/e2e_birefnet_test.ts` has rows for the 3 series of 2048² (birefnet-hr's f16,
-lucida's f32 / f16) × the B570 environment key (`deno-intel-graphics-bmg-g21`), and on this machine
-the tests that use the GPU (golden comparison, geometry discrimination) are explicitly SKIPped
-(a warn at registration; the asset integrity tests still run; no effect on other machines — the held
-rows of ADR [0106](decisions/0106-device-keyed-references.md) addendum 2026-09-26, part 3). The
-condition for lifting it is to split `deform_conv2d` into several dispatches on the kernel side, or
-to speed it up so that one dispatch fits within the limit ([perf-ledger](perf-ledger.md) K-63);
-the rows are removed then.
+(Deno 2.9.6's ext/webgpu unwraps the result of the device poll).
+On that machine the three 2048² series (birefnet-hr's f16, lucida's f32 / f16) were held under its environment key
+(`HELD_SERIES` of `packages/e2e/tests/e2e_birefnet_test.ts`); the rows were dropped on 2026-11-11 with the other
+`deno-*` keys no run can match, and the table is empty. A device whose job limit is that short still loses the device
+on the 2048² `deform_conv2d`; lifting it needs that dispatch split or sped up ([perf-ledger](perf-ledger.md) K-63).
+On the RTX 3080 Ti the 2048² series are green.
 
 ## The BiRefNet family's α matte: it does not match the output of HR's upstream half-precision model, and upstream's truncation is not copied
 
@@ -565,7 +568,7 @@ construction took the rest of the same process down with it).
 - **The ceiling is a point-in-time value, not a fixed one**: the `heapBudget` in the test is reported
   dynamically by the driver, so it moves with every measurement even on the same machine. The
   re-measurement on the same machine on 2026-08-08 gave **11,136–11,264MiB**
-  (allocating in 256MiB steps with `tools/diag/hold-vram.ts` (removed in 0.15) → `not enough memory left`;
+  (allocating in 256MiB steps with a probe script → `not enough memory left`;
   two samples on the same day showed this spread). This does not contradict the 7,280MiB above; both
   simply reflect 97% of the budget reported at that time.
 - Measurement (Intel Arc B570 10,172MiB = 9.93GiB, Linux xe, Deno 2.9.6, as of 2026-10-02): ceiling
@@ -820,8 +823,7 @@ by-design properties are as follows.
   machine's RTX 3080 Ti, Deno), the total GPU time in timing mode was within the wobble of the
   no-budget case at budgets of 1 GiB / 512 MiB, and +24.9% at 256 MiB (measured 2026-10-11,
   [research 2026-10-11 (measurements of step 4b)](research/2026-10-11-row-block-budget-stage-4b.md)).
-- **Of the models pipelines, only the Gemma 4 ones have a knob for it (gpu-lab, removed in 0.15, had
-  none)**: `gemma.PipelineOptions.attentionRowBlockMaxBytes` passes it to the target and drafter
+- **Of the models pipelines, only the Gemma 4 ones have a knob for it**: `gemma.PipelineOptions.attentionRowBlockMaxBytes` passes it to the target and drafter
   Sessions and to `estimateSessionMemory`, unset by default (ADR 0124 addendum of 2026-11-05). It
   cannot be passed from `wan.Ti2vPipeline` and the like, and it is not put into Wan's default either
   (ruling 39 = a, the maintainer 2026-10-11 — the results section of step 4b in ADR 0124). A knob will
@@ -1119,7 +1121,7 @@ the Record, **every part is in host RAM at once**. The property that holds the h
 per source type (the section below) holds only for the surface that goes through the fetch layer
 (`fromPretrained`); what the whole-bytes surface shrinks is **the size of a single ArrayBuffer**
 (Chromium's wall — below), not the total resident amount. Its positioning as a surface meant for local
-debugging and `examples/` (removed in 0.15) is unchanged.
+debugging is unchanged.
 
 A sequence whose indices do not start at `[0]` or are not contiguous, or a mix of plain keys
 (`transformer`) and split keys (`transformer[0]`), fails loudly **with a diagnostic that names the
@@ -1554,6 +1556,17 @@ Therefore:
   into the `is_interrogative` flag" erases the interrogative information completely, so do not add
   that.
 
+## SBV2: a style at weight 1 changes the speech less than another seed does (upstream behaviour)
+
+The style vector is mixed from the distribution's `style_vectors.npy` towards its mean row, as upstream does, and its
+effect is upstream's (measured 2026-11-18 for model F1 at `f16+bert8`: the same prior means within a relative 3.4e-4
+at every style and weight tried). At weight 1 the six styles move the speech by 0.7–2.7 dB of log-mel distance, against
+about 4.5 dB for another seed; the effect grows about linearly with the weight and is plain from about 5. `Neutral` is
+the mean row, so its weight changes nothing (the waveform is bit-identical). The weight runs from 0 to 20 as upstream's
+(default 1); the playground's hint names about 10 as a strong style and 20 as an extreme one.
+`packages/e2e/tests/e2e_sbv2_style_test.ts` fails if the style stops reaching the audio. Not covered: the other three
+models, and upstream's own text front end.
+
 ## Anima: `pipelineConfig.scheduler.shift` accepts only values for which the sigma ladder holds
 
 The `shift` a distribution declares must not only pass "a positive finite number"; the sigma ladder
@@ -1643,8 +1656,7 @@ default `"per-stage"`. By-design constraints:
 - **Even when the resolution changes, the steady-state resident amount is at most "weights + the single largest backing"**
   (only one backing over the 256 MiB budget is retained — ADR 0095). In the run right after a switch, the retired old
   backing lives until after the flush, so the transient peak exceeds this. Up to 12 derived plans remain as host objects.
-- **The gain appears only when generate is repeated on the same pipeline** (0 for one generation per process, like
-  `examples/anima/main.ts` (removed in 0.15)). On the Arc B570 with 1024² turbo, 2.45 s per generation from the second one
+- **The gain appears only when generate is repeated on the same pipeline** (0 for one generation per process). On the Arc B570 with 1024² turbo, 2.45 s per generation from the second one
   on (10.4% of wall time — [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)). Other machines and Chrome
   are not measured.
 
@@ -1660,6 +1672,16 @@ not measured. The accepted set is not narrowed for this reason (ruling of 2026-0
 freedom without a measurement). In practice the upper limit of S and VRAM bind first. The history is detection limit 2 of
 [ADR 0036](decisions/0036-freeform-resolution.md); the record on the code side is the NOTE on `MAX_LATENT_SIDE` in
 `packages/models/src/anima/resolution.ts`.
+
+## Anima `fromSingleFile`: safetensors only, the file is read for the pipeline's life, and other families have none
+
+`anima.Pipeline.fromSingleFile` ([spec](spec/single-file.md)) reads only safetensors, and only Anima has it. The
+pipeline reads the file whenever a component from it builds its Session — the text conditioner at every generate, the
+transformer at every generate in the default per-stage residency — so the file must stay readable until `dispose`, and
+each build converts again; `retainConverted: true` keeps the converted weights in host memory instead (about 1.8 GiB
+for the transformer as int8, 3.6 GiB as bf16). A float component whose tensors mix dtypes or are F32 is refused before a
+weight part is downloaded. The distribution must carry a name map (manifest `karume/6`). Not built: other families,
+int4 targets, LoRA ([backlog](backlog.md)).
 
 ## Wan2.1: accepted sizes are 832×480 / 480×832 only, and frame counts only 4n+1 from 5 to 81 (prompt acceptance depends on the text encoder route — ADR 0118 / 0119)
 
@@ -1702,7 +1724,7 @@ Consequences).
 - The DiT's i8 presets (ADR [0120](decisions/0120-wan-dit-w8a8-seat.md), 2026-10-03): the reference preset `f16+dit8` and the practical preset `f16+dit8-a8-attn8-s16` were added to the distribution. The GPU numeric checks (r check, self A/B check) and the visual A/B (steps 3–6) are done (2026-10-03 to 04). The default is the practical preset (ruling of 2026-10-04 — `f16` is chosen explicitly with `quant: "f16"`). The practical preset's a8 is not faster on Metal (M2) (measured in K-70 — it becomes a preset that only costs quality). (→ 2026-10-17: when a8 is requested on a device without dp4a, the runtime warns once per device — ADR 0128 decision 5)
 - Chrome (step 9 ✅ — the range confirmed is the precomputed route (`textEncoder: "precomputed"`), the `f16` preset, 832×480, 81 frames, 50 steps. RTX 5070 Ti, ADR 0118 addendum 2026-10-04 "step 9: 81 frames × 50 steps complete in Chrome on the RTX 5070 Ti". As of the same addendum, the GPU route and the practical preset had not been run in Chrome): the default binding limit of 128 MiB is not enough even for the VAE's largest value of 192 MiB. `acquireGpu` requests the adapter values,
   so the actual limit depends on the adapter, and the required minimum is the FFN intermediate of 503,193,600 B (33 frames) / 1,174,118,400 B (81 frames). The environment key
-  changes with the WebGPU Developer Features flag (separate sha rows). The check page is the Wan tab of tools/gpu-lab (removed in 0.15).
+  changes with the WebGPU Developer Features flag (separate sha rows).
 - Text encoder route (ADR 0119, 2026-10-03): the default `textEncoder: "gpu"` runs umT5-XXL on the GPU and accepts any prompt (2–512 tokens;
   out-of-vocabulary and in-text special tokens, HTML entity candidates (`R&D` → `R & D`), mojibake, C1 and characters unassigned in Unicode 16.0.0 are rejected with `ModelInputError`).
   `"precomputed"` accepts only the 4 of the embedding asset and does not fetch the umT5 component. The umT5 component is a cross-repository reference to the separate repository `karume-umt5-xxl`, and locally it
@@ -1803,7 +1825,7 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
     chooses a free size within an area limit (1248×704 for a 16:9 image), so with the same image `fit: "crop"` can cut more here.
   - Image files are not decoded (zero runtime dependencies). What is accepted is decoded RGB8, and no colour-space conversion is done either. The preprocessing (LANCZOS downscale and
     crop) is bit-identical to Pillow 12.3.0, but producing RGB8 from a file is the caller's job, and whether the input matches the reference is decided there
-    (`examples/wan` (removed in 0.15) read PNG pixel-identically to Pillow, JPEG drifts slightly due to decoder differences, and the EXIF orientation is applied (deliberately different from upstream's `generate.py` — ADR 0121 addendum 2026-10-11) — `examples/wan/README.md` (removed in 0.15)).
+    (the former Wan example read PNG pixel-identically to Pillow, JPEG drifts slightly due to decoder differences, and the EXIF orientation is applied (deliberately different from upstream's `generate.py` — ADR 0121 addendum 2026-10-11)).
   - The range confirmed on Deno is only the precomputed route (`textEncoder: "precomputed"`) on the RTX 3080 Ti: 2 steps × 9 frames (3 images at 1280×704,
     1 image at 704×1280) and 50 steps × 1280×704×33 (sha rows for both presets — the sha256 item above). It was not run on Deno on GPUs other than the RTX 3080 Ti.
     The combination with the GPU umT5 route is only the one that completed in Chrome on an RTX 5070 Ti (gpu-lab, 2026-10-10): condition image 896×1152 (portrait) → 704×1280, fit crop,
@@ -2137,7 +2159,10 @@ boundary). The export scripts, dist recipes and card templates of known models a
 `karume dist` has an empty pipeline table and fails loudly (the source of truth of the accepted set is the repository's
 `tools/export-recipes/dist.py`). `karume verify` works with the installed version too.
 
-## On Metal (Apple GPU), GPU-side timestamp measurement is not practical (external constraint)
+## On Metal under Deno (wgpu), GPU-side timestamp measurement is not practical (external constraint)
+
+In Chrome on Metal (Dawn) timestamps work: the workbench's decode bench and the GEMV sweep time the GPU on the Apple
+M2 there. What follows is the Deno path.
 
 `gpuTiming: true` (ADR 0021) opens 1 dispatch = 1 pass and takes timestamps at the pass boundaries, so
 it creates one query set per chunk. On Metal the `createQuerySet` that creates that query set fails and
@@ -2162,7 +2187,7 @@ too many" was wrong, and it also happens with gemma4, which has fewer dispatches
 "It is visible as `GpuDeviceLostError`, so it is not silent" is also **retracted**. In a script that grabs resources with a top-level
 `await using`, the body's exception and the exception at release are folded into a `SuppressedError`, and Deno
 prints only its outer shell, so neither the type nor the message can be read. **These 2 points were filled on 2026-09-03** — the example script
-(`examples/gemma4/main.ts` (removed in 0.15)) wrapped its body in a function and at the top level recursively expanded `SuppressedError` (`.error` /
+(the gemma4 example of the time) wrapped its body in a function and at the top level recursively expanded `SuppressedError` (`.error` /
 `.suppressed`), `AggregateError` and the `cause` chain to stderr in full, and exited 1.
 `device.ts` puts the loss reason (`reason` / `message` of `GPUDeviceLostInfo`) into the message of
 `GpuDeviceLostError`. However, **on this path the string of the real cause did not arrive** (measured on the M2, 2026-09-03) — what actually came out
@@ -2283,8 +2308,9 @@ is rejected by hub as "unsupported major" (`packages/hub/src/manifest.ts`), and 
 fail with "unknown magic" (`packages/runtime/src/format/container/header.ts`). The processing that reads old formats lives only in the migration CLI
 (`uv run karume migrate` of `tools/exporter` — positional arguments per component, or the whole-repository mode of `--manifest`),
 which only reads its input and does not delete it. Old package versions pin old revisions (40-digit SHA), so as long as the old versions are used,
-the old distribution form keeps working. All 10 public HF repositories have been re-uploaded as `karume/5` (the 0.13.0 re-upload,
-2026-09-24), and the pins of the current packages point to those revisions.
+the old distribution form keeps working. The published repositories hold `karume/5` manifests (the form since 0.13.0), which the released packages read; the
+0.23.0 release publishes every manifest again as `karume/6` and moves the pins, so until then the pins of the
+unreleased packages name revisions this hub refuses.
 
 ## hub: the cache is not isolated by credential (by-design — ruling of 2026-08-28)
 
@@ -2337,8 +2363,8 @@ decision 1). The design's source of truth is ADR [0086](decisions/0086-distribut
 > **rows per environment key**. The section title is kept as is to preserve existing pointers (comments on the code side
 > refer to it by name).
 
-The PNG / WAV reference sha256 of the e2e tests (`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`) are
-**values recorded in that environment**, stored in `packages/models/tests/fixtures/references/<series>.json` as rows per environment key
+The PNG / WAV reference sha256 of the e2e tests (`e2e_anima_test` / `e2e_sbv2_wav_test` / the Irodori WAV tests) and
+the other series below are **values recorded in that environment**, stored in `packages/models/tests/fixtures/references/<series>.json` as rows per environment key
 (`<runtime>-<adapter name slug>`, e.g. `node-nvidia-geforce-rtx-3080-ti`).
 **An environment without a row SKIPs explicitly without comparing** (Metal and the like) — this is the specification, and the check
 works as "a port and regression detector **on that machine**". So that a SKIP does not become a silent green, if even one registered
@@ -2350,10 +2376,12 @@ tiny numeric differences). This measurement was the direct motivation for moving
 `deno-*` key, were deleted with the other `deno-*` rows on 2026-11-15). How rows are made, the reference guard (opt-out with `KARUME_ALLOW_NO_REFERENCE`) and the results
 directory (`outputs/verify/`) are defined by ADR [0106](decisions/0106-device-keyed-references.md).
 
-9 series have rows (2026-09-26 — ADR 0106 third addendum): besides the PNG / WAV of anima / sbv2 / irodori, the goldens of siglip2 /
-gemma4 (runtime-side e2e — rows in `packages/runtime/tests/fixtures/references/<series>-golden.json`),
-the real images of birefnet / depth-anything, the f32 output of the whole chain of vowel-detector (safetensors), and the
-token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat. The rows of anima, whose artifact is a PNG, are the sha of the pixels before compression (RGB8); the bytes of the PNG
+The series with rows (2026-11-19): in `packages/models/tests/fixtures/references/` the PNG / WAV of anima / sbv2 /
+irodori (the three Irodori lines in one file), the real images of birefnet / depth-anything, the f32 output of the
+whole chain of vowel-detector (safetensors), the token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat /
+gemma4-qat-mobile, the hidden states and logits of the Gemma 4 26B cut model, MOSS-Image, its Qwen3.5 text encoder,
+and Wan2.1 / Wan2.2; in `packages/runtime/tests/fixtures/references/` the goldens of siglip2 and gemma4 (runtime-side
+e2e — `<series>-golden.json`). The rows of anima, whose artifact is a PNG, are the sha of the pixels before compression (RGB8); the bytes of the PNG
 (the IDAT deflate depends on the runtime's zlib implementation) are not in the rows (2026-10-17, ADR 0106 addendum).
 
 Mechanism: IEEE 754 addition, subtraction, multiplication and division are exactly identical across devices too, but because of ① transcendental function (`exp` and the like) implementations
@@ -2439,8 +2467,8 @@ required total — it does not compare with the free side).
   declared values.
 - **`capacity` does not affect the token sequence** (the work is cut by the logical length, and the values do not depend on the capacity — with a bit-identity check).
 - **The reduction form of decode attention follows the attention level the quant preset declares** (on 2026-09-26 the models code default `"parallel"` was removed
-  and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-fast` of both QAT lines and the mobile QAT line's
-  `i4-gemvpar` declare `reorder`, which resolves to `"parallel-fused"` — the parallel reductions (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
+  and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-fast` of both QAT lines, the mobile QAT line's
+  `i4-gemvpar` and the regular line's `bf16-fast` (not published yet) declare `reorder`, which resolves to `"parallel-fused"` — the parallel reductions (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
   decode and speculative verify; widened from M=1 on 2026-09-09)) with the row statistics and PV fused in the same addition order where the fold applies
   (the "row-statistics/PV fusion" section below) — and `i4` without a declaration and `fromAssets` use the runtime's reference path `"sequential"`.
   Prefill plans (M ≥ 16) use the tiled paths of the GEMM skeleton
@@ -2655,7 +2683,7 @@ It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision and audio are
 `karume-gemma4-qat-mobile` (E2B and E4B): it was published on Hugging Face as `hdae/karume-gemma4-qat` with 0.15.1 (ADR 0097 addendum 9) and renamed
 on 2026-11-04 — that name now holds the q4_0 QAT line, which `@karume/models/gemma` reads — and it was uploaded under its new name on 2026-11-04, pinned by
 `gemma4QatMobile.SOURCES["gemma4-qat-mobile"]` from 0.16.0 (ADR 0097 addendum 10).
-The local usage example is the QAT CLI (`examples/gemma4-qat/README.md` (removed in 0.15)), the numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
+The numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
 the terms are in the [glossary](glossary.md), and the source of the measurements is the [measurement record of the QAT review](research/2026-09-19-qat-review.md).
 
 **Activations are "only rounded", not the official mobile integer dot product**.
@@ -2671,7 +2699,7 @@ karume, like upstream transformers, does not read them.
 The full-layer KV per position is 12,288 B for E2B / 32,768 B for E4B, and the sliding layers are fixed buffers with a window of 512, so they
 do not depend on capacity. int8 conversion was filed as [perf-ledger](perf-ledger.md) K-46.
 
-**The defaults are capacity 4096, chunkLength 768, trace limit 768, and `--max-new-tokens` 256 for the interactive CLI (removed in 0.15)** (the same as regular Gemma).
+**The defaults are capacity 4096, chunkLength 768 and trace limit 768** (the same as regular Gemma).
 The prefill buckets also use the same ladder as regular Gemma (not a sequence re-measured specifically for QAT).
 **Output quality in contexts over 512 is not accepted**, and this is the only substantive precondition when using up the capacity.
 That it runs at all is confirmed: a run at capacity 8192 is in the
@@ -2701,8 +2729,8 @@ The MTP drafters take a row only for the shapes the RTX 3080 Ti's GEMV sweep sup
 `packedStaticQuantize` is an optional setting of [ADR 0105](decisions/0105-packed-static-quantize-activations.md) that packs 4 int8 codes produced by fixed SRQ into one u32 word and passes them to the parallel GEMV.
 QAT E2B's `i4-fast` declares it by default (regular Gemma 4 has no `static_quantize`, so it does not declare it). 4 by-design constraints:
 
-- **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of the default geometry profile's parallel-GEMV table, `linearGemv.parallelShapes`, whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
-- **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted for the opt-in: [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2 classes `packedStaticQuantize` as E on finite values and states this NaN saturation.
+- **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of the default geometry profile's parallel-GEMV table, `linearGemv.parallelShapes`, whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 81 rows (47 of them int4 g32, 17 bf16) are outside the targets.
+- **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted for the opt-in: [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2 classes `packedStaticQuantize` as exact on finite values and states this NaN saturation.
 - **The allocation does not become 1/4**. The output tensor's storage is allocated at the declared shape, and only 1/4 of it is actually written. This is a choice to keep the arena buckets unchanged, not a VRAM saving.
 - **It is accepted only with linear at the level `reorder` and `linearCompute: "f32"`** (it is a form of the parallel GEMV). Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.
 
@@ -2713,7 +2741,7 @@ The RMS→add fusion is bit-identical to the unfused plan and applies wherever i
 The subgroup forms of the RMS reduction and of the parallel GEMV are `reorder` strategies that no Session selects by itself: only the private Session key `[REORDER_STRATEGIES]` (`rmsNorm: "subgroup32"` / `linearGemv: "subgroup32"`, used by the kernel checks and tests) runs them, each only where its op kind is at the level `reorder`.
 When an external GPU is passed, request the required features with `acquireGpu({ subgroups: true })`.
 They need WebGPU's subgroups / subgroup-size-control, WGSL's subgroup_id and the 32-lane known-answer check, and are rejected when anything is missing.
-Deno 2.9.6 did not provide the required features; on Node + Dawn (0.15) they are exposed and the variants run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). Running in Chrome and the follow-up test on the M2 are done, but adopting them as the M2 default is deferred.
+On Node + Dawn the development machine exposes the features and the variants run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12); Deno 2.9.6 did not. No adapter is measured to gain from them end to end, so no level selects them.
 Neither a manifest's `quant.session` nor a public option can name them.
 For the numbers, target shapes and the range not yet accepted, see [ADR 0100](decisions/0100-rms-subgroup-reduction.md) and [0101](decisions/0101-linear-gemv-subgroup.md).
 
@@ -2732,23 +2760,14 @@ measured and adopted; none is scheduled.
 
 ## The real-execution checks of the subgroup variants do not run automatically (the workbench's kernel-check entry is the manual check)
 
-> Resolved in 0.15 (2026-10-16): on Node + Dawn the development machine exposes `subgroups`, so the real-execution cases below run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). The text below records the Deno-era state; the manual check still applies to a machine whose adapter lacks the features.
-
-> Manual procedure: the workbench's `kernel-check` entry ([spec/workbench.md](spec/workbench.md#the-entries); until 2026-11-16 the Playground's `/kernel-check` page). It runs the same checks as the node GPU tests (one implementation, the private package `@karume/kernel-checks`) on the browser's backend — D3D12 in Chrome, Metal — which the node lanes (Dawn / Vulkan) do not reach: the GEMV and RMS subgroup32 checks below (RMS now with its full test criteria rather than the round trip) and the K-55 / K-91 states-attention rewrites. A device without the subgroup features shows those two as "not available", never PASS. The `/check.html` and round-trip procedure below is the 0.14.0 record.
-
-The real-execution checks of the subgroup32 RMS reduction and the subgroup32 parallel GEMV
-(the cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that actually run the subgroup instructions) SKIP explicitly
-on a device without the required features. Deno 2.9.6 did not provide `subgroups`, so in the Deno-era full verify and in CI they
-**were not executed in any run**. There is no all-skip guard that turns the SKIP red either (something like `gpu_gate_test.ts`, which turns a missing GPU adapter red).
-What the automatic checks see is only WGSL generation (snapshots) and the accept / reject branches; they do not look at the numbers from actually issuing subgroup instructions.
-The real-execution check is manual: run the following 2 in Chrome (the procedure is `tools/llm-speed/browser/README.md` (removed in 0.15)).
-
-- GEMV: the measurement page's `/check.html` checks u32 equality of parallel and `parallel-subgroup32` and outputs `PASS` / `FAIL`
-  (the same check as `packages/runtime/tests/helpers/gemv-subgroup-check.ts` of 0.14.0 — now `checkGemvSubgroup` of `@karume/kernel-checks`).
-- RMS: outside the scope of `/check.html`. Use the measurement page's "round-trip comparison of the 2 RMS paths" (`fused → subgroup32 → subgroup32 → fused`) to
-  see that generation does not break. The reduction order changes, so the generated text can change.
-
-When the WGSL or the selection conditions of the subgroup variants change, treat real execution on a backend as unverified until the workbench's `kernel-check` entry has run there (until 2026-10-28: these 2).
+The cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that issue subgroup instructions run
+in the core lane on Node + Dawn where the adapter exposes `subgroups` (the development machine does since 0.15 —
+[research 2026-10-16](research/2026-10-16-node-port-results.md) item 12), and SKIP explicitly on an adapter without the
+features; no all-skip guard turns that SKIP red. D3D12 in Chrome and Metal are not reached by the node lanes: there the
+workbench's `kernel-check` entry ([spec/workbench.md](spec/workbench.md#the-entries)) runs the same checks (one
+implementation, `@karume/kernel-checks`), and a device without the features shows them as "not available", never PASS.
+When the WGSL or the selection conditions of the subgroup variants change, treat real execution on a backend as
+unverified until that entry has run there.
 
 ## The public-surface snapshot check looks only at exports added or removed — signature compatibility is not guaranteed
 
