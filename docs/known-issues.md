@@ -157,7 +157,6 @@ on Metal too, so the harness is not blind there.
 | `state-attention-rewrites` (`state-qk-fold`) | folded ①′ vs ①′ | 252 of 252, the F = 8 classes the product folds included |
 | `state-attention-rewrites` (`state-pv-unroll`, `state-stats-pv-unroll`) | the unrolled forms (perf-ledger K-91) vs their v1 WGSL | 532 of 546 and 476 of 490 |
 | `state-kv16` (`state-kv16-readers`) | f16 full-slot readers vs their f32 forms over a rounded slot | 31 of 246, the read-only reader's O words only |
-| `expert-linear` (the grouped form and the pooled grouped form; measured 2026-11-18 on the M2) | the form that shares the walk of an expert's weight row among the rows that picked it vs `linear`'s GEMV on that expert | 55 of 72 cases of the `down` projection (n 2816, k 704, one x row per pick), 33,919 of 202,752 words in each form; none of the 72 `gate_up` cases |
 
 Identical on Metal: every fusion twin part, the prefetch form of `rms_norm` (below), the subgroup GEMV and RMS
 reductions, the integer and byte-plane GEMVs, the row-blocked parallel GEMV, the f16 score store, the bidirectional
@@ -175,19 +174,13 @@ made `x · weight` overflow so that an `inv` of 0 gave NaN. The key's v3 rounds 
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
   (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
   seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
-  The grouped form of `expert_linear` — which a Session runs for a run of 2 to 768 tokens over weight rows of 64
-  words or more (`expertLinearGrouped`), at every numerics level, on the statement that it writes the one-row form's
-  words — does not hold that statement on Metal at one of the two shapes the check runs it at. At `down` (weight
-  rows of 22 words), in every walk of two or more rows the first row's words are the oracle's and every other
-  row's differ (the 55 failing cases; the 17 passing ones are the first rows of the walks and the one-row walks;
-  the first failing word differs by 4 ULP). A Session does not run that case: `down`'s rows are shorter than 64
-  words, so it takes the one-row form, and `gate_up` (88 words), which is grouped, is identical in all 72 cases.
-  So no word of Gemma 4 26B A4B is known to depend on an Apple GPU on whether a token was computed in a run of one
-  or of several; what is open is the form itself at other shapes. The two shapes differ in two ways the record
-  does not tell apart: `down` leaves 2 words after the 4-word unrolled loop (22 = 5 × 4 + 2; 88 leaves none), and
-  it has one x row per pick. Which of them it is, and a form that is identical on Metal, is being isolated on the
-  M2 (the record is `outputs/workbench/browser-apple-m2/kernel-check_2026-11-18T19-23-24.json`, untracked;
-  checkout `453921bc`).
+  The grouped form of `expert_linear` (a run of 2 to 768 tokens over weight rows of 64 words or more) takes the
+  words that its 4-word unrolled loop leaves with one loop per row for this reason: with every row's word in one
+  loop body, the M2 rounded the rows after the first of a walk unlike the one-row form (55 of 72 cases at each of
+  the three shapes with words left, first difference 4 ULP; none at the three shapes without), and with a loop per
+  row all 432 cases are identical (record `outputs/workbench/browser-apple-m2/kernel-check_2026-11-19T09-39-19.json`,
+  untracked, checkout `184fd433`). No shipped model was affected: Gemma 4 26B A4B's grouped projection, gate_up,
+  has 88 words and leaves none. Not yet measured on Metal: the pooled grouped form with the loop per row.
 - **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
   so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
   Confirmed for the fixed `rms_norm` prefetch form (a product chain reassociated, above). Analysis of the table's
