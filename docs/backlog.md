@@ -60,13 +60,12 @@ Node and Deno.
   decode is measured on three devices (2026-11-19, `bf16` and `bf16-fast` interleaved in one process, decode
   ms/token): RTX 3080 Ti (Node) E2B ×0.73 to ×0.78 and E4B ×0.57 to ×0.72, RTX 5070 Ti (Chrome) ×0.52 and ×0.51,
   Apple M2 (Chrome) ×0.93 and ×0.95, the same tokens in both presets; each model's description carries its sentence
-  on speed (`GEMMA4_SPEED_NOTE`). Open:
+  on speed (`GEMMA4_SPEED_NOTE`). The maintainer reviewed the label and the descriptions, the speed sentences
+  included, on 2026-11-19. Open:
   - E2B's speculative decode (with the drafter) under `bf16-fast` against `bf16`: not measured (the workbench's
     `gemma4-bench` entry has no drafter arm), so E2B's sentence says "without the drafter";
-  - the maintainer's review of the preset's label and description (drafts written 2026-11-19, the speed sentences
-    included);
-  - the sha256 reference rows `e2b/bf16-fast` and `e4b/bf16-fast` of each environment (written only on the
-    maintainer's OK);
+  - the sha256 reference rows `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's,
+    which has them (written only on the maintainer's OK);
   - publication with the next release, on the maintainer's explicit OK (manifest and card only — the containers are
     the published ones).
 
