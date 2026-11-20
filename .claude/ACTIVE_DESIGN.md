@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > The entry point to the current design and to reviews. History lives in the ADRs / research / git; the source of truth for the work order is the [backlog](../docs/backlog.md), and for performance adoption decisions the [perf-ledger](../docs/perf-ledger.md).
-> Last updated: 2026-11-19 (**the 0.23.0 release is being prepared — nothing of it is published**; items 1–6 of [ADR 0152](../docs/decisions/0152-maintained-specs-and-declared-numeric-requirements.md) landed and item 7, weights from a single file, has its first family; the release history this file used to carry was removed — git and `CHANGELOG.md` keep it)
+> Last updated: 2026-11-20 (**0.23.0 is released**; items 1–6 of [ADR 0152](../docs/decisions/0152-maintained-specs-and-declared-numeric-requirements.md) landed and item 7, weights from a single file, has its first family; the release history this file used to carry was removed — git and `CHANGELOG.md` keep it)
 
 ## Current focus
 
