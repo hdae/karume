@@ -1,6 +1,6 @@
 {
   "name": "@karume/convert",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Weights converted while a Session reads them: a tensor list encoded against the plan of a distributed preset, served as a container and optionally written as one.",
   "license": "MIT",
   "files": [
