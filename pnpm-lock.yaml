@@ -580,11 +580,11 @@ importers:
   tools/published-smoke:
     dependencies:
       '@karume/hub':
-        specifier: jsr:^0.22.0
-        version: '@jsr/karume__hub@0.22.0'
+        specifier: jsr:^0.23.0
+        version: '@jsr/karume__hub@0.23.0'
       '@karume/models':
-        specifier: jsr:^0.22.0
-        version: '@jsr/karume__models@0.22.0'
+        specifier: jsr:^0.23.0
+        version: '@jsr/karume__models@0.23.0'
       webgpu:
         specifier: 'catalog:'
         version: 0.6.2
@@ -832,14 +832,20 @@ packages:
   '@jsr/hdae__yomi@0.4.2':
     resolution: {integrity: sha512-i9AfjEKfAqQROhMAi4BI1xWgiDDJn7pR2/5KB/IRCsCr0YUp/UDW1wg0cdxP7R9Bf7leuRdZCVjs7jgFEcpWQQ==, tarball: https://npm.jsr.io/~/11/@jsr/hdae__yomi/0.4.2.tgz}
 
-  '@jsr/karume__hub@0.22.0':
-    resolution: {integrity: sha512-nH0Qh/Cmny5QGTh7c2YvMprsdGLT+9/BXZl241tG44TYwwT2g/4XBYBdceQKMB3jZ52KN97evuZCLL4eXFUZjQ==, tarball: https://npm.jsr.io/~/11/@jsr/karume__hub/0.22.0.tgz}
+  '@jsr/karume__convert@0.23.0':
+    resolution: {integrity: sha512-sOT8nvVIHyS24oVBwVWGr5w1AnKDmVqtVz6cRg4opuvruWnmZpVSVmhbYIUn57C1chEsfLRtv675kfo2ojk46w==, tarball: https://npm.jsr.io/~/11/@jsr/karume__convert/0.23.0.tgz}
 
-  '@jsr/karume__models@0.22.0':
-    resolution: {integrity: sha512-IT7ZxJ8PKc/I/ncy5Zkq25tJqTjDG8+wz+9wGhPK5Cj0VvSsYPDK0AsW64FG2S1no+RcwhgiaJEKA7L+jOdBDA==, tarball: https://npm.jsr.io/~/11/@jsr/karume__models/0.22.0.tgz}
+  '@jsr/karume__hub@0.23.0':
+    resolution: {integrity: sha512-jl3a9/WBeFtn4FGwrowcP3qvHs50wCXbCKuu1xnIu1YaJ0pIrWpVrRE/Y9/Lro87JcYy+Y+jnP2DLpcHuo51AA==, tarball: https://npm.jsr.io/~/11/@jsr/karume__hub/0.23.0.tgz}
 
-  '@jsr/karume__runtime@0.22.0':
-    resolution: {integrity: sha512-9P6717kIkosxIgruwbiDTJNMKXhkynfU3JyeEtpEbQfhf62iyJgRHL6y/Ql0yRy6FdR6hOMzymn5BR/qySAQ0g==, tarball: https://npm.jsr.io/~/11/@jsr/karume__runtime/0.22.0.tgz}
+  '@jsr/karume__models@0.23.0':
+    resolution: {integrity: sha512-nrUjuTzo0S3PaC7E7ZjI0Vxdmken1+cWJGEKZ6tfIHdAmACgjTvvVfCq/mZSz/e8fEVMbYrTf0Zue2pub6Tm7g==, tarball: https://npm.jsr.io/~/11/@jsr/karume__models/0.23.0.tgz}
+
+  '@jsr/karume__runtime@0.23.0':
+    resolution: {integrity: sha512-1RzxwUvXZuny4gDOsEVli3b4+iodau7OK7GN2CkdlIaxpe2o3al9sZ9lKyDzo8TQcEeQBd0TQG/Bjd074hmpmg==, tarball: https://npm.jsr.io/~/11/@jsr/karume__runtime/0.23.0.tgz}
+
+  '@jsr/karume__safetensors@0.23.0':
+    resolution: {integrity: sha512-SX+OxRB6A5S8Oj1trB7kjBw9QXUQrpwwtcGmCRMOsW7dJNWk6A46DnT1qxK0U9RrJsWh+8YAV4QHSWtwWm7+gg==, tarball: https://npm.jsr.io/~/11/@jsr/karume__safetensors/0.23.0.tgz}
 
   '@jsr/std__assert@1.0.19':
     resolution: {integrity: sha512-pEj6RPkGbqlgRmyKwATp4cUs6+ijxtdrv3bq8v1d2I2CEcMEyPaO8cVKro61wGRDH4cNg8Zx6haztvK/9m7gkA==, tarball: https://npm.jsr.io/~/11/@jsr/std__assert/1.0.19.tgz}
@@ -3677,16 +3683,24 @@ snapshots:
     dependencies:
       '@jsr/hdae__fetch-cache': 0.3.1
 
-  '@jsr/karume__hub@0.22.0':
+  '@jsr/karume__convert@0.23.0':
+    dependencies:
+      '@jsr/karume__runtime': 0.23.0
+
+  '@jsr/karume__hub@0.23.0':
     dependencies:
       '@jsr/hdae__fetch-cache': 0.8.0
 
-  '@jsr/karume__models@0.22.0':
+  '@jsr/karume__models@0.23.0':
     dependencies:
-      '@jsr/karume__hub': 0.22.0
-      '@jsr/karume__runtime': 0.22.0
+      '@jsr/karume__convert': 0.23.0
+      '@jsr/karume__hub': 0.23.0
+      '@jsr/karume__runtime': 0.23.0
+      '@jsr/karume__safetensors': 0.23.0
 
-  '@jsr/karume__runtime@0.22.0': {}
+  '@jsr/karume__runtime@0.23.0': {}
+
+  '@jsr/karume__safetensors@0.23.0': {}
 
   '@jsr/std__assert@1.0.19':
     dependencies:
