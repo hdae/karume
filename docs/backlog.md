@@ -96,9 +96,12 @@ maintainer's ruling of 2026-11-06).
     parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
     publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
     and EmbeddingGemma 2, which has no item or design yet.
-  - Here without a ruling on their timing: whether `apple-metal-3` matches Apple adapters other than the M2, which the
-    maintainer decides from the Apple M5's records (item 6 of "The move to maintained specs (ADR 0152)"); and the two
-    items below.
+  - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
+    Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
+    parallel rows are faster than the default's but its sequential choices are not, and part of them were not compared
+    word for word there ([research 2026-11-19](research/2026-11-19-gemv-tables-across-devices.md) §7). A first table
+    needs the M5's geometry sweep records beside its GEMV ones (item 6 of "The move to maintained specs (ADR 0152)").
+  - Here without a ruling on their timing: the two items below.
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
     workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
     (`GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`); it needs a drafter arm in that entry. The
@@ -198,9 +201,10 @@ maintainer's ruling of 2026-11-06).
          `262144 × 3840` of 12B ×1.44 and ×1.57, `262144 × 2816` of 26B ×1.48 and ×1.68, and the int8
          `262144 × 2560` no distribution ships), which a speculative decode's verify run reaches; on `apple-metal-3` 11
          groups, ×1.00 to ×1.12;
-       - `apple-metal-3` matches only the Apple M2's description. The maintainer's ruling of 2026-11-19: an Apple M5,
-         which matches no table, runs the kernel checks, the decodes and the full GEMV sweep twice, and whether
-         `apple-metal-3` matches other Apple adapters is decided from those records. On the M2 the default's 22
+       - `apple-metal-3` matches only the Apple M2's description, and stays so (the maintainer's ruling of
+         2026-11-20, from the Apple M5's records of 2026-11-19 —
+         [research](research/2026-11-19-gemv-tables-across-devices.md) §7): an Apple adapter that reports no
+         description gets a table of its own after the 0.23.0 release, which needs its geometry sweep records. On the M2 the default's 22
          exceptions stay although per dispatch its records time the general variant faster on most of the shapes they
          time, because end to end they were faster (perf-ledger K-112); the per-dispatch comparison, the five
          exceptions `apple-metal-3` keeps and the shapes compared word for word on Metal are in
