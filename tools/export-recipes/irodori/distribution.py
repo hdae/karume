@@ -727,7 +727,7 @@ class IrodoriSources:
     published: Mapping[str, PublishedContainer] = MappingProxyType({})
     #: Role name → sha256 of part 0 its series container must have: the roles the model exports
     #: again although other models take them as published ({@link IRODORI_REEXPORTED}; empty for
-    #: every other model — {@link irodori_reexported_pins}).
+    #: a model that exports none again — {@link irodori_reexported_pins}).
     reexported: Mapping[str, str] = MappingProxyType({})
 
     @property
@@ -1431,17 +1431,9 @@ def _v41_owner(role: str) -> str:
 #: references name — and the holder's build requires its series to hold exactly those bytes
 #: ({@link assert_irodori_reexported_containers}). So the holder never ships a container its
 #: borrowers do not pin, and every other role it takes as published still never takes a fresh
-#: export. Once the new container is published, its entry can go: the role is then taken as
-#: published again, at the same digest.
-#:
-#: v4-small's f16 text backbone: the f16 rounding now leaves the non-persistent buffers (the
-#: ModernBERT RoPE `inv_freq`) at f32, where the published container had rounded them (measured
-#: 2026-11-20: the four RoPE cos / sin constants are the only stored tensors that differ, and they
-#: equal those of the f32 and i8 series; a fresh export of every other f16 graph is byte-identical
-#: to its series).
-IRODORI_REEXPORTED: Mapping[str, frozenset[str]] = {
-    IRODORI_V4_MODEL: frozenset({"backbone_f16"}),
-}
+#: export. Once the new container is published, its entry goes: the role is then taken as
+#: published again, at the same digest. Empty while no re-export is waiting for its publication.
+IRODORI_REEXPORTED: Mapping[str, frozenset[str]] = {}
 
 #: Model → (role name → the model whose repository holds the **published container** the role is
 #: taken as). Such a role is not re-exported: the assembly reads the container from the holder's
@@ -1460,7 +1452,7 @@ IRODORI_REEXPORTED: Mapping[str, frozenset[str]] = {
 #: part 0 in {@link IRODORI_PUBLISHED_PART0} — the models that borrow it keep it here.
 #:
 #: - v4-small and v4.1-small take every graph role as published: v4-small from its own repository
-#:   (except what it exports again — {@link IRODORI_REEXPORTED}), v4.1-small its own roles
+#:   (but a role it names in {@link IRODORI_REEXPORTED} — none today), v4.1-small its own roles
 #:   (`duration_*`, `dit_i4`) from its own and the rest from v4-small
 #:   ({@link IRODORI_V41_SHARED_ROLES}).
 #: - v4.1-small-mf (ADR 0150) exports only the DiT pair, whose bytes are new, and takes every other
@@ -1481,7 +1473,7 @@ IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
         irodori_role(role, dtype): IRODORI_V4_MODEL
         for dtype, roles in IRODORI_DTYPE_ROLES.items()
         for role in roles
-        if irodori_role(role, dtype) not in IRODORI_REEXPORTED[IRODORI_V4_MODEL]
+        if irodori_role(role, dtype) not in IRODORI_REEXPORTED.get(IRODORI_V4_MODEL, frozenset())
     },
     IRODORI_V41_MODEL: {
         irodori_role(role, dtype): _v41_owner(irodori_role(role, dtype))
@@ -1506,8 +1498,10 @@ IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
 #: descriptor declares the sha256 of every other part (container-v1 §7), so this one digest pins
 #: the whole container. Recorded 2026-11-14 from the Hub's main of `karume-irodori-v4-small` and
 #: `karume-irodori-v4.1-small` (LFS oids; the local mirrors were byte-compared with every file of
-#: those commits the same day), except the roles of {@link IRODORI_REEXPORTED}: recorded
-#: 2026-11-20 from the series they were exported again into.
+#: those commits the same day), except v4-small's `backbone_f16`: recorded 2026-11-20 from the
+#: series it was exported again into ({@link IRODORI_REEXPORTED} — the f16 rounding had come to
+#: leave the ModernBERT RoPE `inv_freq` at f32, and the four RoPE constants were the only stored
+#: tensors that differed), then published with 0.23.0.
 IRODORI_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
     IRODORI_V4_MODEL: {
         "backbone_f16": "f14c2f8bc97cd96ff929e8a681839dedf3d16176c48eea3541d625593eca7174",

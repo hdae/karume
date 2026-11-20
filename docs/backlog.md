@@ -17,8 +17,6 @@ per term, a part of `karume-anima` that this release did not upload (the `later`
 fragmented"). The order of what comes next is the maintainer's; the items put after this release are the first group of
 `later`.
 
-- **The `IRODORI_REEXPORTED` entry goes** (`tools/export-recipes/irodori/distribution.py`): the f16 text backbone of
-  v4-Small that 0.23.0 exported again is published, so the role is taken as published again, at the same digest.
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
