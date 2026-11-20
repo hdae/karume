@@ -73,8 +73,9 @@ is the umT5 and Wan2.2 items of "First publication of a family" below. For the a
          the borrowed roles from the `karume-anima` mirror) — `vp test --project models:anima`
 
 For the irodori repositories (v4.1-small references v4-small — upstream v4.1 retrained only the duration predictor;
-v4.1-small-mf references both; v4-small stays self-contained). **No irodori build exports a published container again**:
-each model takes its published containers from the local mirror of the repository that holds them (`IRODORI_PUBLISHED`)
+v4.1-small-mf references both; v4-small stays self-contained). **No irodori build exports a published container again**
+except by the deliberate re-export below: each model takes its published containers from the local mirror of the
+repository that holds them (`IRODORI_PUBLISHED`)
 and the build fails unless every part is the published bytes (`IRODORI_PUBLISHED_PART0` — ADR
 [0149](decisions/0149-irodori-rare-token-split.md) decision 5). So before building, the mirrors must hold the published
 containers — compare them with HF's main as in §2, and restore any difference from the Hub (`hf download`), never by
@@ -84,8 +85,9 @@ per model):
 1. **`karume-irodori-v4-small` first.** When its bytes and manifest are unchanged since its published pin
    (`irodori.SOURCES["irodori-v4-small"]`), it need not be uploaded again — the others reference that commit. When it is
    rebuilt (a new tokenizer asset, generator tag or card text), in `tools/export-recipes`
-   `uv run python dist.py --pipeline irodori` (it reads its containers from `models/karume-irodori-v4-small/` itself and
-   replaces the non-container files), upload it first, and let the next steps read its new main.
+   `uv run python dist.py --pipeline irodori` (it reads its containers from `models/karume-irodori-v4-small/` itself —
+   a role it exports again from its series — and replaces the non-container files), upload it first, and let the next
+   steps read its new main.
 2. **Build `karume-irodori-v4.1-small`**: in `tools/export-recipes`,
    `uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf` (it reads both mirrors).
    The result holds 16 files: the 12 parts of `duration` f32 / f16 / i8 and `dit` i4, the manifest, the card and the 2 legal texts.
@@ -101,6 +103,16 @@ per model):
    `tools/release/hf-upload.zsh upload karume-irodori-v4.1-small-mf` (a new repository — nothing to delete).
 5. **Pins**: update `irodori.SOURCES["irodori-v4.1-small"]` (and `"irodori-v4-small"` only when step 1 uploaded it); add
    `SOURCES["irodori-v4.1-small-mf"]` when step 4 published it (the first-publication items of §3).
+
+**A deliberate re-export of a published irodori container** is a recipe change, not a rebuild (the procedure is in
+`tools/export-recipes/irodori/README.md`): the role's series is exported again and the full-loop goldens that read it are
+baked again; the role is named in `IRODORI_REEXPORTED` and its new part 0 pinned in `IRODORI_PUBLISHED_PART0`, so the
+holder's build places it from the series and fails unless the series holds exactly the pinned bytes, while the models
+that borrow it keep taking it as published at the new digest. The holder is then built and uploaded like any other (in
+the §2 comparison the parts of that container are the only container files that may differ, and they are uploaded with
+the manifest and card), every repository that references it is rebuilt against its new main (the rule below), the moved
+goldens go to the test-asset dataset with the pin move (step 4 of the v4-Large procedure below), and only the sha256 rows
+that move are rewritten, on the maintainer's OK with the diff shown first.
 
 **`karume-irodori-v4-large`** (ADR [0151](decisions/0151-irodori-v4-large.md); first published in 0.22.0, pinned as
 `irodori.SOURCES["irodori-v4-large"]`). It is its own recipe Pipeline, `irodori-large`, because its repository carries the
@@ -145,7 +157,9 @@ repository (deprecation notice, replacing the README) is the maintainer's ruling
 ### The release after the manifest moved to `karume/6` (ADR [0153](decisions/0153-manifest-v6-name-map.md) — that release only)
 
 The hub of that release reads only `karume/6`, so **every published repository's manifest and card are uploaded again,
-in the cross-reference order; the weights are not uploaded again** (no container changed). The ordering invariant
+in the cross-reference order; the weights are not uploaded again** (no container changed, except one exported again
+on purpose — 0.23.0: the f16 text backbone of `karume-irodori-v4-small`, by the procedure "A deliberate re-export of a
+published irodori container" above). The ordering invariant
 above still holds (bump → mirrors → upload → pins → JSR).
 
 1. **Upgrade every mirror in place**, in `tools/exporter`. The upgrade rewrites `karume.json` in the new format, the
@@ -165,7 +179,8 @@ above still holds (bump → mirrors → upload → pins → JSR).
    `karume-irodori-v4.1-small` (which `karume-irodori-v4.1-small-mf` references) — and the self-contained ones in any
    order. Before each upload, compare HF's main with the mirror as in §2: the files that differ must be among
    `karume.json`, `README.md` and, for the Anima pair, the new `name-map.json`; a container that differs means the
-   mirror is not the published one — stop. Upload only those files: the `--include` patterns of `hf upload`, passed through the script
+   mirror is not the published one — stop (the parts of a deliberately re-exported container are the exception, and
+   are uploaded with the manifest). Upload only those files: the `--include` patterns of `hf upload`, passed through the script
    (`tools/release/hf-upload.zsh upload <repo> --include karume.json --include README.md`, plus
    `--include name-map.json` for the Anima pair — check `tools/.venv/bin/hf upload --help` for the option before the
    first use).
@@ -220,6 +235,10 @@ after changing to the repository root, so the pin applies to it too.
       The node lanes run the same checks only on Dawn / Vulkan, and a device without the subgroup features SKIPs the subgroup ones; there is no check
       that turns that SKIP red (the "The real-execution checks of the subgroup variants do not run automatically" section of limitations).
       "not available" on the page is not a PASS, and neither is a page where a check was not run (the overall verdict then reads INCOMPLETE).
+      A check that reads incomplete because one of its parts cannot run on the device does not block when the record names the
+      device limit that part exceeds (`notRun` of the part) and the form of the same check the device can run passes (the maintainer's
+      ruling of 2026-11-20) — today the online-attention check's `wg` form at head width 128, which declares 35328 B of workgroup
+      storage where a device grants 32768 B, while its `sg32` form passes ([limitations](limitations.md)).
       The MUST reads each check's verdict, and for a check that has known classes its product verdict
       (`productVerdict` of that check in `data.checks` — the record's top-level `verdict` counts the known FAILs too):
       a known FAIL outside the paths the product selects is recorded with its perf-ledger id and does not block —

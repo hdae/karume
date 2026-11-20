@@ -49,9 +49,9 @@ the CHANGELOG's `[Unreleased]`. Left, in the runbook's order:
   - Irodori v4-Large has no part: its f16 text backbone, exported again on 2026-11-19, is byte-identical to the
     distributed one in all ten parts (the recipe already kept T5Gemma2's buffers at f32 when it was exported), so its
     three `f16` sha256 rows stay.
-  - Open before it starts: the recipe takes every graph role of v4-Small as published (`IRODORI_PUBLISHED` and
-    `IRODORI_PUBLISHED_PART0` in `tools/export-recipes/irodori/distribution.py`, pinned by a test), so the export needs
-    a change of those tables whose form the maintainer decides.
+  - Done 2026-11-20: the series is exported again and its f16 goldens baked again, and the recipe names the role in
+    `IRODORI_REEXPORTED` with the new part 0 pinned (the maintainer's ruling of 2026-11-20). Left: the mirrors after
+    the bump, the dataset and the uploads below; once the container is published the `IRODORI_REEXPORTED` entry goes.
   - What it touches: the export, v4-Small's local mirror and the manifests that reference it, the goldens named above
     (a dataset upload and its pin) and the Hugging Face repositories (each on the maintainer's go-ahead).
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; the label and the descriptions, the speed sentences included,
