@@ -378,6 +378,16 @@ measurements in `docs/research/`.
   replaces `f16`). A caller that omits `quant` gets `bf16+dit8-a8-attn8-s16`, whose text encoder, text conditioner and
   VAE decoder are now bf16, so its images differ from the earlier default's. The f16 files leave both repositories;
   the revisions published versions pin keep them and keep working.
+- `karume-irodori-v4-small`: the f16 container of the text backbone (`v4-small/backbone/model.f16-*`, which
+  `karume-irodori-v4.1-small` and `karume-irodori-v4.1-small-mf` reference) is exported again under the exporter's f16
+  rule above, so its four RoPE tables are computed from the f32 seed — the values the f32 and i8 containers already
+  carry; no other tensor and no other container changes. The `f16` preset of v4-Small, v4.1-Small and v4.1-Small-MF
+  therefore gives slightly different outputs. The backbone's output moves by at most 1.3e-2 (62 to 92 dB of signal to
+  difference over six text and caption cases, the long caption moving most) and lies closer to the f32 backbone's (on
+  the long caption, 61 → 68 dB). On the CPU reference of the full loop the latent moves by at most 1.4e-2 for v4-Small
+  (40 steps, relative RMS 4.3e-4, |z| up to 5.1) and 2.4e-2 for v4.1-Small-MF (4 steps, relative RMS 2.4e-3). The
+  other presets are unchanged, and so is `karume-irodori-v4-large`, whose f16 backbone already kept those constants at
+  f32. Published versions pin the previous revision and keep it.
 
 ## [0.22.0] - 2026-11-14
 

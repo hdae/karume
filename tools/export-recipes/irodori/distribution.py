@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -725,6 +725,10 @@ class IrodoriSources:
     #: instead of the series (empty for a model that exports everything it ships —
     #: {@link irodori_published_sources}).
     published: Mapping[str, PublishedContainer] = MappingProxyType({})
+    #: Role name → sha256 of part 0 its series container must have: the roles the model exports
+    #: again although other models take them as published ({@link IRODORI_REEXPORTED}; empty for
+    #: every other model — {@link irodori_reexported_pins}).
+    reexported: Mapping[str, str] = MappingProxyType({})
 
     @property
     def series(self) -> Path:
@@ -774,6 +778,7 @@ def irodori_sources(
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
         published=irodori_published_sources(model, DIST_ROOT if dist_root is None else dist_root),
+        reexported=irodori_reexported_pins(model),
     )
 
 
@@ -1218,6 +1223,7 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     assert_irodori_calib_provenance(sources, irodori_flow_parameterization(config))
     assert_irodori_borrowed_weights(sources, model)
     assert_irodori_published_containers(sources)
+    assert_irodori_reexported_containers(sources, placements)
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)
@@ -1418,6 +1424,25 @@ def _v41_owner(role: str) -> str:
     return IRODORI_V4_MODEL if role in IRODORI_V41_SHARED_ROLES else IRODORI_V41_MODEL
 
 
+#: Holder model → the roles it **exports again** from its series although the models that borrow
+#: them keep taking them as published: a deliberate re-export, not a rebuild. Such a role is left
+#: out of the holder's own entry in {@link IRODORI_PUBLISHED} and keeps its digest in
+#: {@link IRODORI_PUBLISHED_PART0} — the digest of the new container, which the borrowers'
+#: references name — and the holder's build requires its series to hold exactly those bytes
+#: ({@link assert_irodori_reexported_containers}). So the holder never ships a container its
+#: borrowers do not pin, and every other role it takes as published still never takes a fresh
+#: export. Once the new container is published, its entry can go: the role is then taken as
+#: published again, at the same digest.
+#:
+#: v4-small's f16 text backbone: the f16 rounding now leaves the non-persistent buffers (the
+#: ModernBERT RoPE `inv_freq`) at f32, where the published container had rounded them (measured
+#: 2026-11-20: the four RoPE cos / sin constants are the only stored tensors that differ, and they
+#: equal those of the f32 and i8 series; a fresh export of every other f16 graph is byte-identical
+#: to its series).
+IRODORI_REEXPORTED: Mapping[str, frozenset[str]] = {
+    IRODORI_V4_MODEL: frozenset({"backbone_f16"}),
+}
+
 #: Model → (role name → the model whose repository holds the **published container** the role is
 #: taken as). Such a role is not re-exported: the assembly reads the container from the holder's
 #: mirror ({@link irodori_published_sources}) and requires it to be the published bytes
@@ -1430,11 +1455,13 @@ def _v41_owner(role: str) -> str:
 #: rounds about 16% of the DiT weights differently on another machine (measured 2026-11-14 — an
 #: environment difference, not an upstream one). A reassembly that only adds or changes a
 #: non-container file (the rare-token split table of ADR 0149, the card) must therefore not move a
-#: published container. Re-exporting a model's containers is a deliberate change: remove its
-#: entries here and in {@link IRODORI_PUBLISHED_PART0}.
+#: published container. Re-exporting a published container is a deliberate change: name the role
+#: in {@link IRODORI_REEXPORTED}, which takes it out of the holder's own entry here, and pin the new
+#: part 0 in {@link IRODORI_PUBLISHED_PART0} — the models that borrow it keep it here.
 #:
-#: - v4-small and v4.1-small take every graph role as published: v4-small from its own repository,
-#:   v4.1-small its own roles (`duration_*`, `dit_i4`) from its own and the rest from v4-small
+#: - v4-small and v4.1-small take every graph role as published: v4-small from its own repository
+#:   (except what it exports again — {@link IRODORI_REEXPORTED}), v4.1-small its own roles
+#:   (`duration_*`, `dit_i4`) from its own and the rest from v4-small
 #:   ({@link IRODORI_V41_SHARED_ROLES}).
 #: - v4.1-small-mf (ADR 0150) exports only the DiT pair, whose bytes are new, and takes every other
 #:   graph role from the repository that physically holds it — references are not followed further
@@ -1454,6 +1481,7 @@ IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
         irodori_role(role, dtype): IRODORI_V4_MODEL
         for dtype, roles in IRODORI_DTYPE_ROLES.items()
         for role in roles
+        if irodori_role(role, dtype) not in IRODORI_REEXPORTED[IRODORI_V4_MODEL]
     },
     IRODORI_V41_MODEL: {
         irodori_role(role, dtype): _v41_owner(irodori_role(role, dtype))
@@ -1478,10 +1506,11 @@ IRODORI_PUBLISHED: Mapping[str, Mapping[str, str]] = {
 #: descriptor declares the sha256 of every other part (container-v1 §7), so this one digest pins
 #: the whole container. Recorded 2026-11-14 from the Hub's main of `karume-irodori-v4-small` and
 #: `karume-irodori-v4.1-small` (LFS oids; the local mirrors were byte-compared with every file of
-#: those commits the same day).
+#: those commits the same day), except the roles of {@link IRODORI_REEXPORTED}: recorded
+#: 2026-11-20 from the series they were exported again into.
 IRODORI_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
     IRODORI_V4_MODEL: {
-        "backbone_f16": "f7da9ed1cc9424b89217515aaa15aa44eee43f3a10d8f183ce4da0d310dda5b5",
+        "backbone_f16": "f14c2f8bc97cd96ff929e8a681839dedf3d16176c48eea3541d625593eca7174",
         "backbone_f32": "4bf46f4feed0c8c51491d6d3e086b5e68322a31cd29cc3f7d9a5003f2195008c",
         "backbone_i8": "4faccb6361996b0efc66b123fd76547326cf7c0d141de8d400a193e77c366a4b",
         "caption_proj_f16": "8499b683a87ece8dcec9c7febb8c3b2f8a2fb508a8f7e68d1e966b45c4d309b2",
@@ -1580,21 +1609,70 @@ def assert_irodori_published_containers(sources: IrodoriSources) -> None:
                 f" {published.part0_sha256}) — restore the mirror from the Hub instead of"
                 " rebuilding it from the series"
             )
-        if len(parts) == 1:
-            continue
-        try:
-            descriptor = verify_container(parts).read.model
-        except (ContainerError, ContainerFormatError) as cause:
-            raise DistError(f"{role}: {parts[0]} cannot be read as a container: {cause}") from cause
-        declared = (
-            {} if descriptor is None else {part.index: part.sha256 for part in descriptor.parts}
-        )
-        for index, part in enumerate(parts[1:], start=1):
-            if sha256_file(part) != declared.get(index):
-                raise DistError(
-                    f"{role}: {part} is not the part {index} the published part 0 declares"
-                    f" ({declared.get(index)}) — restore the mirror from the Hub"
-                )
+        _assert_declared_parts(role, parts, "published", "restore the mirror from the Hub")
+
+
+def irodori_reexported_pins(model: str) -> Mapping[str, str]:
+    """Role name → the pinned sha256 of part 0 of every role `model` exports again
+    ({@link IRODORI_REEXPORTED}) — the digest its borrowers' references name.
+
+    MUST: a re-exported role without a pin fails, for the reason of
+    {@link irodori_published_sources}: the borrowers would have no digest to take it at.
+    """
+    pins: dict[str, str] = {}
+    for role in sorted(IRODORI_REEXPORTED.get(model, frozenset())):
+        digest = IRODORI_PUBLISHED_PART0.get(model, {}).get(role)
+        if digest is None:
+            raise DistError(
+                f"{model} exports {role} again, but there is no pinned digest for the new"
+                " container (IRODORI_PUBLISHED_PART0)"
+            )
+        pins[role] = digest
+    return MappingProxyType(pins)
+
+
+def assert_irodori_reexported_containers(
+    sources: IrodoriSources, placements: Mapping[str, Path]
+) -> None:
+    """Check that every role the model exports again ({@link IrodoriSources.reexported}) is the
+    container its borrowers pin: part 0 of the series container has the pinned sha256, and every
+    other part has the sha256 part 0's descriptor declares for it.
+
+    MUST: the models that borrow the role reference exactly the pinned bytes, so a series exported
+    again under another rule or from other inputs must fail here — shipped, it would be a container
+    no borrower pins, found only when a borrower is rebuilt against the uploaded repository.
+    """
+    for role, digest in sources.reexported.items():
+        parts = component_parts(placements[role])
+        if not all(part.is_file() for part in parts):
+            raise DistError(f"{role}: the series holds no exported container: {placements[role]}")
+        actual = sha256_file(parts[0])
+        if actual != digest:
+            raise DistError(
+                f"{role}: {parts[0]} is not the container pinned for its re-export (part 0 sha256"
+                f" {actual}, pinned {digest}) — the models that reference it name the pinned"
+                " bytes: export the series again, or pin a deliberate new export in"
+                " IRODORI_PUBLISHED_PART0 and rebuild every model that references it"
+            )
+        _assert_declared_parts(role, parts, "pinned", "export the series again")
+
+
+def _assert_declared_parts(role: str, parts: Sequence[Path], kind: str, remedy: str) -> None:
+    """Check that every part after part 0 has the sha256 part 0's descriptor declares for it (part
+    0 itself is checked against its pin by the caller; `kind` names that pin in the message)."""
+    if len(parts) == 1:
+        return
+    try:
+        descriptor = verify_container(parts).read.model
+    except (ContainerError, ContainerFormatError) as cause:
+        raise DistError(f"{role}: {parts[0]} cannot be read as a container: {cause}") from cause
+    declared = {} if descriptor is None else {part.index: part.sha256 for part in descriptor.parts}
+    for index, part in enumerate(parts[1:], start=1):
+        if sha256_file(part) != declared.get(index):
+            raise DistError(
+                f"{role}: {part} is not the part {index} the {kind} part 0 declares"
+                f" ({declared.get(index)}) — {remedy}"
+            )
 
 
 #: Graph role → the checkpoint's state_dict prefixes it is built from (the attribute names of

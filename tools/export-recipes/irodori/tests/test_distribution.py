@@ -66,6 +66,7 @@ from irodori.distribution import (
     IRODORI_PUBLISHED_PART0,
     IRODORI_QUANT_ABBREVIATIONS,
     IRODORI_QUANT_SEATS,
+    IRODORI_REEXPORTED,
     IRODORI_SAMPLING_DEFAULTS,
     IRODORI_SERIES_DIRS,
     IRODORI_STORAGE_FORBIDDEN,
@@ -96,6 +97,7 @@ from irodori.distribution import (
     irodori_presets,
     irodori_published_sources,
     irodori_quants,
+    irodori_reexported_pins,
     irodori_references,
     irodori_repo_name,
     irodori_series_name,
@@ -387,12 +389,15 @@ def _irodori_specs(meanflow: bool = False) -> dict[str, _Spec]:
     }
 
 
-def _irodori_input(dtype: str, role: str, spec: _Spec | None = None) -> list[bytes]:
+def _irodori_input(
+    dtype: str, role: str, spec: _Spec | None = None, *, mark: str | None = None
+) -> list[bytes]:
     """The input of one series that reaches the assembly (the parts of **a valid container**).
 
     The assembly opens the input containers and applies every rule of the declarations
     (`karume.dist.assert_weight_components_verified`), so the cases a check must refuse are built
-    the same way and **only the declarations differ from the real ones** (`spec` is that axis).
+    the same way and **only the declarations differ from the real ones** (`spec` is that axis);
+    `mark` gives the same declarations other bytes (a container exported again).
     The storage vocabulary has the same shape as the real one (only eligible weights compressed,
     bias / constants / scales f32, i4 a mix of i4 + i8 + f32), so the check against preset
     mix-ups ({@link IRODORI_STORAGE_FORBIDDEN}) applies to this shape the same way.
@@ -400,7 +405,7 @@ def _irodori_input(dtype: str, role: str, spec: _Spec | None = None) -> list[byt
     inputs, outputs, _symbol = _irodori_specs()[role] if spec is None else spec
     named_outputs = [(None, [1]) for _ in range(outputs)] if isinstance(outputs, int) else outputs
     return ir_container(
-        mark=f"irodori-{role}-{dtype}",
+        mark=f"irodori-{role}-{dtype}" if mark is None else mark,
         # The pseudo series also **names itself after the component** (the container's graph
         # name = the manifest's weights key, MUST, container-v1 §2.1 — the assembly check looks
         # at this match).
@@ -1813,10 +1818,15 @@ class TestIrodoriPublishedContainers:
         f"{role}_{dtype}" for dtype, roles in IRODORI_DTYPE_ROLES.items() for role in roles
     )
 
-    def test_v4_small_takes_every_graph_role_from_its_own_repository(self, tmp_path: Path) -> None:
+    #: What v4-small exports again (spelled out, not derived like the recipe's table).
+    _V4_REEXPORTED = frozenset({"backbone_f16"})
+
+    def test_v4_small_takes_every_graph_role_but_its_re_export_from_its_own_repository(
+        self, tmp_path: Path
+    ) -> None:
         published = irodori_published_sources(IRODORI_V4_MODEL, tmp_path)
 
-        assert set(published) == self._ALL_GRAPH_ROLES
+        assert set(published) == self._ALL_GRAPH_ROLES - self._V4_REEXPORTED
         for role, container in published.items():
             assert container.holder == IRODORI_V4_MODEL, role
             assert container.path == (
@@ -1835,11 +1845,41 @@ class TestIrodoriPublishedContainers:
             set(IRODORI_V41_SHARED_ROLES) - {"tokenizer"}
         )
 
+    def test_only_v4_small_exports_a_published_role_again(self) -> None:
+        """The deliberate re-export of v4-small's f16 text backbone (the maintainer's ruling of
+        2026-11-20): v4-small places it from its series, pinned at the digest its borrowers name."""
+        assert IRODORI_REEXPORTED == {IRODORI_V4_MODEL: self._V4_REEXPORTED}
+        assert irodori_reexported_pins(IRODORI_V4_MODEL) == {
+            "backbone_f16": IRODORI_PUBLISHED_PART0[IRODORI_V4_MODEL]["backbone_f16"]
+        }
+        for model in (IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL, IRODORI_V4_LARGE_MODEL):
+            assert irodori_reexported_pins(model) == {}, model
+
+    def test_the_borrowers_keep_taking_the_re_exported_role_as_published_by_v4_small(
+        self, tmp_path: Path
+    ) -> None:
+        pin = IRODORI_PUBLISHED_PART0[IRODORI_V4_MODEL]["backbone_f16"]
+        for model in (IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL):
+            container = irodori_published_sources(model, tmp_path)["backbone_f16"]
+
+            assert (container.holder, container.part0_sha256) == (IRODORI_V4_MODEL, pin), model
+
     def test_every_declared_role_is_pinned_at_a_sha256(self) -> None:
-        for model, roles in IRODORI_PUBLISHED.items():
-            for role, holder in roles.items():
-                digest = IRODORI_PUBLISHED_PART0[holder][role]
-                assert len(digest) == 64 and set(digest) <= set("0123456789abcdef"), (model, role)
+        declared = [
+            *(
+                (model, holder, role)
+                for model, roles in IRODORI_PUBLISHED.items()
+                for role, holder in roles.items()
+            ),
+            *(
+                (model, model, role)
+                for model, roles in IRODORI_REEXPORTED.items()
+                for role in roles
+            ),
+        ]
+        for model, holder, role in declared:
+            digest = IRODORI_PUBLISHED_PART0[holder][role]
+            assert len(digest) == 64 and set(digest) <= set("0123456789abcdef"), (model, role)
 
     def test_a_declared_role_without_a_pin_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1852,6 +1892,16 @@ class TestIrodoriPublishedContainers:
 
         with pytest.raises(DistError, match="no published digest"):
             irodori_published_sources(IRODORI_V4_MODEL, tmp_path)
+
+    def test_a_re_exported_role_without_a_pin_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from irodori import distribution
+
+        pins = {holder: dict(roles) for holder, roles in IRODORI_PUBLISHED_PART0.items()}
+        del pins[IRODORI_V4_MODEL]["backbone_f16"]
+        monkeypatch.setattr(distribution, "IRODORI_PUBLISHED_PART0", pins)
+
+        with pytest.raises(DistError, match="no pinned digest for the new container"):
+            irodori_reexported_pins(IRODORI_V4_MODEL)
 
     @staticmethod
     def _files(directory: Path) -> dict[str, bytes]:
@@ -1872,9 +1922,12 @@ class TestIrodoriPublishedContainers:
         before = json.loads((mirror / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         containers = self._files(mirror)
         # The series keeps writing other container bytes (a fresh export cannot reproduce the
-        # published ones) — none of them may reach the distribution.
+        # published ones) — none of them may reach the distribution. A role v4-small exports again
+        # comes from the series and must stay its pinned bytes (the tests below).
         for dtype, roles in IRODORI_DTYPE_ROLES.items():
             for role in roles:
+                if f"{role}_{dtype}" in self._V4_REEXPORTED:
+                    continue
                 series = (
                     sources.codec_series_by_dtype[dtype]
                     if role in IRODORI_CODEC_DIRS
@@ -1898,6 +1951,69 @@ class TestIrodoriPublishedContainers:
         assert model_after["assets"] != model_before["assets"]
         tokenizer = mirror / model_after["assets"]["tokenizer"]["path"]
         assert tokenizer.read_bytes() == b'{"vocabText": "b"}'
+
+    @staticmethod
+    def _export_backbone_f16_again(sources: IrodoriSources) -> Path:
+        """Write a new f16 backbone into v4-small's series (the stand-in for the re-export)."""
+        path = sources.series_by_dtype["f16"] / IRODORI_SERIES_DIRS["backbone"] / "model.krm"
+        replace_component(path, _irodori_input("f16", "backbone", mark="re-export"))
+        return path
+
+    def test_a_re_exported_role_is_placed_from_the_series_at_its_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path)
+        flags = _mirrors_for(IRODORI_V4_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        mirror = tmp_path / "models" / irodori_repo_name(IRODORI_V4_MODEL)
+        before = self._files(mirror)
+        series = self._export_backbone_f16_again(sources)
+        pins = {h: dict(r) for h, r in distribution.IRODORI_PUBLISHED_PART0.items()}
+        pins[IRODORI_V4_MODEL]["backbone_f16"] = _part0_digest(series)
+        monkeypatch.setattr(distribution, "IRODORI_PUBLISHED_PART0", pins)
+
+        main(["--pipeline", "irodori", "--series", str(sources.series.parent), *flags])
+
+        after = self._files(mirror)
+        backbone = f"{IRODORI_V4_MODEL}/backbone/model.f16-"
+        changed = {path for path in after if after[path] != before.get(path)}
+        assert changed and all(path.startswith(backbone) for path in changed)
+        assert [after[path] for path in sorted(changed)] == [
+            part.read_bytes() for part in component_parts(series)
+        ]
+
+    def test_a_re_exported_container_that_is_not_the_pinned_one_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUST: the borrowers reference the pinned bytes — a series exported again under another
+        rule must not reach the holder's distribution."""
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path)
+        flags = _mirrors_for(IRODORI_V4_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        mirror = tmp_path / "models" / irodori_repo_name(IRODORI_V4_MODEL)
+        before = self._files(mirror)
+        self._export_backbone_f16_again(sources)
+
+        with pytest.raises(DistError, match="is not the container pinned for its re-export"):
+            main(["--pipeline", "irodori", "--series", str(sources.series.parent), *flags])
+        assert self._files(mirror) == before
+
+    def test_a_later_part_of_a_re_export_that_part_0_does_not_declare_fails(
+        self, tmp_path: Path
+    ) -> None:
+        from dataclasses import replace
+
+        sources = self._v4_sources(tmp_path)
+        series = sources.series_by_dtype["f16"] / IRODORI_SERIES_DIRS["backbone"] / "model.krm"
+        sources = replace(sources, reexported={"backbone_f16": _part0_digest(series)})
+        self._flip_last_byte(component_parts(series)[-1])
+
+        with pytest.raises(DistError, match="the pinned part 0 declares"):
+            irodori_plan(sources, IRODORI_V4_MODEL)
 
     @staticmethod
     def _v4_sources(tmp_path: Path, **kwargs: Any) -> IrodoriSources:
@@ -1931,7 +2047,7 @@ class TestIrodoriPublishedContainers:
 
     def test_a_published_container_missing_from_its_mirror_fails(self, tmp_path: Path) -> None:
         sources = self._v4_sources(tmp_path)
-        for part in component_parts(sources.published["backbone_f16"].path):
+        for part in component_parts(sources.published["backbone_f32"].path):
             part.unlink()
 
         with pytest.raises(DistError, match="not in its mirror"):
@@ -2024,9 +2140,11 @@ class TestIrodoriMeanFlow:
             self._FROM_V41,
         )
 
-    def test_only_the_student_exports_a_graph_role(self) -> None:
-        """The RF models take every graph role as published; the student exports the DiT pair;
-        v4-Large exports everything but the codec, in the series its presets select."""
+    def test_each_model_exports_only_its_new_graph_roles(self) -> None:
+        """v4.1-small takes every graph role as published; v4-small too, except its f16 text
+        backbone, which it exports again (the maintainer's ruling of 2026-11-20); the student
+        exports the DiT pair; v4-Large exports everything but the codec, in the series its presets
+        select."""
         exported = {
             model: {
                 f"{role}_{dtype}"
@@ -2038,7 +2156,7 @@ class TestIrodoriMeanFlow:
         }
 
         assert exported == {
-            IRODORI_V4_MODEL: set(),
+            IRODORI_V4_MODEL: {"backbone_f16"},
             IRODORI_V41_MODEL: set(),
             IRODORI_V41_MF_MODEL: {
                 f"{role}_{dtype}"

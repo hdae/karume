@@ -37,8 +37,19 @@ repository that holds it (`IRODORI_PUBLISHED`), and the build fails unless each 
 bytes (`IRODORI_PUBLISHED_PART0` pins part 0, whose descriptor pins the other parts). Only the
 tokenizer asset comes from the series. A reassembly therefore changes non-container files only (the
 tokenizer's rare-token split table, the card, the manifest's `generator`); a mirror that fails the
-check is restored from the Hub, and a deliberate re-export of a model's containers is a change to
-those two tables.
+check is restored from the Hub, never rebuilt from the series.
+
+A deliberate re-export of a published container is a recipe change, not a rebuild: export the
+role's series again (and re-bake the full-loop goldens of every series that reads it), name the role
+in `IRODORI_REEXPORTED` — which takes it out of its holder's entry in `IRODORI_PUBLISHED` while the
+models that borrow it keep it there — and pin the new part 0 in `IRODORI_PUBLISHED_PART0`. The
+holder's step 7 then places that role from the series and fails unless the series holds exactly the
+pinned bytes; every other role stays taken as published. Build and upload the holder first, then
+rebuild every model that references it against its new main (`--resolve-refs hf`). Once the new
+container is published, the `IRODORI_REEXPORTED` entry can go: the role is taken as published again,
+at the same digest. The one entry today is v4-small's f16 text backbone (`backbone_f16`), exported
+again under the f16 rounding that keeps non-persistent buffers at f32 (below, under v4-Large's
+graphs); v4.1-small and v4.1-small-mf reference it at the new digest.
 
 The distribution carries **f16 and i8 weight-storage series** next to f32 (ADR 0050), plus an i4
 series for the DiT's two graphs (below), so step 7 needs f32 / f16 / i8 (all nine roles) and i4
@@ -191,8 +202,9 @@ uv run --with 'transformers==5.14.1' python -m irodori.export --model-dir ../../
   checkpoint carries), so the folded RoPE tables are upstream's own values: rounded to f16, the full layers' scaled
   frequencies lose up to 15% (they fall into f16's subnormal range). Measured on the backbone alone against f32
   (2026-11-14): 61.3 → 68.6 dB on the two long caption cases. The same rule covers ModernBERT's `inv_freq` in the
-  small models' f16 series: their folded RoPE tables change on the next export (the published files do not change
-  until then).
+  small models' f16 series: v4-small's f16 backbone was exported again under it (2026-11-20 — its four folded RoPE
+  tables are now the f32 and i8 series' own; every other f16 graph exports to the same bytes as before), which is the
+  container `IRODORI_REEXPORTED` names.
 - The containers of this model carry the provenance licence `gemma` (`provenance_of`), the small models `mit`.
 - The `dit` io goldens of this model do not carry the 48 condition K/V inputs: they are the same bytes in all seven
   cases (597 MB each) and equal to the outputs of `dit-context/io.dit-cond-min.safetensors`. Each `dit` io names that
