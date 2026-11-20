@@ -28,7 +28,11 @@ the CHANGELOG's `[Unreleased]`. Left, in the runbook's order:
      [0154](decisions/0154-anima-bf16-preset-names.md)) — the bf16 builds of "Keep bf16 where the upstream is bf16"
      (`later`);
    - `karume-gemma4` with the `bf16-fast` preset: manifest and card only, the containers are the published ones;
-   - the Irodori repositories with their f16 containers exported again (the first item below).
+   - the Irodori repositories with their f16 containers exported again (the first item below);
+   - `karume-wan2.2` built again against `karume-umt5-xxl`'s new main (the maintainer's rulings of 2026-11-20). This
+     machine holds no Wan or umT5 series, so the series folders are laid out from the published containers of the two
+     local mirrors and the unchanged build reads them (`dist.py --pipeline wan-ti2v --series … --resolve-refs hf`):
+     the containers stay the published bytes and the build keeps its checks against the Hub.
 4. **Pins** (runbook §3): every `SOURCES` entry, Anima's included.
 5. **JSR** (runbook §4): before the first publish the maintainer creates `@karume/convert` and `@karume/safetensors` in
    the `@karume` scope and links this repository (the tokenless publish needs it); the publish runs hub, runtime and
@@ -108,6 +112,9 @@ maintainer's ruling of 2026-11-06).
     maintainer's Playground chats with the drafter on the RTX 5070 Ti (2026-11-19) gave sound replies; they are not an
     A/B.
   - **Small checks found while preparing 0.23.0 (filed 2026-11-19; none approved yet)**:
+    - The Wan recipe has no build from published containers pinned by digest, which Anima's and Irodori's have: a
+      rebuild needs the series, or series folders laid out from a mirror by hand (0.23.0 did the latter). Filed
+      2026-11-20, after the release by the maintainer's ruling.
     - Nothing compares the versions of the five JSR packages with one another or with the `^` pins between them
       (`packages/models/deno.json`, `packages/convert/deno.json`): `verify_package_manifests_test.ts` compares each
       package's `deno.json` with its own `package.json` only.
