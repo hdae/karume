@@ -45,7 +45,7 @@
  * | 0.13.x | `karume/5` | The distribution becomes containers (`krm`) — dtype entries become
  * `{ container }` (the descriptor's expected values + the FileRef list of parts); `shards` / `extras`
  * retired (ADR 0109) |
- * | Unreleased | `karume/6` | The optional `nameMap` (the reference of the repository's name map,
+ * | 0.23.x | `karume/6` | The optional `nameMap` (the reference of the repository's name map,
  * ADR 0153); the content of `karume/5` otherwise, so a `karume/5` repository is rewritten in place
  * with the exporter's `karume upgrade` |
  *

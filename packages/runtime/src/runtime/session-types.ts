@@ -400,8 +400,8 @@ export type SessionOptions = {
    * reference kernel. A `reorder` result stays inside the op's band against an f64 evaluation and
    * is bit-identical between two runs on one device, but the generated sequence may differ from
    * `exact`. Today `reorder` runs the parallel GEMV on the linears whose weight storage and shape
-   * the geometry profile's table names (int2 / int4 / int8 weights in the default profile; a table
-   * may name bf16 / f16 / f32 shapes too), with 1 to 8 rows, and on states-form attention the parallel reductions of QK and PV with the
+   * the geometry profile's table names (int2 / int4 / int8 and bf16 weights in the default profile; a
+   * table may name f16 / f32 shapes too), with 1 to 8 rows, and on states-form attention the parallel reductions of QK and PV with the
    * row statistics folded into PV (decode and verification plans; a prefill plan keeps kernels
    * that give the reference bits).
    *
