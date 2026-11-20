@@ -7,27 +7,24 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — the 0.23.0 release (distributions published and pinned 2026-11-20; the JSR publish is left)
+## now — after the 0.23.0 release (released 2026-11-20)
 
-The release follows [release-runbook](release-runbook.md): the version is bumped, the checks ran, every distribution
-repository is published again as `karume/6` and pinned, and the CHANGELOG has its `[0.23.0]` section. JSR takes five
-packages from this release: `@karume/runtime`, `@karume/hub`, `@karume/safetensors`, `@karume/convert` and
-`@karume/models` (the maintainer's ruling of 2026-11-19). Left, in the runbook's order, each outward step on the
-maintainer's explicit OK:
+0.23.0 is out: the five JSR packages (`@karume/runtime`, `@karume/hub`, `@karume/safetensors`, `@karume/convert`,
+`@karume/models`), every distribution repository published again as `karume/6` and pinned, and the published-smoke
+green on Node and on Deno (17 manifests and the sbv2 `fromPretrained`). What it shipped is the CHANGELOG's
+`[0.23.0]`. The uploads' fragmentation tables read no FAILED row; of the 568 files of 64 MiB or more one is below 10 MiB
+per term, a part of `karume-anima` that this release did not upload (the `later` item "Two anima parts read as
+fragmented"). The order of what comes next is the maintainer's; the items put after this release are the first group of
+`later`.
 
-1. **Push and JSR** (runbook §4): the maintainer pushes; before the first publish the maintainer creates
-   `@karume/convert` and `@karume/safetensors` in the `@karume` scope and links this repository (the tokenless publish
-   needs it); the publish runs hub, runtime and safetensors, then convert, then models.
-2. **Published-smoke** and the docs sync (runbook §5).
-3. After the publication: the `IRODORI_REEXPORTED` entry of `tools/export-recipes/irodori/distribution.py` goes — the
-   f16 text backbone of v4-Small that was exported again is then taken as published, at the same digest.
-
+- **The `IRODORI_REEXPORTED` entry goes** (`tools/export-recipes/irodori/distribution.py`): the f16 text backbone of
+  v4-Small that 0.23.0 exported again is published, so the role is taken as published again, at the same digest.
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
 - **Irodori**: v4.1-small-mf has no self A/B band for its `i8-a8` (ADR [0150](decisions/0150-irodori-meanflow.md)), and
-  v4-Large's Playground page has not been run in a browser (ADR [0151](decisions/0151-irodori-v4-large.md)). Neither
-  blocks the release; their order is not ruled.
+  v4-Large's Playground page has not been run in a browser (ADR [0151](decisions/0151-irodori-v4-large.md)). Their
+  order is not ruled.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
