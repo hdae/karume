@@ -23,13 +23,13 @@ export type HeaderInput = {
   readonly minSpeedup: number;
   /**
    * The GEMV sweep records the GEMV choices of linear were derived from, with the rule's threshold
-   * and steadiness bound; absent when this generation did not derive them (their verdict lines are
-   * among `verdicts`).
+   * and the factor within which a second record repeats a reference's fastest time; absent when
+   * this generation did not derive them (their verdict lines are among `verdicts`).
    */
   readonly gemv?: {
     readonly records: readonly LoadedRecord[];
     readonly minSpeedup: number;
-    readonly steadySpread: number;
+    readonly referenceRepeat: number;
   };
   /**
    * The registered table the derivation took as its base: the last commit that touched its file
@@ -224,9 +224,10 @@ export const profileHeader = (input: HeaderInput): string => {
           `least ${ratio(gemv.minSpeedup)} faster than that choice in every GEMV sweep record, with its words equal to`,
           "the baseline's (identical class: the sequential variant's per-shape exceptions) or inside the",
           "band (reorder class: the parallel rows, measured at every row count of the parallel range and",
-          "not slower at any) in every record; among those, the one whose smallest gain is largest. A shape",
-          `that a record measured while the baseline's rounds spread beyond ${ratio(gemv.steadySpread)} keeps the default,`,
-          "and so do the shared sequential keys whose cases disagree and the rows with packed activations.",
+          "not slower at any) in every record; among those, the one whose smallest gain is largest. The",
+          "choice's time is its fastest over the records, and only when a second record repeats it within",
+          `${ratio(gemv.referenceRepeat)}: a shape whose choice has no such time keeps the default, and so do the shared`,
+          "sequential keys whose cases disagree and the rows with packed activations.",
         ]),
     "",
     ...input.verdicts,

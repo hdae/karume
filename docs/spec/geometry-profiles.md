@@ -260,25 +260,40 @@ measures nothing and changes no default value.
 - **The unit of evidence is a group**: one record's measurement of one case at one row count. A row is *current* when
   the current runtime has its candidate at that case and row count and builds the same kernel for it (the row's
   `kernel` fingerprint). A group is current when its case is the current runtime's (the record's case fingerprint, and
-  the row count in the case table), the default profile's choices its summary names at `exact` and `reorder` are the
-  current ones, and the rows of those choices — the baseline, and the choice at `reorder` where the sweep measures it
-  — are current and timed. The current kernel of a GEMM baseline is the one the table the records derive for builds:
-  a group whose GEMM was measured with another tile geometry (under another profile) is not current, and the reason
-  names the record's profile and the table. A record that does not name its profile is read by the same comparison of
-  kernel fingerprints. A group is evidence for a candidate when it is current, steady, and the candidate's row is
-  current and timed (a row the quick look screened out, or one the sweep skipped because the same record's M = 1 group
-  left the candidate unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is
-  refused). So a change to one kernel, or a case
-  added, leaves the other rows' evidence standing, and records that each hold part of the cases add up.
+  the row count in the case table). Which choices its summary names as the default's is not read for it: a record made
+  under older default choices stands wherever it timed the kernels the current default runs. So a change to one
+  kernel, a case added or a default choice moved leaves the other rows' evidence standing, and records that each hold
+  part of the cases add up.
+- **The reference**: a candidate is read against the kernel the current default profile runs for its class at the
+  case and row count — the identical class against the choice at `exact` (the baseline), the reorder class against
+  the choice at `reorder`. A current group is usable for a class when the reference's row in it is present, has no
+  error, is timed and is current; for the identical class, where the reference is not the record's own baseline, its
+  row must also have its words equal to that baseline's (then candidate, record baseline and reference write the same
+  words). The current kernel of a GEMM reference is the one the table the records derive for builds: a GEMM measured
+  with another tile geometry (under another profile) is no reference, and the reason names the record's profile and
+  the table. A record that does not name its profile is read by the same comparison of kernel fingerprints. A record's
+  baseline that is not the current reference is a candidate like any other, whose words are its own.
+- **The reference's time**: at a case and row count, the fastest `perDispatch` of the reference kernel over every
+  current group of the given records in which its row is current, timed and without error. It is a time only when at
+  least two different records hold a time within ×1.10 of it (`GEMV_REFERENCE_REPEAT`); otherwise no group at that
+  case and row count is evidence for the class, and the reason says the fastest time is not repeated. On a device
+  whose reference kernel runs in two timing modes, a bound on the spread of one record's rounds discards groups whose
+  fastest round is the device's fastest (182 of 265 such groups on the RTX 3080 Ti) and admits groups that stayed slow throughout, which overstate a gain (bf16
+  262144 × 1536 at one row on the RTX 3080 Ti: ×2.78 against a record's baseline that stayed slow, ×1.67 against the
+  device's fastest). Against the repeated fastest time a slow record can only lower a candidate's gain. The bound
+  comes from the records of four devices: of the baseline kernels timed in two or more records, 210 of 222 repeat
+  their fastest time within ×1.10 on the RTX 3080 Ti (36 records of 2026-11-18/19), 344 of 345 on the Apple M2, 256
+  of 258 on the Apple M5 and 367 of 367 on the RTX 5070 Ti. The summaries' `baselineSpread` is not read.
+- **Evidence**: a group is evidence for a candidate when it is current, usable for the candidate's class, the
+  reference's time at its case and row count is repeated, and the candidate's row is current and timed (a row the
+  quick look screened out, or one the sweep skipped because the same record's M = 1 group left the candidate
+  unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is refused). The
+  candidate's gain in it is the reference's time ÷ the row's `perDispatch` (the minimum of its rounds ÷ `reps`).
 - **Adoption**: a candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at least
   two different records are evidence for it, it is at least ×1.10 faster than that choice in every one, and its check
-  held in every current group, steady or not (identical class: its words equal the baseline's; reorder class: inside
-  the band); a row that failed in a current group rules it out too. Among several, the one whose smallest gain is
-  largest. A candidate's time is the row's `perDispatch` (the minimum of its rounds ÷ `reps`). The identical class
-  gains against the baseline, the reorder class against the default's choice at `reorder`.
-- **Steadiness**: a group whose baseline spread (`baselineSpread`) exceeds 1.25, or that has none, is unsteady and no
-  evidence. The bound comes from the two `quick` records of the RTX 3080 Ti of 2026-11-17: below 1.25 the spread did
-  not predict a less repeatable gain.
+  held in every current group, evidence or not (identical class: its words equal the record's baseline's; reorder
+  class: inside the band); a row that failed in a current group rules it out too. Among several, the one whose
+  smallest gain is largest.
 - **The identical class** writes the sequential variant's per-shape exceptions (`sequential.shapes`) from M = 1. Its
   key has no group length: the cases that share a key must reach the same decision, or the key keeps the default. An
   adopted variant replaces the key's exception or adds one; when it is the general variant, the key's exception goes.
@@ -315,11 +330,12 @@ measures nothing and changes no default value.
 - **Output**: the field (absent when nothing is adopted), the default profile's choices, one decision per sequential
   key, per parallel row and for the thread target (adopted or kept, the default's choice and the derived one, the gains
   per group that is evidence, why it was kept; for a parallel row also the row block of the default's row and of the
-  derived one, and the derived row's gains at its other row counts), the groups that are not current (record, case, row count, and whether
-  the case, the default's choices or a reference's row moved), the lines that state them (per record its groups —
-  current and steady, unsteady, not current by cause — and its rows of current groups that are not current), the
-  rule's two numbers and the records used (path, sha256, date, candidate set, user agent and those counts; the adapter
-  and the case table).
+  derived one, and the derived row's gains at its other row counts), the groups whose case is not current (record,
+  case, row count and how the case differs), the lines that state them (per record its groups — current and not
+  current —, the current groups without a usable reference at `exact` and at `reorder` (a choice the sweep does not
+  measure, a row with packed activations, is not counted) and its rows of current groups that are not current), the
+  rule's two numbers (the threshold ×1.10 and the repeat factor ×1.10) and the records used (path, sha256, date,
+  candidate set, user agent and those counts; the adapter and the case table).
 
 ## Planning the GEMV measurements
 
@@ -327,11 +343,16 @@ measures nothing and changes no default value.
 for the derivation to be complete under the current runtime (the GEMM baselines read against the table given, or,
 without one, against the embedded table the records' adapter selects): per case and row count of the `full` set, the
 candidates the derivation reads there — at M = 1 every candidate, at M = 4 and 8 the reorder class, on the records'
-gates (subgroups, grid limit; records whose gates differ are refused) — that fewer than two records hold a current,
-steady group with a current row of. A row the quick look screened out counts as looked at (measured again, it would be
-screened again), and so does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would
-skip it again); a row that failed does not. The default's choice at `reorder` is no candidate of the list: every
-measurement of a group takes it.
+gates (subgroups, grid limit; records whose gates differ are refused) — that fewer than two records could be evidence
+for: a current group, usable for the candidate's class, whose reference's time is repeated, with a current row of the
+candidate. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
+does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would skip it again); a row
+that failed does not. A record made under older default choices counts where it timed the current reference. The
+default's choice at `reorder` is no candidate of the list, and neither is the baseline: every measurement of a group
+takes both (a narrowed `gemv-sweep` step measures the references whatever candidates it names). So where a
+reference's fastest time is not repeated, every candidate read against it at that case and row count is missing, and
+the step that measures them measures the reference again. A candidate whose reference is a choice the sweep does not
+measure (a row with packed activations) is not listed: no measurement makes it evidence.
 
 The generator writes the plan as a workbench batch ([workbench.md](workbench.md#batches)),
 `inputs/workbench/batches/gemv-plan-<profile id>.json`: per list of missing candidates one `gemv-sweep` step of the

@@ -160,7 +160,10 @@ describe("--gemv-records on a registered table", () => {
       `Carried over from the registered table at commit ${BASE_COMMIT}: gemm.`,
     );
     assertStringIncludes(header, "least ×1.100 faster than that choice in every GEMV sweep record");
-    assertStringIncludes(header, "spread beyond ×1.250 keeps the default");
+    assertStringIncludes(
+      header,
+      "only when a second record repeats it within\n * ×1.100: a shape whose choice has no such time keeps the default",
+    );
     // No tile geometry was derived, so its rule is not stated
     assertEquals(header.includes("Adoption: a geometry replaces"), false);
     assertStringIncludes(

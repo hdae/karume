@@ -4,14 +4,15 @@
 // oracle's restoration of each storage, the record's form of the GEMM and the derivation of a
 // parallel row read against the GEMM at M = 4 and 8.
 //
-// The GEMM reference takes its tile geometry from the profile the device resolves to, so a record's
-// group whose GEMM was measured under another geometry is not current for the table derived for.
+// The GEMM reference takes its tile geometry from the profile the device resolves to, so a GEMM a
+// record measured under another geometry is no reference for the table derived for.
 //
 // Faults injected: a bf16 word read high half first, an f16 half read as bf16 (the oracle's value
 // moves); a launch that binds a scale buffer (the WGSL's roles refuse it); a parallel candidate
 // slower than the GEMM at M = 8 (the row is not adopted); a record whose GEMM row has no `v4`
 // (refused); records measured under the default profile's GEMM derived for a table with another
-// GEMM geometry (no row is adopted, the groups are reported as not current).
+// GEMM geometry (no row is adopted, the groups past one row are counted as without a usable
+// reference).
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -533,21 +534,24 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
       return { derivation, decision };
     };
 
-    it("adopts no row and reports the groups past one row as not current, naming both profiles (fault: records of the default profile's GEMM)", () => {
+    it("adopts no row and reads no group past one row against a GEMM measured under another profile, naming both profiles (fault: records of the default profile's GEMM)", () => {
       const { derivation, decision } = deriveFor(OTHER_TABLE);
       assertEquals(decision.outcome, "kept");
       assertStringIncludes(decision.reason ?? "", "evidence at M=4 from fewer than 2 records");
-      assertEquals(
-        derivation.stale.map(({ caseId, m, cause }) => [caseId, m, cause]),
-        ["a.json", "bb.json"].flatMap(() => [
-          [UP.id, 4, "references"],
-          [UP.id, 8, "references"],
-        ]),
+      assertStringIncludes(
+        decision.reason ?? "",
+        "the GEMM reference in [1] at M=4 was measured under the profile 'default', and it is not the GEMM kernel the table 'test-gpu' runs there",
       );
+      // Past one row the GEMM is the reference of both classes (the case has no parallel row): each
+      // record's groups at M = 4 and 8 have no usable reference at either level, and stay current
       assertEquals(
-        derivation.stale[0].reason,
-        "the GEMM reference was measured under the profile 'default', and it is not the GEMM kernel the table 'test-gpu' runs there",
+        derivation.provenance.records.map(({ groups }) => groups.withoutReference),
+        [
+          { exact: 2, reorder: 2 },
+          { exact: 2, reorder: 2 },
+        ],
       );
+      assertEquals(derivation.stale, []);
       // The same records are evidence for the table they were measured under
       assertEquals(deriveFor(TABLE).decision.outcome, "adopted");
     });
@@ -567,8 +571,12 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
         [input("a.json", specs, unnamed), input("bb.json", specs, unnamed)],
         { table: OTHER_TABLE },
       );
+      const parallelOf = (of: typeof derivation) =>
+        of.decisions.find(
+          ({ field, cases }) => field === "parallelShapes" && cases.includes(UP.id),
+        );
       assertStringIncludes(
-        derivation.stale[0].reason,
+        parallelOf(derivation)?.reason ?? "",
         "measured under a profile the record does not name",
       );
       // …and reads it where its GEMM is the table's: a record's kernel fingerprint decides
@@ -577,6 +585,7 @@ describe("deriveLinearGemvChoices on a float-stored case", () => {
         { table: TABLE },
       );
       assertEquals(same.stale, []);
+      assertEquals(parallelOf(same)?.outcome, "adopted");
     });
 
     it("keeps an integer case's evidence: its kernels are the GEMV family's under any profile", () => {

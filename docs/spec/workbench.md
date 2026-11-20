@@ -159,7 +159,7 @@ rows — where the derivation only checks that a candidate M = 1 would adopt is 
 M = 1 has a time (not screened by the quick look, not failed), held its check (inside the band, no non-finite output),
 and — when the M = 1 group was steady (its baseline spread at most 1.25) and the default's choice at `reorder` has a
 time there — is at least ×1.10 faster than that choice (gemv-candidates.ts's `gemvCarriedFromM1`, with the
-derivation's threshold and steadiness bound). Any other is skipped: it takes none of the steps below, and its row has
+derivation's threshold and the sweep's own steadiness bound, which the derivation does not read). Any other is skipped: it takes none of the steps below, and its row has
 its kernel's fingerprint, its pipeline key and workgroups and `skipped: true`. Nothing is skipped in a run that has
 no M = 1 group of the case to read (narrowed by `rows`, stopped before it, or its baseline was not timed there), for a
 candidate without a row at M = 1, for the identical class or at any other row count.

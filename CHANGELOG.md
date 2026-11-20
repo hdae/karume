@@ -15,6 +15,23 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Breaking
+
+- `@karume/runtime/tune`: `deriveLinearGemvChoices` and `planGemvMeasurements` read GEMV sweep records by two other
+  evidence rules. A group (a record's case at one row count) is current when its case is the current runtime's; the
+  default profile's choices the record names no longer decide it, so a record made under older default choices
+  stands wherever it timed the kernels the current default runs. A candidate is read against that kernel for its
+  class (the choice at `exact` for the identical class, at `reorder` for the reorder class), and a group whose row of
+  it is missing, failed, untimed or not current — or, for the identical class, neither the record's baseline nor
+  shown to write its words — is no evidence for that class. The reference's time is its fastest over the records,
+  read only when a second record repeats it within ×1.10; the baseline's spread (`baselineSpread`, still recorded by
+  the sweep) is no longer read, so no group is unsteady. A failure or a failed check in a current group still rules a
+  candidate out. The result changes shape: `LinearGemvDerivation.rule` is `{ minSpeedup, referenceRepeat }` (was
+  `{ minSpeedup, steadySpread }`), `LinearGemvRecordGroups` is `{ current, stale, withoutReference: { exact, reorder },
+  staleRows }` (was `{ current, unsteady, stale, staleRows }`), and `LinearGemvStaleGroup` has no `cause` (only a
+  group whose case is not current is stale). The plan lists, at a case and row count where a reference's fastest
+  time is not repeated, every candidate read against it, and no candidate whose reference the sweep does not measure.
+
 ## [0.23.0] - 2026-11-20
 
 ### Added

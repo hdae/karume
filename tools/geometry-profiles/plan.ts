@@ -1,7 +1,7 @@
 /**
  * The generator's plan of GEMV measurements (`--gemv-plan`): what the GEMV sweep records at hand
  * lack for `deriveLinearGemvChoices` to be complete under the current runtime — per case and row
- * count, the candidates fewer than two records hold a current group of (`planGemvMeasurements` of
+ * count, the candidates fewer than two records could be evidence for (`planGemvMeasurements` of
  * `@karume/runtime/tune`) — written as a workbench batch (`karume-workbench-batch/1`) whose steps
  * measure exactly that, twice. With no record at hand the batch is the whole measurement (the `full`
  * set, twice). Pure over the records; the command writes the file.
@@ -141,7 +141,7 @@ export const gemvPlan = (input: {
   const pass = planSteps(missing);
   const measurements = missing.reduce((sum, { candidates }) => sum + candidates.length, 0);
   const lines = [
-    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (fewer than two records hold a current, steady group with the candidate's row).`,
+    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (fewer than two records could be evidence for the candidate: a current group with its row, read against a usable reference whose fastest time a second record repeats).`,
     `Groups of the records that are not current: ${stale.length}.`,
     ...(pass.length === 0
       ? ["Nothing is missing: the derivation is complete under the current runtime."]
@@ -160,7 +160,7 @@ export const gemvPlan = (input: {
     batch: {
       format: BATCH_FORMAT,
       title: `GEMV sweep for ${profileId}: what the derivation lacks, twice`,
-      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates fewer than two of those records hold a current, steady group of; each step measures them with the references, and the steps run ${PLAN_PASSES} times.`,
+      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates fewer than two of those records could be evidence for; each step measures them with the references, and the steps run ${PLAN_PASSES} times.`,
       steps,
     },
     missing,

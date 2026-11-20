@@ -4,29 +4,38 @@
 // sweep of the current runtime writes.
 //
 // What this pins: ① a candidate is adopted only at ×1.10 or more in every group that is evidence,
-// groups of two records or more, the one with the largest smallest gain among several; ② an unsteady
-// group, a failed check in one record, the packed rows, a shared sequential key whose cases disagree,
-// a row count of the parallel range a record did not measure and a regression at one keep the
-// default; ③ groups as the unit of evidence — a stale, screened or skipped row is no evidence while the
-// record's other groups are, records that each hold half of the cases derive what a complete pair
-// derives, and groups that are not current are reported by cause instead of refused; ④ the refusals —
+// groups of two records or more, the one with the largest smallest gain among several; ② a failed
+// check in one record, the packed rows, a shared sequential key whose cases disagree, a row count of
+// the parallel range a record did not measure and a regression at one keep the default; ③ groups as
+// the unit of evidence — a stale, screened or skipped row is no evidence while the record's other
+// groups are, records that each hold half of the cases derive what a complete pair derives, and
+// groups whose case is not current are reported instead of refused; ③′ the reference a class is read
+// against — the current default's kernel wherever a record timed it, whatever default the record
+// was made under, and no group for that class where its row is no reference; ③″ the reference's
+// time — its fastest over the records, read only when a second record repeats it within ×1.10, the
+// baseline's spread unread; ④ the refusals —
 // none and the same record twice, an older format, another adapter, wall-clock or quantized timing
 // (one record derives nothing); ⑤ what the field gets (the exception row replaced, added or removed;
 // the parallel row replaced in place; nothing when nothing is adopted) and the provenance and lines
 // that name the records; ⑥ the plan of what the records lack (planGemvMeasurements); ⑦ a regeneration
 // of the tile geometry carries a base table's `linearGemv`.
 //
-// Faults injected: record 2 at ×1.09 (one record below the bar); a baseline spread of ×1.26 in
-// record 2 (unsteady); differing words, and a reorder row outside the band, in record 2; the two cases
+// Faults injected: record 2 at ×1.09 (one record below the bar); differing words, and a reorder row
+// outside the band, in record 2; records made under older default choices (read against the current
+// ones), with the current baseline's words differing or unchecked; the reference's row dropped,
+// untimed, failed or with another kernel in record 2; differing words where the baseline failed; a
+// record whose baseline stayed slow (×1.3 against it, ×1.0 against the fastest); baselines spread ×2.5;
+// the baseline's fastest time ×1.25 and ×1.11 ahead of the second record's; the two cases
 // of one sequential key adopting different variants; a parallel candidate ×0.95 at M = 4; record 2
 // without M = 8, and records of M = 1 alone, for a parallel row; a row's kernel fingerprint replaced
 // (no evidence there, the record's other cases adopt; the plan lists that candidate alone); the
 // winner screened out in one record; the parallel winner skipped at M = 4 in one record; a skipped
-// row that is a baseline, has a time or is screened (refused); a case's fingerprint replaced, the
-// reorder choice of a summary renamed and the baseline's kernel fingerprint replaced (each a stale
-// group of its cause); the formats /3, /2 and /1, the unit, the quantized flag and the adapter
-// changed; a failed row and an unsteady group (missing in the plan), a screened or skipped row (not
-// missing).
+// row that is a baseline, has a time or is screened (refused); a case's fingerprint replaced (a stale
+// group), the reorder choice of a summary renamed (no fault) and the baseline's kernel fingerprint
+// replaced (a current group without a usable reference); the formats /3, /2 and /1, the unit, the
+// quantized flag and the adapter changed; a failed row, a group without a usable reference and a
+// reference whose fastest time one record holds (missing in the plan), a screened or skipped row and
+// records made under older defaults (not missing).
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -42,7 +51,8 @@ import {
 } from "../tune.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import type { LinearGemvChoices } from "../src/kernels/linear-gemv.ts";
-import { GEMV_CASES } from "../src/tune/gemv-cases.ts";
+import { gemvCandidates } from "../src/tune/gemv-candidates.ts";
+import { GEMV_CASES, gemvCaseOf } from "../src/tune/gemv-cases.ts";
 import { pickRowBlock, type RowBlockAt, rowBlockRefusal } from "../src/tune/gemv-derive.ts";
 import type { GemvSweepReport } from "../src/tune/gemv-report.ts";
 import {
@@ -155,19 +165,6 @@ describe("deriveLinearGemvChoices: the identical class (sequential.shapes)", () 
       [{ caseId: PLE, times: at1({ c64u8: faster(1.11), c128u4: faster(1.25) }) }],
     );
     assertEquals(decisionOf(derivation, "sequential.shapes", PLE).derivedChoice, "c128u4");
-  });
-
-  it("keeps a shape with an unsteady record (fault: baseline spread ×1.26 in record 2), and takes ×1.25 as steady", () => {
-    const times = at1({ c64u8: faster(1.2) });
-    const unsteady = derive([{ caseId: PLE, times }], [{ caseId: PLE, times, spread: 1.26 }]);
-    const decision = decisionOf(unsteady, "sequential.shapes", PLE);
-    assertEquals(decision.outcome, "kept");
-    assertStringIncludes(
-      decision.reason ?? "",
-      "unsteady in [2] at M=1 (baseline spread ×1.260 > ×1.250)",
-    );
-    const bound = derive([{ caseId: PLE, times }], [{ caseId: PLE, times, spread: 1.25 }]);
-    assertEquals(decisionOf(bound, "sequential.shapes", PLE).outcome, "adopted");
   });
 
   it("keeps the default when the candidate's words differ from the baseline's in one record (fault)", () => {
@@ -626,6 +623,295 @@ describe("deriveLinearGemvChoices: the reorder class (parallelShapes)", () => {
   });
 });
 
+/**
+ * A record made under older default choices at M = 1: its summary names `exact` and `reorder` as the
+ * default's, its baseline row is `exact`'s, and the current baseline is a candidate row whose words
+ * were found equal to that baseline's or not (`words`), or not checked.
+ */
+const underOlderDefaults =
+  (exact: string, reorder: string, words: boolean | "unchecked" = true) =>
+  (record: GemvSweepReport): GemvSweepReport => ({
+    ...record,
+    summaries: record.summaries.map((summary) =>
+      summary.m === 1 ? { ...summary, profile: { exact, reorder } } : summary,
+    ),
+    rows: record.rows.map((row) => {
+      if (row.m !== 1) return row;
+      if (row.candidate === exact) {
+        const {
+          identicalToBaseline: _words,
+          differingWords: _differing,
+          speedupVsBaseline: _speedup,
+          ...rest
+        } = row;
+        return { ...rest, isBaseline: true };
+      }
+      if (!row.isBaseline) return row;
+      return {
+        ...row,
+        isBaseline: false,
+        ...(words === "unchecked"
+          ? {}
+          : { identicalToBaseline: words, differingWords: words ? 0 : 3 }),
+      };
+    }),
+  });
+
+/** A record made when the default ran c64u4 at `exact` and parallel-l8 at `reorder` at M = 1. */
+const OLDER_DEFAULTS = underOlderDefaults("c64u4", "parallel-l8");
+
+/** A change that lays `fields` over one row of a record (absent: the row is dropped). */
+const rowChange =
+  (m: number, candidate: string, fields?: Partial<GemvSweepReport["rows"][number]>) =>
+  (record: GemvSweepReport): GemvSweepReport => ({
+    ...record,
+    rows: record.rows.flatMap((row) =>
+      row.m !== m || row.candidate !== candidate
+        ? [row]
+        : fields === undefined
+          ? []
+          : [{ ...row, ...fields }],
+    ),
+  });
+
+describe("deriveLinearGemvChoices: the reference a class is read against", () => {
+  /** A case both classes adopt from: c64u8 ×1.2 over c32u4, staged-l8 ×1.3 over parallel-l4. */
+  const specs: GemvCaseSpec[] = [
+    {
+      caseId: PLE,
+      rows: PARALLEL_ROWS,
+      // The choices of the older defaults are slow: a gain read against them would be larger
+      times: at1({
+        c64u8: faster(1.2),
+        "staged-l8": faster(1.3),
+        c64u4: faster(0.5),
+        "parallel-l8": faster(0.5),
+      }),
+    },
+  ];
+  const pair = (
+    first: (record: GemvSweepReport) => unknown,
+    second: (record: GemvSweepReport) => unknown,
+  ): LinearGemvDerivation =>
+    deriveLinearGemvChoices([input("a.json", specs, first), input("bb.json", specs, second)], {
+      table: TABLE,
+    });
+
+  it("reads a record made under other default choices wherever it timed the current default's kernels, against those kernels (fault of the earlier rule: the group was not current)", () => {
+    const derivation = pair(OLDER_DEFAULTS, OLDER_DEFAULTS);
+    const sequential = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals([sequential.outcome, sequential.derivedChoice], ["adopted", "c64u8"]);
+    // Against the current baseline (c32u4), not the record's baseline (c64u4: ×2.4)
+    assertEquals(
+      sequential.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.200", "1.200"],
+    );
+    const parallel = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals([parallel.outcome, parallel.derivedChoice], ["adopted", "staged-l8"]);
+    assertEquals(
+      parallel.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.300", "1.300"],
+    );
+    assertEquals(derivation.stale, []);
+    assertEquals(
+      derivation.provenance.records.map(({ groups }) => groups.withoutReference),
+      [
+        { exact: 0, reorder: 0 },
+        { exact: 0, reorder: 0 },
+      ],
+    );
+  });
+
+  it("takes a record's baseline as a candidate where the default moved off it: its own words are the baseline's (faults of a stricter reading: it ruled out for no word check, or never a candidate)", () => {
+    const fasterOld: GemvCaseSpec[] = [{ caseId: PLE, times: at1({ c64u4: faster(1.2) }) }];
+    const derivation = deriveLinearGemvChoices(
+      [input("a.json", fasterOld, OLDER_DEFAULTS), input("bb.json", fasterOld, OLDER_DEFAULTS)],
+      { table: TABLE },
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals([decision.outcome, decision.derivedChoice], ["adopted", "c64u4"]);
+  });
+
+  it("reads the identical class against the choice at exact alone: a moved choice at reorder whose row is missing leaves it standing (fault: parallel-l4's row dropped in record 2)", () => {
+    const moved = (record: GemvSweepReport) =>
+      rowChange(1, "parallel-l4")(underOlderDefaults("c32u4", "parallel-l8")(record));
+    const derivation = pair((record) => record, moved);
+    assertEquals(decisionOf(derivation, "sequential.shapes", PLE).outcome, "adopted");
+    const parallel = decisionOf(derivation, "parallelShapes", PLE);
+    assertEquals(parallel.outcome, "kept");
+    assertStringIncludes(
+      parallel.reason ?? "",
+      "the reference parallel-l4 is not measured in [2] at M=1",
+    );
+  });
+
+  it("reads no group for the identical class whose reference is not the record's baseline and was not shown to write its words (faults: words differing, and not checked)", () => {
+    for (const words of [false, "unchecked"] as const) {
+      const derivation = pair(
+        (record) => record,
+        underOlderDefaults("c64u4", "parallel-l4", words),
+      );
+      const decision = decisionOf(derivation, "sequential.shapes", PLE);
+      assertEquals(decision.outcome, "kept", String(words));
+      assertStringIncludes(
+        decision.reason ?? "",
+        "the reference c32u4 is not the baseline in [2] at M=1, and its words were not shown equal to the baseline's",
+      );
+      assertEquals(
+        decision.gains.map(({ record }) => record),
+        ["a.json"],
+      );
+      // The reorder class compares no words with the baseline: its reference stands
+      assertEquals(decisionOf(derivation, "parallelShapes", PLE).outcome, "adopted");
+      assertEquals(derivation.provenance.records[1]?.groups.withoutReference, {
+        exact: 1,
+        reorder: 0,
+      });
+    }
+  });
+
+  it("reads no group for a class whose reference's row is missing, untimed, failed or not current, and leaves the other class standing (faults in record 2)", () => {
+    const reorderFaults = [
+      [rowChange(1, "parallel-l4"), "the reference parallel-l4 is not measured in [2] at M=1"],
+      [
+        rowChange(1, "parallel-l4", { perDispatch: undefined }),
+        "the reference parallel-l4 has no time in [2] at M=1",
+      ],
+      [
+        rowChange(1, "parallel-l4", { error: "Error: lost" }),
+        "the reference parallel-l4 failed in [2] at M=1 (Error: lost)",
+      ],
+      [
+        rowChange(1, "parallel-l4", { kernel: "0000000000000000" }),
+        "the reference parallel-l4 is not current in [2] at M=1 (its kernel changed)",
+      ],
+    ] as const;
+    for (const [change, reason] of reorderFaults) {
+      const derivation = pair((record) => record, change);
+      const parallel = decisionOf(derivation, "parallelShapes", PLE);
+      assertEquals(parallel.outcome, "kept", reason);
+      assertStringIncludes(parallel.reason ?? "", reason);
+      assertEquals(decisionOf(derivation, "sequential.shapes", PLE).outcome, "adopted", reason);
+      assertEquals(derivation.provenance.records[1]?.groups.withoutReference, {
+        exact: 0,
+        reorder: 1,
+      });
+    }
+    const baseline = pair(
+      (record) => record,
+      rowChange(1, "c32u4", { kernel: "0000000000000000" }),
+    );
+    const sequential = decisionOf(baseline, "sequential.shapes", PLE);
+    assertEquals(sequential.outcome, "kept");
+    assertStringIncludes(
+      sequential.reason ?? "",
+      "the reference c32u4 is not current in [2] at M=1 (its kernel changed)",
+    );
+    assertEquals(decisionOf(baseline, "parallelShapes", PLE).outcome, "adopted");
+    // The control: the same records without a fault adopt both
+    const control = pair(
+      (record) => record,
+      (record) => record,
+    );
+    assertEquals(
+      [
+        decisionOf(control, "sequential.shapes", PLE).outcome,
+        decisionOf(control, "parallelShapes", PLE).outcome,
+      ],
+      ["adopted", "adopted"],
+    );
+  });
+
+  it("rules a candidate out by a failed check in a group that has no usable reference (fault: differing words where the baseline's row failed, in one of three records)", () => {
+    const derivation = deriveLinearGemvChoices(
+      [
+        input("a.json", specs),
+        input("bb.json", specs, (record) =>
+          rowChange(1, "c64u8", { identicalToBaseline: false, differingWords: 3 })(
+            rowChange(1, "c32u4", { error: "Error: lost" })(record),
+          ),
+        ),
+        input("ccc.json", specs),
+      ],
+      { table: TABLE },
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "kept");
+    assertStringIncludes(decision.reason ?? "", "its words differ from the baseline's in [2]");
+  });
+});
+
+describe("deriveLinearGemvChoices: the reference's time", () => {
+  const one = (times: Readonly<Record<string, number>>, spread?: number): GemvCaseSpec[] => [
+    { caseId: PLE, times: at1(times), ...(spread === undefined ? {} : { spread }) },
+  ];
+  const three = (
+    first: readonly GemvCaseSpec[],
+    second: readonly GemvCaseSpec[],
+    third: readonly GemvCaseSpec[],
+  ): LinearGemvDerivation =>
+    deriveLinearGemvChoices(
+      [input("a.json", first), input("bb.json", second), input("ccc.json", third)],
+      { table: TABLE },
+    );
+
+  it("reads every gain against the reference's fastest time over the records, so a record whose reference stayed slow cannot overstate a gain (fault of the earlier rule: ×1.37 against record 1's own baseline)", () => {
+    // Record 1's baseline stayed slow (1300) and c64u8 took 950 there: ×1.37 against the record's
+    // own baseline, ×1.05 against the fastest, which records 2 and 3 repeat
+    const derivation = three(
+      one({ c32u4: 1300, c64u8: 950 }),
+      one({ c64u8: faster(1.2) }),
+      one({ c64u8: faster(1.2) }),
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals([decision.outcome, decision.candidate], ["kept", "c64u8"]);
+    assertStringIncludes(decision.reason ?? "", "×1.053 < ×1.100 in [1]");
+    assertEquals(
+      decision.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.053", "1.200", "1.200"],
+    );
+  });
+
+  it("reads records whose baseline's rounds spread widely: the spread is not read, the repeated fastest time is (fault of the earlier rule: a spread of ×2.5 discarded both)", () => {
+    const derivation = derive(
+      one({ c64u8: faster(1.2) }, 2.5),
+      one({ c32u4: 1050, c64u8: faster(1.2) }, 2.5),
+    );
+    const decision = decisionOf(derivation, "sequential.shapes", PLE);
+    assertEquals(decision.outcome, "adopted");
+    // Both against the fastest (1000), record 2's own slower baseline unread
+    assertEquals(
+      decision.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.200", "1.200"],
+    );
+  });
+
+  it("reads no group where the reference's fastest time is held by one record alone, and takes a second within ×1.10 as a repeat (faults: ×1.25 and ×1.11 apart; ×1.10 is a repeat)", () => {
+    /** The baseline at 800 in record 1, at `second` in record 2 and at 1000 in record 3; c64u8 at 600. */
+    const withSecond = (second: number): LinearGemvDerivation =>
+      three(
+        one({ c32u4: 800, c64u8: 600 }),
+        one({ c32u4: second, c64u8: 600 }),
+        one({ c32u4: 1000, c64u8: 600 }),
+      );
+    for (const second of [1000, 889]) {
+      const decision = decisionOf(withSecond(second), "sequential.shapes", PLE);
+      assertEquals(decision.outcome, "kept", String(second));
+      assertStringIncludes(
+        decision.reason ?? "",
+        "the reference c32u4's fastest time at M=1 ([1]) is repeated within ×1.100 by no second record",
+      );
+      assertEquals(decision.gains, []);
+    }
+    const repeated = decisionOf(withSecond(880), "sequential.shapes", PLE);
+    assertEquals(repeated.outcome, "adopted");
+    assertEquals(
+      repeated.gains.map(({ gain }) => gain.toFixed(3)),
+      ["1.333", "1.333", "1.333"],
+    );
+  });
+});
+
 describe("the rule of a parallel row's row block (rowBlockRefusal, pickRowBlock)", () => {
   /** A row count where the row block and the reference run different kernels, with one gain a record. */
   const at = (m: number, ...gains: number[]): RowBlockAt => ({
@@ -724,7 +1010,7 @@ describe("deriveLinearGemvChoices: the derivation", () => {
       ],
     );
     assertEquals(derivation.provenance.adapter, GEMV_ADAPTER);
-    assertEquals(derivation.rule, { minSpeedup: 1.1, steadySpread: 1.25 });
+    assertEquals(derivation.rule, { minSpeedup: 1.1, referenceRepeat: 1.1 });
     assertEquals(derivation.verdicts[1]?.startsWith("  - [1] a.json ("), true);
     assert(
       derivation.verdicts.includes(
@@ -767,8 +1053,8 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
     assertEquals(decisionOf(derivation, "sequential.shapes", Q_G32).outcome, "adopted");
     assertEquals(derivation.provenance.records[1]?.groups, {
       current: 3,
-      unsteady: 0,
       stale: 0,
+      withoutReference: { exact: 0, reorder: 0 },
       staleRows: 1,
     });
   });
@@ -911,11 +1197,11 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
     );
   });
 
-  it("adopts from a third record when one of three has the candidate's group unsteady", () => {
+  it("adopts from a third record when one of three has no usable reference for the candidate's class (fault: its baseline's row failed)", () => {
     const derivation = deriveLinearGemvChoices(
       [
         input("a.json", twice),
-        input("bb.json", [{ ...twice[0], spread: 1.3 }]),
+        input("bb.json", [{ ...twice[0], fields: { 1: { c32u4: { error: "Error: lost" } } } }]),
         input("ccc.json", twice),
       ],
       { table: TABLE },
@@ -928,7 +1214,7 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
     );
   });
 
-  it("reports the groups that are not current, by cause, without refusing their records (faults: a case's fingerprint, a default's choice renamed, the baseline's kernel)", () => {
+  it("reports the groups whose case is not current and counts the current groups without a usable reference, without refusing their records (faults: a case's fingerprint, the baseline's kernel; a default's choice renamed is no fault)", () => {
     const changedCase = input("bb.json", [{ caseId: PLE }, { caseId: Q_G32 }], (record) => ({
       ...record,
       cases: record.cases.map((entry) =>
@@ -950,33 +1236,36 @@ describe("deriveLinearGemvChoices: groups as the unit of evidence", () => {
       { table: TABLE },
     );
     assertEquals(
-      derivation.stale.map(({ record, caseId, m, cause }) => [record, caseId, m, cause]),
-      [
-        ["bb.json", PLE, 1, "case"],
-        ["ccc.json", PLE, 1, "choices"],
-        ["dddd.json", HEAD_I8, 1, "references"],
-      ],
+      derivation.stale.map(({ record, caseId, m }) => [record, caseId, m]),
+      [["bb.json", PLE, 1]],
     );
     assertStringIncludes(derivation.stale[0]?.reason ?? "", "changed (its fingerprint differs)");
-    assertStringIncludes(
-      derivation.stale[1]?.reason ?? "",
-      "is parallel-l8 in the record, parallel-l4 now",
-    );
-    assertStringIncludes(derivation.stale[2]?.reason ?? "", "the reference c32u4 is not current");
     assertEquals(
-      derivation.provenance.records.map(({ groups }) => [groups.current, groups.stale]),
+      derivation.provenance.records.map(({ groups }) => [
+        groups.current,
+        groups.stale,
+        groups.withoutReference.exact,
+        groups.withoutReference.reorder,
+      ]),
       [
-        [1, 0],
-        [1, 1],
-        [0, 1],
-        [0, 1],
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+        [1, 0, 0, 0],
+        [1, 0, 1, 0],
       ],
     );
     assert(
       derivation.verdicts.some((line) =>
-        line.includes("1 not current: the default profile's choices moved"),
+        line.includes(
+          "dddd.json (2026-11-17T09:00:00.000Z, set quick): 1 groups — 1 current, 0 not current (their case is not the current one); of the current, 1 without a usable reference at exact and 0 at reorder; 1 rows of current groups not current",
+        ),
       ),
       derivation.verdicts.join("\n"),
+    );
+    // The baseline's reason is the identical class's, read per group
+    assertStringIncludes(
+      decisionOf(derivation, "sequential.shapes", HEAD_I8).reason ?? "",
+      "the reference c32u4 is not current in [4] at M=1 (its kernel changed)",
     );
   });
 });
@@ -993,7 +1282,9 @@ describe("deriveLinearGemvChoices: the refusals", () => {
       { table: TABLE },
     );
     const decision = decisionOf(one, "sequential.shapes", PLE);
-    assertEquals([decision.outcome, decision.candidate], ["kept", "c64u8"]);
+    assertEquals(decision.outcome, "kept");
+    // One record's fastest time of the reference is not repeated, so its groups are no evidence
+    assertStringIncludes(decision.reason ?? "", "repeated within ×1.100 by no second record");
     assertStringIncludes(decision.reason ?? "", "evidence at M=1 from fewer than 2 records");
     assertEquals(one.linearGemv, undefined);
     const record = input("a.json", specs);
@@ -1107,7 +1398,7 @@ describe("planGemvMeasurements: what the records lack", () => {
     assertEquals(missingAt(absent, PLE, 4), ["staged-l8"]);
   });
 
-  it("counts a screened row as looked at, a failed row and an unsteady group as missing (faults: an error, a spread of ×1.3)", () => {
+  it("counts a screened row as looked at, a failed row and a group without a usable reference as missing (faults: an error, the baseline's kernel)", () => {
     const screened = plan([
       input("a.json", complete),
       input("bb.json", [{ ...complete[0], fields: { 1: { c64u8: { screened: true } } } }]),
@@ -1118,13 +1409,54 @@ describe("planGemvMeasurements: what the records lack", () => {
       input("bb.json", [{ ...complete[0], fields: { 1: { c64u8: { error: "Error: lost" } } } }]),
     ]);
     assertEquals(missingAt(failed, PLE, 1), ["c64u8"]);
-    const unsteady = plan([
+    // The identical class reads against the baseline: its candidates go missing, the reorder ones not
+    const noReference = plan([
+      input("a.json", complete),
+      input("bb.json", [
+        { ...complete[0], fields: { 1: { c32u4: { kernel: "0000000000000000" } } } },
+      ]),
+    ]);
+    const one = missingAt(noReference, PLE, 1) ?? [];
+    assert(one.includes("c64u8") && !one.includes("staged-l8"), one.join(", "));
+    assertEquals(missingAt(noReference, PLE, 8), undefined);
+    // The baseline's spread is not read (a spread of ×1.3, an unsteady group by the earlier rule)
+    const spread = plan([
       input("a.json", complete),
       input("bb.json", [{ ...complete[0], spread: { 8: 1.3 } }]),
     ]);
-    assertEquals(missingAt(unsteady, PLE, 1), undefined);
-    const eight = missingAt(unsteady, PLE, 8) ?? [];
-    assert(eight.includes("parallel-l8") && eight.includes("staged-l32"), eight.join(", "));
+    assertEquals(missingAt(spread, PLE, 8), undefined);
+  });
+
+  it("lists every candidate read against a reference whose fastest time one record alone holds, so the step measures the reference again (fault: the baseline ×1.25 faster in record 1)", () => {
+    const planning = plan([
+      input("a.json", [{ ...complete[0], times: { 1: { c32u4: 800 } } }]),
+      input("bb.json", complete),
+    ]);
+    // Every identical candidate, the reorder ones (read against parallel-l4) not
+    const gemvCase = gemvCaseOf(PLE);
+    assert(gemvCase !== undefined);
+    const identical = gemvCandidates(gemvCase, 1, "full", {
+      subgroups: true,
+      maxComputeWorkgroupsPerDimension: 65535,
+    })
+      .filter((candidate) => candidate.class === "identical")
+      .map(({ name }) => name);
+    assertEquals(missingAt(planning, PLE, 1), identical);
+    assertEquals(missingAt(planning, PLE, 4), undefined);
+  });
+
+  it("counts a record made under other default choices where it timed the current reference, and not where that reference's words were not shown equal to its baseline's (fault: differing)", () => {
+    const older = plan([
+      input("a.json", complete, OLDER_DEFAULTS),
+      input("bb.json", complete, OLDER_DEFAULTS),
+    ]);
+    for (const m of PARALLEL_ROWS) assertEquals(missingAt(older, PLE, m), undefined);
+    const differing = plan([
+      input("a.json", complete, OLDER_DEFAULTS),
+      input("bb.json", complete, underOlderDefaults("c64u4", "parallel-l8", false)),
+    ]);
+    const one = missingAt(differing, PLE, 1) ?? [];
+    assert(one.includes("c64u8") && !one.includes("staged-l8"), one.join(", "));
   });
 });
 

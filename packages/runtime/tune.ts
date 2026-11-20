@@ -82,9 +82,11 @@
  * {@link deriveLinearGemvChoices} turns any number of its records of one adapter into a profile's
  * `linearGemv`, reading them group by group (a record's case at a row count): a group is evidence
  * when its rows are of the current runtime (each row and each case carries its own fingerprint) and
- * the device was steady (the baseline's rounds spread at most ×1.25). A candidate replaces the
- * default profile's choice for a shape only when groups of two or more records are evidence for it,
- * it is at least ×1.10 faster than that choice in every one, and its check held. The identical class
+ * it timed the kernel the current default runs for the candidate's class, whatever default the record
+ * was made under. That kernel's time is its fastest over the records, read only when a second record
+ * repeats it within ×1.10. A candidate replaces the default profile's choice for a shape only when
+ * groups of two or more records are evidence for it, it is at least ×1.10 faster than that choice in
+ * every one, and its check held. The identical class
  * writes the sequential variant's per-shape exceptions, which change no number of any Session; the
  * reorder class writes the parallel rows, which change the numbers of Sessions at `reorder`, inside
  * the band, and need evidence at every row count a row serves (M = 1 to 8: the `full` set). Groups
@@ -253,14 +255,15 @@ export type {
 /**
  * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from GEMV sweep
  * records of its adapter, group by group: per shape and class a decision (adopted or kept, the gains
- * per group that is evidence, why it was kept), the groups that are not of the current runtime, the
- * lines that state them, and the records used with how much of each is current. The field is absent
+ * per group that is evidence, why it was kept), the groups whose case is not the current runtime's,
+ * the lines that state them, and the records used with how much of each is current and how many of
+ * its current groups have no usable reference at `exact` and at `reorder`. The field is absent
  * from the result when every choice stays the default's. A record of another format or adapter, a
  * wall-clock or quantized one, the same record twice and no record at all are refused.
  *
  * {@link planGemvMeasurements} reads the same records and says, per case and row count of the
- * `full` set, the candidates the derivation reads there that fewer than two records hold a current
- * group of — what a sweep must measure for the derivation to be complete.
+ * `full` set, the candidates the derivation reads there that fewer than two records could be
+ * evidence for — what a sweep must measure for the derivation to be complete.
  */
 export { deriveLinearGemvChoices, planGemvMeasurements } from "./src/tune/gemv-derive.ts";
 export type {

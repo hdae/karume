@@ -450,7 +450,7 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
           gemv: {
             records: gemvRecords,
             minSpeedup: gemv.derivation.rule.minSpeedup,
-            steadySpread: gemv.derivation.rule.steadySpread,
+            referenceRepeat: gemv.derivation.rule.referenceRepeat,
           },
         }),
     minSpeedup: request.minSpeedup,

@@ -265,8 +265,23 @@ export const gemvGroupRole = (m: number, candidateClass: GemvCandidateClass): Ge
 export const GEMV_MIN_SPEEDUP = 1.1;
 
 /**
- * The steadiness bound: a group whose baseline rounds spread (`baselineSpread`, the baseline's
- * largest round ÷ its smallest) beyond this is unsteady, and no evidence.
+ * How close a second record's time of a reference kernel must come to its fastest for that fastest
+ * time to be repeated (`deriveLinearGemvChoices`): the derivation reads a candidate against the
+ * fastest time of the reference over the records only when at least two different records hold a
+ * time within this factor of it. One record's fastest round is not evidence; a time repeated by a
+ * second record is the device's.
+ *
+ * Source: the GEMV sweep records of four devices, per baseline kernel (by fingerprint) timed in two
+ * or more records: on the RTX 3080 Ti under Node (36 records of 2026-11-18/19) 210 of 222 repeat
+ * their fastest time within ×1.10, on the Apple M2 344 of 345, on the Apple M5 256 of 258 and on
+ * the RTX 5070 Ti 367 of 367 (all in Chrome).
+ */
+export const GEMV_REFERENCE_REPEAT = 1.1;
+
+/**
+ * The sweep's steadiness bound ({@link gemvCarriedFromM1}): an M = 1 group whose baseline rounds
+ * spread (`baselineSpread`, the baseline's largest round ÷ its smallest) beyond this rules out no
+ * candidate by its times. The derivation does not read the spread.
  *
  * Source: the two `karume-gemv-sweep/2` records of the `quick` set on the RTX 3080 Ti under Node
  * (2026-11-17T11-51-15 and T12-29-00), grouped by the worse spread of a case over the two records: a
@@ -308,8 +323,8 @@ export type GemvM1Group = {
  * 1. has no time (screened by the quick look, or failed), or
  * 2. did not hold its check (outside the band, or a non-finite output), or
  * 3. is less than {@link GEMV_MIN_SPEEDUP} faster than the default's choice at `reorder` in a steady
- *    group (baseline spread at most {@link GEMV_STEADY_SPREAD}). An unsteady group is no evidence,
- *    so its times rule nothing out; without the default's time at M = 1 the gain is unknown.
+ *    group (baseline spread at most {@link GEMV_STEADY_SPREAD}). The times of an unsteady group
+ *    rule nothing out; without the default's time at M = 1 the gain is unknown.
  *
  * A row-blocked candidate (`choice.parallelRows`) has no row at M = 1: it is the form a parallel
  * row of its lanes takes at M ≥ 2, so it is read by the rows of that lane count — measured when the

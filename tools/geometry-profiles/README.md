@@ -34,11 +34,13 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   field is carried over from the base.
 - `--gemv-records` adds GEMV sweep records of the table's adapter, which decide `linearGemv` group by group (one
   record's case at one row count): a candidate replaces the default profile's choice for a shape only at ×1.10 or more
-  over it in every group that is evidence — current (its rows' and its case's fingerprints are the current runtime's)
-  and steady (the baseline's rounds spread at most ×1.25) —, from at least two records, its check held; a parallel row
-  also needs that evidence at M = 4 and 8 without a regression (it serves M = 1 to 8: the `full` set)
-  ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). Groups that are not current are
-  reported in the verdict lines, not refused. The field is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
+  over it in every group that is evidence — current (its rows' and its case's fingerprints are the current runtime's),
+  with the current default's kernel timed whatever default the record was made under, and read against that kernel's
+  fastest time over the records, which a second record repeats within ×1.10 —, from at least two records, its check
+  held; a parallel row also needs that evidence at M = 4 and 8 without a regression (it serves M = 1 to 8: the `full`
+  set) ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). Groups whose case is not current
+  are reported in the verdict lines, not refused, and so are the current groups without a usable reference. The field
+  is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
 - `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
   keep their own ×1.10.
@@ -48,8 +50,8 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   the GEMV decisions shape by shape (the default's choice, the derived one, the gains per record, or why it was kept)
   and a line that says whether the table would carry the field; `linearGemv` is compared as each table runs with it.
 - `--gemv-plan` derives nothing. From the GEMV records given (none: nothing at hand) it prints, per case and row
-  count of the `full` set, how many candidates the derivation would still miss — those fewer than two records hold a
-  current, steady group of ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)) — and
+  count of the `full` set, how many candidates the derivation would still miss — those fewer than two records could be
+  evidence for ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)) — and
   writes `inputs/workbench/batches/gemv-plan-<profile id>.json` (outside git; the workbench lists it as an untracked
   batch): `gemv-sweep` steps of the `full` set narrowed to the cases, row counts and candidates that miss the same,
   run twice. With no record at hand the batch is the whole `full` set, twice; with nothing missing no batch is
