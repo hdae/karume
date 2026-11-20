@@ -86,7 +86,8 @@ per model):
    (`irodori.SOURCES["irodori-v4-small"]`), it need not be uploaded again — the others reference that commit. When it is
    rebuilt (a new tokenizer asset, generator tag or card text), in `tools/export-recipes`
    `uv run python dist.py --pipeline irodori` (it reads its containers from `models/karume-irodori-v4-small/` itself —
-   a role it exports again from its series — and replaces the non-container files), upload it first, and let the next
+   except a role named in `IRODORI_REEXPORTED`, which it places from its series; the table is empty unless a deliberate
+   re-export is under way — and replaces the non-container files), upload it first, and let the next
    steps read its new main.
 2. **Build `karume-irodori-v4.1-small`**: in `tools/export-recipes`,
    `uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf` (it reads both mirrors).
