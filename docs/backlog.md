@@ -53,9 +53,9 @@ maintainer's ruling of 2026-11-06).
 ## later
 
 - **After the 0.23.0 release (filed together on 2026-11-19; the order among them is not ruled)**:
-  - Put after the release by the maintainer's rulings of 2026-11-19: the design of the GEMV derivation's evidence rules
-    (perf-ledger K-113), which the next derivation of `nvidia-ampere` waits for, and the bf16 shapes that could take a
-    parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
+  - Put after the release by the maintainer's rulings of 2026-11-19: the GEMV derivation's evidence rules
+    (perf-ledger K-113; built 2026-11-20), after which the registered tables are derived again, and the bf16 shapes
+    that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
     publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
     and EmbeddingGemma 2, which has no item or design yet.
   - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
@@ -154,11 +154,13 @@ maintainer's ruling of 2026-11-06).
          say what removes a row of the default from a device's table: the derivation judges a candidate against the
          default's choice for the shape, so a device drops an inherited exception only when its records show the
          general variant ×1.10 faster in every group, and a device on which the row is slower by less keeps it;
-       - **after the 0.23.0 release, not before** (the maintainer's ruling of 2026-11-19): the design of the
-         derivation's evidence rules (perf-ledger K-113), and with it the bf16 shapes that could take a parallel row of
-         the default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080
-         Ti) — a row added to the default before that discards the other devices' records of the shape. `nvidia-ampere`
-         is derived again after K-113, not before;
+       - the derivation's evidence rules are built (perf-ledger K-113, 2026-11-20): a record stands wherever it timed
+         the kernels the current default runs, so a row added to the default no longer discards the other devices'
+         records of the shape. Left: the three registered tables derived again under them, each on the maintainer's
+         review of its diff (`nvidia-ampere` from records of the card's turbo mode and its driver of 2026-11-20 —
+         the records before that are of another driver and are not mixed with them), and the bf16 shapes that could
+         take a parallel row of the default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at
+         8 rows on the RTX 3080 Ti);
        - where a table's choice at `reorder` is slower than its choice at `exact` (the three devices' GEMV sweep records
          since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured; perf-ledger
          K-113): on `nvidia-ampere` 37 groups at 4 and 8 rows (×1.01 to ×5.06), shapes the two other tables hold
@@ -213,8 +215,9 @@ maintainer's ruling of 2026-11-06).
          sets, which moves those families' case-set versions;
        - the two drafter shapes with a large gain whose row-block baseline was unsteady (`256 × 2048`, `256 × 5120`),
          and a parallel form of the int4 output heads that is not slower at four and eight rows (perf-ledger K-101);
-       - the bf16 output heads, whose general variant ran at two speeds from record to record on the RTX 3080 Ti (the
-         steadiness half of K-113);
+       - the bf16 output heads, whose general variant ran at two speeds from record to record on the RTX 3080 Ti: under
+         the rules of K-113 a candidate there is read against the variant's fastest time, and one that itself ran at
+         two speeds is not adopted (bf16 `262144 × 2560` at one row);
        - a rule for the row-block thread target from the `row-blocks` set; the shared sequential keys whose cases
          disagree (the key has no group length); the packed rows (not measured); the integer and byte-plane GEMV
          tables, which are still in the kernel source;

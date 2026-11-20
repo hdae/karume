@@ -283,10 +283,12 @@
 | quick look (sweeps) △ | 予備計測 | ウォームアップの後にグループの全カーネルを短く 1 回測り、参照（既定の幾何・GEMV のベースラインと既定の選択）と、クラスの目安から既定 ×1.25 以内のカーネルだけを本計測に回す工程 | — | spec/workbench.md |
 | screened (sweep row) △ | 予備計測で外れた行 | 予備計測で本計測に進まなかった行。ラウンドの時間も出力のチェックも持たないので、採用の根拠にならない | — | spec/workbench.md |
 | skipped (GEMV sweep row) △ | 測らなかった行 | 同じ run の M = 1 の結果から採用できないと決まった reorder の候補を、M = 4 / 8 で測らずに残した行 | — | spec/geometry-profiles.md |
-| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る） | — | spec/geometry-profiles.md |
-| steadiness bound (GEMV derivation) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えたグループは、時間の根拠にしない | — | spec/geometry-profiles.md |
+| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る。利得は基準の再現された最速の時間に対して読む） | — | spec/geometry-profiles.md |
+| steadiness bound (GEMV sweep) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えた M = 1 のグループは、掃引が M = 4 / 8 で測らない候補を決める根拠にしない。導出はこの値を読まない | — | glossary.md |
+| reference (GEMV derivation) △ | 基準（のカーネル） | 候補の利得を読む相手。今の既定プロファイルがその形状・行数で走らせるカーネル（出力の語が同じ種類の候補は `exact` の選択、加算順が違う種類の候補は `reorder` の選択）。記録がどの既定の下で作られたかは問わず、その記録が計時していれば使う | 参照（sha256 の参照値と混ぜない） | spec/geometry-profiles.md |
+| repeated reference time (GEMV derivation) △ | 再現された最速の時間 | 基準のカーネルの、与えた記録全体での最速の時間。別の記録が ×1.10 以内の時間を持つときだけ使う。無ければその形状・行数は根拠にならない | — | spec/geometry-profiles.md |
 | group (GEMV evidence) △ | 計測のグループ | 1 つの記録の、1 ケース × 1 行数の計測（要約と行） | — | spec/geometry-profiles.md |
-| current (row, case, group) △ | いまの runtime に合う（行・ケース・グループ） | 指紋が手元の runtime の作るカーネルと一致し、導出の根拠に使える状態 | — | spec/geometry-profiles.md |
+| current (row, case, group) △ | いまの runtime に合う（行・ケース・グループ） | 行はカーネルの指紋が、ケースはケースの指紋が手元の runtime のものと一致する状態。グループはケースが合えば合う（記録が覚えている既定の選択は見ない） | — | spec/geometry-profiles.md |
 | GEMV measurement plan (`--gemv-plan`) △ | GEMV の計測の不足分（`--gemv-plan`） | 手元の記録で導出を完全にするために足りない計測を、workbench のバッチとして書き出したもの | 計画（作業の計画とは別の語） | spec/geometry-profiles.md |
 | identical class / reorder class (GEMV sweep) △ | ビット同一の候補 / reorder の候補 | 掃引の候補を加算順で 2 つに分けたもの。前者はベースラインと語単位で同じ、後者は linear の帯の中で加算順が違う | — | spec/geometry-profiles.md |
 | rounding-error bound (E) | 丸め誤差の上界 | 100 µs 丸めが既定比に与える相対誤差の上界 | — | ADR 0117 決定 3 |

@@ -630,7 +630,9 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   pipeline object: a fresh pipeline from the same WGSL runs at normal speed. Not seen on the RTX 5070 Ti. The mechanism
   is open; the display was detached from the card on 2026-11-19 to see whether it stops (no result yet). The sequential
   GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
-  §6), which makes GEMV sweep groups unsteady (perf-ledger K-113).
+  §6), which spreads the rounds of a GEMV sweep's baseline — in the turbo mode too (216 of 690 groups of two `full`
+  records of 2026-11-20 beyond ×1.25), so it is not the thermal throttling below; the derivation reads a reference at its fastest time
+  over the records for that reason (perf-ledger K-113).
 - **Clock changes under load** (thermal throttling identified 2026-11-17; mitigated 2026-11-20 by switching the card
   from its quiet mode to its turbo mode): in the quiet mode the card ran at 77–96 °C under long or shared load with its
   thermal slowdown flag set, and a long run after a quiet spell was slower than the same run warm. In the turbo mode
