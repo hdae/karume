@@ -631,8 +631,13 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   is open; the display was detached from the card on 2026-11-19 to see whether it stops (no result yet). The sequential
   GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
   §6), which makes GEMV sweep groups unsteady (perf-ledger K-113).
-- **Thermal throttling** (identified 2026-11-17, not mitigated): under long or shared load the card runs at 77–96 °C
-  with its thermal slowdown flag set, and a long run after a quiet spell is slower than the same run warm.
+- **Clock changes under load** (thermal throttling identified 2026-11-17; mitigated 2026-11-20 by switching the card
+  from its quiet mode to its turbo mode): in the quiet mode the card ran at 77–96 °C under long or shared load with its
+  thermal slowdown flag set, and a long run after a quiet spell was slower than the same run warm. In the turbo mode
+  the same GEMV sweep (three cases, 10 rounds) reads the flag in 0.7% and 2.6% of the samples of two runs, against
+  79%, and peaks at 78 °C, against 95 °C; a gap-free geometry sweep of 15 minutes at about 300 W levels at 79–81 °C
+  with the flag in 0–6% of a minute's samples. What is left is the power cap: at full load its flag is set in about
+  nine samples of ten and the SM clock still moves between 1,305 and 1,920 MHz. Its effect on timings is not measured.
 - Impact: wall-clock and per-dispatch numbers on this machine, and the sweep records the device tables are derived
-  from. Outputs are not affected. Compare arms interleaved in one process, at the same thermal state, and read a
-  median beside a minimum.
+  from. Outputs are not affected. Compare arms interleaved in one process, and read a median beside a minimum. Records
+  made before 2026-11-20 were taken in the quiet mode.
