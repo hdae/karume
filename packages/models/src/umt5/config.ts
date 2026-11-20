@@ -54,7 +54,7 @@ export const UMT5_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   "umt5-xxl": {
     repo: "hdae/karume-umt5-xxl",
-    revision: "c66a8db12e005ba37027f2afa5b15efee4a681a7",
+    revision: "e8452300ee94d82f81f2d76ac7bbfd1d0dcd0b41",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

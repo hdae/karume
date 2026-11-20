@@ -61,11 +61,11 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   gemma4: {
     repo: "hdae/karume-gemma4",
-    revision: "a3016952bb63cd4665dfbe68ade9cbac5d2092e8",
+    revision: "e4c1690dd03869fb883023c89562185b73c239de",
   },
   "gemma4-qat": {
     repo: "hdae/karume-gemma4-qat",
-    revision: "1c6349e9a8b618c15adcffb559b7683c7e27e939",
+    revision: "fa62b8007ed3dfd3113ebd513606e0cd5e65f527",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
@@ -93,7 +93,7 @@ export const SOURCES = {
 export const QAT_MOBILE_SOURCES = {
   "gemma4-qat-mobile": {
     repo: "hdae/karume-gemma4-qat-mobile",
-    revision: "d4685bf2ba3026115cc3dec5459e82f9fe6ded98",
+    revision: "4ad3cbb04de5f0af8d65d1245d7fd4d377a1ac77",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

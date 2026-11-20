@@ -75,7 +75,7 @@ export const WAN_TI2V_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   "wan2.2": {
     repo: "hdae/karume-wan2.2",
-    revision: "fe8e3302b1b726cbddca21a9e414547173d56444",
+    revision: "3e1eb7ff9528c07fd1d6468347e8a648f23191d5",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

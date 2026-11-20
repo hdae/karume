@@ -87,7 +87,7 @@ export const SIGLIP2_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   siglip2: {
     repo: "hdae/karume-siglip2",
-    revision: "71077b1810e42e9a1a25d80ee0f43c75db5d3b23",
+    revision: "3009c57cc697509f84e660f19cab473c55f44701",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

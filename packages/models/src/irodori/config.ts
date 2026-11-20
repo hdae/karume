@@ -96,19 +96,19 @@ export const IRODORI_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   "irodori-v4-small": {
     repo: "hdae/karume-irodori-v4-small",
-    revision: "b90ab65f03c0198eb1561a83c6afd0624418af0d",
+    revision: "501239954b205be819a6d3692b4bdad6938d7c90",
   },
   "irodori-v4.1-small": {
     repo: "hdae/karume-irodori-v4.1-small",
-    revision: "8b54ca335c1ff16621ab5645fbf579ce2ec12ce4",
+    revision: "925d6782b006f930daab609b41b5f3c58543acbc",
   },
   "irodori-v4.1-small-mf": {
     repo: "hdae/karume-irodori-v4.1-small-mf",
-    revision: "fc4ba31e2f9ea5bc03564758fc98a17805216ace",
+    revision: "564014b4832c0ab7400b8821c952e56cdfd72758",
   },
   "irodori-v4-large": {
     repo: "hdae/karume-irodori-v4-large",
-    revision: "63ff6cf0f120f091a65e849bdaa2133004886c3c",
+    revision: "f3dd92f596dcad10d450a712c0872380f8b43b3c",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
