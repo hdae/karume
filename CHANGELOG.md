@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-20
+
 ### Added
 
 - Two packages published on JSR from this release, in lockstep with the others: `@karume/safetensors` (a safetensors
@@ -151,7 +153,7 @@ measurements in `docs/research/`.
   attention runs its parallel reductions with the row statistics folded into PV. Its tokens can differ from those of
   `bf16`, which stays the default and keeps the reference summation order. A decode token took ×0.51 to ×0.78 of
   `bf16`'s time on an RTX 3080 Ti and an RTX 5070 Ti and ×0.93 to ×0.95 on an Apple M2 (E2B and E4B, without E2B's
-  drafter; with it, not measured). The recipe and the local mirror carry it; the published repository does not yet.
+  drafter; with it, not measured). `karume-gemma4` carries it from this release.
 
 ### Changed
 
@@ -211,7 +213,7 @@ measurements in `docs/research/`.
     (16 lanes); every other row is the default's.
 
   Each row of a table's own met the derivation's ×1.10 over the default's choice in every record that is evidence.
-  Of regular Gemma 4's presets only `bf16-fast` (above; not published yet) declares linear at `reorder`, so only
+  Of regular Gemma 4's presets only `bf16-fast` (above) declares linear at `reorder`, so only
   its Sessions run the bf16 rows. On an RTX 5070 Ti in Chrome, with the choices of `nvidia-blackwell` before its
   derivation from 82 records, a decode token of QAT 12B `i4-fast` takes 15.3 ms in place of 18.9 ms with the
   default's choices (E2B and E4B by 1 to 3 %, which the measurement does not resolve). With the tables as they are
@@ -351,7 +353,8 @@ measurements in `docs/research/`.
   manifest is published again as `karume/6` (with its card). Most repositories keep their weights; `karume-anima` /
   `karume-anima-extra` gain `name-map.json` and move to bf16 (below), and the three Gemma 4 repositories declare
   `numerics` in place of the removed session keys (`karume-gemma4` gains `bf16-fast`, `karume-gemma4-qat` loses
-  `i4-gemvpar`). Published versions pin their repositories' revisions and keep working.
+  `i4-gemvpar`). Every `SOURCES` entry of `@karume/models` moves to the new main of its repository. Published
+  versions pin their repositories' revisions and keep working.
 - Exporter: `karume dist` writes `karume/6`. A recipe declares its family's name map (`Pipeline.name_map`); the assembly
   checks its format tag, copies it to `name-map.json` at the repository root and references it. `karume upgrade
   <repository directory> [--name-map <file>]` rewrites a `karume/5` repository's manifest in place (the same content,
@@ -2915,7 +2918,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/hdae/karume/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/hdae/karume/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/hdae/karume/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/hdae/karume/compare/v0.19.0...v0.20.0

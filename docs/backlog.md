@@ -7,61 +7,24 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — the 0.23.0 release (not released; every outward step on the maintainer's explicit OK for that step)
+## now — the 0.23.0 release (distributions published and pinned 2026-11-20; the JSR publish is left)
 
-The release follows [release-runbook](release-runbook.md) from the top: the order of its §0 (version bump → rebuild of
-the distributions → HF upload → baking the pins → JSR publish) and, this once, its section "The release after the
-manifest moved to `karume/6`". JSR takes five packages from this release: `@karume/runtime`, `@karume/hub`,
-`@karume/safetensors`, `@karume/convert` and `@karume/models` (the maintainer's ruling of 2026-11-19). What it ships is
-the CHANGELOG's `[Unreleased]`. Left, in the runbook's order:
+The release follows [release-runbook](release-runbook.md): the version is bumped, the checks ran, every distribution
+repository is published again as `karume/6` and pinned, and the CHANGELOG has its `[0.23.0]` section. JSR takes five
+packages from this release: `@karume/runtime`, `@karume/hub`, `@karume/safetensors`, `@karume/convert` and
+`@karume/models` (the maintainer's ruling of 2026-11-19). Left, in the runbook's order, each outward step on the
+maintainer's explicit OK:
 
-1. **Bump** (runbook §4, cut before §1 to §3): the lockstep version of the five packages and their `^` pins, then the
-   venv sync.
-2. **Checks** (runbook §1): every item there, among them the full verify, the workbench's `kernel-check` entry on each
-   GPU at hand (MUST on Dawn / Vulkan on the RTX 3080 Ti and on Chrome / D3D12 on the RTX 5070 Ti) and the licence check
-   (the `release` section below); and a read-through of the CHANGELOG's `[Unreleased]`.
-3. **Distributions**, built again after the bump; each upload on the maintainer's go-ahead (runbook §0 and §2):
-   - every published repository's manifest and card again as `karume/6`; the Gemma 4 QAT pair with the presets that
-     declare `numerics` (`karume-gemma4-qat` without `i4-gemvpar`; both local mirrors are regenerated);
-   - `karume-anima` uploaded with its f16 files deleted from `main`, then `karume-anima-extra` built with
-     `--resolve-refs hf` against the new main and uploaded with its f16 files deleted (the sizes are in ADR
-     [0154](decisions/0154-anima-bf16-preset-names.md)) — the bf16 builds of "Keep bf16 where the upstream is bf16"
-     (`later`);
-   - `karume-gemma4` with the `bf16-fast` preset: manifest and card only, the containers are the published ones;
-   - the Irodori repositories with their f16 containers exported again (the first item below);
-   - `karume-wan2.2` built again against `karume-umt5-xxl`'s new main (the maintainer's rulings of 2026-11-20). This
-     machine holds no Wan or umT5 series, so the series folders are laid out from the published containers of the two
-     local mirrors and the unchanged build reads them (`dist.py --pipeline wan-ti2v --series … --resolve-refs hf`):
-     the containers stay the published bytes and the build keeps its checks against the Hub.
-4. **Pins** (runbook §3): every `SOURCES` entry, Anima's included.
-5. **JSR** (runbook §4): before the first publish the maintainer creates `@karume/convert` and `@karume/safetensors` in
-   the `@karume` scope and links this repository (the tokenless publish needs it); the publish runs hub, runtime and
-   safetensors, then convert, then models.
-6. **Published-smoke** (runbook §5).
+1. **Push and JSR** (runbook §4): the maintainer pushes; before the first publish the maintainer creates
+   `@karume/convert` and `@karume/safetensors` in the `@karume` scope and links this repository (the tokenless publish
+   needs it); the publish runs hub, runtime and safetensors, then convert, then models.
+2. **Published-smoke** and the docs sync (runbook §5).
+3. After the publication: the `IRODORI_REEXPORTED` entry of `tools/export-recipes/irodori/distribution.py` goes — the
+   f16 text backbone of v4-Small that was exported again is then taken as published, at the same digest.
 
-- **Export again the f16 containers made under the earlier rounding rule (filed 2026-11-18; the maintainer's ruling: with
-  the next release (0.23.0), in one pass)**. `round_weights_to_f16` now rounds only what the checkpoint carries, so a
-  non-persistent buffer computed at init (RoPE's `inv_freq`, T5Gemma2's `embed_scale`) keeps its f32 value; the
-  distributed f16 containers below were exported while it rounded those buffers too, and they keep the earlier constants
-  until they are exported again. On the small Irodori model the maintainer heard no difference between the two
-  (2026-11-18). Anima's f16 containers leave the distribution instead (ADR
-  [0154](decisions/0154-anima-bf16-preset-names.md)), so the item has no Anima part.
-  - Irodori v4-Small: the f16 container of its text backbone (measured: the new graph is the one the f32 and i8 series
-    already carry), which v4.1-Small and v4.1-Small-MF reference and do not hold. The sha256 rows of v4-Small and
-    v4.1-Small-MF are of the `f32` preset and do not move; v4.1-Small has none. The f16 full-loop goldens of v4-Small
-    and v4.1-Small-MF in the test-asset dataset were baked under the earlier rule and are baked again with it.
-  - Irodori v4-Large has no part: its f16 text backbone, exported again on 2026-11-19, is byte-identical to the
-    distributed one in all ten parts (the recipe already kept T5Gemma2's buffers at f32 when it was exported), so its
-    three `f16` sha256 rows stay.
-  - Done 2026-11-20: the series is exported again and its f16 goldens baked again, and the recipe names the role in
-    `IRODORI_REEXPORTED` with the new part 0 pinned (the maintainer's ruling of 2026-11-20). Left: the mirrors after
-    the bump, the dataset and the uploads below; once the container is published the `IRODORI_REEXPORTED` entry goes.
-  - What it touches: the export, v4-Small's local mirror and the manifests that reference it, the goldens named above
-    (a dataset upload and its pin) and the Hugging Face repositories (each on the maintainer's go-ahead).
-- **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; the label and the descriptions, the speed sentences included,
-  reviewed by the maintainer on 2026-11-19): besides its publication above, the sha256 rows `e2b/bf16-fast` and
-  `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on the maintainer's OK;
-  whether before the release is not ruled). E2B's speculative decode is in the first item of `later`.
+- **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
+  `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
+  the maintainer's OK). E2B's speculative decode is in the first item of `later`.
 - **Irodori**: v4.1-small-mf has no self A/B band for its `i8-a8` (ADR [0150](decisions/0150-irodori-meanflow.md)), and
   v4-Large's Playground page has not been run in a browser (ADR [0151](decisions/0151-irodori-v4-large.md)). Neither
   blocks the release; their order is not ruled.
@@ -291,10 +254,9 @@ maintainer's ruling of 2026-11-06).
   and the RTX 3080 Ti's sha256 rows (CHANGELOG, Unreleased); the maintainer approved the default preset's images, the
   notice text and the preset labels and descriptions on 2026-11-19. The numerics check of bf16 storage computed in f16
   (`packages/runtime/tests/gpu_f16_compute_test.ts`) has not run on D3D12 or Metal.
-  - Left, in order (each step on the maintainer's go-ahead): the publication of Anima's two repositories as the bf16
-    builds, with the 0.23.0 release (`now`); then the unpublished 2.9B Anima distribution takes the new names before its
-    first publication, which comes after the 0.23.0 release (the maintainer's ruling of 2026-11-19; its order among the
-    post-release items is not ruled).
+  - Left: the unpublished 2.9B Anima distribution takes the new names before its first publication, which comes after
+    the 0.23.0 release (the maintainer's ruling of 2026-11-19; its order among the post-release items is not ruled).
+    Anima's two repositories were published as the bf16 builds on 2026-11-20.
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.

@@ -2310,9 +2310,9 @@ is rejected by hub as "unsupported major" (`packages/hub/src/manifest.ts`), and 
 fail with "unknown magic" (`packages/runtime/src/format/container/header.ts`). The processing that reads old formats lives only in the migration CLI
 (`uv run karume migrate` of `tools/exporter` — positional arguments per component, or the whole-repository mode of `--manifest`),
 which only reads its input and does not delete it. Old package versions pin old revisions (40-digit SHA), so as long as the old versions are used,
-the old distribution form keeps working. The published repositories hold `karume/5` manifests (the form since 0.13.0), which the released packages read; the
-0.23.0 release publishes every manifest again as `karume/6` and moves the pins, so until then the pins of the
-unreleased packages name revisions this hub refuses.
+the old distribution form keeps working. The published repositories held `karume/5` manifests from 0.13.0 to 0.22.0; the
+0.23.0 release published every manifest again as `karume/6` and moved the pins, so the packages up to 0.22.0 keep
+reading the revisions they pin and the packages from 0.23.0 read the new ones.
 
 ## hub: the cache is not isolated by credential (by-design — ruling of 2026-08-28)
 
