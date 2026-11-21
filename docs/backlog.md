@@ -57,7 +57,7 @@ maintainer's ruling of 2026-11-06).
     (perf-ledger K-113; built 2026-11-20; the registered tables derived again under them 2026-11-21), and the bf16 shapes
     that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
     publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
-    and EmbeddingGemma 2, which has no item or design yet.
+    and EmbeddingGemma 2 ("EmbeddingGemma 2" below).
   - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
     Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
     parallel rows are faster than the default's but its sequential choices are not, and part of them were not compared
@@ -86,6 +86,17 @@ maintainer's ruling of 2026-11-06).
     - `tools/lang/check-doc-links.ts` accepts an absolute filesystem path as a link target when the file exists on the
       machine that runs it; such a link resolves nowhere else (CI went red on one, 2026-11-19). Proposed: reject
       absolute targets.
+  - **Found while adding EmbeddingGemma 2 (filed 2026-11-21; none approved yet)**:
+    - Two cases of `tools/export-recipes/irodori/tests/test_tokenizer_ref.py` (`TestTableReproducesSplitter`) end
+      as errors, not as explicit skips, in an environment without `tokenizers` that holds the assets: the fixture
+      helper `_unigram_tokenizer` imports `tokenizers` without `importorskip`. `uv run --locked --isolated pytest`
+      exits 1 on the development machine because of them; CI skips them (it has no assets).
+    - The Families table of `tools/export-recipes/README.md` and `docs/assets-layout.md` have no row for the
+      `embeddinggemma2` recipe and its upstream snapshot under `inputs/embeddinggemma2/`.
+    - The attention hook of the Gemma 4 recipe refuses `attention_mask=None`, so the EmbeddingGemma 2 recipe carries
+      a bidirectional hook of its own; one shared helper for the Gemma-line recipes is not built.
+    - The comment on the tolerance of `packages/e2e/tests/e2e_embeddinggemma_test.ts` says its relative term is
+      "about 1/4 of atol"; it is 2.5 times atol.
 
 - **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
   [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted; the maintainer confirmed this
@@ -641,6 +652,19 @@ maintainer's ruling of 2026-11-06).
   the 0.23.0 release (the maintainer's ruling of 2026-11-19; the first item of `later`). The tokenizer is shared with
   Gemma 4 and its assets are compiled separately (ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The
   wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md).
+- **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
+  2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
+  recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
+  token length up to 2,048, the opt-in comparison with sentence-transformers), the series and its e2e in the lane
+  `models:embeddinggemma2`. Left, in order:
+  1. The TypeScript pipeline (one family `embeddinggemma` for both models) and the distribution recipe. Ruled
+     2026-11-21: a text holding an image, audio or video placeholder id is refused (the upstream composite model
+     replaces such an id with the pad id; sentence-transformers refuses the text).
+  2. The model's 8K context: the folded band constant stops near 2,896 tokens (the container's 32 MiB const block) and
+     a `[T, T]` buffer passes the default 128 MiB binding near 5,792, and at 2,048 tokens the plan backing is 252 MiB
+     against the default budget of 256 MiB. The candidate is a column range the attention kernel checks, which would
+     also carry key padding and batch>1 for both models; it needs a decision record and is not designed.
+  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
