@@ -6,7 +6,8 @@
  * 2. Through a Session: `static_quantize → linear (i2) → static_quantize` at a measured decode shape
  *    (M = 1). With the option on, the integer key runs (with the SRQ epilogue when the linear→SRQ
  *    fusion takes the window, plain otherwise) and the output words equal `referenceIntegerGemv`;
- *    with it off, the parallel GEMV's key runs and no integer key does.
+ *    with it off, the parallel GEMV's key of the shape's row in the table the adapter selects runs
+ *    and no integer key does.
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
@@ -15,8 +16,12 @@ import { describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { integerGemvKey, type IntegerGemvVariant } from "../src/kernels/linear-gemv-integer.ts";
 import {
+  type LinearGemvChoices,
+  linearGemvParallelEligible,
   linearGemvParallelKey,
   linearGemvParallelPackedKey,
+  linearGemvParallelStagedKey,
+  linearGemvStagedEligible,
   linearGemvStaticQuantizeKey,
   linearGemvStaticQuantizePackedKey,
 } from "../src/kernels/linear-gemv.ts";
@@ -24,6 +29,7 @@ import { STATIC_QUANTIZE_PACKED_KEY } from "../src/kernels/static-quantize.ts";
 import { referenceIntegerGemv } from "../src/reference/linear-gemv-integer.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { createSessionFromContainer, DISABLED_FUSION_RULES } from "../src/runtime/executor.ts";
+import { sessionGeometryProfile } from "../src/runtime/geometry-selection.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
@@ -63,8 +69,11 @@ type Shape = {
   readonly n: number;
   readonly k: number;
   readonly variant: IntegerGemvVariant;
-  /** The parallel GEMV's key of the shape with the option off (fused with the output SRQ or not). */
-  readonly parallelKey: (fused: boolean) => string;
+  /**
+   * The parallel GEMV's key of the shape with the option off (fused with the output SRQ or not),
+   * under the GEMV choices of the table the adapter selects.
+   */
+  readonly parallelKey: (fused: boolean, gemv: LinearGemvChoices) => string;
 };
 
 /** The measured shapes (E2B QAT, the KV-shared layers' MLP). */
@@ -85,11 +94,17 @@ const SHAPES: readonly Shape[] = [
     n: 12288,
     k: 1536,
     variant: { weight: { storage: "i2" }, lanes: 8, rows: 4 },
-    // ... and not this one: without the option its SRQ stays f32.
-    parallelKey: (fused) =>
-      fused
-        ? linearGemvStaticQuantizeKey("i2", undefined, 2)
-        : linearGemvParallelKey("i2", undefined, 2),
+    // ... and not this one: without the option its SRQ stays f32. Its lanes and staged flag are the
+    // row's of the adapter's table (the default profile's 2 lanes, plain; the RTX 3080 Ti's 4,
+    // staged); the fused epilogue has no staged form.
+    parallelKey: (fused, gemv) => {
+      const lanes = linearGemvParallelEligible(gemv, "i2", 1, 12288, 1536);
+      if (lanes === undefined) throw new Error("the table has no parallel row for i2 12288×1536");
+      if (fused) return linearGemvStaticQuantizeKey("i2", undefined, lanes);
+      return linearGemvStagedEligible(gemv, "i2", 1, 12288, 1536) === undefined
+        ? linearGemvParallelKey("i2", undefined, lanes)
+        : linearGemvParallelStagedKey("i2", undefined, lanes);
+    },
   },
 ];
 
@@ -171,12 +186,19 @@ const wordsOf = (data: ArrayBufferView<ArrayBuffer>): Uint32Array<ArrayBuffer> =
 const GEMV_INTEGER_FAMILY = "linear_gemv_integer";
 const isInteger = (key: string): boolean => key.split(":", 1)[0] === GEMV_INTEGER_FAMILY;
 
-/** Runs the fixture twice (the second run hits the prepared plan); returns the words and census. */
+/**
+ * Runs the fixture twice (the second run hits the prepared plan); returns the words, the census and
+ * the GEMV choices the Session ran with.
+ */
 const runTwice = async (
   fixture: Fixture,
   options: SessionOptions,
   where: string,
-): Promise<{ readonly words: Uint32Array<ArrayBuffer>; readonly census: readonly CensusRow[] }> => {
+): Promise<{
+  readonly words: Uint32Array<ArrayBuffer>;
+  readonly census: readonly CensusRow[];
+  readonly gemv: LinearGemvChoices;
+}> => {
   const gpu = await acquireGpu();
   try {
     const session = await createSessionFromContainer(gpu, fixture.model, GRAPH_NAME, options);
@@ -194,6 +216,7 @@ const runTwice = async (
       return {
         words: first,
         census: requireCensus(session.diagnostics().lastRunPipelines, where),
+        gemv: sessionGeometryProfile(gpu).linearGemv,
       };
     } finally {
       await session.dispose();
@@ -232,7 +255,7 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
           : { [DISABLED_FUSION_RULES]: ["linearStaticQuantize"] };
         it(`runs the integer key ${form} and writes the mirror's words`, async () => {
           const where = `${shape.name} ${form}`;
-          const { words, census } = await runTwice(
+          const { words, census, gemv } = await runTwice(
             fixtureFor(),
             {
               numerics: { ops: { linear: "reorder" } },
@@ -244,13 +267,13 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
           );
           assertEquals(countDispatches(census, integerGemvKey(shape.variant, fused)), 1, where);
           assertEquals(countDispatches(census, STATIC_QUANTIZE_PACKED_KEY), 1, where);
-          assertEquals(countDispatches(census, shape.parallelKey(fused)), 0, where);
+          assertEquals(countDispatches(census, shape.parallelKey(fused, gemv)), 0, where);
           assertEquals(words, expectedWords(shape, fixtureFor()), where);
         });
 
         it(`runs the parallel GEMV's key ${form} with the option off`, async () => {
           const where = `${shape.name} ${form} (option off)`;
-          const { census } = await runTwice(
+          const { census, gemv } = await runTwice(
             fixtureFor(),
             {
               numerics: { ops: { linear: "reorder" } },
@@ -259,7 +282,7 @@ describe.skipIf(!GPU_AVAILABLE)("integerGemv through a Session (real GPU)", () =
             },
             where,
           );
-          assertEquals(countDispatches(census, shape.parallelKey(fused)), 1, where);
+          assertEquals(countDispatches(census, shape.parallelKey(fused, gemv)), 1, where);
           assertEquals(countDispatches(census, isInteger), 0, where);
         });
       }

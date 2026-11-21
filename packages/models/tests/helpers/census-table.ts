@@ -329,23 +329,29 @@ const GEMMA4_REGULAR_MIRROR = "karume-gemma4";
 
 /**
  * Pipeline `gemma4` rows of the regular line's mirror (`models/karume-gemma4`, bf16 — its preset
- * `bf16-fast` declares `level: "reorder"`). Derived 2026-11-19 from the mirror's E2B / E4B `model`
- * and E2B `drafter` part 0 with the procedure of the file header, on the parallel rows of the table
- * the development machine's RTX 3080 Ti selects (`nvidia-ampere`: the default profile's 17 bf16
- * rows and its own bf16 `2560 × 256`), where the real-GPU runs compare them with the dispatched
- * kernels (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows, and
- * the default profile's plan with that table's).
+ * `bf16-fast` declares `level: "reorder"`). Derived from the mirror's E2B / E4B `model` and E2B
+ * `drafter` part 0 with the procedure of the file header, on the parallel rows of the table the
+ * development machine's RTX 3080 Ti selects (`nvidia-ampere` as derived 2026-11-21: the default
+ * profile's 17 bf16 rows, its own bf16 `1536 × 2048` and `2560 × 256`, and int8 rows on five shapes
+ * of the drafter), where the real-GPU runs compare them with the dispatched kernels
+ * (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows, and the default
+ * profile's plan with that table's).
  *
- * E2B (product graph): of the 277 bf16 linears, 207 take a parallel GEMV row at M ≤ 8; the other 70
- * (`12288 × 1536` 40, `1536 × 2048` 28, the output head 262144×1536 and `8960 × 1536`) have no
- * row and keep the sequential GEMV at M = 1 and the GEMM above it.
+ * E2B (product graph): of the 277 bf16 linears, 235 take a parallel GEMV row at M ≤ 8 — the 207 the
+ * default profile's rows reach and the 28 `1536 × 2048` of `nvidia-ampere`'s own row; the other 42
+ * (`12288 × 1536` 40, the output head 262144×1536 and `8960 × 1536`) have no row and keep the
+ * sequential GEMV at M = 1 and the GEMM above it. Under the default profile `1536 × 2048` has no row
+ * either (207 / 70).
  */
-const GEMMA4_BF16_E2B_GEMV = { variant: 207, reference: 70 } as const;
+const GEMMA4_BF16_E2B_GEMV = { variant: 235, reference: 42 } as const;
 /**
- * The regular E2B int8 drafter: of its 68 linears, the two `post_projection` 1536×256 take a
- * parallel GEMV row; the other 66 have none in the default profile.
+ * The regular E2B int8 drafter: of its 68 linears, 65 take a parallel GEMV row — the two
+ * `post_projection` 1536×256 of the default profile and the 63 that `nvidia-ampere`'s own rows reach
+ * (`2048 × 256` 27, `256 × 2048` 15, `1024 × 256` 9, `256 × 1024` 9 and `256 × 3072` 3); the
+ * other 3 (the output head 262144×256) have none. Under the default profile only the two
+ * `post_projection` have a row (2 / 66).
  */
-const GEMMA4_BF16_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
+const GEMMA4_BF16_E2B_DRAFTER_GEMV = { variant: 65, reference: 3 } as const;
 /**
  * E4B (product graph): of the 344 bf16 linears, 258 take a parallel GEMV row at M ≤ 8 — the 216
  * the default profile's rows reach and the 42 `2560 × 256` of `nvidia-ampere`'s own row; the other
@@ -368,13 +374,16 @@ const GEMMA4_BF16_E4B_GEMV = { variant: 258, reference: 86 } as const;
  */
 const GEMMA4_E2B_GEMV = { variant: 276, reference: 1 } as const;
 /**
- * The E2B QAT drafter: of its 68 linears (all i4 g32), 14 take a parallel GEMV row —
- * `post_projection` 1536×256 (twice, the model's per_layer_projection row) and, since the drafter
- * rows of 2026-11-18, `pre_projection` 256×3072 (3) and the sliding o 256×1024 (9). The other 54
- * (256×2048 15, {1024,2048}×256 36, lm_head 262144×256 3) fall to the sequential GEMV: the GEMV
- * sweep's records give them no row (docs/research/2026-11-18-gemma4-gemv-census.md §4).
+ * The E2B QAT drafter: of its 68 linears (all i4 g32), 56 take a parallel GEMV row on the table the
+ * development machine's RTX 3080 Ti selects (`nvidia-ampere` as derived 2026-11-21) —
+ * `post_projection` 1536×256 (twice, the model's per_layer_projection row), `pre_projection`
+ * 256×3072 (3) and the sliding o 256×1024 (9) of the default profile, and 2048×256 (27) and 256×2048
+ * (15) of that table's own rows. The other 12 (1024×256 9, lm_head 262144×256 3) fall to the
+ * sequential GEMV. Under the default profile 256×2048 and 2048×256 have no row either (14 / 54: the
+ * GEMV sweep's records of 2026-11-18 gave them none — docs/research/2026-11-18-gemma4-gemv-census.md
+ * §4).
  */
-const GEMMA4_E2B_DRAFTER_GEMV = { variant: 14, reference: 54 } as const;
+const GEMMA4_E2B_DRAFTER_GEMV = { variant: 56, reference: 12 } as const;
 /**
  * gemma4-qat E2B (product graph): of the 277 linears, 275 take the parallel GEMV (i2 60 + i4 145 +
  * i8 70). The other 2 fall to the sequential path — the i2 lm_head 262144×1536 (a shape the
@@ -449,12 +458,13 @@ const GEMMA4_E4B_GEMV = { variant: 343, reference: 1 } as const;
 const GEMMA4_E4B_RMS_ADD = { variant: 127 } as const;
 /**
  * The E4B QAT drafter (the regular E4B shipped none, so these columns are new): of its 68 linears
- * (all i4 g32), 11 take a parallel GEMV row — `post_projection` 2560×256 (twice) and, since the
- * drafter rows of 2026-11-18, the sliding o 256×1024 (9). The other 57 (256×{2048,5120} 18,
- * {1024,2048}×256 36, lm_head 262144×256 3) fall to the sequential GEMV. RMS→add folds 24 times and
- * its 12 readonly attention nodes run ①' / ③' once each, as E2B's drafter.
+ * (all i4 g32), 56 take a parallel GEMV row on `nvidia-ampere` (as the E2B drafter's) —
+ * `post_projection` 2560×256 (twice) and the sliding o 256×1024 (9) of the default profile, and
+ * 2048×256 (27), 256×2048 (15) and 256×5120 (3) of that table's own rows. The other 12 (1024×256 9,
+ * lm_head 262144×256 3) fall to the sequential GEMV; under the default profile 11 / 57. RMS→add folds
+ * 24 times and its 12 readonly attention nodes run ①' / ③' once each, as E2B's drafter.
  */
-const GEMMA4_E4B_DRAFTER_GEMV = { variant: 11, reference: 57 } as const;
+const GEMMA4_E4B_DRAFTER_GEMV = { variant: 56, reference: 12 } as const;
 const GEMMA4_E4B_DRAFTER_RMS_ADD = { variant: 24 } as const;
 
 const E2B = ["e2b"] as const;

@@ -54,7 +54,7 @@ maintainer's ruling of 2026-11-06).
 
 - **After the 0.23.0 release (filed together on 2026-11-19; the order among them is not ruled)**:
   - Put after the release by the maintainer's rulings of 2026-11-19: the GEMV derivation's evidence rules
-    (perf-ledger K-113; built 2026-11-20), after which the registered tables are derived again, and the bf16 shapes
+    (perf-ledger K-113; built 2026-11-20; the registered tables derived again under them 2026-11-21), and the bf16 shapes
     that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
     publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
     and EmbeddingGemma 2, which has no item or design yet.
@@ -148,7 +148,8 @@ maintainer's ruling of 2026-11-06).
        device's own best stays in its table. The ruling answered the RTX 5070 Ti, on which 51 of the default's 66
        parallel rows then derived to another choice (a median ×1.79 per dispatch — counted only here). The default's 22
        bf16 sequential exceptions (2026-11-18) and 17 bf16 parallel rows (2026-11-19) follow it by hand, and the three
-       device tables are derived from their records against the current default (2026-11-19). Open:
+       device tables are derived from their records against the current default (2026-11-19, and again under K-113's
+       rules on 2026-11-21). Open:
        - the rule itself (to be proposed with the three devices' overlap in numbers), the generator deriving the default
          from records of several adapters, and GEMV sweep records of the devices collaborators measure. The rule has to
          say what removes a row of the default from a device's table: the derivation judges a candidate against the
@@ -156,11 +157,12 @@ maintainer's ruling of 2026-11-06).
          general variant ×1.10 faster in every group, and a device on which the row is slower by less keeps it;
        - the derivation's evidence rules are built (perf-ledger K-113, 2026-11-20): a record stands wherever it timed
          the kernels the current default runs, so a row added to the default no longer discards the other devices'
-         records of the shape. Left: the three registered tables derived again under them, each on the maintainer's
-         review of its diff (`nvidia-ampere` from records of the card's turbo mode and its driver of 2026-11-20 —
-         the records before that are of another driver and are not mixed with them), and the bf16 shapes that could
-         take a parallel row of the default (`2560 × 256` and `1536 × 2048`; `8960 × 1536` is slower than the GEMM at
-         8 rows on the RTX 3080 Ti);
+         records of the shape. The three registered tables are derived again under them (2026-11-21, on the
+         maintainer's review of their diffs; `nvidia-ampere` from 24 records of the card's turbo mode and its driver of
+         2026-11-20 — the records before that are of another driver and are not mixed with them). Left: the
+         development machine's sha256 rows that follow its new choices, re-recorded on the maintainer's approval of
+         their list, and the bf16 shapes that could take a parallel row of the default (`2560 × 256` and
+         `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080 Ti);
        - where a table's choice at `reorder` is slower than its choice at `exact` (the three devices' GEMV sweep records
          since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured; perf-ledger
          K-113): on `nvidia-ampere` 37 groups at 4 and 8 rows (×1.01 to ×5.06), shapes the two other tables hold

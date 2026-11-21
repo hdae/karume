@@ -9,7 +9,9 @@
  * sequential GEMV at one row and the GEMM above it. This pins, on the mirror's actual graphs and
  * with the same predicate as the recipe builder, which linear lands where under the default profile;
  * which lands elsewhere under `nvidia-ampere`, the table of the development machine's RTX 3080 Ti
- * (its own parallel row, bf16 `2560 × 256`); and that the totals under that table are the census
+ * (its rows on bf16 `1536 × 2048` and on the int8 shapes of the E2B drafter, which the default has
+ * none for, and other lanes on bf16 `512 × 1536` and `2560 × 256`); and that the totals under that
+ * table are the census
  * table's `karume-gemma4` rows (`models/tests/helpers/census-table.ts`), which the real-GPU runs on
  * that machine compare with the dispatched kernels.
  *
@@ -175,12 +177,22 @@ const EXPECTED = {
 } as const;
 
 /**
- * Per component: the linears that `nvidia-ampere`'s own parallel row takes off the sequential path
- * of the default profile's fold, `<storage> <n>×<k>` → lanes. The rest of its fold is the default's.
+ * Per component: the linears that `nvidia-ampere` runs elsewhere than the default profile's fold —
+ * a shape the default has no row for, or a row with other lanes —, `<storage> <n>×<k>` → the lanes
+ * of that table's row. The rest of its fold is the default's.
  */
 const AMPERE_MOVED: Record<keyof typeof EXPECTED, Record<string, Record<string, number>>> = {
-  e2b: { model: {}, drafter: {} },
-  e4b: { model: { "bf16 2560×256": 16 } },
+  e2b: {
+    model: { "bf16 1536×2048": 32, "bf16 512×1536": 32 },
+    drafter: {
+      "i8 1024×256": 4,
+      "i8 2048×256": 4,
+      "i8 256×1024": 32,
+      "i8 256×2048": 32,
+      "i8 256×3072": 32,
+    },
+  },
+  e4b: { model: { "bf16 2560×256": 8 } },
 };
 
 /** The default profile's fold with the linears `moved` names on the parallel GEMV at its lanes. */
@@ -192,7 +204,7 @@ const movedFold = (
     Object.fromEntries(
       Object.entries(counts).map(([key, count]) => {
         const shape = key.slice(0, key.lastIndexOf(" "));
-        const lanes = key.endsWith(" sequential") ? moved[shape] : undefined;
+        const lanes = moved[shape];
         return [lanes === undefined ? key : `${shape} l${lanes}`, count];
       }),
     ),

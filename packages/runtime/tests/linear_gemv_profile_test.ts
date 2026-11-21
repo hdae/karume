@@ -70,8 +70,8 @@ const GEMV = DEFAULT_GEOMETRY_PROFILE.linearGemv;
 // (`OLD_DEFAULT_VARIANT`). The per-shape exceptions are the 22 rows added since
 // (`ADDED_SEQUENTIAL_SHAPES`, 2026-11-18, perf-ledger K-112: bf16 linears of regular E2B / E4B that
 // no measured device is slower with). The exceptions one device gains from and another loses with
-// are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES` and `AMPERE_PARALLEL_SHAPES`:
-// `nvidia-ampere`).
+// are rows of that device's table (`AMPERE_SEQUENTIAL_SHAPES`, `AMPERE_CHANGED_PARALLEL_SHAPES` and
+// `AMPERE_PARALLEL_SHAPES`: `nvidia-ampere`).
 // ---------------------------------------------------------------------------
 
 const PINNED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
@@ -347,26 +347,361 @@ const ADDED_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
 
 /**
  * The sequential exceptions `nvidia-ampere` carries after the default profile's (the generator's
- * order: the order of the sweep's case table): what the RTX 3080 Ti's GEMV sweep records adopt and
- * the default profile does not hold — the int4 output heads of the q4_0 QAT E2B / E4B models and
- * bf16 10240 × 2560, which the RTX 5070 Ti is slower with, the drafter shape int4 256 × 2048, and
- * the bf16 output head of regular E4B, 262144 × 2560, which neither the RTX 5070 Ti's nor the Apple
- * M2's records adopt.
+ * order: the order of the sweep's case table): what the RTX 3080 Ti's GEMV sweep records of
+ * 2026-11-20/21 adopt and the default profile does not hold — 37 int4 and 11 int8 shapes of the
+ * Gemma 4 QAT models and their MTP drafters, and two bf16 ones, the output head of regular E2B,
+ * 262144 × 1536, and 10240 × 2560 of regular E4B. The default's 22 are there with the default's
+ * variant: no variant reaches the ×1.10 that replaces one.
  */
 const AMPERE_SEQUENTIAL_SHAPES: readonly LinearGemvShapeVariant[] = [
-  { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 2 } },
+  { storage: "i4", n: 256, k: 1536, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 1536, k: 6144, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 1536, k: 4096, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 12288, k: 1536, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 1536, k: 12288, variant: { cols: 32, unroll: 16 } },
+  { storage: "i8", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
+  { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 1 } },
+  { storage: "i4", n: 256, k: 3072, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 256, k: 1024, variant: { cols: 16, unroll: 16 } },
   { storage: "i4", n: 256, k: 2048, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 256, k: 3072, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 1024, k: 256, variant: { cols: 32, unroll: 16 } },
+  { storage: "i8", n: 256, k: 1024, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 2048, k: 256, variant: { cols: 32, unroll: 16 } },
+  { storage: "i8", n: 256, k: 2048, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 1536, k: 256, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 2048, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 2560, k: 2048, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 2560, k: 10240, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 1024, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 262144, k: 2560, variant: { cols: 16, unroll: 4 } },
   { storage: "i4", n: 262144, k: 2560, variant: { cols: 16, unroll: 2 } },
-  { storage: "bf16", n: 10240, k: 2560, variant: { cols: 16, unroll: 8 } },
-  { storage: "bf16", n: 262144, k: 2560, variant: { cols: 16, unroll: 4 } },
+  { storage: "i4", n: 256, k: 5120, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
+  { storage: "i8", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 4096, k: 3840, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 2048, k: 3840, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 512, k: 3840, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 3840, k: 4096, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 3840, k: 8192, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 262144, k: 3840, variant: { cols: 16, unroll: 2 } },
+  { storage: "i4", n: 1024, k: 7680, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 4096, k: 1024, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 1024, k: 4096, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 8192, k: 1024, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 1024, k: 8192, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 3840, k: 1024, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 262144, k: 1024, variant: { cols: 16, unroll: 8 } },
+  { storage: "i4", n: 2048, k: 2816, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 2112, k: 2816, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 1024, k: 2816, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 128, k: 2816, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 2816, k: 4096, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 2816, k: 8192, variant: { cols: 32, unroll: 16 } },
+  { storage: "i4", n: 2816, k: 2112, variant: { cols: 16, unroll: 16 } },
+  { storage: "i4", n: 262144, k: 2816, variant: { cols: 16, unroll: 1 } },
+  { storage: "bf16", n: 262144, k: 1536, variant: { cols: 16, unroll: 4 } },
+  { storage: "bf16", n: 10240, k: 2560, variant: { cols: 32, unroll: 8 } },
 ];
 
 /**
- * The parallel row `nvidia-ampere` adds after the default profile's: bf16 2560 × 256 of regular
- * E4B, which the default has no row for (the three devices' records adopt three lane counts there).
+ * The default profile's parallel rows that `nvidia-ampere` holds with what those records adopt in
+ * place (the default's order): other lanes, the staged flag or a row block on 37 integer-stored
+ * rows, and bf16 512 × 1536 at 32 lanes in place of 16.
+ */
+const AMPERE_CHANGED_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
+  {
+    storage: "i4",
+    n: 1536,
+    k: 2048,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 1536,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false, rowBlock: 4 },
+  {
+    storage: "i4",
+    n: 2048,
+    k: 1536,
+    group: 512,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 6144,
+    k: 1536,
+    group: 512,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  {
+    storage: "i4",
+    n: 4096,
+    k: 1536,
+    group: 512,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i2",
+    n: 12288,
+    k: 1536,
+    lanes: 4,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 8,
+  },
+  {
+    storage: "i4",
+    n: 2048,
+    k: 2560,
+    group: 32,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 2560,
+    k: 2048,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 2560,
+    group: 32,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false, rowBlock: 4 },
+  {
+    storage: "i4",
+    n: 2048,
+    k: 2560,
+    group: 512,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  { storage: "i4", n: 512, k: 2560, group: 512, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 10240,
+    k: 2560,
+    group: 512,
+    lanes: 8,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  {
+    storage: "i4",
+    n: 4096,
+    k: 2560,
+    group: 512,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 2560,
+    group: 512,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  { storage: "i4", n: 256, k: 3072, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 256, k: 1024, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 15360,
+    k: 3840,
+    group: 32,
+    lanes: 8,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 8,
+  },
+  {
+    storage: "i4",
+    n: 3840,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 3840,
+    k: 15360,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 262144,
+    k: 3840,
+    group: 32,
+    lanes: 8,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 7680,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 8192,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 1024,
+    k: 2816,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 2816,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 2816,
+    k: 8192,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 2,
+  },
+  {
+    storage: "i4",
+    n: 2816,
+    k: 2112,
+    group: 32,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  {
+    storage: "i4",
+    n: 262144,
+    k: 2816,
+    group: 32,
+    lanes: 8,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 8,
+  },
+  { storage: "bf16", n: 512, k: 1536, lanes: 32, packedActivations: false },
+];
+
+/**
+ * The parallel rows `nvidia-ampere` adds after the default profile's, on shapes the default has
+ * none for: int4 4 and int8 5 (shapes of the MTP drafters), and bf16 1536 × 2048 of regular E2B
+ * and 2560 × 256 of regular E4B.
  */
 const AMPERE_PARALLEL_SHAPES: readonly LinearGemvParallelShape[] = [
-  { storage: "bf16", n: 2560, k: 256, lanes: 16, packedActivations: false },
+  { storage: "i4", n: 2048, k: 256, group: 32, lanes: 4, packedActivations: false, rowBlock: 2 },
+  { storage: "i4", n: 256, k: 2048, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  { storage: "i8", n: 256, k: 3072, lanes: 32, packedActivations: false },
+  { storage: "i8", n: 1024, k: 256, lanes: 4, packedActivations: false },
+  { storage: "i8", n: 256, k: 1024, lanes: 32, packedActivations: false },
+  { storage: "i8", n: 2048, k: 256, lanes: 4, packedActivations: false },
+  { storage: "i8", n: 256, k: 2048, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 256, k: 5120, group: 32, lanes: 32, packedActivations: false, rowBlock: 2 },
+  {
+    storage: "i4",
+    n: 3840,
+    k: 1024,
+    group: 32,
+    lanes: 16,
+    packedActivations: false,
+    stagedActivations: true,
+    rowBlock: 4,
+  },
+  { storage: "bf16", n: 1536, k: 2048, lanes: 32, packedActivations: false },
+  { storage: "bf16", n: 2560, k: 256, lanes: 8, packedActivations: false },
 ];
 
 /** The pinned sequential variant of a shape: a row added since, otherwise the kernel module's lookup. */
@@ -907,7 +1242,15 @@ const OWN: GeometryProfile = {
 };
 
 describe("a table without the GEMV choices runs with the default profile's, resolved where a Session selects its profile", () => {
-  it("an embedded table without the field runs with the default profile's choices, and every embedded table carries its own; nvidia-ampere's are the default's with its five sequential exceptions and its one parallel row after them", () => {
+  /** `[storage, n, k]` of a sequential exception, which has no group length. */
+  const shapeKey = ({ storage, n, k }: { storage: string; n: number; k: number }): string =>
+    [storage, n, k].join(" ");
+
+  /** A parallel row's shape: `[storage, n, k, group]`. */
+  const rowKey = (row: LinearGemvParallelShape): string =>
+    [row.storage, row.n, row.k, row.group ?? "-"].join(" ");
+
+  it("an embedded table without the field runs with the default profile's choices, and every embedded table carries its own; nvidia-ampere's are, row for row, the default's with 38 of its parallel rows changed in place and 50 sequential exceptions and 11 parallel rows after them", () => {
     const carrying: string[] = [];
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       if ("linearGemv" in profile) {
@@ -919,25 +1262,24 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     assertEquals(carrying, ["apple-metal-3", "nvidia-ampere", "nvidia-blackwell"]);
     const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere");
     assert(ampere !== undefined);
-    // A table holds the field as a whole, so this also pins that its parallel rows, thread target
-    // and general variant are the default's of today: a change of those regenerates the table.
+    const changed = new Map(AMPERE_CHANGED_PARALLEL_SHAPES.map((row) => [rowKey(row), row]));
+    // Every changed row is a row of the default, and none is pinned twice
+    assertEquals(changed.size, 38);
+    assertEquals(GEMV.parallelShapes.filter((row) => changed.has(rowKey(row))).length, 38);
+    // A table holds the field as a whole, so this also pins that its other parallel rows, thread
+    // target and general variant are the default's of today: a change of those regenerates the table.
     assertEquals(resolveGeometryProfile(ampere).linearGemv, {
       ...GEMV,
       sequential: {
         variant: GEMV.sequential.variant,
         shapes: [...GEMV.sequential.shapes, ...AMPERE_SEQUENTIAL_SHAPES],
       },
-      parallelShapes: [...GEMV.parallelShapes, ...AMPERE_PARALLEL_SHAPES],
+      parallelShapes: [
+        ...GEMV.parallelShapes.map((row) => changed.get(rowKey(row)) ?? row),
+        ...AMPERE_PARALLEL_SHAPES,
+      ],
     });
   });
-
-  /** `[storage, n, k]` of a sequential exception, which has no group length. */
-  const shapeKey = ({ storage, n, k }: { storage: string; n: number; k: number }): string =>
-    [storage, n, k].join(" ");
-
-  /** A parallel row's shape: `[storage, n, k, group]`. */
-  const rowKey = (row: LinearGemvParallelShape): string =>
-    [row.storage, row.n, row.k, row.group ?? "-"].join(" ");
 
   /**
    * Pins a table's field against the default's: the general variant and the thread target are the
@@ -982,24 +1324,23 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     assertEquals([changed, added], [counts.changed, counts.added]);
   };
 
-  it("nvidia-blackwell's are the default's with what its own records adopt in place: two of the default's exceptions with another variant, 42 more sequential exceptions, and 63 parallel rows changed or added", () => {
+  it("nvidia-blackwell's are the default's with what its own records adopt in place: two of the default's exceptions with another variant, 41 more sequential exceptions, and 62 parallel rows changed or added", () => {
     assertDerivedFrom(
       "nvidia-blackwell",
       new Map([
-        ["bf16 1536 256", { cols: 16, unroll: 16 }],
+        ["bf16 1536 256", { cols: 16, unroll: 8 }],
         ["bf16 4096 2560", { cols: 16, unroll: 16 }],
       ]),
-      { ownExceptions: 42, changed: 43, added: 20 },
+      { ownExceptions: 41, changed: 42, added: 20 },
     );
   });
 
-  it("apple-metal-3's are the default's with what the Apple M2's records adopt in place: 17 of the default's exceptions with another variant, 64 more sequential exceptions, and 65 parallel rows changed or added", () => {
+  it("apple-metal-3's are the default's with what the Apple M2's records adopt in place: 15 of the default's exceptions with another variant, 65 more sequential exceptions, and 65 parallel rows changed or added", () => {
     assertDerivedFrom(
       "apple-metal-3",
       new Map([
         ["bf16 8960 1536", { cols: 128, unroll: 16 }],
         ["bf16 2048 1536", { cols: 256, unroll: 8 }],
-        ["bf16 1536 2048", { cols: 256, unroll: 8 }],
         ["bf16 1536 6144", { cols: 256, unroll: 8 }],
         ["bf16 1536 256", { cols: 64, unroll: 2 }],
         ["bf16 4096 1536", { cols: 128, unroll: 16 }],
@@ -1008,14 +1349,13 @@ describe("a table without the GEMV choices runs with the default profile's, reso
         ["bf16 1536 12288", { cols: 128, unroll: 8 }],
         ["bf16 512 2560", { cols: 128, unroll: 8 }],
         ["bf16 256 2560", { cols: 128, unroll: 8 }],
-        ["bf16 2560 2048", { cols: 128, unroll: 16 }],
+        ["bf16 2560 2048", { cols: 128, unroll: 8 }],
         ["bf16 2560 10240", { cols: 128, unroll: 16 }],
         ["bf16 2560 256", { cols: 32, unroll: 2 }],
-        ["bf16 4096 2560", { cols: 128, unroll: 16 }],
         ["bf16 1024 2560", { cols: 256, unroll: 8 }],
         ["bf16 2560 4096", { cols: 128, unroll: 16 }],
       ]),
-      { ownExceptions: 64, changed: 52, added: 13 },
+      { ownExceptions: 65, changed: 52, added: 13 },
     );
   });
 

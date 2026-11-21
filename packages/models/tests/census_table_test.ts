@@ -172,7 +172,7 @@ describe("the table's key is determined by the effective settings obtained by pa
     assertEquals(regular.distribution, REGULAR);
     assertEquals(qat.distribution, QAT_Q4_0);
     // The linears differ (bf16 rows against int4 rows), so the counts do.
-    assertEquals(regular.census.target?.decode?.linearGemvReduce, { variant: 207, reference: 70 });
+    assertEquals(regular.census.target?.decode?.linearGemvReduce, { variant: 235, reference: 42 });
     assertEquals(qat.census.target?.decode?.linearGemvReduce, { variant: 276, reference: 1 });
     assertThrows(() => censusRowOf("gemma4", "e2b", effective), Error, "name their distribution");
     // A family with one distribution names none and is looked up with or without it.

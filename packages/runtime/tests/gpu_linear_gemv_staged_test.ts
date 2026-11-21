@@ -167,39 +167,62 @@ const CODEC: Readonly<Record<Storage, CodecName>> = {
   i8: "int8-sym",
 };
 
+/** The container tensor of an `[n, k]` weight: bf16 elements, or the codes of `storage` with their scales. */
+const weightTensor = (
+  storage: Storage | "bf16",
+  n: number,
+  k: number,
+  group: number | undefined,
+): TensorInput => {
+  if (storage === "bf16") {
+    // The upper half of each f32 word: a finite bf16 value (any finite weight serves here).
+    const values = Float32Array.from({ length: n * k }, (_, i) => Math.sin(i * 0.013) * 0.05);
+    const halves = Uint16Array.from(new Uint32Array(values.buffer), (word) => word >>> 16);
+    return {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: new Uint8Array(halves.buffer),
+      encoding: { codec: "bf16" },
+    };
+  }
+  const bits = storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
+  return {
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: Uint8Array.from(
+      { length: (n * k * bits) / 8 },
+      (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
+    ),
+    encoding: {
+      codec: CODEC[storage],
+      groupSize: group,
+      scale: {
+        dtype: "f32",
+        bytes: f32Bytes(
+          Array.from({ length: n * (k / (group ?? k)) }, (_, i) => ((i % 17) + 1) * 0.00017),
+        ),
+      },
+    },
+  };
+};
+
 describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV in a Session (real GPU)", () => {
   it("runs only on the marked rows with linear at 'reorder', with the same words for M = 1 / 4 / 8", async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of [
-        // Marked (gemma4 E2B o projection): takes the staged key.
-        { storage: "i4", bits: 4, n: 1536, k: 2048, group: 32, staged: true },
+        // Marked (regular gemma4 E2B, bf16): takes the staged key at every row count — a float row
+        // has no row block on any table, where an integer row may run its row-blocked kernel at
+        // M = 4 and 8.
+        { storage: "bf16", n: 1536, k: 4096, group: undefined, staged: true },
         // Not marked (E2B k / v, K = 1536 measured slower staged): keeps the plain key.
-        { storage: "i4", bits: 4, n: 256, k: 1536, group: 32, staged: false },
+        { storage: "i4", n: 256, k: 1536, group: 32, staged: false },
         // Marked by its packed-activation row instead (ADR 0105), not staged.
-        { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048, staged: false },
+        { storage: "i4", n: 1536, k: 2048, group: 2048, staged: false },
       ] as const) {
-        const { storage, n, k, bits, group } = shape;
-        const w = Uint8Array.from(
-          { length: (n * k * bits) / 8 },
-          (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
-        );
+        const { storage, n, k, group } = shape;
         const tensors: readonly TensorInput[] = [
-          {
-            graph: GRAPH_NAME,
-            initializer: "w",
-            bytes: w,
-            encoding: {
-              codec: CODEC[storage],
-              groupSize: group,
-              scale: {
-                dtype: "f32",
-                bytes: f32Bytes(
-                  Array.from({ length: n * (k / group) }, (_, i) => ((i % 17) + 1) * 0.00017),
-                ),
-              },
-            },
-          },
+          weightTensor(storage, n, k, group),
           {
             graph: GRAPH_NAME,
             initializer: "b",

@@ -15,10 +15,10 @@
       "node-nvidia-geforce-rtx-3080-ti": "59618539b591fdba0083aca673eb658a1fc71223c690fe2a9fb6904d0baa5b77"
     },
     "e4b/i4-fast": {
-      "node-nvidia-geforce-rtx-3080-ti": "406321966cf917aeb59a63249cf4e8db3cf90de3f4668e4b8b6be30471520813"
+      "node-nvidia-geforce-rtx-3080-ti": "15ff5a20b43dd33f4adc9686d44f2785c6a4fc70d5cd59bc74fdc3f0b68714c6"
     },
     "e4b/i4-gemvpar": {
-      "node-nvidia-geforce-rtx-3080-ti": "406321966cf917aeb59a63249cf4e8db3cf90de3f4668e4b8b6be30471520813"
+      "node-nvidia-geforce-rtx-3080-ti": "15ff5a20b43dd33f4adc9686d44f2785c6a4fc70d5cd59bc74fdc3f0b68714c6"
     }
   }
 }

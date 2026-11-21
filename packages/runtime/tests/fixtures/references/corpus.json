@@ -3,76 +3,76 @@
   "kind": "sha256",
   "cases": {
     "gemma4-qat-e2b-cut4/prefill64/exact/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "f707255c5e625b0b8f20a22cd3cec666c955ff7db192ab3442209ec3d2a11174"
+      "node-nvidia-geforce-rtx-3080-ti": "8a8771c3a865b54843bc9a09bd26be74a6ab77a3fc55d2783c26c35c06dd0d77"
     },
     "gemma4-qat-e2b-cut4/prefill64/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "0647bacb72c0499dd55eb295b6c380aad869be094be75df90f9a9bd0f3fb0bbb"
     },
     "gemma4-qat-e2b-cut4/prefill64/reorder/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "3761e66132129a1e92222d080aaf8e641877679545ec7fd7abc149afcd5b6d97"
+      "node-nvidia-geforce-rtx-3080-ti": "3b4c37b9e93c1b839e06169f864b301be400fe148087d2c402c38b1bc8983f24"
     },
     "gemma4-qat-e2b-cut4/prefill64/reorder/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "cee29bb145601f0f322c8b3b21d20402065cb8f871f379e2df904fd53e9f1b50"
     },
     "gemma4-qat-e2b-cut4/prefill8/exact/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "b9b0714185b5925e7d7b72081b508f0d6a8a5ecae9854945cb9ff22db9667f5d"
+      "node-nvidia-geforce-rtx-3080-ti": "e32ea4445f6c4ca254c0ef09258a72001d22887a85fbb4caa9587aac680a2be3"
     },
     "gemma4-qat-e2b-cut4/prefill8/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "3d86b4e1671edf8dfbd25fdba14cb77dea58aabe557e29f21488fffbc4339d62"
     },
     "gemma4-qat-e2b-cut4/prefill8/reorder/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "4879581c7893ee335eed70322bcb32b9a5fa1582f444a8267e5d507315649041"
+      "node-nvidia-geforce-rtx-3080-ti": "f3a3876cfd94bbe66bb565b941b4808afffa65798c693bd26bcd4cc514577fe6"
     },
     "gemma4-qat-e2b-cut4/prefill8/reorder/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "db9b93f99d04b81f117163516820342c574022e83bbe3753c3a19804583bdc18"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/exact/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "cf9b904cc171003a9fabfab31c8dc5b6d39a825c03e05119d3c80dc2ee11ffe8"
+      "node-nvidia-geforce-rtx-3080-ti": "c083201cfdb9a407c85817b69fcb0cbe7275aa2b1364fef422da990e01af18f1"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "26bd3763f6896c9f88fdcbf42182f31856818f636a7207f2ff1029cc460829d4"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/integer/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "19d310de0ea5c0184f1506a2f77ed5174734295ffaf57435c0a4e3de5e5eb80a"
+      "node-nvidia-geforce-rtx-3080-ti": "a5419c999701de2ac09322f902e8b68160f8e2d6592436c7cba1f923250fe399"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/integer/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "3d55d1c8db0274445bf9da6254dd6f2e273eef3fbe5d6313a962685da768368e"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/packed/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "b1d6aef20148c2e6840b318ee468946aec53cf842bb8ea8370b45f42689ac21e"
+      "node-nvidia-geforce-rtx-3080-ti": "439a0bde00c21b21f32512dc45cd8915bbeaf8d3b278bc06bc94a716e767ae6f"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/packed/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "65cb32b98246de71a8150ed63f94a665cfe538f1fa70a03ffdac507a5d9ebd04"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/reorder/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "0dd3f3804603c806f21bb090d8f5cef533f4324da368cb63f4a502fe2ab5d734"
+      "node-nvidia-geforce-rtx-3080-ti": "30e78b1ca52b93c8197b693a73d81b07430590f75b3566c69e68560693ddc5fe"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill64/reorder/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "65cb32b98246de71a8150ed63f94a665cfe538f1fa70a03ffdac507a5d9ebd04"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/exact/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "73ced8fde8419a4017d1ca5debc845ac308a76b29f6783d8749ce0fdd0db508f"
+      "node-nvidia-geforce-rtx-3080-ti": "5adc656298923587cc767c968d02e039f2506d0a60664d46f7996c1b1461e961"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/exact/outputs": {
       "node-nvidia-geforce-rtx-3080-ti": "b72bd8a777a2465333fdbf5507e1756108001f7fc8856c59fd2b465b8b313ff7"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/integer/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "e0e42176025ba3dd82268cf3ed9a98707ff835ca436cc6ba348b032ea028d25a"
+      "node-nvidia-geforce-rtx-3080-ti": "d91141f017a46c2847d95b105f313d49e6d192774aa944b529ec2f63a26c6e0e"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/integer/outputs": {
-      "node-nvidia-geforce-rtx-3080-ti": "42bf0ad0f28902a4fd27b106418c39c5ca78859ea0f861d5f71232f2734ffb8d"
+      "node-nvidia-geforce-rtx-3080-ti": "1d464f1681794d6bc013fe299d7caded9af26c51f884052bce8300300edebafe"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/packed/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "cc7872a950873d05e34d7b0f609df98b3c2836b4f11ed945bf54060b64e59c62"
+      "node-nvidia-geforce-rtx-3080-ti": "a4853fdab1748414090860f61370bfbddecfb7e307a6e14945015d48d01e97cd"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/packed/outputs": {
-      "node-nvidia-geforce-rtx-3080-ti": "42bf0ad0f28902a4fd27b106418c39c5ca78859ea0f861d5f71232f2734ffb8d"
+      "node-nvidia-geforce-rtx-3080-ti": "1d464f1681794d6bc013fe299d7caded9af26c51f884052bce8300300edebafe"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/reorder/census": {
-      "node-nvidia-geforce-rtx-3080-ti": "cc3180c8dee49332e646bdf52191d0fe03e2fe65c33270308163281e2fd79a5b"
+      "node-nvidia-geforce-rtx-3080-ti": "d286ec35ac7fe246c172a3965e0555585656ac8173030c3d2f8e8b56acf8540c"
     },
     "gemma4-qat-mobile-e2b-cut3/prefill8/reorder/outputs": {
-      "node-nvidia-geforce-rtx-3080-ti": "42bf0ad0f28902a4fd27b106418c39c5ca78859ea0f861d5f71232f2734ffb8d"
+      "node-nvidia-geforce-rtx-3080-ti": "1d464f1681794d6bc013fe299d7caded9af26c51f884052bce8300300edebafe"
     },
     "irodori-v4-small-dit-cut2/s48-s513/a8/census": {
       "node-nvidia-geforce-rtx-3080-ti": "53350bf91af31319dd38eeab7a3b149f7181defd621970caf6ba9d64807fea4a"

@@ -114,10 +114,10 @@ adapter's match and measures nothing at run time.
   shapes have a parallel row (the linear → `static_quantize` fusion) and a row's packed-activation flag (the packed
   pairing); no size reads the sequential variants, a row's lanes, its staged flag or its row block. No registered
   table removes a parallel row of the default, moves a packed flag or adds a packed row. Each adds rows on shapes the
-  default has none for — `nvidia-ampere` one (bf16 `2560 × 256`), `nvidia-blackwell` 20 and `apple-metal-3` 13 —, so
-  on its adapter the Session's fusion plan differs from the estimate's where a linear of one of those shapes feeds a
-  `static_quantize` with linear at `reorder` and at most 8 rows. A bf16 linear is never fused with a following
-  `static_quantize`, and the integer shapes `apple-metal-3` adds are among those `nvidia-blackwell` adds. No graph of a
+  default has none for — `nvidia-ampere` 11, `nvidia-blackwell` 20 and `apple-metal-3` 13 —, so on its adapter the
+  Session's fusion plan differs from the estimate's where a linear of one of those shapes feeds a `static_quantize`
+  with linear at `reorder` and at most 8 rows. A bf16 linear is never fused with a following `static_quantize`, and
+  the integer shapes `nvidia-ampere` and `apple-metal-3` add are among those `nvidia-blackwell` adds. No graph of a
   Gemma 4 distribution has such a linear: their plans and estimates are the same under each table
   ([limitations](../limitations.md), the section on `workspaceBytes`).
 - The default profile's sequential variant is 32 columns per workgroup and 4 weight words read ahead (`c32u4`). Its
@@ -137,67 +137,79 @@ adapter's match and measures nothing at run time.
   `8960 × 1536`, `10752 × 2560` and `10240 × 2560` are slower than the GEMM at 8 rows on the RTX 3080 Ti (×0.69 to
   ×0.89), and when the default's rows were derived `1536 × 2048`, `12288 × 1536`, `2560 × 256` and the two output
   heads had no candidate measured at all three row counts on all three devices. The devices' tables carry rows of
-  their own on some of these: `2560 × 256` on all three, at 16 lanes on `nvidia-ampere`, 8 on `nvidia-blackwell` and
-  4 on `apple-metal-3` (below).
+  their own on some of these: `2560 × 256` on all three, at 8 lanes on `nvidia-ampere` and `nvidia-blackwell` and 4
+  on `apple-metal-3`, and `1536 × 2048` on `nvidia-ampere` and `nvidia-blackwell` (below).
 - A row is added to the default profile only where no measured device is slower with it: an adapter whose table has
   no GEMV choices of its own runs it. A row that one device gains from and another loses with is a row of the first
   one's table. The devices measured are the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2, and each has a table with
   GEMV choices of its own, so the default's choices run on adapters no table matches (an Apple adapter whose
   description is empty among them: `apple-metal-3` matches `Apple M2`). The 17 bf16 parallel rows were adopted over
   the records of all three devices. The 22 bf16 exceptions were adopted over those of the RTX 3080 Ti and the RTX
-  5070 Ti; the Apple M2's records, taken since, time the general variant against the default's exception on 12 of
-  their shapes and read it ×1.01 to ×1.26 faster on 11 of them (×0.94 to ×0.99 on `2048 × 2560`).
-- `nvidia-ampere`'s field is the default profile's choices with five more per-shape exceptions and one more parallel
-  row, what the derivation adopts from 21 GEMV sweep records of the RTX 3080 Ti (Node, Vulkan) beyond the default's
-  rows:
-  - The exceptions: the int4 output heads of the Gemma 4 q4_0 QAT E2B and E4B models, `262144 × 1536` and
-    `262144 × 2560` (`c16u2`), bf16 `10240 × 2560` (`c16u8`) and the MTP drafter shape int4 `256 × 2048`
-    (`c16u16`) — each slower than `c32u4` on the RTX 5070 Ti —, and the bf16 output head of regular E4B,
-    `262144 × 2560` (`c16u4`, ×1.62 to ×2.14), which neither the RTX 5070 Ti's nor the Apple M2's records adopt. The
-    derivation leaves the bf16 output head of E2B on the general variant: no candidate gained in every record. The
-    default's 22 exceptions are there as they are: no variant reaches the ×1.10 that replaces one.
-  - The parallel row: bf16 `2560 × 256` at 16 lanes, plain (×1.12 to ×1.14 faster than the sequential GEMV at one
-    row, ×2.12 to ×2.17 than the GEMM at 4 rows and ×1.17 to ×1.34 at 8). Every other row is the default's.
+  5070 Ti; the Apple M2's records, taken since, time the general variant against the default's exception on 13 of
+  their shapes and read it ×1.01 to ×1.26 faster on 11 of them (×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to ×0.87
+  on `1536 × 2048`).
+- `nvidia-ampere`'s field is the default profile's choices with what the derivation adopts from 24 GEMV sweep
+  records of the RTX 3080 Ti (Node, Vulkan) of 2026-11-20 and 21 in place — 50 sequential decisions and 49 parallel
+  ones adopted:
+  - The default's 22 exceptions, in the default's order and with the default's variant: no variant reaches the ×1.10
+    that replaces one.
+  - 50 per-shape exceptions after them, on int4 (37), int8 (11) and bf16 (2) shapes: `c16u16` on 27, `c32u16` on
+    14, `c16u4` on the int8 output heads and the bf16 output head of regular E2B, `262144 × 1536`, `c16u2` and
+    `c16u1` on two int4 output heads each, `c16u8` on the 12B drafter's int4 output head `262144 × 1024` and `c32u8`
+    on bf16 `10240 × 2560` (the smallest gains of the 50 ×1.10 to ×1.88). The bf16 output head of regular E4B,
+    `262144 × 2560`, has none: against the general variant's repeated fastest time no candidate reaches ×1.10
+    (`c16u4` ×0.97 to ×1.00). Of the 50, 32
+    are on shapes `nvidia-blackwell` has an exception for too, 6 of them with the same variant.
+  - 49 parallel rows apart from the default's. 38 of the default's 88 rows are changed — 37 integer-stored and bf16
+    `512 × 1536`, at 32 lanes in place of 16 (×1.20 at one row, not slower at 4 and 8): other lanes on 14, the staged
+    flag set on 14, another row block on 36 (34 without one take one — 2 on 22, 4 on 9, 8 on 3 — and two go from 2
+    to 4). 11 rows are on shapes the default has none for: int4 4 and int8 5 (shapes of the MTP drafters), and bf16 2
+    — `1536 × 2048` at 32 lanes (×3.54 faster than the sequential GEMV at one row, ×6.10 to ×6.12 than the GEMM at 4
+    rows and ×3.41 to ×3.42 at 8) and `2560 × 256` at 8 (×1.10 to ×1.11, ×2.73 to ×2.74 and ×1.64), plain, in two
+    records at each row count. Of the 49, 27 gain at one row (×1.10 to ×7.11) and 22 change only the row block.
+  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 14
+    rows with other lanes and on the 11 added ones, inside the band of `linear`. On the other 24 changed rows it
+    writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
+    at the same lanes.
 - `nvidia-blackwell`'s field is the default profile's choices with what the derivation adopts from 84 GEMV sweep
   records of the RTX 5070 Ti in Chrome (D3D12) in place:
   - The default's 22 exceptions, in the default's order; two of them with the variant the records adopt over the
-    default's: bf16 `1536 × 256` runs `c16u16` in place of `c32u16` (×1.20 to ×1.21), and bf16 `4096 × 2560`
-    `c16u16` in place of `c16u8` (×1.12 to ×1.13). On the other 20 no variant reaches the ×1.10 that replaces an
+    default's: bf16 `1536 × 256` runs `c16u8` in place of `c32u16` (×1.19 to ×1.21), and bf16 `4096 × 2560`
+    `c16u16` in place of `c16u8` (×1.11 to ×1.12). On the other 20 no variant reaches the ×1.10 that replaces an
     exception.
-  - 42 per-shape exceptions after them, on int4 (33) and int8 (9) shapes, which read 8 or 16 words ahead: `c16u8` on
-    16 shapes, `c32u8` on 16, `c16u16` on 9 and `c32u16` on one. None of `nvidia-ampere`'s five rows is adopted
-    there.
-  - 63 parallel rows apart from the default's. 41 of the default's 71 integer-stored rows are changed: other lanes
-    on 22, the staged flag set on 30, another row block on 7 (three lose theirs, one without a row block takes 4, two
-    go from 4 to 8 and one from 2 to 4). Two of its 17 bf16 rows are changed, `2560 × 10240` and `2560 × 4096`: 32
-    lanes, staged, in place of 16 (×1.15 to ×1.16 and ×1.23 at one row, not slower at 4 and 8); on the other 15 no
-    candidate reaches ×1.10. 20 rows are on shapes the default has none for: int4 8 and int8 5 (shapes of the MTP
+  - 41 per-shape exceptions after them, on int4 (32) and int8 (9) shapes, which read 8 or 16 words ahead: `c16u8` on
+    16 shapes, `c32u8` on 15, `c16u16` on 9 and `c32u16` on one.
+  - 62 parallel rows apart from the default's. 41 of the default's 71 integer-stored rows are changed: other lanes
+    on 22, the staged flag set on 31, another row block on 6 (three lose theirs, two go from 4 to 8 and one from 2 to
+    4). One of its 17 bf16 rows is changed, `2560 × 4096`: 32 lanes, staged, in place of 16 (×1.22 to ×1.23 at one
+    row, not slower at 4 and 8); on the other 16 no candidate reaches ×1.10. 20 rows are on shapes the default has
+    none for: int4 8 and int8 5 (shapes of the MTP
     drafters), the int2 output heads `262144 × 1536` and `262144 × 2560`, and bf16 5 — `8960 × 1536`,
     `1536 × 2048`, `12288 × 1536`, `10240 × 2560` and `2560 × 256`. Of these 5, 3 have 8 lanes, one 16 and one 32,
-    two of them staged; each is ×2.07 to ×4.1 faster than the default's choice at one row (the sequential GEMV),
-    ×1.92 to ×4.1 at 4 rows and ×1.04 to ×2.21 at 8 (the GEMM), in four records at each row count.
-  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 24
+    two of them staged; each is ×2.06 to ×4.1 faster than the default's choice at one row (the sequential GEMV),
+    ×1.92 to ×4.1 at 4 rows and ×1.04 to ×2.20 at 8 (the GEMM), in four records or more at each row count.
+  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 23
     rows with other lanes and on the 20 added ones, inside the band of `linear`. On the other 19 changed rows it
     writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
     at the same lanes.
-- `apple-metal-3`'s field is the default profile's choices with what the derivation adopts from 12 GEMV sweep
-  records of an Apple M2 in Chrome (Metal) in place — 81 sequential decisions and 65 parallel ones adopted:
-  - The default's 22 exceptions, in the default's order; 17 of them with the variant the records adopt over the
-    default's, of 32 to 256 columns per workgroup (`c128u16` on 6, `c256u8` on 5, `c128u8` on 4, `c64u2` on
-    `1536 × 256` and `c32u2` on `2560 × 256`, ×1.10 to ×1.54). On the other 5 no variant reaches ×1.10.
-  - 64 per-shape exceptions after them, on int4 (55) and int8 (9) shapes, all of 128 or 256 columns per workgroup:
-    `c128u4` on 48, `c256u4` on 13 and `c128u8` on 3 (the smallest gains of the 81 adopted exceptions ×1.10 to
-    ×2.56).
+- `apple-metal-3`'s field is the default profile's choices with what the derivation adopts from 14 GEMV sweep
+  records of an Apple M2 in Chrome (Metal) in place — 80 sequential decisions and 65 parallel ones adopted:
+  - The default's 22 exceptions, in the default's order; 15 of them with the variant the records adopt over the
+    default's, of 32 to 256 columns per workgroup (`c128u8` on 5, `c128u16` on 4, `c256u8` on 4, `c64u2` on
+    `1536 × 256` and `c32u2` on `2560 × 256`, ×1.10 to ×1.54). On the other 7 no variant reaches ×1.10.
+  - 65 per-shape exceptions after them, on int4 (55) and int8 (10) shapes, all of 128 or 256 columns per workgroup:
+    `c128u4` on 48, `c256u4` on 14 and `c128u8` on 3 (the smallest gains of the 80 adopted exceptions ×1.10 to
+    ×2.54).
   - 65 parallel rows apart from the default's. 52 of the default's 88 rows are changed — 48 integer-stored and 4
     bf16 (`256 × 1536` and `256 × 2560` from 32 lanes to 16, `512 × 1536` from 16 to 8, `1536 × 256` from 8 to 4):
-    other lanes on 34, the staged flag cleared on 15, another row block on 42 (39 without one take one — 2 on 21, 4
-    on 16, 8 on 2 — and three go from 2 to 4). 13 rows are on shapes the default has none for: int4 6 and int8 4
-    (shapes of the MTP drafters), and bf16 3 — `8960 × 1536` (8 lanes),
-    `1536 × 2048` and `2560 × 256` (4 lanes each), each ×1.11 to ×2.21 faster than the sequential GEMV at one row,
-    ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.53 at 8, in four records at each row count. Of the 65,
-    47 gain at one row (×1.11 to ×11.2) and 18 change only the row block.
-  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 34
-    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 18 changed rows it
+    other lanes on 35, the staged flag cleared on 16, another row block on 42 (39 without one take one — 2 on 23, 4
+    on 14, 8 on 2 — and three go from 2 to 4). 13 rows are on shapes the default has none for: int4 6 and int8 5
+    (shapes of the MTP drafters), and bf16 2 — `8960 × 1536` (8 lanes) and `2560 × 256` (4 lanes), each ×1.15 to
+    ×2.20 faster than the sequential GEMV at one row, ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.51 at
+    8, in four records at each row count. Of the 65, 48 gain at one row (×1.10 to ×11.2) and 17 change only the row
+    block.
+  - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 35
+    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 17 changed rows it
     writes the words of the default's row.
   - An exception is adopted only where its words equal the baseline's in every record, on Metal
     ([limitations](../limitations.md), the section on the linear GEMV family).
@@ -402,12 +414,13 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   by the fingerprints of the kernels it runs.
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
   they moved into the profile, without its one per-shape exception, and the rows added since —; every registered
-  table carries the field; `nvidia-ampere`'s equal the default's with its five pinned exceptions and its one pinned
-  parallel row after them; `nvidia-blackwell`'s and `apple-metal-3`'s hold the default's general variant and thread
-  target, the default's 22 exceptions in the default's order — each with the default's variant except the ones the
-  case names with the table's (two and 17) —, the counted exceptions of their own after them (42 and 64), and every
-  parallel row of the default in the default's order, a counted number of them changed (43 and 52), with the counted
-  rows added (20 and 13); no registered table removes a parallel row of the default, moves a packed flag or adds a
+  table carries the field; `nvidia-ampere`'s equal, row for row, the default's with its 38 pinned changed parallel
+  rows in place and its 50 pinned exceptions and 11 pinned parallel rows after them; `nvidia-blackwell`'s and
+  `apple-metal-3`'s hold the default's general variant and thread target, the default's 22 exceptions in the
+  default's order — each with the default's variant except the ones the case names with the table's (two and 15) —,
+  the counted exceptions of their own after them (41 and 65), and every parallel row of the default in the default's
+  order, a counted number of them changed (42 and 52), with the counted rows added (20 and 13); no registered table
+  removes a parallel row of the default, moves a packed flag or adds a
   packed row; a profile with other choices changes the selection and the pipeline key (core lane).
 - Every per-shape exception of the sequential variant that can run — the default profile's and those of every
   registered table that carries GEMV choices: on the development machine's GPU its kernel writes the words the

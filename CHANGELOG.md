@@ -32,6 +32,32 @@ measurements in `docs/research/`.
   group whose case is not current is stale). The plan lists, at a case and row count where a reference's fastest
   time is not repeated, every candidate read against it, and no candidate whose reference the sweep does not measure.
 
+### Changed
+
+- `@karume/runtime`: the three embedded tables carry GEMV choices derived again from their devices' GEMV sweep
+  records under those rules, so on their adapters the GEMV of linear runs other kernels on some shapes — a matter of
+  speed there. A sequential variant changes no output bit, so Sessions at `exact` write what they wrote; with linear
+  at `reorder` the outputs change inside the band of `linear` on the shapes whose lanes changed or that gained a row
+  (the staged form or a row block alone changes no bit). Every Session on an adapter no table matches runs what it
+  ran. In `SessionDiagnostics.lastRunPipelines` those dispatches read the keys of the new choices.
+  - NVIDIA Ampere (`nvidia-ampere`, from 24 records of an RTX 3080 Ti under Node, Vulkan): 50 sequential variants
+    of its own in place of 5, on int4 and int8 shapes of the Gemma 4 QAT models and their MTP drafters, the bf16
+    output head of regular E2B and bf16 `10240 × 2560` (×1.10 to ×1.88 per dispatch over the general variant);
+    the bf16 output head of regular E4B runs the general variant again. Of the default profile's parallel
+    rows, 38 run its own choice — other lanes on 14 (bf16 `512 × 1536` among them, 32 lanes in place of 16), the
+    staged form or a row block on the rest —, and 11 shapes take a row the default has none for: int4 and int8
+    shapes of the MTP drafters, bf16 `1536 × 2048` of regular E2B and bf16 `2560 × 256` of regular E4B (8 lanes in
+    place of 16).
+  - NVIDIA Blackwell (`nvidia-blackwell`): bf16 `1536 × 256` reads 8 words ahead in place of 16 at one row and int4
+    `2112 × 2816` runs the general variant again; the int8 `262144 × 1536` row takes the staged form in place of a
+    row block, and bf16 `2560 × 10240` runs the default profile's row again (16 lanes, plain).
+  - Apple M2 (`apple-metal-3`, from 14 records): bf16 `1536 × 2048` and `4096 × 2560` run the default's variant
+    again and bf16 `2560 × 2048` reads 8 words ahead in place of 16; int4 `1536 × 6144` and `3840 × 4096` and int8
+    `1024 × 256` take a variant of their own, int4 `1536 × 256` and int8 `1536 × 256` another one, and int4
+    `6144 × 1536` and `4096 × 1536` run the general variant again; int4 `3840 × 4096`, `1024 × 4096` and
+    `1024 × 8192` run other lanes, int8 `1024 × 256` takes a row, and bf16 `1536 × 2048` runs the sequential GEMV
+    and the GEMM again.
+
 ## [0.23.0] - 2026-11-20
 
 ### Added

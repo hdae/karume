@@ -166,15 +166,15 @@ f32 reproduces the M2 record exactly). Since the key's v3 rounds `x · inv` thro
 [0017](decisions/0017-rms-norm-conv2d-clamp-min.md) addendum 3) both pass on the M2 and the M5
 (`outputs/bench-browser/kernel-check_2026-11-13T21-22-18.json` / `…T20-59-22.json`, untracked).
 
-The sequential GEMV's candidates in the workbench's `gemv-sweep` entry (Apple M2, the 12 records of 2026-11-18 and
+The sequential GEMV's candidates in the workbench's `gemv-sweep` entry (Apple M2, the 14 records of 2026-11-18 and
 2026-11-19 that the table `apple-metal-3` is derived from): a candidate of the identical class is one that writes the
-words of the record's baseline, which every one does on Vulkan and D3D12. On the M2, 423 of the 2,737 variant rows
+words of the record's baseline, which every one does on Vulkan and D3D12. On the M2, 423 of the 2,768 variant rows
 compared at one row differ from their baseline — every one a variant of 32 columns or more whose unroll is not 4
 (`c32`, `c64`, `c128` and `c256` with `u1`, `u2`, `u8` or `u16`), every one over an integer weight (int4, int8, int2);
 no `c16` variant, no `u4` variant and no variant over a bf16 weight differs. So do the sequential row blocks of height
 2 and 4 on one shape, int4 g32 `2816 × 2112` at 4 and 8 rows, against height 1 (8 rows of two records). The sweep's
-verdict of such a record is `fail` (8 of the 12), and the derivation refuses a candidate that is not identical to its
-baseline, so no table holds one: none of the 86 sequential exceptions of `apple-metal-3` and none of the default
+verdict of such a record is `fail` (8 of the 14), and the derivation refuses a candidate that is not identical to its
+baseline, so no table holds one: none of the 87 sequential exceptions of `apple-metal-3` and none of the default
 profile's 22 differs in those records. What it costs is the verdict of a sweep on Metal and the candidates the
 derivation can choose from there, not an output. On the Apple M5 (eight records of 2026-11-19 under the default
 profile) more variants differ: 1,165 of the 2,749 rows compared at one row, every one over an integer weight and with

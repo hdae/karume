@@ -450,16 +450,19 @@ describe("M=1 GEMV shape selection", () => {
   it("selects 8 or 16 words ahead for the bf16 shapes no measured device is slower with, each under its own key, and leaves the int4 output heads and bf16 10240 × 2560 to the table of the device that gains from them", () => {
     // The default profile: the general variant. The RTX 3080 Ti's table: its own rows.
     const ampere = resolveGeometryProfile(NVIDIA_AMPERE).linearGemv;
-    for (const k of [1536, 2560]) {
+    for (const [k, unroll] of [
+      [1536, 1],
+      [2560, 2],
+    ] as const) {
       const shape = { storage: "i4", n: 262144, k } as const;
       assertEquals(defaultLinearGemvVariant(GEMV, shape), { cols: 32, unroll: 4 });
       const head = defaultLinearGemvVariant(ampere, shape);
-      assertEquals(head, { cols: 16, unroll: 2 });
-      assertEquals(linearGemvKey("i4", 32, head), "linear_gemv:v1:f32:c16u2:wi4g32");
+      assertEquals(head, { cols: 16, unroll });
+      assertEquals(linearGemvKey("i4", 32, head), `linear_gemv:v1:f32:c16u${unroll}:wi4g32`);
     }
     const tall = { storage: "bf16", n: 10240, k: 2560 } as const;
     assertEquals(defaultLinearGemvVariant(GEMV, tall), { cols: 32, unroll: 4 });
-    assertEquals(defaultLinearGemvVariant(ampere, tall), { cols: 16, unroll: 8 });
+    assertEquals(defaultLinearGemvVariant(ampere, tall), { cols: 32, unroll: 8 });
     // A table holds the default's rows too: a shape of the default selects the same variant there
     assertEquals(defaultLinearGemvVariant(ampere, { storage: "bf16", n: 12288, k: 1536 }), {
       cols: 16,

@@ -715,9 +715,9 @@ it plans its fusions with the default geometry profile's GEMV choices, and a Ses
 those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
 a linear whose shape has a parallel row, and each embedded table has rows on shapes the default has
 none for: `nvidia-blackwell` (the RTX 5070 Ti's table) on 20 (5 of them bf16 linears of regular
-Gemma 4 E2B and E4B), `apple-metal-3` (the Apple M2's) on 13 (3 bf16; its 10 integer shapes are
-among `nvidia-blackwell`'s) and `nvidia-ampere` (the RTX 3080 Ti's) on one, bf16 `2560 × 256`; no
-registered table removes a row of the default or changes which
+Gemma 4 E2B and E4B), `apple-metal-3` (the Apple M2's) on 13 (2 bf16; its 11 integer shapes are
+among `nvidia-blackwell`'s) and `nvidia-ampere` (the RTX 3080 Ti's) on 11 (2 bf16; its 9 integer
+shapes are among `nvidia-blackwell`'s); no registered table removes a row of the default or changes which
 rows read packed activations (a core-lane test). On such an adapter a linear of one of those shapes that
 feeds a `static_quantize`, with linear at `reorder` and at most 8 rows, is one fused step in the
 Session and two nodes in the estimate: the estimate then counts the linear's f32 output (4 · rows · N
@@ -906,43 +906,45 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   from its own GEMV sweep records. Such a table starts from the default's exceptions: it keeps the ones its records
   give no evidence about, and replaces one only when its records adopt another variant over it, which takes ×1.10
   in every group — a device on which an inherited exception is slower by less keeps it.
-  - `nvidia-ampere` (RTX 3080 Ti, Node, Vulkan): the default's 22, and five of its own — the int4 output heads of the
-    q4_0 QAT E2B / E4B models, bf16 `10240 × 2560` and the drafter shape int4 `256 × 2048`, which the RTX 5070 Ti
-    reads ×0.89 to ×0.95 ([perf-ledger](perf-ledger.md) K-101, K-112), and the bf16 output head of regular E4B,
-    `262144 × 2560`, which neither of the other devices' records adopt.
+  - `nvidia-ampere` (RTX 3080 Ti, Node, Vulkan): the default's 22, and 50 of its own — 37 int4 and 11 int8 shapes of
+    the QAT models and their MTP drafters, the bf16 output head of regular E2B, `262144 × 1536`, and bf16
+    `10240 × 2560` (×1.10 to ×1.88).
   - `nvidia-blackwell` (RTX 5070 Ti, Chrome, D3D12): the default's 22, two of them with its own variant (bf16
-    `1536 × 256` and `4096 × 2560`, both `c16u16`, ×1.12 to ×1.21), and 42 int4 and int8 shapes of its own.
-  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 17 of them with its own variant of 32 to 256
-    columns per workgroup (×1.10 to ×1.54), and 64 int4 and int8 shapes of its own. The M2's records compare every
+    `1536 × 256` `c16u8` and `4096 × 2560` `c16u16`, ×1.11 to ×1.21), and 41 int4 and int8 shapes of its own.
+  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 15 of them with its own variant of 32 to 256
+    columns per workgroup (×1.10 to ×1.54), and 65 int4 and int8 shapes of its own. The M2's records compare every
     sequential variant they time with the baseline (what an `exact` Session runs with the default profile) word for
     word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So each of
-    the table's 81 adopted exceptions writes the baseline's words on Metal in every record that timed it (224
-    groups): the general variant's on its 64 own shapes, the default's exception's on the 17 others. Not every
-    variant does: 423 of the 2,737 sequential-variant rows the records time at one row besides the baseline — all of
-    int2, int4 and int8 cases and all of read-ahead depths other than 4; no bf16 row — write other words than the
-    baseline there, and none of them is adopted. On 12 of the default's 22 shapes the records also time the general
-    variant against the default's exception, with the same words; on the other 10 the quick look left it untimed, so
-    on those shapes the default's exception has not been compared with the general variant on Metal. **The 5 exceptions of the default that the
-    table keeps are not thereby shown faster on the M2**: they stay because no variant reaches ×1.10 over them, and
-    the general variant reads ×1.02 to ×1.04 faster than the default's exception on `6144 × 1536` and
-    `12288 × 1536`, ×0.995 to ×1.03 on `10752 × 2560` and ×0.94 to ×0.99 on `2048 × 2560` (`256 × 1536`: not
-    timed). Over the 12 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
+    the table's 80 adopted exceptions writes the baseline's words on Metal in every record that timed it (216
+    groups of its 14 records): the general variant's on its 65 own shapes, the default's exception's on the 15
+    others. Not every variant does: 423 of the 2,768 sequential-variant rows the records time at one row besides the
+    baseline — all of int2, int4 and int8 cases and all of read-ahead depths other than 4; no bf16 row — write other
+    words than the baseline there, and none of them is adopted. On 13 of the default's 22 shapes the records also
+    time the general variant against the default's exception, with the same words; on the other 9 the quick look
+    left it untimed, so on those shapes the default's exception has not been compared with the general variant on
+    Metal. **The 7 exceptions of the default that the table keeps are not thereby shown faster on the M2**: they stay
+    because no variant reaches ×1.10 over them, and the general variant reads ×1.02 to ×1.04 faster than the
+    default's exception on `6144 × 1536` and `12288 × 1536`, ×1.04 to ×1.07 on `4096 × 2560`, ×0.995 to ×1.03 on
+    `10752 × 2560`, ×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to ×0.87 on `1536 × 2048` (`256 × 1536`: not
+    timed). Over the 13 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
     11 on the M2: there the default's exceptions do not meet the default's rule that no measured device is slower
     with a row.
-- **On each embedded table's adapter the parallel rows are that table's**: `nvidia-ampere` holds the default's 88
-  and one of its own, bf16 `2560 × 256` at 16 lanes; `nvidia-blackwell` 63 apart from the default's (other lanes on
-  24 of the default's rows, 2 of them bf16; 20 rows on shapes the default has none for, 5 of them bf16; the staged
-  form or another row block on the rest); `apple-metal-3` 65 apart from the default's (other lanes on 34 of the
-  default's rows, 4 of them bf16; 13 rows on shapes the default has none for, 3 of them bf16; the staged form
-  cleared or another row block on the rest). Each table is derived from GEMV sweep records of one device: the RTX
-  3080 Ti under Node on Vulkan, the RTX 5070 Ti in Chrome on D3D12, the Apple M2 in Chrome on Metal. A Session with
-  linear at `reorder` there gives other bits than the same Session on another adapter on the shapes whose lanes
-  differ or whose row is new (1, 44 and 47 of them), inside the band of `linear`. Each row of a table's own met the
+- **On each embedded table's adapter the parallel rows are that table's**: `nvidia-ampere` 49 apart from the
+  default's (other lanes on 14 of the default's rows, one of them bf16; 11 rows on shapes the default has none for, 2
+  of them bf16; the staged form or another row block on the rest); `nvidia-blackwell` 62 apart from the default's
+  (other lanes on 23 of the default's rows, one of them bf16; 20 rows on shapes the default has none for, 5 of them
+  bf16; the staged form or another row block on the rest); `apple-metal-3` 65 apart from the default's (other lanes
+  on 35 of the default's rows, 4 of them bf16; 13 rows on shapes the default has none for, 2 of them bf16; the staged
+  form cleared or another row block on the rest). Each table is derived from GEMV sweep records of one device: the
+  RTX 3080 Ti under Node on Vulkan, the RTX 5070 Ti in Chrome on D3D12, the Apple M2 in Chrome on Metal. A Session
+  with linear at `reorder` there gives other bits than the same Session on another adapter on the shapes whose lanes
+  differ or whose row is new (25, 43 and 48 of them), inside the band of `linear`. Each row of a table's own met the
   adoption rule in every record that is evidence ([spec](spec/geometry-profiles.md#deriving-the-gemv-choices)).
   A decode token was measured with `nvidia-blackwell` as it was before its derivation from 82 records (QAT `i4-fast`
   E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); with the rows
-  derived from the current records, `nvidia-blackwell` and `apple-metal-3` were measured end to end on E2B alone
-  and `nvidia-ampere` was not ([research](research/2026-11-19-gemv-tables-across-devices.md) §3), and no test runs a
+  derived on 2026-11-19, `nvidia-blackwell` and `apple-metal-3` were measured end to end on E2B alone and
+  `nvidia-ampere` was not ([research](research/2026-11-19-gemv-tables-across-devices.md) §3) — measurements taken
+  before the derivation of 2026-11-21 that the three tables hold now —, and no test runs a
   table's rows on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
   only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's presets only `bf16-fast` declares
   that level (in the recipe and the local mirror, not published yet), so only its Sessions run the bf16 rows.
@@ -2724,7 +2726,7 @@ The table of target shapes is an allowlist, and shapes not on it silently fall b
 [The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
 The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares the level `reorder` and packed int8 activations; the RMS→add and linear→SRQ fusions apply wherever they match, without a declaration ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) default to `bf16` since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there. Their `bf16-fast` (in the recipe and the local mirror since 2026-11-19, not published yet) declares the level `reorder` on the same weights: the linears of the 17 bf16 shapes the default table names (the kernel takes bf16 / f16 / f32 words since 2026-11-18 — [spec](spec/geometry-profiles.md#the-gemv-choices-of-linear); the measured candidates are in [research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)) take the parallel GEMV, the others keep the sequential GEMV; their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its `i4-fast` (it declares the level `reorder`) is chosen by name.
 The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
-The MTP drafters take a row only for the shapes the RTX 3080 Ti's GEMV sweep supports one for (2026-11-18, [research](research/2026-11-18-gemma4-gemv-census.md) §4): with `i4-fast`, 54 of the 68 linears of the q4_0 QAT E2B drafter, 57 of the E4B drafter's and 41 of the 12B drafter's still run sequentially (the bundle's census table pins 54 and 57 for the reference), and the regular E2B's int8 drafter runs 66 of its 68 linears sequentially — none of its own shapes has a row (its two `post_projection` linears take the row of the mobile line's int8 `per_layer_projection`), they were measured once, and no preset of `karume-gemma4` reaches `reorder`. The output heads of the E2B / E4B QAT lines stay sequential too — int4 on `karume-gemma4-qat`, int2 on `karume-gemma4-qat-mobile`: the parallel GEMV is slower than the sequential row blocks at the four rows a verify run gives the head, or gains nothing at one row (the same research §5; perf-ledger K-59, K-101). On the RTX 3080 Ti's table (`nvidia-ampere`) the int4 heads run another variant of the sequential kernel at one row (16 columns per workgroup, 2 words read ahead: the same words — perf-ledger K-101); on every other adapter they run the general one. A row is matched by shape, not by model, so "the drafter rows" describes the shipped pipelines: int4 g32 `1024 × 4096`, the 12B drafter's sliding o, is also the shape of the 22 FFN-down linears of the SBV2 text encoder's int4 graph. The sbv2 pipeline does not accept `numerics`, so those linears take the row only in a Session created directly with linear at `reorder` and at most 8 rows; the row was not measured there.
+The MTP drafters take a row only for the shapes the RTX 3080 Ti's GEMV sweep supports one for (2026-11-18, [research](research/2026-11-18-gemma4-gemv-census.md) §4): with `i4-fast`, 54 of the 68 linears of the q4_0 QAT E2B drafter, 57 of the E4B drafter's and 41 of the 12B drafter's still run sequentially under the default profile's rows, and the regular E2B's int8 drafter runs 66 of its 68 linears sequentially — none of its own shapes has a row there (its two `post_projection` linears take the row of the mobile line's int8 `per_layer_projection`), they were measured once, and no preset of `karume-gemma4` reaches `reorder`. The RTX 3080 Ti's table (`nvidia-ampere`, derived 2026-11-21) has rows of its own on the drafters' int4 `2048 × 256`, `256 × 2048`, `256 × 5120` and `3840 × 1024` and on five int8 shapes of the regular drafter: there 12, 12 and 39 of those linears run sequentially, and 3 of the int8 drafter's (the bundle's census table pins 12 and 12, and 3, counted on that table). The output heads of the E2B / E4B QAT lines stay sequential too — int4 on `karume-gemma4-qat`, int2 on `karume-gemma4-qat-mobile`: the parallel GEMV is slower than the sequential row blocks at the four rows a verify run gives the head, or gains nothing at one row (the same research §5; perf-ledger K-59, K-101). On the RTX 3080 Ti's table (`nvidia-ampere`) the int4 heads run another variant of the sequential kernel at one row (16 columns per workgroup, 1 word read ahead on E2B's and 2 on E4B's: the same words — perf-ledger K-101, K-113); on every other adapter they run the general one. A row is matched by shape, not by model, so "the drafter rows" describes the shipped pipelines: int4 g32 `1024 × 4096`, the 12B drafter's sliding o, is also the shape of the 22 FFN-down linears of the SBV2 text encoder's int4 graph. The sbv2 pipeline does not accept `numerics`, so those linears take the row only in a Session created directly with linear at `reorder` and at most 8 rows; the row was not measured there.
 
 ## packed int8 activations (`packedStaticQuantize`, 2026-09-19)
 
