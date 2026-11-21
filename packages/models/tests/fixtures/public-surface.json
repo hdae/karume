@@ -47,6 +47,10 @@
         "kind": "namespace"
       },
       {
+        "name": "embeddinggemma",
+        "kind": "namespace"
+      },
+      {
         "name": "encodePng",
         "kind": "function"
       },
@@ -271,6 +275,36 @@
       {
         "name": "SOURCES",
         "kind": "variable"
+      }
+    ],
+    "./embeddinggemma": [
+      {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "EmbedContentPart",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "EmbedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
       }
     ],
     "./gemma": [

@@ -88,6 +88,7 @@ import {
 import { ANIMA_SESSION_POLICY } from "../../src/anima/pipeline.ts";
 import { BIREFNET_SESSION_POLICY } from "../../src/birefnet/pipeline.ts";
 import { DEPTH_ANYTHING_SESSION_POLICY } from "../../src/depth-anything/pipeline.ts";
+import { EMBEDDINGGEMMA_SESSION_POLICY } from "../../src/embeddinggemma/pipeline.ts";
 import { GEMMA_SESSION_POLICY } from "../../src/gemma/session-options.ts";
 import { IRODORI_SESSION_POLICY } from "../../src/irodori/admission.ts";
 import { MOSS_SESSION_POLICY } from "../../src/moss/preset.ts";
@@ -116,6 +117,7 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   anima: ANIMA_SESSION_POLICY,
   birefnet: BIREFNET_SESSION_POLICY,
   "depth-anything": DEPTH_ANYTHING_SESSION_POLICY,
+  embeddinggemma: EMBEDDINGGEMMA_SESSION_POLICY,
   gemma4: GEMMA_SESSION_POLICY,
   "gemma4-qat": GEMMA_SESSION_POLICY,
   irodori: IRODORI_SESSION_POLICY,

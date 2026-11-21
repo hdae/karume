@@ -13,6 +13,7 @@ import { numericLevels } from "../../runtime/src/runtime/numerics.ts";
 import { ANIMA_SESSION_POLICY } from "../src/anima/pipeline.ts";
 import { BIREFNET_SESSION_POLICY } from "../src/birefnet/pipeline.ts";
 import { DEPTH_ANYTHING_SESSION_POLICY } from "../src/depth-anything/pipeline.ts";
+import { EMBEDDINGGEMMA_SESSION_POLICY } from "../src/embeddinggemma/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { GEMMA_SESSION_POLICY } from "../src/gemma/session-options.ts";
 import { IRODORI_SESSION_POLICY } from "../src/irodori/admission.ts";
@@ -468,7 +469,7 @@ describe("assertSessionOverrides", () => {
 });
 
 describe("the families' policy tables", () => {
-  it("the tables of all 10 families have every key of SessionSpec (the run-time counterpart of the type's exhaustiveness)", () => {
+  it("the tables of all 11 families have every key of SessionSpec (the run-time counterpart of the type's exhaustiveness)", () => {
     // The tables' type is the exhaustive `Required<SessionSpec>`, so a new key fails the type
     // check. This is the counterpart for a change that loosens the type (making it `Partial`, for
     // example) and so passes the type check.
@@ -476,6 +477,7 @@ describe("the families' policy tables", () => {
       anima: ANIMA_SESSION_POLICY,
       birefnet: BIREFNET_SESSION_POLICY,
       "depth-anything": DEPTH_ANYTHING_SESSION_POLICY,
+      embeddinggemma: EMBEDDINGGEMMA_SESSION_POLICY,
       gemma: GEMMA_SESSION_POLICY,
       irodori: IRODORI_SESSION_POLICY,
       sbv2: SBV2_SESSION_POLICY,

@@ -1934,6 +1934,28 @@ implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` �
 only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
 is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
+## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one text per call, at most 2,048 tokens, text only, no batch
+
+The text model of the local distribution `karume-embeddinggemma-2` (not published), through
+`@karume/models/embeddinggemma`:
+
+- **One sequence per call, no batch.** `embed` takes one input and returns one vector; concurrent
+  calls queue on the pipeline. The graph runs the symbolic length T of one sequence with no
+  run-time mask: its sliding-window band is a folded `[1, 1, 2048, 2048]` constant cut down by
+  `sym_prefix_slice` — the single-sequence scheme of the first EmbeddingGemma above.
+- **At most 2,048 tokens**, `<bos>` and `<eos>` included (`pipelineConfig.maxTokens`, checked
+  against the graph's bound at construction); upstream's model reads 8,192. A longer text is refused
+  with a `ModelInputError` that states the count and the limit — nothing is truncated. What lifting
+  the bound needs (a column range the attention kernel checks) is backlog item "EmbeddingGemma 2".
+- **Text only.** The distribution holds the text tower alone. A text whose tokens include the image,
+  audio or video placeholder id (258880 / 258881 / 258884) is refused: the text tower would embed
+  the id as an ordinary token, while upstream's composite model replaces it with the pad id and
+  sentence-transformers refuses the text.
+- **One preset, `bf16`** (the checkpoint's own weights, f32 compute). The output widths are the
+  model's Matryoshka widths (768 / 512 / 256 / 128); there is no other width.
+- **sha256 rows exist only for the RTX 3080 Ti under Node** (`node-nvidia-geforce-rtx-3080-ti`);
+  another machine SKIPs those cases explicitly with a red reference guard until it writes its rows.
+
 ## Irodori text side (backbone / projector): no run-time attention_mask; an empty caption and T=1 are not representable
 
 The same static scheme as EmbeddingGemma (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"

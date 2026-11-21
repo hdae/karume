@@ -1,7 +1,8 @@
 /**
  * `@karume/models` — the barrel of the pipelines. Offered alongside the per-family subpaths
  * (`./anima` / `./birefnet` / `./depth-anything` / `./gemma` / `./gemma4-qat-mobile` / `./irodori` /
- * `./sbv2` / `./siglip2` / `./umt5` / `./vowel-detector` / `./wan` / `./moss`) (ADR 0037).
+ * `./sbv2` / `./siglip2` / `./umt5` / `./vowel-detector` / `./wan` / `./moss` / `./embeddinggemma`)
+ * (ADR 0037).
  *
  * Two kinds of export:
  *
@@ -9,8 +10,8 @@
  *   every `fromPretrained`, {@link ModelInputError}, {@link KARUME_SOURCES} and the PNG / WAV /
  *   image helpers.
  * - **One namespace per family** (`anima`, `birefnet`, `depthAnything`, `gemma`, `gemma4QatMobile`,
- *   `irodori`, `sbv2`, `siglip2`, `umt5`, `vowelDetector`, `wan`, `moss` — the subpath key in
- *   camelCase).
+ *   `irodori`, `sbv2`, `siglip2`, `umt5`, `vowelDetector`, `wan`, `moss`, `embeddinggemma` — the
+ *   subpath key in camelCase).
  *   Each namespace **is** that subpath's module (`export * as`), so the barrel and the subpaths
  *   cannot drift apart, and the members are documented once, on the subpath's own page (JSR lists a
  *   namespace without its members — follow the link in its doc).
@@ -162,6 +163,13 @@ export * as wan from "./wan.ts";
  * its members and their docs are on that page: https://jsr.io/@karume/models/doc/moss
  */
 export * as moss from "./moss.ts";
+
+/**
+ * EmbeddingGemma — text → sentence embedding. This namespace is the module of the subpath
+ * `@karume/models/embeddinggemma`; its members and their docs are on that page:
+ * https://jsr.io/@karume/models/doc/embeddinggemma
+ */
+export * as embeddinggemma from "./embeddinggemma.ts";
 
 /**
  * NOTE: the fixed-length greedy generation loop (`generateGreedy` / `GreedySpec`) was **removed**

@@ -25,6 +25,7 @@ import { type Manifest, parseManifest } from "@karume/hub";
 import { ANIMA_SESSION_POLICY } from "../../models/src/anima/pipeline.ts";
 import { BIREFNET_SESSION_POLICY } from "../../models/src/birefnet/pipeline.ts";
 import { DEPTH_ANYTHING_SESSION_POLICY } from "../../models/src/depth-anything/pipeline.ts";
+import { EMBEDDINGGEMMA_SESSION_POLICY } from "../../models/src/embeddinggemma/pipeline.ts";
 import {
   GEMMA_SESSION_POLICY,
   resolveGemmaSessionOptions,
@@ -56,6 +57,7 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   anima: ANIMA_SESSION_POLICY,
   birefnet: BIREFNET_SESSION_POLICY,
   "depth-anything": DEPTH_ANYTHING_SESSION_POLICY,
+  embeddinggemma: EMBEDDINGGEMMA_SESSION_POLICY,
   gemma4: GEMMA_SESSION_POLICY,
   "gemma4-qat": GEMMA_SESSION_POLICY,
   irodori: IRODORI_SESSION_POLICY,

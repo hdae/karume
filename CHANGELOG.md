@@ -32,6 +32,20 @@ measurements in `docs/research/`.
   group whose case is not current is stale). The plan lists, at a case and row count where a reference's fastest
   time is not repeated, every candidate read against it, and no candidate whose reference the sweep does not measure.
 
+### Added
+
+- `@karume/models/embeddinggemma` (barrel namespace `embeddinggemma`): sentence embeddings with the EmbeddingGemma
+  family, today the text model of EmbeddingGemma 2 (pipeline `embeddinggemma/1`; its distribution is not published —
+  a local one is passed as a source handle). `Pipeline.fromPretrained` / `fromAssets` build it with one resident
+  Session; `embed(input, { prompt, dimension, signal })` returns a unit vector (`Float32Array`). `input` is a string
+  or an array of `EmbedContentPart`s (text parts today, concatenated in order); `prompt` names a prompt of the
+  manifest (`"query"`, `"document"`, …) whose prefix goes before the text; `dimension` is one of the declared widths
+  (768 / 512 / 256 / 128 — a shorter one is the leading slice re-normalised). A `ModelInputError` refuses, before the
+  GPU, an empty part list, a part of another type, an unknown prompt or width, a text whose tokens include an image,
+  audio or video placeholder, and a sequence over the limit (2,048 tokens with `<bos>` and `<eos>`; nothing is
+  truncated). Also exported: `EmbedOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
+  `ModelInputError`.
+
 ### Changed
 
 - `@karume/runtime`: the three embedded tables carry GEMV choices derived again from their devices' GEMV sweep

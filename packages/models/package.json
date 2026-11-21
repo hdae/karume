@@ -21,7 +21,8 @@
     "./gemma4-qat-mobile": "./gemma4-qat-mobile.ts",
     "./umt5": "./umt5.ts",
     "./wan": "./wan.ts",
-    "./moss": "./moss.ts"
+    "./moss": "./moss.ts",
+    "./embeddinggemma": "./embeddinggemma.ts"
   },
   "scripts": {
     "test": "vp test"
