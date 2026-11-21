@@ -97,6 +97,41 @@ maintainer's ruling of 2026-11-06).
       a bidirectional hook of its own; one shared helper for the Gemma-line recipes is not built.
     - The comment on the tolerance of `packages/e2e/tests/e2e_embeddinggemma_test.ts` says its relative term is
       "about 1/4 of atol"; it is 2.5 times atol.
+  - **Moving the pinned transformers from 5.14.1 to 5.23.0 (filed 2026-11-21; a task of its own by the maintainer's
+    ruling of that day, each difference in a result confirmed one by one when it is done)**: the pin stays 5.14.1 for
+    every dependency group and every per-run `--with` but the EmbeddingGemma 2 recipe's, which adds 5.23.0 per run. A
+    trial move on 2026-11-21 was taken back; it locked with nothing published after 2026-11-14 (transformers 5.14.1 →
+    5.23.0, tokenizers 0.22.2 → 0.23.3 and huggingface-hub 1.27.0 → 1.33.0, both required by it; uv has no standing
+    cut-off here — a lock made with `--exclude-newer` records the option and a later `--locked` run fails until a
+    plain `uv lock` removes it). What the trial found, the cases called red being red under 5.23.0:
+    - The Gemma 4 recipe does not run on 5.23.0 (183 red cases): `Gemma4TextConfig` keeps `head_dim` /
+      `num_key_value_heads` per layer (`global_head_dim` / `num_global_key_value_heads` are no longer attributes, and
+      reading a per-layer attribute on the global config raises), the tiny test configs whose KV-shared layer has
+      no earlier layer of its type are refused by the config, and `Gemma4UnifiedVisionEmbedder.forward` returns
+      `BaseModelOutputWithPooling` (the projected features are `pooler_output`). Upstream's RoPE tables for E2B /
+      E4B are bit-identical to 5.14.1's.
+    - The Qwen3.5 text tower recipe does not run (15 red cases): `Qwen3_5GatedDeltaNet` no longer holds the
+      instance attributes its rewrites replace (it calls module functions under the kernel-hub decorators), and the
+      module no longer has `chunk_gated_delta_rule` or `is_fast_path_available` (`moss.text_embeds` reads the latter).
+    - Upstream rewrote `torch_chunk_gated_delta_rule`: the exporter's copy (of 5.14.1) differs from it by up to
+      3.7e-9 on under 2 % of the elements, so the bit-for-bit case of `test_gated_delta_scan.py` and the band case of
+      `tests/test_gated_delta_fixture.py` are red; the runtime fixture `gated-delta-scan.safetensors` would get
+      other bands.
+    - umT5 attention now goes through the attention interface (SDPA by default; eager no longer upcasts the
+      softmax to f32): the spelled-out encoder and its references are no longer bit-exact with upstream (8 red
+      cases), and the published umT5 / Wan tokenizer assets record 5.14.1, so the distribution gates refuse them
+      (`test_the_plan_passes_every_gate` is red) until they are regenerated; the Wan text embeddings would change.
+    - Re-exported on 5.23.0, Anima's text encoder graph has 56 more nodes (a reshape after SDPA and a permute per
+      layer, from `sdpa_attention_forward`) with bit-identical eager outputs; every recipe that exports through
+      transformers' `sdpa` would change its graph at its next export.
+    - tokenizers 0.23.3 folds the grapheme tables of Anima's T5 normalizer differently (newer Unicode data:
+      `extend` gains 6 ranges and widens 2, `prepend` loses U+11A3A); `packages/models/tests/fixtures/anima-text/parity.json` and
+      the distributed T5 table would change when regenerated. No check is red.
+    - Not re-checked on 5.23.0 (assets absent here): the umT5, Wan and Qwen3.5 tokenizer fixtures, the MOSS stage-0
+      records, the real-weight exports of siglip2, birefnet, depth-anything, deberta, minicpm5, embeddinggemma and
+      sbv2, and the batch>1 EmbeddingGemma entry of known-issues (written for the 5.14 line).
+    - Comments in `packages/models/src` still name transformers 5.14.1 as the source of truth (the T5 / umT5 /
+      Qwen2 / Qwen3.5 tokenizers, the image preprocessing, the umT5 relative positions, Gemma 4 vision).
 
 - **The move to maintained specs (ADR 0152) (filed 2026-11-15; ADR
   [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) accepted; the maintainer confirmed this
