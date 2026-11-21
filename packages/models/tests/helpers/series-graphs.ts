@@ -35,6 +35,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "deberta-i8": { "full-24layer": "text_encoder", "sbv2-22layer": "text_encoder" },
   "depth-anything-v2-small-hf": { "": "depth" },
   "embeddinggemma-300m": { "": "model" },
+  "embeddinggemma-2-text": { "": "model" },
   // Gemma 4 26B A4B cut after its first layers (ADR 0145 decision 6 — `gemma4.export_moe --layers
   // --routing-outputs`): the cut product graph and, under `routing/`, the same graph with each
   // layer's routing ids as extra outputs.

@@ -55,6 +55,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("anima/export.py", "emit_target", "target", "TARGETS"),
     ("deberta/export.py", "export_variant", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
+    ("embeddinggemma2/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("gemma4/export.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_decode.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_drafter.py", "export_series", "GEMMA4_DRAFTER_ROLE", "GEMMA4_DRAFTER_ROLE"),
@@ -347,9 +348,9 @@ class TestTheNamesAreTheWeightsKeys:
         }
         assert self._named("moss") | self._named("qwen3_5") == set(MOSS_WEIGHTS)
 
-    @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
+    @pytest.mark.parametrize("family", ["embeddinggemma", "embeddinggemma2", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
-        """Pin the spelling of the 2 families that build no distribution (they have no
+        """Pin the spelling of the 3 families that build no distribution (they have no
         `distribution.py`).
 
         So that the containers already in place can be used as is on the day one is built, they

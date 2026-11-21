@@ -53,7 +53,12 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("siglip2", both("siglip2")),
   family("vowel-detector", both("vowel_detector")),
   family("minicpm5", both("minicpm5")),
-  family("embeddinggemma", [`${E2E}/e2e_embeddinggemma*_test.ts`]),
+  family(
+    "embeddinggemma",
+    [`${E2E}/e2e_embeddinggemma*_test.ts`],
+    [`${E2E}/e2e_embeddinggemma2*_test.ts`],
+  ),
+  family("embeddinggemma2", [`${E2E}/e2e_embeddinggemma2*_test.ts`]),
   family("deberta", [`${E2E}/e2e_deberta*_test.ts`]),
   family("wan", both("wan"), both("wan_ti2v")),
   family("wan-ti2v", both("wan_ti2v")),
