@@ -17,6 +17,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
+| Text | EmbeddingGemma — sentence embeddings (EmbeddingGemma 2's text model, `embeddinggemma-2`) | `/embeddinggemma` | built; not yet checked in a browser |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -78,6 +79,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
 | `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | `hdae/karume-gemma4-qat-mobile` | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
+| `embeddinggemma-2` | `models/karume-embeddinggemma-2` | — (not published yet: no `SOURCES` entry, so direct only) | EmbeddingGemma |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
 the pages show a disabled state naming the directory.
@@ -1043,6 +1045,74 @@ JSON.
 - The mobile QAT entry point is experimental (ADR 0097): fixed int2/int4/int8 with SRQ, no MTP.
 - After a device loss, **Acquire the GPU again** rebuilds the pipeline for the same Load and starts
   an empty chat.
+
+## The EmbeddingGemma page
+
+`embeddinggemma.Pipeline.embed` turns one text into a sentence embedding: a **unit vector**, so the
+dot product of two results is their cosine similarity. Today the family serves the text model of
+EmbeddingGemma 2 (the local mirror `models/karume-embeddinggemma-2`, model `text`, preset `bf16`).
+The distribution is not published, so the mount has no HF-compatible route: the page reads it
+**direct** (plain `fetch` from `/models/embeddinggemma-2/`), and Cached is disabled with the reason.
+
+The page embeds a list of rows, one `embed` call per row in order, all at one dimension, and shows
+the **similarity matrix** of the rows. It acquires the GPU once (`acquireGpu({ subgroups: "available"
+})`, plus `gpuTiming: true` while **GPU timing** is on). `fromPretrained` creates the Session and
+uploads the weights while it builds, so the page builds the pipeline on the **first Run** and keeps
+it for later runs with the same GPU, source, model and preset (`canReuse` in `request.ts`). The
+prompt and the dimension are per call and never rebuild it. A run with a different choice first
+disposes the old pipeline. A new GPU and leaving the page dispose it too.
+
+| Control | What it does |
+| --- | --- |
+| Model, Preset | The manifest's `models` and the chosen model's `quants` (today one each: `text`, `bf16`), the defaults marked "(default)". |
+| Source | **Direct** only for this mount (above). |
+| Dimension | The widths the model's `pipelineConfig.dimensions` declares (768, 512, 256, 128); the first is the full width and the default. A shorter one is the leading slice re-normalised by the pipeline. One width for every row of a run. |
+| Rows | Each row is a text and a **Prompt**: "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). |
+| Run / Cancel | Run builds the pipeline if needed, then embeds every row. Cancel stops the **fetch** at once; the **Session build** takes no signal, so Cancel is disabled during it. `embed` checks the signal before its run, so a Cancel during a row takes effect when that row ends: the rest are skipped and the run ends as cancelled with no result. |
+| GPU timing | As on the SigLIP 2 page: the GPU is acquired again with `gpuTiming: true`, the next run rebuilds the pipeline, and every embedded row records its GPU time per kernel. |
+
+A row the pipeline **refuses** (`ModelInputError` — a prompt the model does not declare, a text over
+`pipelineConfig.maxTokens` tokens with the prefix, `<bos>` and `<eos>`, a text holding the image,
+audio or video placeholder token) gets the refusal as its result, name and message as raised, and
+the run goes on with the next row. Any other failure (the GPU, the Session, the build) ends the run
+and the status card shows it in full.
+
+The result card shows the similarity matrix (`similarity[i][j]` at 4 decimals; "—" in the row and
+the column of a refused row), then one line per row: its prompt, its text, and its result (width,
+L2 norm, embed seconds, the first 8 values and the sha256 of its f32 bytes) or its refusal. Below
+come the buttons and a summary: adapter, source, model, preset, dimension, rows embedded, build and
+wall seconds, the model Session's runs, weights, this run's submits and dispatches (with the
+Session's totals), geometry profile, build cost, and GPU time per op when timed.
+
+### The record (`format: "karume-playground-embeddinggemma/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-embeddinggemma/1`, `embeddinggemma` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`, as on the other pages |
+| `distribution` | `directory` and `manifestSha256` (the sha256 of `karume.json`, which also pins the prompt prefixes) |
+| `source` | `{ "kind": "direct" }` (or the cached form once the mount has an HF-compatible route) |
+| `model`, `preset` | `name` / `quant`, `label`, `isDefault` |
+| `request` | `dimension` (every row's width) and `rows`: per row in order, `text` as typed and `prompt` (a name, or `null` for none) |
+| `timings` | `pipelineReused`, `buildSeconds` (`null` when reused), `wallSeconds` (from Run to the last row, hashing excluded) |
+| `output.rows` | per row: `{ "kind": "embedding", dimension, nonFinite, l2Norm, first, sha256, embedSeconds }` (`l2Norm` is `null` with non-finite values; `first` spells a non-finite value as `"NaN"`, `"Infinity"` or `"-Infinity"`) or `{ "kind": "refused", "error": { "name", "message" }, embedSeconds }` |
+| `output.similarity` | the matrix of dot products at 6 decimals, accumulated in f64; `null` for a pair with a refused row or a vector holding non-finite values |
+| `diagnostics.model` | the model Session over this run's embedded rows, one report per row: as `diagnostics.vision` on the SigLIP 2 page (absent when every row was refused) |
+
+**Download record (JSON)** saves `embeddinggemma_<UTC timestamp>.json`. **Download Row N (raw
+f32)** saves `embeddinggemma_<UTC timestamp>_row<N>.f32` for each embedded row: the bytes the
+sha256 covers. **Copy record** copies the JSON.
+
+### Caveats
+
+- No token count per row: the pipeline's public surface reports none. The limit and the count
+  appear only in the refusal of a row that is over it.
+- The vector sha256 compares runs exactly; two GPUs, drivers or browsers can differ in the last
+  bits while the similarities agree to many digits. Compare the downloaded `.f32` files then.
+- The per-run counts assume that the runtime's submit and dispatch counters start at 0 when the
+  Session is built and only grow (implementation behavior, as on the SigLIP 2 page).
+- The sample rows name the prompts `query` and `document`; a model that declares neither shows them
+  as not declared, and the pipeline refuses those rows.
 
 ## Develop
 

@@ -16,6 +16,7 @@ import {
   MountainIcon,
   ScissorsIcon,
   SparklesIcon,
+  TextSearchIcon,
   VideoIcon,
 } from "lucide-react";
 
@@ -114,6 +115,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Text",
     icon: MessageSquareTextIcon,
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
+  },
+  {
+    path: "/embeddinggemma",
+    title: "EmbeddingGemma",
+    summary:
+      "Text → sentence embedding with EmbeddingGemma 2's text model: a prompt per row, a chosen dimension and the rows' cosine similarity matrix.",
+    group: "Text",
+    icon: TextSearchIcon,
+    mounts: ["embeddinggemma-2"],
   },
 ];
 

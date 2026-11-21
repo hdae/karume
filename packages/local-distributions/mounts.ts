@@ -7,7 +7,9 @@
  *
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
  * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
- * directory only reached as a cross-repo reference (umT5) is mounted for the direct route only.
+ * directory only reached as a cross-repo reference (umT5) is mounted for the direct route only, and
+ * so is a distribution that is not published yet (EmbeddingGemma 2): its family has no `SOURCES`
+ * entry, so there is no public repo name to serve it under.
  */
 
 import * as anima from "@karume/models/anima";
@@ -89,6 +91,9 @@ export const MOUNTS = {
     directory: "models/karume-moss-image",
     hfRepo: moss.SOURCES["moss-image"].repo,
   },
+  // Not published yet (no `embeddinggemma.SOURCES`): the direct route only, until its first
+  // publication gives it the object form.
+  "embeddinggemma-2": "models/karume-embeddinggemma-2",
 } as const satisfies DistributionsPluginOptions["distributions"];
 
 /** The name of a mount (`/models/<name>/`, the key of `/models/index.json`). */

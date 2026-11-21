@@ -690,16 +690,26 @@ maintainer's ruling of 2026-11-06).
 - **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
   2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
-  token length up to 2,048, the opt-in comparison with sentence-transformers), the series and its e2e in the lane
-  `models:embeddinggemma2`. Left, in order:
-  1. The TypeScript pipeline (one family `embeddinggemma` for both models) and the distribution recipe. Ruled
-     2026-11-21: a text holding an image, audio or video placeholder id is refused (the upstream composite model
-     replaces such an id with the pad id; sentence-transformers refuses the text).
+  token length up to 2,048 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
+  recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, preset `bf16`, nothing published),
+  the series and its e2e, and step 1 of the order below: the TypeScript family `embeddinggemma`
+  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts and widths and the 2,048-token
+  limit, no `SOURCES` until the first publication) with its pipeline e2e over the mirror, all in the lane
+  `models:embeddinggemma2`. Ruled 2026-11-21: one family `embeddinggemma` serves both models; a text holding an image,
+  audio or video placeholder id is refused (the upstream composite model replaces such an id with the pad id;
+  sentence-transformers refuses the text); an input is a string or an array of content parts, and placeholders are
+  never written in text; a later video input is an array of frames, the frame type (`VideoFrame` or `ImageBitmap`)
+  to be decided then. Left, in order:
+  1. ~~The TypeScript pipeline and the distribution recipe~~ — built (above).
   2. The model's 8K context: the folded band constant stops near 2,896 tokens (the container's 32 MiB const block) and
      a `[T, T]` buffer passes the default 128 MiB binding near 5,792, and at 2,048 tokens the plan backing is 252 MiB
      against the default budget of 256 MiB. The candidate is a column range the attention kernel checks, which would
      also carry key padding and batch>1 for both models; it needs a decision record and is not designed.
-  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead).
+  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead). The publication
+     also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
+     with `hfRepo` from it.
+  4. The Playground page `/embeddinggemma` (built 2026-11-21, not yet checked in a browser) shows no token count per
+     row: the pipeline exposes none. Whether `Pipeline` gains a `tokenize` or a count is undecided.
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
