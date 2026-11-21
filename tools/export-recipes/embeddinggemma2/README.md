@@ -1,9 +1,10 @@
 # EmbeddingGemma 2 export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
-[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)); it writes series, not a
-distribution, and has no dist recipe yet. Only the **text tower** of `google/embeddinggemma-2` is in
-scope; the checkpoint's vision and audio towers are never built.
+[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)); it writes series and the
+distribution `karume-embeddinggemma-2`, which is built as a local mirror only (nothing is
+published). Only the **text tower** of `google/embeddinggemma-2` is in scope; the checkpoint's
+vision and audio towers are never built.
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstring of `export.py`; this file is the entry point only. Every file a
@@ -23,7 +24,20 @@ head × 512 on the full ones). Prompt prefixing and tokenization stay on the hos
 ```
 outputs/series/embeddinggemma-2-text/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
 outputs/series/embeddinggemma-2-text/io.<case>.safetensors      input tensors and expected outputs from torch CPU (f32)
+outputs/series/embeddinggemma-2-text-bf16/…                     the same with `--dtype bf16` (what the distribution ships)
 ```
+
+Every run also writes the golden texts (case name, prompt name, body, T) to the git-tracked fixture
+`packages/models/tests/fixtures/embeddinggemma2/golden-cases.json`, which the TypeScript pipeline's
+e2e over the distribution reads (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts`); a
+recipe test holds it to `GOLDEN_CASES`. After editing the cases without an export, rewrite it with
+`uv run python -c "from embeddinggemma2.export import write_golden_case_fixture; write_golden_case_fixture()"`.
+
+`--dtype bf16` stores every weight of a weight slot (the token table and the linears) as bf16 and
+the rest (norms, per-layer scalars, folded constants) as f32. The checkpoint is BF16, so nothing is
+rounded: measured on 2026-11-21, all 427 tensors of the bf16 series decode bit for bit to the f32
+series' values (219 of them, 270,925,824 elements, stored as bf16), the graph descriptors are equal
+and the seven io files are byte-identical. The bf16 series is 571,961,874 bytes in 5 parts.
 
 Seven golden cases: four short ones with and without a prompt, and three long documents at T 609 and
 1,508 (past the first window cut at T = 514) and exactly 2,048 (the whole folded band). Before
@@ -67,12 +81,35 @@ holding the image placeholder is outside the goldens' domain: SentenceTransforme
 the composite model fed the ids directly swaps the placeholder for the pad id, which the text tower
 does not (max abs 9.25e-5 on one such text; 0 once the pad id is substituted).
 
+## The distribution (`distribution.py`, `card.py`)
+
+`dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (local only — no
+upload, no published pin): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
+family `embeddinggemma`) with the bf16 series' graph as the weights `model` and the compiled
+tokenizer as the asset `tokenizer`, one preset `bf16` (the original weights, the default),
+`LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice). Its
+`pipelineConfig` carries the model's own values, each read from its source and checked against the
+others when the plan is built:
+
+| Field               | Value                                         | Source and check                                                                                      |
+| ------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `prompts`           | prompt name → prefix (20 names, 8 prefixes)   | `config_sentence_transformers.json` at the pin, verbatim; no default prompt, cosine similarity       |
+| `dimensions`        | `[768, 512, 256, 128]`                        | the upstream model card; the first equals the graph's output width                                    |
+| `maxTokens`         | `2048`                                        | the bound the graph's folded constants carry for `T`, held to the export's `SYM_MAX`                 |
+| `placeholderTokens` | `{image: 258880, audio: 258881, video: 258884}` | `config.json` at the pin; each a special token of the tokenizer asset                                 |
+
+The plan also checks the bf16 storage (the f32 series is refused), the graph's inputs and output,
+the tokenizer asset against the pinned `tokenizer.json` and the graph's vocabulary, and the
+container's licence and upstream revision against the pin.
+
 ## Running
 
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.tokenizer
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
+uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity
 ```

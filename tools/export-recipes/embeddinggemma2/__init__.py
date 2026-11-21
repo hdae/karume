@@ -5,9 +5,10 @@ Only **what cannot live in the general-purpose exporter core** goes here: the pi
 snapshot ({@link embeddinggemma2.sources}), the compile of the tokenizer asset
 ({@link embeddinggemma2.tokenizer} — the same machinery as gemma4 and the first EmbeddingGemma,
 `_shared/gemma_tokenizer.py`), the export of the text tower's series
-({@link embeddinggemma2.export}) and the opt-in parity measurement against SentenceTransformer
-({@link embeddinggemma2.parity}). Only the text tower is in scope; the vision and audio towers of
-the checkpoint are not read.
+({@link embeddinggemma2.export}), the opt-in parity measurement against SentenceTransformer
+({@link embeddinggemma2.parity}) and the distribution recipe with its model card
+({@link embeddinggemma2.distribution} / {@link embeddinggemma2.card}). Only the text tower is in
+scope; the vision and audio towers of the checkpoint are not read.
 
 The dependency runs **one way only, recipe → core** (enforced mechanically by
 `tools/exporter/tests/test_architecture_boundary.py`).

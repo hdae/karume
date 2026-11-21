@@ -11,10 +11,14 @@ broken:
 - the SentenceTransformer layout check rejects every layout the wrapper does not fold
 - the golden cases are pinned (names, lengths, one case cutting the window, one at Tmax) and the
   case builder refuses drift and the multimodal placeholder ids
+- the tracked golden-case fixture (the TypeScript pipeline e2e's texts) holds exactly those cases
 - every file the script reads is pinned
 - {@link export.assert_ir_form} rejects a decomposed attention, a widened k / v, a mask on a full
   layer (upstream under torch.export materialises an all-zero one), a missing band, and a band
   from a graph input or of the wrong extent or values
+- `--dtype` writes each storage to a series of its own, and {@link export.assert_storage_form}
+  rejects a weight slot left f32 under bf16, bf16 outside a weight slot and any other storage; a
+  weight bf16 cannot hold fails the bf16 write
 
 The cases that need transformers at the pinned release, tokenizers or the snapshot SKIP explicitly
 without them (CI has none of them).
@@ -31,9 +35,12 @@ import pytest
 import torch
 
 from embeddinggemma2 import export, sources
+from karume.container import Provenance
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
+from karume.emit import EmitError, eligible_compressed_initializers
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
-from karume.pipeline import export_module
+from karume.pipeline import export_module, publish_model
+from karume.quantize import round_weights_to_bf16
 from karume.rope import assert_rope_lifted
 
 #: The upstream SentenceTransformer declarations at the pin.
@@ -334,6 +341,48 @@ class TestGoldenCases:
         assert export.long_document(19).startswith(export.LONG_PASSAGE)
         assert export.long_document(72).startswith(export.long_document(19))
         assert export.long_document(3, filler=2).endswith(" and and")
+
+
+class TestGoldenCaseFixture:
+    """The tracked fixture the TypeScript pipeline's e2e reads holds exactly the declared cases (a
+    case edited without regenerating it would leave the e2e embedding the old text against the new
+    golden)."""
+
+    def test_the_tracked_fixture_holds_the_golden_cases(self) -> None:
+        fixture = json.loads(export.GOLDEN_CASE_FIXTURE.read_text(encoding="utf-8"))
+
+        assert fixture == export.golden_case_fixture()
+
+    def test_each_case_carries_its_prompt_name_body_and_pinned_length(self) -> None:
+        cases = export.golden_case_fixture()["cases"]
+
+        assert [case["name"] for case in cases] == [name for name, _, _ in export.GOLDEN_CASES]
+        for (name, kind, body), case in zip(export.GOLDEN_CASES, cases, strict=True):
+            assert case.get("prompt") == kind, name
+            assert case["text"] == body, name
+            assert case["tokens"] == export.CASE_LENGTHS[name], name
+
+    def test_a_case_without_a_prompt_has_no_prompt_key(self) -> None:
+        bare = [case for case in export.golden_case_fixture()["cases"] if case["name"] == "bare"]
+
+        assert bare == [{"name": "bare", "text": bare[0]["text"], "tokens": 12}]
+
+    def test_the_fixture_names_the_series_whose_goldens_it_matches(self) -> None:
+        assert export.golden_case_fixture()["series"] == export.TEXT_SERIES
+
+    def test_the_writer_writes_what_the_tracked_fixture_holds(self, tmp_path: Path) -> None:
+        written = export.write_golden_case_fixture(tmp_path / "nested" / "golden-cases.json")
+
+        assert written.read_bytes() == export.GOLDEN_CASE_FIXTURE.read_bytes()
+
+    def test_every_prompt_name_is_a_prompt_of_the_pinned_snapshot(self) -> None:
+        directory = _snapshot()
+        sources.assert_pinned(directory, ["config_sentence_transformers.json"])
+        prompts = export.load_prompts(directory)
+
+        for case in export.golden_case_fixture()["cases"]:
+            if "prompt" in case:
+                assert case["prompt"] in prompts, case["name"]
 
 
 def _case(ids: list[int]) -> tuple[str, torch.Tensor, torch.Tensor]:
@@ -647,3 +696,171 @@ class TestTinyModel:
 
         assert form["attention_nodes"] == 3
         assert form["full_layers"] == [2]
+
+
+def _storage_graph(table: str = "bf16", projection: str = "bf16", band: str = "f32") -> IrGraph:
+    """A graph with two weight-slot initializers (the token table and a projection) and one that
+    is not (a band sliced by T), stored as given."""
+    graph = IrGraph(symbols=["T"])
+    graph.inputs.append(IrInput(name="input_ids", dtype="i32", shape=[1, "T"]))
+    for name, shape, dtype in (
+        ("table", [8, 4], table),
+        ("projection", [6, 4], projection),
+        (BAND, [1, 1, TINY_SYM_MAX, 1], band),
+    ):
+        graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage(dtype))
+        graph.values[name] = IrValue("f32", shape)
+    graph.values["tokens"] = IrValue("f32", [1, "T", 4])
+    graph.values["projected"] = IrValue("f32", [1, "T", 6])
+    graph.values["band.T"] = IrValue("f32", [1, 1, "T", 1])
+    graph.nodes += [
+        IrNode(op="embedding", ins=["table", "input_ids"], outs=["tokens"], attrs={}),
+        IrNode(op="linear", ins=["tokens", "projection"], outs=["projected"], attrs={}),
+        IrNode(
+            op=export.SYM_PREFIX_SLICE_OP,
+            ins=[BAND],
+            outs=["band.T"],
+            attrs={"sym": "T", "slices": [{"dim": 2, "coeff": 1, "offset": 0}]},
+        ),
+    ]
+    graph.outputs.append("projected")
+    return graph
+
+
+class TestStorageForm:
+    """{@link export.assert_storage_form} — what the writer committed is the storage asked for."""
+
+    def test_bf16_in_every_weight_slot_and_f32_elsewhere_passes(self) -> None:
+        assert export.assert_storage_form(_storage_graph(), "bf16") == {"bf16": 2, "f32": 1}
+
+    def test_an_all_f32_graph_passes_as_f32(self) -> None:
+        graph = _storage_graph(table="f32", projection="f32")
+
+        assert export.assert_storage_form(graph, "f32") == {"f32": 3}
+
+    def test_a_weight_slot_left_f32_fails_the_bf16_form(self) -> None:
+        with pytest.raises(AssertionError, match=r"projection: f32 \(expected bf16\)"):
+            export.assert_storage_form(_storage_graph(projection="f32"), "bf16")
+
+    def test_a_weight_in_another_compressed_storage_fails_the_bf16_form(self) -> None:
+        with pytest.raises(AssertionError, match=r"table: f16 \(expected bf16\)"):
+            export.assert_storage_form(_storage_graph(table="f16"), "bf16")
+
+    def test_bf16_outside_a_weight_slot_fails(self) -> None:
+        with pytest.raises(AssertionError, match=rf"{BAND}: bf16 \(expected f32 / i32\)"):
+            export.assert_storage_form(_storage_graph(band="bf16"), "bf16")
+
+    def test_bf16_in_the_f32_form_fails(self) -> None:
+        with pytest.raises(AssertionError, match="the f32 storage form does not hold"):
+            export.assert_storage_form(_storage_graph(), "f32")
+
+    def test_a_bf16_graph_without_a_weight_slot_fails(self) -> None:
+        graph = _storage_graph()
+        graph.nodes = [node for node in graph.nodes if node.op == export.SYM_PREFIX_SLICE_OP]
+        for name in ("table", "projection"):
+            graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage("f32"))
+
+        with pytest.raises(AssertionError, match="no initializer is stored as bf16"):
+            export.assert_storage_form(graph, "bf16")
+
+    def test_a_storage_the_script_does_not_write_is_refused(self) -> None:
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="not one of"):
+            export.assert_storage_form(_storage_graph(), "f16")
+
+
+class TestStorageOption:
+    """`--dtype` picks the storage and, without `--out`, the series of that storage."""
+
+    @pytest.fixture
+    def calls(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
+        recorded: list[tuple[Path, str]] = []
+
+        def export_series(directory: Path, out_dir: Path, *, dtype: str) -> dict[str, str]:
+            recorded.append((out_dir, dtype))
+            return {"dir": str(out_dir)}
+
+        monkeypatch.setattr(export, "export_series", export_series)
+        return recorded
+
+    def test_the_default_is_the_f32_series(self, calls) -> None:
+        export.main([])
+
+        assert calls == [(export.DEFAULT_OUT_DIRS["f32"], "f32")]
+        assert export.DEFAULT_OUT_DIRS["f32"].name == export.TEXT_SERIES
+
+    def test_bf16_writes_its_own_series(self, calls) -> None:
+        export.main(["--dtype", "bf16"])
+
+        assert calls == [(export.DEFAULT_OUT_DIRS["bf16"], "bf16")]
+        assert export.DEFAULT_OUT_DIRS["bf16"].name == f"{export.TEXT_SERIES}-bf16"
+
+    def test_out_overrides_the_series(self, calls, tmp_path: Path) -> None:
+        export.main(["--dtype", "bf16", "--out", str(tmp_path)])
+
+        assert calls == [(tmp_path, "bf16")]
+
+    def test_every_storage_has_a_series_of_its_own(self) -> None:
+        assert sorted(export.DEFAULT_OUT_DIRS) == sorted(export.WEIGHT_DTYPES)
+        assert len(set(export.DEFAULT_OUT_DIRS.values())) == len(export.WEIGHT_DTYPES)
+
+    def test_another_storage_is_refused_by_the_parser(self, calls) -> None:
+        with pytest.raises(SystemExit):
+            export.main(["--dtype", "f16"])
+        assert calls == []
+
+    def test_the_export_refuses_another_storage_before_reading_anything(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="not one of"):
+            export.export_series(tmp_path / "missing", tmp_path / "out", dtype="i8")
+
+
+class TestTinyModelBf16:
+    """The bf16 write on the real export path (a tiny random text tower — transformers at the
+    pinned release)."""
+
+    def _export(self, wrapper) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+        ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
+        return export_module(
+            wrapper,
+            (ids, pool),
+            dynamic_shapes=({1: seq}, {1: seq}),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+
+    def test_weights_bf16_holds_are_stored_as_bf16_in_every_weight_slot(
+        self, tiny_wrapper, tmp_path: Path
+    ) -> None:
+        round_weights_to_bf16(tiny_wrapper)
+        graph, tensors = self._export(tiny_wrapper)
+
+        stored = publish_model(
+            tmp_path / "model.krm",
+            graph,
+            tensors,
+            provenance=Provenance(license=export.LICENSE),
+            graph_name=export.GRAPH_NAME,
+            weight_dtype="bf16",
+        )
+        counts = export.assert_storage_form(stored, "bf16")
+
+        # The 3 layers' q / k / v / o and the 3 MLP projections, the per-layer input projections,
+        # the final projection and the token table — at least one per layer plus the table.
+        assert counts["bf16"] > 3
+        assert counts["bf16"] == len(eligible_compressed_initializers(stored))
+
+    def test_a_weight_bf16_cannot_hold_fails_the_write(self, tiny_wrapper, tmp_path: Path) -> None:
+        graph, tensors = self._export(tiny_wrapper)
+
+        with pytest.raises(EmitError, match="bf16 cannot represent"):
+            publish_model(
+                tmp_path / "model.krm",
+                graph,
+                tensors,
+                provenance=Provenance(license=export.LICENSE),
+                graph_name=export.GRAPH_NAME,
+                weight_dtype="bf16",
+            )
+        assert not list(tmp_path.iterdir())

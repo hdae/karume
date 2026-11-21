@@ -32,6 +32,7 @@ from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
 from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
+from embeddinggemma2.distribution import PIPELINE as EMBEDDINGGEMMA2_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
@@ -80,6 +81,7 @@ RECIPE_PIPELINES = {
     "wan-ti2v": WAN_TI2V_PIPELINE,
     "umt5": UMT5_PIPELINE,
     "moss-image": MOSS_PIPELINE,
+    "embeddinggemma-2": EMBEDDINGGEMMA2_PIPELINE,
 }
 
 
@@ -203,6 +205,7 @@ class TestRegistry:
             "wan-ti2v",
             "umt5",
             "moss-image",
+            "embeddinggemma-2",
         }
         carried = {
             name

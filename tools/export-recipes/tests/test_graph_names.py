@@ -348,6 +348,12 @@ class TestTheNamesAreTheWeightsKeys:
         }
         assert self._named("moss") | self._named("qwen3_5") == set(MOSS_WEIGHTS)
 
+    def test_embeddinggemma2_names_its_distribution_role(self) -> None:
+        """The script names its one graph with the weights key the distribution declares."""
+        from embeddinggemma2.distribution import EMBEDDINGGEMMA2_WEIGHTS
+
+        assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
+
     @pytest.mark.parametrize("family", ["embeddinggemma", "embeddinggemma2", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
         """Pin the spelling of the 3 families that build no distribution (they have no

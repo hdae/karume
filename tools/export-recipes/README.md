@@ -66,7 +66,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 18 pipeline seats across 11 families with the core engine and passes
+that injection: it composes 19 pipeline seats across 12 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
@@ -84,12 +84,13 @@ uv run python dist.py --pipeline wan \
 uv run python dist.py --pipeline wan-ti2v \
     --resolve-refs hf                                   # Wan2.2 TI2V 5B (references karume-umt5-xxl)
 uv run python dist.py --pipeline moss-image             # MOSS-Image-SFT
+uv run python dist.py --pipeline embeddinggemma-2       # EmbeddingGemma 2's text tower (not published)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `irodori-large` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md). The house non-endorsement sentence every card

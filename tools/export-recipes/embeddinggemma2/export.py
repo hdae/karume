@@ -6,6 +6,7 @@ and staged publication it follows). The artifacts go under `outputs/series/` and
 commits by the repository root's `.gitignore` (the f32 weights are about 1.1 GB).
 
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
+    uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
 
 transformers is **pinned to 5.23.0** (a change of the modeling code changes the graph's form, and
 EmbeddingGemma 2 first ships in 5.19.0). It is not added to pyproject.toml / uv.lock but added per
@@ -91,6 +92,20 @@ The goldens come from torch on CPU in f32 with the bf16 weights upcast. The embe
 script ({@link embeddinggemma2.parity}) measures that gap and the agreement with
 SentenceTransformer.
 
+## Storage: f32, or the checkpoint's own bf16 values
+
+`--dtype` picks the storage of the weights, one series per storage (ADR 0019 — sharing a directory
+would put one storage's goldens on the other's assets):
+
+- `f32` (the default, {@link TEXT_SERIES}) — every weight widened to f32, the series the e2e
+  check reads;
+- `bf16` (`<series>-bf16`) — what the distribution ships (ADR 0131): every weight in a weight slot
+  (the embedding and the linears) is stored as bf16, the rest (the norms, the per-layer scalars,
+  the folded constants) stays f32. The checkpoint is BF16, so nothing is rounded: the loaded f32
+  values are the checkpoint's bits, the writer stores a weight as bf16 only when the round trip is
+  exact and fails otherwise, and the goldens are the f32 series' own (the same values go through
+  the same code). {@link assert_storage_form} checks the stored form before anything is published.
+
 ## Multimodal placeholder ids
 
 The composite model replaces the image / video / audio placeholder ids (258880 / 258884 / 258881)
@@ -102,9 +117,15 @@ none ({@link build_cases} refuses them); what the host does with such ids is ope
 
     outputs/series/embeddinggemma-2-text/model-NNNNN-of-NNNNN.krm  weights, constants, descriptors
     outputs/series/embeddinggemma-2-text/io.<case>.safetensors     inputs + torch CPU expectation
+    outputs/series/embeddinggemma-2-text-bf16/…                    the same with `--dtype bf16`
 
 The io tensor key convention is the first recipe's (`input.<graph input name>` /
 `output.<position>`). `pool_mask` is all ones, for the same reason as there.
+
+Every run also writes the golden texts to a fixture tracked in git,
+{@link GOLDEN_CASE_FIXTURE} ({@link write_golden_case_fixture}): the case names, the prompt names
+and the bodies of {@link GOLDEN_CASES} with their lengths, so the TypeScript pipeline's e2e embeds
+the same texts through the distribution without spelling the long documents a second time.
 """
 
 from __future__ import annotations
@@ -122,7 +143,7 @@ from safetensors import safe_open
 from torch import nn
 from torch.export import Dim
 
-from _shared.paths import SERIES_ROOT
+from _shared.paths import REPO_ROOT, SERIES_ROOT
 from embeddinggemma.export import (
     GRAPH_NAME,
     MODEL_FILE,
@@ -135,6 +156,7 @@ from embeddinggemma2.tokenizer import REQUIRED_TRANSFORMERS
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
+from karume.emit import eligible_compressed_initializers
 from karume.ir import IrGraph
 from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
 from karume.pipeline import export_module, publish_model
@@ -144,8 +166,15 @@ from karume.shapes import declared_shape
 #: The series this script writes (assets-layout: `outputs/series/<series>/`).
 TEXT_SERIES = "embeddinggemma-2-text"
 
-#: The default location of the artifacts. The storage dtype is f32 only.
-DEFAULT_OUT_DIR = SERIES_ROOT / TEXT_SERIES
+#: The storage dtypes of the weights `--dtype` takes (module doc, "Storage").
+WEIGHT_DTYPES = ("f32", "bf16")
+
+#: The default location of the artifacts, one series per storage dtype. MUST: one directory per
+#: dtype (ADR 0019 — sharing one puts one storage's goldens on the other's assets).
+DEFAULT_OUT_DIRS: Mapping[str, Path] = {
+    "f32": SERIES_ROOT / TEXT_SERIES,
+    "bf16": SERIES_ROOT / f"{TEXT_SERIES}-bf16",
+}
 
 #: The license identifier baked into the container (container-v1 §2.3) — the upstream model card's
 #: front matter at the pinned revision (`THIRD_PARTY_NOTICES.md`).
@@ -305,6 +334,18 @@ CASE_LENGTHS: Mapping[str, int] = {
     "document-1508": 1508,
     "document-2048": 2048,
 }
+
+#: The golden texts as the TypeScript pipeline's e2e reads them (tracked in git — read by
+#: `packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts`).
+GOLDEN_CASE_FIXTURE = (
+    REPO_ROOT
+    / "packages"
+    / "models"
+    / "tests"
+    / "fixtures"
+    / "embeddinggemma2"
+    / "golden-cases.json"
+)
 
 #: The cosine pairs the sanity check compares (near pair, far pair).
 NEAR_PAIR = ("query-en", "document-en")
@@ -629,6 +670,36 @@ def build_cases(
     return tuple(cases)
 
 
+def golden_case_fixture() -> dict[str, Any]:
+    """The golden texts as the fixture holds them: per case its name, its prompt name (the key of
+    `prompts` in `config_sentence_transformers.json` — absent for a case without a prompt), its
+    body and its token length, in {@link GOLDEN_CASES}' order.
+
+    The prefix itself is not written: the pipeline takes it from the distribution's manifest by the
+    prompt name, which is what the e2e checks.
+    """
+    return {
+        "series": TEXT_SERIES,
+        "cases": [
+            {
+                "name": name,
+                **({} if kind is None else {"prompt": kind}),
+                "text": body,
+                "tokens": CASE_LENGTHS[name],
+            }
+            for name, kind, body in GOLDEN_CASES
+        ],
+    }
+
+
+def write_golden_case_fixture(path: Path = GOLDEN_CASE_FIXTURE) -> Path:
+    """Write {@link golden_case_fixture} to `path` (2-space JSON, UTF-8, trailing newline)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(golden_case_fixture(), indent=2, ensure_ascii=False)
+    path.write_text(payload + "\n", encoding="utf-8")
+    return path
+
+
 def assert_case_coverage(
     cases: Sequence[tuple[str, torch.Tensor, torch.Tensor]], sym_max: int, window: int
 ) -> None:
@@ -860,7 +931,36 @@ def _sanity(embeddings: Mapping[str, torch.Tensor]) -> dict[str, Any]:
     }
 
 
-def export_series(directory: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> dict[str, Any]:
+def assert_storage_form(graph: IrGraph, dtype: str) -> dict[str, int]:
+    """Check the storage the writer committed (the graph `publish_model` returns) and count it.
+
+    `f32`: every initializer is f32 (or i32). `bf16`: every initializer in a weight slot is bf16 and
+    every other one f32 / i32 — a weight slot left f32 would ship 2× its bytes without a word, and
+    a weight in another compressed storage would not be the checkpoint's values.
+    """
+    if dtype not in WEIGHT_DTYPES:
+        raise EmbeddingGemma2ExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
+    eligible = eligible_compressed_initializers(graph)
+    counts: dict[str, int] = {}
+    wrong: list[str] = []
+    for name, initializer in graph.initializers.items():
+        stored = initializer.storage.dtype
+        counts[stored] = counts.get(stored, 0) + 1
+        expected = {dtype} if dtype == "bf16" and name in eligible else {"f32", "i32"}
+        if stored not in expected:
+            wrong.append(f"{name}: {stored} (expected {' / '.join(sorted(expected))})")
+    if wrong:
+        raise AssertionError(
+            f"the {dtype} storage form does not hold for {len(wrong)} initializers: {wrong[:4]}"
+        )
+    if dtype == "bf16" and counts.get("bf16", 0) == 0:
+        raise AssertionError("no initializer is stored as bf16 (the graph has no weight slot)")
+    return dict(sorted(counts.items()))
+
+
+def export_series(
+    directory: Path, out_dir: Path, *, dtype: str = "f32", sym_max: int = SYM_MAX
+) -> dict[str, Any]:
     """Write the IR container and the golden io, and return a summary.
 
     MUST: the artifacts are written to a staging directory and put in place only after every check
@@ -868,6 +968,8 @@ def export_series(directory: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
     taken from the same wrapper, so a broken run placed at the final location would turn the TS-side
     comparison green ({@link karume.artifacts.staged_publication}).
     """
+    if dtype not in WEIGHT_DTYPES:
+        raise EmbeddingGemma2ExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
     sources.assert_pinned(directory, READ_FILES)
     assert_sentence_transformer_layout(directory)
     model, composite = load_text_model(directory)
@@ -905,7 +1007,12 @@ def export_series(directory: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
             # The graph name is the component name (the first recipe's convention for a
             # single-component series), not the directory name.
             graph_name=GRAPH_NAME,
+            # bf16: nothing to round first — the weights are the checkpoint's bf16 values, and
+            # the writer fails on one that bf16 cannot hold (module doc, "Storage").
+            weight_dtype=dtype,
         )
+        # MUST: checked before publishing (on failure the staging directory is removed).
+        storage = assert_storage_form(graph, dtype)
         written, embeddings = _write_io(wrapper, graph, cases, staged)
         # MUST: evaluated before publishing (on failure the staging directory is removed).
         sanity = _sanity(embeddings)
@@ -918,6 +1025,7 @@ def export_series(directory: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
+        "storage": storage,
         "form": form,
         "window_evidence": evidence,
         "io": written,
@@ -929,12 +1037,29 @@ def export_series(directory: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--snapshot-dir", type=Path, default=sources.SNAPSHOT_DIR)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--dtype",
+        choices=WEIGHT_DTYPES,
+        default="f32",
+        help="storage dtype of the weights (bf16 = the checkpoint's own values in every weight"
+        " slot — the distribution's storage)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output directory (default: the series of the --dtype —"
+        f" {' / '.join(str(path) for path in DEFAULT_OUT_DIRS.values())})",
+    )
     args = parser.parse_args(argv)
-    summary = export_series(args.snapshot_dir, args.out)
+    out_dir = args.out if args.out is not None else DEFAULT_OUT_DIRS[args.dtype]
+    summary = export_series(args.snapshot_dir, out_dir, dtype=args.dtype)
+    write_golden_case_fixture()
     print(
         json.dumps(
-            {"snapshot_dir": str(args.snapshot_dir), **summary}, indent=1, ensure_ascii=False
+            {"snapshot_dir": str(args.snapshot_dir), "dtype": args.dtype, **summary},
+            indent=1,
+            ensure_ascii=False,
         )
     )
 

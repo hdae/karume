@@ -29,9 +29,12 @@ questions it has to answer.
 - **Prompt prefixes** — read verbatim at run time from the snapshot's
   `config_sentence_transformers.json`.
 
-NOTE: this recipe has no distribution seat yet (no `card.py` / `distribution.py`), so no weights
-derived from it are published today. The inventory below still has to be settled before that
-changes. Moving the pin to another commit needs this review again.
+NOTE: this recipe has a distribution recipe (`distribution.py` / `card.py` —
+`karume-embeddinggemma-2`), built as a local mirror only; no weights derived from it are published
+today. The mirror carries the Apache-2.0 text (`LICENSE.md`) and a modification notice
+(`NOTICE.md` — upstream ships no `NOTICE` file), in the form of the Gemma 4 distribution. The
+inventory below still has to be settled before anything is published. Moving the pin to another
+commit needs this review again.
 
 ## Release-gate inventory
 
@@ -44,7 +47,7 @@ published.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/google/embeddinggemma-2>                                                                                                           |
 | Revision used            | `f9972ac22e696a105c482202646979e33e4b5a1e` (fetched 2026-11-21 into `inputs/embeddinggemma2/embeddinggemma-2`; pinned with per-file SHA-256 in `sources.py`) |
-| Form of copy             | Loaded and converted (the text tower, upcast to f32) into a local series. Not distributed from this repository today.                                       |
+| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast) and bf16 (the checkpoint's values) — and the bf16 one assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes. Not distributed from this repository today. |
 | Code license             | n/a (weights, configs and tokenizer only)                                                                                                                  |
 | Weights license          | Apache-2.0 as declared by the model card's front matter (`license: apache-2.0`) at the revision used; not gated. Unverified by the release review           |
 | Attribution requirements | Unverified                                                                                                                                                 |
