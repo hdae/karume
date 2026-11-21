@@ -1341,9 +1341,33 @@ describe("deriveLinearGemvChoices: the refusals", () => {
     });
     const withProvenance: GeometryProfile = {
       ...TABLE,
-      provenance: { adapter: { ...GEMV_ADAPTER, description: "Another GPU" }, families: {} },
+      provenance: { adapter: { ...GEMV_ADAPTER, device: "0x9999" }, families: {} },
     };
-    refused(inputs, "differs from table 'test-gpu''s provenance", withProvenance);
+    refused(inputs, "differs from table 'test-gpu''s provenance \"0x9999\"", withProvenance);
+  });
+
+  it("takes records whose description differs from the table's provenance (a driver update), while records that disagree on it are still refused", () => {
+    const table: GeometryProfile = {
+      ...TABLE,
+      provenance: {
+        adapter: { ...GEMV_ADAPTER, description: "NVIDIA: 615.78.08 615.78.8.0" },
+        families: {},
+      },
+    };
+    const updated = (record: GemvSweepReport): GemvSweepReport => ({
+      ...record,
+      adapter: { ...record.adapter, description: "NVIDIA: 620.70.06 620.70.6.0" },
+    });
+    const derivation = deriveLinearGemvChoices(
+      [input("a.json", specs, updated), input("bb.json", specs, updated)],
+      { table },
+    );
+    assertEquals(derivation.provenance.adapter.description, "NVIDIA: 620.70.06 620.70.6.0");
+    refused(
+      [input("a.json", specs), input("bb.json", specs, updated)],
+      "bb.json: adapter description",
+      table,
+    );
   });
 });
 

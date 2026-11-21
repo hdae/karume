@@ -252,8 +252,10 @@ adapter's match and measures nothing at run time.
 `deriveLinearGemvChoices` of `@karume/runtime/tune` derives `linearGemv` for a table from GEMV sweep records. It
 measures nothing and changes no default value.
 
-- **Inputs**: any number of `karume-gemv-sweep/4` records of one adapter — the table's match selects it and, when the
-  table has provenance, its four adapter fields are the table's —, with GPU timestamps (`ns` or `deno-raw-tick`)
+- **Inputs**: any number of `karume-gemv-sweep/4` records of one adapter — they agree on its four fields, the table's
+  match selects it and, when the table has provenance, its vendor, architecture and device are the table's (not its
+  description: under Node on Dawn that is the driver's version, and a table takes records made after a driver
+  update) —, with GPU timestamps (`ns` or `deno-raw-tick`)
   that are not quantised. A record of an older format (`karume-gemv-sweep/3`, `/2`, `/1`) is refused with a message that
   names the format, and nothing converts it; so are a wall-clock or quantised record, a record of another adapter, the
   same record twice and no record at all.

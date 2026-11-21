@@ -903,12 +903,21 @@ export type LinearGemvDerivation = {
 export type DeriveLinearGemvOptions = {
   /**
    * The table the field is derived for: the records must be of an adapter its match selects and,
-   * when it has provenance, of its adapter (all four fields — a table is one adapter's answer).
+   * when it has provenance, of its adapter by vendor, architecture and device (a table is one
+   * adapter's answer).
    */
   readonly table: GeometryProfile;
 };
 
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
+
+/**
+ * The fields a table's provenance is compared by. Not the description: under Node on Dawn it is the
+ * driver's version string ("NVIDIA: 620.70.06 …"), so comparing it would refuse every record made
+ * after a driver update. The records of one derivation still agree on it among themselves
+ * ({@link ADAPTER_FIELDS}), so records of two driver versions are not read together.
+ */
+const PROVENANCE_ADAPTER_FIELDS = ["vendor", "architecture", "device"] as const;
 
 /** The records agree on the adapter, which the table's match selects and its provenance names. */
 const assertOneAdapter = (
@@ -938,7 +947,7 @@ const assertOneAdapter = (
     }
   }
   if (provenance !== undefined) {
-    for (const field of ADAPTER_FIELDS) {
+    for (const field of PROVENANCE_ADAPTER_FIELDS) {
       if (provenance.adapter[field] !== first.adapter[field]) {
         throw new Error(
           `${first.path}: adapter ${field} ${JSON.stringify(first.adapter[field])} differs from table '${table.id}''s provenance ${JSON.stringify(provenance.adapter[field])} (a table is one adapter's answer)`,
