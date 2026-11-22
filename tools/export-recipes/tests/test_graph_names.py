@@ -56,6 +56,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("deberta/export.py", "export_variant", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
+    ("embeddinggemma2/export_vision.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("gemma4/export.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_decode.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_drafter.py", "export_series", "GEMMA4_DRAFTER_ROLE", "GEMMA4_DRAFTER_ROLE"),
@@ -349,15 +350,22 @@ class TestTheNamesAreTheWeightsKeys:
         assert self._named("moss") | self._named("qwen3_5") == set(MOSS_WEIGHTS)
 
     def test_embeddinggemma2_names_its_distribution_role(self) -> None:
-        """The script names its one graph with the weights key the distribution declares."""
+        """The text script names its graph with the weights key the distribution declares
+        (`model`, the single-component convention); the vision tower's script names its own graph
+        `vision`, a series the distribution does not carry yet (stage 1 of image input)."""
         from embeddinggemma2.distribution import EMBEDDINGGEMMA2_WEIGHTS
+        from embeddinggemma2.export_vision import GRAPH_NAME as VISION
 
-        assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
+        assert _declared_values("embeddinggemma2/export.py", "GRAPH_NAME") == {"model"}
+        assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model"}
+        assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS) | {VISION}
+        assert VISION == "vision"
 
-    @pytest.mark.parametrize("family", ["embeddinggemma", "embeddinggemma2", "minicpm5"])
+    @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
-        """Pin the spelling of the 3 families that build no distribution (they have no
-        `distribution.py`).
+        """Pin the spelling of the families that build no distribution (they have no
+        `distribution.py`; EmbeddingGemma 2's text script, which has one, is pinned to the same
+        `model` by the test above).
 
         So that the containers already in place can be used as is on the day one is built, they
         use the convention of a single-component series (`model` — the same as gemma4 /

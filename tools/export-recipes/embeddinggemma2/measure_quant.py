@@ -430,7 +430,7 @@ def assert_linears_called(model: nn.Module, ids: torch.Tensor, window: int) -> N
 
 
 def embed_all(
-    wrapper: nn.Module, inputs: Sequence[torch.Tensor], texts: Sequence[Text]
+    wrapper: export.EmbeddingWrapper, inputs: Sequence[torch.Tensor], texts: Sequence[Text]
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """`[texts, 768]` embeddings, and the seconds each long text took."""
     rows: list[torch.Tensor] = []
@@ -438,7 +438,7 @@ def embed_all(
     for text, ids in zip(texts, inputs, strict=True):
         started = time.perf_counter()
         with torch.no_grad():
-            rows.append(wrapper(ids, torch.ones_like(ids, dtype=torch.float32)).reshape(-1))
+            rows.append(wrapper.text(ids, torch.ones_like(ids, dtype=torch.float32)).reshape(-1))
         if int(ids.shape[1]) >= LONG_FROM:
             seconds[text.name] = round(time.perf_counter() - started, 2)
     return torch.stack(rows).detach().clone(), seconds

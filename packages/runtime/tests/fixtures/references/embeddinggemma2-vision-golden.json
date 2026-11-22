@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "embeddinggemma-2-vision-bf16/gradient-square": {
+      "node-nvidia-geforce-rtx-3080-ti": "0a2fd4d4a11719112db44f96632bc68375e1fd5bb5648b5ee46e197cfded47af"
+    },
+    "embeddinggemma-2-vision-bf16/noise-tall": {
+      "node-nvidia-geforce-rtx-3080-ti": "c9e425ef1c5cc14547329aa11cb7ac4a673bcc07ba690835a6954b31eb83626b"
+    },
+    "embeddinggemma-2-vision-bf16/shapes-wide": {
+      "node-nvidia-geforce-rtx-3080-ti": "59a2371c8841773df26b2c314ff1ee1bd9e7c02a070f23ceb5342a6c4b84504c"
+    },
+    "embeddinggemma-2-vision-bf16/stripes-edge": {
+      "node-nvidia-geforce-rtx-3080-ti": "bd290b381559704b9ed2d9dd71abeb0a7e4b4f32f82be8502c47e66196e689e8"
+    },
+    "embeddinggemma-2-vision/gradient-square": {
+      "node-nvidia-geforce-rtx-3080-ti": "0a2fd4d4a11719112db44f96632bc68375e1fd5bb5648b5ee46e197cfded47af"
+    },
+    "embeddinggemma-2-vision/noise-tall": {
+      "node-nvidia-geforce-rtx-3080-ti": "c9e425ef1c5cc14547329aa11cb7ac4a673bcc07ba690835a6954b31eb83626b"
+    },
+    "embeddinggemma-2-vision/shapes-wide": {
+      "node-nvidia-geforce-rtx-3080-ti": "59a2371c8841773df26b2c314ff1ee1bd9e7c02a070f23ceb5342a6c4b84504c"
+    },
+    "embeddinggemma-2-vision/stripes-edge": {
+      "node-nvidia-geforce-rtx-3080-ti": "bd290b381559704b9ed2d9dd71abeb0a7e4b4f32f82be8502c47e66196e689e8"
+    }
+  }
+}

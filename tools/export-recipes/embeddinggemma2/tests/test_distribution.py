@@ -2,11 +2,12 @@
 assembly pass.
 
 No real weights are used: each storage's series (bf16 and i8) holds a **valid minimal container**
-of the graph's contract (`input_ids` i32 / `pool_mask` f32 `[1, T]` in, one f32 `[1, 768]` out, a
-token table, a projection and a constant sliced by `T` at the bound), written through the core's
-own writer ({@link _write_container} — the i8 one rounded first, as the export does); the tokenizer
-asset and the upstream snapshot are synthetic JSON, held to a synthetic pin. Every check of the
-plan is exercised by shifting one input from that passing form. The card is covered by
+of the graph's contract (`input_ids` i32 / `pool_mask` f32 `[1, T]`, `soft_embeds` f32
+`[1, T, 4]` / `soft_mask` bool `[1, T, 1]` in, one f32 `[1, 768]` out, a token table, a projection
+and a constant sliced by `T` at the bound), written through the core's own writer
+({@link _write_container} — the i8 one rounded first, as the export does); the tokenizer asset
+and the upstream snapshot are synthetic JSON, held to a synthetic pin. Every check of the plan is
+exercised by shifting one input from that passing form. The card is covered by
 `test_card.py`; the cases that read the real pinned snapshot skip explicitly without it.
 """
 
@@ -67,7 +68,7 @@ def _write_container(
     *,
     weight_dtype: str = "bf16",
     overrides: Mapping[str, str] | None = None,
-    inputs: tuple[tuple[str, str], ...] = eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS,
+    inputs: tuple[tuple[str, str, tuple[int | str, ...]], ...] = eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS,
     width: int = WIDTH,
     bound: int = eg2.EMBEDDINGGEMMA2_MAX_TOKENS,
     vocab: int = VOCAB,
@@ -79,8 +80,11 @@ def _write_container(
     parts at `path`'s place), through the core's writer. Under i8 the two weights are rounded to
     per-row int8 first and stored with their scales (the export's order)."""
     graph = IrGraph(symbols=[eg2.EMBEDDINGGEMMA2_SYMBOL])
-    for name, dtype in inputs:
-        graph.inputs.append(IrInput(name=name, dtype=dtype, shape=[1, eg2.EMBEDDINGGEMMA2_SYMBOL]))
+    # The trailing axes of each input, the table's width (4) in place of the hidden placeholder.
+    for name, dtype, trailing in inputs:
+        shape = [1, eg2.EMBEDDINGGEMMA2_SYMBOL]
+        shape += [4 if axis == eg2.EMBEDDINGGEMMA2_HIDDEN else axis for axis in trailing]
+        graph.inputs.append(IrInput(name=name, dtype=dtype, shape=shape))
     # Values bf16 holds exactly (multiples of 1/8), so the bf16 write stores them unchanged.
     tensors = {
         "table": torch.arange(vocab * 4, dtype=torch.float32).reshape(vocab, 4) / 8,
@@ -411,7 +415,7 @@ class TestOneGraph:
 
     def test_an_int8_container_with_a_mask_input_is_refused(self, fixture: Fixture) -> None:
         fixture.rewrite_storage(
-            "i8", inputs=(*eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS, ("attention_mask", "f32"))
+            "i8", inputs=(*eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS, ("attention_mask", "f32", ()))
         )
 
         with pytest.raises(DistError, match="its graph is not the graph of"):
@@ -526,13 +530,50 @@ class TestPipelineConfig:
 class TestGraphContract:
     def test_a_mask_left_as_an_input_is_refused(self, fixture: Fixture) -> None:
         fixture.rewrite_container(
-            inputs=(*eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS, ("attention_mask", "f32")),
+            inputs=(*eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS, ("attention_mask", "f32", ())),
         )
         with pytest.raises(DistError, match="the graph inputs are"):
             fixture.plan()
 
     def test_a_pool_mask_of_another_dtype_is_refused(self, fixture: Fixture) -> None:
-        fixture.rewrite_container(inputs=(("input_ids", "i32"), ("pool_mask", "i32")))
+        fixture.rewrite_container(
+            inputs=(
+                ("input_ids", "i32", ()),
+                ("pool_mask", "i32", ()),
+                *eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS[2:],
+            )
+        )
+
+        with pytest.raises(DistError, match="the graph inputs are"):
+            fixture.plan()
+
+    def test_a_graph_without_the_soft_inputs_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_container(inputs=eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS[:2])
+
+        with pytest.raises(DistError, match="the graph inputs are"):
+            fixture.plan()
+
+    def test_soft_rows_of_another_width_than_the_token_table_are_refused(
+        self, fixture: Fixture
+    ) -> None:
+        fixture.rewrite_container(
+            inputs=(
+                *eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS[:2],
+                ("soft_embeds", "f32", (8,)),
+                eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS[3],
+            )
+        )
+
+        with pytest.raises(DistError, match="the graph inputs are"):
+            fixture.plan()
+
+    def test_a_soft_mask_of_the_full_width_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_container(
+            inputs=(
+                *eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS[:3],
+                ("soft_mask", "bool", (eg2.EMBEDDINGGEMMA2_HIDDEN,)),
+            )
+        )
 
         with pytest.raises(DistError, match="the graph inputs are"):
             fixture.plan()
@@ -728,7 +769,7 @@ class TestMirroredConstants:
         assert eg2.EMBEDDINGGEMMA2_ROLE == export.GRAPH_NAME
 
     def test_the_inputs_are_the_exports(self) -> None:
-        assert tuple(name for name, _ in eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS) == export.GRAPH_INPUTS
+        assert tuple(name for name, *_ in eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS) == export.GRAPH_INPUTS
 
     def test_the_file_names_are_the_writers(self) -> None:
         assert eg2.EMBEDDINGGEMMA2_MODEL_FILE == SINGLE_COMPONENT_FILE

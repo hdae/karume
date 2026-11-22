@@ -745,6 +745,32 @@ maintainer's ruling of 2026-11-06).
      on an Apple M2 on 2026-11-22: a run of the three sample rows at 768 and at 256 dimensions, and the refusal of a
      row holding the image placeholder. Not checked in a browser yet: Cancel, the downloads, GPU timing, a row over the
      limit and the token count.
+  5. Image input (approved by the maintainer 2026-11-22; the upstream facts in the untracked investigation notes
+     `outputs/diag/eg2-multimodal-2026-11-22/`). Stage 1 built 2026-11-22:
+     - the text graph takes the soft rows of a tower — `soft_embeds` `[1, T, 512]` f32 and `soft_mask` `[1, T, 1]`
+       bool, merged by one `where` after the scaled token lookup (the Gemma 4 12B product graph's names and form;
+       the recipe checks the merge's form and, on every long case, that no soft row is the `input_ids` path bit
+       for bit). Every series was exported again: all thirty io outputs and every container part but the
+       descriptor's byte-identical, and the lane green with every existing sha256 row and golden untouched. The
+       pipeline binds zeros and false for a text (no public API change); on the RTX 3080 Ti under Node that costs a
+       `bf16` text call nothing measurable at 16 tokens (fastest visit 12.8 → 12.8 / 13.0 ms) and about 2 ms at
+       2,048 (114.9 → 117.2 / 117.4 ms; the workbench's `embeddinggemma-preset-ab`, 31 rounds, two runs after);
+     - `export_vision.py`: the vision tower with `embed_vision` as one graph `vision` — `pixels` `[1, 9n, 768]`,
+       `position_x` / `position_y` `[1, 9n]` → soft tokens `[1, n, 512]`, the real patches only, in block order (the
+       io contract in the recipe README), the 2-D RoPE folded into two `[840, 32]` tables gathered by the positions;
+       no new op, kernel or runtime change. Series `embeddinggemma-2-vision` (f32) and `-bf16`, goldens from
+       upstream on four synthetic images (139 soft tokens is the resize rule's smallest count — a rounding edge),
+       the wrapper within 3.9e-5 of upstream in torch, the series e2e on the GPU within atol 1e-3 (measured 6.5e-5
+       to 3.35e-4 — the tower is that sensitive in f32: torch f32 is up to 9.8e-5 from f64) with sha256 rows;
+     - `multimodal_reference.py`: upstream SentenceTransformer's token ids and vectors of five whole inputs holding an
+       image, as the fixture `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`; Karume's two
+       graphs composed in torch reproduce them to 1.8e-6.
+     Left, in order: the pipeline stage — image content parts in `embed` / `tokenize` (the placeholder expansion,
+     the count from the image's size alone), the host preprocessing in TypeScript (the resize rule with its rounding
+     edge, the torch bicubic port of `src/image/`, the patch rows in block order), the tower in the distribution
+     (a weights role per preset, the image fields of `pipelineConfig`, the admission of the tower graph, its row-block
+     budget) and the pipeline e2e against the fixture; then the Playground's image rows; then audio (the checkpoint's
+     audio tower is Gemma 4 E2B / E4B's, unchanged) and video (frames through the same tower).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

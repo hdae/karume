@@ -53,7 +53,10 @@ class SourcePin:
 #: 2026-11-21. `model.safetensors` is 1,488,915,288 B and holds all three towers; the text tower is
 #: its 413 `language_model.*` tensors (271,002,648 bf16 parameters, bytes
 #: [612,180,776, 1,154,186,072) of the file). Each digest matched the fetch record of
-#: `hf download` (the LFS oid for the two large files, the git blob id for the others).
+#: `hf download` (the LFS oid for the two large files, the git blob id for the others). The image
+#: path's three files (the processor's `processor_config.json` and `preprocessor_config.json`, the
+#: chat template sentence-transformers renders every input with) were added on 2026-11-22 from the
+#: same fetch: their git blob ids equal the fetch record's for this revision.
 #:
 #: Moving the pin needs the licence review again.
 PIN = SourcePin(
@@ -79,6 +82,13 @@ PIN = SourcePin(
         "tokenizer_config.json": (
             "17bd5d6e9364ca49a534e1502076593317c298d4a663623091ed45388f004874"
         ),
+        "processor_config.json": (
+            "168f6a08522f3ce5dea596d94d003af2fd691742d4f41fe1f9d8cce76bfbf69c"
+        ),
+        "preprocessor_config.json": (
+            "ea2ae257e901064abdd98dceb19f2b0da06af600bed15e0f99f5c85c37ee9d78"
+        ),
+        "chat_template.jinja": ("4b852efc0b9960283e735363331e6f325b33bc74bdbaa076f595bc4e9b94d85e"),
     },
 )
 

@@ -35,6 +35,28 @@ upstream's: each token is projected to 768 inside the text model, then pooled. T
 hard-codes is checked against the upstream declarations ({@link assert_sentence_transformer_layout}
 — sentence-transformers 6's module types, mean pooling with the prompt included, no Dense).
 
+## Soft tokens from a tower
+
+The graph inputs are `input_ids` `[1, T]` i32, `pool_mask` `[1, T]` f32, `soft_embeds` `[1, T, 512]`
+f32 and `soft_mask` `[1, T, 1]` bool ({@link GRAPH_INPUTS}) — the names and the mask form of the
+Gemma 4 12B product graph (`gemma4/export_unified.py`). The rows the text tower runs on are
+`where(soft_mask, soft_embeds, embed_tokens(input_ids))` ({@link merged_embeddings}): a soft row
+takes a tower's output (`embed_vision` of `embeddinggemma2/export_vision.py` for an image) as it
+is, after `embed_tokens` applied its `sqrt(512)` to the text rows — upstream's composite model
+overwrites the scaled lookup with unscaled soft tokens the same way (`masked_scatter` in
+`EmbeddingGemma2Model.forward`). The per-layer embedding is projected from the merged rows
+(`EmbeddingGemma2TextModel.forward` computes it from `inputs_embeds`), so nothing else changes;
+positions stay `arange(T)` and the band applies to soft rows as to text rows. `soft_mask` is
+`[1, T, 1]`: `where` broadcasts it over the 512 columns, so the host binds one word per row.
+
+What sits under a soft row's id does not matter (the lookup is overwritten); the composite feeds
+the pad id there, a host may feed the placeholder id itself. With an all-false mask and zero rows
+({@link no_soft_inputs}) `where` selects the text operand exactly, so the graph computes the text
+forward bit for bit and the text goldens keep their values: {@link window_evidence} checks the
+wrapper against the `input_ids` path with `torch.equal` on every long case, and
+{@link assert_soft_merge} checks the form (one merge, its text operand from `input_ids` alone and
+read by nothing else, the soft inputs read by nothing else).
+
 Nothing upstream is reimplemented: the RMSNorm (`x · (mean(x²) + eps)^-0.5 · weight` — the weight
 as is, not `1 + weight` as in the first EmbeddingGemma), the projection-only PLE, the three residual
 sub-blocks of each layer and the per-layer `layer_scalar` multiply (none of the 24 values is 1, so
@@ -52,8 +74,8 @@ the wrapper builds `{"full_attention": None, "sliding_attention": band}` itself
 `arange` and `full` with T at extent positions, so the export traces it as **one Tmax×Tmax f32
 constant + `sym_prefix_slice`** (ADR 0010) shared by the 20 sliding layers — the form
 {@link assert_ir_form} checks. The full layers carry **no mask** in the graph (upstream under
-torch.export would materialise an all-zero one; the Irodori recipe's precedent of dropping it). The
-graph inputs stay `input_ids` and `pool_mask`.
+torch.export would materialise an all-zero one; the Irodori recipe's precedent of dropping it). No
+attention mask is a graph input.
 
 The traced band then goes through the core's band surgery ({@link declare_band} —
 `karume.band.to_band_form`, ADR 0155): each sliding layer's attention drops the mask input and
@@ -89,8 +111,11 @@ the cos / sin tables fold to constants.
 
 - {@link assert_ir_form} — the traced form: 24 fused attention nodes in layer order with each
   layer's q / k / v shapes, a mask on exactly the 20 sliding layers and none on the full ones, one
-  band constant equal to the inclusive band, the two inputs and the one `[1, 768]` output. Each is
+  band constant equal to the inclusive band, the four inputs and the one `[1, 768]` output. Each is
   a property that breaks while the numbers still agree.
+- {@link assert_soft_merge} — the soft inputs' dtypes and shapes and their one merge: a soft row
+  that passed through `embed_scale`, a per-layer embedding projected from the unmerged lookup or a
+  mask left unread keep every text golden.
 - {@link assert_band_matches_upstream} — the band equals upstream's own mask function at Tmax.
 - {@link assert_band_form} — the form that is written: no attention takes a mask, exactly the
   sliding layers declare the band of the window and the full ones none, the traced band constant
@@ -98,7 +123,8 @@ the cos / sin tables fold to constants.
 - {@link window_evidence} — on every case whose T cuts the window (T >= 514), the wrapper's output
   differs from the same model with every position visible by far more than float noise (the window
   is really exercised), and equals the upstream model's own forward (attention_mask of ones,
-  upstream's masking utilities, upstream's SDPA path) to f32 noise.
+  upstream's masking utilities, upstream's SDPA path) to f32 noise; the wrapper fed no soft row
+  equals the `input_ids` path bit for bit.
 - {@link _sanity} — unit norms, and a near pair beating a far pair in cosine.
 - {@link round_weights_to_i8} (`--dtype i8`) — the rounding reached exactly the linears and the
   token table; {@link assert_storage_form} — the stored form is the storage asked for, and under i8
@@ -139,9 +165,11 @@ would put one storage's goldens on the other's assets):
 ## Multimodal placeholder ids
 
 The composite model replaces the image / video / audio placeholder ids (258880 / 258884 / 258881)
-with the pad id before the embedding lookup; the text tower alone does not. The graph is the text
-tower, so for an input holding such an id it does not equal upstream's composite. The goldens hold
-none ({@link build_cases} refuses them); what the host does with such ids is open.
+with the pad id before the embedding lookup; the text tower alone does not. A placeholder row is
+only right when the host marks it in `soft_mask` and fills it from a tower ("Soft tokens from a
+tower"); a placeholder id left as a text row is not upstream's composite. The text goldens hold
+none ({@link build_cases} refuses them); the inputs holding an image are the reference vectors of
+`embeddinggemma2/multimodal_reference.py`.
 
 ## Output layout
 
@@ -151,7 +179,8 @@ none ({@link build_cases} refuses them); what the host does with such ids is ope
     outputs/series/embeddinggemma-2-text-i8/…                      `--dtype i8` (its own goldens)
 
 The io tensor key convention is the first recipe's (`input.<graph input name>` /
-`output.<position>`). `pool_mask` is all ones, for the same reason as there.
+`output.<position>`). `pool_mask` is all ones, for the same reason as there; `soft_embeds` and
+`soft_mask` are zeros and false (no golden text holds a soft row).
 
 Every run also writes the golden texts to a fixture tracked in git,
 {@link GOLDEN_CASE_FIXTURE} ({@link write_golden_case_fixture}): the case names, the prompt names
@@ -171,23 +200,27 @@ from typing import Any
 
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 from embeddinggemma.export import (
     GRAPH_NAME,
+    INPUT_PREFIX,
+    IO_PREFIX,
+    IO_SUFFIX,
     MODEL_FILE,
+    OUTPUT_PREFIX,
     _l2_normalize,
     _masked_mean,
-    _write_io,
 )
 from embeddinggemma2 import sources
 from embeddinggemma2.tokenizer import REQUIRED_TRANSFORMERS
 from karume.artifacts import staged_publication
 from karume.band import BandAttentionSpec, to_band_form
 from karume.container import Provenance, container_parts
-from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
+from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.emit import eligible_compressed_initializers
 from karume.ir import IrGraph, IrNode
 from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
@@ -261,8 +294,16 @@ TEXT_MODALITY: Mapping[str, str] = {"method": "forward", "method_output_name": "
 #: constant. The traced band constant at this bound (256 MiB) is pruned by {@link declare_band}.
 SYM_MAX = 8192
 
-#: The graph input names (the wrapper's forward argument names).
-GRAPH_INPUTS = ("input_ids", "pool_mask")
+#: The graph inputs that carry soft tokens from a tower (module doc, "Soft tokens from a tower") —
+#: the Gemma 4 12B product graph's spellings.
+SOFT_EMBEDS = "soft_embeds"
+SOFT_MASK = "soft_mask"
+
+#: The graph input names (the wrapper's forward argument names), in order.
+GRAPH_INPUTS = ("input_ids", "pool_mask", SOFT_EMBEDS, SOFT_MASK)
+
+#: The IR op of the soft-row merge.
+WHERE_OP = "where"
 
 #: The layer types of `config.layer_types` (= the mask dictionary's keys).
 FULL_ATTENTION = "full_attention"
@@ -648,9 +689,55 @@ def embed(
     return _l2_normalize(_masked_mean(hidden, pool_mask)), hidden
 
 
+def merged_embeddings(
+    model: nn.Module, input_ids: torch.Tensor, soft_embeds: torch.Tensor, soft_mask: torch.Tensor
+) -> torch.Tensor:
+    """The rows the text tower runs on: a soft row's tower output where `soft_mask` is set, the
+    scaled token lookup elsewhere (module doc, "Soft tokens from a tower").
+
+    MUST: the soft rows are not scaled — upstream overwrites the scaled lookup with them.
+    """
+    return torch.where(soft_mask, soft_embeds, model.embed_tokens(input_ids))
+
+
+def no_soft_inputs(input_ids: torch.Tensor, hidden_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """`(soft_embeds [1, T, H], soft_mask [1, T, 1])` of an input without soft rows: zeros and all
+    false — what the host binds for a text."""
+    length = int(input_ids.shape[1])
+    return (
+        torch.zeros(1, length, hidden_size, dtype=torch.float32),
+        torch.zeros(1, length, 1, dtype=torch.bool),
+    )
+
+
+def soft_inputs(
+    input_ids: torch.Tensor, hidden_size: int, blocks: Sequence[tuple[int, torch.Tensor]]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`(soft_embeds, soft_mask)` with each block `(start, rows [n, H])` placed at the positions
+    `[start, start + n)` and {@link no_soft_inputs} elsewhere.
+
+    MUST: blocks do not overlap and stay inside `[0, T)` — a soft row written twice or past the end
+    fails loudly (upstream's `masked_scatter` count check).
+    """
+    soft_embeds, soft_mask = no_soft_inputs(input_ids, hidden_size)
+    length = int(input_ids.shape[1])
+    for start, rows in blocks:
+        stop = start + int(rows.shape[0])
+        if rows.dim() != 2 or int(rows.shape[1]) != hidden_size or not 0 <= start < stop <= length:
+            raise EmbeddingGemma2ExportError(
+                f"a soft block of shape {list(rows.shape)} at {start} does not fit [1, {length},"
+                f" {hidden_size}]"
+            )
+        if bool(soft_mask[0, start:stop].any()):
+            raise EmbeddingGemma2ExportError(f"the soft block at {start} overlaps another one")
+        soft_embeds[0, start:stop] = rows
+        soft_mask[0, start:stop] = True
+    return soft_embeds, soft_mask
+
+
 class EmbeddingWrapper(nn.Module):
-    """Export wrapper: the text tower with the wrapper-built masks, then masked mean and L2
-    normalisation.
+    """Export wrapper: the text tower over the merged rows ({@link merged_embeddings}) with the
+    wrapper-built masks, then masked mean and L2 normalisation.
 
     MUST: `attention_mask` is always the dictionary of {@link layer_masks}. Omitted, transformers
     builds the masks from the padding mask and the export no longer folds them.
@@ -661,10 +748,37 @@ class EmbeddingWrapper(nn.Module):
         self.model = model
         self.window = window
 
-    def forward(self, input_ids: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        pool_mask: torch.Tensor,
+        soft_embeds: torch.Tensor,
+        soft_mask: torch.Tensor,
+    ) -> torch.Tensor:
         masks = layer_masks(input_ids.shape[1], self.window)
-        embedding, _ = embed(self.model, input_ids, pool_mask, masks)
-        return embedding
+        rows = merged_embeddings(self.model, input_ids, soft_embeds, soft_mask)
+        hidden = self.model(inputs_embeds=rows, attention_mask=masks).last_hidden_state
+        return _l2_normalize(_masked_mean(hidden, pool_mask))
+
+    def text(self, input_ids: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
+        """The forward of an input without soft rows (the host's text call)."""
+        hidden_size = int(self.model.config.hidden_size)
+        return self(input_ids, pool_mask, *no_soft_inputs(input_ids, hidden_size))
+
+
+def trace(
+    wrapper: EmbeddingWrapper, example_ids: torch.Tensor, example_mask: torch.Tensor, sym_max: int
+) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """Export the wrapper with T symbolic in `[2, sym_max]` on every input (the example has no soft
+    row — the graph does not depend on the values)."""
+    seq = Dim("T", min=2, max=sym_max)
+    soft_embeds, soft_mask = no_soft_inputs(example_ids, int(wrapper.model.config.hidden_size))
+    return export_module(
+        wrapper,
+        (example_ids, example_mask, soft_embeds, soft_mask),
+        dynamic_shapes=({1: seq}, {1: seq}, {1: seq}, {1: seq}),
+        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    )
 
 
 def load_prompts(directory: Path) -> dict[str, str]:
@@ -804,7 +918,7 @@ def assert_ir_form(
     embedding_dim: int,
 ) -> dict[str, Any]:
     """Check the traced form (before {@link declare_band}): the fused attention in the true GQA form
-    on every layer, the band on exactly the sliding layers as one folded constant, and the two
+    on every layer, the band on exactly the sliding layers as one folded constant, and the four
     inputs / one output.
 
     Each property breaks silently with the numbers still matching the goldens:
@@ -821,7 +935,8 @@ def assert_ir_form(
     names = [spec.name for spec in graph.inputs]
     if names != list(GRAPH_INPUTS):
         raise AssertionError(
-            f"graph inputs are {names}, not {list(GRAPH_INPUTS)} (a mask may have stayed an input)"
+            f"graph inputs are {names}, not {list(GRAPH_INPUTS)} (a mask may have stayed an input,"
+            " or the soft inputs are missing)"
         )
     if len(graph.outputs) != 1:
         raise AssertionError(f"{len(graph.outputs)} IR outputs (an embedding has 1)")
@@ -886,6 +1001,73 @@ def assert_ir_form(
         "band_constant": band_name,
         "band_visible_per_middle_row": int((band[0, 0, sym_max // 2] == 0).sum()),
     }
+
+
+def assert_soft_merge(graph: IrGraph, hidden_size: int) -> dict[str, Any]:
+    """The soft rows' merge (module doc, "Soft tokens from a tower"): `soft_embeds` f32
+    `[1, T, H]` and `soft_mask` bool `[1, T, 1]`, read by exactly one
+    `where(soft_mask, soft_embeds, text)` and by nothing else, whose `text` operand derives from
+    `input_ids` alone, and every value derived from `input_ids` read only on the way to that merge.
+
+    MUST: checked in the graph — each of these breaks while every text golden still holds: soft
+    rows that pass through `embed_scale`, a mask left unread, and a per-layer embedding (or a layer)
+    that reads the lookup before the merge, so a soft row would reach one consumer and not another.
+    """
+    symbol = graph.symbols[0] if graph.symbols else None
+    expected = {
+        SOFT_EMBEDS: ("f32", [1, symbol, hidden_size]),
+        SOFT_MASK: ("bool", [1, symbol, 1]),
+    }
+    declared = {spec.name: (spec.dtype, list(spec.shape)) for spec in graph.inputs}
+    for name, form in expected.items():
+        if declared.get(name) != form:
+            raise AssertionError(f"'{name}' is {declared.get(name)} — not {form[0]} {form[1]}")
+    merges = [node for node in graph.nodes if node.op == WHERE_OP]
+    if len(merges) != 1 or merges[0].ins[:2] != [SOFT_MASK, SOFT_EMBEDS]:
+        raise AssertionError(
+            f"`{WHERE_OP}` nodes are {[node.ins for node in merges]} — not one"
+            f" `{WHERE_OP}({SOFT_MASK}, {SOFT_EMBEDS}, text)`: the soft rows must reach it unscaled"
+        )
+    (merge,) = merges
+    readers = sorted(
+        {name for node in graph.nodes if node is not merge for name in node.ins if name in expected}
+    )
+    if readers:
+        raise AssertionError(f"{readers} are read besides the merge")
+    producers = {out: node for node in graph.nodes for out in node.outs}
+    text = merge.ins[2]
+    # The values the text operand derives from (walked back through the producers).
+    chain: set[str] = set()
+    frontier = [text]
+    while frontier:
+        value = frontier.pop()
+        if value in chain:
+            continue
+        chain.add(value)
+        node = producers.get(value)
+        if node is not None:
+            frontier.extend(node.ins)
+    if GRAPH_INPUTS[0] not in chain or chain & {SOFT_EMBEDS, SOFT_MASK, GRAPH_INPUTS[1]}:
+        raise AssertionError(
+            f"the merge's text operand does not come from '{GRAPH_INPUTS[0]}' alone"
+        )
+    # The values on the way from input_ids to the merge (derived from input_ids, inside the chain).
+    derived = {GRAPH_INPUTS[0]}
+    for node in graph.nodes:
+        if set(node.ins) & derived and node.outs[0] in chain:
+            derived.update(node.outs)
+    leaks = sorted(
+        f"{name} → {node.op}"
+        for node in graph.nodes
+        if node is not merge and node.outs[0] not in chain
+        for name in node.ins
+        if name in derived
+    )
+    if leaks:
+        raise AssertionError(
+            f"values derived from '{GRAPH_INPUTS[0]}' are read outside the merge: {leaks}"
+        )
+    return {"merge": merge.outs[0], "text_operand": text, "text_chain": sorted(derived)}
 
 
 def _attentions(graph: IrGraph) -> list[IrNode]:
@@ -1022,15 +1204,20 @@ def window_evidence(
             visible, _ = embed(model, ids, pool_mask, all_visible_masks())
             with upstream_attention(model):
                 upstream, upstream_hidden = embed(model, ids, pool_mask, torch.ones_like(ids))
-            exported = wrapper(ids, pool_mask)
+            exported = wrapper.text(ids, pool_mask)
         measured = {
             "band_vs_all_visible": _max_abs(banded, visible),
             "upstream": _max_abs(banded, upstream),
             "upstream_hidden_rel": _max_abs(hidden, upstream_hidden)
             / float(upstream_hidden.abs().max()),
         }
+        # MUST: equal, not close — no soft row means the merge selects the scaled lookup exactly,
+        # which is what keeps the text goldens' values (module doc, "Soft tokens from a tower").
         if not torch.equal(exported, banded):
-            raise AssertionError(f"{name}: the wrapper's forward is not its own band path")
+            raise AssertionError(
+                f"{name}: the wrapper's forward without soft rows is not the input_ids band path"
+                " bit for bit"
+            )
         if measured["band_vs_all_visible"] <= WINDOW_FLOOR:
             raise AssertionError(
                 f"{name}: the band moves the output by {measured['band_vs_all_visible']:.3e}"
@@ -1045,6 +1232,49 @@ def window_evidence(
     if not record:
         raise AssertionError("no case cuts the window — the evidence is vacuous")
     return record
+
+
+def write_io(
+    wrapper: EmbeddingWrapper,
+    graph: IrGraph,
+    cases: Sequence[tuple[str, torch.Tensor, torch.Tensor]],
+    out_dir: Path,
+) -> tuple[list[str], dict[str, torch.Tensor]]:
+    """Write each case's four inputs (no soft row — {@link no_soft_inputs}) and the torch CPU
+    expected output to `io.<case>.safetensors`; returns the file names and the outputs.
+
+    MUST: one tensor per graph input, lowered to the IR's semantic dtype at the boundary (i64 →
+    i32, bool → u32 — ADR 0009), so the series e2e binds the golden's inputs as they are.
+    """
+    if len(graph.outputs) != 1:
+        raise AssertionError(f"{len(graph.outputs)} IR outputs (an embedding has 1)")
+    hidden_size = int(wrapper.model.config.hidden_size)
+    written: list[str] = []
+    embeddings: dict[str, torch.Tensor] = {}
+    for name, ids, pool_mask in cases:
+        soft_embeds, soft_mask = no_soft_inputs(ids, hidden_size)
+        with torch.no_grad():
+            output = wrapper(ids, pool_mask, soft_embeds, soft_mask)
+        args = {
+            GRAPH_INPUTS[0]: ids,
+            GRAPH_INPUTS[1]: pool_mask,
+            SOFT_EMBEDS: soft_embeds,
+            SOFT_MASK: soft_mask,
+        }
+        tensors = {
+            f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
+                args[declared.name], f"{name}: input '{declared.name}'"
+            )
+            for declared in graph.inputs
+        }
+        tensors[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
+            output.detach().contiguous(), f"{name}: output 0"
+        )
+        path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
+        save_file(tensors, str(path))
+        written.append(path.name)
+        embeddings[name] = output.detach()
+    return written, embeddings
 
 
 def _sanity(embeddings: Mapping[str, torch.Tensor]) -> dict[str, Any]:
@@ -1204,16 +1434,11 @@ def export_series(
     # The example input is the longest case (at the bound — far from the 0/1 specialisation). min=2
     # avoids the 0/1 specialisation; max is the folding's evaluation point itself (ADR 0010).
     _, example_ids, example_mask = max(cases, key=lambda case: case[1].shape[1])
-    seq = Dim("T", min=2, max=sym_max)
-    graph, tensors = export_module(
-        wrapper,
-        (example_ids, example_mask),
-        dynamic_shapes=({1: seq}, {1: seq}),
-        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-    )
+    graph, tensors = trace(wrapper, example_ids, example_mask, sym_max)
     layouts = attention_layouts(config)
     # MUST: the form is checked before anything is written (the numbers do not catch it).
     form = assert_ir_form(graph, tensors, layouts, sym_max, window, int(config.embedding_dim))
+    merge = assert_soft_merge(graph, int(config.hidden_size))
     graph, pruned = declare_band(graph, layouts, window)
     band_form = assert_band_form(graph, layouts, sym_max, window, pruned, form["band_constant"])
     # The tensors of the initializers the surgery pruned are not stored (the contract of the
@@ -1241,7 +1466,7 @@ def export_series(
         storage = assert_storage_form(
             graph, dtype, () if rounding is None else tuple(rounding.scales)
         )
-        written, embeddings = _write_io(wrapper, graph, cases, staged)
+        written, embeddings = write_io(wrapper, graph, cases, staged)
         # MUST: evaluated before publishing (on failure the staging directory is removed).
         sanity = _sanity(embeddings)
     return {
@@ -1260,6 +1485,7 @@ def export_series(
             else {"rounded": {"tensors": rounding.modules, "elements": rounding.elements}}
         ),
         "form": form,
+        "soft_merge": merge,
         "band_form": band_form,
         "window_evidence": evidence,
         "io": written,

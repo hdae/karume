@@ -16,6 +16,11 @@ broken:
 - {@link export.assert_ir_form} rejects a decomposed attention, a widened k / v, a mask on a full
   layer (upstream under torch.export materialises an all-zero one), a missing band, and a band
   from a graph input or of the wrong extent or values
+- the soft rows: without one the wrapper is the `input_ids` path bit for bit, with them it is the
+  composite model's merge (the pad id looked up, `masked_scatter` of unscaled rows), the io holds
+  the four inputs (zeros and false), and {@link export.assert_soft_merge} rejects soft rows of
+  another width, a full-width mask, scaled soft rows, a soft input read elsewhere, a per-layer
+  projection of the unmerged lookup, a text operand not from the ids, and a second `where`
 - {@link export.declare_band} declares the window on exactly the sliding layers and prunes the
   traced band constant alone, and {@link export.assert_band_form} rejects a mask left on an
   attention, a band missing, of another width or on a full layer, anything else pruned and a graph
@@ -47,10 +52,9 @@ import torch
 from embeddinggemma2 import export, sources
 from embeddinggemma2.card import EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS
 from karume.container import Provenance
-from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.emit import EmitError, eligible_compressed_initializers
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
-from karume.pipeline import export_module, publish_model
+from karume.pipeline import publish_model
 from karume.quantize import quantize_to_int8, round_weights_to_bf16
 from karume.rope import assert_rope_lifted
 
@@ -485,6 +489,8 @@ TINY_LAYOUTS = (
 TINY_SYM_MAX = 16
 TINY_WINDOW = 3
 TINY_EMBEDDING = 6
+#: The tiny IR's hidden width (the soft rows' width).
+TINY_HIDDEN = 4
 BAND = "const_band"
 
 
@@ -494,6 +500,8 @@ def _ir_graph(layouts=TINY_LAYOUTS) -> tuple[IrGraph, dict[str, torch.Tensor]]:
     graph = IrGraph(symbols=["T"])
     graph.inputs.append(IrInput(name="input_ids", dtype="i32", shape=[1, "T"]))
     graph.inputs.append(IrInput(name="pool_mask", dtype="f32", shape=[1, "T"]))
+    graph.inputs.append(IrInput(name=export.SOFT_EMBEDS, dtype="f32", shape=[1, "T", TINY_HIDDEN]))
+    graph.inputs.append(IrInput(name=export.SOFT_MASK, dtype="bool", shape=[1, "T", 1]))
     graph.initializers[BAND] = IrInitializer(tensor=f"const.{BAND}", storage=IrStorage("f32"))
     graph.values[BAND] = IrValue(dtype="f32", shape=[1, 1, TINY_SYM_MAX, TINY_SYM_MAX])
     graph.values[f"{BAND}.T"] = IrValue(dtype="f32", shape=[1, 1, "T", "T"])
@@ -636,6 +644,161 @@ class TestAssertIrForm:
         with pytest.raises(AssertionError, match="the output is"):
             _check(graph, tensors)
 
+    def test_a_graph_without_the_soft_inputs_is_rejected(self) -> None:
+        graph, tensors = _ir_graph()
+        graph.inputs = graph.inputs[:2]
+
+        with pytest.raises(AssertionError, match="the soft inputs are missing"):
+            _check(graph, tensors)
+
+
+def _merge_graph() -> IrGraph:
+    """The smallest graph of the merge's form: `input_ids` → `embedding` → `mul` (the scale) →
+    `where(soft_mask, soft_embeds, ·)` → the per-layer projection and a layer, both reading the
+    merged rows."""
+    graph = IrGraph(symbols=["T"])
+    graph.inputs += [
+        IrInput(name="input_ids", dtype="i32", shape=[1, "T"]),
+        IrInput(name="pool_mask", dtype="f32", shape=[1, "T"]),
+        IrInput(name=export.SOFT_EMBEDS, dtype="f32", shape=[1, "T", TINY_HIDDEN]),
+        IrInput(name=export.SOFT_MASK, dtype="bool", shape=[1, "T", 1]),
+    ]
+    for name, shape in (("table", [8, TINY_HIDDEN]), ("scale", []), ("ple", [6, TINY_HIDDEN])):
+        graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage("f32"))
+        graph.values[name] = IrValue("f32", shape)
+    for name in ("lookup", "scaled", "merged", "layer"):
+        graph.values[name] = IrValue("f32", [1, "T", TINY_HIDDEN])
+    graph.values["projected"] = IrValue("f32", [1, "T", 6])
+    graph.nodes += [
+        IrNode(op="embedding", ins=["table", "input_ids"], outs=["lookup"], attrs={}),
+        IrNode(op="mul", ins=["lookup", "scale"], outs=["scaled"], attrs={}),
+        IrNode(
+            op=export.WHERE_OP,
+            ins=[export.SOFT_MASK, export.SOFT_EMBEDS, "scaled"],
+            outs=["merged"],
+            attrs={},
+        ),
+        IrNode(op="linear", ins=["merged", "ple"], outs=["projected"], attrs={}),
+        IrNode(op="rms_norm", ins=["merged", "scale"], outs=["layer"], attrs={}),
+    ]
+    graph.outputs.append("layer")
+    return graph
+
+
+def _node(graph: IrGraph, op: str) -> IrNode:
+    return next(node for node in graph.nodes if node.op == op)
+
+
+class TestAssertSoftMerge:
+    """{@link export.assert_soft_merge} — the form that keeps soft rows unscaled and reaching every
+    reader of the rows; each broken form still passes every text golden."""
+
+    def test_the_expected_form_passes(self) -> None:
+        merge = export.assert_soft_merge(_merge_graph(), TINY_HIDDEN)
+
+        assert merge == {
+            "merge": "merged",
+            "text_operand": "scaled",
+            "text_chain": ["input_ids", "lookup", "scaled"],
+        }
+
+    def test_soft_rows_of_another_width_are_rejected(self) -> None:
+        with pytest.raises(AssertionError, match="'soft_embeds' is"):
+            export.assert_soft_merge(_merge_graph(), TINY_HIDDEN + 1)
+
+    def test_a_mask_of_the_full_width_is_rejected(self) -> None:
+        graph = _merge_graph()
+        graph.inputs[3] = IrInput(name=export.SOFT_MASK, dtype="bool", shape=[1, "T", TINY_HIDDEN])
+
+        with pytest.raises(AssertionError, match="'soft_mask' is"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+    def test_soft_rows_scaled_before_the_merge_are_rejected(self) -> None:
+        """Upstream writes the soft tokens over the scaled lookup as they are."""
+        graph = _merge_graph()
+        graph.values["soft_scaled"] = IrValue("f32", [1, "T", TINY_HIDDEN])
+        graph.nodes.insert(
+            0, IrNode(op="mul", ins=[export.SOFT_EMBEDS, "scale"], outs=["soft_scaled"], attrs={})
+        )
+        _node(graph, export.WHERE_OP).ins[1] = "soft_scaled"
+
+        with pytest.raises(AssertionError, match="unscaled"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+    def test_a_soft_input_read_besides_the_merge_is_rejected(self) -> None:
+        graph = _merge_graph()
+        _node(graph, "rms_norm").ins[0] = export.SOFT_EMBEDS
+
+        with pytest.raises(AssertionError, match=r"\['soft_embeds'\] are read besides the merge"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+    def test_a_per_layer_projection_of_the_unmerged_lookup_is_rejected(self) -> None:
+        graph = _merge_graph()
+        _node(graph, "linear").ins[0] = "scaled"
+
+        with pytest.raises(AssertionError, match=r"read outside the merge: \['scaled → linear'\]"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+    def test_a_text_operand_that_does_not_come_from_the_ids_is_rejected(self) -> None:
+        graph = _merge_graph()
+        _node(graph, "mul").ins[0] = "pool_mask"
+
+        with pytest.raises(AssertionError, match="does not come from 'input_ids' alone"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+    def test_a_second_where_is_rejected(self) -> None:
+        graph = _merge_graph()
+        graph.values["again"] = IrValue("f32", [1, "T", TINY_HIDDEN])
+        graph.nodes.append(
+            IrNode(
+                op=export.WHERE_OP,
+                ins=[export.SOFT_MASK, export.SOFT_EMBEDS, "layer"],
+                outs=["again"],
+                attrs={},
+            )
+        )
+
+        with pytest.raises(AssertionError, match="not one"):
+            export.assert_soft_merge(graph, TINY_HIDDEN)
+
+
+class TestSoftInputs:
+    """The host's soft inputs as the recipe builds them (zeros and false around each block)."""
+
+    def test_no_soft_row_is_zeros_and_all_false(self) -> None:
+        ids = torch.zeros(1, 5, dtype=torch.int64)
+
+        soft_embeds, soft_mask = export.no_soft_inputs(ids, 3)
+
+        assert soft_embeds.dtype == torch.float32 and list(soft_embeds.shape) == [1, 5, 3]
+        assert soft_mask.dtype == torch.bool and list(soft_mask.shape) == [1, 5, 1]
+        assert not soft_embeds.any() and not soft_mask.any()
+
+    def test_blocks_are_placed_at_their_rows_only(self) -> None:
+        ids = torch.zeros(1, 8, dtype=torch.int64)
+        first, second = torch.ones(2, 3), torch.full((3, 3), 2.0)
+
+        soft_embeds, soft_mask = export.soft_inputs(ids, 3, [(1, first), (5, second)])
+
+        assert soft_mask[0, :, 0].tolist() == [False, True, True, False, False, True, True, True]
+        assert torch.equal(soft_embeds[0, 1:3], first)
+        assert torch.equal(soft_embeds[0, 5:8], second)
+        assert not soft_embeds[0, [0, 3, 4]].any()
+
+    @pytest.mark.parametrize(
+        ("blocks", "match"),
+        [
+            ([(7, torch.ones(2, 3))], "does not fit"),
+            ([(0, torch.ones(2, 4))], "does not fit"),
+            ([(0, torch.ones(3, 3)), (2, torch.ones(1, 3))], "overlaps"),
+        ],
+    )
+    def test_a_block_past_the_end_of_another_width_or_overlapping_fails(
+        self, blocks, match: str
+    ) -> None:
+        with pytest.raises(export.EmbeddingGemma2ExportError, match=match):
+            export.soft_inputs(torch.zeros(1, 8, dtype=torch.int64), 3, blocks)
+
 
 ROPE = "const_rope"
 
@@ -664,6 +827,8 @@ def _traced_graph() -> IrGraph:
             ins=[
                 "input_ids",
                 "pool_mask",
+                export.SOFT_EMBEDS,
+                export.SOFT_MASK,
                 *(f"attn{layer}" for layer in range(len(TINY_LAYOUTS))),
                 f"{ROPE}.T",
             ],
@@ -840,14 +1005,8 @@ class TestTinyModel:
     def test_the_export_has_the_expected_form(self, tiny_wrapper) -> None:
         ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
         pool = torch.ones_like(ids, dtype=torch.float32)
-        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
 
-        graph, tensors = export_module(
-            tiny_wrapper,
-            (ids, pool),
-            dynamic_shapes=({1: seq}, {1: seq}),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
+        graph, tensors = export.trace(tiny_wrapper, ids, pool, TINY_SYM_MAX)
         config = tiny_wrapper.model.config
         form = export.assert_ir_form(
             graph,
@@ -857,22 +1016,95 @@ class TestTinyModel:
             TINY_WINDOW,
             int(config.embedding_dim),
         )
+        merge = export.assert_soft_merge(graph, int(config.hidden_size))
 
         assert form["attention_nodes"] == 3
         assert form["full_layers"] == [2]
+        assert [spec.name for spec in graph.inputs] == list(export.GRAPH_INPUTS)
+        # The text operand is the lookup and its scale, nothing more (ids → embedding → mul).
+        assert len(merge["text_chain"]) == 3 and "input_ids" in merge["text_chain"]
+
+    def test_without_soft_rows_the_wrapper_is_the_input_ids_path_bit_for_bit(
+        self, tiny_wrapper
+    ) -> None:
+        torch.manual_seed(2)
+        ids = torch.randint(3, 64, (1, 12))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+
+        with torch.no_grad():
+            ours = tiny_wrapper.text(ids, pool)
+            text, _ = export.embed(
+                tiny_wrapper.model, ids, pool, export.layer_masks(12, TINY_WINDOW)
+            )
+
+        assert torch.equal(ours, text)
+
+    def test_soft_rows_are_upstreams_merge_of_the_composite_model(self, tiny_wrapper) -> None:
+        """`EmbeddingGemma2Model.forward`'s merge: the placeholder ids looked up as the pad id,
+        then `masked_scatter` of the unscaled soft tokens, then the text tower on the merged
+        rows (its per-layer embedding included)."""
+        torch.manual_seed(3)
+        ids = torch.randint(3, 64, (1, 12))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+        model = tiny_wrapper.model
+        hidden = int(model.config.hidden_size)
+        rows = torch.randn(4, hidden) * 3
+        soft_embeds, soft_mask = export.soft_inputs(ids, hidden, [(5, rows)])
+        placed = ids.clone()
+        placed[0, 5:9] = 63  # a placeholder-like id the host may leave under a soft row
+
+        with torch.no_grad():
+            ours = tiny_wrapper(placed, pool, soft_embeds, soft_mask)
+            scatter = soft_mask.expand(-1, -1, hidden)
+            pad = torch.where(soft_mask[..., 0], int(model.config.pad_token_id), placed)
+            merged = model.embed_tokens(pad).masked_scatter(scatter, rows)
+            hidden_states = model(
+                inputs_embeds=merged, attention_mask=export.layer_masks(12, TINY_WINDOW)
+            ).last_hidden_state
+            upstream = export._l2_normalize(export._masked_mean(hidden_states, pool))
+            text = tiny_wrapper.text(ids, pool)
+
+        assert torch.equal(ours, upstream)
+        assert float((ours - text).abs().max()) > 1e-3
+
+    def test_the_io_holds_the_four_inputs_without_soft_rows_and_the_text_output(
+        self, tiny_wrapper, tmp_path: Path
+    ) -> None:
+        from safetensors.torch import load_file
+
+        ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+        graph, _tensors = export.trace(tiny_wrapper, ids, pool, TINY_SYM_MAX)
+        short = ids[:, :5]
+
+        written, outputs = export.write_io(
+            tiny_wrapper, graph, [("short", short, pool[:, :5])], tmp_path
+        )
+
+        io = load_file(str(tmp_path / written[0]))
+        hidden = int(tiny_wrapper.model.config.hidden_size)
+        assert sorted(io) == sorted(
+            [*(f"input.{name}" for name in export.GRAPH_INPUTS), "output.0"]
+        )
+        assert io["input.input_ids"].dtype == torch.int32
+        assert list(io["input.soft_embeds"].shape) == [1, 5, hidden]
+        assert not io["input.soft_embeds"].any()
+        assert io["input.soft_mask"].dtype == torch.uint32
+        assert list(io["input.soft_mask"].shape) == [1, 5, 1]
+        assert not io["input.soft_mask"].to(torch.int64).any()
+        with torch.no_grad():
+            text, _ = export.embed(
+                tiny_wrapper.model, short, pool[:, :5], export.layer_masks(5, TINY_WINDOW)
+            )
+        assert torch.equal(io["output.0"], text)
+        assert torch.equal(outputs["short"], text)
 
     def test_the_band_form_passes_the_writer(self, tiny_wrapper, tmp_path: Path) -> None:
         """The surgery's result passes the writer's acceptance rules (runtime support and the op
         contracts) and is written without the band constant."""
         ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
         pool = torch.ones_like(ids, dtype=torch.float32)
-        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
-        graph, tensors = export_module(
-            tiny_wrapper,
-            (ids, pool),
-            dynamic_shapes=({1: seq}, {1: seq}),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
+        graph, tensors = export.trace(tiny_wrapper, ids, pool, TINY_SYM_MAX)
         layouts = export.attention_layouts(tiny_wrapper.model.config)
         width = int(tiny_wrapper.model.config.embedding_dim)
         traced = export.assert_ir_form(graph, tensors, layouts, TINY_SYM_MAX, TINY_WINDOW, width)
@@ -1078,13 +1310,7 @@ class TestTinyModelBf16:
     def _export(self, wrapper) -> tuple[IrGraph, dict[str, torch.Tensor]]:
         ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
         pool = torch.ones_like(ids, dtype=torch.float32)
-        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
-        return export_module(
-            wrapper,
-            (ids, pool),
-            dynamic_shapes=({1: seq}, {1: seq}),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
+        return export.trace(wrapper, ids, pool, TINY_SYM_MAX)
 
     def test_weights_bf16_holds_are_stored_as_bf16_in_every_weight_slot(
         self, tiny_wrapper, tmp_path: Path
@@ -1228,13 +1454,7 @@ class TestTinyModelI8:
     def _export(self, wrapper) -> tuple[IrGraph, dict[str, torch.Tensor]]:
         ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
         pool = torch.ones_like(ids, dtype=torch.float32)
-        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
-        return export_module(
-            wrapper,
-            (ids, pool),
-            dynamic_shapes=({1: seq}, {1: seq}),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
+        return export.trace(wrapper, ids, pool, TINY_SYM_MAX)
 
     def test_it_rounds_every_linear_and_the_token_table_and_nothing_else(
         self, tiny_wrapper

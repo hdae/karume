@@ -8,7 +8,8 @@
  * 1. Host: the input's content parts → one text, the prompt's prefix in front → token ids with
  *    `<bos>` … `<eos>` (the distribution's tokenizer asset, the Gemma tokenizer of
  *    `src/gemma/text/`); the limit and the placeholder refusal (`./input.ts`)
- * 2. Runs `model` once (`input_ids` `[1, T]`, `pool_mask` `[1, T]` of ones) → the unit vector
+ * 2. Runs `model` once (`input_ids` `[1, T]`, `pool_mask` `[1, T]` of ones, and no soft row:
+ *    `soft_embeds` `[1, T, H]` of zeros and `soft_mask` `[1, T, 1]` all false) → the unit vector
  *    `[1, D]` (the graph holds the text tower, the masked mean pooling and the L2 normalisation)
  * 3. Host: a shorter width is the leading slice re-normalised (`truncateEmbedding`)
  *
@@ -137,6 +138,15 @@ const TOKENIZER = "tokenizer";
 /** The graph inputs (`GRAPH_INPUTS` of `tools/export-recipes/embeddinggemma2/export.py`). */
 const INPUT_IDS = "input_ids";
 const POOL_MASK = "pool_mask";
+/**
+ * The soft rows of a tower: a row where `soft_mask` is set runs on its `soft_embeds` row instead of
+ * its token's scaled lookup (the recipe's module doc, "Soft tokens from a tower"). A text binds no
+ * soft row — zeros and all false, which the graph computes as the text forward bit for bit.
+ */
+const SOFT_EMBEDS = "soft_embeds";
+const SOFT_MASK = "soft_mask";
+/** Every input the host binds, in the graph's order. */
+const GRAPH_INPUTS = [INPUT_IDS, POOL_MASK, SOFT_EMBEDS, SOFT_MASK] as const;
 
 /** The op that cuts a folded constant down to the bound length (ADR 0010). */
 const SYM_PREFIX_SLICE = "sym_prefix_slice";
@@ -254,6 +264,8 @@ export type EmbeddingGemmaGraphContract = {
   readonly width: number;
   /** The row count of the embedding table `input_ids` indexes. */
   readonly vocabularySize: number;
+  /** The width of a soft row (= the embedding table's width — a soft row replaces a scaled lookup). */
+  readonly softWidth: number;
   /** The bytes per token of the graph's largest symbolic value (module doc "The device's token limit"). */
   readonly bytesPerToken: number;
 };
@@ -404,14 +416,15 @@ const graphSymbolMaximum = (model: GraphOwner, symbol: string): number | undefin
  * Matches the graph declaration against what the host feeds and reads, and against
  * `pipelineConfig`.
  *
- * MUST: call it at admission (before the weight parts are fetched): the host builds the two inputs
+ * MUST: call it at admission (before the weight parts are fetched): the host builds the four inputs
  * from its own token ids and reads one `[1, D]` output, so a mismatch would otherwise surface after
  * the weights are uploaded, in the Session's shape check.
  *
- * - One symbolic length T; exactly the inputs `input_ids` i32 `[1, T]` and `pool_mask` f32 `[1, T]`.
+ * - One symbolic length T; exactly the inputs `input_ids` i32 `[1, T]`, `pool_mask` f32 `[1, T]`,
+ *   `soft_embeds` f32 `[1, T, W]` and `soft_mask` bool `[1, T, 1]`, in that order.
  * - One f32 output `[1, D]` with D = `pipelineConfig.dimensions[0]` (the full width a caller gets).
  * - Exactly one `embedding` node reads `input_ids`, its table `[V, W]` static (V bounds the token
- *   ids the tokenizer may produce — checked when the asset arrives).
+ *   ids the tokenizer may produce — checked when the asset arrives; W is the soft rows' width).
  * - The graph's maximum of T (read from its folded constants) equals `pipelineConfig.maxTokens`:
  *   a smaller declaration would refuse lengths the graph runs, a larger one would let a length
  *   through that fails only when the run is planned.
@@ -431,23 +444,18 @@ export const embeddingGemmaGraphContract = (
     );
   }
   const [symbol] = graph.symbols;
-  const ids = graphInput(model, INPUT_IDS);
-  const mask = graphInput(model, POOL_MASK);
-  if (graph.inputs.length !== 2) {
+  for (const name of GRAPH_INPUTS) graphInput(model, name);
+  if (graph.inputs.length !== GRAPH_INPUTS.length) {
     throw new Error(
-      `${OWNER}: the graph has ${graph.inputs.length} inputs (the host feeds only '${INPUT_IDS}' and '${POOL_MASK}')`,
+      `${OWNER}: the graph has ${graph.inputs.length} inputs (the host feeds only` +
+        ` ${GRAPH_INPUTS.map((name) => `'${name}'`).join(", ")})`,
     );
   }
-  for (const [spec, dtype] of [
-    [ids, "i32"],
-    [mask, "f32"],
-  ] as const) {
-    if (spec.dtype !== dtype || !sameShape(spec.shape, [1, symbol])) {
-      throw new Error(
-        `${OWNER}: graph input '${spec.name}' is ${spec.dtype} [${spec.shape.join(", ")}], expected` +
-          ` ${dtype} [1, ${symbol}]`,
-      );
-    }
+  if (graph.inputs.some((input, index) => input.name !== GRAPH_INPUTS[index])) {
+    throw new Error(
+      `${OWNER}: the graph's inputs are ${graph.inputs.map((input) => input.name).join(" / ")},` +
+        ` not ${GRAPH_INPUTS.join(" / ")} in that order`,
+    );
   }
   if (graph.outputs.length !== 1) {
     throw new Error(
@@ -477,16 +485,34 @@ export const embeddingGemmaGraphContract = (
   const table = lookups[0].ins[0];
   const tableShape = Object.hasOwn(graph.values, table) ? graph.values[table].shape : undefined;
   const vocabularySize = tableShape?.[0];
+  const softWidth = tableShape?.[1];
   if (
     tableShape?.length !== 2 ||
     typeof vocabularySize !== "number" ||
     !Number.isInteger(vocabularySize) ||
-    vocabularySize <= 0
+    vocabularySize <= 0 ||
+    typeof softWidth !== "number" ||
+    !Number.isInteger(softWidth) ||
+    softWidth <= 0
   ) {
     throw new Error(
       `${OWNER}: the embedding table '${table}' has shape [${tableShape?.join(", ") ?? "undeclared"}]` +
         " (expected a static [V, W])",
     );
+  }
+  for (const [name, dtype, shape] of [
+    [INPUT_IDS, "i32", [1, symbol]],
+    [POOL_MASK, "f32", [1, symbol]],
+    [SOFT_EMBEDS, "f32", [1, symbol, softWidth]],
+    [SOFT_MASK, "bool", [1, symbol, 1]],
+  ] as const) {
+    const spec = graphInput(model, name);
+    if (spec.dtype !== dtype || !sameShape(spec.shape, shape)) {
+      throw new Error(
+        `${OWNER}: graph input '${name}' is ${spec.dtype} [${spec.shape.join(", ")}], expected` +
+          ` ${dtype} [${shape.join(", ")}]`,
+      );
+    }
   }
   const maximum = graphSymbolMaximum(model, symbol);
   if (maximum === undefined) {
@@ -501,7 +527,13 @@ export const embeddingGemmaGraphContract = (
         ` ${maximum} (the bound of its folded constants)`,
     );
   }
-  return { output, width, vocabularySize, bytesPerToken: graphBytesPerToken(model, symbol) };
+  return {
+    output,
+    width,
+    vocabularySize,
+    softWidth,
+    bytesPerToken: graphBytesPerToken(model, symbol),
+  };
 };
 
 /** The part of a Session the embedder uses (narrow, so a host test can stand in for the GPU). */
@@ -624,6 +656,13 @@ export class Embedder {
       // All ones: the pooling averages every token, the prompt's included (upstream's
       // `include_prompt`); the mask is not wired to attention.
       [POOL_MASK]: { dtype: "f32", shape: [1, length], data: new Float32Array(length).fill(1) },
+      // No soft row: a text runs on its scaled token lookups alone (`SOFT_EMBEDS`).
+      [SOFT_EMBEDS]: {
+        dtype: "f32",
+        shape: [1, length, contract.softWidth],
+        data: new Float32Array(length * contract.softWidth),
+      },
+      [SOFT_MASK]: { dtype: "bool", shape: [1, length, 1], data: new Uint32Array(length) },
     });
     onRunDiagnostics?.(session.diagnostics());
     return truncateEmbedding(readEmbedding(outputs, contract), request.dimension);

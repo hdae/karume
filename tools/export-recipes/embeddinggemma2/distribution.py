@@ -12,8 +12,9 @@ first EmbeddingGemma will join later from a repository of its own (another licen
 `Pipeline` with other root files). The model ships one graph in two storages and one asset:
 
 - `model` — the text tower, mean pooling and L2 normalisation as one graph, `input_ids` /
-  `pool_mask` `[1, T]` in, a unit vector `[1, 768]` out, under two dtype labels, each the container
-  of its own series ({@link EMBEDDINGGEMMA2_SERIES}):
+  `pool_mask` `[1, T]` and the soft rows of a tower (`soft_embeds` `[1, T, 512]`, `soft_mask`
+  `[1, T, 1]` — all false for a text) in, a unit vector `[1, 768]` out, under two dtype labels,
+  each the container of its own series ({@link EMBEDDINGGEMMA2_SERIES}):
   - `bf16` — `embeddinggemma2/export.py --dtype bf16`: every weight in a weight slot is the
     checkpoint's own bf16 bits; the rest is f32 holding the same values widened;
   - `i8` — `embeddinggemma2/export.py --dtype i8`: the same weight slots (the token table and every
@@ -193,11 +194,16 @@ EMBEDDINGGEMMA2_QUANTS: Mapping[str, Any] = {
 EMBEDDINGGEMMA2_DEFAULT_QUANT = EMBEDDINGGEMMA2_DTYPE
 
 #: The graph's inputs in order (the writer's `GRAPH_INPUTS`, mirrored — held equal by the tests)
-#: with their dtypes, and the token-length symbol.
+#: with their dtypes and the axes after `[1, T]` ({@link EMBEDDINGGEMMA2_HIDDEN} stands for the
+#: token table's width: a soft row replaces a scaled lookup, so the two have one width), and the
+#: token-length symbol.
 EMBEDDINGGEMMA2_SYMBOL = "T"
-EMBEDDINGGEMMA2_GRAPH_INPUTS: tuple[tuple[str, str], ...] = (
-    ("input_ids", "i32"),
-    ("pool_mask", "f32"),
+EMBEDDINGGEMMA2_HIDDEN = "hidden"
+EMBEDDINGGEMMA2_GRAPH_INPUTS: tuple[tuple[str, str, tuple[int | str, ...]], ...] = (
+    ("input_ids", "i32", ()),
+    ("pool_mask", "f32", ()),
+    ("soft_embeds", "f32", (EMBEDDINGGEMMA2_HIDDEN,)),
+    ("soft_mask", "bool", (1,)),
 )
 
 #: The most tokens one text may encode to — the mirror of `embeddinggemma2.export.SYM_MAX` (held
@@ -342,10 +348,27 @@ def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> in
 def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[int, int]:
     """Check the graph's contract before placement and return `(vocabulary size, output width)`.
 
-    The reader binds `input_ids` (i32) and `pool_mask` (f32) `[1, T]` by name and reads one f32
-    `[1, D]` vector: a graph of another form (a mask left as an input, a fixed length, the
-    per-token states) has a valid manifest and fails only on the user's machine.
+    The reader binds `input_ids` (i32) and `pool_mask` (f32) `[1, T]`, `soft_embeds` (f32)
+    `[1, T, H]` with H the token table's width, and `soft_mask` (bool) `[1, T, 1]` by name and
+    reads one f32 `[1, D]` vector: a graph of another form (a mask left as an input, a fixed
+    length, the per-token states, soft rows of another width) has a valid manifest and fails only
+    on the user's machine.
     """
+    values = graph.get("values")
+    lookups = [
+        node
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict) and node.get("op") == "embedding"
+    ]
+    if len(lookups) != 1:
+        raise DistError(
+            f"{path}: {len(lookups)} embedding lookups — the text tower has one (the token table)"
+        )
+    table = values.get(lookups[0]["ins"][0], {}) if isinstance(values, dict) else {}
+    table_shape = table.get("shape") if isinstance(table, dict) else None
+    if not isinstance(table_shape, list) or len(table_shape) != 2:
+        raise DistError(f"{path}: the token table's shape is {table_shape!r}, not [vocab, hidden]")
+    hidden = _positive_int(table_shape[1], f"{path}: the token table's width")
     inputs = graph.get("inputs")
     declared = (
         tuple((item.get("name"), item.get("dtype"), item.get("shape")) for item in inputs)
@@ -353,7 +376,16 @@ def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[
         else None
     )
     expected = tuple(
-        (name, dtype, [1, EMBEDDINGGEMMA2_SYMBOL]) for name, dtype in EMBEDDINGGEMMA2_GRAPH_INPUTS
+        (
+            name,
+            dtype,
+            [
+                1,
+                EMBEDDINGGEMMA2_SYMBOL,
+                *(hidden if axis == EMBEDDINGGEMMA2_HIDDEN else axis for axis in trailing),
+            ],
+        )
+        for name, dtype, trailing in EMBEDDINGGEMMA2_GRAPH_INPUTS
     )
     if declared != expected:
         raise DistError(
@@ -366,7 +398,6 @@ def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[
             f" [{EMBEDDINGGEMMA2_SYMBOL!r}]"
         )
     outputs = graph.get("outputs")
-    values = graph.get("values")
     if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(values, dict):
         raise DistError(f"{path}: the graph outputs are {outputs!r} — an embedding has one")
     output = values.get(outputs[0], {})
@@ -380,19 +411,6 @@ def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[
     ):
         raise DistError(f"{path}: the graph output '{outputs[0]}' is {output!r}, not f32 [1, D]")
     width = _positive_int(shape[1], f"{path}: the output width")
-    lookups = [
-        node
-        for node in graph.get("nodes", [])
-        if isinstance(node, dict) and node.get("op") == "embedding"
-    ]
-    if len(lookups) != 1:
-        raise DistError(
-            f"{path}: {len(lookups)} embedding lookups — the text tower has one (the token table)"
-        )
-    table = values.get(lookups[0]["ins"][0], {})
-    table_shape = table.get("shape") if isinstance(table, dict) else None
-    if not isinstance(table_shape, list) or len(table_shape) != 2:
-        raise DistError(f"{path}: the token table's shape is {table_shape!r}, not [vocab, hidden]")
     return _positive_int(table_shape[0], f"{path}: the vocabulary size"), width
 
 

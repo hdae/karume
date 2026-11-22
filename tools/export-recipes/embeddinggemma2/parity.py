@@ -23,9 +23,9 @@ model substitutes the pad id and the text tower does not (the export's module do
 the wrapper as is, and against the wrapper fed the pad id in the placeholder's place.
 
 SentenceTransformer loads more of the snapshot than the export reads: its processor needs
-`processor_config.json`, `preprocessor_config.json` and `chat_template.jinja`, and it opens
-`README.md`. Those files are outside the pin; the record lists their SHA-256 so a measurement can
-be traced to the bytes it ran on.
+`processor_config.json`, `preprocessor_config.json` and `chat_template.jinja` (pinned, as the
+image path reads them too), and it opens `README.md`, which is outside the pin; the record lists
+its SHA-256 so a measurement can be traced to the bytes it ran on.
 """
 
 from __future__ import annotations
@@ -47,15 +47,13 @@ PINNED_READS: tuple[str, ...] = (
     *export.READ_FILES,
     "tokenizer_config.json",
     "2_Normalize/config.json",
-)
-
-#: The snapshot files SentenceTransformer reads that are not pinned (their digests are recorded).
-UNPINNED_READS: tuple[str, ...] = (
-    "README.md",
     "chat_template.jinja",
     "preprocessor_config.json",
     "processor_config.json",
 )
+
+#: The snapshot file SentenceTransformer reads that is not pinned (its digest is recorded).
+UNPINNED_READS: tuple[str, ...] = ("README.md",)
 
 #: The embedding scale as bf16 rounds `sqrt(512)` (upstream running in its checkpoint dtype).
 BF16_EMBED_SCALE = float(torch.tensor(512**0.5, dtype=torch.bfloat16))
@@ -147,11 +145,11 @@ def measure(directory: Path) -> dict[str, Any]:
     texts = export.case_texts(directory)
 
     with torch.no_grad():
-        reference = {name: wrapper(ids, pool) for name, ids, pool in cases}
+        reference = {name: wrapper.text(ids, pool) for name, ids, pool in cases}
         rounded_scale = _with_embed_scale(
             model,
             BF16_EMBED_SCALE,
-            lambda: {name: wrapper(ids, pool) for name, ids, pool in cases},
+            lambda: {name: wrapper.text(ids, pool) for name, ids, pool in cases},
         )
 
     record: dict[str, Any] = {
@@ -214,8 +212,8 @@ def _placeholder(
     with torch.no_grad():
         hidden = upstream[0].model(input_ids=ids, attention_mask=torch.ones_like(ids))
         expected = export._l2_normalize(export._masked_mean(hidden.last_hidden_state, pool))
-        as_is = wrapper(ids, pool)
-        substituted = wrapper(padded, pool)
+        as_is = wrapper.text(ids, pool)
+        substituted = wrapper.text(padded, pool)
     return {
         "text": PLACEHOLDER_TEXT,
         "sentence_transformer_refusal": refusal,

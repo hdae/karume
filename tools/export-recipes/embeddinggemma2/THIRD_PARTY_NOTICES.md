@@ -17,15 +17,20 @@ questions it has to answer.
 - **Weights, configs and tokenizer** — `google/embeddinggemma-2` on Hugging Face
   (<https://huggingface.co/google/embeddinggemma-2>), fetched at one commit into
   `inputs/embeddinggemma2/embeddinggemma-2/`; `sources.py` pins the commit and the SHA-256 of every
-  file the scripts read. Only the text tower's tensors (`language_model.*` of `model.safetensors`)
-  are read.
+  file the scripts read. Of `model.safetensors` the text tower's tensors (`language_model.*`) and
+  the vision tower's with its projector (`vision_tower.*`, `embed_vision.*` — `export_vision.py`)
+  are read; the audio tower's never are.
 - **Model implementation** — the `transformers` package (`EmbeddingGemma2TextModel`, its config and,
-  for comparison only, the bidirectional sliding mask function of `masking_utils`), added per run
+  for comparison only, the bidirectional sliding mask function of `masking_utils`; for the image
+  path `Gemma4VisionModel`, `EmbeddingGemma2MultimodalEmbedder` and the image processor
+  `Gemma4ImageProcessor`, which makes the goldens' patch rows), added per run
   with `uv run --with 'transformers==5.23.0'`. Nothing is monkeypatched and nothing is copied: the
   recipe registers its own attention function through transformers' public `AttentionInterface`
   (it calls torch's SDPA) and passes its own masks through the forward's `attention_mask` argument.
 - **SentenceTransformer pipeline** — the `sentence-transformers` package, imported by the opt-in
-  `parity.py` only (`uv run --with 'sentence-transformers==6.1.0'`), as a measurement reference.
+  `parity.py` and `multimodal_reference.py` (`uv run --with 'sentence-transformers==6.1.0'`), as a
+  measurement reference; the second writes its outputs on synthetic images of our own (the token ids
+  and the vectors) to a tracked test fixture.
 - **Prompt prefixes** — read verbatim at run time from the snapshot's
   `config_sentence_transformers.json`.
 
@@ -47,7 +52,7 @@ published.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/google/embeddinggemma-2>                                                                                                           |
 | Revision used            | `f9972ac22e696a105c482202646979e33e4b5a1e` (fetched 2026-11-21 into `inputs/embeddinggemma2/embeddinggemma-2`; pinned with per-file SHA-256 in `sources.py`) |
-| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes. Not distributed from this repository today. |
+| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes; the vision tower and its projector converted into local series (f32 upcast and bf16, its two position tables split from one, its RoPE folded into two tables), not in the mirror. Model outputs on synthetic inputs (the soft tokens and vectors of the goldens; the 768-wide vectors of `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`, tracked). Not distributed from this repository today. |
 | Code license             | n/a (weights, configs and tokenizer only)                                                                                                                  |
 | Weights license          | Apache-2.0 as declared by the model card's front matter (`license: apache-2.0`) at the revision used; not gated. Unverified by the release review           |
 | Attribution requirements | Unverified                                                                                                                                                 |
@@ -68,8 +73,8 @@ published.
 | Item                     | Value                                                                |
 | ------------------------ | -------------------------------------------------------------------- |
 | Upstream repository      | <https://github.com/huggingface/sentence-transformers>                |
-| Revision used            | `sentence-transformers==6.1.0` (per-run `--with`, `parity.py` only)  |
-| Form of copy             | Imported and used as-is to measure against; nothing enters a series. |
+| Revision used            | `sentence-transformers==6.1.0` (per-run `--with`, `parity.py` and `multimodal_reference.py`) |
+| Form of copy             | Imported and used as-is to measure against; nothing enters a series (its outputs on synthetic inputs are the fixture of `multimodal_reference.py`). |
 | Code license             | Unverified                                                           |
 | Weights license          | n/a                                                                  |
 | Attribution requirements | Unverified                                                           |

@@ -1981,7 +1981,7 @@ The text model of the local distribution `karume-embeddinggemma-2` (not publishe
   sentence-transformers refuses the text.
 - **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
   checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
-  int8 — a 323,958,008-byte container against 592,932,727). The int8 rounding moves each embedding
+  int8 — a 323,958,272-byte container against 592,932,991). The int8 rounding moves each embedding
   a little: on the ten golden texts its cosine to the `bf16` vector is 0.99940 to 0.99993 at 768
   values (the pipeline e2e asserts at least 0.999 at every width), and the torch-CPU screening of
   58 texts put its rank inversion rate at 0.74% ([research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md)) —

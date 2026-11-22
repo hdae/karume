@@ -604,6 +604,8 @@ const recipeGraph = (): Graph => ({
   inputs: [
     { name: "input_ids", dtype: "i32", shape: [1, "T"] },
     { name: "pool_mask", dtype: "f32", shape: [1, "T"] },
+    { name: "soft_embeds", dtype: "f32", shape: [1, "T", 512] },
+    { name: "soft_mask", dtype: "bool", shape: [1, "T", 1] },
   ],
   outputs: ["div_1"],
   initializers: {},
@@ -654,6 +656,7 @@ describe("embeddingGemmaGraphContract", () => {
       output: "div_1",
       width: 768,
       vocabularySize: 262144,
+      softWidth: 512,
       bytesPerToken: 12288 * 4,
     });
   });
@@ -704,13 +707,15 @@ describe("embeddingGemmaGraphContract", () => {
           inputs: [...base.inputs, { name: "attention_mask", dtype: "f32", shape: [1, "T"] }],
         })),
       Error,
-      "the graph has 3 inputs",
+      "the graph has 5 inputs",
     );
     assertThrows(
       () =>
         contractOf((base) => ({
           ...base,
-          inputs: [base.inputs[0], { name: "pool_mask", dtype: "i32", shape: [1, "T"] }],
+          inputs: base.inputs.map((input) =>
+            input.name === "pool_mask" ? { ...input, dtype: "i32" } : input,
+          ),
         })),
       Error,
       "graph input 'pool_mask' is i32 [1, T], expected f32 [1, T]",
@@ -719,6 +724,45 @@ describe("embeddingGemmaGraphContract", () => {
       () => contractOf((base) => ({ ...base, inputs: base.inputs.slice(0, 1) })),
       Error,
       "graph input 'pool_mask' is missing",
+    );
+  });
+
+  it("refuses a graph without the soft inputs, soft rows of another width than the table, a full-width soft mask and another input order", () => {
+    assertThrows(
+      () => contractOf((base) => ({ ...base, inputs: base.inputs.slice(0, 2) })),
+      Error,
+      "graph input 'soft_embeds' is missing",
+    );
+    assertThrows(
+      () =>
+        contractOf((base) => ({
+          ...base,
+          inputs: base.inputs.map((input) =>
+            input.name === "soft_embeds" ? { ...input, shape: [1, "T", 768] } : input,
+          ),
+        })),
+      Error,
+      "graph input 'soft_embeds' is f32 [1, T, 768], expected f32 [1, T, 512]",
+    );
+    assertThrows(
+      () =>
+        contractOf((base) => ({
+          ...base,
+          inputs: base.inputs.map((input) =>
+            input.name === "soft_mask" ? { ...input, shape: [1, "T", 512] } : input,
+          ),
+        })),
+      Error,
+      "graph input 'soft_mask' is bool [1, T, 512], expected bool [1, T, 1]",
+    );
+    assertThrows(
+      () =>
+        contractOf((base) => ({
+          ...base,
+          inputs: [base.inputs[0], base.inputs[1], base.inputs[3], base.inputs[2]],
+        })),
+      Error,
+      "not input_ids / pool_mask / soft_embeds / soft_mask in that order",
     );
   });
 
@@ -829,6 +873,7 @@ const STAND_CONTRACT: EmbeddingGemmaGraphContract = {
   output: "out",
   width: 4,
   vocabularySize: 262144,
+  softWidth: 3,
   bytesPerToken: 49152,
 };
 
@@ -866,13 +911,28 @@ describe("Embedder: one run per call", () => {
     const vector = await embedder.embed(text);
 
     assertEquals(stand.runs.length, 1);
-    assertEquals(Object.keys(stand.runs[0]).sort(), ["input_ids", "pool_mask"]);
+    assertEquals(Object.keys(stand.runs[0]).sort(), [
+      "input_ids",
+      "pool_mask",
+      "soft_embeds",
+      "soft_mask",
+    ]);
     const ids = hostInput(stand.runs[0], "input_ids");
     assertEquals([ids.dtype, ids.shape], ["i32", [1, idsWithSpecials.length]]);
     assertEquals([...ids.data], idsWithSpecials);
     const mask = hostInput(stand.runs[0], "pool_mask");
     assertEquals([mask.dtype, mask.shape], ["f32", [1, idsWithSpecials.length]]);
     assertEquals([...mask.data], Array<number>(idsWithSpecials.length).fill(1));
+    // No soft row: zeros of the table's width and an all-false mask, one word per row.
+    const softEmbeds = hostInput(stand.runs[0], "soft_embeds");
+    assertEquals(
+      [softEmbeds.dtype, softEmbeds.shape],
+      ["f32", [1, idsWithSpecials.length, STAND_CONTRACT.softWidth]],
+    );
+    assert([...softEmbeds.data].every((value) => value === 0));
+    const softMask = hostInput(stand.runs[0], "soft_mask");
+    assertEquals([softMask.dtype, softMask.shape], ["bool", [1, idsWithSpecials.length, 1]]);
+    assert([...softMask.data].every((value) => value === 0));
     assertEquals([...vector], [...Float32Array.from(UNIT)]);
   });
 
@@ -1203,6 +1263,8 @@ const modelInput = (): ModelInput => ({
       inputs: [
         { name: "input_ids", dtype: "i32", shape: [1, "T"] },
         { name: "pool_mask", dtype: "f32", shape: [1, "T"] },
+        { name: "soft_embeds", dtype: "f32", shape: [1, "T", 4] },
+        { name: "soft_mask", dtype: "bool", shape: [1, "T", 1] },
       ],
       outputs: ["out"],
       initializers: { table: {}, band: {} },

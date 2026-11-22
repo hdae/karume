@@ -37,6 +37,8 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "embeddinggemma-300m": { "": "model" },
   "embeddinggemma-2-text": { "": "model" },
   "embeddinggemma-2-text-i8": { "": "model" },
+  "embeddinggemma-2-vision": { "": "vision" },
+  "embeddinggemma-2-vision-bf16": { "": "vision" },
   // Gemma 4 26B A4B cut after its first layers (ADR 0145 decision 6 — `gemma4.export_moe --layers
   // --routing-outputs`): the cut product graph and, under `routing/`, the same graph with each
   // layer's routing ids as extra outputs.

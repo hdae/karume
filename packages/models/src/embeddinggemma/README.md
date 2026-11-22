@@ -30,8 +30,10 @@ source handle (`nodeDirectory` / `denoDirectory`); `fromAssets` takes the manife
    are concatenated in order with nothing between them. The prompt's prefix goes in front, and the
    Gemma tokenizer of `src/gemma/text/` (the distribution's asset, with its `<bos>` … `<eos>`
    post-processor) gives the token ids.
-2. **GPU** — the graph `model` runs once on `input_ids` `[1, T]` and `pool_mask` `[1, T]` (all ones —
-   the pooling averages every token, the prompt's included, as upstream's `include_prompt`). The graph
+2. **GPU** — the graph `model` runs once on `input_ids` `[1, T]`, `pool_mask` `[1, T]` (all ones —
+   the pooling averages every token, the prompt's included, as upstream's `include_prompt`) and no
+   soft row (`soft_embeds` `[1, T, 512]` of zeros and `soft_mask` `[1, T, 1]` all false — the inputs
+   a tower's soft tokens will take; the graph then computes the text forward bit for bit). The graph
    holds the text tower, the masked mean pooling and the L2 normalisation, and returns `[1, D]`.
 3. **Host** — a shorter width is the leading slice divided by `max(norm, 1e-12)` (computed in f64,
    stored as f32 — sentence-transformers' `truncate_dim` followed by its normalisation).
@@ -92,8 +94,10 @@ the count first; `embed` still refuses both.
 `pipelineConfig` schema, the quant (its `session` must declare no knob —
 `EMBEDDINGGEMMA_SESSION_POLICY`), the tokenizer asset's declaration, a shared GPU's features and
 limits, and the graph contract (`embeddingGemmaGraphContract`): one symbolic length T, exactly the
-inputs `input_ids` i32 `[1, T]` and `pool_mask` f32 `[1, T]`, one f32 output `[1, D]` with D the
-first declared width, one `embedding` lookup of `input_ids` (its table's rows bound the token ids),
+inputs `input_ids` i32 `[1, T]`, `pool_mask` f32 `[1, T]`, `soft_embeds` f32 `[1, T, W]` and
+`soft_mask` bool `[1, T, 1]` in that order, one f32 output `[1, D]` with D the first declared width,
+one `embedding` lookup of `input_ids` (its table `[V, W]`: its rows bound the token ids, its width is
+the soft rows'),
 the graph's maximum of T — read from the `sym_prefix_slice` of its folded constants (the RoPE
 tables; the sliding window is a band declared on the attention, not a constant) — equal to
 `maxTokens`, and every symbolic value holding T on exactly one axis (the largest gives the bytes

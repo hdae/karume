@@ -35,10 +35,13 @@ class TestPin:
         assert sorted(sources.PIN.sha256) == [
             "1_Pooling/config.json",
             "2_Normalize/config.json",
+            "chat_template.jinja",
             "config.json",
             "config_sentence_transformers.json",
             "model.safetensors",
             "modules.json",
+            "preprocessor_config.json",
+            "processor_config.json",
             "sentence_bert_config.json",
             "tokenizer.json",
             "tokenizer_config.json",
