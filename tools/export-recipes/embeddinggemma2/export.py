@@ -39,7 +39,7 @@ as is, not `1 + weight` as in the first EmbeddingGemma), the projection-only PLE
 sub-blocks of each layer and the per-layer `layer_scalar` multiply (none of the 24 values is 1, so
 it stays a real multiply) all run through `EmbeddingGemma2TextModel.forward` unchanged.
 
-## Attention: bidirectional, GQA in its true form, the window as a folded constant
+## Attention: bidirectional, GQA in its true form, the window as a declared band
 
 Every layer is bidirectional (`is_causal = False`). The sliding layers see `|q − kv| <= 512`
 (inclusive, symmetric — upstream's `sliding_window_bidirectional_overlay`), the four full layers
@@ -48,16 +48,28 @@ Every layer is bidirectional (`is_causal = False`). The sliding layers see `|q �
 `EmbeddingGemma2TextModel.forward` hands `attention_mask` to the layers as is when it is a dict, so
 the wrapper builds `{"full_attention": None, "sliding_attention": band}` itself
 ({@link layer_masks}) and upstream's masking utilities are bypassed. The band's leaves are only
-`arange` and `full` with T at extent positions, so the exporter folds it into **one Tmax×Tmax f32
-initializer + `sym_prefix_slice`** (ADR 0010) shared by the 20 sliding layers. The full layers
-carry **no mask** in the graph (upstream under torch.export would materialise an all-zero one; the
-Irodori recipe's precedent of dropping it). The graph inputs stay `input_ids` and `pool_mask`.
+`arange` and `full` with T at extent positions, so the export traces it as **one Tmax×Tmax f32
+constant + `sym_prefix_slice`** (ADR 0010) shared by the 20 sliding layers — the form
+{@link assert_ir_form} checks. The full layers carry **no mask** in the graph (upstream under
+torch.export would materialise an all-zero one; the Irodori recipe's precedent of dropping it). The
+graph inputs stay `input_ids` and `pool_mask`.
 
-MUST: the maximum T is {@link SYM_MAX} = 2,048 — the folded band is `[1, 1, 2048, 2048]` f32 =
-16 MiB, inside the container's 32 MiB block limit. This single-sequence scheme (the first
-EmbeddingGemma's) is a deliberate scaffold that a kernel-side column range will replace; a T beyond
-the bound fails loudly at the prefix slice of the folded constants (`sym_prefix_slice` refuses a
-prefix longer than its input), never approximated.
+The traced band then goes through the core's band surgery ({@link declare_band} —
+`karume.band.to_band_form`, ADR 0155): each sliding layer's attention drops the mask input and
+declares `attrs.band` = the config's `sliding_window` (512), so the score kernel checks the window
+from positions, and the Tmax×Tmax constant is pruned — at the upstream context it is
+`[1, 1, 8192, 8192]` f32 = 256 MiB, eight times the container's 32 MiB block, and it never reaches
+the container. The surgery does not read the mask; that the declared band is the mask the model
+applies is this script's claim, backed by {@link assert_ir_form} (the traced constant is the
+inclusive band of the config's window), {@link assert_band_matches_upstream} (that band is
+upstream's own mask function) and {@link window_evidence}. {@link assert_band_form} checks the
+result.
+
+MUST: the maximum T is {@link SYM_MAX} = 8,192, the upstream model's context. After the surgery the
+bound is carried by the folded RoPE tables (`[1, 1, 8192, 256]` on the sliding layers and
+`[1, 1, 8192, 512]` on the full ones, 8 / 16 MiB, cut down by `sym_prefix_slice`): a T beyond it
+fails loudly at the prefix slice (`sym_prefix_slice` refuses a prefix longer than its input), never
+approximated. The scheme stays single-sequence (one text per run, no padding, no batch).
 
 Grouped-query attention stays in its true form: {@link bidirectional_gqa_attention} is registered
 at transformers' `AttentionInterface` and calls SDPA with `enable_gqa=True`, without `repeat_kv`,
@@ -74,11 +86,14 @@ the cos / sin tables fold to constants.
 
 ## Checks before anything is published
 
-- {@link assert_ir_form} — 24 fused attention nodes in layer order with each layer's q / k / v
-  shapes, a mask on exactly the 20 sliding layers and none on the full ones, one band constant
-  equal to the inclusive band, the two inputs and the one `[1, 768]` output. Each is a property
-  that breaks while the numbers still agree.
+- {@link assert_ir_form} — the traced form: 24 fused attention nodes in layer order with each
+  layer's q / k / v shapes, a mask on exactly the 20 sliding layers and none on the full ones, one
+  band constant equal to the inclusive band, the two inputs and the one `[1, 768]` output. Each is
+  a property that breaks while the numbers still agree.
 - {@link assert_band_matches_upstream} — the band equals upstream's own mask function at Tmax.
+- {@link assert_band_form} — the form that is written: no attention takes a mask, exactly the
+  sliding layers declare the band of the window and the full ones none, the traced band constant
+  is gone, and the bound of T is still readable from the folded constants left (at Tmax).
 - {@link window_evidence} — on every case whose T cuts the window (T >= 514), the wrapper's output
   differs from the same model with every position visible by far more than float noise (the window
   is really exercised), and equals the upstream model's own forward (attention_mask of ones,
@@ -154,10 +169,11 @@ from embeddinggemma.export import (
 from embeddinggemma2 import sources
 from embeddinggemma2.tokenizer import REQUIRED_TRANSFORMERS
 from karume.artifacts import staged_publication
+from karume.band import BandAttentionSpec, to_band_form
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.emit import eligible_compressed_initializers
-from karume.ir import IrGraph
+from karume.ir import IrGraph, IrNode
 from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
 from karume.pipeline import export_module, publish_model
 from karume.rope import assert_rope_lifted
@@ -216,9 +232,12 @@ POOLING_CONFIG: Mapping[str, Any] = {
 #: and its `last_hidden_state` (the per-token 768-dim projections) as the token embeddings.
 TEXT_MODALITY: Mapping[str, str] = {"method": "forward", "method_output_name": "last_hidden_state"}
 
-#: Upper bound of the symbolic dimension T — the folding's evaluation point (a `[1, 1, Tmax, Tmax]`
-#: f32 band: 16 MiB at 2,048, inside the container's 32 MiB block limit).
-SYM_MAX = 2048
+#: Upper bound of the symbolic dimension T — the folding's evaluation point and the most tokens one
+#: text may encode to. It is the upstream model's context window (the model card at the pinned
+#: revision: "Context Window | 8,192 tokens"); no configuration file of the snapshot states it
+#: (`text_config.max_position_embeddings` is 262,144, the RoPE's own range), so it is this recipe's
+#: constant. The traced band constant at this bound (256 MiB) is pruned by {@link declare_band}.
+SYM_MAX = 8192
 
 #: The graph input names (the wrapper's forward argument names).
 GRAPH_INPUTS = ("input_ids", "pool_mask")
@@ -245,8 +264,9 @@ UPSTREAM_ATTENTION = "sdpa"
 #: moves the output by 2.5e-4 to 5.6e-4 — over two orders of magnitude above this bound.
 UPSTREAM_TOLERANCE = 1e-6
 #: The floor of "differs by more than float noise" between the band and every position visible
-#: (max abs difference of the unit-vector output). Measured: 1.09e-2 / 2.91e-2 / 3.89e-2 at
-#: T 609 / 1,508 / 2,048 — ten times above the floor at the shortest.
+#: (max abs difference of the unit-vector output). Measured: 1.09e-2 / 2.91e-2 / 3.89e-2 /
+#: 3.95e-2 / 5.09e-2 / 4.98e-2 at T 609 / 1,508 / 2,048 / 3,062 / 5,935 / 8,192 — ten times above
+#: the floor at the shortest.
 WINDOW_FLOOR = 1e-3
 
 #: The prompt kinds of the golden cases (keys of `prompts` in `config_sentence_transformers.json`,
@@ -311,8 +331,11 @@ def long_document(records: int, filler: int = 0) -> str:
 
 
 #: The fixed golden texts (`(case name, prompt kind | None, body)`). Short cases with and without a
-#: prompt, then three long ones: T 609 / 1,508 (past the first window cut at T = 514) and exactly
-#: {@link SYM_MAX} (the whole folded band). The lengths are pinned by {@link CASE_LENGTHS}.
+#: prompt, then the long ones: T 609 / 1,508 (past the first window cut at T = 514) and 2,048 (the
+#: bound of the series before the band was declared), then 3,062 and 5,935 (past the 2,048 of the
+#: earlier bound; at 5,935 one head's `T × T` f32 scores are over 128 MiB, the WebGPU default
+#: binding) and exactly {@link SYM_MAX} (the upstream context, the far corner of every folded
+#: constant). The lengths are pinned by {@link CASE_LENGTHS}.
 GOLDEN_CASES: tuple[tuple[str, str | None, str], ...] = (
     ("query-en", QUERY, "What is the capital of France?"),
     ("document-en", DOCUMENT, "Paris is the capital and most populous city of France."),
@@ -321,6 +344,9 @@ GOLDEN_CASES: tuple[tuple[str, str | None, str], ...] = (
     ("document-609", DOCUMENT, long_document(19)),
     ("document-1508", DOCUMENT, long_document(72)),
     ("document-2048", DOCUMENT, long_document(103, filler=10)),
+    ("document-3062", DOCUMENT, long_document(160)),
+    ("document-5935", DOCUMENT, long_document(320)),
+    ("document-8192", DOCUMENT, long_document(445, filler=10)),
 )
 
 #: T (`<bos>` and `<eos>` included) of each golden case at the pinned tokenizer. A drift fails
@@ -333,6 +359,9 @@ CASE_LENGTHS: Mapping[str, int] = {
     "document-609": 609,
     "document-1508": 1508,
     "document-2048": 2048,
+    "document-3062": 3062,
+    "document-5935": 5935,
+    "document-8192": 8192,
 }
 
 #: The golden texts as the TypeScript pipeline's e2e reads them (tracked in git — read by
@@ -706,7 +735,8 @@ def assert_case_coverage(
     """At least one case cuts the window (T >= window + 2) and one runs at exactly `sym_max`.
 
     MUST: with every T <= window + 1 the band is all zeros and the sliding layers' window is never
-    evaluated; without a case at `sym_max` the far corner of the folded band is never read.
+    evaluated; without a case at `sym_max` the far corner of the folded constants (the RoPE
+    tables) is never read.
     """
     lengths = [int(ids.shape[1]) for _, ids, _ in cases]
     if not any(length >= window + 2 for length in lengths):
@@ -751,8 +781,9 @@ def assert_ir_form(
     window: int,
     embedding_dim: int,
 ) -> dict[str, Any]:
-    """Check that the IR has the fused attention in the true GQA form on every layer, the band on
-    exactly the sliding layers as one folded constant, and the two inputs / one output.
+    """Check the traced form (before {@link declare_band}): the fused attention in the true GQA form
+    on every layer, the band on exactly the sliding layers as one folded constant, and the two
+    inputs / one output.
 
     Each property breaks silently with the numbers still matching the goldens:
 
@@ -761,6 +792,9 @@ def assert_ir_form(
     - a mask on a full layer (upstream's all-zero one) costs a Tmax² constant and an addition
     - the band reaching the wrong layers, or another window, agrees with the goldens at T <= 513
     - a mask left as a graph input means the host builds T² every call
+
+    The constant being the inclusive band of `window` is also what ties the band
+    {@link declare_band} declares to the mask the model applies.
     """
     names = [spec.name for spec in graph.inputs]
     if names != list(GRAPH_INPUTS):
@@ -829,6 +863,97 @@ def assert_ir_form(
         ],
         "band_constant": band_name,
         "band_visible_per_middle_row": int((band[0, 0, sym_max // 2] == 0).sum()),
+    }
+
+
+def _attentions(graph: IrGraph) -> list[IrNode]:
+    return [node for node in graph.nodes if node.op == ATTENTION_OP]
+
+
+def declare_band(
+    graph: IrGraph, layouts: Sequence[AttentionLayout], window: int
+) -> tuple[IrGraph, list[str]]:
+    """The band surgery (`karume.band.to_band_form`): every sliding layer's attention declares the
+    band `window` in place of its mask, and the traced band constant is pruned. Returns the new
+    graph and the initializers the surgery pruned.
+
+    The layers are named by the attention nodes in layer order (the order {@link assert_ir_form}
+    checked against `layouts`); the surgery never reads the mask (module doc, "Attention").
+    """
+    attentions = _attentions(graph)
+    if len(attentions) != len(layouts):
+        raise AssertionError(f"{len(attentions)} attention nodes for {len(layouts)} layers")
+    specs = [
+        BandAttentionSpec(output=node.outs[0], band=window)
+        for node, layout in zip(attentions, layouts, strict=True)
+        if layout.layer_type == SLIDING_ATTENTION
+    ]
+    declared = to_band_form(graph, specs)
+    pruned = sorted(set(graph.initializers) - set(declared.initializers))
+    return declared, pruned
+
+
+def assert_band_form(
+    graph: IrGraph,
+    layouts: Sequence[AttentionLayout],
+    sym_max: int,
+    window: int,
+    pruned: Sequence[str],
+    band_constant: str,
+) -> dict[str, Any]:
+    """Check the form that is written (after {@link declare_band}).
+
+    Each property breaks while the numbers can still agree with the goldens:
+
+    - an attention that still takes a mask holds a Tmax² constant the container cannot carry
+    - a band on a full layer, a sliding layer without one, or another width agrees with the
+      goldens at T <= 513
+    - the surgery pruning anything but the traced band constant drops a value something reads
+    - without a `sym_prefix_slice` of T at Tmax left, the bound of T is no longer in the graph
+      (the distribution's `maxTokens` and the reader's check read it there)
+    - a slice with a coefficient or an offset bounds T at another value than its extent; the
+      distribution refuses such a slice, so this check refuses it too (the readers of the bound
+      agree)
+    """
+    attentions = _attentions(graph)
+    if len(attentions) != len(layouts):
+        raise AssertionError(f"{len(attentions)} attention nodes for {len(layouts)} layers")
+    for index, (node, layout) in enumerate(zip(attentions, layouts, strict=True)):
+        where = f"attention[{index}] ({layout.layer_type})"
+        if len(node.ins) != 3:
+            raise AssertionError(f"{where}: {len(node.ins)} ins (no attention takes a mask)")
+        expected = window if layout.layer_type == SLIDING_ATTENTION else None
+        if node.attrs.get("band") != expected:
+            raise AssertionError(
+                f"{where}: attrs.band is {node.attrs.get('band')!r}, not {expected!r}"
+            )
+    if list(pruned) != [band_constant]:
+        raise AssertionError(
+            f"the surgery pruned {list(pruned)}, not the traced band constant '{band_constant}'"
+        )
+    bounds: set[int] = set()
+    for node in graph.nodes:
+        if node.op != SYM_PREFIX_SLICE_OP or node.attrs.get("sym") != graph.symbols[0]:
+            continue
+        shape = declared_shape(graph, node.ins[0])
+        for cut in node.attrs["slices"]:
+            if cut.get("coeff") != 1 or cut.get("offset") != 0:
+                raise AssertionError(
+                    f"a sym_prefix_slice of {node.ins[0]} cuts {cut} — the bound of T is read"
+                    " only from a slice with coeff 1 and offset 0"
+                )
+            bounds.add(int(shape[cut["dim"]]))
+    if bounds != {sym_max}:
+        raise AssertionError(
+            f"the folded constants left bound T at {sorted(bounds)}, not exactly {sym_max}"
+        )
+    return {
+        "band_layers": [
+            index for index, node in enumerate(attentions) if node.attrs.get("band") is not None
+        ],
+        "band": window,
+        "pruned": list(pruned),
+        "bound": sym_max,
     }
 
 
@@ -964,9 +1089,9 @@ def export_series(
     """Write the IR container and the golden io, and return a summary.
 
     MUST: the artifacts are written to a staging directory and put in place only after every check
-    (the form, the band against upstream, the window evidence, the sanity) passes — the goldens are
-    taken from the same wrapper, so a broken run placed at the final location would turn the TS-side
-    comparison green ({@link karume.artifacts.staged_publication}).
+    (the traced form, the band against upstream, the window evidence, the band form, the sanity)
+    passes — the goldens are taken from the same wrapper, so a broken run placed at the final
+    location would turn the TS-side comparison green ({@link karume.artifacts.staged_publication}).
     """
     if dtype not in WEIGHT_DTYPES:
         raise EmbeddingGemma2ExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
@@ -992,10 +1117,15 @@ def export_series(
         dynamic_shapes=({1: seq}, {1: seq}),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
+    layouts = attention_layouts(config)
     # MUST: the form is checked before anything is written (the numbers do not catch it).
-    form = assert_ir_form(
-        graph, tensors, attention_layouts(config), sym_max, window, int(config.embedding_dim)
-    )
+    form = assert_ir_form(graph, tensors, layouts, sym_max, window, int(config.embedding_dim))
+    graph, pruned = declare_band(graph, layouts, window)
+    band_form = assert_band_form(graph, layouts, sym_max, window, pruned, form["band_constant"])
+    # The tensors of the initializers the surgery pruned are not stored (the contract of the
+    # core's golden rewrite and of the states surgery's recipes).
+    declared = {initializer.tensor for initializer in graph.initializers.values()}
+    tensors = {key: value for key, value in tensors.items() if key in declared}
     with staged_publication(out_dir) as staged:
         # The writer creates the directory (the primitive only hands over a path).
         staged.mkdir()
@@ -1027,6 +1157,7 @@ def export_series(
         "symbols": list(graph.symbols),
         "storage": storage,
         "form": form,
+        "band_form": band_form,
         "window_evidence": evidence,
         "io": written,
         "case_lengths": {name: int(ids.shape[1]) for name, ids, _ in cases},

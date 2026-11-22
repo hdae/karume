@@ -11,9 +11,10 @@
  * when it is built, so the page builds it on the first Run and keeps it for later runs with the same
  * source, model and preset (the prompt and the dimension are per call).
  *
- * Once a pipeline is held, each row shows its token count against the limit (`tokenize` — on the
- * host, recomputed as the row changes), marked when it is over; the record keeps the count of each
- * row as it was run.
+ * Once a pipeline is held, each row shows its token count against the model's limit `maxTokens`
+ * (`tokenize` — on the host, recomputed as the row changes), marked when it is over; the record
+ * keeps the count of each row as it was run. A device whose buffer limit is smaller runs fewer
+ * tokens; the page does not know that limit, so such a row is refused only when it is run.
  */
 
 import {
@@ -577,9 +578,10 @@ export const EmbeddingGemmaPage = () => {
               {config === undefined ? null : (
                 <p className="text-xs text-muted-foreground">
                   A row may be up to {config.maxTokens} tokens, prompt prefix, &lt;bos&gt; and
-                  &lt;eos&gt; included; a longer row is refused (nothing is truncated). A text
-                  holding an image, audio or video placeholder token is refused too. Each row shows
-                  its count once the first Run has built the pipeline.
+                  &lt;eos&gt; included, or fewer on a device whose buffer limit is smaller (such a
+                  row is refused when it is run); a longer row is refused (nothing is truncated). A
+                  text holding an image, audio or video placeholder token is refused too. Each row
+                  shows its count once the first Run has built the pipeline.
                 </p>
               )}
             </div>

@@ -29,9 +29,9 @@ export const RECORD_FORMAT = "karume-playground-embeddinggemma/1";
 
 /**
  * One row as it was sent: the text as typed, the prompt name (null = none) and the token count
- * `tokenize` gave for them (the prefix, `<bos>` and `<eos>` included — over the limit for a row the
- * pipeline refused for its length; null when the pipeline could not tokenize the row, an undeclared
- * prompt).
+ * `tokenize` gave for them (the prefix, `<bos>` and `<eos>` included — over `maxTokens` for a row
+ * the pipeline refused for the model's limit, at or below it for a row refused for the device's
+ * smaller buffer limit; null when the pipeline could not tokenize the row, an undeclared prompt).
  */
 export type RowRequestRecord = {
   readonly text: string;

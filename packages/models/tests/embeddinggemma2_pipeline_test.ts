@@ -12,7 +12,8 @@
  *    equal upstream's own `<bos>` … `<eos>` ids (the parity fixture, from `tokenizers` alone).
  * ④ The leading slice re-normalised to unit length (`truncateEmbedding`), on values whose result is
  *    known exactly.
- * ⑤ The graph contract, including the declared maximum against the graph's folded constants.
+ * ⑤ The graph contract, including the declared maximum against the graph's folded constants (the
+ *    RoPE tables — the sliding window is a band declared on the attention, not a constant).
  * ⑥ The run lifecycle over a stand-in Session (`Embedder` — what `Pipeline` delegates to): the run's
  *    inputs, the width, one run at a time, cancellation before and during a call, dispose after the
  *    work in flight, then the GPU release; `tokenize` gives the ids `embed` runs, off the chain, and
@@ -44,6 +45,7 @@ import {
   Embedder,
   type EmbeddingGemmaGraphContract,
   type EmbeddingSession,
+  embeddingGemmaDeviceLimit,
   embeddingGemmaGraphContract,
   Pipeline,
 } from "../src/embeddinggemma/pipeline.ts";
@@ -134,7 +136,7 @@ const CONFIG_JSON = {
     query: "task: search result | query: ",
   },
   dimensions: [768, 512, 256, 128],
-  maxTokens: 2048,
+  maxTokens: 8192,
   placeholderTokens: { image: 258880, audio: 258881, video: 258884 },
 };
 
@@ -154,7 +156,7 @@ describe("pipelineConfig: the distribution's four fields", () => {
     assertEquals([...CONFIG.prompts.keys()], Object.keys(CONFIG_JSON.prompts));
     assertEquals(CONFIG.prompts.get("query"), "task: search result | query: ");
     assertEquals(CONFIG.dimensions, [768, 512, 256, 128]);
-    assertEquals(CONFIG.maxTokens, 2048);
+    assertEquals(CONFIG.maxTokens, 8192);
     assertEquals(
       [...CONFIG.placeholderTokens],
       [
@@ -589,7 +591,11 @@ describe("truncateEmbedding: the leading slice re-normalised to unit length", ()
 
 type Graph = GraphOwner["graph"];
 
-/** The declaration of the recipe's graph (the shapes of the mirror's `model`, minus the layers). */
+/**
+ * The declaration of the recipe's graph (the shapes of the mirror's `model`, minus the layers): the
+ * folded RoPE tables of the sliding and the full layers bound T; the window is `attrs.band` on the
+ * sliding attention, so no band constant is left.
+ */
 const recipeGraph = (): Graph => ({
   format: "karume-ir",
   version: 2,
@@ -603,8 +609,12 @@ const recipeGraph = (): Graph => ({
   initializers: {},
   values: {
     "model.embed_tokens.weight": { dtype: "f32", shape: [262144, 512] },
-    rope: { dtype: "f32", shape: [1, 1, 2048, 256] },
-    band: { dtype: "f32", shape: [1, 1, 2048, 2048] },
+    rope: { dtype: "f32", shape: [1, 1, 8192, 256] },
+    rope_full: { dtype: "f32", shape: [1, 1, 8192, 512] },
+    rope_t: { dtype: "f32", shape: [1, 1, "T", 256] },
+    rope_full_t: { dtype: "f32", shape: [1, 1, "T", 512] },
+    linear: { dtype: "f32", shape: [1, "T", 12288] },
+    query: { dtype: "f32", shape: [1, 4, "T", 512] },
     div_1: { dtype: "f32", shape: [1, 768] },
   },
   states: {},
@@ -625,15 +635,9 @@ const recipeGraph = (): Graph => ({
     },
     {
       op: "sym_prefix_slice",
-      ins: ["band"],
-      outs: ["band_t"],
-      attrs: {
-        sym: "T",
-        slices: [
-          { dim: 2, coeff: 1, offset: 0 },
-          { dim: 3, coeff: 1, offset: 0 },
-        ],
-      },
+      ins: ["rope_full"],
+      outs: ["rope_full_t"],
+      attrs: { sym: "T", slices: [{ dim: 2, coeff: 1, offset: 0 }] },
       states: {},
     },
   ],
@@ -646,16 +650,21 @@ const same = (graph: Graph): Graph => graph;
 
 describe("embeddingGemmaGraphContract", () => {
   it("accepts the recipe's declaration and reads the output, its width and the vocabulary", () => {
-    assertEquals(contractOf(same), { output: "div_1", width: 768, vocabularySize: 262144 });
+    assertEquals(contractOf(same), {
+      output: "div_1",
+      width: 768,
+      vocabularySize: 262144,
+      bytesPerToken: 12288 * 4,
+    });
   });
 
   it("refuses a declared maximum that differs from the graph's folded constants, both ways", () => {
-    for (const maxTokens of [4096, 1024]) {
+    for (const maxTokens of [16384, 4096]) {
       const config = parseEmbeddingGemmaPipelineConfig({ ...CONFIG_JSON, maxTokens });
       assertThrows(
         () => contractOf(same, config),
         Error,
-        `pipelineConfig.maxTokens is ${maxTokens}, but the graph runs 'T' up to 2048`,
+        `pipelineConfig.maxTokens is ${maxTokens}, but the graph runs 'T' up to 8192`,
       );
     }
   });
@@ -710,6 +719,28 @@ describe("embeddingGemmaGraphContract", () => {
       () => contractOf((base) => ({ ...base, inputs: base.inputs.slice(0, 1) })),
       Error,
       "graph input 'pool_mask' is missing",
+    );
+  });
+
+  it("reads the bytes per token as the largest symbolic value's", () => {
+    const wider = (base: Graph): Graph => ({
+      ...base,
+      values: { ...base.values, wider: { dtype: "f32", shape: [1, "T", 24, 1024] } },
+    });
+    assertEquals(contractOf(wider).bytesPerToken, 24 * 1024 * 4);
+  });
+
+  it("refuses a value with the length on two axes (it grows with T², not per token)", () => {
+    assertThrows(
+      () =>
+        contractOf((base) => ({
+          ...base,
+          values: { ...base.values, band_t: { dtype: "f32", shape: [1, 1, "T", "T"] } },
+        })),
+      Error,
+      "graph value 'band_t' is [1, 1, T, T] — every symbolic value must hold 'T' on exactly one axis" +
+        " (the device's token limit is read per token; a T × T mask must be declared as the" +
+        " attention's band instead)",
     );
   });
 
@@ -793,11 +824,27 @@ const standIn = (): Stand => {
 /** The config of the stand-in (widths 4 and 2). */
 const SMALL = parseEmbeddingGemmaPipelineConfig({ ...CONFIG_JSON, dimensions: [4, 2] });
 
+/** The stand-in's graph contract (the real graph's 49,152 B per token). */
+const STAND_CONTRACT: EmbeddingGemmaGraphContract = {
+  output: "out",
+  width: 4,
+  vocabularySize: 262144,
+  bytesPerToken: 49152,
+};
+
+/** The development machine's limits (a 2 GiB binding): 43,690 tokens, above every input here. */
+const STAND_DEVICE_LIMITS = {
+  maxStorageBufferBindingSize: 2147483644,
+  maxBufferSize: 1099511627776,
+};
+const STAND_DEVICE_LIMIT = embeddingGemmaDeviceLimit(STAND_CONTRACT, STAND_DEVICE_LIMITS);
+
 const embedderOf = (stand: Stand): Embedder =>
   new Embedder({
     session: stand.session,
-    contract: { output: "out", width: 4, vocabularySize: 262144 },
+    contract: STAND_CONTRACT,
     rules: embedTextRules(TOKENIZER, SMALL),
+    deviceLimits: STAND_DEVICE_LIMITS,
     release: () => {
       stand.events.push("release");
     },
@@ -960,11 +1007,12 @@ describe("Embedder: dispose", () => {
 const embedderWith = (stand: Stand, patch: Record<string, unknown>): Embedder =>
   new Embedder({
     session: stand.session,
-    contract: { output: "out", width: 4, vocabularySize: 262144 },
+    contract: STAND_CONTRACT,
     rules: embedTextRules(
       TOKENIZER,
       parseEmbeddingGemmaPipelineConfig({ ...CONFIG_JSON, dimensions: [4, 2], ...patch }),
     ),
+    deviceLimits: STAND_DEVICE_LIMITS,
   });
 
 describe("Embedder.tokenize: the ids embed runs, without running", () => {
@@ -1071,6 +1119,71 @@ describe("Embedder.tokenize: the ids embed runs, without running", () => {
 });
 
 // ---- ⑦ fromAssets admission --------------------------------------------------------------------
+
+describe("embeddingGemmaDeviceLimit: the device's binding limit over the bytes per token", () => {
+  it("divides the smaller of the binding and the buffer limit", () => {
+    const contract = { bytesPerToken: 49152 };
+    const MIB = 2 ** 20;
+    assertEquals(
+      embeddingGemmaDeviceLimit(contract, {
+        maxStorageBufferBindingSize: 256 * MIB,
+        maxBufferSize: 1024 * MIB,
+      }),
+      { maxTokens: 5461, bytesPerToken: 49152, bindingBytes: 256 * MIB },
+    );
+    assertEquals(
+      embeddingGemmaDeviceLimit(contract, {
+        maxStorageBufferBindingSize: 2047 * MIB,
+        maxBufferSize: 256 * MIB,
+      }).maxTokens,
+      5461,
+    );
+    assertEquals(STAND_DEVICE_LIMIT.maxTokens, 43690);
+  });
+});
+
+describe("Embedder: the device's token limit", () => {
+  const { text, idsWithSpecials } = parityCase("english");
+  const length = idsWithSpecials.length;
+  /** A device whose binding holds exactly `tokens` tokens of 49,152 B. */
+  const embedderFor = (stand: Stand, tokens: number): Embedder =>
+    new Embedder({
+      session: stand.session,
+      contract: STAND_CONTRACT,
+      rules: embedTextRules(TOKENIZER, SMALL),
+      deviceLimits: {
+        maxStorageBufferBindingSize: tokens * 49152,
+        maxBufferSize: 1099511627776,
+      },
+    });
+
+  it("runs an input at the device's limit", async () => {
+    const stand = standIn();
+    await embedderFor(stand, length).embed(text);
+    assertEquals(stand.runs.length, 1);
+  });
+
+  it("refuses an input one over it before the run, naming the count, both limits and the buffer", async () => {
+    const stand = standIn();
+    const error = await assertRejects(
+      () => embedderFor(stand, length - 1).embed(text),
+      ModelInputError,
+    );
+    for (const fragment of [
+      `the input is ${length} tokens (<bos> and <eos> included), over this device's limit of ${length - 1}`,
+      "the graph's largest intermediate (49152 B per token)",
+      `must fit one storage buffer of ${(length - 1) * 49152} B`,
+      "nothing is truncated",
+    ]) {
+      assert(error.message.includes(fragment), `"${fragment}" is not in: ${error.message}`);
+    }
+    assertEquals(stand.runs.length, 0);
+  });
+
+  it("still lets tokenize return the ids (only embed refuses)", () => {
+    assertEquals([...embedderFor(standIn(), length - 1).tokenize(text)], idsWithSpecials);
+  });
+});
 
 /** The policy accepts no execution knob (the distribution's preset declares none). */
 describe("EMBEDDINGGEMMA_SESSION_POLICY", () => {

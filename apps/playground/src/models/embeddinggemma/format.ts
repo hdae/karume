@@ -46,10 +46,13 @@ export const buildStatus = (progress: BuildProgress): RunProgress =>
 /** `Row 1`, … (1-based, as the form numbers them). */
 export const rowLabel = (index: number): string => `Row ${index + 1}`;
 
-/** How a row shows its token count against the model's limit. */
+/**
+ * How a row shows its token count against the model's limit `maxTokens` (a device whose buffer
+ * limit is smaller refuses fewer tokens when the row is run; that limit is not shown).
+ */
 export type TokenCountView = { readonly text: string; readonly overLimit: boolean };
 
-/** `12 / 2048 tokens`, marked when the count is over the limit (the pipeline refuses such a row). */
+/** `12 / 8192 tokens`, marked when the count is over `maxTokens` (the pipeline refuses such a row). */
 export const tokenCountView = (count: number, maxTokens: number): TokenCountView => ({
   text: `${count} / ${maxTokens} tokens`,
   overLimit: count > maxTokens,

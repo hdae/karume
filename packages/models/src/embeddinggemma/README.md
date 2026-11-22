@@ -38,6 +38,11 @@ source handle (`nodeDirectory` / `denoDirectory`); `fromAssets` takes the manife
 The Session is opened at construction and kept until `dispose`; calls queue on one serialization
 chain (a refused request returns at once without waiting for its turn), and `dispose` waits for the
 calls in flight, disposes the Session, then destroys the GPU only when the pipeline acquired it.
+The Session runs the attention scores in row blocks of at most 128 MiB
+(`attentionRowBlockMaxBytes`, a fixed value of the family — the measurement and the reasons are at
+the constant in `pipeline.ts`): the output is bit-identical to the unbudgeted run, and at 8,192
+tokens the plan backing is 944 MiB instead of 1,648 MiB on the RTX 3080 Ti, for 2–7% of the run's
+time.
 `embed`'s `signal` is checked after the turn and before the run; construction's `signal` reaches the
 fetch layer. There is no batch API and no similarity helper.
 
@@ -59,8 +64,14 @@ before the GPU is touched:
   use for them: upstream's composite model replaces such an id with the pad id before the lookup,
   and sentence-transformers refuses the text. Placeholders are never written in text; a later model
   that takes images, audio or video takes them as content parts (a video as an array of frames);
-- a token sequence longer than `maxTokens` (2,048 for EmbeddingGemma 2, against upstream's 8,192 —
-  docs/limitations.md); nothing is truncated.
+- a token sequence longer than `maxTokens` (8,192 for EmbeddingGemma 2, upstream's context —
+  docs/limitations.md); nothing is truncated;
+- a token sequence longer than this device runs: the graph's largest intermediate grows with the
+  length (EmbeddingGemma 2's per-layer-embedding projection, 49,152 B per token — 384 MiB at 8,192)
+  and must fit one storage buffer, so the device's limit is the smaller of its
+  `maxStorageBufferBindingSize` and `maxBufferSize` over those bytes (5,461 tokens on a device
+  that binds 256 MiB, 43,690 at 2 GiB). The message names the count, the device's limit and the
+  buffer; a device whose limit is at or above `maxTokens` never refuses this way.
 
 The empty string is accepted (`<bos>` `<eos>` alone, the shortest sequence the graph runs). Text
 holding other special spellings (`<bos>`, the turn and tool markup, the media begin / end markers)
@@ -81,15 +92,17 @@ the count first; `embed` still refuses both.
 limits, and the graph contract (`embeddingGemmaGraphContract`): one symbolic length T, exactly the
 inputs `input_ids` i32 `[1, T]` and `pool_mask` f32 `[1, T]`, one f32 output `[1, D]` with D the
 first declared width, one `embedding` lookup of `input_ids` (its table's rows bound the token ids),
-and the graph's maximum of T — read from the `sym_prefix_slice` of its folded constants — equal to
-`maxTokens`. Once the asset arrives, and before the GPU is acquired, the tokenizer must wrap the
+the graph's maximum of T — read from the `sym_prefix_slice` of its folded constants (the RoPE
+tables; the sliding window is a band declared on the attention, not a constant) — equal to
+`maxTokens`, and every symbolic value holding T on exactly one axis (the largest gives the bytes
+per token of the device's limit; a `[T, T]` value fails). Once the asset arrives, and before the GPU is acquired, the tokenizer must wrap the
 sequence in `<bos>` … `<eos>`, every placeholder id must be one of its added tokens, and its largest
 token id must lie inside the embedding table.
 
 ## Numerics
 
 The real-GPU e2e over the local mirror (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts`)
-embeds the seven golden texts of the series with their prompts: the token ids equal the golden's
+embeds the ten golden texts of the series with their prompts (up to 8,192 tokens): the token ids equal the golden's
 (upstream's `tokenizers` over prefix + body), the vectors equal the torch CPU goldens within the
 series e2e's tolerance (atol 1e-6), and each vector is pinned by a sha256 row per environment, as
 are two shorter widths. On the RTX 3080 Ti the pipeline's vectors over the bf16 distribution are

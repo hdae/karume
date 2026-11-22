@@ -16,6 +16,10 @@ broken:
 - {@link export.assert_ir_form} rejects a decomposed attention, a widened k / v, a mask on a full
   layer (upstream under torch.export materialises an all-zero one), a missing band, and a band
   from a graph input or of the wrong extent or values
+- {@link export.declare_band} declares the window on exactly the sliding layers and prunes the
+  traced band constant alone, and {@link export.assert_band_form} rejects a mask left on an
+  attention, a band missing, of another width or on a full layer, anything else pruned and a graph
+  whose bound of T is no longer readable at Tmax; the result passes the writer's rules
 - `--dtype` writes each storage to a series of its own, and {@link export.assert_storage_form}
   rejects a weight slot left f32 under bf16, bf16 outside a weight slot and any other storage; a
   weight bf16 cannot hold fails the bf16 write
@@ -35,6 +39,7 @@ import pytest
 import torch
 
 from embeddinggemma2 import export, sources
+from embeddinggemma2.card import EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS
 from karume.container import Provenance
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.emit import EmitError, eligible_compressed_initializers
@@ -325,12 +330,25 @@ class TestGoldenCases:
         assert set(export.FAR_PAIR) <= names
 
     def test_the_lengths_cut_the_window_and_reach_the_bound(self) -> None:
-        """Pinned on the 512-position window of the config and the 2,048 bound."""
+        """Pinned on the 512-position window of the config and the 8,192 bound."""
         lengths = sorted(export.CASE_LENGTHS.values())
 
         assert export.SYM_MAX in lengths
         assert any(514 <= length < export.SYM_MAX for length in lengths)
         assert all(2 <= length <= export.SYM_MAX for length in lengths)
+
+    def test_the_bound_is_the_upstream_context(self) -> None:
+        """The card states the upstream context; the graph's bound is that context."""
+        assert export.SYM_MAX == EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS == 8192
+
+    def test_the_long_cases_run_past_the_earlier_bound_up_to_the_context(self) -> None:
+        """Past 2,048 (the bound before the band was declared), near 5,000–6,000, and at 8,192."""
+        lengths = set(export.CASE_LENGTHS.values())
+
+        assert any(2048 < length <= 4096 for length in lengths)
+        assert any(5000 <= length <= 6000 for length in lengths)
+        assert 8192 in lengths
+        assert {609, 1508, 2048} <= lengths
 
     def test_cases_with_and_without_a_prompt(self) -> None:
         kinds = {kind for _name, kind, _body in export.GOLDEN_CASES}
@@ -613,6 +631,146 @@ class TestAssertIrForm:
             _check(graph, tensors)
 
 
+ROPE = "const_rope"
+
+
+def _traced_graph() -> IrGraph:
+    """The tiny traced IR plus a RoPE-like table `[1, Tmax, 8]` sliced by T (what still bounds T
+    once the band constant is pruned) feeding the output."""
+    graph, _tensors = _ir_graph()
+    graph.initializers[ROPE] = IrInitializer(tensor=f"const.{ROPE}", storage=IrStorage("f32"))
+    graph.values[ROPE] = IrValue("f32", [1, TINY_SYM_MAX, 8])
+    graph.values[f"{ROPE}.T"] = IrValue("f32", [1, "T", 8])
+    graph.nodes.insert(
+        0,
+        IrNode(
+            op=export.SYM_PREFIX_SLICE_OP,
+            ins=[ROPE],
+            outs=[f"{ROPE}.T"],
+            attrs={"sym": "T", "slices": [{"dim": 1, "coeff": 1, "offset": 0}]},
+        ),
+    )
+    # The inputs, every attention output and the table reach the output (the pruning keeps live
+    # values only and refuses an input left unread).
+    graph.nodes.append(
+        IrNode(
+            op="concat",
+            ins=[
+                "input_ids",
+                "pool_mask",
+                *(f"attn{layer}" for layer in range(len(TINY_LAYOUTS))),
+                f"{ROPE}.T",
+            ],
+            outs=["embedding"],
+            attrs={},
+        )
+    )
+    return graph
+
+
+def _band_check(graph: IrGraph, pruned=(BAND,)) -> dict:
+    return export.assert_band_form(graph, TINY_LAYOUTS, TINY_SYM_MAX, TINY_WINDOW, pruned, BAND)
+
+
+class TestDeclareBand:
+    def test_the_sliding_layers_declare_the_window_and_the_band_constant_is_pruned(self) -> None:
+        traced = _traced_graph()
+
+        graph, pruned = export.declare_band(traced, TINY_LAYOUTS, TINY_WINDOW)
+
+        assert pruned == [BAND]
+        assert [node.attrs.get("band") for node in _attentions(graph)] == [
+            TINY_WINDOW,
+            None,
+            TINY_WINDOW,
+        ]
+        assert all(len(node.ins) == 3 for node in _attentions(graph))
+        assert BAND not in graph.initializers
+        assert f"{BAND}.T" not in graph.values
+        assert ROPE in graph.initializers
+        # The traced graph is only read.
+        assert len(_attentions(traced)[0].ins) == 4
+
+    def test_the_result_has_the_band_form(self) -> None:
+        graph, pruned = export.declare_band(_traced_graph(), TINY_LAYOUTS, TINY_WINDOW)
+
+        form = _band_check(graph, pruned)
+
+        assert form == {"band_layers": [0, 2], "band": TINY_WINDOW, "pruned": [BAND], "bound": 16}
+
+    def test_layouts_of_another_layer_count_are_refused(self) -> None:
+        with pytest.raises(AssertionError, match="3 attention nodes for 2 layers"):
+            export.declare_band(_traced_graph(), TINY_LAYOUTS[:2], TINY_WINDOW)
+
+
+def _attentions(graph: IrGraph) -> list[IrNode]:
+    return [node for node in graph.nodes if node.op == export.ATTENTION_OP]
+
+
+def _declared() -> IrGraph:
+    graph, _pruned = export.declare_band(_traced_graph(), TINY_LAYOUTS, TINY_WINDOW)
+    return graph
+
+
+class TestAssertBandForm:
+    def test_an_attention_that_still_takes_a_mask_is_rejected(self) -> None:
+        graph = _declared()
+        _attentions(graph)[0].ins.append(f"{ROPE}.T")
+
+        with pytest.raises(AssertionError, match="no attention takes a mask"):
+            _band_check(graph)
+
+    def test_a_sliding_layer_without_the_band_is_rejected(self) -> None:
+        graph = _declared()
+        del _attentions(graph)[2].attrs["band"]
+
+        with pytest.raises(AssertionError, match=r"attention\[2\] \(sliding_attention\)"):
+            _band_check(graph)
+
+    def test_another_width_is_rejected(self) -> None:
+        graph = _declared()
+        _attentions(graph)[0].attrs["band"] = TINY_WINDOW + 1
+
+        with pytest.raises(AssertionError, match=r"attrs\.band is 4, not 3"):
+            _band_check(graph)
+
+    def test_a_band_on_a_full_layer_is_rejected(self) -> None:
+        graph = _declared()
+        _attentions(graph)[1].attrs["band"] = TINY_WINDOW
+
+        with pytest.raises(AssertionError, match=r"attention\[1\] \(full_attention\)"):
+            _band_check(graph)
+
+    def test_pruning_anything_but_the_band_constant_is_rejected(self) -> None:
+        with pytest.raises(AssertionError, match="the surgery pruned"):
+            _band_check(_declared(), pruned=(BAND, ROPE))
+
+    def test_a_graph_whose_bound_is_no_longer_readable_is_rejected(self) -> None:
+        graph = _declared()
+        graph.nodes = [node for node in graph.nodes if node.op != export.SYM_PREFIX_SLICE_OP]
+
+        with pytest.raises(AssertionError, match=r"bound T at \[\], not exactly 16"):
+            _band_check(graph)
+
+    @pytest.mark.parametrize("cut", [{"coeff": 2, "offset": 0}, {"coeff": 1, "offset": 1}])
+    def test_a_slice_with_a_coefficient_or_an_offset_is_rejected(self, cut) -> None:
+        graph = _declared()
+        rope = next(node for node in graph.nodes if node.op == export.SYM_PREFIX_SLICE_OP)
+        rope.attrs["slices"] = [{"dim": 1, **cut}]
+
+        with pytest.raises(
+            AssertionError, match="read only from a slice with coeff 1 and offset 0"
+        ):
+            _band_check(graph)
+
+    def test_a_bound_other_than_tmax_is_rejected(self) -> None:
+        graph = _declared()
+        graph.values[ROPE] = IrValue("f32", [1, 8, 8])
+
+        with pytest.raises(AssertionError, match=r"bound T at \[8\], not exactly 16"):
+            _band_check(graph)
+
+
 def _tiny_config():
     """A three-layer EmbeddingGemma 2 text config (sliding, sliding, full) with small numbers."""
     from transformers.models.embedding_gemma2.configuration_embedding_gemma2 import (
@@ -696,6 +854,43 @@ class TestTinyModel:
 
         assert form["attention_nodes"] == 3
         assert form["full_layers"] == [2]
+
+    def test_the_band_form_passes_the_writer(self, tiny_wrapper, tmp_path: Path) -> None:
+        """The surgery's result passes the writer's acceptance rules (runtime support and the op
+        contracts) and is written without the band constant."""
+        ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
+        graph, tensors = export_module(
+            tiny_wrapper,
+            (ids, pool),
+            dynamic_shapes=({1: seq}, {1: seq}),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+        layouts = export.attention_layouts(tiny_wrapper.model.config)
+        width = int(tiny_wrapper.model.config.embedding_dim)
+        traced = export.assert_ir_form(graph, tensors, layouts, TINY_SYM_MAX, TINY_WINDOW, width)
+
+        declared, pruned = export.declare_band(graph, layouts, TINY_WINDOW)
+        form = export.assert_band_form(
+            declared, layouts, TINY_SYM_MAX, TINY_WINDOW, pruned, traced["band_constant"]
+        )
+        kept = {initializer.tensor for initializer in declared.initializers.values()}
+        stored = publish_model(
+            tmp_path / "model.krm",
+            declared,
+            {key: value for key, value in tensors.items() if key in kept},
+            provenance=Provenance(license=export.LICENSE),
+            graph_name=export.GRAPH_NAME,
+        )
+
+        assert form["band_layers"] == [0, 1]
+        assert traced["band_constant"] not in stored.initializers
+        assert [node.attrs.get("band") for node in _attentions(stored)] == [
+            TINY_WINDOW,
+            TINY_WINDOW,
+            None,
+        ]
 
 
 def _storage_graph(table: str = "bf16", projection: str = "bf16", band: str = "f32") -> IrGraph:

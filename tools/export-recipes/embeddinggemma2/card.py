@@ -115,6 +115,30 @@ def _spell(values: Any) -> str:
     return " / ".join(str(value) for value in values)
 
 
+def _input_length(max_tokens: int) -> list[str]:
+    """The input-length line: the distribution's limit, against the upstream model's context.
+
+    MUST: a limit above the upstream context is not drawn (the card would promise lengths the
+    model was not trained for); "for now" is said only while the limit is below it.
+    """
+    if max_tokens > EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:
+        raise ValueError(
+            f"maxTokens {max_tokens} is above the upstream model's context of"
+            f" {EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS} tokens"
+        )
+    if max_tokens == EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:
+        return [
+            f"- **Input length**: at most {max_tokens:,} tokens including `<bos>` and `<eos>` (the",
+            "  upstream model's whole context). A longer text is refused, never truncated.",
+        ]
+    return [
+        f"- **Input length**: at most {max_tokens:,} tokens including `<bos>` and `<eos>` for now",
+        f"  (the upstream model's context is {EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:,} tokens). A"
+        " longer text is refused, never",
+        "  truncated.",
+    ]
+
+
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
     dimensions = config["dimensions"]
@@ -133,11 +157,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "  Matryoshka Representation Learning, so a shorter vector of"
         f" {_spell(dimensions[1:])} values can be asked for:",
         "  the leading values, re-normalised to unit length.",
-        f"- **Input length**: at most {config['maxTokens']:,} tokens including `<bos>` and `<eos>`"
-        " for now",
-        f"  (the upstream model's context is {EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:,} tokens). A"
-        " longer text is refused, never",
-        "  truncated.",
+        *_input_length(config["maxTokens"]),
         "- **Text only.** The upstream checkpoint also carries vision and audio towers; this",
         "  distribution contains neither, and cannot embed images, video or audio. A text holding",
         "  the image, audio or video placeholder token is refused.",
@@ -213,7 +233,8 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
         "  as one graph in the Karume container format; the sliding-window attention mask is a",
-        "  constant of the graph; the weights keep the checkpoint's bf16 values unchanged.",
+        "  band declared on the attention, applied from the token positions; the weights keep the",
+        "  checkpoint's bf16 values unchanged.",
         "  No retraining and no fine-tuning.",
         *_precision_lines(manifest),
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",

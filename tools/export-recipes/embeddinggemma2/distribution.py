@@ -156,9 +156,9 @@ EMBEDDINGGEMMA2_GRAPH_INPUTS: tuple[tuple[str, str], ...] = (
 )
 
 #: The most tokens one text may encode to — the mirror of `embeddinggemma2.export.SYM_MAX` (held
-#: equal by the tests), and checked against the bound the graph's folded constants carry
-#: ({@link embeddinggemma2_graph_max_tokens}).
-EMBEDDINGGEMMA2_MAX_TOKENS = 2048
+#: equal by the tests; the upstream model's context), and checked against the bound the graph's
+#: folded constants carry ({@link embeddinggemma2_graph_max_tokens}).
+EMBEDDINGGEMMA2_MAX_TOKENS = 8192
 
 #: The Matryoshka dimensions, the full one first. The upstream model card at the pinned revision
 #: states them ("The supported dimensions are 768, 512, 256, and 128"); no configuration file
@@ -244,8 +244,9 @@ def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> in
     """The upper bound of the token symbol `T`, read from the graph's folded constants.
 
     The IR's `symbols` lists names only; the bound lives in the constants traced at the maximum and
-    sliced by `sym_prefix_slice` (the sliding band `[1, 1, Tmax, Tmax]` and the RoPE tables). Every
-    slice of `T` must read a prefix of one extent — that extent is the most rows the graph can bind.
+    sliced by `sym_prefix_slice` (the RoPE tables — the sliding window is a declared band, not a
+    constant). Every slice of `T` must read a prefix of one extent — that extent is the most rows
+    the graph can bind.
 
     MUST: fail on a slice whose form leaves the bound unreadable (a coefficient or an offset), on
     disagreeing extents and on a graph without one — `maxTokens` would otherwise be a number
@@ -565,8 +566,9 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - The text tower, together with the mean pooling and the L2 normalisation of the
   SentenceTransformer pipeline, was re-expressed as one graph in the Karume container format (a
   `.krm` part sequence whose first part carries the graph and model descriptors). The
-  sliding-window attention mask was folded into a constant of the graph, which bounds the input
-  length the graph accepts (stated in `README.md`).
+  sliding-window attention mask was replaced by a band declared on the attention of each sliding
+  layer, which the runtime applies from the token positions; the rotary position tables are
+  constants of the graph, which bound the input length it accepts (stated in `README.md`).
 - **The weights keep the checkpoint's BF16 values unchanged** (the parameters stored in float32,
   the norms among others, hold the same values widened).
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt

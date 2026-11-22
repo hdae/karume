@@ -246,6 +246,8 @@
 | interval embedding △ | 区間の埋め込み | MeanFlow の 1 ステップの区間長 `t − t_next` を t と同じ関数で埋め込んだもの（`dit` の入力 `delta_embed`） | — | ADR 0150 |
 | rare-token split △ | 稀なトークンの分割 | Irodori のテキストを、v4 Small のトークナイザが持つ稀な長いトークンを使わずに符号化すること（スコアを -1e9 にした別の Unigram と強制分割）。キャプションには掛けない。トークナイザ資産の `rareTokenSplit` に上流の結果を持つ | — | ADR 0149 |
 | bidirectional sliding window △ | 双方向の sliding window | Irodori v4-Large の T5Gemma 2 テキストエンコーダの sliding 層 22 層が使うマスク。各クエリは左 256・右 257 の位置を見るので、T = 257 から切れる（テキストは最大 256 トークンなので切れるのはキャプションだけ）。1 つの `[1,1,512,512]` 定数に畳み込み、各層が切り出す | — | ADR 0151 決定 1 |
+| attention band (`attrs.band`) △ | attention の band | states 欄のない attention の任意 attrs。クエリ行 m はキー列 n を `\|m − n\| ≤ band` のときだけ見る（両端を含む・対称）。①QK の中で位置から判定し、範囲外のスコアを −inf にする。有限のスコアでは 0 / −inf の加算マスク `[1,1,M,N]` と同じ意味で、マスク tensor は作らない。states 形式とマスクとの併用は拒否 | — | ADR 0155 |
+| device token limit △ | デバイスのトークン上限 | 埋め込みパイプラインがそのデバイスで走らせられる最長の入力。`maxStorageBufferBindingSize` と `maxBufferSize` の小さい方を、グラフの最大の中間値の 1 トークンあたりのバイト数で割った値（EmbeddingGemma 2 は 49,152 B で、256 MiB のデバイスでは 5,461 トークン）。超える入力は実行前に `ModelInputError` で断る | — | `packages/models/src/embeddinggemma/pipeline.ts` |
 | non-persistent buffer △ | non-persistent buffer | `state_dict` に入らない（チェックポイントに無い）module の buffer。transformers が初期化時に計算する（`embed_scale`・RoPE の `inv_freq` など）。Irodori v4-Large の f16 は T5Gemma 2 の分を f32 のまま保つ | — | ADR 0151 決定 6 |
 | chunkLength | chunkLength | prefill 1 回に流す行数 | — | ADR 0066 決定 4 |
 | maxChunkLength | maxChunkLength | `chunkLength` の上限（配布形の宣言） | trace 上限 | ADR 0066 |

@@ -1926,7 +1926,8 @@ always pass all ones).
 
 Related: since `SYM_MAX = 512`, T > 512 fails at Session construction (the config's
 max_position_embeddings is 2048). Raising it is to be done together with a ruling on the band mask constant growing with Tmax²
-(512 → 2MB / 2048 → 32MB).
+(512 → 2MB / 2048 → 32MB). The attention band ([below](#attention-band-dense-routes-only-never-beside-the-mask-every-score-still-computed))
+removes that constant, but it cannot sit beside a padding mask yet.
 
 The design for lifting it (run-time mask support) is settled in
 [decisions/0044](decisions/0044-runtime-attention-mask.md) (accepted), and **the mechanism is
@@ -1934,19 +1935,40 @@ implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` �
 only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
 is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
-## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one text per call, at most 2,048 tokens, text only, no batch
+## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one text per call, at most 8,192 tokens, text only, no batch
 
 The text model of the local distribution `karume-embeddinggemma-2` (not published), through
 `@karume/models/embeddinggemma`:
 
-- **One sequence per call, no batch.** `embed` takes one input and returns one vector; concurrent
-  calls queue on the pipeline. The graph runs the symbolic length T of one sequence with no
-  run-time mask: its sliding-window band is a folded `[1, 1, 2048, 2048]` constant cut down by
-  `sym_prefix_slice` — the single-sequence scheme of the first EmbeddingGemma above.
-- **At most 2,048 tokens**, `<bos>` and `<eos>` included (`pipelineConfig.maxTokens`, checked
-  against the graph's bound at construction); upstream's model reads 8,192. A longer text is refused
-  with a `ModelInputError` that states the count and the limit — nothing is truncated. What lifting
-  the bound needs (a column range the attention kernel checks) is backlog item "EmbeddingGemma 2".
+- **One sequence per call, no batch, no padding.** `embed` takes one input and returns one vector;
+  concurrent calls queue on the pipeline. The graph runs the symbolic length T of one sequence with
+  no run-time mask: the 20 sliding layers declare their window as `attrs.band` 512 on the attention
+  (ADR [0155](decisions/0155-attention-band.md) — checked in the score kernel from positions; the
+  "Attention band" section below), the 4 full layers see every position, and nothing marks a key as
+  padding.
+- **At most 8,192 tokens** (upstream's context), `<bos>` and `<eos>` included
+  (`pipelineConfig.maxTokens`, checked against the bound of the graph's folded RoPE tables at
+  construction). A longer text is refused with a `ModelInputError` that states the count and the
+  limit — nothing is truncated.
+- **Memory grows with T** (measured on the RTX 3080 Ti under Node, 2026-11-22, the bf16 mirror —
+  565.1 MiB of weights): the plan backing of one run is 236.1 MiB at 2,048 tokens and 944.0 MiB at
+  8,192 (1,509.2 MiB accounted with the weights, by the estimate). The family runs the attention
+  scores in row blocks of at most 128 MiB; without that budget one layer's scores alone are 1 GiB at
+  8,192 tokens and the plan backing is 1,648.3 MiB. Most of what is left (about 912 MiB at 8,192)
+  is the per-layer-embedding intermediates, `[1, T, 12288]` f32 = 49,152 B per token, alive for
+  almost the whole run. One 8,192-token run takes 0.93–1.19 s on that machine once its plan exists
+  (0.97–1.58 s for the first run of that length; four runs of the lane and the budget measurement).
+- **A device whose buffer limit cannot hold the per-layer-embedding intermediate refuses the
+  length.** The largest intermediate must fit one storage buffer, so a device runs at most
+  `min(maxStorageBufferBindingSize, maxBufferSize) / 49,152` tokens — 5,461 on a device that binds
+  256 MiB (the distribution's `requiredLimits` asks for 256 MiB, for the token table), 43,690 at
+  2 GiB. A longer input gets a `ModelInputError` naming the count, the device's limit and the buffer,
+  before the run; the pipeline keeps running shorter texts. Decided 2026-11-22: accepted as is (the
+  graph's per-layer embedding is not rewritten); nothing in the manifest states it, so such a device
+  passes the checks before the download and learns its limit from the first long input.
+- **Every score is still computed.** The band removes the mask tensor, not the quadratic work: on
+  the sliding layers ①QK and ③PV compute all `T × T` scores, while each query row sees at most
+  1,025 of the 8,192 keys at the bound (12.5%).
 - **Text only.** The distribution holds the text tower alone. A text whose tokens include the image,
   audio or video placeholder id (258880 / 258881 / 258884) is refused: the text tower would embed
   the id as an ordinary token, while upstream's composite model replaces it with the pad id and
@@ -2098,6 +2120,20 @@ The fourth input of `attention`, the mask (ADR 0023 addendum 2026-08-11), is del
 - The permanent bit-identity check (parity) against the decomposed path is **on the f32 path only**. s16 / c16 × mask is confirmed only up to WGSL
   generation, pipeline creation and execution on a real GPU (whether to add a check or keep stating f32-only in the ADR
   is decided when such a case appears in real assets).
+
+## Attention band: dense routes only, never beside the mask, every score still computed
+
+The optional `band` of plain `attention` (ADR [0155](decisions/0155-attention-band.md) — key column `n` visible to query
+row `m` iff `|m − n| ≤ band`) is checked inside ①QK from positions. Its limits:
+
+- **band × `attentionCompute:'a8'` fails loudly**, on the three a8 dispatches and on the online kernel alike (neither has
+  the predicate), exactly as mask × a8 does. The f32 and f16 compute routes and f16 score storage take it.
+- **Not on the states form** (its causal rule and `window` decide the columns) and **not beside the additive mask** (one
+  mechanism per node). A padding mask on top of a band has no form yet.
+- **No work is skipped.** S is still `B·H × M × N`, every tile of ①QK and ③PV is computed, and the row blocks are those of
+  a node without the band; the band removes the mask tensor, not the quadratic score work.
+- The identity with the equivalent additive mask is claimed on finite scores; a NaN or +inf score outside the band is
+  hidden by the band, while the mask would turn it into NaN.
 
 ## GQA × `attentionCompute:'a8'` in fused attention fails loudly (provisional)
 

@@ -14,8 +14,17 @@
     "embeddinggemma-2/bf16/document-2048/128": {
       "node-nvidia-geforce-rtx-3080-ti": "44ae5745320ae8706a53e437924631e8aaaf606a9e5b5e94980bc67c616440c1"
     },
+    "embeddinggemma-2/bf16/document-3062": {
+      "node-nvidia-geforce-rtx-3080-ti": "e7908a1d1255b100a8d7e5324b0f11beeb1e49e8746edea8eff9e3c0f01c2eb5"
+    },
+    "embeddinggemma-2/bf16/document-5935": {
+      "node-nvidia-geforce-rtx-3080-ti": "f845bdf7613f1be03cb986e727814ee6ad4a342788911a26e963dfc028a70a90"
+    },
     "embeddinggemma-2/bf16/document-609": {
       "node-nvidia-geforce-rtx-3080-ti": "b3e82cd2e5fe380dc6be846967189d7b80ff7206c82a6a6dac2fd6294f608772"
+    },
+    "embeddinggemma-2/bf16/document-8192": {
+      "node-nvidia-geforce-rtx-3080-ti": "0f9fc75c902c924f1790b3d7c2e04865830ca7859a45c46c34155eba0d45cd60"
     },
     "embeddinggemma-2/bf16/document-en": {
       "node-nvidia-geforce-rtx-3080-ti": "41cf7c791fc4b2bea40bb1d6e93d657be9333ab4fe903bad52d129b3bf455124"

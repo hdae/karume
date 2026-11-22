@@ -686,25 +686,37 @@ maintainer's ruling of 2026-11-06).
 - **Completing EmbeddingGemma** (models pipeline / distribution, batch>1 export, runtime attention_mask wiring) — after
   the 0.23.0 release (the maintainer's ruling of 2026-11-19; the first item of `later`). The tokenizer is shared with
   Gemma 4 and its assets are compiled separately (ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The
-  wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md).
+  wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md). Its recipe must declare its
+  window with `karume.band.to_band_form`: the family `embeddinggemma` refuses a graph value holding the token length on
+  two axes, which the folded `[1, 1, T, T]` band mask is.
 - **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
   2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
-  token length up to 2,048 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
+  token length up to 8,192 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
   recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, preset `bf16`, nothing published),
   the series and its e2e, and step 1 of the order below: the TypeScript family `embeddinggemma`
-  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts and widths and the 2,048-token
-  limit, no `SOURCES` until the first publication) with its pipeline e2e over the mirror, all in the lane
+  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts, widths and token limit, no
+  `SOURCES` until the first publication) with its pipeline e2e over the mirror, all in the lane
   `models:embeddinggemma2`. Ruled 2026-11-21: one family `embeddinggemma` serves both models; a text holding an image,
   audio or video placeholder id is refused (the upstream composite model replaces such an id with the pad id;
   sentence-transformers refuses the text); an input is a string or an array of content parts, and placeholders are
   never written in text; a later video input is an array of frames, the frame type (`VideoFrame` or `ImageBitmap`)
   to be decided then. Left, in order:
   1. ~~The TypeScript pipeline and the distribution recipe~~ — built (above).
-  2. The model's 8K context: the folded band constant stops near 2,896 tokens (the container's 32 MiB const block) and
-     a `[T, T]` buffer passes the default 128 MiB binding near 5,792, and at 2,048 tokens the plan backing is 252 MiB
-     against the default budget of 256 MiB. The candidate is a column range the attention kernel checks, which would
-     also carry key padding and batch>1 for both models; it needs a decision record and is not designed.
+  2. ~~The model's 8K context~~ — built 2026-11-22 (the maintainer's approval of that day). Stage 4a: the optional
+     attr `band` of plain attention, checked inside ①QK from positions with no mask tensor, its kernel check
+     `attention-band` and the exporter's `karume.band.to_band_form` (ADR [0155](decisions/0155-attention-band.md)).
+     Stage 4b: the recipe declares the band 512 on the 20 sliding layers and feeds no mask, the bound is 8,192 (upstream's
+     context; golden cases at 3,062, 5,935 and 8,192 tokens, every existing sha256 row unchanged), the family opens its
+     Session with a 128 MiB row-block budget for the attention scores (plan backing 944 MiB instead of 1,648 MiB at
+     8,192 tokens on the RTX 3080 Ti) and refuses, before the run, an input longer than the device's buffer limit holds
+     (docs/limitations.md). Left from it, unordered:
+     - skipping the work outside the band (①QK and ③PV still compute every `T × T` score; each row sees at most 1,025
+       keys) — filed as [perf-ledger](perf-ledger.md) K-114, not measured;
+     - the per-layer-embedding intermediate (`[1, T, 12288]` f32, 49,152 B per token) on devices with 256 MiB limits,
+       which stop at 5,461 tokens — accepted as is (2026-11-22), the graph's per-layer embedding not rewritten;
+     - batch and key padding, through a valid-key range the score kernel checks beside the band, for both models;
+     - measuring what batch would buy (throughput against one text per call) before building it.
   3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead). The publication
      also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
      with `hfRepo` from it.

@@ -11,7 +11,7 @@
 //    equal the golden's `input_ids`, which the recipe took from upstream's `tokenizers` over the
 //    prefix of `config_sentence_transformers.json` + the body: the prompt prefix the manifest
 //    carries, the concatenation and `<bos>` … `<eos>` are upstream's.
-// 2. **The seven golden texts through the pipeline** (real GPU): each vector is a unit vector and
+// 2. **The ten golden texts through the pipeline** (real GPU): each vector is a unit vector and
 //    bit-for-bit equals this machine's sha256 row (rows per environment — ADR 0106); with the
 //    series it also equals the torch CPU golden of `outputs/series/embeddinggemma-2-text/` within
 //    the tolerance of the series e2e (`e2e_embeddinggemma2_test.ts`). The distribution's bf16
@@ -22,8 +22,15 @@
 //    its own sha256 row, and — with the series — the golden's slice re-normalised within the
 //    tolerance.
 // 4. **Timings** (recorded, not asserted): `fromPretrained` with a shared GPU, and the first and a
-//    repeated `embed` of a short and of the 2,048-token text (the repeat must give the same bits —
-//    the sha rows stand on that).
+//    repeated `embed` of a short, the 2,048-token and the 8,192-token text (the repeat must give the
+//    same bits — the sha rows stand on that), with each run's plan backing. The 8,192-token run's
+//    plan backing must stay under 1 GiB — one layer's unsplit scores (4 heads × 8,192² f32) alone
+//    are 1 GiB, so it shows the family's row-block budget reached the Session.
+// 5. **The device's token limit on a narrowed device** (real GPU): a device acquired with its
+//    binding and buffer limits capped at 256 MiB (the test-only `LIMIT_CAPS` — the mirror's
+//    `requiredLimits`) runs an input of exactly ⌊256 MiB / 49,152 B⌋ = 5,461 tokens, refuses
+//    5,462 with a `ModelInputError` before the run, and still embeds a short text afterwards — the
+//    family's limit agrees with what the runtime runs on the real graph.
 //
 // The golden texts come from the tracked fixture the recipe writes
 // (`packages/models/tests/fixtures/embeddinggemma2/golden-cases.json` — `GOLDEN_CASES` of
@@ -43,9 +50,11 @@ import {
   type GpuContext,
   parseSafetensors,
   type SafetensorsFile,
+  type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
 import * as embeddinggemma from "../../models/embeddinggemma.ts";
+import { ModelInputError } from "../../models/src/errors.ts";
 import { parseEmbeddingGemmaPipelineConfig } from "../../models/src/embeddinggemma/config.ts";
 import {
   type EmbedTextRules,
@@ -68,6 +77,7 @@ import {
   formatAllclose,
   type Tolerance,
 } from "../../runtime/src/reference/allclose.ts";
+import { LIMIT_CAPS } from "../../runtime/src/gpu/device.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import {
@@ -91,7 +101,8 @@ import {
  *
  * Measured through the pipeline (bf16 weights, f32 compute) on node-nvidia-geforce-rtx-3080-ti
  * (2026-11-21, 7 cases × `[1,768]`, and the two shorter widths against the golden's slice
- * re-normalised):
+ * re-normalised; the three cases past 2,048 tokens added 2026-11-22 with the band declared and the
+ * family's row-block budget):
  *
  * | Case          | T     | Width | maxAbs  | maxRel  |
  * | ------------- | ----- | ----- | ------- | ------- |
@@ -102,6 +113,9 @@ import {
  * | document-609  | 609   | 768   | 1.60e-7 | 3.70e-4 |
  * | document-1508 | 1,508 | 768   | 1.43e-7 | 2.08e-2 |
  * | document-2048 | 2,048 | 768   | 1.79e-7 | 1.09e-3 |
+ * | document-3062 | 3,062 | 768   | 1.83e-7 | 9.28e-4 |
+ * | document-5935 | 5,935 | 768   | 1.41e-7 | 5.16e-4 |
+ * | document-8192 | 8,192 | 768   | 1.04e-7 | 1.87e-3 |
  * | query-en      | 16    | 256   | 1.53e-7 | 6.98e-4 |
  * | document-2048 | 2,048 | 128   | 2.68e-7 | 6.05e-5 |
  *
@@ -158,6 +172,11 @@ const TRUNCATIONS: readonly (readonly [string, number])[] = [
 ];
 const SHORT = "query-en";
 const LONG = "document-2048";
+/** The text at the bound (`pipelineConfig.maxTokens`). */
+const LONGEST = "document-8192";
+
+/** One layer's unsplit attention scores at 8,192 tokens (4 heads × 8,192² f32). */
+const UNSPLIT_SCORES_BYTES = 4 * 8192 * 8192 * 4;
 
 const caseOf = (name: string): GoldenCase => {
   const found = CASES.find((entry) => entry.name === name);
@@ -256,7 +275,7 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: the manifest and the tokenize
     assertEquals([entry.pipeline.name, entry.pipeline.major], ["embeddinggemma", 1]);
     assertEquals([entry.defaultQuant, entry.available.quants], ["bf16", ["bf16"]]);
     assertEquals(rules.config.dimensions, [768, 512, 256, 128]);
-    assertEquals(rules.config.maxTokens, 2048);
+    assertEquals(rules.config.maxTokens, 8192);
     assertEquals(rules.placeholders.size, 3);
   });
 
@@ -284,12 +303,23 @@ describe.skipIf(!RUNNABLE)("EmbeddingGemma 2 pipeline over the mirror (real GPU)
   let gpu: GpuContext;
   let pipeline: embeddinggemma.Pipeline;
   let fromPretrainedMs = 0;
+  /** The diagnostics of the latest run (the pipeline's observation hook). */
+  let lastDiagnostics: SessionDiagnostics | undefined;
+  /** Forgets the latest run's diagnostics (a function, so the hook's later write is not narrowed away). */
+  const clearDiagnostics = (): void => {
+    lastDiagnostics = undefined;
+  };
   beforeAll(async () => {
     // The rows written below are this machine's: the adapter the key was taken from must be the
     // one running.
     gpu = verifyRunningGpu(await acquireTestGpu());
     const start = performance.now();
-    pipeline = await embeddinggemma.Pipeline.fromPretrained(mirrorDirectory(MIRROR_ROOT), { gpu });
+    pipeline = await embeddinggemma.Pipeline.fromPretrained(mirrorDirectory(MIRROR_ROOT), {
+      gpu,
+      onRunDiagnostics: (diagnostics) => {
+        lastDiagnostics = diagnostics;
+      },
+    });
     fromPretrainedMs = milliseconds(start);
     console.log(`[embeddinggemma2-pipeline] fromPretrained ${fromPretrainedMs} ms (shared GPU)`);
   });
@@ -399,22 +429,128 @@ describe.skipIf(!RUNNABLE)("EmbeddingGemma 2 pipeline over the mirror (real GPU)
     });
   }
 
-  it("a repeated call gives the same bits, and the timings of a short and of the 2,048-token text", async () => {
+  it("a repeated call gives the same bits, the timings of a short, the 2,048- and the 8,192-token text, and the 8,192-token plan under 1 GiB", async () => {
     const timings: string[] = [`fromPretrained ${fromPretrainedMs} ms`];
-    for (const name of [SHORT, LONG]) {
+    for (const name of [SHORT, LONG, LONGEST]) {
       const entry = caseOf(name);
       const firstStart = performance.now();
       const first = await pipeline.embed(entry.text, optionsOf(entry));
       const firstMs = milliseconds(firstStart);
+      // Cleared before the measured run, so the plan backing read below is that run's report.
+      clearDiagnostics();
       const againStart = performance.now();
       const again = await pipeline.embed(entry.text, optionsOf(entry));
       const againMs = milliseconds(againStart);
       assertEquals([...again], [...first], `${name}: a repeated call differs`);
-      timings.push(`${name} (T=${entry.tokens}) embed ${firstMs} ms, again ${againMs} ms`);
+      assert(lastDiagnostics !== undefined, "the observation hook saw no run");
+      const { planBacking } = lastDiagnostics;
+      const planMiB = (planBacking.residentBytes / 2 ** 20).toFixed(1);
+      timings.push(
+        `${name} (T=${entry.tokens}) embed ${firstMs} ms, again ${againMs} ms, plan backing ${planMiB} MiB`,
+      );
+      if (name === LONGEST) {
+        assert(
+          planBacking.residentBytes < UNSPLIT_SCORES_BYTES,
+          `the 8,192-token plan backing is ${planBacking.residentBytes} B, not under one layer's unsplit scores` +
+            ` (${UNSPLIT_SCORES_BYTES} B) — the row-block budget did not reach the Session`,
+        );
+      }
     }
     console.log(`[embeddinggemma2-pipeline] timings: ${timings.join("; ")}`);
   });
 });
+
+/** The binding and buffer limit of the narrowed device (the mirror's `requiredLimits`). */
+const CAPPED_BINDING_BYTES = 256 * 2 ** 20;
+/** The graph's bytes per token (the per-layer-embedding intermediate `[1, T, 12288]` f32). */
+const BYTES_PER_TOKEN = 12288 * 4;
+/** The longest input the narrowed device runs. */
+const CAPPED_MAX_TOKENS = Math.floor(CAPPED_BINDING_BYTES / BYTES_PER_TOKEN);
+
+/**
+ * The prefix of `text` that tokenizes, without a prompt, to exactly `count` ids (`<bos>` and
+ * `<eos>` included): a binary search for the shortest prefix with at least `count` ids, then the
+ * lengths around it (a few more characters can merge tokens, so the count is not strictly
+ * monotone). Fails loudly when no prefix has the count.
+ */
+const prefixOfTokens = (pipeline: embeddinggemma.Pipeline, text: string, count: number): string => {
+  const countOf = (length: number): number => pipeline.tokenize(text.slice(0, length)).length;
+  assert(countOf(text.length) > count, `the text has no more than ${count} tokens`);
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (countOf(middle) >= count) high = middle;
+    else low = middle + 1;
+  }
+  for (let offset = 0; offset <= 64; offset += 1) {
+    for (const length of [low + offset, low - offset]) {
+      if (length >= 0 && length <= text.length && countOf(length) === count) {
+        return text.slice(0, length);
+      }
+    }
+  }
+  throw new Error(`no prefix of the text tokenizes to exactly ${count} ids`);
+};
+
+describe.skipIf(!RUNNABLE)(
+  "EmbeddingGemma 2 pipeline on a device capped at 256 MiB (real GPU)",
+  () => {
+    let gpu: GpuContext;
+    let pipeline: embeddinggemma.Pipeline;
+    beforeAll(async () => {
+      gpu = await acquireTestGpu({
+        [LIMIT_CAPS]: {
+          maxStorageBufferBindingSize: CAPPED_BINDING_BYTES,
+          maxBufferSize: CAPPED_BINDING_BYTES,
+        },
+      });
+      pipeline = await embeddinggemma.Pipeline.fromPretrained(mirrorDirectory(MIRROR_ROOT), {
+        gpu,
+      });
+    });
+    afterAll(async () => {
+      if (gpu === undefined) return;
+      try {
+        await pipeline?.dispose();
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    it("runs an input of exactly the device's limit, refuses one token more, and still embeds a short text", async () => {
+      assertEquals(
+        [gpu.limits.maxStorageBufferBindingSize, gpu.limits.maxBufferSize],
+        [CAPPED_BINDING_BYTES, CAPPED_BINDING_BYTES],
+        "the device's limits are not narrowed (the check would see nothing)",
+      );
+      assertEquals(CAPPED_MAX_TOKENS, 5461);
+      const { text } = caseOf(LONGEST);
+      const atLimit = prefixOfTokens(pipeline, text, CAPPED_MAX_TOKENS);
+      const overLimit = prefixOfTokens(pipeline, text, CAPPED_MAX_TOKENS + 1);
+
+      const vector = await pipeline.embed(atLimit);
+      assertEquals(vector.length, 768);
+      assert(unitNormError(vector) < 1e-5, `|norm − 1| = ${unitNormError(vector)}`);
+
+      const error = await assertRejects(() => pipeline.embed(overLimit), ModelInputError);
+      assert(
+        error.message.includes(
+          `the input is ${CAPPED_MAX_TOKENS + 1} tokens (<bos> and <eos> included), over this` +
+            ` device's limit of ${CAPPED_MAX_TOKENS}`,
+        ),
+        error.message,
+      );
+
+      const short = caseOf(SHORT);
+      const after = await pipeline.embed(short.text, optionsOf(short));
+      assert(
+        unitNormError(after) < 1e-5,
+        `after the refusal: |norm − 1| = ${unitNormError(after)}`,
+      );
+    });
+  },
+);
 
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

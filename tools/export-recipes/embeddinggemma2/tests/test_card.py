@@ -106,6 +106,22 @@ class TestWhatTheCardSays:
         assert f"{EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:,} tokens" in card
         assert "refused, never" in card
 
+    def test_a_limit_at_upstreams_context_is_stated_as_the_whole_context(self) -> None:
+        manifest = _manifest()
+        config = manifest["models"]["text"]["pipelineConfig"]
+        config["maxTokens"] = EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS
+        card = _render(manifest)
+
+        assert (
+            f"at most {EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS:,} tokens including `<bos>` and"
+            " `<eos>` (the\n  upstream model's whole context)"
+        ) in card
+        assert "for now" not in card
+        assert "refused, never truncated" in card
+
+    def test_it_states_the_band_among_the_changes(self) -> None:
+        assert "band declared on the attention" in _render()
+
     def test_it_states_the_bf16_storage(self) -> None:
         card = _render()
         assert "its weights shipped unchanged (bf16)" in card
@@ -168,6 +184,14 @@ class TestWhatTheCardRefuses:
         weights = manifest["models"]["text"]["weights"]["model"]
         weights["f16"] = weights.pop("bf16")
         with pytest.raises(ValueError, match=r"stored as \['f16'\]"):
+            _render(manifest)
+
+    def test_a_limit_above_upstreams_context_is_refused(self) -> None:
+        manifest = _manifest()
+        manifest["models"]["text"]["pipelineConfig"]["maxTokens"] = (
+            EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS + 1
+        )
+        with pytest.raises(ValueError, match="above the upstream model's context"):
             _render(manifest)
 
     def test_a_preset_with_a_session_is_refused(self) -> None:

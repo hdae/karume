@@ -42,12 +42,22 @@ measurements in `docs/research/`.
   manifest (`"query"`, `"document"`, …) whose prefix goes before the text; `dimension` is one of the declared widths
   (768 / 512 / 256 / 128 — a shorter one is the leading slice re-normalised). A `ModelInputError` refuses, before the
   GPU, an empty part list, a part of another type, an unknown prompt or width, a text whose tokens include an image,
-  audio or video placeholder, and a sequence over the limit (2,048 tokens with `<bos>` and `<eos>`; nothing is
-  truncated). `tokenize(input, { prompt })` returns, synchronously and without the GPU, the token ids (`Int32Array`)
+  audio or video placeholder, a sequence over the limit (8,192 tokens with `<bos>` and `<eos>`, upstream's context;
+  nothing is truncated), and a sequence longer than the device runs: the graph's largest intermediate (49,152 B per
+  token for EmbeddingGemma 2) must fit one storage buffer, so a device that binds 256 MiB runs at most 5,461 tokens,
+  and the message names both limits. The Session computes the attention scores in row blocks of at most 128 MiB,
+  bit-identical to one block (at 8,192 tokens its plan holds 944 MiB of intermediates on an RTX 3080 Ti instead of
+  1,648 MiB). `tokenize(input, { prompt })` returns, synchronously and without the GPU, the token ids (`Int32Array`)
   `embed` would run for the same input and prompt; it refuses the same unreadable inputs and unknown prompts, but
   returns a sequence over the limit or one holding a placeholder id, so the count can be shown before `embed` refuses
   it. Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
   `ModelInputError`.
+- IR: the optional attr `band` (an integer ≥ 0) of `attention` without a states field — key column `n` is visible to
+  query row `m` iff `|m − n| ≤ band` — which `@karume/runtime` checks inside the score kernel from positions, so a
+  sliding-window band needs no mask tensor. On finite scores it gives the output of the same node fed the band as an
+  additive 0 / −inf mask; it is refused on the states form, beside the mask and with `attentionCompute: "a8"`. The exporter (PyPI
+  `karume`) gains `karume.band.to_band_form`, with which a recipe declares the band on exported attention nodes in place
+  of their mask. The workbench's `kernel-check` entry runs a fourteenth check, `attention-band`.
 
 ### Changed
 

@@ -15,11 +15,16 @@ script reads is checked against the pin in `sources.py` first (the snapshot is f
 
 The text tower, masked mean pooling (prompt tokens, `<bos>` and `<eos>` included) and L2
 normalisation as **one graph**, whose output is a single unit vector `[1, 768]`. The inputs are
-`input_ids` and `pool_mask` (all ones); the token length `T` is symbolic up to 2,048. Every layer is
-bidirectional: the 20 sliding layers see `|q − kv| <= 512` through one folded
-`[1, 1, 2048, 2048]` band constant sliced by `sym_prefix_slice`, the 4 full layers carry no mask,
-and grouped-query attention stays in its true form (2 KV heads × 256 on the sliding layers, 1 KV
-head × 512 on the full ones). Prompt prefixing and tokenization stay on the host.
+`input_ids` and `pool_mask` (all ones); the token length `T` is symbolic up to 8,192, the upstream
+model's context (the model card's; no configuration file states it). Every layer is bidirectional:
+the 20 sliding layers see `|q − kv| <= 512` through `attrs.band` 512 on their attention (ADR
+[0155](../../../docs/decisions/0155-attention-band.md) — checked in the score kernel from
+positions), the 4 full layers carry no mask, and grouped-query attention stays in its true form
+(2 KV heads × 256 on the sliding layers, 1 KV head × 512 on the full ones). The export traces the
+band as one `[1, 1, 8192, 8192]` constant (256 MiB) sliced by `sym_prefix_slice`, checks it against
+the config's window, and declares the band in its place with `karume.band.to_band_form` — the
+constant never reaches the container. The bound of `T` is carried by the folded RoPE tables
+(`[1, 1, 8192, 256]` and `[1, 1, 8192, 512]`). Prompt prefixing and tokenization stay on the host.
 
 ```
 outputs/series/embeddinggemma-2-text/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
@@ -35,26 +40,37 @@ recipe test holds it to `GOLDEN_CASES`. After editing the cases without an expor
 
 `--dtype bf16` stores every weight of a weight slot (the token table and the linears) as bf16 and
 the rest (norms, per-layer scalars, folded constants) as f32. The checkpoint is BF16, so nothing is
-rounded: measured on 2026-11-21, all 427 tensors of the bf16 series decode bit for bit to the f32
-series' values (219 of them, 270,925,824 elements, stored as bf16), the graph descriptors are equal
-and the seven io files are byte-identical. The bf16 series is 571,961,874 bytes in 5 parts.
+rounded (the writer stores a weight as bf16 only when the round trip is exact): measured on
+2026-11-21, with the graph before the band was declared, all 427 tensors of the bf16 series decoded
+bit for bit to the f32 series' values (219 of them, 270,925,824 elements, stored as bf16) and the
+graph descriptors were equal. Measured on 2026-11-22: the bf16 series holds 426 initializers (219
+bf16, 207 f32 — the band constant is gone) and is 592,932,727 bytes in 5 parts, and its ten io files
+are byte-identical to the f32 series'.
 
-Seven golden cases: four short ones with and without a prompt, and three long documents at T 609 and
-1,508 (past the first window cut at T = 514) and exactly 2,048 (the whole folded band). Before
-anything is published the script checks the IR form, that the band equals upstream's own mask
-function, that the band really moves the long outputs and that its wrapper equals the upstream
-model's own forward on them, and a cosine sanity order.
+Ten golden cases: four short ones with and without a prompt, and six long documents at T 609 and
+1,508 (past the first window cut at T = 514), 2,048 (the bound before the band was declared), 3,062,
+5,935 and exactly 8,192 (the bound). Their texts, and those of the seven cases before them, are
+unchanged when cases are added. Before anything is published the script checks the traced IR form
+(the band constant equal to the config's inclusive window), that the band equals upstream's own
+mask function, that the band really moves the long outputs and that its wrapper equals the upstream
+model's own forward on them, the band form it writes (the band on exactly the sliding layers, no
+mask left, the bound still readable at 8,192), and a cosine sanity order.
 
-Measured on 2026-11-21 (CPU, f32):
+Measured on 2026-11-21 (the first three) and 2026-11-22 (the rest) (CPU, f32):
 
 | Case          | T     | band vs every position visible (max abs) | wrapper vs upstream forward |
 | ------------- | ----- | ---------------------------------------- | --------------------------- |
 | document-609  | 609   | 1.09e-2                                  | 0 (output and hidden)       |
 | document-1508 | 1,508 | 2.91e-2                                  | 0 (output and hidden)       |
 | document-2048 | 2,048 | 3.89e-2                                  | 0 (output and hidden)       |
+| document-3062 | 3,062 | 3.95e-2                                  | 0 (output and hidden)       |
+| document-5935 | 5,935 | 5.09e-2                                  | 0 (output and hidden)       |
+| document-8192 | 8,192 | 4.98e-2                                  | 0 (output and hidden)       |
 
-Moving the window by one position (511 or 513) moves those outputs by 2.5e-4 to 5.6e-4. The series is
-1,113,815,088 bytes in 7 parts (f32 weights). The real-GPU check is
+Moving the window by one position (511 or 513) moves the first three outputs by 2.5e-4 to 5.6e-4
+(2026-11-21). Declaring the band left the seven earlier io files byte-identical and the f32 series
+is 1,134,785,941 bytes in 7 parts (f32 weights; 1,113,815,088 before, with the 2,048 bound). One run
+of the f32 export takes about 3 minutes on the development machine (CPU). The real-GPU check is
 `packages/e2e/tests/e2e_embeddinggemma2_test.ts` (lane `models:embeddinggemma2`, run with
 `KARUME_SERIES=1`).
 
@@ -95,7 +111,7 @@ others when the plan is built:
 | ------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `prompts`           | prompt name → prefix (20 names, 8 prefixes)   | `config_sentence_transformers.json` at the pin, verbatim; no default prompt, cosine similarity       |
 | `dimensions`        | `[768, 512, 256, 128]`                        | the upstream model card; the first equals the graph's output width                                    |
-| `maxTokens`         | `2048`                                        | the bound the graph's folded constants carry for `T`, held to the export's `SYM_MAX`                 |
+| `maxTokens`         | `8192`                                        | the bound the graph's folded RoPE tables carry for `T`, held to the export's `SYM_MAX`               |
 | `placeholderTokens` | `{image: 258880, audio: 258881, video: 258884}` | `config.json` at the pin; each a special token of the tokenizer asset                                 |
 
 The plan also checks the bf16 storage (the f32 series is refused), the graph's inputs and output,

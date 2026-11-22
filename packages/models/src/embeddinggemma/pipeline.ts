@@ -12,8 +12,9 @@
  *    `[1, D]` (the graph holds the text tower, the masked mean pooling and the L2 normalisation)
  * 3. Host: a shorter width is the leading slice re-normalised (`truncateEmbedding`)
  *
- * One sequence per call, no padding and no batch (the graph's window band is a folded constant over
- * the symbolic length — docs/limitations.md). Concurrent calls queue on the serialization chain.
+ * One sequence per call, no padding and no batch (the graph's sliding window is a band declared on
+ * its attention, with no run-time mask — docs/limitations.md). Concurrent calls queue on the
+ * serialization chain.
  *
  * ## MUST: one Session is opened at construction and kept until `dispose`
  *
@@ -25,6 +26,18 @@
  * flush-before-destroy violation). The chain, the Session and the release live in {@link Embedder},
  * the part a host test drives with a stand-in Session; `Pipeline` adds construction only.
  *
+ * ## The device's token limit
+ *
+ * The graph's intermediates grow with the token length T, and the largest must fit one storage
+ * buffer (EmbeddingGemma 2: the per-layer-embedding projection `[1, T, 12288]` f32 —
+ * 49,152 B per token, 384 MiB at 8,192 tokens). The graph contract reads the largest bytes per
+ * token from the declared values ({@link embeddingGemmaGraphContract}); the device's limit is its
+ * binding limit over it ({@link embeddingGemmaDeviceLimit} — 5,461 tokens on a device that binds
+ * 256 MiB). A longer input is refused with a `ModelInputError` that names both limits, before the
+ * run (the runtime's own preflight of the intermediates stays behind it); a device whose limit is
+ * at least `pipelineConfig.maxTokens` never sees it. It is not an admission check: the device still
+ * runs every shorter text.
+ *
  * ## Cancellation (`signal`)
  *
  * Construction uses {@link FromPretrainedOptions.signal} (the fetch layer — as siglip2 / umt5);
@@ -34,7 +47,7 @@
  * ## MUST: numerical correctness is not guaranteed here
  *
  * It is guaranteed by the real-GPU e2e over the local distribution
- * (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts` — the seven golden texts against the
+ * (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts` — the ten golden texts against the
  * torch CPU goldens of the series, the token ids against the goldens' ids, and sha256 rows per
  * environment) and by the tokenizer's parity with upstream (`gemma4_tokenizer_test.ts`,
  * `embeddinggemma2_pipeline_test.ts`).
@@ -62,6 +75,7 @@ import {
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { isRecord } from "../config/readers.ts";
+import { ModelInputError } from "../errors.ts";
 import { parseGemmaTokenizerAsset } from "../gemma/text/asset.ts";
 import { Tokenizer } from "../gemma/text/tokenizer.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
@@ -126,6 +140,44 @@ const POOL_MASK = "pool_mask";
 
 /** The op that cuts a folded constant down to the bound length (ADR 0010). */
 const SYM_PREFIX_SLICE = "sym_prefix_slice";
+
+/**
+ * The row-block budget of the attention scores — the Session's `attentionRowBlockMaxBytes`, a fixed
+ * value of this family (not a caller option).
+ *
+ * Why: every attention node materialises its scores S, heads × T × T f32 (4 × T² × 4 bytes: 64 MiB
+ * at 2,048 tokens, 1 GiB at 8,192), and without a budget the device's binding limit alone decides
+ * the split — one block on a device that binds 2 GiB, so the 8,192-token plan holds a 1 GiB score
+ * buffer. With this budget S runs in row blocks of at most 128 MiB. Row blocks only reassign which
+ * rows a dispatch computes (ADR 0124), so the output is bit-identical to the unbudgeted run: the
+ * runtime's row-block parity tests check that as u32 identity, and on 2026-11-22 the budgeted
+ * outputs of the golden cases that split (3,062, 5,935 and 8,192 tokens) were measured identical,
+ * word for word, to the series' unbudgeted Session (the tolerance note of the pipeline e2e). The
+ * sha256 rows of the pipeline e2e pin the budgeted output itself; they do not compare it with an
+ * unbudgeted run.
+ *
+ * Measured on the RTX 3080 Ti under Node (2026-11-22, the bf16 mirror, two rounds of each arm;
+ * second run and fastest of three repeats, the plan backing, and the estimate's peak of accounted
+ * bytes with the 565 MiB of weights):
+ *
+ * | T     | Budget  | Second run       | Fastest repeat   | Plan backing | Peak accounted | Attention dispatches |
+ * | ----- | ------- | ---------------- | ---------------- | ------------ | -------------- | -------------------- |
+ * | 2,048 | none    | 152 / 139 ms     | 114 / 114 ms     | 236.1 MiB    | 821.1 MiB      | 72                   |
+ * | 2,048 | 128 MiB | 134 / 137 ms     | 113 / 114 ms     | 236.1 MiB    | 821.1 MiB      | 72                   |
+ * | 2,048 | 64 MiB  | 141 / 137 ms     | 115 / 113 ms     | 236.1 MiB    | 821.1 MiB      | 72                   |
+ * | 2,048 | 32 MiB  | 144 / 141 ms     | 117 / 117 ms     | 236.0 MiB    | 821.1 MiB      | 144                  |
+ * | 8,192 | none    | 922 / 949 ms     | 909 / 881 ms     | 1,648.3 MiB  | 2,213.4 MiB    | 72                   |
+ * | 8,192 | 128 MiB | 978 / 983 ms     | 927 / 940 ms     | 944.0 MiB    | 1,509.2 MiB    | 576                  |
+ * | 8,192 | 64 MiB  | 1,045 / 1,055 ms | 989 / 1,007 ms   | 912.0 MiB    | 1,477.2 MiB    | 1,152                |
+ * | 8,192 | 32 MiB  | 1,282 / 1,404 ms | 1,207 / 1,226 ms | 912.0 MiB    | 1,477.2 MiB    | 2,304                |
+ *
+ * 128 MiB takes 704 MiB off the 8,192-token plan for 2–7% of its time and leaves 2,048 tokens
+ * unchanged (S fits one block). Halving it to 64 MiB takes only 32 MiB more, for 8–14%: what is left
+ * (about 912 MiB) is the per-layer-embedding intermediates, which no attention budget moves, and
+ * 32 MiB moves nothing more for 35–40%. 128 MiB is also the WebGPU default binding limit, so the
+ * split is the same on every device that binds at least that much.
+ */
+const ATTENTION_ROW_BLOCK_BYTES = 128 * 2 ** 20;
 
 /** Construction options (shared by {@link Pipeline.fromAssets} / {@link Pipeline.fromPretrained}). */
 export type PipelineOptions = {
@@ -202,6 +254,86 @@ export type EmbeddingGemmaGraphContract = {
   readonly width: number;
   /** The row count of the embedding table `input_ids` indexes. */
   readonly vocabularySize: number;
+  /** The bytes per token of the graph's largest symbolic value (module doc "The device's token limit"). */
+  readonly bytesPerToken: number;
+};
+
+/** Bytes per element (every semantic dtype is 4 bytes — ADR 0009). */
+const BYTES_PER_ELEMENT = 4;
+
+/**
+ * The bytes per token of the largest value declared with `symbol`.
+ *
+ * MUST: every symbolic value holds `symbol` on exactly one axis, the rest static — a value with the
+ * length on two axes (a `[T, T]` mask or score) grows with T², and the per-token limit would not be
+ * its; that fails loudly here. A sliding window's mask is declared as the attention's band instead
+ * (`karume.band.to_band_form` in the recipe), which leaves no `[T, T]` value.
+ */
+const graphBytesPerToken = (model: GraphOwner, symbol: string): number => {
+  let largest = 0;
+  for (const [name, value] of Object.entries(model.graph.values)) {
+    const symbolic = value.shape.filter((dim) => typeof dim !== "number");
+    if (symbolic.length === 0) continue;
+    if (symbolic.length !== 1 || symbolic[0] !== symbol) {
+      throw new Error(
+        `${OWNER}: graph value '${name}' is [${value.shape.join(", ")}] — every symbolic value must` +
+          ` hold '${symbol}' on exactly one axis (the device's token limit is read per token; a` +
+          ` ${symbol} × ${symbol} mask must be declared as the attention's band instead)`,
+      );
+    }
+    const elements = value.shape.reduce<number>(
+      (product, dim) => (typeof dim === "number" ? product * dim : product),
+      1,
+    );
+    largest = Math.max(largest, elements * BYTES_PER_ELEMENT);
+  }
+  return largest;
+};
+
+/** The device limits the token limit is read from (`GpuContext.limits`). */
+export type EmbeddingGemmaDeviceLimits = {
+  readonly maxStorageBufferBindingSize: number;
+  readonly maxBufferSize: number;
+};
+
+/** The longest input one device runs (module doc "The device's token limit"). */
+export type EmbeddingGemmaDeviceLimit = {
+  /** The most tokens of one input, `<bos>` and `<eos>` included. */
+  readonly maxTokens: number;
+  /** The bytes per token of the graph's largest intermediate. */
+  readonly bytesPerToken: number;
+  /** The one storage buffer it must fit (the smaller of the binding and the buffer limit). */
+  readonly bindingBytes: number;
+};
+
+/**
+ * The device's token limit for the graph of `contract`: its binding limit over the largest bytes per
+ * token.
+ *
+ * NOTE: the `export` is for the host tests (not on `mod.ts` / the subpath surface — ADR 0008).
+ */
+export const embeddingGemmaDeviceLimit = (
+  contract: Pick<EmbeddingGemmaGraphContract, "bytesPerToken">,
+  limits: EmbeddingGemmaDeviceLimits,
+): EmbeddingGemmaDeviceLimit => {
+  const bindingBytes = Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
+  return {
+    maxTokens: Math.floor(bindingBytes / contract.bytesPerToken),
+    bytesPerToken: contract.bytesPerToken,
+    bindingBytes,
+  };
+};
+
+/** Refuses an input longer than the device runs (nothing is truncated). */
+const assertDeviceTokenLimit = (count: number, limit: EmbeddingGemmaDeviceLimit): void => {
+  if (count <= limit.maxTokens) return;
+  throw new ModelInputError(
+    `${OWNER}: the input is ${count} tokens (<bos> and <eos> included), over this device's limit of` +
+      ` ${limit.maxTokens} — the graph's largest intermediate (${limit.bytesPerToken} B per token)` +
+      ` must fit one storage buffer of ${limit.bindingBytes} B (the device's` +
+      " maxStorageBufferBindingSize / maxBufferSize); nothing is truncated — shorten the text or" +
+      " split it",
+  );
 };
 
 /** A graph input by name (fails loudly when absent). */
@@ -283,6 +415,8 @@ const graphSymbolMaximum = (model: GraphOwner, symbol: string): number | undefin
  * - The graph's maximum of T (read from its folded constants) equals `pipelineConfig.maxTokens`:
  *   a smaller declaration would refuse lengths the graph runs, a larger one would let a length
  *   through that fails only when the run is planned.
+ * - Every symbolic value holds T on one axis; the largest of them gives the bytes per token the
+ *   device's token limit is read from.
  *
  * NOTE: the `export` is for the host tests (not on `mod.ts` / the subpath surface — ADR 0008).
  */
@@ -367,7 +501,7 @@ export const embeddingGemmaGraphContract = (
         ` ${maximum} (the bound of its folded constants)`,
     );
   }
-  return { output, width, vocabularySize };
+  return { output, width, vocabularySize, bytesPerToken: graphBytesPerToken(model, symbol) };
 };
 
 /** The part of a Session the embedder uses (narrow, so a host test can stand in for the GPU). */
@@ -379,6 +513,12 @@ export type EmbedderParts = {
   readonly session: EmbeddingSession;
   readonly contract: EmbeddingGemmaGraphContract;
   readonly rules: EmbedTextRules;
+  /**
+   * The limits of the Session's device; the embedder derives the longest input it runs from them and
+   * `contract.bytesPerToken` ({@link embeddingGemmaDeviceLimit}), so the bytes per token have one
+   * source.
+   */
+  readonly deviceLimits: EmbeddingGemmaDeviceLimits;
   /**
    * Runs after the Session is disposed, even if that fails (the pipeline destroys a GPU it
    * acquired itself here).
@@ -428,6 +568,8 @@ const readEmbedding = (
  */
 export class Embedder {
   readonly #parts: EmbedderParts;
+  /** The longest input the Session's device runs (derived once from the parts). */
+  readonly #deviceLimit: EmbeddingGemmaDeviceLimit;
   /** The serialization chain of embed and dispose (module doc). */
   readonly #chain = createOperationChain();
   /** The single dispose. **Not undefined means "disposed"** (no separate flag to keep in step). */
@@ -435,6 +577,7 @@ export class Embedder {
 
   constructor(parts: EmbedderParts) {
     this.#parts = parts;
+    this.#deviceLimit = embeddingGemmaDeviceLimit(parts.contract, parts.deviceLimits);
   }
 
   /**
@@ -450,6 +593,7 @@ export class Embedder {
     if (this.#disposal !== undefined) throw new Error(`${OWNER}: cannot embed after dispose`);
     // Refusals return without waiting for the turn (the plan is pure).
     const request = planEmbedRequest(this.#parts.rules, input, options);
+    assertDeviceTokenLimit(request.ids.length, this.#deviceLimit);
     return await this.#chain(() => this.#run(request, options.signal));
   }
 
@@ -652,9 +796,13 @@ const buildEmbedder = async (
       `${OWNER}: quant '${quantName}'`,
     );
     return new Embedder({
-      session: await model.createSession(gpu, sessionOptions),
+      session: await model.createSession(gpu, {
+        ...sessionOptions,
+        attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
+      }),
       contract,
       rules,
+      deviceLimits: gpu.limits,
       release: () => {
         if (ownsGpu) gpu.destroy();
       },
@@ -772,7 +920,8 @@ export class Pipeline {
    * Refused with a `ModelInputError`, before the GPU is touched: an empty part array, a part of a
    * type the model does not accept, an unknown prompt, an undeclared width, a text whose tokens
    * include an image / audio / video placeholder id, and a sequence longer than the model's limit
-   * (`<bos>` and `<eos>` included — nothing is truncated).
+   * or than this device runs (its storage-buffer limit — the module doc; `<bos>` and `<eos>`
+   * included — nothing is truncated).
    *
    * Concurrent calls **wait and run in order** (one Session is never shared by two runs).
    */

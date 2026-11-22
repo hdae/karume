@@ -1072,8 +1072,10 @@ disposes the old pipeline. A new GPU and leaving the page dispose it too.
 | GPU timing | As on the SigLIP 2 page: the GPU is acquired again with `gpuTiming: true`, the next run rebuilds the pipeline, and every embedded row records its GPU time per kernel. |
 
 A row the pipeline **refuses** (`ModelInputError` — a prompt the model does not declare, a text over
-`pipelineConfig.maxTokens` tokens with the prefix, `<bos>` and `<eos>`, a text holding the image,
-audio or video placeholder token) gets the refusal as its result, name and message as raised, and
+`pipelineConfig.maxTokens` tokens with the prefix, `<bos>` and `<eos>`, or over what this device
+runs (its buffer limit over the graph's bytes per token — the count marks only `maxTokens`), a text
+holding the image, audio or video placeholder token) gets the refusal as its result, name and
+message as raised, and
 the run goes on with the next row. Any other failure (the GPU, the Session, the build) ends the run
 and the status card shows it in full.
 

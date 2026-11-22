@@ -320,7 +320,7 @@ class TestPipelineConfig:
 
     def test_the_token_bound_is_the_graphs(self, assembled) -> None:
         _, manifest = assembled
-        assert _model(manifest)["pipelineConfig"]["maxTokens"] == 2048
+        assert _model(manifest)["pipelineConfig"]["maxTokens"] == 8192
 
     def test_the_placeholders_come_from_the_upstream_config(self, assembled) -> None:
         """The synthetic ids differ from the real ones — hard-coded ids would show."""
@@ -527,6 +527,7 @@ class TestLegalText:
             assert f"`{EMBEDDINGGEMMA2_UPSTREAM[name]}`" in notice
         assert "**text tower only**" in notice
         assert "keep the checkpoint's BF16 values unchanged" in notice
+        assert "replaced by a band declared on the attention" in notice
         # The weights are not rounded, so no quantized form is claimed.
         assert "quantiz" not in notice
         assert "int8" not in notice
