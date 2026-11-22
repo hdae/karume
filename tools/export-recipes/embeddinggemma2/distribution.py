@@ -70,6 +70,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
 from _shared.upstream import assert_upstream_provenance
 from embeddinggemma2 import sources as upstream_sources
@@ -650,9 +651,14 @@ def assert_embeddinggemma2_vision_graph(
 
     The reader binds `pixels` f32 `[1, pooling² · n, patch² · 3]` and `position_x` / `position_y`
     i32 `[1, pooling² · n]` by name and reads one f32 `[1, n, hidden]` output — the text graph's
-    soft rows; one symbol, no state. MUST: the tables gathered by the positions cover the longest
-    side the resize rule gives at the budget (`pooling · budget` patches — the reader checks the
-    same), or a long thin image would read past their end on the user's machine.
+    soft rows; one symbol, no state. MUST: both position inputs gather a table (the reader requires
+    the same), and the tables gathered by the positions cover the longest side the resize rule
+    gives at the budget (`pooling · budget` patches — the reader checks the same), or a long thin
+    image would read past their end on the user's machine. MUST: a table gathered by both positions
+    (the folded RoPE `cos` / `sin`, one table serving both axes) is stored f32 — its values are
+    upstream's rotary module, not bf16 checkpoint values, and a bf16 copy would move every rotation
+    while every shape still holds (the learned position tables, one per axis, are bf16 in the bf16
+    tower).
     """
     symbol = EMBEDDINGGEMMA2_VISION_SYMBOL
     rows = f"{processor.pooling * processor.pooling}{symbol}"
@@ -683,16 +689,38 @@ def assert_embeddinggemma2_vision_graph(
             f"{path}: the vision graph's output is {output!r}, not f32 [1, {symbol!r}, {hidden}]"
             " — the text graph's soft rows"
         )
-    positions = [
-        values.get(node["ins"][0], {}).get("shape", [None])[0]
+    position_inputs = {name for name, _ in EMBEDDINGGEMMA2_VISION_INPUTS[1:]}
+    gathers = [
+        (node["ins"][0], node["ins"][1])
         for node in graph.get("nodes", [])
         if isinstance(node, dict)
         and node.get("op") == "embedding"
-        and node["ins"][1] in {name for name, _ in EMBEDDINGGEMMA2_VISION_INPUTS[1:]}
+        and node["ins"][1] in position_inputs
     ]
+    positions = [values.get(table, {}).get("shape", [None])[0] for table, _ in gathers]
     if not positions or not all(isinstance(count, int) for count in positions):
         raise DistError(
             f"{path}: the vision graph gathers no table of static rows by the positions"
+        )
+    gathered = {index for _, index in gathers}
+    if gathered != position_inputs:
+        raise DistError(
+            f"{path}: the vision graph gathers tables by {sorted(gathered)} only, not by both"
+            f" {sorted(position_inputs)}"
+        )
+    axes: dict[str, set[str]] = {}
+    for table, index in gathers:
+        axes.setdefault(table, set()).add(index)
+    layouts = read_layouts(path)
+    rounded = {
+        table: layouts.get(table)
+        for table, indices in sorted(axes.items())
+        if indices == position_inputs and layouts.get(table) != "f32"
+    }
+    if rounded:
+        raise DistError(
+            f"{path}: the vision graph's tables gathered by both positions (the folded RoPE) are"
+            f" stored {rounded}, not f32"
         )
     longest = processor.pooling * processor.budget
     if min(positions) < longest:

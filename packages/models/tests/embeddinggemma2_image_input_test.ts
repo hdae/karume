@@ -5,21 +5,27 @@
  *
  * ① `pipelineConfig.vision`: the distribution's shape (the Gemma 4 family's reader) and its tie to
  *    the image placeholder.
- * ② The host preprocessing (`imagePatchRows`) of the fixture's four images: the resize rule's sizes
- *    (the 1190 × 17 rounding edge included), the block order of the rows, and the bytes of the
- *    pixels and of both position arrays, equal to the vision series' io inputs (their sha256 pinned
- *    here; with `KARUME_SERIES=1` and the series present, read from the io files too).
+ * ② The host preprocessing (`imagePatchRows`) of the fixture's five images: the resize rule's sizes
+ *    (the 1190 × 17 rounding edge and the 840-patch side included), the block order of the rows,
+ *    and the bytes of the pixels and of both position arrays, equal to the vision series' io inputs
+ *    (their sha256 pinned here; with `KARUME_SERIES=1` and the series present, read from the io
+ *    files too).
  * ③ The sequence of an input holding images (`planEmbedRequest` / `tokenizeEmbedInput`): the image
  *    blocks, the text runs, the prompt's prefix before an image, the limit counting the soft tokens,
- *    and every refusal — an image part without the vision tower names how to build one with it.
+ *    and every refusal — an image part without the vision tower names how to build one with it; and
+ *    the ids of the fixture's id cases (spaces, newlines and tabs at a run's boundary, an empty text
+ *    between images, Japanese, a prompt before an image) equal upstream's exactly.
  * ④ The tower graph's contract (`embeddingGemmaVisionContract`).
  * ⑤ The run over stand-in Sessions (`Embedder`): one tower run per image, its output placed at the
  *    image's soft rows with the mask set there and nowhere else, a text call as without the tower,
- *    the pixels read at issue, cancellation between the runs, dispose of both Sessions.
+ *    the pixels read at issue, two queued calls holding images, cancellation before and between the
+ *    runs, dispose of both Sessions; and their opening (`openEmbedder`): both Sessions take the
+ *    row-block budget, and a failure disposes what was opened and releases.
  * ⑥ `Pipeline.fromAssets` with `vision`: the admission's refusals, before any GPU.
  */
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
+import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -28,6 +34,7 @@ import {
   type RunInputs,
   type RunOutputs,
   type SafetensorsFile,
+  type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -48,7 +55,9 @@ import {
 import {
   Embedder,
   type EmbeddingGemmaGraphContract,
+  type EmbeddingGraph,
   type EmbeddingSession,
+  openEmbedder,
   Pipeline,
 } from "../src/embeddinggemma/pipeline.ts";
 import {
@@ -155,6 +164,17 @@ type MultimodalFixture = {
     readonly height: number;
     readonly resized: { readonly width: number; readonly height: number };
     readonly softTokens: number;
+  }[];
+  /** The inputs whose ids alone upstream's processor pinned (`ID_CASES` of the script). */
+  readonly idCases: readonly {
+    readonly name: string;
+    readonly parts: readonly (
+      | { readonly type: "text"; readonly text: string }
+      | { readonly type: "image"; readonly image: string }
+    )[];
+    readonly prompt?: string;
+    readonly tokens: number;
+    readonly imageBlocks: readonly { readonly start: number; readonly softTokens: number }[];
   }[];
 };
 
@@ -289,6 +309,12 @@ const SERIES_DIGESTS: Readonly<
     x: "9aceb1db27159e280d296212cd69f7b4ec19425688241e7ab1cdae3c61e7b8bf",
     y: "b0a1f080c2685eec86846514c475e1eb53d4b5cb028e1b9106f12f85009ddc2b",
   },
+  // Taken on 2026-11-22 from the series' io file of the 840 × 3 strip (its columns reach 839).
+  "gradient-strip": {
+    pixels: "27bf9da21192a2e599641f0641ac6790e7fd560177ce8936b94438ba3f285384",
+    x: "d84d8d8a0954f926950b185b0cb74b1833735c5c92f2d3770e221f211e2b9348",
+    y: "cc8f9149ecccf17e41208d227fed17389f59d4e11f8865c87005b3f78fab73d3",
+  },
 };
 
 const BUDGET = 280;
@@ -311,7 +337,7 @@ const exists = (url: URL): boolean => {
 };
 
 describe("imagePatchRows: the fixture's images as the tower reads them", () => {
-  it("covers the four images of the fixture, the rounding edge among them (a positive control)", () => {
+  it("covers the five images of the fixture, the rounding edge and the longest side among them (a positive control)", () => {
     assertEquals(
       Object.keys(SERIES_DIGESTS).sort(),
       MULTIMODAL.images.map(({ name }) => name).sort(),
@@ -357,6 +383,13 @@ describe("imagePatchRows: the fixture's images as the tower reads them", () => {
       },
     );
   }
+
+  it("reaches the last row of the tower's position tables on the longest side (840 patches)", () => {
+    const rows = imagePatchRows(fixtureImage("gradient-strip"), BUDGET);
+    assertEquals(rows.softTokens, 280);
+    assertEquals(Math.max(...rows.positionX), 839);
+    assertEquals(Math.max(...rows.positionY), 2);
+  });
 
   it("orders the rows by 3 × 3 block, each block's 9 patches in raster order", () => {
     // gradient-square resizes to 768 × 768: 48 × 48 patches, 16 blocks per row of blocks.
@@ -579,6 +612,36 @@ describe("planEmbedRequest with image parts: the sequence", () => {
       "pass fewer images",
     );
   });
+});
+
+/** The ids upstream ran for a fixture case (`<case>.input_ids`, I32). */
+const fixtureIds = (name: string): number[] => {
+  const bytes = tensorBytes(MULTIMODAL_TENSORS, `${name}.input_ids`);
+  return [...new Int32Array(bytes.slice().buffer)];
+};
+
+describe("planEmbedRequest with image parts: the ids of upstream's processor at run boundaries", () => {
+  it("covers the fixture's seven id cases (a positive control)", () => {
+    assertEquals(MULTIMODAL.idCases.length, 7);
+  });
+
+  for (const entry of MULTIMODAL.idCases) {
+    it(`${entry.name}: the ids and each image's soft rows are upstream's exactly`, () => {
+      const parts: readonly EmbedContentPart[] = entry.parts.map((part) =>
+        part.type === "text" ? part : { type: "image", image: fixtureImage(part.image) },
+      );
+      const options = entry.prompt === undefined ? {} : { prompt: entry.prompt };
+      const request = planEmbedRequest(IMAGE_RULES, parts, options);
+      const expected = fixtureIds(entry.name);
+      assertEquals(idsOf(request), expected);
+      assertEquals(expected.length, entry.tokens);
+      assertEquals([...tokenizeEmbedInput(IMAGE_RULES, parts, options)], expected);
+      assertEquals(
+        request.images.map(({ start, softTokens }) => ({ start, softTokens })),
+        entry.imageBlocks.map(({ start, softTokens }) => ({ start, softTokens })),
+      );
+    });
+  }
 });
 
 describe("planEmbedRequest with image parts: the refusals", () => {
@@ -1001,6 +1064,84 @@ describe("Embedder with the vision tower: the runs of a call holding images", ()
     assertEquals([tower.runs.length, text.runs.length], [1, 0]);
   });
 
+  it("runs two queued calls that both hold images one after the other, each with its own image", async () => {
+    let open: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let towerRuns = 0;
+    const { embedder, text, tower, events } = rig({
+      tower: true,
+      gate: async () => {
+        towerRuns += 1;
+        if (towerRuns === 1) await held;
+      },
+    });
+    const first = embedder.embed([{ type: "image", image: WIDE }]);
+    const second = embedder.embed([
+      { type: "text", text: "a" },
+      { type: "image", image: SQUARE },
+    ]);
+    // The second call waits for its turn while the first one's tower run is held.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(events, ["vision.run"]);
+    open();
+    await Promise.all([first, second]);
+
+    assertEquals(events, ["vision.run", "model.run", "vision.run", "model.run"]);
+    assertEquals(
+      tower.runs.map((inputs) => hostInput(inputs, "pixels").shape[1]),
+      [WIDE_TOKENS * 9, SQUARE_TOKENS * 9],
+    );
+    assertEquals(
+      bytesOf(hostInput(tower.runs[1], "pixels").data),
+      bytesOf(imagePatchRows(SQUARE, BUDGET).pixels),
+    );
+    const start =
+      planEmbedRequest(
+        SMALL_RULES,
+        [
+          { type: "text", text: "a" },
+          { type: "image", image: SQUARE },
+        ],
+        {},
+      ).images[0]?.start ?? -1;
+    const firstRows = softRowsOf(text.runs[0]);
+    const secondRows = softRowsOf(text.runs[1]);
+    assertEquals(firstRows.masked, range(2, WIDE_TOKENS));
+    assertEquals(secondRows.masked, range(start, SQUARE_TOKENS));
+    // The second call's soft rows are its own tower run's (the second), not the first call's.
+    assertEquals(secondRows.rows.get(start)?.[0], 2000);
+    assertEquals([...secondRows.rows.keys()], range(start, SQUARE_TOKENS));
+  });
+
+  it("stops before any tower run when the signal is aborted while the call waits for its turn", async () => {
+    let open: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let towerRuns = 0;
+    const { embedder, text, tower } = rig({
+      tower: true,
+      gate: async () => {
+        towerRuns += 1;
+        if (towerRuns === 1) await held;
+      },
+    });
+    const first = embedder.embed([{ type: "image", image: WIDE }]);
+    const controller = new AbortController();
+    const reason = new Error("stop before the image");
+    const second = embedder
+      .embed([{ type: "image", image: SQUARE }], { signal: controller.signal })
+      .catch((error: unknown) => error);
+    controller.abort(reason);
+    open();
+    await first;
+    assertStrictEquals(await second, reason);
+    assertEquals([tower.runs.length, text.runs.length], [1, 1]);
+    assertEquals(hostInput(tower.runs[0], "pixels").shape[1], WIDE_TOKENS * 9);
+  });
+
   it("fails loudly on a tower output of another row count", async () => {
     const events: string[] = [];
     const embedder = new Embedder({
@@ -1081,6 +1222,162 @@ describe("Embedder with the vision tower: the runs of a call holding images", ()
       Error,
       "the image rules and the vision tower are not built together",
     );
+  });
+});
+
+/** A device that binds 2 GiB (the stand-in GPU of {@link openEmbedder}'s tests). */
+const LIMITED_GPU = (): GpuContext =>
+  new GpuContext(
+    fakeDevice(),
+    readAdapterInfo({}),
+    {
+      maxBufferSize: 2 ** 40,
+      maxStorageBufferBindingSize: 2147483644,
+      maxUniformBufferBindingSize: 65536,
+      maxStorageBuffersPerShaderStage: 10,
+      maxUniformBuffersPerShaderStage: 12,
+      maxComputeWorkgroupStorageSize: 16384,
+      maxComputeInvocationsPerWorkgroup: 256,
+      maxComputeWorkgroupSizeX: 256,
+      maxComputeWorkgroupSizeY: 256,
+      maxComputeWorkgroupSizeZ: 64,
+      maxComputeWorkgroupsPerDimension: 65535,
+    },
+    new Set(),
+  );
+
+/** A stand-in graph: records the settings its Session is opened with, fails when told to. */
+const graphOf = (
+  name: string,
+  events: string[],
+  settings: SessionOptions[],
+  failures: { readonly open?: Error; readonly dispose?: Error } = {},
+): EmbeddingGraph => ({
+  createSession: async (_gpu, options) => {
+    events.push(`${name}.open`);
+    settings.push(options);
+    if (failures.open !== undefined) throw failures.open;
+    const stand = standIn(name, events, name === "vision" ? towerAnswer : textAnswer);
+    return {
+      ...stand.session,
+      dispose: async () => {
+        events.push(`${name}.dispose`);
+        if (failures.dispose !== undefined) throw failures.dispose;
+      },
+    };
+  },
+});
+
+/** A quant's effective settings (one knob, so the test sees them passed through). */
+const QUANT_SETTINGS: SessionOptions = { numerics: { level: "reorder" } };
+
+/** The family's row-block budget of the attention scores (`ATTENTION_ROW_BLOCK_BYTES`). */
+const ROW_BLOCK_BYTES = 128 * 2 ** 20;
+
+describe("openEmbedder: the Sessions of a pipeline with the tower, and their clean-up", () => {
+  const opening = (
+    events: string[],
+    settings: SessionOptions[],
+    overrides: {
+      readonly model?: EmbeddingGraph;
+      readonly tower?: EmbeddingGraph;
+      readonly towerContract?: EmbeddingGemmaVisionContract;
+      readonly assertGpu?: () => void;
+      readonly release?: () => void;
+    } = {},
+  ) =>
+    openEmbedder({
+      gpu: LIMITED_GPU(),
+      assertGpu: overrides.assertGpu ?? (() => {}),
+      model: overrides.model ?? graphOf("model", events, settings),
+      tower: {
+        graph: overrides.tower ?? graphOf("vision", events, settings),
+        contract: overrides.towerContract ?? TOWER_CONTRACT,
+      },
+      sessionOptions: QUANT_SETTINGS,
+      contract: TEXT_CONTRACT,
+      rules: SMALL_RULES,
+      release:
+        overrides.release ??
+        (() => {
+          events.push("release");
+        }),
+    });
+
+  it("opens the text graph's Session, then the tower's, both with the quant's settings and the row-block budget", async () => {
+    const events: string[] = [];
+    const settings: SessionOptions[] = [];
+    const embedder = await opening(events, settings);
+    const expected = { ...QUANT_SETTINGS, attentionRowBlockMaxBytes: ROW_BLOCK_BYTES };
+    assertEquals(settings, [expected, expected]);
+    await embedder.embed([{ type: "image", image: SQUARE }]);
+    await embedder.dispose();
+    assertEquals(events, [
+      "model.open",
+      "vision.open",
+      "vision.run",
+      "model.run",
+      "model.dispose",
+      "vision.dispose",
+      "release",
+    ]);
+  });
+
+  it("disposes the text Session and releases when the tower's Session fails to open", async () => {
+    const events: string[] = [];
+    const failure = new Error("the tower's Session failed");
+    const caught = await opening(events, [], {
+      tower: graphOf("vision", events, [], { open: failure }),
+    }).catch((error: unknown) => error);
+    assertStrictEquals(caught, failure);
+    assertEquals(events, ["model.open", "vision.open", "model.dispose", "release"]);
+  });
+
+  it("disposes both Sessions and releases when the embedder refuses its parts", async () => {
+    const events: string[] = [];
+    await assertRejects(
+      () => opening(events, [], { towerContract: { ...TOWER_CONTRACT, width: WIDTH + 1 } }),
+      Error,
+      `the vision graph's soft tokens are ${WIDTH + 1} wide, the text graph's soft rows ${WIDTH}`,
+    );
+    assertEquals(events, [
+      "model.open",
+      "vision.open",
+      "model.dispose",
+      "vision.dispose",
+      "release",
+    ]);
+  });
+
+  it("releases before any Session is opened when the GPU checks fail", async () => {
+    const events: string[] = [];
+    const failure = new Error("a feature is missing");
+    const caught = await opening(events, [], {
+      assertGpu: () => {
+        throw failure;
+      },
+    }).catch((error: unknown) => error);
+    assertStrictEquals(caught, failure);
+    assertEquals(events, ["release"]);
+  });
+
+  it("throws both failures in an AggregateError when the clean-up fails too, and still runs every step", async () => {
+    const events: string[] = [];
+    const failure = new Error("the tower's Session failed");
+    const cleanup = new Error("the text Session's dispose failed");
+    const caught = await opening(events, [], {
+      model: graphOf("model", events, [], { dispose: cleanup }),
+      tower: graphOf("vision", events, [], { open: failure }),
+    }).catch((error: unknown) => error);
+    assert(caught instanceof AggregateError, `not an AggregateError: ${String(caught)}`);
+    assertEquals(
+      caught.message,
+      "embeddinggemma.Pipeline: construction failed, and so did its clean-up",
+    );
+    assertEquals(caught.errors.length, 2);
+    assertStrictEquals(caught.errors[0], failure);
+    assertStrictEquals(caught.errors[1], cleanup);
+    assertEquals(events, ["model.open", "vision.open", "model.dispose", "release"]);
   });
 });
 

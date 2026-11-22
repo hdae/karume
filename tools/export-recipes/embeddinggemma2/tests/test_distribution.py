@@ -161,11 +161,14 @@ def _write_vision_container(
     row_width: int = 768,
     revision: str = FIXTURE_REVISION,
     license: str = eg2.EMBEDDINGGEMMA2_LICENSE,
+    gathered_by: tuple[str, ...] = ("position_x", "position_y"),
+    rope_storage: str = "f32",
 ) -> None:
     """Write the smallest container of the tower graph's contract (`pixels` f32 `[1, 9n, 768]`,
     `position_x` / `position_y` i32 `[1, 9n]` in, one f32 `[1, n, width]` out, a projection and a
     folded table of `positions` rows gathered by both positions — kept f32, as the export keeps
-    its rotary tables) as a series component."""
+    its rotary tables) as a series component. `gathered_by` and `rope_storage` break the table's
+    gathers and its storage."""
     symbol = eg2.EMBEDDINGGEMMA2_VISION_SYMBOL
     rows = f"9{symbol}"
     graph = IrGraph(symbols=[symbol])
@@ -181,29 +184,30 @@ def _write_vision_container(
         )
         / 8,
         "bias": torch.zeros(width, dtype=torch.float32),
-        "rope": torch.full((positions, 2), 1 / 3, dtype=torch.float32),
+        # 1/3 is no bf16 value, so the bf16 write refuses it unless it is kept f32 (as upstream's
+        # rotary values are); 1/2 is one, for the fault of a table stored bf16.
+        "rope": torch.full(
+            (positions, 2), 1 / 3 if rope_storage == "f32" else 1 / 2, dtype=torch.float32
+        ),
         "seed": torch.ones(1, 1, dtype=torch.float32),
     }
     for name, tensor in tensors.items():
         graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage("f32"))
         graph.values[name] = IrValue("f32", list(tensor.shape))
     graph.values["projected"] = IrValue("f32", [1, rows, width])
-    graph.values["rope_x"] = IrValue("f32", [1, rows, 2])
-    graph.values["rope_y"] = IrValue("f32", [1, rows, 2])
+    for axis in gathered_by:
+        graph.values[f"rope_{axis[-1]}"] = IrValue("f32", [1, rows, 2])
     graph.values["soft"] = IrValue("f32", [1, symbol, width])
     graph.nodes += [
         IrNode(op="linear", ins=["pixels", "projection", "bias"], outs=["projected"], attrs={}),
-        IrNode(
-            op="embedding",
-            ins=["rope", "position_x"],
-            outs=["rope_x"],
-            attrs={"padding_idx": -1},
-        ),
-        IrNode(
-            op="embedding",
-            ins=["rope", "position_y"],
-            outs=["rope_y"],
-            attrs={"padding_idx": -1},
+        *(
+            IrNode(
+                op="embedding",
+                ins=["rope", axis],
+                outs=[f"rope_{axis[-1]}"],
+                attrs={"padding_idx": -1},
+            )
+            for axis in gathered_by
         ),
         IrNode(op="expand", ins=["seed"], outs=["soft"], attrs={}),
     ]
@@ -218,7 +222,7 @@ def _write_vision_container(
         tensors,
         weight_dtype=weight_dtype,
         weight_scales=scales,
-        weight_dtype_overrides={"rope": "f32"},
+        weight_dtype_overrides={"rope": rope_storage},
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     publish_container(
@@ -955,6 +959,28 @@ class TestVisionTower:
 
         with pytest.raises(
             DistError, match=f"cover {POSITIONS - 1} positions, but an image side reaches"
+        ):
+            fixture.plan()
+
+    @pytest.mark.parametrize("axis", ["position_x", "position_y"])
+    def test_a_tower_that_gathers_by_one_position_alone_is_refused(
+        self, fixture: Fixture, axis: str
+    ) -> None:
+        """The reader requires a table gathered by each axis (it reads the positions covered from
+        both); a table of enough rows gathered by one axis alone is refused here too."""
+        fixture.rewrite_vision(gathered_by=(axis,))
+
+        with pytest.raises(DistError, match=rf"gathers tables by \['{axis}'\] only, not by both"):
+            fixture.plan()
+
+    def test_rope_tables_stored_bf16_are_refused(self, fixture: Fixture) -> None:
+        """bf16 is the tower role's own storage, so the forbidden table lets the rounded table
+        through; the check of the tables gathered by both positions does not."""
+        fixture.rewrite_vision(rope_storage="bf16")
+
+        with pytest.raises(
+            DistError,
+            match=r"gathered by both positions \(the folded RoPE\) are stored \{'rope': 'bf16'\}",
         ):
             fixture.plan()
 

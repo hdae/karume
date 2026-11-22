@@ -4,6 +4,7 @@
     "Upstream: SentenceTransformer of the pinned snapshot, f32 on the CPU; each case is one `encode` call of an upstream dict input (its keys in the parts' order; an audio as its f32 samples at 16 kHz), with the prompt name when the case has one.",
     "The tensors of multimodal-reference.safetensors: `image.<name>` U8 [height, width, 3] (row-major RGB8, what upstream's processor read), `audio.<name>` F32 [samples] (16 kHz mono, what upstream's processor read), `audio.<name>.features` F32 [L, 128] (the valid log-mel frames upstream's feature extractor made of them; its frames after them are zeros), `<case>.input_ids` I32 [T] (the ids the composite model received, `<bos>` and `<eos>` included, each image as `<|image>` + n x `<|image|>` + `<image|>`, each audio as `<|audio>` + m x `<|audio|>` + `<audio|>`), `<case>.embedding` F32 [768] (the normalised vector `encode` returned).",
     "`cases` hold images only; `audioCases` hold an audio (and an image in one of them).",
+    "`idCases` pin the ids alone where a text meets an image (no vector): each is one user message of content parts in order, its ids caught as for the other cases.",
     "`composition` is Karume's graphs composed in torch f32 (the tower wrappers' soft tokens at the placeholder rows of the text wrapper) against upstream's vector.",
     "The images and waveforms are synthetic and neutral (tools/export-recipes/embeddinggemma2/images.py, waveforms.py); do not add others."
   ],
@@ -66,6 +67,17 @@
         "height": 48
       },
       "softTokens": 139
+    },
+    {
+      "name": "gradient-strip",
+      "why": "the longest side the resize rule gives (840 patches: positions 0 \u2026 839)",
+      "width": 840,
+      "height": 3,
+      "resized": {
+        "width": 13440,
+        "height": 48
+      },
+      "softTokens": 280
     }
   ],
   "cases": [
@@ -343,6 +355,190 @@
         "maxAbs": 5.029141902923584e-8,
         "cosine": 0.9999999999999164
       }
+    }
+  ],
+  "idCases": [
+    {
+      "name": "trailing-space-before-image",
+      "why": "a text whose trailing space meets an image",
+      "parts": [
+        {
+          "type": "text",
+          "text": "trailing "
+        },
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        }
+      ],
+      "tokens": 145,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 4,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "leading-space-after-image",
+      "why": "an image, then a text with a leading space",
+      "parts": [
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": " leading"
+        }
+      ],
+      "tokens": 144,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 2,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "empty-text-between-images",
+      "why": "an empty text part between two images",
+      "parts": [
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": ""
+        },
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        }
+      ],
+      "tokens": 284,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 2,
+          "softTokens": 139
+        },
+        {
+          "image": "stripes-edge",
+          "start": 143,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "newline-and-tab-at-boundaries",
+      "why": "a newline before and after an image, a tab at both ends of the input",
+      "parts": [
+        {
+          "type": "text",
+          "text": "a\tb\n"
+        },
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": "\nc\t"
+        }
+      ],
+      "tokens": 150,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 6,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "japanese-around-image",
+      "why": "Japanese text before and after an image",
+      "parts": [
+        {
+          "type": "text",
+          "text": "\u3080\u304b\u3057\u3080\u304b\u3057\u3001"
+        },
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": "\u304a\u3058\u3044\u3055\u3093\u3068\u304a\u3070\u3042\u3055\u3093"
+        }
+      ],
+      "tokens": 156,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 7,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "prompt-before-image-first",
+      "why": "a prompt's prefix before an input that starts with an image (a run of its own)",
+      "parts": [
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": "The quick brown fox."
+        }
+      ],
+      "prompt": "query",
+      "tokens": 156,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 10,
+          "softTokens": 139
+        }
+      ]
+    },
+    {
+      "name": "prompt-image-text-image",
+      "why": "a prompt's prefix, an image, a text with a space at both ends, another image",
+      "parts": [
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        },
+        {
+          "type": "text",
+          "text": " leading "
+        },
+        {
+          "type": "image",
+          "image": "stripes-edge"
+        }
+      ],
+      "prompt": "document",
+      "tokens": 293,
+      "imageBlocks": [
+        {
+          "image": "stripes-edge",
+          "start": 9,
+          "softTokens": 139
+        },
+        {
+          "image": "stripes-edge",
+          "start": 152,
+          "softTokens": 139
+        }
+      ]
     }
   ]
 }

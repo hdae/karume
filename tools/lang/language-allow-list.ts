@@ -217,6 +217,11 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "tools/export-recipes/embeddinggemma/export.py", why: TOKENIZER_CASES, maxLines: 1 },
   { path: "tools/export-recipes/embeddinggemma/tokenizer.py", why: TOKENIZER_CASES, maxLines: 1 },
   { path: "tools/export-recipes/embeddinggemma2/export.py", why: TOKENIZER_CASES, maxLines: 1 },
+  {
+    path: "tools/export-recipes/embeddinggemma2/multimodal_reference.py",
+    why: TOKENIZER_CASES,
+    maxLines: 1,
+  },
   { path: "tools/export-recipes/embeddinggemma2/tokenizer.py", why: TOKENIZER_CASES, maxLines: 2 },
   {
     path: "tools/export-recipes/gemma4/chat.py",

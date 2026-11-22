@@ -105,7 +105,17 @@ export const imagePatchRows = (image: Rgb8Image, budget: number): ImagePatchRows
           for (let y = 0; y < PATCH_SIDE; y += 1) {
             const start = (row * PATCH_SIDE + y) * rowStride + column * PATCH_SIDE * 3;
             for (let k = 0; k < PATCH_SIDE * 3; k += 1) {
-              pixels[at] = (data[start + k] ?? 0) * RESCALE;
+              const value = data[start + k];
+              // MUST: a read past the resized pixels fails — zero there would embed black patches
+              // of an image whose size and pixels disagree.
+              if (value === undefined) {
+                throw new Error(
+                  `${OWNER}: internal inconsistency: patch (${column}, ${row}) reads byte` +
+                    ` ${start + k} of a ${target.width} × ${target.height} RGB8 image of` +
+                    ` ${data.length} bytes`,
+                );
+              }
+              pixels[at] = value * RESCALE;
               at += 1;
             }
           }

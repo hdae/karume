@@ -174,16 +174,19 @@ holds bit for bit; `i8` against the i8 series' goldens, the quantized model's ow
 0.99993 at 768 — the torch-CPU screening's values for the same rounding,
 [research 2026-11-22](../../../../docs/research/2026-11-22-embeddinggemma2-quant-screen.md)).
 
-Images: the host preprocessing equals the vision series' io inputs byte for byte on its four images
+Images: the host preprocessing equals the vision series' io inputs byte for byte on its five images
 (`packages/models/tests/embeddinggemma2_image_input_test.ts` — the pixels and both position arrays;
-the 1190 × 17 rounding edge, 139 soft tokens, among them), and the pipeline e2e over the mirror
+the 1190 × 17 rounding edge, 139 soft tokens, and the 840 × 3 strip whose columns reach position 839
+among them), the ids of seven inputs where a text run meets an image (spaces, newlines and tabs at the
+boundary, an empty text between images, Japanese, a prompt before an image) equal upstream's in the
+same host test, and the pipeline e2e over the mirror
 (`packages/e2e/tests/e2e_embeddinggemma2_image_pipeline_test.ts`) runs the five inputs of
 upstream's SentenceTransformer fixture (an image alone, a text then an image, an image then a text,
 a `query`-prompted text with an image, two images): the token ids equal upstream's exactly, and on
 the RTX 3080 Ti the `bf16` vectors are within 5.44e-6 of upstream's (cosine at least
-0.999999999136; atol 2e-5 — the text graph fed upstream's own soft tokens is within 9.8e-7, the rest
-is the tower's GPU noise), the `i8` vectors at a cosine of 0.99976 to 0.99991 (floor 0.999), each
-pinned by a sha256 row per preset.
+0.999999999136; atol 2e-5 — the text graph fed upstream's own soft tokens is within 9.8e-7, checked
+at atol 3e-6, and the rest is the tower's GPU noise), the `i8` vectors at a cosine of 0.99976 to
+0.99991 (floor 0.999), each pinned by a sha256 row per preset.
 
 | Files         | Contents                                                                                                                                                                                                                                                  |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

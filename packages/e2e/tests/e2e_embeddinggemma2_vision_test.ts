@@ -10,8 +10,9 @@
 // `[1, n, 512]` out, `n` symbolic (the image's soft-token count). The rows are only the image's real
 // patches, each soft token's 9 patches adjacent (the io contract in the recipe's module doc and
 // README); the goldens are upstream's own soft tokens (its processor and its tower in torch on CPU,
-// f32, over the processor's padded rows), on four synthetic images — a square, a wide and a tall
-// aspect and the smallest soft-token count the resize rule produces.
+// f32, over the processor's padded rows), on five synthetic images — a square, a wide and a tall
+// aspect, the smallest soft-token count the resize rule produces, and its longest side (840
+// patches, so the positions reach the last row of the tower's tables).
 //
 // Each comparison is followed by a sha256 check of the output against this machine's reference row
 // (ADR 0106; the row ID is `<series>/<image>`). Rows are created with KARUME_REFERENCE=write.
@@ -45,32 +46,57 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 
+/** How one golden image is held to upstream's soft tokens (both series — module doc). */
+type ImageCheck = {
+  /** Its soft-token count n. */
+  readonly tokens: number;
+  /** The allclose of the whole `[1, n, 512]` output against the golden. */
+  readonly tolerance: Tolerance;
+  /** The floor of the cosine of every soft token (one `[512]` row) to the golden's. */
+  readonly minTokenCosine: number;
+};
+
 /**
- * The tolerance of the tower's soft tokens against upstream's (both series — their weights hold
- * the same values, so they have the same goldens; on this machine the two series' outputs are
- * bit-identical).
+ * The checks of each golden image (both series — their weights hold the same values, so they have
+ * the same goldens; on this machine the two series' outputs are bit-identical).
  *
  * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22, plain comparison, `[1, n, 512]` soft
  * tokens whose values reach 5.0 to 6.2). The torch columns place the GPU's error: the same graph in
- * torch f64 on the same rows is the reference the f32 runs scatter around.
+ * torch f64 on the same rows is the reference the f32 runs scatter around. "Min token cosine" is
+ * the lowest cosine of one soft token to the golden's, `1 − cosine` shown:
  *
- * | Image           | n   | GPU vs golden | GPU vs torch f64 | torch f32 vs f64 | golden vs f64 |
- * | --------------- | --- | ------------- | ---------------- | ---------------- | ------------- |
- * | gradient-square | 256 | 3.35e-4       | 2.56e-4          | 9.78e-5          | 1.01e-4       |
- * | shapes-wide     | 253 | 6.64e-5       | 6.07e-5          | 2.81e-5          | 4.00e-5       |
- * | noise-tall      | 250 | 6.46e-5       | 5.63e-5          | 1.93e-5          | 2.23e-5       |
- * | stripes-edge    | 139 | 7.37e-5       | 8.38e-5          | 5.16e-5          | 6.73e-5       |
+ * | Image           | n   | GPU vs golden | GPU vs torch f64 | torch f32 vs f64 | golden vs f64 | Min token cosine, GPU vs golden |
+ * | --------------- | --- | ------------- | ---------------- | ---------------- | ------------- | ------------------------------- |
+ * | gradient-square | 256 | 3.35e-4       | 2.56e-4          | 9.78e-5          | 1.01e-4       | 1 − 3.19e-9                     |
+ * | shapes-wide     | 253 | 6.64e-5       | 6.07e-5          | 2.81e-5          | 4.00e-5       | 1 − 1.01e-10                    |
+ * | noise-tall      | 250 | 6.46e-5       | 5.63e-5          | 1.93e-5          | 2.23e-5       | 1 − 6.89e-11                    |
+ * | stripes-edge    | 139 | 7.37e-5       | 8.38e-5          | 5.16e-5          | 6.73e-5       | 1 − 1.32e-10                    |
+ * | gradient-strip  | 280 | 1.27e-4       | 1.23e-4          | 9.21e-5          | 1.07e-4       | 1 − 4.22e-10                    |
  *
  * The tower is sensitive in f32 (16 layers over activations near 1,000, attention with scale 1):
  * torch's own f32 run is up to 9.8e-5 from f64, and upstream's golden (its f32 run over 2,520
- * padded rows) up to 1.0e-4. The GPU is up to 2.6e-4 from f64 — the same order, another summation
- * order. atol 1e-3 is three times the worst measured (gradient-square); the cosine of every
- * output to its golden is above 0.99999999992. The breakages this guards against are far above
- * it: the rows in the processor's raster order (patches pooled into the wrong tokens) or the two
- * position axes swapped move the soft tokens by 5.9 to 6.5 (measured on gradient-square and
+ * padded rows) up to 1.1e-4. The GPU is up to 2.6e-4 from f64 — the same order, another summation
+ * order. Each image is held at about three times its own measured error, both for the whole output
+ * (atol) and for its worst soft token (`1 − cosine`), so a regression that keeps every value under
+ * the worst image's error still fails on the others; a uniform bound sized to gradient-square
+ * would leave the other four 13 to 15 times headroom. The breakages this guards against are far
+ * above it: the rows in the processor's raster order (patches pooled into the wrong tokens) or the
+ * two position axes swapped move the soft tokens by 5.9 to 6.5 (measured on gradient-square and
  * shapes-wide in torch, 2026-11-22). rtol 0: the values are of one scale, atol alone decides.
+ * gradient-strip's columns reach position 839, the last row of the folded RoPE tables and the
+ * highest learned-table rows any image at the budget reads.
  */
-const VISION_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
+const IMAGE_CHECKS: Readonly<Record<string, ImageCheck>> = {
+  "gradient-square": { tokens: 256, tolerance: { atol: 1e-3, rtol: 0 }, minTokenCosine: 1 - 1e-8 },
+  "shapes-wide": { tokens: 253, tolerance: { atol: 2e-4, rtol: 0 }, minTokenCosine: 1 - 3e-10 },
+  "noise-tall": { tokens: 250, tolerance: { atol: 2e-4, rtol: 0 }, minTokenCosine: 1 - 2e-10 },
+  "stripes-edge": { tokens: 139, tolerance: { atol: 2.2e-4, rtol: 0 }, minTokenCosine: 1 - 4e-10 },
+  "gradient-strip": {
+    tokens: 280,
+    tolerance: { atol: 3.8e-4, rtol: 0 },
+    minTokenCosine: 1 - 1.3e-9,
+  },
+};
 
 /** The generate command a SKIP prints (the same spelling as tools/export-recipes/embeddinggemma2/README.md). */
 const GENERATE_COMMAND =
@@ -80,7 +106,6 @@ const GENERATE_COMMAND =
 type SeriesSpec = {
   /** The directory under `outputs/series/` (also the prefix of its sha256 row IDs). */
   readonly name: string;
-  readonly tolerance: Tolerance;
   /** The command that writes it. */
   readonly generate: string;
   /** What the series holds, for the SKIP message. */
@@ -90,13 +115,11 @@ type SeriesSpec = {
 const SERIES: readonly SeriesSpec[] = [
   {
     name: "embeddinggemma-2-vision",
-    tolerance: VISION_TOLERANCE,
     generate: GENERATE_COMMAND,
     weights: "f32 weights of about 640 MiB",
   },
   {
     name: "embeddinggemma-2-vision-bf16",
-    tolerance: VISION_TOLERANCE,
     generate: `${GENERATE_COMMAND} --dtype bf16`,
     weights: "bf16 weights of about 320 MiB",
   },
@@ -111,18 +134,38 @@ const SYMBOL = "n";
 const PATCHES_PER_TOKEN = 9;
 
 /**
- * The cases that should have been generated, with their soft-token count n. Pinned here rather than
- * taken from the listing, so a partial generation fails instead of losing tests silently; the source
- * of truth is `IMAGES` of `tools/export-recipes/embeddinggemma2/images.py`. 139 is the smallest
- * count upstream's resize rule produces at the 280-token budget.
+ * The cases that should have been generated are the keys of {@link IMAGE_CHECKS}, each with its
+ * soft-token count n. Pinned here rather than taken from the listing, so a partial generation fails
+ * instead of losing tests silently; the source of truth is `IMAGES` of
+ * `tools/export-recipes/embeddinggemma2/images.py`. 139 is the smallest count upstream's resize
+ * rule produces at the 280-token budget; `gradient-strip` resizes to its longest side.
  */
-const EXPECTED_TOKENS: Readonly<Record<string, number>> = {
-  "gradient-square": 256,
-  "noise-tall": 250,
-  "shapes-wide": 253,
-  "stripes-edge": 139,
+const EXPECTED_CASES = Object.keys(IMAGE_CHECKS).sort();
+
+/** The longest side the resize rule gives at the budget, in patches (the tables' row count). */
+const LONGEST_SIDE = 840;
+
+/** The lowest cosine of one soft token to the golden's (`[n, 512]` rows, in f64). */
+const minTokenCosine = (
+  output: Float32Array<ArrayBuffer>,
+  golden: Float32Array<ArrayBuffer>,
+  width: number,
+): number => {
+  assertEquals(output.length, golden.length, "token cosine of outputs of two sizes");
+  let lowest = 1;
+  for (let at = 0; at < output.length; at += width) {
+    let dot = 0;
+    let left = 0;
+    let right = 0;
+    for (let index = at; index < at + width; index += 1) {
+      dot += output[index] * golden[index];
+      left += output[index] * output[index];
+      right += golden[index] * golden[index];
+    }
+    lowest = Math.min(lowest, dot / Math.sqrt(left * right));
+  }
+  return lowest;
 };
-const EXPECTED_CASES = Object.keys(EXPECTED_TOKENS).sort();
 
 /**
  * Lists the asset directory. It falls back to empty only when the directory does not exist.
@@ -215,7 +258,8 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
           ]);
           const parsed = prepareContainer(opened, graphName);
           const io = parseSafetensors(ioBytes);
-          const tokens = EXPECTED_TOKENS[caseName];
+          const check = IMAGE_CHECKS[caseName];
+          const { tokens } = check;
 
           // Every tensor of io matches the graph's inputs and outputs exactly.
           const expectedKeys = [
@@ -237,6 +281,18 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
             assert(view !== undefined, `input.${input.name} is missing from the golden`);
             assertEquals(view.shape, shapeAt(input.shape, tokens), `input.${input.name}: shape`);
             inputs[input.name] = ioTensor(io, view, input.dtype);
+          }
+          // Every position is inside the tables; the strip's columns reach their last row.
+          const reach = Math.max(
+            ...["position_x", "position_y"].map((key) => {
+              const positions = inputs[key];
+              assert(positions?.dtype === "i32", `${key}: not i32`);
+              return Math.max(...positions.data);
+            }),
+          );
+          assert(reach < LONGEST_SIDE, `a position ${reach} past the tables' ${LONGEST_SIDE} rows`);
+          if (caseName === "gradient-strip") {
+            assertEquals(reach, LONGEST_SIDE - 1, "the strip's last column");
           }
 
           const gpu = await acquireGpu();
@@ -270,15 +326,26 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
               assertEquals(output.shape, [1, tokens, 512], `${where}: shape`);
               assertEquals(output.shape, view.shape, `${where}: the golden's shape`);
               assertEquals(output.dtype, declared, `${where}: dtype`);
-              const report = compareTensors(output, ioTensor(io, view, declared), spec.tolerance);
+              const golden = ioTensor(io, view, declared);
+              const report = compareTensors(output, golden, check.tolerance);
               measurements.push({
                 output: name,
                 maxAbs: report.maxAbsError,
                 maxRel: report.maxRelError,
-                tolerance: spec.tolerance,
+                tolerance: check.tolerance,
                 stage: "karume",
               });
+              assert(output.dtype === "f32" && golden.dtype === "f32", `${where}: not f32`);
+              const tokenCosine = minTokenCosine(output.data, golden.data, 512);
+              console.log(
+                `[embeddinggemma2-vision] ${spec.name} ${caseName} maxAbs ${report.maxAbsError.toExponential(3)},` +
+                  ` min token cosine 1 - ${(1 - tokenCosine).toExponential(3)}`,
+              );
               assert(report.pass, `${where}: ${formatAllclose(report)}`);
+              assert(
+                tokenCosine >= check.minTokenCosine,
+                `${where}: a soft token's cosine to the golden's is ${tokenCosine}, under ${check.minTokenCosine}`,
+              );
               // The sha row stands on the Session's own determinism.
               assert(output.dtype === "f32", `${where}: the artifact's dtype is ${output.dtype}`);
               assert(again[name].dtype === "f32", `${where}: the second run's dtype`);

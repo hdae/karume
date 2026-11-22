@@ -15,12 +15,18 @@ image processor at the snapshot's budget of 280 soft tokens):
 | `shapes-wide`     | 128 × 64       | 1104 × 528 | 253         | a wide aspect, hard edges        |
 | `noise-tall`      | 48 × 112       | 480 × 1200 | 250         | a tall aspect, noise             |
 | `stripes-edge`    | 1190 × 17      | 6672 × 48  | 139         | the smallest count of the rule   |
+| `gradient-strip`  | 840 × 3        | 13440 × 48 | 280         | the longest side the rule gives  |
 
 The table's sizes and counts are pinned by the tests against upstream's own function. 139 is the
 smallest count the rule produces: in exact arithmetic 1190 × 17 resizes to 96 × 6720 px (2 × 140
 blocks), but the f64 `sqrt` lands both sides a hair under their multiples of 48 (1.9999999999999998
 and 139.99999999999997), so both round down — 48 × 6672 px, 1 × 139 blocks. Without that rounding
 the smallest is 140.
+
+`gradient-strip` reaches the other end: at an aspect of 280 : 1 the short side resizes to 48 px
+and the long one to 280 · 48 = 13,440 px (840 patches), the longest side the rule gives at the
+budget (a longer aspect is capped there). Its patch columns run 0 … 839, the last row of the
+tower's position tables; it is small in pixels, so the fixture stays small.
 
 MUST: torch-free and transformers-free (numpy only) — the pure tests import it.
 """
@@ -111,6 +117,13 @@ IMAGES: Mapping[str, SyntheticImage] = {
             17,
             "the smallest soft-token count the resize rule produces (139, a rounding edge)",
             _stripes,
+        ),
+        SyntheticImage(
+            "gradient-strip",
+            840,
+            3,
+            "the longest side the resize rule gives (840 patches: positions 0 … 839)",
+            _gradient,
         ),
     )
 }

@@ -800,6 +800,81 @@ export class Embedder {
   }
 }
 
+/**
+ * A graph whose Session the embedder opens (a container component — narrow, so a host test can
+ * stand in for one).
+ */
+export type EmbeddingGraph = {
+  readonly createSession: (gpu: GpuContext, options: SessionOptions) => Promise<EmbeddingSession>;
+};
+
+/** What {@link openEmbedder} opens on the GPU in hand and builds the embedder from. */
+export type EmbedderOpening = Omit<EmbedderParts, "session" | "tower" | "deviceLimits"> & {
+  readonly gpu: GpuContext;
+  /** The checks of the GPU in hand, run before any Session is opened. */
+  readonly assertGpu: () => void;
+  readonly model: EmbeddingGraph;
+  /** The vision tower's graph and contract ({@link PipelineOptions.vision}). */
+  readonly tower?: {
+    readonly graph: EmbeddingGraph;
+    readonly contract: EmbeddingGemmaVisionContract;
+  };
+  /** The quant's effective settings; both Sessions take them with the row-block budget. */
+  readonly sessionOptions: SessionOptions;
+};
+
+/**
+ * Opens the Sessions on the GPU in hand — the text graph's, then the tower's, both with the
+ * family's row-block budget ({@link ATTENTION_ROW_BLOCK_BYTES}) — and builds the {@link Embedder}.
+ *
+ * MUST: on any failure (the GPU checks, a Session, the embedder itself) the Sessions opened so far
+ * are disposed and then `release` runs — no one else holds them, and a GPU the pipeline acquired
+ * would never be returned. If that clean-up fails too, both failures are thrown in an
+ * `AggregateError`; otherwise the original failure as it is.
+ *
+ * NOTE: the `export` is for the host test that drives it with stand-in graphs (not on `mod.ts` /
+ * the subpath surface — ADR 0008).
+ */
+export const openEmbedder = async (opening: EmbedderOpening): Promise<Embedder> => {
+  const { gpu, assertGpu, model, tower, sessionOptions, ...parts } = opening;
+  // Both Sessions split the attention scores in row blocks of the family's budget (the tower's are
+  // 12 heads × (9n)² f32, about 291 MiB unsplit at 280 soft tokens).
+  const settings: SessionOptions = {
+    ...sessionOptions,
+    attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
+  };
+  let session: EmbeddingSession | undefined;
+  let towerSession: EmbeddingSession | undefined;
+  try {
+    assertGpu();
+    session = await model.createSession(gpu, settings);
+    if (tower !== undefined) towerSession = await tower.graph.createSession(gpu, settings);
+    return new Embedder({
+      ...parts,
+      session,
+      ...(towerSession === undefined || tower === undefined
+        ? {}
+        : { tower: { session: towerSession, contract: tower.contract } }),
+      deviceLimits: gpu.limits,
+    });
+  } catch (error) {
+    // The Sessions first — flush before destroy.
+    try {
+      await disposeSteps([
+        () => session?.dispose(),
+        () => towerSession?.dispose(),
+        () => parts.release?.(),
+      ]);
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        `${OWNER}: construction failed, and so did its clean-up`,
+      );
+    }
+    throw error;
+  }
+};
+
 /** What the family admission ({@link admitEmbeddingGemma}) settles. */
 type EmbeddingGemmaAdmission = {
   readonly config: EmbeddingGemmaPipelineConfig;
@@ -996,65 +1071,32 @@ const buildEmbedder = async (
         ` table's ${contract.vocabularySize} rows (a tokenizer of another vocabulary)`,
     );
   }
-  // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
-  const model = open(MODEL);
-  const towerGraph = vision === undefined ? undefined : open(VISION);
-  // Both Sessions split the attention scores in row blocks of the family's budget (the tower's are
-  // 12 heads × (9n)² f32, about 291 MiB unsplit at 280 soft tokens).
-  const sessionSettings: SessionOptions = {
-    ...sessionOptions,
-    attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
-  };
   // MUST: declared features can be requested only at device creation (ADR 0028).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
-  let session: Session | undefined;
-  let towerSession: Session | undefined;
-  try {
+  // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
+  return await openEmbedder({
+    gpu,
     // The features and limits of the GPU in hand — one helper for every family.
-    assertAcquiredGpuCapabilities(
-      gpuFeatures,
-      quant.requiredLimits,
-      gpu,
-      `${OWNER}: quant '${quantName}'`,
-    );
-    session = await model.createSession(gpu, sessionSettings);
-    if (towerGraph !== undefined)
-      towerSession = await towerGraph.createSession(gpu, sessionSettings);
-    return new Embedder({
-      session,
-      contract,
-      rules,
-      ...(towerSession === undefined || vision === undefined
-        ? {}
-        : { tower: { session: towerSession, contract: vision } }),
-      deviceLimits: gpu.limits,
-      release: () => {
-        if (ownsGpu) gpu.destroy();
-      },
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    });
-  } catch (error) {
-    // The Sessions opened before the failure and a GPU acquired internally can be released by no
-    // one else (the Sessions first — flush before destroy).
-    try {
-      await disposeSteps([
-        () => session?.dispose(),
-        () => towerSession?.dispose(),
-        () => {
-          if (ownsGpu) gpu.destroy();
-        },
-      ]);
-    } catch (cleanup) {
-      throw new AggregateError(
-        [error, cleanup],
-        `${OWNER}: construction failed, and so did its clean-up`,
-      );
-    }
-    throw error;
-  }
+    assertGpu: () =>
+      assertAcquiredGpuCapabilities(
+        gpuFeatures,
+        quant.requiredLimits,
+        gpu,
+        `${OWNER}: quant '${quantName}'`,
+      ),
+    model: open(MODEL),
+    ...(vision === undefined ? {} : { tower: { graph: open(VISION), contract: vision } }),
+    sessionOptions,
+    contract,
+    rules,
+    release: () => {
+      if (ownsGpu) gpu.destroy();
+    },
+    ...(options.onRunDiagnostics === undefined
+      ? {}
+      : { onRunDiagnostics: options.onRunDiagnostics }),
+  });
 };
 
 /**

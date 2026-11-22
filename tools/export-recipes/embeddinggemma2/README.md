@@ -152,9 +152,10 @@ same counts.
 
 ### Checks and measurements
 
-Before anything is published the script checks, on four synthetic images
+Before anything is published the script checks, on five synthetic images
 (`images.py`: `gradient-square` 64 × 64 → 256 soft tokens, `shapes-wide` 128 × 64 → 253,
-`noise-tall` 48 × 112 → 250, `stripes-edge` 1190 × 17 → 139), that the gathered RoPE equals
+`noise-tall` 48 × 112 → 250, `stripes-edge` 1190 × 17 → 139, and `gradient-strip` 840 × 3 → 280,
+whose 13,440 px side is the longest the rule gives, so its positions reach 839), that the gathered RoPE equals
 upstream's rotary module bit for bit, that the wrapper's soft tokens equal upstream's within 1e-4,
 the traced form (three inputs on `9n`, 16 attention nodes without a mask and with upstream's scale
 1, the six lookups, no `where`) and the storage. Measured on 2026-11-22 (CPU, f32; soft tokens reach
@@ -166,13 +167,17 @@ the traced form (three inputs on `9n`, 16 attention nodes without a mask and wit
 | shapes-wide     | 253 | 1.86e-5                                        | 1.67e-6                             | 1.86e-5                       |
 | noise-tall      | 250 | 2.54e-5                                        | 1.19e-6                             | 2.50e-5                       |
 | stripes-edge    | 139 | 3.87e-5                                        | 1.31e-6                             | 3.85e-5                       |
+| gradient-strip  | 280 | 4.45e-5                                        | 1.43e-6                             | 4.45e-5                       |
 
 The wrapper equals upstream on the same rows to the pooling's summation order (about 1e-6); what is
-left against the golden is upstream's own f32 run over 2,520 padded rows against the real ones. The
+left against the golden is upstream's own f32 run over 2,520 padded rows against the real ones
+(`gradient-strip` fills the budget, so it has no padding row — its difference is the processor's
+raster order against the block order). The
 tower is sensitive in f32: torch's own f32 run is up to 9.8e-5 from the same graph in f64. The real-GPU
 check is `packages/e2e/tests/e2e_embeddinggemma2_vision_test.ts` (lane `models:embeddinggemma2`,
-`KARUME_SERIES=1`): both series against the goldens within atol 1e-3 (measured on the RTX 3080 Ti at
-6.5e-5 to 3.35e-4; its comment has the table against f64), the two series bit-identical to each
+`KARUME_SERIES=1`): both series against the goldens at about three times each image's own error
+(measured on the RTX 3080 Ti at 6.5e-5 to 3.35e-4, atol 2e-4 to 1e-3) with a floor on every soft
+token's cosine; its comment has the table against f64. The two series are bit-identical to each
 other, with sha256 rows per series.
 
 Storage: the f32 series is 671,506,936 bytes in 5 parts; the bf16 series 336,093,696 bytes in 4 parts
@@ -282,7 +287,7 @@ takes about 25 s on the development machine (CPU).
 ## What `multimodal_reference.py` writes (the reference vectors of whole inputs)
 
 The fixture `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.{json,safetensors}`
-(tracked in git, about 510 KB) for the TypeScript pipeline's stages: upstream's
+(tracked in git, about 520 KB) for the TypeScript pipeline's stages: upstream's
 `SentenceTransformer` (f32, CPU, the releases `parity.py` runs) on five whole inputs built from the
 synthetic images — an image alone, a text then an image, an image then a text, a text with the
 `query` prompt and an image, and two images (`cases`) — and on four holding an audio built from the
@@ -295,7 +300,15 @@ exact token ids the composite model received (`<bos>`, the text runs, each image
 block's start and soft-token count, and the 768-wide vector; the images are the RGB8 bytes the
 processor read, the audios the f32 samples it read (`audio.<name>`) with the valid log-mel frames its
 feature extractor made of them (`audio.<name>.features` `[L, 128]` — the script checks they are the
-frames the composite model received, bit for bit). The JSON's `_doc` says how it was made.
+frames the composite model received, bit for bit). Seven more inputs pin only the ids upstream runs
+where a text run meets an image (`idCases`, no vector): a trailing space before an image, a leading
+space after one, an empty text between two images, a newline and a tab at the boundaries, Japanese
+around an image, the `query` prompt before an input that starts with an image, and the `document`
+prompt before an image, a text and an image. Each is one user message of content parts in order
+(upstream's chat form, which holds a repeated or an empty text part); their texts are pieces of the
+tokenizer parity fixture's, so the host test checks them with that fixture's tokenizer, without the
+mirror. Adding them and the fifth image left every earlier case, tensor and field byte-identical.
+The JSON's `_doc` says how it was made.
 
 The script also composes Karume's graphs in torch (the tower wrappers' soft tokens placed at the
 placeholder rows of the text wrapper, over the ids upstream ran) and holds them to upstream's

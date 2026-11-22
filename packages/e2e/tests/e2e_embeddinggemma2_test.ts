@@ -153,6 +153,9 @@ const SERIES: readonly SeriesSpec[] = [
   },
 ];
 
+/** The width of a soft row (the text tower's hidden size, `text_config.hidden_size` at the pin). */
+const SOFT_WIDTH = 512;
+
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
@@ -282,22 +285,27 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
           );
 
           // T is bound from the golden's input shape (no explicit bindings). It must be the length
-          // this case is pinned at, or the case no longer exercises what it is named for: each
-          // input's declared shape with T read as that length (`[1, T]` for the ids and the pool
-          // mask, `[1, T, 512]` / `[1, T, 1]` for the soft rows, which no golden text holds).
+          // this case is pinned at, or the case no longer exercises what it is named for. Each
+          // input's shape is fixed here, not read from the graph's own declaration — a graph and
+          // goldens that agree on another shape fail: `[1, T]` for the ids and the pool mask,
+          // `[1, T, 512]` / `[1, T, 1]` for the soft rows (which no golden text holds).
+          const length = EXPECTED_LENGTHS[caseName];
+          const expectedShapes: Readonly<Record<string, readonly number[]>> = {
+            input_ids: [1, length],
+            pool_mask: [1, length],
+            soft_embeds: [1, length, SOFT_WIDTH],
+            soft_mask: [1, length, 1],
+          };
+          assertEquals(
+            parsed.graph.inputs.map((input) => input.name),
+            Object.keys(expectedShapes),
+            "the graph's inputs",
+          );
           const inputs: Record<string, Tensor> = {};
           for (const input of parsed.graph.inputs) {
             const view = io.tensors.get(`input.${input.name}`);
             assert(view !== undefined, `input.${input.name} is missing from the golden`);
-            assertEquals(
-              view.shape,
-              input.shape.map((dim) => {
-                if (typeof dim === "number") return dim;
-                if (dim === "T") return EXPECTED_LENGTHS[caseName];
-                throw new Error(`input.${input.name}: a dimension '${dim}' outside the contract`);
-              }),
-              `input.${input.name}: shape`,
-            );
+            assertEquals(view.shape, expectedShapes[input.name], `input.${input.name}: shape`);
             inputs[input.name] = ioTensor(io, view, input.dtype);
           }
 

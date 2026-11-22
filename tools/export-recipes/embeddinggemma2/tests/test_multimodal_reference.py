@@ -11,8 +11,10 @@ hold what the next stage relies on, read without torch or transformers:
 - each vector is a unit vector of width 768, and Karume's composed graphs stayed within the
   script's bound of it
 - the image cases' list holds images alone (the image pipeline reads it as it is)
+- the id cases hold ids alone, run `<bos>` … `<eos>` with one block per image, and cover every
+  boundary they are named for
 - the helpers find the soft blocks and refuse a run outside its begin and end ids, and build
-  upstream's dict inputs in the parts' order
+  upstream's dict inputs and its one-message inputs in the parts' order
 """
 
 from __future__ import annotations
@@ -41,7 +43,11 @@ class TestFixture:
     def test_it_holds_the_scripts_cases(self, fixture) -> None:
         document, _ = fixture
 
-        for key, cases in (("cases", reference.CASES), ("audioCases", reference.AUDIO_CASES)):
+        for key, cases in (
+            ("cases", reference.CASES),
+            ("audioCases", reference.AUDIO_CASES),
+            ("idCases", reference.ID_CASES),
+        ):
             assert [case["name"] for case in document[key]] == [c.name for c in cases]
             for case, expected in zip(document[key], cases, strict=True):
                 parts = [{"type": kind, kind: value} for kind, value in expected.parts]
@@ -112,6 +118,7 @@ class TestFixture:
                 for case in (*document["cases"], *document["audioCases"])
                 for field in ("input_ids", "embedding")
             }
+            | {f"{case['name']}.input_ids" for case in document["idCases"]}
         )
         assert set(tensors) == expected
         assert document["tensors"] == reference.FIXTURE_TENSORS.name
@@ -120,7 +127,7 @@ class TestFixture:
         document, tensors = fixture
         tokens = document["imageTokens"]
         counts = {image["name"]: image["softTokens"] for image in document["images"]}
-        for case in document["cases"]:
+        for case in (*document["cases"], *document["idCases"]):
             ids = tensors[f"{case['name']}.input_ids"].tolist()
             images = [part["image"] for part in case["parts"] if part["type"] == "image"]
 
@@ -191,6 +198,42 @@ class TestFixture:
         assert starts["text-then-image"] > 2
         assert starts["query-text-image"] > starts["text-then-image"] - 1
 
+    def test_the_id_cases_hold_no_vector_and_no_composition(self, fixture) -> None:
+        document, tensors = fixture
+
+        for case in document["idCases"]:
+            assert f"{case['name']}.embedding" not in tensors
+            assert "composition" not in case
+            assert {part["type"] for part in case["parts"]} <= {"text", "image"}, case["name"]
+
+    def test_the_id_cases_cover_the_boundaries_they_are_named_for(self, fixture) -> None:
+        """Each boundary is in its case's parts, so a case edited into another input fails here."""
+        document, _ = fixture
+        parts = {case["name"]: case["parts"] for case in document["idCases"]}
+        prompts = {case["name"]: case.get("prompt") for case in document["idCases"]}
+        texts = {
+            name: [p["text"] for p in found if p["type"] == "text"] for name, found in parts.items()
+        }
+        kinds = {name: [p["type"] for p in found] for name, found in parts.items()}
+
+        assert kinds["trailing-space-before-image"] == ["text", "image"]
+        assert texts["trailing-space-before-image"][0].endswith(" ")
+        assert kinds["leading-space-after-image"] == ["image", "text"]
+        assert texts["leading-space-after-image"][0].startswith(" ")
+        assert kinds["empty-text-between-images"] == ["image", "text", "image"]
+        assert texts["empty-text-between-images"] == [""]
+        before, after = texts["newline-and-tab-at-boundaries"]
+        assert before.endswith("\n") and after.startswith("\n")
+        assert before.startswith("a\t") and after.endswith("\t")
+        assert all(
+            any("\u3040" <= char <= "\u30ff" for char in text)
+            for text in texts["japanese-around-image"]
+        )
+        assert kinds["prompt-before-image-first"][0] == "image"
+        assert prompts["prompt-before-image-first"] is not None
+        assert kinds["prompt-image-text-image"] == ["image", "text", "image"]
+        assert prompts["prompt-image-text-image"] is not None
+
 
 class TestSoftBlocks:
     def test_it_finds_each_run_of_soft_ids(self) -> None:
@@ -233,6 +276,22 @@ class TestUpstreamInput:
         assert list(built) == ["text", "audio"]
         assert built["audio"]["sampling_rate"] == 16_000
         assert np.array_equal(built["audio"]["array"], WAVEFORMS["edge"].f32())
+
+    def test_the_message_form_is_one_user_message_of_the_parts_in_order(self) -> None:
+        pytest.importorskip("PIL")
+        case = reference.Case(
+            "x", (("image", "noise-tall"), ("text", ""), ("image", "stripes-edge")), "why"
+        )
+
+        (message,) = reference.upstream_message(case)
+
+        assert message["role"] == "user"
+        assert [item["type"] for item in message["content"]] == ["image", "text", "image"]
+        assert message["content"][1]["text"] == ""
+        assert [message["content"][index]["image"].size for index in (0, 2)] == [
+            (48, 112),
+            (1190, 17),
+        ]
 
     def test_a_repeated_text_part_is_refused(self) -> None:
         case = reference.Case("x", (("text", "a"), ("image", "noise-tall"), ("text", "b")), "why")

@@ -24,10 +24,16 @@
 //    images). Each case records maxAbs, maxRel and the cosine.
 // 3. **A text call on the vision pipeline** is the text call of the pipeline without it: its vector
 //    has the sha256 row the text pipeline e2e pins (`embeddinggemma-2/<preset>/query-en`).
-// 4. **The tower within the preset's limits** (real GPU), per preset, on a device whose binding and
+// 4. **The text graph's soft-row path alone** (real GPU, `bf16`, `KARUME_SERIES=1` with the vision
+//    series present): the embedder over the mirror's text graph, its tower a stand-in that answers
+//    with upstream's own soft tokens of each image (the vision series' goldens), against upstream's
+//    vectors within {@link SOFT_ROW_TOLERANCE} — the tower's GPU noise is out of the comparison, so
+//    an error where the soft rows enter the text graph is not hidden under it.
+// 5. **The tower within the preset's limits** (real GPU), per preset, on a device whose binding and
 //    buffer limits are capped at the preset's own need (`bf16` 256 MiB, `i8` the WebGPU default
 //    128 MiB): an image of 280 soft tokens — whose tower scores are 12 × 2,520² f32 = 290.7 MiB
-//    unsplit, more than either cap — embeds to the same bits as on the uncapped device, so the tower
+//    unsplit, more than either cap — embeds to the same bits as on the uncapped device (that run
+//    is taken again when the uncapped block did not run first, so the case runs alone), so the tower
 //    adds no limit to the preset's. NOTE: this does not show the family's row-block budget reaching
 //    the tower's Session — on a capped device the runtime splits the scores by the binding limit
 //    anyway (measured: the tower with the budget removed passes it too); the budget bounds the plan
@@ -37,7 +43,7 @@
 // Without the mirror every case SKIPs explicitly (the distribution gate owns that red); without a
 // GPU the GPU cases SKIP. Rows are created with `KARUME_REFERENCE=write` on the lane.
 
-import { readFile, readTextFile } from "@karume/test-support/fs";
+import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, fail } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -49,6 +55,12 @@ import {
   embedTextRules,
   planEmbedRequest,
 } from "../../models/src/embeddinggemma/input.ts";
+import {
+  type Embedder,
+  embeddingGemmaGraphContract,
+  openEmbedder,
+} from "../../models/src/embeddinggemma/pipeline.ts";
+import { embeddingGemmaVisionContract } from "../../models/src/embeddinggemma/vision.ts";
 import { parseGemmaTokenizerAsset } from "../../models/src/gemma/text/asset.ts";
 import { Tokenizer } from "../../models/src/gemma/text/tokenizer.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -56,8 +68,10 @@ import {
   mirrorDirectory,
   mirrorPresent,
   mirrorRoot,
+  openMirrorComponent,
   readMirrorAsset,
 } from "../../models/tests/helpers/mirror.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import {
   compareTensors,
   formatAllclose,
@@ -107,6 +121,20 @@ import {
  * the placeholder's token lookup instead.
  */
 const IMAGE_TOLERANCE: Tolerance = { atol: 2e-5, rtol: 0 };
+
+/**
+ * The tolerance of check 4: the `bf16` text graph on the GPU fed upstream's own soft tokens,
+ * against upstream's vectors.
+ *
+ * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22, the five inputs): maxAbs 5.96e-8
+ * (`image-only`), 9.76e-7 (`text-then-image`), 1.79e-7 (`image-then-text`), 1.04e-7
+ * (`query-text-image`) and 8.99e-8 (`two-images`) — the order of the torch composition's own error
+ * (the table above). atol 3e-6 is three times the worst; rtol 0, as for {@link IMAGE_TOLERANCE}. The bound is
+ * nearly seven times tighter than that one, whose budget the tower's GPU noise takes: a soft row
+ * that enters the text graph off by about 1e-5 (through the embedding scale on one backend, say)
+ * passes {@link IMAGE_TOLERANCE} and fails here.
+ */
+const SOFT_ROW_TOLERANCE: Tolerance = { atol: 3e-6, rtol: 0 };
 
 /**
  * The floor of the cosine between the `i8` preset's vector of an input holding an image and
@@ -260,6 +288,43 @@ const FULL_BUDGET_IMAGE: embeddinggemma.Rgb8Image = (() => {
   return { data, width, height };
 })();
 const FULL_BUDGET_TOKENS = 280;
+
+/** The f32 vision series (outside the repository): its io files hold upstream's soft tokens. */
+const VISION_SERIES = new URL("../../../outputs/series/embeddinggemma-2-vision/", import.meta.url);
+const goldenIo = (image: string): URL => new URL(`io.${image}.safetensors`, VISION_SERIES);
+
+/** Whether the file exists (anything but NotFound propagates). */
+const exists = (url: URL): boolean => {
+  try {
+    return statSync(url).isFile;
+  } catch (cause) {
+    if (isNotFound(cause)) return false;
+    throw cause;
+  }
+};
+
+/** Whether check 4 can run: the vision series' io file of every image the fixture's inputs hold. */
+const GOLDEN_SOFT_TOKENS =
+  SERIES_CHECKS &&
+  FIXTURE.cases.every((entry) => entry.imageBlocks.every(({ image }) => exists(goldenIo(image))));
+if (MIRROR && SERIES_CHECKS && !GOLDEN_SOFT_TOKENS) {
+  console.warn(
+    `[karume] ${VISION_SERIES.pathname} lacks the io files of the fixture's images, so the check of` +
+      " the text graph fed upstream's soft tokens SKIPs. Generate: cd tools/export-recipes && uv run" +
+      " --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision",
+  );
+}
+
+/** Upstream's soft tokens of an image (`output.0` `[1, n, 512]` of its io file in the vision series). */
+const goldenSoftTokens = async (image: string): Promise<Float32Array<ArrayBuffer>> => {
+  const bytes = await readFile(goldenIo(image));
+  const file = parseSafetensors(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
+  const view = file.tensors.get("output.0");
+  assert(view !== undefined && view.dtype === "F32", `io.${image}: no f32 output.0`);
+  return new Float32Array(file.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+};
 
 const unitNormError = (vector: Float32Array<ArrayBuffer>): number =>
   Math.abs(Math.hypot(...vector) - 1);
@@ -491,6 +556,135 @@ for (const preset of PRESETS) {
   );
 }
 
+describe.skipIf(!RUNNABLE || !GOLDEN_SOFT_TOKENS)(
+  `EmbeddingGemma 2 image input: the bf16 text graph fed upstream's soft tokens (real GPU)${SERIES_CHECKS_OPT_IN}`,
+  () => {
+    let gpu: GpuContext;
+    let embedder: Embedder;
+    /** The soft tokens the stand-in tower answers with, in the order of the next call's images. */
+    const answers: Float32Array<ArrayBuffer>[] = [];
+    beforeAll(async () => {
+      gpu = verifyRunningGpu(await acquireTestGpu());
+      const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
+      const entry = manifest.models["text"];
+      assert(entry !== undefined, "the mirror has no model 'text'");
+      // The preset declares no session knob, so its Session takes the family's settings alone.
+      assertEquals(entry.quants["bf16"]?.session, {}, "the bf16 preset's session");
+      const config = parseEmbeddingGemmaPipelineConfig(entry.pipelineConfig);
+      const tokenizer = new Tokenizer(
+        parseGemmaTokenizerAsset(await readMirrorAsset(MIRROR_ROOT, "tokenizer")),
+      );
+      const model = await openMirrorComponent(MIRROR_ROOT, "model", { quant: "bf16" });
+      const tower = await openMirrorComponent(MIRROR_ROOT, "vision", { quant: "bf16" });
+      assert(config.vision !== undefined, "the mirror declares no pipelineConfig.vision");
+      const towerContract = embeddingGemmaVisionContract(tower, config.vision);
+      embedder = await openEmbedder({
+        gpu,
+        assertGpu: () => {},
+        model,
+        // The stand-in tower: each run takes the next of `answers` (the image's own soft tokens),
+        // checked against the row count the embedder sent.
+        tower: {
+          graph: {
+            createSession: async () => ({
+              run: async (inputs) => {
+                const soft = answers.shift();
+                assert(soft !== undefined, "a tower run with no golden soft tokens queued");
+                const pixels = inputs["pixels"];
+                const rows = pixels !== undefined && "shape" in pixels ? pixels.shape[1] : -1;
+                const tokens = soft.length / towerContract.width;
+                assertEquals(rows, 9 * tokens, "the tower's patch rows for the queued image");
+                return {
+                  [towerContract.output]: {
+                    dtype: "f32",
+                    shape: [1, tokens, towerContract.width],
+                    data: soft,
+                  },
+                };
+              },
+              diagnostics: () => {
+                throw new Error("the stand-in tower has no diagnostics");
+              },
+              dispose: async () => {},
+            }),
+          },
+          contract: towerContract,
+        },
+        sessionOptions: {},
+        contract: embeddingGemmaGraphContract(model, config),
+        rules: embedTextRules(tokenizer, config, { images: true }),
+      });
+    });
+    afterAll(async () => {
+      if (gpu === undefined) return;
+      try {
+        await embedder?.dispose();
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    for (const entry of FIXTURE.cases) {
+      it(`${entry.name} (T=${entry.tokens}): upstream's vector within ${SOFT_ROW_TOLERANCE.atol}`, async () => {
+        await runRecordedCase(
+          results,
+          { id: `embeddinggemma-2/bf16/image-golden-soft/${entry.name}` },
+          async ({ measurements }) => {
+            for (const { image } of entry.imageBlocks) answers.push(await goldenSoftTokens(image));
+            const vector = await embedder.embed(partsOf(entry), optionsOf(entry));
+            assertEquals(answers.length, 0, "a queued golden was not taken");
+            const upstream = fixtureVector(entry.name);
+            const report = compareTensors(
+              { dtype: "f32", data: vector },
+              { dtype: "f32", data: upstream },
+              SOFT_ROW_TOLERANCE,
+            );
+            measurements.push({
+              output: "embedding",
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: SOFT_ROW_TOLERANCE,
+              stage: "karume",
+            });
+            const note =
+              `T=${entry.tokens}: the text graph fed upstream's soft tokens, maxAbs` +
+              ` ${report.maxAbsError.toExponential(3)}, cosine ${cosine(vector, upstream).toFixed(12)}`;
+            console.log(`[embeddinggemma2-image] bf16 ${entry.name} ${note}`);
+            assert(report.pass, `${entry.name}: ${formatAllclose(report)}`);
+            return { status: "pass", note };
+          },
+        );
+      });
+    }
+  },
+);
+
+/**
+ * The full-budget image's vector on an uncapped device: the one the uncapped block recorded, or —
+ * when that block did not run first (a filtered run) — one taken now on a fresh uncapped device.
+ */
+const uncappedFullBudgetVector = async (quant: string): Promise<Float32Array<ArrayBuffer>> => {
+  const recorded = fullBudgetVectors.get(quant);
+  if (recorded !== undefined) return recorded;
+  const gpu = verifyRunningGpu(await acquireTestGpu());
+  try {
+    const pipeline = await embeddinggemma.Pipeline.fromPretrained(mirrorDirectory(MIRROR_ROOT), {
+      gpu,
+      quant,
+      vision: true,
+    });
+    try {
+      const vector = await pipeline.embed([{ type: "image", image: FULL_BUDGET_IMAGE }]);
+      fullBudgetVectors.set(quant, vector);
+      return vector;
+    } finally {
+      await pipeline.dispose();
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
 for (const preset of PRESETS) {
   const mebibytes = preset.cappedBindingBytes / 2 ** 20;
   describe.skipIf(!RUNNABLE)(
@@ -529,9 +723,7 @@ for (const preset of PRESETS) {
         const unsplit = 12 * (9 * FULL_BUDGET_TOKENS) ** 2 * 4;
         assert(unsplit > preset.cappedBindingBytes, "the image's scores fit the cap unsplit");
         const vector = await pipeline.embed([{ type: "image", image: FULL_BUDGET_IMAGE }]);
-        const uncapped = fullBudgetVectors.get(preset.quant);
-        assert(uncapped !== undefined, "the uncapped run of the same image did not run first");
-        assertEquals([...vector], [...uncapped]);
+        assertEquals([...vector], [...(await uncappedFullBudgetVector(preset.quant))]);
       });
     },
   );

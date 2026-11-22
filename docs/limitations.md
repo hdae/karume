@@ -1986,7 +1986,12 @@ and the vision tower with `vision: true` — through `@karume/models/embeddingge
   An image is an image part of decoded **RGB8** pixels (`Rgb8Image`) — the caller decodes it (no
   PNG / JPEG decoder is included, alpha is not taken, colour management and EXIF orientation are the
   decoder's); the host resizes it with torch's uint8 bicubic port, as upstream's processor does on a
-  CPU (upstream run on a GPU resizes in f32 and gives slightly other pixels). A text whose tokens
+  CPU (upstream run on a GPU resizes in f32 and gives slightly other pixels). The Playground's
+  decoder drops alpha (a transparent pixel comes out black through the canvas), where upstream's
+  path for a PIL image composites alpha onto white: a PNG with transparent areas embeds there with
+  a black background where sentence-transformers given the same file as a PIL image sees white
+  (upstream's own decode of a path may not composite either, so parity depends on how upstream is
+  given the image). A text whose tokens
   include the image, audio or video placeholder id (258880 / 258881 / 258884) is refused: the text
   tower would embed the id as an ordinary token, while upstream's composite model replaces it with
   the pad id and sentence-transformers refuses the text.
@@ -2002,9 +2007,14 @@ and the vision tower with `vision: true` — through `@karume/models/embeddingge
   12 × 2,520² f32 = 290.7 MiB unsplit), measured on the RTX 3080 Ti under Node (2026-11-22). The
   tower's per-row intermediates stay under the WebGPU default binding size, so it adds no
   `requiredLimits`: an image of 280 soft tokens embeds to the same bits on a device whose binding and
-  buffer limits are capped at 128 MiB (`i8`) or 256 MiB (`bf16`). Each image is also preprocessed on
-  the host (resize and patch rows in JS, about 7.7 MB of f32 rows at 280 soft tokens, built when
-  `embed` is called). `onRunDiagnostics` reports the text graph's runs only.
+  buffer limits are capped at 128 MiB (`i8`) or 256 MiB (`bf16`). `onRunDiagnostics` reports the
+  text graph's runs only.
+- **Each image is preprocessed synchronously when `embed` is called, and its rows are held while the
+  call waits.** The resize and the patch rows run in JS on the caller's thread at issue (so a later
+  write into the pixels does not reach the call), before the call takes its turn on the pipeline's
+  queue: about 7.7 MB of f32 rows per image at 280 soft tokens (2,520 × 768), kept until the call
+  has run. Many queued calls with large images block the event loop during each resize and hold their
+  rows at once (20 queued calls of 29 such images would hold about 4.5 GB); nothing bounds the queue.
 - **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
   checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
   int8 — a 323,958,272-byte container against 592,932,991). The int8 rounding moves each embedding

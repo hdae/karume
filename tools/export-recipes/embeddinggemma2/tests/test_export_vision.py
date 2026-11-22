@@ -22,6 +22,7 @@ The cases that need transformers at the pinned release SKIP explicitly without i
 
 from __future__ import annotations
 
+from functools import cache
 from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,11 +123,53 @@ class TestHostRows:
             export_vision.host_rows(pixels, positions)
 
 
+@cache
+def _resize_extremes() -> tuple[int, int]:
+    """`(longest side in patches, smallest soft-token count)` of upstream's own resize rule at the
+    budget, over every aspect from 1 : 1 to 290 : 1 with a short side of 1 to 30 px (both
+    orientations) and a few aspects far past the cap."""
+    _require_transformers()
+    from transformers.models.gemma4.image_processing_gemma4 import (
+        get_aspect_ratio_preserving_size,
+    )
+
+    patch, pooling = 16, export_vision.POOLING
+    sizes = [
+        (height, width)
+        for short in range(1, 31)
+        for long in range(short, short * 290 + 1)
+        for height, width in ((short, long), (long, short))
+    ]
+    sizes += [(1, 100_000), (100_000, 1), (3, 1_000_000)]
+    longest, smallest = 0, export_vision.SOFT_TOKEN_BUDGET
+    for height, width in sizes:
+        target_height, target_width = get_aspect_ratio_preserving_size(
+            height=height,
+            width=width,
+            patch_size=patch,
+            max_patches=export_vision.SOFT_TOKEN_BUDGET * export_vision.PATCHES_PER_TOKEN,
+            pooling_kernel_size=pooling,
+        )
+        longest = max(longest, target_height // patch, target_width // patch)
+        blocks = (target_height // patch // pooling) * (target_width // patch // pooling)
+        smallest = min(smallest, blocks)
+    return longest, smallest
+
+
 class TestConstants:
-    def test_the_rope_covers_the_longest_side_at_the_budget(self) -> None:
-        """At 280 soft tokens the longest side is (280 · 9 // 9) · 48 px = 13,440 px = 840 patches
-        (upstream's `max_side_length`)."""
-        assert export_vision.ROPE_POSITIONS == (280 * 9 // 9) * 48 // 16 == 840
+    def test_the_rope_covers_the_longest_side_upstreams_resize_rule_gives(self) -> None:
+        """The RoPE tables end at the longest side upstream's function gives at the budget (840
+        patches), not at a restated formula."""
+        longest, _smallest = _resize_extremes()
+
+        assert export_vision.ROPE_POSITIONS == longest == 840
+
+    def test_the_traces_lower_bound_is_the_smallest_count_upstreams_resize_rule_gives(
+        self,
+    ) -> None:
+        _longest, smallest = _resize_extremes()
+
+        assert export_vision.SOFT_TOKENS_MIN == smallest == 139
 
     def test_the_files_read_are_pinned(self) -> None:
         assert set(export_vision.READ_FILES) <= set(sources.PIN.sha256)

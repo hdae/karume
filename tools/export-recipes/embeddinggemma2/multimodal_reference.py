@@ -30,6 +30,16 @@ The audio cases sit in a list of their own (`audioCases`): the five image cases,
 every field of the document they had are unchanged, so the image pipeline's checks read the fixture
 as before.
 
+## The id cases
+
+{@link ID_CASES} pin only the token ids upstream runs where text meets an image: a trailing space
+before an image, a leading space after one, an empty text between two images, a newline and a tab
+at the boundaries, Japanese text around an image, a prompt before an input that starts with an
+image, and a prompt before an image, a text and an image. Each is one user message of content parts
+in order (upstream's chat form, the one form that holds a repeated or an empty text part —
+{@link upstream_message}); its ids are caught on the way into the composite model as for the other
+cases, and no vector is recorded (a list of its own, `idCases`, with `<case>.input_ids` alone).
+
 ## The composition check
 
 Karume's graphs, in torch: each image's padded rows from the same processor run, stripped and
@@ -52,17 +62,17 @@ The safetensors holds `image.<name>` (U8 `[height, width, 3]`, row-major RGB8 �
 processor read), `audio.<name>` (F32 `[samples]`, 16 kHz mono — the samples upstream's processor
 read), `audio.<name>.features` (F32 `[L, 128]`, the valid log-mel frames upstream's feature
 extractor made of them; its frames after them are zeros), `<case>.input_ids` (I32 `[T]`) and
-`<case>.embedding` (F32 `[768]`). The JSON describes the images (size, the resized size, the
-soft-token count), the audios (samples, frames, soft-token count) and the cases (the content parts
-and the prompt name, `T`, the image and audio blocks, the measured composition error) and how they
-were made.
+`<case>.embedding` (F32 `[768]`; not for the id cases). The JSON describes the images (size, the
+resized size, the soft-token count), the audios (samples, frames, soft-token count) and the cases
+(the content parts and the prompt name, `T`, the image and audio blocks, the measured composition
+error) and how they were made.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -152,6 +162,49 @@ AUDIO_CASES: tuple[Case, ...] = (
     ),
 )
 
+#: The inputs whose token ids alone are pinned (module doc, "The id cases"): where a text run
+#: meets an image. The texts are pieces of the tokenizer parity fixture's (`embeddinggemma2/
+#: tokenizer.py`), so the host tests' tokenizer of that fixture's subset holds their tokens.
+ID_CASES: tuple[Case, ...] = (
+    Case(
+        "trailing-space-before-image",
+        (("text", "trailing "), ("image", "stripes-edge")),
+        "a text whose trailing space meets an image",
+    ),
+    Case(
+        "leading-space-after-image",
+        (("image", "stripes-edge"), ("text", " leading")),
+        "an image, then a text with a leading space",
+    ),
+    Case(
+        "empty-text-between-images",
+        (("image", "stripes-edge"), ("text", ""), ("image", "stripes-edge")),
+        "an empty text part between two images",
+    ),
+    Case(
+        "newline-and-tab-at-boundaries",
+        (("text", "a\tb\n"), ("image", "stripes-edge"), ("text", "\nc\t")),
+        "a newline before and after an image, a tab at both ends of the input",
+    ),
+    Case(
+        "japanese-around-image",
+        (("text", "むかしむかし、"), ("image", "stripes-edge"), ("text", "おじいさんとおばあさん")),
+        "Japanese text before and after an image",
+    ),
+    Case(
+        "prompt-before-image-first",
+        (("image", "stripes-edge"), ("text", "The quick brown fox.")),
+        "a prompt's prefix before an input that starts with an image (a run of its own)",
+        prompt="query",
+    ),
+    Case(
+        "prompt-image-text-image",
+        (("image", "stripes-edge"), ("text", " leading "), ("image", "stripes-edge")),
+        "a prompt's prefix, an image, a text with a space at both ends, another image",
+        prompt="document",
+    ),
+)
+
 #: The waveforms the audio cases use (the fixture carries their samples and frames).
 FIXTURE_WAVEFORMS: tuple[str, ...] = tuple(
     dict.fromkeys(value for case in AUDIO_CASES for kind, value in case.parts if kind == "audio")
@@ -162,25 +215,42 @@ class MultimodalReferenceError(ValueError):
     """What upstream ran is not what the fixture describes."""
 
 
+def _upstream_value(kind: str, value: str) -> Any:
+    """One part's value as sentence-transformers takes it (a PIL image, an audio as its f32
+    samples with their rate, a text as it is)."""
+    from PIL import Image
+
+    if kind == "image":
+        return Image.fromarray(IMAGES[value].rgb8(), mode="RGB")
+    if kind == "audio":
+        return {"array": WAVEFORMS[value].f32(), "sampling_rate": SAMPLE_RATE}
+    return value
+
+
 def upstream_input(case: Case) -> dict[str, Any]:
     """The case as sentence-transformers takes it: one dict, its keys in the parts' order, an
     image key holding a list when the case has two images, an audio as its f32 samples with their
     rate."""
-    from PIL import Image
-
-    def value_of(kind: str, value: str) -> Any:
-        if kind == "image":
-            return Image.fromarray(IMAGES[value].rgb8(), mode="RGB")
-        if kind == "audio":
-            return {"array": WAVEFORMS[value].f32(), "sampling_rate": SAMPLE_RATE}
-        return value
-
+    value_of = _upstream_value
     kinds = [kind for kind, _ in case.parts]
     if len(set(kinds)) != len(kinds) and set(kinds) != {"image"}:
         raise MultimodalReferenceError(f"{case.name}: a repeated text part has no dict form")
     if set(kinds) == {"image"} and len(kinds) > 1:
         return {"image": [value_of(kind, value) for kind, value in case.parts]}
     return {kind: value_of(kind, value) for kind, value in case.parts}
+
+
+def upstream_message(case: Case) -> list[dict[str, Any]]:
+    """The case as one user message of content parts in its parts' order (upstream's chat form —
+    it holds a repeated text part and an empty one, which the dict form cannot)."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": kind, kind: _upstream_value(kind, value)} for kind, value in case.parts
+            ],
+        }
+    ]
 
 
 def soft_blocks(ids: Sequence[int], begin: int, soft: int, end: int) -> list[tuple[int, int]]:
@@ -221,8 +291,11 @@ class UpstreamRun:
     embedding: torch.Tensor
 
 
-def run_upstream(model: Any, case: Case) -> UpstreamRun:
-    """`encode` of one input, with the composite model's inputs caught on their way in.
+def run_upstream(
+    model: Any, case: Case, build: Callable[[Case], Any] = upstream_input
+) -> UpstreamRun:
+    """`encode` of one input (`build` makes it of the case), with the composite model's inputs
+    caught on their way in.
 
     NOTE: sentence-transformers calls the model's `forward` method itself (not the module), so a
     forward hook never fires; the instance's `forward` is wrapped for the call instead.
@@ -241,7 +314,7 @@ def run_upstream(model: Any, case: Case) -> UpstreamRun:
     try:
         with torch.no_grad():
             vector = model.encode(
-                [upstream_input(case)],
+                [build(case)],
                 prompt_name=case.prompt,
                 convert_to_tensor=True,
                 batch_size=1,
@@ -457,6 +530,35 @@ def measure(directory: Path) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
                 "composition": difference,
             }
         )
+    id_cases: list[dict[str, Any]] = []
+    for case in ID_CASES:
+        run = run_upstream(upstream, case, upstream_message)
+        ids = run.input_ids.tolist()
+        if ids[0] != int(config.text_config.bos_token_id) or ids[-1] != int(
+            config.text_config.eos_token_id
+        ):
+            raise MultimodalReferenceError(f"{case.name}: the ids do not run <bos> … <eos>")
+        blocks = soft_blocks(ids, begin, soft, end)
+        images = [value for kind, value in case.parts if kind == "image"]
+        expected = [counts[name].soft_tokens for name in images]
+        if [count for _, count in blocks] != expected:
+            raise MultimodalReferenceError(
+                f"{case.name}: soft runs {blocks}, the images give {expected}"
+            )
+        tensors[f"{case.name}.input_ids"] = run.input_ids.to(torch.int32)
+        id_cases.append(
+            {
+                "name": case.name,
+                "why": case.why,
+                "parts": [{"type": kind, kind: value} for kind, value in case.parts],
+                **({} if case.prompt is None else {"prompt": case.prompt}),
+                "tokens": len(ids),
+                "imageBlocks": [
+                    {"image": name, "start": start, "softTokens": count}
+                    for name, (start, count) in zip(images, blocks, strict=True)
+                ],
+            }
+        )
     document = {
         "_doc": [
             "Reference vectors of whole inputs holding an image or an audio, for the EmbeddingGemma"
@@ -474,6 +576,8 @@ def measure(directory: Path) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
             " `<image|>`, each audio as `<|audio>` + m x `<|audio|>` + `<audio|>`),"
             " `<case>.embedding` F32 [768] (the normalised vector `encode` returned).",
             "`cases` hold images only; `audioCases` hold an audio (and an image in one of them).",
+            "`idCases` pin the ids alone where a text meets an image (no vector): each is one"
+            " user message of content parts in order, its ids caught as for the other cases.",
             "`composition` is Karume's graphs composed in torch f32 (the tower wrappers' soft"
             " tokens at the placeholder rows of the text wrapper) against upstream's vector.",
             "The images and waveforms are synthetic and neutral"
@@ -516,6 +620,7 @@ def measure(directory: Path) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
             for name, audio in audios.items()
         ],
         "audioCases": audio_cases,
+        "idCases": id_cases,
     }
     return document, tensors
 

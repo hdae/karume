@@ -788,9 +788,24 @@ maintainer's ruling of 2026-11-06).
      - The Playground page `/embeddinggemma`: an optional image per row on a model with the tower, the row's count with
        its soft tokens, the record `karume-playground-embeddinggemma/2` (each image's name, size and RGB8 sha256). Not
        checked in a browser yet.
+     Review follow-ups (2026-11-22): per-image tolerances and a per-token cosine floor in the series e2e, a fifth
+     golden image whose side is the longest the resize rule gives (`gradient-strip`, 840 × 3 → 13,440 × 48 px:
+     positions up to 839, the tables' last row), the text graph's soft-row path checked alone against upstream's
+     vectors (the text graph fed upstream's soft tokens, atol 3e-6), seven id-only cases of upstream's ids at run
+     boundaries (spaces, newlines, tabs, an empty text between images, Japanese, a prompt before an image) checked
+     on the host without the mirror, and the distribution's checks that both position axes are gathered and the
+     folded RoPE tables are stored f32.
      Left: audio (item 6) and video (frames through the same tower); unordered and not chosen: the tower's runs in
      `onRunDiagnostics` (reported for the text graph only), other soft-token budgets (they would need longer position
-     tables), and a rounded tower (unscreened).
+     tables), and a rounded tower (unscreened). Open couplings, not built: (a) a manifest whose
+     `pipelineConfig.vision.softTokenBudget` is below the traced range is admitted — the reader takes 70 or 140,
+     the tower was traced and checked for n in 139 to 280 only (the IR records no symbol range to check against), so
+     such a hand-made manifest runs the tower at counts no golden covers (560 and 1120 are refused by the position
+     extent check; the distribution writes 280); (b) the tower's Session takes the text preset's session options
+     and GPU features, and the dist recipe folds the tower's demand into every preset's `requiredLimits` — both
+     presets have an empty session and the tower's largest tensor is about 15.7 MB, so nothing changes today, but a
+     preset with a knob screened for the text tower alone would apply it to the bf16 tower unscreened, and a
+     text-only pipeline inherits the tower's limits.
   6. Audio input (the checkpoint's audio tower is Gemma 4 E2B / E4B's, unchanged; the upstream facts in the untracked
      investigation notes `outputs/diag/eg2-multimodal-2026-11-22/`). Stage 1 built 2026-11-22:
      - `export_audio.py`: the audio tower with `embed_audio` as one graph `audio` — `features` `[1, 4n, 128]` (the audio's

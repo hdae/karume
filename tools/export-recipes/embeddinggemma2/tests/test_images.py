@@ -23,6 +23,7 @@ TABLE = {
     "shapes-wide": (1104, 528, 253),
     "noise-tall": (480, 1200, 250),
     "stripes-edge": (6672, 48, 139),
+    "gradient-strip": (13440, 48, 280),
 }
 
 #: The resize rule's constants at the snapshot's budget (patch 16, pooling 3, 280 soft tokens).
