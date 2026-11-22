@@ -5,7 +5,8 @@
 distribution `karume-embeddinggemma-2`, which is built as a local mirror only (nothing is
 published). The **text tower** of `google/embeddinggemma-2` is the distribution's one model, `text`;
 the **vision tower** is exported as series of its own (`export_vision.py`) and ships in the same
-model as the weights role `vision` (since 2026-11-22), and the audio tower is never built.
+model as the weights role `vision` (since 2026-11-22), and the **audio tower** is exported as series
+of its own (`export_audio.py`, since 2026-11-22; not in the distribution yet).
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstring of `export.py`; this file is the entry point only. Every file a
@@ -180,22 +181,126 @@ values — and 107 f32: the norms and the two RoPE tables, which sit in an `embe
 are not bf16 values and are kept f32 explicitly). Its goldens are the f32 series' (the io files are
 byte-identical). One export takes about 35 s on the development machine (CPU).
 
+## What `export_audio.py` emits (the audio tower, stage 1 of audio input)
+
+Upstream's audio tower (`audio_config`, `model_type` `gemma4_audio` — Gemma 4 E2B / E4B's, every
+tensor unchanged: a subsampling of two stride-2 convolutions, 12 conformer layers of 1024 with 8
+heads of 128, chunked local attention with a relative-position term and a soft cap of 50, clipped
+linears, `output_proj` to 1536) and its projector `embed_audio` (scale-free RMSNorm → linear
+1536 → 512) as **one graph** `audio`, whose output is ready to be the text graph's soft rows. The
+authority for the design is the module docstring of `export_audio.py`. The distribution does not
+carry it yet (stage 2).
+
+```
+outputs/series/embeddinggemma-2-audio/model-NNNNN-of-NNNNN.krm  the container (f32 weights)
+outputs/series/embeddinggemma-2-audio/io.<waveform>.safetensors the graph's inputs and upstream's soft tokens
+outputs/series/embeddinggemma-2-audio/reference.json            per waveform: lengths, digests, soft tokens, measured differences
+outputs/series/embeddinggemma-2-audio-bf16/…                    `--dtype bf16`: every linear and convolution weight as bf16
+```
+
+### The io contract
+
+| Name         | Dtype | Shape          | What the host binds                                                         |
+| ------------ | ----- | -------------- | --------------------------------------------------------------------------- |
+| `features`   | f32   | `[1, 4n, 128]` | the audio's `L` valid log-mel frames as upstream's feature extractor gives them, then `4n − L` zero frames |
+| `frame_mask` | f32   | `[1, 4n]`      | 1 on the first `L` frames, 0 on the padding (upstream's `input_features_mask`) |
+| → output     | f32   | `[1, n, 512]`  | the soft tokens, in the order of the audio's placeholder rows               |
+
+`n = ceil(L / 4)` is the audio's soft-token count (the graph's symbol, 1 to 750), so the host pads
+0 to 3 zero frames; every output row is a soft token (upstream keeps the same `n`). **The mask
+matters exactly when `L ≡ 2 (mod 4)`**: the first convolution's last output frame then reads the
+last real frame, and upstream masks it before the second convolution — dropped, the last token moves
+by 4.2 (`edge`); at the other residues the mask changes no bit. A mask-free form exists only with
+frame counts `4s + 2` and one output token more than the audio's for half the residues, so the mask
+keeps the output at `n`. An audio of at most 160 samples has no valid frame and no soft token.
+
+The frames (the front end stage 2 implements; upstream's `Gemma4AudioFeatureExtractor`, f32 out):
+
+- 16 kHz mono f32 samples, **not resampled** (an array is read as 16 kHz whatever its rate),
+  **truncated at 480,000 samples (30 s)** without a word; zero-padded on the right to a multiple of
+  128 samples; 160 zeros prepended (semicausal);
+- frames of 321 samples by a hop of 160, the first 320 of each used (preemphasis 0), times a
+  periodic Hann window `0.5 − 0.5 · cos(2πk / 320)` stored as f32; `rfft` of length 512 (the frame
+  zero-padded), its **magnitude**; an HTK mel bank of 128 triangles from 0 to 8,000 Hz
+  (`2595 · log10(1 + f / 700)`, centres `linspace` over 130 mel points, FFT bins `linspace(0, 8000,
+  257)`, no area normalisation, f64, filter 0 all zero); `log(mel + 1e-3)` (natural log; silence is
+  −6.9077554); no per-bin normalisation. numpy computes the window and the FFT in f32 (complex64)
+  for f32 samples and the mel product and the log in f64, then casts to f32;
+- frame `i` is valid iff sample `160 · i + 160` exists, so `s` samples have
+  `L = max(0, ceil(s / 160) − 1)` valid frames (1 s → 99 → 25 soft tokens, 30 s → 2,999 → 750); an
+  invalid frame is zeros. The 128-sample padding can add one invalid frame, which the host drops.
+
+### Checks and measurements
+
+Before anything is published the script checks, on six synthetic waveforms (`waveforms.py`: every
+residue of `L` mod 4, 1 s, 10 s and the 30 s maximum), that the wrapper's soft tokens equal
+upstream's within 3e-4, that the all-ones mask is bit-identical at the other residues and far off at
+2, the traced form (two inputs on `4n`, no fused attention and no `where`, 12 softmaxes on the
+12-key window, 24 window copies over one selector, one `[750, 12]` bias prefix) and the storage.
+Measured on 2026-11-22 (CPU, f32; soft tokens reach 5.5 to 6.1):
+
+| Waveform | Samples | L     | n   | wrapper vs upstream (the golden) | upstream: graph's frames vs extractor's | without the mask |
+| -------- | ------- | ----- | --- | -------------------------------- | --------------------------------------- | ---------------- |
+| sweep    | 16,000  | 99    | 25  | 1.55e-5                          | 0                                       | 0                |
+| noise    | 40,000  | 249   | 63  | 7.44e-5                          | 0                                       | 0                |
+| click    | 16,100  | 100   | 25  | 5.10e-6                          | 0                                       | 0                |
+| edge     | 16,400  | 102   | 26  | 3.30e-5                          | 0                                       | 4.16             |
+| tones    | 160,000 | 999   | 250 | 1.01e-4                          | 0                                       | 0                |
+| long     | 480,000 | 2,999 | 750 | 6.51e-5                          | 0                                       | 0                |
+
+The rewrite is exact in arithmetic: in f64 (upstream's f32 casts lifted) the wrapper equals upstream
+to 1.3e-12, while upstream's own f32 run is up to 3.0e-4 from that f64 run and the wrapper's up to
+3.4e-4 — the differences above are f32 summation order. The real-GPU check is
+`packages/e2e/tests/e2e_embeddinggemma2_audio_test.ts` (lane `models:embeddinggemma2`,
+`KARUME_SERIES=1`): both series against the goldens within atol 2e-3 (measured on the RTX 3080 Ti at
+1.41e-5 to 5.82e-4; the GPU is up to 5.0e-4 from f64 — its comment has the table), the two series
+bit-identical to each other, with sha256 rows per series, and the 30 s golden on a device capped at
+128 MiB (the WebGPU default binding and buffer limits) bit-identical to the uncapped run.
+
+On the RTX 3080 Ti under Node (2026-11-22, five warm runs after the first, the median):
+
+| Audio            | n   | f32 series: warm run / first run | bf16 series: warm run / first run | plan backing |
+| ---------------- | --- | -------------------------------- | --------------------------------- | ------------ |
+| 1 s (`sweep`)    | 25  | 17.6 ms / 82 ms                  | 16.5 ms / 67 ms                   | 4.2 MiB      |
+| 10 s (`tones`)   | 250 | 34.3 ms / 98 ms                  | 33.3 ms / 95 ms                   | 42.0 MiB     |
+| 30 s (`long`)    | 750 | 94.4 ms / 171 ms                 | 94.2 ms / 154 ms                  | 126.0 MiB    |
+
+A second run of the lane that day read the same within 0.1 to 4.9 ms. The Session builds in 1.02 to
+1.22 s (f32, 1,119.1 MiB of weights) and 0.48 to 0.63 s (bf16, 560.1 MiB). The graph has 1,202 nodes (312 `clamp`, 127 `reshape`, 123 `linear`, 122 `mul`, 113
+`permute`, 109 `rms_norm`, 72 `add`, 48 `sigmoid`, 36 each of `pad`, `conv1d` and `bmm`, 25 `slice`,
+12 each of `div`, `tanh` and `softmax`, 2 each of `conv2d`, `layer_norm` and `relu`, one
+`sym_prefix_slice`) and 286 initializers (293,353,708 elements). Its largest intermediate is the
+first convolution's output `[1, 128, 2n, 64]` f32 (46.9 MiB at 750), its largest stored tensor 16 MiB
+(f32) or 8 MiB (bf16): the tower needs no `requiredLimits`.
+
+Storage: the f32 series is 1,173,714,150 bytes in 7 parts; the bf16 series 587,590,521 bytes in 5
+parts (138 initializers bf16 — the 123 linears, the 2 subsampling and 12 depthwise convolutions and
+the window selector, the checkpoint's own values or 0 and 1 — and 148 f32: the norms, the biases and
+the folded constants). Its goldens are the f32 series' (the io files are byte-identical). One export
+takes about 25 s on the development machine (CPU).
+
 ## What `multimodal_reference.py` writes (the reference vectors of whole inputs)
 
 The fixture `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.{json,safetensors}`
-(tracked in git, about 140 KB) for the TypeScript pipeline's next stage: upstream's
+(tracked in git, about 510 KB) for the TypeScript pipeline's stages: upstream's
 `SentenceTransformer` (f32, CPU, the releases `parity.py` runs) on five whole inputs built from the
 synthetic images — an image alone, a text then an image, an image then a text, a text with the
-`query` prompt and an image, and two images. Each case holds the content parts and the prompt name,
-the exact token ids the composite model received (`<bos>`, the text runs, each image as `<|image>` +
-n × `<|image|>` + `<image|>`, `<eos>`), each image's block start and soft-token count, and the
-768-wide vector; the images are the RGB8 bytes the processor read. The JSON's `_doc` says how it was
-made.
+`query` prompt and an image, and two images (`cases`) — and on four holding an audio built from the
+synthetic waveforms — an audio alone (`sweep`), a text then an audio (`click`), an audio with the
+`query` prompt (`edge`, `L ≡ 2 mod 4`) and an image then an audio (`audioCases`, a list of its own,
+so the image pipeline reads `cases` as before; adding them left the five image cases, their tensors
+and every earlier field byte-identical). Each case holds the content parts and the prompt name, the
+exact token ids the composite model received (`<bos>`, the text runs, each image as `<|image>` + n ×
+`<|image|>` + `<image|>`, each audio as `<|audio>` + m × `<|audio|>` + `<audio|>`, `<eos>`), each
+block's start and soft-token count, and the 768-wide vector; the images are the RGB8 bytes the
+processor read, the audios the f32 samples it read (`audio.<name>`) with the valid log-mel frames its
+feature extractor made of them (`audio.<name>.features` `[L, 128]` — the script checks they are the
+frames the composite model received, bit for bit). The JSON's `_doc` says how it was made.
 
-The script also composes Karume's two graphs in torch (the tower wrapper's soft tokens placed at the
-image's placeholder rows of the text wrapper, over the ids upstream ran) and holds them to upstream's
-vectors within 1e-5. Measured on 2026-11-22: max abs 5.9e-8 to 1.8e-6, cosine at least
-0.99999999991 (`composition` of each case).
+The script also composes Karume's graphs in torch (the tower wrappers' soft tokens placed at the
+placeholder rows of the text wrapper, over the ids upstream ran) and holds them to upstream's
+vectors within 1e-5. Measured on 2026-11-22: max abs 5.9e-8 to 1.8e-6 for the image cases and
+5.0e-8 to 1.2e-7 for the audio cases, cosine at least 0.99999999991 (`composition` of each case).
 
 ## What `tokenizer.py` emits
 
@@ -279,6 +384,8 @@ uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype bf16
 uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity

@@ -19,14 +19,21 @@ questions it has to answer.
   `inputs/embeddinggemma2/embeddinggemma-2/`; `sources.py` pins the commit and the SHA-256 of every
   file the scripts read. Of `model.safetensors` the text tower's tensors (`language_model.*`) and
   the vision tower's with its projector (`vision_tower.*`, `embed_vision.*` — `export_vision.py`)
-  are read; the audio tower's never are.
+  and the audio tower's with its projector (`audio_tower.*`, `embed_audio.*` — `export_audio.py`)
+  are read.
 - **Model implementation** — the `transformers` package (`EmbeddingGemma2TextModel`, its config and,
   for comparison only, the bidirectional sliding mask function of `masking_utils`; for the image
   path `Gemma4VisionModel`, `EmbeddingGemma2MultimodalEmbedder` and the image processor
-  `Gemma4ImageProcessor`, which makes the goldens' patch rows), added per run
-  with `uv run --with 'transformers==5.23.0'`. Nothing is monkeypatched and nothing is copied: the
+  `Gemma4ImageProcessor`, which makes the goldens' patch rows; for the audio path
+  `Gemma4AudioModel`, the same embedder and the feature extractor `Gemma4AudioFeatureExtractor`,
+  which makes the goldens' log-mel frames), added per run with
+  `uv run --with 'transformers==5.23.0'`. Nothing is monkeypatched and nothing is copied: the
   recipe registers its own attention function through transformers' public `AttentionInterface`
   (it calls torch's SDPA) and passes its own masks through the forward's `attention_mask` argument.
+  The audio export runs a run-time copy of the audio tower's layers in which the attention and the
+  clipped linears are replaced by modules of the recipe's own (the attention as a window of 12 keys,
+  the clips with scalar bounds); upstream's classes and the tower that makes the goldens are left as
+  they are.
 - **SentenceTransformer pipeline** — the `sentence-transformers` package, imported by the opt-in
   `parity.py` and `multimodal_reference.py` (`uv run --with 'sentence-transformers==6.1.0'`), as a
   measurement reference; the second writes its outputs on synthetic images of our own (the token ids
@@ -52,7 +59,7 @@ published.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/google/embeddinggemma-2>                                                                                                           |
 | Revision used            | `f9972ac22e696a105c482202646979e33e4b5a1e` (fetched 2026-11-21 into `inputs/embeddinggemma2/embeddinggemma-2`; pinned with per-file SHA-256 in `sources.py`) |
-| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes; the vision tower and its projector converted into local series (f32 upcast and bf16, its two position tables split from one, its RoPE folded into two tables), not in the mirror. Model outputs on synthetic inputs (the soft tokens and vectors of the goldens; the 768-wide vectors of `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`, tracked). Not distributed from this repository today. |
+| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes; the vision tower and its projector converted into local series (f32 upcast and bf16, its two position tables split from one, its RoPE folded into two tables), not in the mirror; the audio tower and its projector converted into local series (f32 upcast and bf16, its chunked attention as a window of 12 keys, its relative position keys and per-dimension query scale folded into constants), not in the mirror. Model outputs on synthetic inputs (the soft tokens and vectors of the goldens; the 768-wide vectors and the log-mel frames of `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`, tracked). Not distributed from this repository today. |
 | Code license             | n/a (weights, configs and tokenizer only)                                                                                                                  |
 | Weights license          | Apache-2.0 as declared by the model card's front matter (`license: apache-2.0`) at the revision used; not gated. Unverified by the release review           |
 | Attribution requirements | Unverified                                                                                                                                                 |
@@ -63,7 +70,7 @@ published.
 | ------------------------ | ------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://github.com/huggingface/transformers>                                               |
 | Revision used            | `transformers==5.23.0` (per-run `--with`, not in `pyproject.toml`)                          |
-| Form of copy             | Imported and used as-is; no patch layer, no copy. An attention function of our own is registered through the public extension point. |
+| Form of copy             | Imported and used as-is; no patch layer, no copy. An attention function of our own is registered through the public extension point; the audio export replaces two kinds of submodules in a run-time copy of the audio tower's layers with modules of its own. |
 | Code license             | Unverified                                                                                  |
 | Weights license          | n/a                                                                                         |
 | Attribution requirements | Unverified                                                                                  |

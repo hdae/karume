@@ -1978,7 +1978,11 @@ and the vision tower with `vision: true` — through `@karume/models/embeddingge
   the sliding layers ①QK and ③PV compute all `T × T` scores, while each query row sees at most
   1,025 of the 8,192 keys at the bound (12.5%).
 - **Text and images; no audio, no video yet.** The distribution holds the text tower and the vision
-  tower (the audio tower is not carried; a video, frames through the same tower, is not taken yet).
+  tower (a video, frames through the same tower, is not taken yet). The audio tower exists as series
+  only (`embeddinggemma-2-audio`, 1,173,714,150 bytes of f32 weights; `-bf16`, 587,590,521 bytes —
+  not carried by the distribution yet): its graph takes at most 750 soft tokens, the 30 s upstream's
+  front end truncates an audio to, and on the RTX 3080 Ti a 30 s audio runs in about 94 ms once its
+  plan (126.0 MiB) exists.
   An image is an image part of decoded **RGB8** pixels (`Rgb8Image`) — the caller decodes it (no
   PNG / JPEG decoder is included, alpha is not taken, colour management and EXIF orientation are the
   decoder's); the host resizes it with torch's uint8 bicubic port, as upstream's processor does on a

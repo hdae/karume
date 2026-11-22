@@ -56,7 +56,9 @@ class SourcePin:
 #: `hf download` (the LFS oid for the two large files, the git blob id for the others). The image
 #: path's three files (the processor's `processor_config.json` and `preprocessor_config.json`, the
 #: chat template sentence-transformers renders every input with) were added on 2026-11-22 from the
-#: same fetch: their git blob ids equal the fetch record's for this revision.
+#: same fetch: their git blob ids equal the fetch record's for this revision. The audio path reads
+#: no other file: its feature extractor's settings are `preprocessor_config.json` (and the same
+#: values under `feature_extractor` of `processor_config.json`), both already pinned.
 #:
 #: Moving the pin needs the licence review again.
 PIN = SourcePin(

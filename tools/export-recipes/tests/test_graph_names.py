@@ -57,6 +57,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("embeddinggemma/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export_vision.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
+    ("embeddinggemma2/export_audio.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("gemma4/export.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_decode.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_drafter.py", "export_series", "GEMMA4_DRAFTER_ROLE", "GEMMA4_DRAFTER_ROLE"),
@@ -352,14 +353,20 @@ class TestTheNamesAreTheWeightsKeys:
     def test_embeddinggemma2_names_its_distribution_roles(self) -> None:
         """The text script names its graph with the weights key the distribution declares
         (`model`, the single-component convention), and the vision tower's script its graph with
-        the distribution's weights key `vision` (the tower is a weights role of every preset)."""
+        the distribution's weights key `vision` (the tower is a weights role of every preset).
+        The audio tower's script names its graph `audio`, a series only so far: the distribution
+        does not carry the tower yet, so it is the one name outside the weights keys (the shape of
+        gemma4's 12B vision above)."""
         from embeddinggemma2.distribution import EMBEDDINGGEMMA2_WEIGHTS
+        from embeddinggemma2.export_audio import GRAPH_NAME as AUDIO
         from embeddinggemma2.export_vision import GRAPH_NAME as VISION
 
         assert _declared_values("embeddinggemma2/export.py", "GRAPH_NAME") == {"model"}
         assert VISION == "vision"
+        assert AUDIO == "audio"
         assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model", VISION}
-        assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
+        assert self._named("embeddinggemma2") - {AUDIO} == set(EMBEDDINGGEMMA2_WEIGHTS)
+        assert AUDIO in self._named("embeddinggemma2")
 
     @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:

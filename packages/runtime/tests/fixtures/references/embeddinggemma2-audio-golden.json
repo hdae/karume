@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "embeddinggemma-2-audio-bf16/click": {
+      "node-nvidia-geforce-rtx-3080-ti": "03ec7b7a35c24a48c30affd0cebeb2a2393ce6df5d051951e208816ebf071045"
+    },
+    "embeddinggemma-2-audio-bf16/edge": {
+      "node-nvidia-geforce-rtx-3080-ti": "bda23065cec2c20d412b39ccba71ea49b810c335d29138002612da209b521840"
+    },
+    "embeddinggemma-2-audio-bf16/long": {
+      "node-nvidia-geforce-rtx-3080-ti": "98e103590d2f4d8281954b758adc71df0e38deee9be7437e490561083786d5a9"
+    },
+    "embeddinggemma-2-audio-bf16/noise": {
+      "node-nvidia-geforce-rtx-3080-ti": "da0456b2b261e2da69e9cbe4bef97cce92d573b59943bd9d6afe265bee907a0d"
+    },
+    "embeddinggemma-2-audio-bf16/sweep": {
+      "node-nvidia-geforce-rtx-3080-ti": "edd5f7c0a4ac454adf5c90cc4ad59075b984de94ae4bea508829d06bbcbd8d1f"
+    },
+    "embeddinggemma-2-audio-bf16/tones": {
+      "node-nvidia-geforce-rtx-3080-ti": "24702249bebb934bc60faa8ef1026dbfb2c4135ec1cf6c549dfa2aabcdbd5a90"
+    },
+    "embeddinggemma-2-audio/click": {
+      "node-nvidia-geforce-rtx-3080-ti": "03ec7b7a35c24a48c30affd0cebeb2a2393ce6df5d051951e208816ebf071045"
+    },
+    "embeddinggemma-2-audio/edge": {
+      "node-nvidia-geforce-rtx-3080-ti": "bda23065cec2c20d412b39ccba71ea49b810c335d29138002612da209b521840"
+    },
+    "embeddinggemma-2-audio/long": {
+      "node-nvidia-geforce-rtx-3080-ti": "98e103590d2f4d8281954b758adc71df0e38deee9be7437e490561083786d5a9"
+    },
+    "embeddinggemma-2-audio/noise": {
+      "node-nvidia-geforce-rtx-3080-ti": "da0456b2b261e2da69e9cbe4bef97cce92d573b59943bd9d6afe265bee907a0d"
+    },
+    "embeddinggemma-2-audio/sweep": {
+      "node-nvidia-geforce-rtx-3080-ti": "edd5f7c0a4ac454adf5c90cc4ad59075b984de94ae4bea508829d06bbcbd8d1f"
+    },
+    "embeddinggemma-2-audio/tones": {
+      "node-nvidia-geforce-rtx-3080-ti": "24702249bebb934bc60faa8ef1026dbfb2c4135ec1cf6c549dfa2aabcdbd5a90"
+    }
+  }
+}

@@ -788,9 +788,33 @@ maintainer's ruling of 2026-11-06).
      - The Playground page `/embeddinggemma`: an optional image per row on a model with the tower, the row's count with
        its soft tokens, the record `karume-playground-embeddinggemma/2` (each image's name, size and RGB8 sha256). Not
        checked in a browser yet.
-     Left: audio (the checkpoint's audio tower is Gemma 4 E2B / E4B's, unchanged) and video (frames through the same
-     tower); unordered and not chosen: the tower's runs in `onRunDiagnostics` (reported for the text graph only), other
-     soft-token budgets (they would need longer position tables), and a rounded tower (unscreened).
+     Left: audio (item 6) and video (frames through the same tower); unordered and not chosen: the tower's runs in
+     `onRunDiagnostics` (reported for the text graph only), other soft-token budgets (they would need longer position
+     tables), and a rounded tower (unscreened).
+  6. Audio input (the checkpoint's audio tower is Gemma 4 E2B / E4B's, unchanged; the upstream facts in the untracked
+     investigation notes `outputs/diag/eg2-multimodal-2026-11-22/`). Stage 1 built 2026-11-22:
+     - `export_audio.py`: the audio tower with `embed_audio` as one graph `audio` — `features` `[1, 4n, 128]` (the audio's
+       valid log-mel frames zero-padded to `4n`) and `frame_mask` `[1, 4n]` → soft tokens `[1, n, 512]`, `n` = the
+       valid frames / 4 rounded up, 1 to 750 (upstream's front end truncates at 30 s); the mask matters only when the
+       valid frames are 2 mod 4 (the io contract in the recipe README). The chunked local attention is rewritten as a
+       window of 12 keys per query (a one-hot depthwise `conv1d` copies the keys, `bmm` for both score terms, the
+       relative keys folded), the clipped linears clamp by scalars; no new op, kernel or runtime change. 1,202 nodes.
+       Series `embeddinggemma-2-audio` (f32, 1,173,714,150 bytes) and `-bf16` (587,590,521), goldens from upstream's
+       feature extractor and tower on six synthetic waveforms (every residue of the frame count mod 4, 1 s, 10 s and the
+       30 s maximum); the wrapper within 1.01e-4 of upstream in torch (in f64 within 1.3e-12 — exact arithmetic; torch's
+       own f32 run is up to 3.0e-4 from f64), the series e2e on the GPU within atol 2e-3 (measured 1.41e-5 to 5.82e-4)
+       with sha256 rows, the 30 s golden bit-identical on a device capped at the WebGPU default 128 MiB. On the RTX 3080
+       Ti under Node a warm run takes 16.5 / 33.3 / 94.2 ms at 1 / 10 / 30 s (bf16; plan backing 4.2 / 42.0 /
+       126.0 MiB), the Session builds in about 0.55 s (bf16) or 1.15 s (f32);
+     - `multimodal_reference.py`: four whole inputs holding an audio (an audio alone, a text then an audio, an audio with
+       the `query` prompt, an image then an audio) as `audioCases` of the same fixture, with the samples and upstream's
+       valid log-mel frames of each audio; the five image cases unchanged byte for byte; Karume's graphs composed in
+       torch reproduce the audio cases to 1.2e-7.
+     Left, in order: the pipeline stage — audio content parts in `embed` / `tokenize` (16 kHz mono f32 samples, the
+     placeholder expansion from the sample count, the 30 s truncation), the host front end in TypeScript (the log-mel
+     frames of the recipe README, checked against the fixture's frames), the tower in the distribution (a weights role
+     per preset, the audio fields of `pipelineConfig`) and the pipeline e2e against the fixture; then the Playground's
+     audio rows.
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
