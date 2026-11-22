@@ -27,8 +27,17 @@ import { type EmbeddingStats, embeddingStats, similarityMatrix } from "./similar
 /** The version of the saved record; bump it when a field changes meaning or goes away. */
 export const RECORD_FORMAT = "karume-playground-embeddinggemma/1";
 
-/** One row as it was sent: the text as typed and the prompt name (null = none). */
-export type RowRequestRecord = { readonly text: string; readonly prompt: string | null };
+/**
+ * One row as it was sent: the text as typed, the prompt name (null = none) and the token count
+ * `tokenize` gave for them (the prefix, `<bos>` and `<eos>` included — over the limit for a row the
+ * pipeline refused for its length; null when the pipeline could not tokenize the row, an undeclared
+ * prompt).
+ */
+export type RowRequestRecord = {
+  readonly text: string;
+  readonly prompt: string | null;
+  readonly tokens: number | null;
+};
 
 /** A refusal of the pipeline as it was raised (`ModelInputError`: fixing the input makes it pass). */
 export type RefusalRecord = { readonly name: string; readonly message: string };
@@ -123,6 +132,8 @@ export const modelDiagnostics = (
 export type MeasuredRow = {
   readonly text: string;
   readonly prompt: string | undefined;
+  /** The row's token count (`rowTokenCount`); `undefined` when it could not be tokenized. */
+  readonly tokens: number | undefined;
   readonly embedMs: number;
   readonly outcome:
     | {
@@ -175,7 +186,11 @@ export const assembleRecord = (input: {
     },
     request: {
       dimension: input.dimension,
-      rows: rows.map(({ text, prompt }) => ({ text, prompt: prompt ?? null })),
+      rows: rows.map(({ text, prompt, tokens }) => ({
+        text,
+        prompt: prompt ?? null,
+        tokens: tokens ?? null,
+      })),
     },
     timings: {
       pipelineReused: input.buildMs === undefined,

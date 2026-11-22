@@ -305,6 +305,10 @@
       {
         "name": "PipelineOptions",
         "kind": "typeAlias"
+      },
+      {
+        "name": "TokenizeOptions",
+        "kind": "typeAlias"
       }
     ],
     "./gemma": [

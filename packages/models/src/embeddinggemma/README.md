@@ -14,6 +14,7 @@ import { nodeDirectory } from "@karume/hub/node";
 
 const pipeline = await Pipeline.fromPretrained(nodeDirectory("models/karume-embeddinggemma-2"), { gpu });
 const query = await pipeline.embed("how do I reset my password", { prompt: "query", dimension: 256 });
+const count = pipeline.tokenize("how do I reset my password", { prompt: "query" }).length;
 await pipeline.dispose();
 ```
 
@@ -65,6 +66,13 @@ The empty string is accepted (`<bos>` `<eos>` alone, the shortest sequence the g
 holding other special spellings (`<bos>`, the turn and tool markup, the media begin / end markers)
 is tokenized as upstream's tokenizer does and is not refused.
 
+`tokenize(input, { prompt })` returns the token ids `embed` would run for the same input and prompt
+(`Int32Array` — the prefix, the joined text parts, `<bos>` … `<eos>`), synchronously, on the host
+and without waiting for the calls in flight. It refuses what `embed` refuses before tokenizing (the
+input, the parts, the prompt) with the same `ModelInputError`, and fails after `dispose`. A sequence
+over `maxTokens` and a text holding a placeholder id are returned, not refused, so a caller can show
+the count first; `embed` still refuses both.
+
 ## Construction checks
 
 `admitEmbeddingGemma` runs before a weight part is fetched: the pipeline name and major, the
@@ -87,8 +95,8 @@ series e2e's tolerance (atol 1e-6), and each vector is pinned by a sha256 row pe
 are two shorter widths. On the RTX 3080 Ti the pipeline's vectors over the bf16 distribution are
 bit-identical to the f32 series' Session outputs.
 
-| Files         | Contents                                                                                                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `config.ts`   | the pipeline name `embeddinggemma/1` and the `pipelineConfig` schema (`prompts`, `dimensions`, `maxTokens`, `placeholderTokens`)                                                     |
-| `input.ts`    | the public input types (`EmbedContentPart`, `EmbedOptions`), the tokenizer checks (`embedTextRules`), a request on the host (`planEmbedRequest`) and the width (`truncateEmbedding`) |
-| `pipeline.ts` | the graph contract, the admission, the resident Session with its chain (`Embedder`) and the public `Pipeline` (`fromPretrained`, `fromAssets`, `embed`, `dispose`)                   |
+| Files         | Contents                                                                                                                                                                                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.ts`   | the pipeline name `embeddinggemma/1` and the `pipelineConfig` schema (`prompts`, `dimensions`, `maxTokens`, `placeholderTokens`)                                                                                                                          |
+| `input.ts`    | the public input types (`EmbedContentPart`, `EmbedOptions`, `TokenizeOptions`), the tokenizer checks (`embedTextRules`), the token ids of an input (`tokenizeEmbedInput`), a request on the host (`planEmbedRequest`) and the width (`truncateEmbedding`) |
+| `pipeline.ts` | the graph contract, the admission, the resident Session with its chain (`Embedder`) and the public `Pipeline` (`fromPretrained`, `fromAssets`, `embed`, `tokenize`, `dispose`)                                                                            |

@@ -1,10 +1,11 @@
 /**
- * The page's form logic: the list of text rows (each with its own prompt), which model and preset
- * are in effect, whether the held pipeline serves a run, and why Run is disabled. Pure, so `vp test`
- * covers it.
+ * The page's form logic: the list of text rows (each with its own prompt), a row's token count,
+ * which model and preset are in effect, whether the held pipeline serves a run, and why Run is
+ * disabled. Pure, so `vp test` covers it.
  */
 
 import type { Manifest } from "@karume/hub";
+import { ModelInputError } from "@karume/models/embeddinggemma";
 
 /** One input of a run: a text and the prompt whose prefix goes before it (`undefined` = none). */
 export type TextRow = {
@@ -62,6 +63,27 @@ export const updateRow = (
       ...(change.prompt === undefined ? {} : { prompt: change.prompt }),
     };
   });
+
+/** What counts a row's tokens: a pipeline's `tokenize`, narrowed so a test can stand in for it. */
+export type RowTokenizer = (
+  text: string,
+  options: { readonly prompt?: string },
+) => { readonly length: number };
+
+/**
+ * The number of tokens the pipeline would embed for `row` (the prompt's prefix, `<bos>` and `<eos>`
+ * included), or `undefined` when it cannot tokenize the row at all (a `ModelInputError` — today a
+ * prompt the model does not declare). A count over the limit is returned as is: `embed` refuses it.
+ * Any other failure propagates.
+ */
+export const rowTokenCount = (tokenize: RowTokenizer, row: TextRow): number | undefined => {
+  try {
+    return tokenize(row.text, row.prompt === undefined ? {} : { prompt: row.prompt }).length;
+  } catch (error) {
+    if (error instanceof ModelInputError) return undefined;
+    throw error;
+  }
+};
 
 /** The model and preset a run builds with, and whether each is the manifest's default. */
 export type Selection = {

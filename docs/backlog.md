@@ -708,8 +708,13 @@ maintainer's ruling of 2026-11-06).
   3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead). The publication
      also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
      with `hfRepo` from it.
-  4. The Playground page `/embeddinggemma` (built 2026-11-21, not yet checked in a browser) shows no token count per
-     row: the pipeline exposes none. Whether `Pipeline` gains a `tokenize` or a count is undecided.
+  4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
+     `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is
+     returned, not refused), and the Playground page `/embeddinggemma` shows each row's count against the limit once
+     the pipeline is built and records it per row. The page (built 2026-11-21) was checked by the maintainer in Chrome
+     on an Apple M2 on 2026-11-22: a run of the three sample rows at 768 and at 256 dimensions, and the refusal of a
+     row holding the image placeholder. Not checked in a browser yet: Cancel, the downloads, GPU timing, a row over the
+     limit and the token count.
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

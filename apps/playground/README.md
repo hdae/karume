@@ -17,7 +17,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
-| Text | EmbeddingGemma — sentence embeddings (EmbeddingGemma 2's text model, `embeddinggemma-2`) | `/embeddinggemma` | built; not yet checked in a browser |
+| Text | EmbeddingGemma — sentence embeddings (EmbeddingGemma 2's text model, `embeddinggemma-2`) | `/embeddinggemma` | checked in Chrome on an Apple M2 (the sample rows at 768 and 256, a placeholder refusal); Cancel, downloads, GPU timing, a row over the limit and the token count not yet |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1067,7 +1067,7 @@ disposes the old pipeline. A new GPU and leaving the page dispose it too.
 | Model, Preset | The manifest's `models` and the chosen model's `quants` (today one each: `text`, `bf16`), the defaults marked "(default)". |
 | Source | **Direct** only for this mount (above). |
 | Dimension | The widths the model's `pipelineConfig.dimensions` declares (768, 512, 256, 128); the first is the full width and the default. A shorter one is the leading slice re-normalised by the pipeline. One width for every row of a run. |
-| Rows | Each row is a text and a **Prompt**: "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). |
+| Rows | Each row is a text and a **Prompt**: "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). Once a pipeline is built, each row shows its **token count** against the limit (`count / maxTokens tokens`, from `Pipeline.tokenize`: the prefix, `<bos>` and `<eos>` included), recomputed as its text or prompt changes; a row over the limit is marked in red with a note before Run. There is no count before the first Run (the page does not build a pipeline to count), while the held pipeline is another model's, or for a row the pipeline cannot tokenize (an undeclared prompt). |
 | Run / Cancel | Run builds the pipeline if needed, then embeds every row. Cancel stops the **fetch** at once; the **Session build** takes no signal, so Cancel is disabled during it. `embed` checks the signal before its run, so a Cancel during a row takes effect when that row ends: the rest are skipped and the run ends as cancelled with no result. |
 | GPU timing | As on the SigLIP 2 page: the GPU is acquired again with `gpuTiming: true`, the next run rebuilds the pipeline, and every embedded row records its GPU time per kernel. |
 
@@ -1093,7 +1093,7 @@ Session's totals), geometry profile, build cost, and GPU time per op when timed.
 | `distribution` | `directory` and `manifestSha256` (the sha256 of `karume.json`, which also pins the prompt prefixes) |
 | `source` | `{ "kind": "direct" }` (or the cached form once the mount has an HF-compatible route) |
 | `model`, `preset` | `name` / `quant`, `label`, `isDefault` |
-| `request` | `dimension` (every row's width) and `rows`: per row in order, `text` as typed and `prompt` (a name, or `null` for none) |
+| `request` | `dimension` (every row's width) and `rows`: per row in order, `text` as typed, `prompt` (a name, or `null` for none) and `tokens` (the count `tokenize` gave when the row was run, prefix, `<bos>` and `<eos>` included — over the limit for a row refused for its length; `null` when the row could not be tokenized). `tokens` is an added field, so the format stays `/1` (the version changes when a field changes meaning or goes away); records without it predate the count |
 | `timings` | `pipelineReused`, `buildSeconds` (`null` when reused), `wallSeconds` (from Run to the last row, hashing excluded) |
 | `output.rows` | per row: `{ "kind": "embedding", dimension, nonFinite, l2Norm, first, sha256, embedSeconds }` (`l2Norm` is `null` with non-finite values; `first` spells a non-finite value as `"NaN"`, `"Infinity"` or `"-Infinity"`) or `{ "kind": "refused", "error": { "name", "message" }, embedSeconds }` |
 | `output.similarity` | the matrix of dot products at 6 decimals, accumulated in f64; `null` for a pair with a refused row or a vector holding non-finite values |
@@ -1105,8 +1105,9 @@ sha256 covers. **Copy record** copies the JSON.
 
 ### Caveats
 
-- No token count per row: the pipeline's public surface reports none. The limit and the count
-  appear only in the refusal of a row that is over it.
+- Checked by the maintainer in Chrome on an Apple M2 (2026-11-22): a run of the three sample rows at
+  768 and at 256 dimensions, and the refusal of a row holding the image placeholder. Not checked in a
+  browser yet: Cancel, the downloads, GPU timing, a row over the limit and the token count.
 - The vector sha256 compares runs exactly; two GPUs, drivers or browsers can differ in the last
   bits while the similarities agree to many digits. Compare the downloaded `.f32` files then.
 - The per-run counts assume that the runtime's submit and dispatch counters start at 0 when the

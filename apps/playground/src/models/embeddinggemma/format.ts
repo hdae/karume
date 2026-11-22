@@ -1,6 +1,6 @@
 /**
- * The record as the page shows it: the build status line, the rows table, the similarity matrix and
- * the summary rows. Pure, so `vp test` covers it.
+ * The record as the page shows it: the build status line, a row's token count, the rows table, the
+ * similarity matrix and the summary rows. Pure, so `vp test` covers it.
  */
 
 import type { AssetProgress } from "@karume/hub";
@@ -45,6 +45,15 @@ export const buildStatus = (progress: BuildProgress): RunProgress =>
 
 /** `Row 1`, … (1-based, as the form numbers them). */
 export const rowLabel = (index: number): string => `Row ${index + 1}`;
+
+/** How a row shows its token count against the model's limit. */
+export type TokenCountView = { readonly text: string; readonly overLimit: boolean };
+
+/** `12 / 2048 tokens`, marked when the count is over the limit (the pipeline refuses such a row). */
+export const tokenCountView = (count: number, maxTokens: number): TokenCountView => ({
+  text: `${count} / ${maxTokens} tokens`,
+  overLimit: count > maxTokens,
+});
 
 /** A similarity cell: the value at 4 decimals, or "—" when there is none. */
 export const similarityText = (value: number | null): string =>

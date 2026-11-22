@@ -1,11 +1,16 @@
 import type { PipelineSource } from "@karume/local-distributions/browser";
+import { ModelInputError } from "@karume/models/embeddinggemma";
 import { describe, expect, it } from "vite-plus/test";
+
+import { tokenCountView } from "../src/models/embeddinggemma/format.ts";
 
 import {
   addRow,
   canReuse,
   type PipelineKey,
   removeRow,
+  rowTokenCount,
+  type RowTokenizer,
   runBlocker,
   SAMPLE_ROWS,
   type TextRow,
@@ -104,5 +109,45 @@ describe("canReuse", () => {
     expect(canReuse(held, { gpu, source: direct, model: "image", quant: "bf16" })).toBe(false);
     expect(canReuse(held, { gpu, source: direct, model: "text", quant: "f32" })).toBe(false);
     expect(canReuse(undefined, { gpu, source: direct, model: "text", quant: "bf16" })).toBe(false);
+  });
+});
+
+describe("a row's token count", () => {
+  /** A stand-in for `tokenize`: one token per word of the prefix and the text, plus <bos> and <eos>. */
+  const calls: { readonly text: string; readonly prompt: string | undefined }[] = [];
+  const tokenize: RowTokenizer = (text, options) => {
+    calls.push({ text, prompt: options.prompt });
+    if (options.prompt !== undefined && options.prompt !== "query") {
+      throw new ModelInputError(`prompt "${options.prompt}" is not one of this model's prompts`);
+    }
+    const prefix = options.prompt === undefined ? "" : "task: search result | query: ";
+    return new Int32Array((prefix + text).split(" ").filter(Boolean).length + 2);
+  };
+
+  it("counts what the pipeline would embed for the row's text and prompt", () => {
+    calls.length = 0;
+    expect(rowTokenCount(tokenize, { id: 0, text: "reset my password", prompt: "query" })).toBe(10);
+    expect(rowTokenCount(tokenize, { id: 1, text: "reset my password" })).toBe(5);
+    expect(calls).toEqual([
+      { text: "reset my password", prompt: "query" },
+      { text: "reset my password", prompt: undefined },
+    ]);
+  });
+
+  it("has no count for a row the pipeline cannot tokenize (an undeclared prompt)", () => {
+    expect(rowTokenCount(tokenize, { id: 0, text: "a", prompt: "Query" })).toBeUndefined();
+  });
+
+  it("lets any other failure through (a disposed pipeline is a bug, not a row's state)", () => {
+    const disposed: RowTokenizer = () => {
+      throw new Error("embeddinggemma.Pipeline: cannot tokenize after dispose");
+    };
+    expect(() => rowTokenCount(disposed, { id: 0, text: "a" })).toThrow("after dispose");
+  });
+
+  it("shows the count against the limit and marks only a count over it", () => {
+    expect(tokenCountView(12, 2048)).toEqual({ text: "12 / 2048 tokens", overLimit: false });
+    expect(tokenCountView(2048, 2048).overLimit).toBe(false);
+    expect(tokenCountView(2049, 2048)).toEqual({ text: "2049 / 2048 tokens", overLimit: true });
   });
 });

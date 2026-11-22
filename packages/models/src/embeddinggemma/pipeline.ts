@@ -100,6 +100,8 @@ import {
   type EmbedTextRules,
   embedTextRules,
   planEmbedRequest,
+  type TokenizeOptions,
+  tokenizeEmbedInput,
   truncateEmbedding,
 } from "./input.ts";
 
@@ -451,6 +453,18 @@ export class Embedder {
     return await this.#chain(() => this.#run(request, options.signal));
   }
 
+  /**
+   * The token ids `embed` would run for this input and prompt, on the host (`tokenizeEmbedInput` —
+   * no run, not on the chain); refused like `embed` after dispose.
+   */
+  tokenize(
+    input: string | readonly EmbedContentPart[],
+    options: TokenizeOptions = {},
+  ): Int32Array<ArrayBuffer> {
+    if (this.#disposal !== undefined) throw new Error(`${OWNER}: cannot tokenize after dispose`);
+    return tokenizeEmbedInput(this.#parts.rules, input, options);
+  }
+
   /** One run (the abort check, the run, the output check, the width). */
   async #run(
     request: EmbedRequest,
@@ -770,11 +784,29 @@ export class Pipeline {
   }
 
   /**
+   * Returns the token ids {@link embed} would run for the same input and prompt: the prompt's
+   * prefix, the joined text parts, `<bos>` … `<eos>`. Synchronous, on the host (no GPU) and not
+   * queued behind the calls in flight.
+   *
+   * Refused with the same `ModelInputError` as `embed`: an input that is neither a string nor an
+   * array, an empty part array, a part of a type the model does not accept, an unknown prompt.
+   * A sequence longer than the model's limit and a text whose tokens include a placeholder id are
+   * **returned, not refused**, so a caller can show the count and the ids first — `embed` still
+   * refuses both. Fails after {@link dispose}, as `embed` does.
+   */
+  tokenize(
+    input: string | readonly EmbedContentPart[],
+    options: TokenizeOptions = {},
+  ): Int32Array<ArrayBuffer> {
+    return this.#embedder.tokenize(input, options);
+  }
+
+  /**
    * Releases. Always disposes the Session and destroys **only a GPU acquired internally** (a
    * GpuContext passed in `options.gpu` belongs to the caller and is not touched).
    *
    * MUST: waits for the calls in flight before destroying (flush-before-destroy). Later calls
-   * return the same completion; `embed` after it fails.
+   * return the same completion; `embed` and `tokenize` after it fail.
    */
   dispose(): Promise<void> {
     return this.#embedder.dispose();

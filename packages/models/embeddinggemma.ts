@@ -6,7 +6,8 @@
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
  * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained} /
  * {@link Pipeline.fromAssets}) / embed (`embed` — a string or {@link EmbedContentPart}s, with
- * {@link EmbedOptions}: a prompt, a width, an abort signal) / release (`dispose`).
+ * {@link EmbedOptions}: a prompt, a width, an abort signal) / count (`tokenize` — the token ids
+ * `embed` would run, with {@link TokenizeOptions}) / release (`dispose`).
  *
  * ```ts
  * const pipeline = await Pipeline.fromPretrained(ref, { gpu });
@@ -31,7 +32,11 @@ export type {
   FromPretrainedOptions,
   PipelineOptions,
 } from "./src/embeddinggemma/pipeline.ts";
-export type { EmbedContentPart, EmbedOptions } from "./src/embeddinggemma/input.ts";
+export type {
+  EmbedContentPart,
+  EmbedOptions,
+  TokenizeOptions,
+} from "./src/embeddinggemma/input.ts";
 
 /**
  * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it

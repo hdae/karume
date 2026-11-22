@@ -15,7 +15,8 @@
  * ⑤ The graph contract, including the declared maximum against the graph's folded constants.
  * ⑥ The run lifecycle over a stand-in Session (`Embedder` — what `Pipeline` delegates to): the run's
  *    inputs, the width, one run at a time, cancellation before and during a call, dispose after the
- *    work in flight, then the GPU release.
+ *    work in flight, then the GPU release; `tokenize` gives the ids `embed` runs, off the chain, and
+ *    returns what only `embed` refuses (over the limit, a placeholder id).
  * ⑦ `Pipeline.fromAssets` with a declaration-only container: manifest violations fail before any GPU
  *    is touched, and the positive path passes admission and stops at the tokenizer asset.
  */
@@ -35,6 +36,7 @@ import {
   type EmbedTextRules,
   embedTextRules,
   planEmbedRequest,
+  tokenizeEmbedInput,
   truncateEmbedding,
 } from "../src/embeddinggemma/input.ts";
 import {
@@ -951,6 +953,120 @@ describe("Embedder: dispose", () => {
     stand.disposeFailure = new Error("device lost");
     await assertRejects(() => embedderOf(stand).dispose(), Error, "device lost");
     assertEquals(stand.events, ["session.dispose", "release"]);
+  });
+});
+
+/** An embedder over the stand-in with the widths 4 and 2 and one more field replaced. */
+const embedderWith = (stand: Stand, patch: Record<string, unknown>): Embedder =>
+  new Embedder({
+    session: stand.session,
+    contract: { output: "out", width: 4, vocabularySize: 262144 },
+    rules: embedTextRules(
+      TOKENIZER,
+      parseEmbeddingGemmaPipelineConfig({ ...CONFIG_JSON, dimensions: [4, 2], ...patch }),
+    ),
+  });
+
+describe("Embedder.tokenize: the ids embed runs, without running", () => {
+  it("returns the ids the Session receives for the same input and prompt", async () => {
+    const stand = standIn();
+    const embedder = embedderOf(stand);
+    const { text } = parityCase("english-long");
+    const half = Math.floor(text.length / 2);
+    const parts = [
+      { type: "text", text: text.slice(0, half) },
+      { type: "text", text: text.slice(half) },
+    ] as const;
+
+    const counted = [embedder.tokenize(text), embedder.tokenize(parts, { prompt: "document" })];
+    await embedder.embed(text);
+    await embedder.embed(parts, { prompt: "document" });
+
+    assertEquals(
+      counted.map((ids) => [...ids]),
+      stand.runs.map((inputs) => [...hostInput(inputs, "input_ids").data]),
+    );
+  });
+
+  it("puts the prompt's prefix in front, <bos> … <eos> around (upstream's ids)", () => {
+    const { text, idsWithSpecials } = parityCase("prompt-query");
+    const body = text.slice("task: search result | query: ".length);
+    const ids = embedderOf(standIn()).tokenize(body, { prompt: "query" });
+    assertEquals([...ids], idsWithSpecials);
+    assert(ids instanceof Int32Array);
+  });
+
+  it("returns a sequence over the limit that embed refuses, so the count can be shown first", async () => {
+    const { text, idsWithSpecials } = parityCase("english");
+    const stand = standIn();
+    const embedder = embedderWith(stand, { maxTokens: idsWithSpecials.length - 1 });
+
+    assertEquals([...embedder.tokenize(text)], idsWithSpecials);
+    await assertRejects(() => embedder.embed(text), ModelInputError, "over this model's limit");
+    assertEquals(stand.runs.length, 0);
+  });
+
+  it("returns a text holding a placeholder id that embed refuses", async () => {
+    const embedder = embedderOf(standIn());
+    const ids = [...embedder.tokenize("look at <|image|> here")];
+    assert(ids.includes(258880), `no image placeholder id in [${ids.join(", ")}]`);
+    await assertRejects(
+      () => embedder.embed("look at <|image|> here"),
+      ModelInputError,
+      "image placeholder",
+    );
+  });
+
+  it("refuses what cannot be tokenized with embed's ModelInputError", () => {
+    // An untyped caller (method parameters are bivariant, so the embedder is assignable).
+    const untyped: { tokenize(input: unknown, options?: unknown): unknown } = embedderOf(standIn());
+    const tokenize = (input: unknown, options: unknown = {}): unknown =>
+      untyped.tokenize(input, options);
+    assertRefused(() => tokenize(42), "the input is neither a string nor an array");
+    assertRefused(() => tokenize([]), "the input has no content part");
+    assertRefused(
+      () => tokenize([{ type: "image", image: {} }]),
+      'content part 0 has type "image" — this model accepts "text" parts',
+    );
+    assertRefused(
+      () => tokenize("text", { prompt: "Query" }),
+      'prompt "Query" is not one of this model\'s prompts',
+    );
+  });
+
+  it("gives the refusal planEmbedRequest gives, word for word", () => {
+    const message = (run: () => unknown): string => assertThrows(run, ModelInputError).message;
+    assertEquals(
+      message(() => tokenizeEmbedInput(RULES, "text", { prompt: "Query" })),
+      message(() => planEmbedRequest(RULES, "text", { prompt: "Query" })),
+    );
+    assertEquals(
+      message(() => tokenizeEmbedInput(RULES, [], {})),
+      message(() => planEmbedRequest(RULES, [], {})),
+    );
+  });
+
+  it("answers while a run holds the Session (it is not on the serialization chain)", async () => {
+    const stand = standIn();
+    stand.gate = new Promise<void>(() => {});
+    const embedder = embedderOf(stand);
+    void embedder.embed("held");
+    for (let turn = 0; stand.runs.length === 0 && turn < 100; turn += 1) {
+      await new Promise((settle) => setTimeout(settle, 0));
+    }
+    assertEquals(stand.runs.length, 1, "the held call never reached the Session");
+
+    assertEquals([...embedder.tokenize("")], [ASSETS.bosId, ASSETS.eosId]);
+  });
+
+  it("fails after dispose, as embed does", async () => {
+    const embedder = embedderOf(standIn());
+    await embedder.dispose();
+    assertThrows(
+      () => embedder.tokenize("text"),
+      Error,
+      "embeddinggemma.Pipeline: cannot tokenize after dispose",
+    );
   });
 });
 

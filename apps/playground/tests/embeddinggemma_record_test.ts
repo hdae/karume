@@ -158,9 +158,11 @@ const embedded = (
   prompt: string | undefined,
   values: readonly number[],
   sha: string,
+  tokens: number | undefined = 7,
 ): MeasuredRow => ({
   text,
   prompt,
+  tokens,
   embedMs: 15.2345,
   outcome: { kind: "embedding", values: new Float32Array(values), sha256: hex(sha) },
 });
@@ -168,6 +170,7 @@ const embedded = (
 const refused: MeasuredRow = {
   text: "an image <|image|> in text",
   prompt: "query",
+  tokens: 16,
   embedMs: 0.4,
   outcome: {
     kind: "refused",
@@ -200,7 +203,7 @@ describe("assembleRecord", () => {
   const rows = [
     embedded("how do I reset my password", "query", [1, 0], "1"),
     refused,
-    embedded("", undefined, [Math.SQRT1_2, Math.SQRT1_2], "2"),
+    embedded("", undefined, [Math.SQRT1_2, Math.SQRT1_2], "2", 2),
   ];
 
   it("records every row as sent, the prompt as a name or null, and the width of the run", () => {
@@ -216,11 +219,30 @@ describe("assembleRecord", () => {
     expect(record.request).toEqual({
       dimension: 2,
       rows: [
-        { text: "how do I reset my password", prompt: "query" },
-        { text: "an image <|image|> in text", prompt: "query" },
-        { text: "", prompt: null },
+        { text: "how do I reset my password", prompt: "query", tokens: 7 },
+        { text: "an image <|image|> in text", prompt: "query", tokens: 16 },
+        { text: "", prompt: null, tokens: 2 },
       ],
     });
+  });
+
+  it("records a row the pipeline could not tokenize (an undeclared prompt) with a null count", () => {
+    const undeclared: MeasuredRow = {
+      text: "a",
+      prompt: "Query",
+      tokens: undefined,
+      embedMs: 0.1,
+      outcome: {
+        kind: "refused",
+        error: {
+          name: "ModelInputError",
+          message: 'embeddinggemma.Pipeline: prompt "Query" is not one of this model\'s prompts',
+        },
+      },
+    };
+    expect(assemble([undeclared], undefined).request.rows).toEqual([
+      { text: "a", prompt: "Query", tokens: null },
+    ]);
   });
 
   it("keeps each row's vector statistics and sha256, or the refusal as it was raised", () => {

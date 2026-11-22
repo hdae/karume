@@ -28,6 +28,9 @@
  * - The token sequence with `<bos>` and `<eos>` (the tokenizer asset's post-processor) may not
  *   exceed the declared maximum. Nothing is truncated silently.
  *
+ * `tokenize` takes the same step from the input and the prompt to the token ids
+ * ({@link tokenizeEmbedInput}) and stops there: the limit and the placeholder refusal are `embed`'s.
+ *
  * Every refusal of the request is a `ModelInputError` (fixing the input makes it pass — ADR 0107);
  * a tokenizer asset that does not fit the manifest is a plain `Error` raised at construction
  * ({@link embedTextRules}).
@@ -66,6 +69,9 @@ export type EmbedOptions = {
    */
   readonly signal?: AbortSignal;
 };
+
+/** Options for one call of `tokenize`: the prompt, as `embed` takes it. */
+export type TokenizeOptions = Pick<EmbedOptions, "prompt">;
 
 /** The part types the text path takes. */
 const TEXT_PART_TYPES: readonly string[] = ["text"];
@@ -230,6 +236,42 @@ const assertTokenLimit = (count: number, maxTokens: number): void => {
 };
 
 /**
+ * The one step from an input to its token ids, shared by {@link tokenizeEmbedInput} and
+ * {@link planEmbedRequest}: the content parts → the prefix + their joined text → `<bos>` … `<eos>`.
+ * It refuses only an input it cannot read (the parts); the limit and the placeholders are the
+ * request's checks.
+ */
+const inputTokenIds = (
+  tokenizer: Tokenizer,
+  prefix: string,
+  input: string | readonly EmbedContentPart[],
+): number[] => {
+  const text = contentParts(input, TEXT_PART_TYPES)
+    .map((part) => part.text)
+    .join("");
+  return tokenizer.encodeWithSpecialTokens(prefix + text);
+};
+
+/**
+ * The token ids `embed` would run for this input and prompt, without the request's checks: a
+ * sequence over the limit or one holding a placeholder id is returned, not refused (a caller sees
+ * the count and the ids before `embed` refuses them). An input that cannot be read and an unknown
+ * prompt are refused with the same `ModelInputError` as {@link planEmbedRequest}. Pure: no GPU, no
+ * state.
+ *
+ * NOTE: the `export` is for the pipeline and its host tests (not on `mod.ts` / the subpath
+ * surface — ADR 0008).
+ */
+export const tokenizeEmbedInput = (
+  rules: EmbedTextRules,
+  input: string | readonly EmbedContentPart[],
+  options: TokenizeOptions,
+): Int32Array<ArrayBuffer> =>
+  Int32Array.from(
+    inputTokenIds(rules.tokenizer, promptPrefix(rules.config, options.prompt), input),
+  );
+
+/**
  * Turns one request into token ids and the result width, or refuses it with a `ModelInputError`
  * (the module doc). Pure: no GPU, no state.
  *
@@ -244,10 +286,7 @@ export const planEmbedRequest = (
   const { config, tokenizer } = rules;
   const prefix = promptPrefix(config, options.prompt);
   const dimension = outputDimension(config, options.dimension);
-  const text = contentParts(input, TEXT_PART_TYPES)
-    .map((part) => part.text)
-    .join("");
-  const ids = tokenizer.encodeWithSpecialTokens(prefix + text);
+  const ids = inputTokenIds(tokenizer, prefix, input);
   assertNoPlaceholder(rules.placeholders, ids);
   assertTokenLimit(ids.length, config.maxTokens);
   return { ids: Int32Array.from(ids), dimension };

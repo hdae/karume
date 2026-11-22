@@ -10,6 +10,10 @@
  * row; any other failure ends the run. The pipeline creates its Session — and uploads the weights —
  * when it is built, so the page builds it on the first Run and keeps it for later runs with the same
  * source, model and preset (the prompt and the dimension are per call).
+ *
+ * Once a pipeline is held, each row shows its token count against the limit (`tokenize` — on the
+ * host, recomputed as the row changes), marked when it is over; the record keeps the count of each
+ * row as it was run.
  */
 
 import {
@@ -20,7 +24,7 @@ import {
 import { ModelInputError, Pipeline } from "@karume/models/embeddinggemma";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { PlusIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
@@ -72,6 +76,7 @@ import {
   rowOutcomeText,
   similarityText,
   summaryRows,
+  tokenCountView,
 } from "./format";
 import { assembleRecord, type EmbeddingGemmaRecord, type MeasuredRow } from "./record";
 import {
@@ -80,6 +85,7 @@ import {
   effectiveSelection,
   type PipelineKey,
   removeRow,
+  rowTokenCount,
   runBlocker,
   SAMPLE_ROWS,
   type Selection,
@@ -197,6 +203,18 @@ export const EmbeddingGemmaPage = () => {
       });
     };
   }, [gpu, track]);
+  // Each row's token count from the held pipeline's tokenizer, recomputed when a row's text or
+  // prompt changes. None before the first build (the page never builds a pipeline just to count)
+  // and none while the held pipeline is another model's (the next Run builds the selected one).
+  const selectedModel = selection?.model;
+  const tokenCounts = useMemo(() => {
+    const counter = held !== undefined && held.model === selectedModel ? held.pipeline : undefined;
+    return rows.map((row) =>
+      counter === undefined
+        ? undefined
+        : rowTokenCount((text, options) => counter.tokenize(text, options), row),
+    );
+  }, [held, rows, selectedModel]);
   // Where `onRunDiagnostics` goes: the running run's report list (the pipeline outlives a run).
   const diagnosticsSinkRef = useRef<((diagnostics: SessionDiagnostics) => void) | undefined>(
     undefined,
@@ -282,6 +300,7 @@ export const EmbeddingGemmaPage = () => {
       const countersBefore = active.counters.latest;
       const reports: SessionDiagnostics[] = [];
       const outcomes: {
+        readonly tokens: number | undefined;
         readonly embedMs: number;
         readonly result:
           | { readonly kind: "embedding"; readonly values: Float32Array<ArrayBuffer> }
@@ -295,6 +314,11 @@ export const EmbeddingGemmaPage = () => {
             count: { done: position, total: runRows.length, unit: "rows" },
             note: "embed() checks the signal before its run: a Cancel during a row takes effect when that row ends.",
           });
+          // Counted before the row's embed, while the pipeline is certainly the one it runs on.
+          const tokens = rowTokenCount(
+            (text, options) => active.pipeline.tokenize(text, options),
+            row,
+          );
           const embedStart = performance.now();
           try {
             const values = await active.pipeline.embed(row.text, {
@@ -303,6 +327,7 @@ export const EmbeddingGemmaPage = () => {
               signal,
             });
             outcomes.push({
+              tokens,
               embedMs: performance.now() - embedStart,
               result: { kind: "embedding", values },
             });
@@ -311,6 +336,7 @@ export const EmbeddingGemmaPage = () => {
             // cancel) ends the run.
             if (!(error instanceof ModelInputError)) throw error;
             outcomes.push({
+              tokens,
               embedMs: performance.now() - embedStart,
               result: { kind: "refused", error },
             });
@@ -332,6 +358,7 @@ export const EmbeddingGemmaPage = () => {
         measured.push({
           text: row.text,
           prompt: row.prompt,
+          tokens: outcome.tokens,
           embedMs: outcome.embedMs,
           outcome:
             result.kind === "embedding"
@@ -460,53 +487,82 @@ export const EmbeddingGemmaPage = () => {
               </Field>
             )}
             <div className="flex flex-col gap-3 sm:col-span-2">
-              {rows.map((row, position) => (
-                <div
-                  key={row.id}
-                  className="flex flex-col gap-2 rounded-lg border p-3"
-                  id={`embeddinggemma-row-${position}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <Label htmlFor={`embeddinggemma-row-${position}-text`}>
-                      {rowLabel(position)}
-                    </Label>
-                    <Button
-                      id={`embeddinggemma-row-${position}-remove`}
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setRows((current) => removeRow(current, row.id))}
-                      disabled={task.running || rows.length <= 1}
-                    >
-                      <Trash2Icon />
-                      Remove
-                    </Button>
+              {rows.map((row, position) => {
+                const count = tokenCounts[position];
+                const tokens =
+                  count === undefined || config === undefined
+                    ? undefined
+                    : tokenCountView(count, config.maxTokens);
+                return (
+                  <div
+                    key={row.id}
+                    className="flex flex-col gap-2 rounded-lg border p-3"
+                    id={`embeddinggemma-row-${position}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Label htmlFor={`embeddinggemma-row-${position}-text`}>
+                          {rowLabel(position)}
+                        </Label>
+                        {tokens === undefined ? null : (
+                          <Badge
+                            id={`embeddinggemma-row-${position}-tokens`}
+                            variant={tokens.overLimit ? "destructive" : "secondary"}
+                          >
+                            {tokens.text}
+                          </Badge>
+                        )}
+                      </div>
+                      <Button
+                        id={`embeddinggemma-row-${position}-remove`}
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setRows((current) => removeRow(current, row.id))}
+                        disabled={task.running || rows.length <= 1}
+                      >
+                        <Trash2Icon />
+                        Remove
+                      </Button>
+                    </div>
+                    <Textarea
+                      id={`embeddinggemma-row-${position}-text`}
+                      rows={2}
+                      value={row.text}
+                      onChange={(event) =>
+                        setRows((current) =>
+                          updateRow(current, row.id, { text: event.target.value }),
+                        )
+                      }
+                      disabled={task.running}
+                      aria-invalid={tokens?.overLimit === true}
+                    />
+                    {tokens?.overLimit === true ? (
+                      <p
+                        id={`embeddinggemma-row-${position}-over-limit`}
+                        className="text-xs text-destructive"
+                      >
+                        Over the limit: the pipeline will refuse this row (nothing is truncated).
+                        Shorten the text or split it.
+                      </p>
+                    ) : null}
+                    {config === undefined ? null : (
+                      <Field id={`embeddinggemma-row-${position}-prompt`} label="Prompt">
+                        <ChoiceSelect
+                          id={`embeddinggemma-row-${position}-prompt`}
+                          value={promptValue(row.prompt)}
+                          choices={promptChoices(config, row.prompt)}
+                          onChange={(value) =>
+                            setRows((current) =>
+                              updateRow(current, row.id, { prompt: promptOfValue(value) }),
+                            )
+                          }
+                          disabled={task.running}
+                        />
+                      </Field>
+                    )}
                   </div>
-                  <Textarea
-                    id={`embeddinggemma-row-${position}-text`}
-                    rows={2}
-                    value={row.text}
-                    onChange={(event) =>
-                      setRows((current) => updateRow(current, row.id, { text: event.target.value }))
-                    }
-                    disabled={task.running}
-                  />
-                  {config === undefined ? null : (
-                    <Field id={`embeddinggemma-row-${position}-prompt`} label="Prompt">
-                      <ChoiceSelect
-                        id={`embeddinggemma-row-${position}-prompt`}
-                        value={promptValue(row.prompt)}
-                        choices={promptChoices(config, row.prompt)}
-                        onChange={(value) =>
-                          setRows((current) =>
-                            updateRow(current, row.id, { prompt: promptOfValue(value) }),
-                          )
-                        }
-                        disabled={task.running}
-                      />
-                    </Field>
-                  )}
-                </div>
-              ))}
+                );
+              })}
               <Button
                 id="embeddinggemma-row-add"
                 variant="outline"
@@ -522,7 +578,8 @@ export const EmbeddingGemmaPage = () => {
                 <p className="text-xs text-muted-foreground">
                   A row may be up to {config.maxTokens} tokens, prompt prefix, &lt;bos&gt; and
                   &lt;eos&gt; included; a longer row is refused (nothing is truncated). A text
-                  holding an image, audio or video placeholder token is refused too.
+                  holding an image, audio or video placeholder token is refused too. Each row shows
+                  its count once the first Run has built the pipeline.
                 </p>
               )}
             </div>

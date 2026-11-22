@@ -43,7 +43,10 @@ measurements in `docs/research/`.
   (768 / 512 / 256 / 128 — a shorter one is the leading slice re-normalised). A `ModelInputError` refuses, before the
   GPU, an empty part list, a part of another type, an unknown prompt or width, a text whose tokens include an image,
   audio or video placeholder, and a sequence over the limit (2,048 tokens with `<bos>` and `<eos>`; nothing is
-  truncated). Also exported: `EmbedOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
+  truncated). `tokenize(input, { prompt })` returns, synchronously and without the GPU, the token ids (`Int32Array`)
+  `embed` would run for the same input and prompt; it refuses the same unreadable inputs and unknown prompts, but
+  returns a sequence over the limit or one holding a placeholder id, so the count can be shown before `embed` refuses
+  it. Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
   `ModelInputError`.
 
 ### Changed
