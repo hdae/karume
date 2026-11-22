@@ -49,9 +49,17 @@ from karume.quantize import channel_scale, quantize_to_int8
 #: The synthetic vocabulary (16 rows) and its placeholder ids — numbers other than the real ones.
 VOCAB = 16
 PLACEHOLDERS = {"image": 13, "audio": 14, "video": 15}
+#: The image markers around an image's soft tokens (`boi_token_id` / `eoi_token_id`).
+BEGIN_IMAGE, END_IMAGE = 11, 12
 BOS, EOS = 2, 1
 #: The graph's output width (the full dimension — it must be the declared one).
 WIDTH = eg2.EMBEDDINGGEMMA2_DIMENSIONS[0]
+#: The token table's width (= the soft rows' and the tower's output width).
+HIDDEN = 4
+#: The synthetic soft-token budget (not the real 280) and the positions the tower's tables cover
+#: at it (3 · budget).
+BUDGET = 140
+POSITIONS = 3 * BUDGET
 
 #: A prompt table over the eight real prefixes (`tokenizer.PROMPT_PREFIXES` — each has a parity
 #: case), with names of its own and an order that is neither sorted nor the prefixes'.
@@ -144,6 +152,85 @@ def _write_container(
     )
 
 
+def _write_vision_container(
+    path: Path,
+    *,
+    weight_dtype: str = "bf16",
+    width: int = HIDDEN,
+    positions: int = POSITIONS,
+    row_width: int = 768,
+    revision: str = FIXTURE_REVISION,
+    license: str = eg2.EMBEDDINGGEMMA2_LICENSE,
+) -> None:
+    """Write the smallest container of the tower graph's contract (`pixels` f32 `[1, 9n, 768]`,
+    `position_x` / `position_y` i32 `[1, 9n]` in, one f32 `[1, n, width]` out, a projection and a
+    folded table of `positions` rows gathered by both positions — kept f32, as the export keeps
+    its rotary tables) as a series component."""
+    symbol = eg2.EMBEDDINGGEMMA2_VISION_SYMBOL
+    rows = f"9{symbol}"
+    graph = IrGraph(symbols=[symbol])
+    graph.inputs += [
+        IrInput(name="pixels", dtype="f32", shape=[1, rows, row_width]),
+        IrInput(name="position_x", dtype="i32", shape=[1, rows]),
+        IrInput(name="position_y", dtype="i32", shape=[1, rows]),
+    ]
+    tensors = {
+        # Multiples of 1/8 below 2, so the bf16 write stores them unchanged.
+        "projection": (torch.arange(width * row_width, dtype=torch.float32) % 16).reshape(
+            width, row_width
+        )
+        / 8,
+        "bias": torch.zeros(width, dtype=torch.float32),
+        "rope": torch.full((positions, 2), 1 / 3, dtype=torch.float32),
+        "seed": torch.ones(1, 1, dtype=torch.float32),
+    }
+    for name, tensor in tensors.items():
+        graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage("f32"))
+        graph.values[name] = IrValue("f32", list(tensor.shape))
+    graph.values["projected"] = IrValue("f32", [1, rows, width])
+    graph.values["rope_x"] = IrValue("f32", [1, rows, 2])
+    graph.values["rope_y"] = IrValue("f32", [1, rows, 2])
+    graph.values["soft"] = IrValue("f32", [1, symbol, width])
+    graph.nodes += [
+        IrNode(op="linear", ins=["pixels", "projection", "bias"], outs=["projected"], attrs={}),
+        IrNode(
+            op="embedding",
+            ins=["rope", "position_x"],
+            outs=["rope_x"],
+            attrs={"padding_idx": -1},
+        ),
+        IrNode(
+            op="embedding",
+            ins=["rope", "position_y"],
+            outs=["rope_y"],
+            attrs={"padding_idx": -1},
+        ),
+        IrNode(op="expand", ins=["seed"], outs=["soft"], attrs={}),
+    ]
+    graph.outputs.append("soft")
+    scales: dict[str, torch.Tensor] = {}
+    if weight_dtype == "i8":
+        scales["projection"] = channel_scale(tensors["projection"], 0)
+        rounded = quantize_to_int8(tensors["projection"], scales["projection"])
+        tensors["projection"] = rounded.to(torch.float32) * scales["projection"]
+    stored = stored_model(
+        graph,
+        tensors,
+        weight_dtype=weight_dtype,
+        weight_scales=scales,
+        weight_dtype_overrides={"rope": "f32"},
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    publish_container(
+        path,
+        stored.graph,
+        stored.tensors,
+        stored.bindings,
+        graph_name=eg2.EMBEDDINGGEMMA2_VISION_ROLE,
+        provenance=Provenance(license=license, upstream_revision=revision),
+    )
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -153,9 +240,22 @@ UPSTREAM_CONFIG = {
     "image_token_id": PLACEHOLDERS["image"],
     "audio_token_id": PLACEHOLDERS["audio"],
     "video_token_id": PLACEHOLDERS["video"],
-    "text_config": {"bos_token_id": BOS, "eos_token_id": EOS},
+    "boi_token_id": BEGIN_IMAGE,
+    "eoi_token_id": END_IMAGE,
+    "text_config": {"bos_token_id": BOS, "eos_token_id": EOS, "hidden_size": HIDDEN},
 }
 PROMPTS_CONFIG = {"default_prompt_name": None, "prompts": PROMPTS, "similarity_fn_name": "cosine"}
+#: The processor's image settings: what the host implements, at the synthetic budget.
+PROCESSOR_CONFIG = {
+    "image_processor": {
+        **eg2.EMBEDDINGGEMMA2_IMAGE_PROCESSOR,
+        "image_seq_length": BUDGET,
+        "max_soft_tokens": BUDGET,
+        "patch_size": 16,
+        "pooling_kernel_size": 3,
+    },
+    "processor_class": "EmbeddingGemma2Processor",
+}
 
 
 def _tokenizer_asset(tokenizer_sha256: str) -> dict[str, Any]:
@@ -164,7 +264,7 @@ def _tokenizer_asset(tokenizer_sha256: str) -> dict[str, Any]:
         "source": {"sha256": tokenizer_sha256},
         "spec": {"postProcessor": eg2.EMBEDDINGGEMMA2_POST_PROCESSOR},
         "vocab": [f"t{index}" for index in range(VOCAB)],
-        "specialIds": [0, EOS, BOS, *PLACEHOLDERS.values()],
+        "specialIds": [0, EOS, BOS, BEGIN_IMAGE, END_IMAGE, *PLACEHOLDERS.values()],
         "bosId": BOS,
         "eosId": EOS,
     }
@@ -179,9 +279,12 @@ class Fixture:
             series={
                 dtype: self.series_root / name for dtype, name in eg2.EMBEDDINGGEMMA2_SERIES.items()
             },
+            vision=self.series_root / eg2.EMBEDDINGGEMMA2_VISION_SERIES,
             tokenizer=self.series_root / tokenizer.TOKENIZER_SERIES,
             snapshot=root / "inputs" / "embeddinggemma2" / "embeddinggemma-2",
         )
+        #: The vision tower's container.
+        self.vision_container = self.sources.vision / eg2.EMBEDDINGGEMMA2_MODEL_FILE
         #: Dtype label → the series' container.
         self.containers = {
             dtype: series / eg2.EMBEDDINGGEMMA2_MODEL_FILE
@@ -193,10 +296,33 @@ class Fixture:
             _write_container(container, weight_dtype=dtype)
             # A series also holds the goldens, which must not be distributed.
             (container.parent / "io.query-en.safetensors").write_bytes(b"io-fixture")
+        _write_vision_container(self.vision_container)
+        (self.sources.vision / "io.gradient-square.safetensors").write_bytes(b"io-fixture")
         _write_json(self.sources.snapshot / "config.json", UPSTREAM_CONFIG)
         _write_json(self.sources.snapshot / "config_sentence_transformers.json", PROMPTS_CONFIG)
+        _write_json(self.sources.snapshot / "processor_config.json", PROCESSOR_CONFIG)
         (self.sources.snapshot / "tokenizer.json").write_text('{"fixture": true}', encoding="utf-8")
         self.write_tokenizer(_tokenizer_asset(self.snapshot_sha("tokenizer.json")))
+        self.write_vision_record({})
+
+    def write_vision_record(self, patch: Mapping[str, Any]) -> None:
+        """The vision series' record (`export_vision.py` writes it), with fields replaced."""
+        record = {
+            "series": eg2.EMBEDDINGGEMMA2_VISION_SERIES,
+            "upstream": f"{upstream_sources.PIN.repo}@{FIXTURE_REVISION}",
+            "softTokenBudget": BUDGET,
+            "ropePositions": POSITIONS,
+            "images": [],
+        }
+        _write_json(
+            self.sources.vision / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE, {**record, **patch}
+        )
+
+    def rewrite_vision(self, **container: Any) -> None:
+        """Replace the vision series' container with one written with other arguments."""
+        for stale in sequence_siblings(self.vision_container):
+            stale.unlink()
+        _write_vision_container(self.vision_container, **container)
 
     def snapshot_sha(self, name: str) -> str:
         return upstream_sources.file_sha256(self.sources.snapshot / name)
@@ -285,15 +411,16 @@ class TestLayout:
         assert manifest["defaultModel"] == "text"
         assert list(manifest["models"]) == ["text"]
         assert model["pipeline"] == "embeddinggemma/1"
-        assert list(model["weights"]) == ["model"]
+        assert list(model["weights"]) == ["model", "vision"]
         assert list(model["weights"]["model"]) == ["bf16", "i8"]
+        assert list(model["weights"]["vision"]) == ["bf16"]
         assert list(model["assets"]) == ["tokenizer"]
         assert list(model["quants"]) == ["bf16", "i8"]
         assert model["defaultQuant"] == "bf16"
-        assert model["quants"]["bf16"]["weights"] == {"model": "bf16"}
+        assert model["quants"]["bf16"]["weights"] == {"model": "bf16", "vision": "bf16"}
         assert model["quants"]["bf16"]["session"] == {}
         assert model["quants"]["bf16"]["label"] == "Original weights (bf16)"
-        assert model["quants"]["i8"]["weights"] == {"model": "i8"}
+        assert model["quants"]["i8"]["weights"] == {"model": "i8", "vision": "bf16"}
         assert model["quants"]["i8"]["session"] == {}
         assert model["quants"]["i8"]["label"] == "Half size (int8)"
 
@@ -391,11 +518,16 @@ class TestStorage:
         )
 
     def test_every_storage_requires_itself(self) -> None:
-        assert eg2.EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS == {"model_bf16": "bf16", "model_i8": "i8"}
+        assert eg2.EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS == {
+            "model_bf16": "bf16",
+            "model_i8": "i8",
+            "vision_bf16": "bf16",
+        }
 
     def test_a_missing_storage_is_refused(self, fixture: Fixture) -> None:
         sources = eg2.EmbeddingGemma2Sources(
             series={"bf16": fixture.sources.series["bf16"]},
+            vision=fixture.sources.vision,
             tokenizer=fixture.sources.tokenizer,
             snapshot=fixture.sources.snapshot,
         )
@@ -434,13 +566,14 @@ class TestPipelineConfig:
     """`pipelineConfig` — the field names part of the TypeScript schema, every value from its
     source."""
 
-    def test_it_declares_exactly_the_four_fields_in_order(self, assembled) -> None:
+    def test_it_declares_exactly_the_five_fields_in_order(self, assembled) -> None:
         _, manifest = assembled
         assert list(_model(manifest)["pipelineConfig"]) == [
             "prompts",
             "dimensions",
             "maxTokens",
             "placeholderTokens",
+            "vision",
         ]
 
     def test_the_prompts_are_upstreams_verbatim_and_in_order(self, assembled) -> None:
@@ -711,11 +844,14 @@ class TestLegalText:
 
         for name in manifest["models"]:
             assert f"`{EMBEDDINGGEMMA2_UPSTREAM[name]}`" in notice
-        assert "**text tower only**" in notice
+        assert "**text tower and the vision tower**" in notice
+        assert "the audio tower was never read" in notice
         assert "**The `bf16` form keeps the checkpoint's BF16 values unchanged**" in notice
         assert "replaced by a band declared on the attention" in notice
         # The i8 form is the one quantized copy, and the notice says what was rounded.
-        assert "**The\n  `i8` form is an int8-quantized copy**" in notice
+        assert "**The `i8` form is an\n  int8-quantized copy**" in notice
+        assert "every linear layer of the text tower were" in notice
+        assert "BF16 values unchanged in both forms" in notice
         assert "rounded to symmetric int8 with one float32 scale per row" in notice
         assert notice.count("quantiz") == 1
 
@@ -727,6 +863,154 @@ class TestLegalText:
 
         named = set(re.findall(r"`([a-z0-9]+)` form", notice))
         assert named == set(_model(manifest)["weights"]["model"])
+
+
+class TestVisionTower:
+    """The tower: one bf16 storage every preset maps, held to the processor, its series' record
+    and both graphs, and `pipelineConfig.vision` read from its sources."""
+
+    def test_every_preset_maps_the_one_bf16_tower_its_series_ships(
+        self, assembled, fixture: Fixture
+    ) -> None:
+        out_dir, manifest = assembled
+        model = _model(manifest)
+        parts = model["weights"]["vision"]["bf16"]["container"]["parts"]
+
+        assert parts[0]["path"].startswith("text/vision/model.bf16-")
+        assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
+            source.read_bytes() for source in sorted(sequence_siblings(fixture.vision_container))
+        ]
+        assert {name: quant["weights"]["vision"] for name, quant in model["quants"].items()} == {
+            "bf16": "bf16",
+            "i8": "bf16",
+        }
+
+    def test_the_vision_series_record_stays_out(self, assembled) -> None:
+        out_dir, _ = assembled
+        assert list(out_dir.rglob(eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE)) == []
+
+    def test_pipeline_config_vision_comes_from_the_processor_the_config_and_the_graphs(
+        self, assembled
+    ) -> None:
+        """The synthetic budget and ids differ from the real ones — hard-coded values would show."""
+        _, manifest = assembled
+        assert _model(manifest)["pipelineConfig"]["vision"] == {
+            "softTokenBudget": BUDGET,
+            "imageTokenId": PLACEHOLDERS["image"],
+            "beginImageTokenId": BEGIN_IMAGE,
+            "endImageTokenId": END_IMAGE,
+            "hiddenSize": HIDDEN,
+        }
+
+    @pytest.mark.parametrize("dtype", ["i8", "f32"])
+    def test_a_tower_in_another_storage_is_refused(self, fixture: Fixture, dtype: str) -> None:
+        fixture.rewrite_vision(weight_dtype=dtype)
+
+        with pytest.raises(DistError, match=r"vision_bf16: storage of .* has no bf16"):
+            fixture.plan()
+
+    def test_the_towers_forbidden_table_names_every_rounded_layout(self) -> None:
+        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", "bf16"}
+
+        assert (
+            set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.EMBEDDINGGEMMA2_VISION_ARTIFACT])
+            == compressed
+        )
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("resample", 2),
+            ("do_normalize", True),
+            ("rescale_factor", 1 / 256),
+            ("image_processor_type", "SiglipImageProcessor"),
+        ],
+    )
+    def test_a_processor_setting_the_host_does_not_implement_is_refused(
+        self, fixture: Fixture, key: str, value: Any
+    ) -> None:
+        image = {**PROCESSOR_CONFIG["image_processor"], key: value}
+        fixture.rewrite_snapshot("processor_config.json", {"image_processor": image})
+
+        with pytest.raises(DistError, match=f"image_processor.{key} is"):
+            fixture.plan()
+
+    def test_a_tower_of_another_output_width_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_vision(width=8)
+
+        with pytest.raises(DistError, match="the vision graph's output is"):
+            fixture.plan()
+
+    def test_patch_rows_of_another_width_are_refused(self, fixture: Fixture) -> None:
+        """12B's embedder takes 48 × 48 × 3 rows — another processor's patches."""
+        fixture.rewrite_vision(row_width=6912)
+
+        with pytest.raises(DistError, match="the vision graph's inputs are"):
+            fixture.plan()
+
+    def test_position_tables_short_of_the_budgets_longest_side_are_refused(
+        self, fixture: Fixture
+    ) -> None:
+        fixture.rewrite_vision(positions=POSITIONS - 1)
+
+        with pytest.raises(
+            DistError, match=f"cover {POSITIONS - 1} positions, but an image side reaches"
+        ):
+            fixture.plan()
+
+    def test_a_text_hidden_size_other_than_the_soft_rows_is_refused(self, fixture: Fixture) -> None:
+        config = {**UPSTREAM_CONFIG, "text_config": {**UPSTREAM_CONFIG["text_config"]}}
+        config["text_config"]["hidden_size"] = 8
+        fixture.rewrite_snapshot("config.json", config)
+
+        with pytest.raises(DistError, match="soft_embeds is 4 wide"):
+            fixture.plan()
+
+    @pytest.mark.parametrize(
+        ("patch", "message"),
+        [
+            ({"softTokenBudget": 280}, "softTokenBudget is 280, not 140"),
+            ({"upstream": f"{upstream_sources.PIN.repo}@{OTHER_REVISION}"}, "upstream is"),
+            ({"series": "embeddinggemma-2-vision"}, "series is 'embeddinggemma-2-vision'"),
+        ],
+    )
+    def test_a_series_record_of_another_budget_pin_or_series_is_refused(
+        self, fixture: Fixture, patch: Mapping[str, Any], message: str
+    ) -> None:
+        fixture.write_vision_record(patch)
+
+        with pytest.raises(DistError, match=message):
+            fixture.plan()
+
+    def test_a_series_without_its_record_is_refused(self, fixture: Fixture) -> None:
+        (fixture.sources.vision / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE).unlink()
+
+        with pytest.raises(DistError, match="missing assembly input"):
+            fixture.plan()
+
+    def test_a_tower_from_another_revision_or_license_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_vision(revision=OTHER_REVISION)
+        with pytest.raises(DistError, match="built from a different revision"):
+            fixture.plan()
+
+        fixture.rewrite_vision(license="gemma")
+        with pytest.raises(DistError, match=r"provenance\.license is 'gemma'"):
+            fixture.plan()
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("boi_token_id", VOCAB, "not an id of the 16 rows"),
+            ("eoi_token_id", 3, "not a special token"),
+            ("eoi_token_id", BEGIN_IMAGE, "the image token ids repeat"),
+        ],
+    )
+    def test_an_image_marker_the_tokenizer_cannot_produce_is_refused(
+        self, fixture: Fixture, field: str, value: Any, message: str
+    ) -> None:
+        fixture.rewrite_snapshot("config.json", {**UPSTREAM_CONFIG, field: value})
+        with pytest.raises(DistError, match=message):
+            fixture.plan()
 
 
 class TestTheDriver:
@@ -775,6 +1059,18 @@ class TestMirroredConstants:
         assert eg2.EMBEDDINGGEMMA2_MODEL_FILE == SINGLE_COMPONENT_FILE
         assert tokenizer.ASSET_PATH.name == eg2.EMBEDDINGGEMMA2_TOKENIZER_FILE
 
+    def test_the_vision_constants_are_the_tower_exports(self) -> None:
+        from embeddinggemma2 import export_vision
+
+        assert export_vision.DEFAULT_OUT_DIRS["bf16"].name == eg2.EMBEDDINGGEMMA2_VISION_SERIES
+        assert export_vision.GRAPH_NAME == eg2.EMBEDDINGGEMMA2_VISION_ROLE
+        assert (
+            tuple(name for name, _ in eg2.EMBEDDINGGEMMA2_VISION_INPUTS)
+            == export_vision.GRAPH_INPUTS
+        )
+        assert export_vision.SYMBOL == eg2.EMBEDDINGGEMMA2_VISION_SYMBOL
+        assert export_vision.REFERENCE_FILE == eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE
+
     def test_the_placeholder_fields_are_the_ones_the_export_refuses(self) -> None:
         """The export keeps these ids out of the goldens (`export.build_cases`); the reader is
         told the same three."""
@@ -818,3 +1114,38 @@ class TestThePinnedSnapshot:
         )
 
         assert placeholders == {"image": 258880, "audio": 258881, "video": 258884}
+
+    def test_its_image_processor_is_the_one_the_host_implements_at_280_soft_tokens(self) -> None:
+        directory = _real_snapshot()
+        upstream_sources.assert_pinned(directory, ("processor_config.json",))
+        path = directory / "processor_config.json"
+
+        processor = eg2.embeddinggemma2_image_processor(
+            json.loads(path.read_text(encoding="utf-8")), str(path)
+        )
+
+        assert processor == eg2.EmbeddingGemma2ImageProcessor(budget=280, patch_size=16, pooling=3)
+
+    def test_its_image_ids_are_special_tokens_of_the_compiled_asset(self) -> None:
+        directory = _real_snapshot()
+        if not tokenizer.ASSET_PATH.is_file():
+            pytest.skip(f"the compiled tokenizer asset is not at {tokenizer.ASSET_PATH}")
+        asset = json.loads(tokenizer.ASSET_PATH.read_text(encoding="utf-8"))
+        config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+
+        vision = eg2.embeddinggemma2_vision_config(
+            config,
+            asset,
+            vocab_size=len(asset["vocab"]),
+            hidden=config["text_config"]["hidden_size"],
+            budget=280,
+            where="config.json",
+        )
+
+        assert vision == {
+            "softTokenBudget": 280,
+            "imageTokenId": 258880,
+            "beginImageTokenId": 255999,
+            "endImageTokenId": 258882,
+            "hiddenSize": 512,
+        }

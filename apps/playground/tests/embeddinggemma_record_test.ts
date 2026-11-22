@@ -345,3 +345,26 @@ describe("buildStatus", () => {
     expect(status.cancellable).toBe(false);
   });
 });
+
+describe("a row that held an image", () => {
+  const withImage: MeasuredRow = {
+    ...embedded("a cat", undefined, [0.6, 0.8], "3", 262),
+    image: { name: "cat.png", width: 640, height: 480, rgbSha256: hex("c") },
+  };
+
+  it("records the image's name, size and RGB8 sha256 beside the text, and no image for a text row", () => {
+    const record = assemble([withImage, embedded("b", undefined, [0, 1], "4")], undefined);
+    expect(record.format).toBe("karume-playground-embeddinggemma/2");
+    expect(record.request.rows).toEqual([
+      {
+        text: "a cat",
+        prompt: null,
+        image: { name: "cat.png", width: 640, height: 480, rgbSha256: hex("c") },
+        tokens: 262,
+      },
+      { text: "b", prompt: null, tokens: 7 },
+    ]);
+    expect(Object.hasOwn(record.request.rows[1] ?? {}, "image")).toBe(false);
+    expect(record.output.similarity[0]?.[1]).toBe(0.8);
+  });
+});

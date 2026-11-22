@@ -24,18 +24,33 @@ import {
 import type { Selection } from "./request";
 import { type EmbeddingStats, embeddingStats, similarityMatrix } from "./similarity";
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-embeddinggemma/1";
+/**
+ * The version of the saved record; bump it when a field changes meaning or goes away. `/2`: a row
+ * may hold an image (`image`), and its `tokens` then count the image's soft tokens too.
+ */
+export const RECORD_FORMAT = "karume-playground-embeddinggemma/2";
+
+/** The image a row sent (embedded after its text). */
+export type RowImageRecord = {
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  /** sha256 of the RGB8 pixels the pipeline was given (alpha already dropped). */
+  readonly rgbSha256: string;
+};
 
 /**
- * One row as it was sent: the text as typed, the prompt name (null = none) and the token count
- * `tokenize` gave for them (the prefix, `<bos>` and `<eos>` included — over `maxTokens` for a row
- * the pipeline refused for the model's limit, at or below it for a row refused for the device's
- * smaller buffer limit; null when the pipeline could not tokenize the row, an undeclared prompt).
+ * One row as it was sent: the text as typed, the prompt name (null = none), its image (absent for a
+ * text row) and the token count `tokenize` gave for them (the prefix, `<bos>` and `<eos>` and an
+ * image's soft tokens with its two markers included — over `maxTokens` for a row the pipeline
+ * refused for the model's limit, at or below it for a row refused for the device's smaller buffer
+ * limit; null when the pipeline could not tokenize the row: an undeclared prompt, an image on a
+ * pipeline without the vision tower).
  */
 export type RowRequestRecord = {
   readonly text: string;
   readonly prompt: string | null;
+  readonly image?: RowImageRecord;
   readonly tokens: number | null;
 };
 
@@ -48,7 +63,10 @@ export type RowOutputRecord =
       readonly kind: "embedding";
       /** sha256 of the vector's raw f32 bytes (little-endian). */
       readonly sha256: string;
-      /** Seconds of the `embed` call (host tokenization, one Session run, readback). */
+      /**
+       * Seconds of the `embed` call (host tokenization and image preprocessing, the vision tower's
+       * run for an image, the text Session's run, readback).
+       */
       readonly embedSeconds: number;
     })
   | {
@@ -94,7 +112,10 @@ export type EmbeddingGemmaRecord = RecordEnvironment & {
     /** `similarity[i][j]` = the dot product of rows i and j ({@link similarityMatrix}). */
     readonly similarity: readonly (readonly (number | null)[])[];
   };
-  /** The model Session's diagnostics over this run's embeddings (one report per embedded row). */
+  /**
+   * The model Session's diagnostics over this run's embeddings (one report per embedded row; the
+   * vision tower's runs are not reported by the pipeline, so they are not in it).
+   */
   readonly diagnostics: { readonly model?: ModelSessionRecord };
 };
 
@@ -132,6 +153,8 @@ export const modelDiagnostics = (
 export type MeasuredRow = {
   readonly text: string;
   readonly prompt: string | undefined;
+  /** The row's image (`undefined` for a text row). */
+  readonly image?: RowImageRecord;
   /** The row's token count (`rowTokenCount`); `undefined` when it could not be tokenized. */
   readonly tokens: number | undefined;
   readonly embedMs: number;
@@ -186,9 +209,10 @@ export const assembleRecord = (input: {
     },
     request: {
       dimension: input.dimension,
-      rows: rows.map(({ text, prompt, tokens }) => ({
+      rows: rows.map(({ text, prompt, image, tokens }) => ({
         text,
         prompt: prompt ?? null,
+        ...(image === undefined ? {} : { image }),
         tokens: tokens ?? null,
       })),
     },

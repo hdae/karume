@@ -3,8 +3,9 @@
 The real `karume.json` is not used: the manifest here carries values **other** than the real ones
 (another token bound, other dimensions, other prompts and placeholder ids), so a hand-written
 number in the template shows as a mismatch. Besides the derivation from the manifest, it pins what
-the card must say plainly (text tower only, the token limit against upstream's context, what each
-storage holds, the int8 form's measured distance with its source and only beside an `i8` preset,
+the card must say plainly (text tower only — or, with the vision tower, text and images with its
+budget and its one bf16 storage —, the token limit against upstream's context, what each storage
+holds, the int8 form's measured distance with its source and only beside an `i8` preset,
 the prompts, the Matryoshka dimensions, upstream's precision statement, the licence) and the
 manifests it refuses to describe.
 """
@@ -318,4 +319,87 @@ class TestWhatTheCardRefuses:
         manifest = _manifest()
         manifest["models"]["text"]["quants"]["bf16"]["session"] = {"numerics": {"level": "reorder"}}
         with pytest.raises(ValueError, match="declares a session"):
+            _render(manifest)
+
+
+def _with_vision(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The manifest with the vision tower: its one bf16 container, mapped by every preset, and
+    `pipelineConfig.vision` (a budget and ids other than the real ones)."""
+    manifest = copy.deepcopy(manifest or _manifest())
+    model = manifest["models"]["text"]
+    container = copy.deepcopy(model["weights"]["model"]["bf16"])
+    for index, part in enumerate(container["container"]["parts"]):
+        part["path"] = part["path"].replace("text/model/", "text/vision/")
+        part["size"] = 17 + index
+    model["weights"]["vision"] = {"bf16": container}
+    for quant in model["quants"].values():
+        quant["weights"]["vision"] = "bf16"
+    model["pipelineConfig"]["vision"] = {
+        "softTokenBudget": 70,
+        "imageTokenId": 71,
+        "beginImageTokenId": 74,
+        "endImageTokenId": 75,
+        "hiddenSize": 48,
+    }
+    return manifest
+
+
+class TestTheVisionTower:
+    def test_a_manifest_with_the_tower_says_text_and_images(self) -> None:
+        card = _render(_with_vision())
+        assert "# EmbeddingGemma 2 Text and Image Embedding — Karume" in card
+        assert "the **text and vision towers** of\n`google/embeddinggemma-2`" in card
+        assert "Built with `vision: true`, the pipeline also fetches the" in card
+        assert "cannot embed images" not in card
+        assert "neither video nor audio can be embedded" in card
+
+    def test_it_states_the_budget_and_a_square_images_count_from_the_manifest(self) -> None:
+        card = _render(_with_vision())
+        assert "becomes up to\n  70 soft tokens (a square one 64)" in card
+        assert "each image counts its soft tokens (at most 70) and its two markers" in card
+        assert "at most 1,234 per input" in card
+
+    def test_it_states_that_every_preset_ships_the_towers_bf16_values(self) -> None:
+        for manifest in (_with_vision(), _with_vision(_with_i8())):
+            card = _render(manifest)
+            assert "The vision tower (`vision`) ships in every preset as the" in card
+            assert "No rounded form of the tower was measured, so no preset rounds it." in card
+            assert "built without `vision: true` does not fetch it" in card
+            assert "its weights keep the checkpoint's bf16 values unchanged in every preset" in card
+
+    def test_the_usage_shows_the_vision_option_and_an_image_part(self) -> None:
+        card = _render(_with_vision())
+        assert "  // vision: true, // also fetches the vision tower, for image parts" in card
+        assert '// const picture = await pipeline.embed([{ type: "image", image }]);' in card
+        assert "image part on a pipeline built without `vision: true` is refused" in card
+
+    def test_a_text_only_manifest_shows_no_vision_option(self) -> None:
+        card = _render()
+        assert "vision: true" not in card
+        assert "# EmbeddingGemma 2 Text Embedding — Karume" in card
+
+    def test_the_tower_paragraph_keeps_the_two_lists_apart(self) -> None:
+        lines = _render(_with_vision(_with_i8())).splitlines()
+        last = max(index for index, line in enumerate(lines) if line.startswith("- `i8`: "))
+        following = next(line for line in lines[last + 1 :] if line.strip())
+        assert not following.startswith("- "), following
+
+    def test_a_rounded_tower_is_refused(self) -> None:
+        manifest = _with_vision(_with_i8())
+        model = manifest["models"]["text"]
+        model["weights"]["vision"]["i8"] = copy.deepcopy(model["weights"]["vision"]["bf16"])
+        model["quants"]["i8"]["weights"]["vision"] = "i8"
+        with pytest.raises(ValueError, match="every preset ships its bf16 values"):
+            _render(manifest)
+
+    def test_weights_without_the_declaration_and_the_other_way_round_are_refused(self) -> None:
+        manifest = _with_vision()
+        del manifest["models"]["text"]["pipelineConfig"]["vision"]
+        with pytest.raises(ValueError, match=r"pipelineConfig\.vision is not declared"):
+            _render(manifest)
+        manifest = _with_vision()
+        del manifest["models"]["text"]["weights"]["vision"]
+        for quant in manifest["models"]["text"]["quants"].values():
+            del quant["weights"]["vision"]
+        with pytest.raises(ValueError, match="the vision weights are not shipped"):
             _render(manifest)

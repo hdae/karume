@@ -90,7 +90,7 @@ minified) until the package declares `"sideEffects": false`
 | `@karume/models/birefnet`          | image to alpha matte (background removal)                 |
 | `@karume/models/depth-anything`    | image to relative depth map                               |
 | `@karume/models/siglip2`           | image to embedding                                        |
-| `@karume/models/embeddinggemma`    | text to sentence embedding (EmbeddingGemma 2)             |
+| `@karume/models/embeddinggemma`    | text and images to sentence embedding (EmbeddingGemma 2)  |
 | `@karume/models/umt5`              | text to encoder hidden states (umT5-XXL)                  |
 | `@karume/models/vowel-detector`    | Japanese speech to lip-sync labels                        |
 | `@karume/models/wan`               | text to video (Wan2.1 / Wan2.2), image to video (Wan2.2)  |

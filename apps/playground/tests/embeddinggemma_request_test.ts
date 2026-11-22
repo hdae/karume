@@ -2,6 +2,7 @@ import type { PipelineSource } from "@karume/local-distributions/browser";
 import { ModelInputError } from "@karume/models/embeddinggemma";
 import { describe, expect, it } from "vite-plus/test";
 
+import type { LoadedImage } from "../src/lib/image.ts";
 import { tokenCountView } from "../src/models/embeddinggemma/format.ts";
 
 import {
@@ -9,6 +10,7 @@ import {
   canReuse,
   type PipelineKey,
   removeRow,
+  rowInput,
   rowTokenCount,
   type RowTokenizer,
   runBlocker,
@@ -113,9 +115,14 @@ describe("canReuse", () => {
 });
 
 describe("a row's token count", () => {
-  /** A stand-in for `tokenize`: one token per word of the prefix and the text, plus <bos> and <eos>. */
+  /**
+   * A stand-in for `tokenize`: one token per word of the prefix and the text, plus <bos> and <eos>
+   * (a text row's input is its string; image rows are covered below).
+   */
   const calls: { readonly text: string; readonly prompt: string | undefined }[] = [];
-  const tokenize: RowTokenizer = (text, options) => {
+  const tokenize: RowTokenizer = (input, options) => {
+    if (typeof input !== "string") throw new Error("a text row sends its text as a string");
+    const text = input;
     calls.push({ text, prompt: options.prompt });
     if (options.prompt !== undefined && options.prompt !== "query") {
       throw new ModelInputError(`prompt "${options.prompt}" is not one of this model's prompts`);
@@ -149,5 +156,56 @@ describe("a row's token count", () => {
     expect(tokenCountView(12, 2048)).toEqual({ text: "12 / 2048 tokens", overLimit: false });
     expect(tokenCountView(2048, 2048).overLimit).toBe(false);
     expect(tokenCountView(2049, 2048)).toEqual({ text: "2049 / 2048 tokens", overLimit: true });
+  });
+});
+
+describe("a row with an image", () => {
+  const image: LoadedImage = {
+    name: "cat.png",
+    rgba: { data: new Uint8ClampedArray(2 * 1 * 4), width: 2, height: 1 },
+    rgb: { data: new Uint8Array(2 * 1 * 3), width: 2, height: 1 },
+  };
+  const row: TextRow = { id: 4, text: "a cat", prompt: "query", image };
+
+  it("sends a text row as its string, an image row as its text then its RGB8 image", () => {
+    expect(rowInput({ id: 0, text: "a cat" })).toBe("a cat");
+    expect(rowInput(row)).toEqual([
+      { type: "text", text: "a cat" },
+      { type: "image", image: image.rgb },
+    ]);
+  });
+
+  it("sets and clears a row's image, leaving the key out when cleared", () => {
+    const [set] = updateRow([{ id: 4, text: "a cat", prompt: "query" }], 4, { image });
+    expect(set).toEqual(row);
+    const [cleared] = updateRow([row], 4, { image: undefined });
+    expect(cleared).toEqual({ id: 4, text: "a cat", prompt: "query" });
+    expect(cleared !== undefined && Object.hasOwn(cleared, "image")).toBe(false);
+    // Changing the prompt keeps the image.
+    expect(updateRow([row], 4, { prompt: undefined })[0]?.image).toBe(image);
+  });
+
+  it("counts the parts the pipeline gets: the text's tokens and the image's soft tokens and markers", () => {
+    const seen: unknown[] = [];
+    const tokenize: RowTokenizer = (input, options) => {
+      seen.push([input, options]);
+      if (typeof input === "string") return new Int32Array(2);
+      const count = input.reduce(
+        (sum, part) => sum + (part.type === "text" ? part.text.split(" ").length : 256 + 2),
+        2,
+      );
+      return new Int32Array(count);
+    };
+    expect(rowTokenCount(tokenize, row)).toBe(2 + 2 + 258);
+    expect(seen).toEqual([[rowInput(row), { prompt: "query" }]]);
+  });
+
+  it("has no count when the pipeline refuses the image (a model without the vision tower)", () => {
+    const refusing: RowTokenizer = () => {
+      throw new ModelInputError(
+        "image parts need the vision tower — build the pipeline with { vision: true }",
+      );
+    };
+    expect(rowTokenCount(refusing, row)).toBeUndefined();
   });
 });

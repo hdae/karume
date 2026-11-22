@@ -1,11 +1,14 @@
 # EmbeddingGemma (host side)
 
-The `./embeddinggemma` subpath of `@karume/models`: `embeddinggemma.Pipeline` turns a text into a
-sentence embedding — a unit vector, so the dot product of two results is their cosine similarity.
-One family serves the EmbeddingGemma models; today it serves the text model of EmbeddingGemma 2
-(`google/embeddinggemma-2`, Apache-2.0 — the distribution `karume-embeddinggemma-2`, model `text`,
-pipeline `embeddinggemma/1`, presets `bf16` — the default, the checkpoint's own weights — and `i8` — the same
-weight slots as per-row int8; both compute in f32 and declare no knob, and `quant` picks one). The first EmbeddingGemma joins it later with its own manifest values.
+The `./embeddinggemma` subpath of `@karume/models`: `embeddinggemma.Pipeline` turns a text, an image
+or both into a sentence embedding — a unit vector, so the dot product of two results is their cosine
+similarity, an image's and a text's alike. One family serves the EmbeddingGemma models; today it
+serves EmbeddingGemma 2 (`google/embeddinggemma-2`, Apache-2.0 — the distribution
+`karume-embeddinggemma-2`, model `text`, pipeline `embeddinggemma/1`, presets `bf16` — the default, the
+checkpoint's own weights — and `i8` — the text tower's weight slots as per-row int8; both compute in
+f32 and declare no knob, and `quant` picks one). Its vision tower is the weights role `vision`, the
+checkpoint's bf16 values in both presets, built only with `vision: true`. The first EmbeddingGemma
+joins the family later with its own manifest values.
 The public surface is [`embeddinggemma.ts`](../../embeddinggemma.ts) (also re-exported from the
 barrel as the namespace `embeddinggemma`); everything here is internal.
 
@@ -13,9 +16,15 @@ barrel as the namespace `embeddinggemma`); everything here is internal.
 import { Pipeline } from "@karume/models/embeddinggemma";
 import { nodeDirectory } from "@karume/hub/node";
 
-const pipeline = await Pipeline.fromPretrained(nodeDirectory("models/karume-embeddinggemma-2"), { gpu });
+const pipeline = await Pipeline.fromPretrained(nodeDirectory("models/karume-embeddinggemma-2"), {
+  gpu,
+  vision: true, // also fetch the vision tower, for image parts
+});
 const query = await pipeline.embed("how do I reset my password", { prompt: "query", dimension: 256 });
 const count = pipeline.tokenize("how do I reset my password", { prompt: "query" }).length;
+// image: decoded RGB8 — { data: Uint8Array (width × height × 3), width, height }
+const picture = await pipeline.embed([{ type: "image", image }], { dimension: 256 });
+const captioned = await pipeline.embed([{ type: "text", text: "a red bicycle" }, { type: "image", image }]);
 await pipeline.dispose();
 ```
 
@@ -26,49 +35,88 @@ source handle (`nodeDirectory` / `denoDirectory`); `fromAssets` takes the manife
 
 ## One call
 
-1. **Host** — the input becomes one text: a string, or an array of content parts whose text parts
-   are concatenated in order with nothing between them. The prompt's prefix goes in front, and the
-   Gemma tokenizer of `src/gemma/text/` (the distribution's asset, with its `<bos>` … `<eos>`
-   post-processor) gives the token ids.
-2. **GPU** — the graph `model` runs once on `input_ids` `[1, T]`, `pool_mask` `[1, T]` (all ones —
-   the pooling averages every token, the prompt's included, as upstream's `include_prompt`) and no
-   soft row (`soft_embeds` `[1, T, 512]` of zeros and `soft_mask` `[1, T, 1]` all false — the inputs
-   a tower's soft tokens will take; the graph then computes the text forward bit for bit). The graph
-   holds the text tower, the masked mean pooling and the L2 normalisation, and returns `[1, D]`.
-3. **Host** — a shorter width is the leading slice divided by `max(norm, 1e-12)` (computed in f64,
+1. **Host** — the input becomes token ids, upstream's sentence-transformers sequence: `<bos>`, then
+   the parts in order — each run of adjacent text parts, the prompt's prefix in front of the first
+   part, tokenized as one string by the Gemma tokenizer of `src/gemma/text/` (the distribution's
+   asset); each image as `<|image>` (255999), n × the image placeholder 258880 and `<image|>`
+   (258882), with no separator — then `<eos>`. A text-only input is the prefix and the joined text,
+   tokenized once, as before images. n comes from the image's size alone: the aspect-preserving
+   resize rule of the Gemma 4 family (`imageTargetSize` — largest multiples of 48 px within
+   `pipelineConfig.vision.softTokenBudget`, upstream's default 280, in f64 as upstream computes it:
+   139 to 280 soft tokens). An input that starts with an image under a prompt gets the prefix as a run
+   of its own before it (sentence-transformers renders the prompt as a system message before the
+   first part).
+2. **Host, at issue** — each image becomes the tower's input (`vision.ts`): torch's uint8
+   antialiased bicubic resize (`src/image/torch-resample.ts`) to the rule's size, the image's real
+   16 × 16 patches as rows of 768 values (row, column, channel; each `f32(u8 · f32(1/255))`) in block
+   order (the 3 × 3 blocks in raster order, each block's 9 patches in raster order), and each row's
+   column and row in the patch grid. Read when `embed` is called, so a later write into the pixels
+   does not reach the call.
+3. **GPU, images only** — the graph `vision` runs once per image (`pixels` `[1, 9n, 768]`,
+   `position_x` / `position_y` `[1, 9n]` → `[1, n, 512]`), and its output is copied into
+   `soft_embeds` at the image's soft rows, with `soft_mask` set there.
+4. **GPU** — the graph `model` runs once on `input_ids` `[1, T]` (the placeholder id stays under each
+   soft row), `pool_mask` `[1, T]` (all ones — the pooling averages every token, the prompt's and
+   the soft ones included, as upstream's `include_prompt`), `soft_embeds` `[1, T, 512]` and
+   `soft_mask` `[1, T, 1]` (zeros and all false for a text — the graph then computes the text forward
+   bit for bit). A soft row runs on its soft token, unscaled, as upstream's composite model overwrites
+   the scaled lookup. The graph holds the text tower, the masked mean pooling and the L2
+   normalisation, and returns `[1, D]`.
+5. **Host** — a shorter width is the leading slice divided by `max(norm, 1e-12)` (computed in f64,
    stored as f32 — sentence-transformers' `truncate_dim` followed by its normalisation).
 
-The Session is opened at construction and kept until `dispose`; calls queue on one serialization
-chain (a refused request returns at once without waiting for its turn), and `dispose` waits for the
-calls in flight, disposes the Session, then destroys the GPU only when the pipeline acquired it.
-The Session runs the attention scores in row blocks of at most 128 MiB
-(`attentionRowBlockMaxBytes`, a fixed value of the family — the measurement and the reasons are at
-the constant in `pipeline.ts`): the output is bit-identical to the unbudgeted run, and at 8,192
-tokens the plan backing is 944 MiB instead of 1,648 MiB on the RTX 3080 Ti, for 2–7% of the run's
-time.
-`embed`'s `signal` is checked after the turn and before the run; construction's `signal` reaches the
-fetch layer. There is no batch API and no similarity helper.
+The Sessions (the text graph's, and the tower's with `vision: true`) are opened at construction and
+kept until `dispose`; calls queue on one serialization chain (a refused request returns at once
+without waiting for its turn), and `dispose` waits for the calls in flight, disposes the Sessions,
+then destroys the GPU only when the pipeline acquired it. Both Sessions run the attention scores in
+row blocks of at most 128 MiB (`attentionRowBlockMaxBytes`, a fixed value of the family — the
+measurement and the reasons are at the constant in `pipeline.ts`): the output is bit-identical to
+the unbudgeted run; at 8,192 tokens the text plan backing is 944 MiB instead of 1,648 MiB on the
+RTX 3080 Ti, for 2–7% of the run's time, and the tower's at 280 soft tokens 135 MiB instead of
+329 MiB.
+`embed`'s `signal` is checked after the turn and before the first run, then between the runs of
+one call; construction's `signal` reaches the fetch layer. `onRunDiagnostics` reports the `model`
+runs only (the tower's are not reported, as the Gemma family's image embedder's are not). There is
+no batch API and no similarity helper; the images of one call run one at a time.
+
+### The vision tower is chosen at construction
+
+`PipelineOptions.vision` follows the Gemma family's option for its image embedder: `true` fetches the
+distribution's `vision` weights as well (the hub selection is narrowed to the roles the pipeline
+runs, so without it not a byte of the tower is fetched) and opens their Session; `fromAssets` takes
+the component `vision` among the assets then. Without it an image part is refused with a
+`ModelInputError` that says to build the pipeline with `{ vision: true }`, and with it a text call
+runs no tower and binds what it bound without it (its vector keeps the text pipeline's sha256 row).
 
 ## Accepted requests
 
-Every value below comes from the manifest's `pipelineConfig` (`config.ts` — four fields, unknown
-and missing ones fail): `prompts` (name → prefix, upstream's `config_sentence_transformers.json`),
-`dimensions` (descending, the first is the full width and the default), `maxTokens` (`<bos>` and
-`<eos>` included) and `placeholderTokens` (modality → id). `embed` refuses with a `ModelInputError`,
+Every value below comes from the manifest's `pipelineConfig` (`config.ts` — four required fields and
+an optional fifth, unknown and missing ones fail): `prompts` (name → prefix, upstream's
+`config_sentence_transformers.json`), `dimensions` (descending, the first is the full width and the
+default), `maxTokens` (`<bos>` and `<eos>` included), `placeholderTokens` (modality → id) and, for a
+distribution with the vision tower, `vision` (the Gemma 4 family's shape and reader:
+`softTokenBudget` 280, `imageTokenId` 258880 — it must be `placeholderTokens.image` —,
+`beginImageTokenId` 255999, `endImageTokenId` 258882, `hiddenSize` 512). The budget is the
+manifest's, upstream's default — not a caller option. `embed` refuses with a `ModelInputError`,
 before the GPU is touched:
 
 - an input that is neither a string nor an array, an empty array, a part that is not an object, a
-  part of a type the model does not accept (named with the accepted types — today `"text"`), a text
-  part whose text is not a string;
+  part of a type the pipeline does not accept (named with the accepted types — `"text"`, and
+  `"image"` with the vision tower; an image part on a pipeline without the tower says to build it
+  with `{ vision: true }`, or that the distribution ships no tower), a text part whose text is not a
+  string, an image part whose image is not decoded RGB8 pixels of its size (`Rgb8Image`: `data` a
+  `Uint8Array` of `width × height × 3` bytes — alpha is not taken, and decoding is the caller's);
 - a prompt name the manifest does not declare (the message lists the declared names);
 - a width the manifest does not declare (the message lists them);
 - a text whose tokens include a placeholder id — the image, audio or video placeholder of
-  EmbeddingGemma 2 (258880 / 258881 / 258884), named in the message. The text tower alone has no
-  use for them: upstream's composite model replaces such an id with the pad id before the lookup,
-  and sentence-transformers refuses the text. Placeholders are never written in text; a later model
-  that takes images, audio or video takes them as content parts (a video as an array of frames);
+  EmbeddingGemma 2 (258880 / 258881 / 258884), named in the message with its place in the whole
+  sequence. The text tower alone has no use for them: upstream's composite model replaces such an id
+  with the pad id before the lookup, and sentence-transformers refuses the text. Placeholders are
+  never written in text: an image is an image part, and the ids of its block are the host's; audio
+  and video are not taken yet (a later video input is an array of frames);
 - a token sequence longer than `maxTokens` (8,192 for EmbeddingGemma 2, upstream's context —
-  docs/limitations.md); nothing is truncated;
+  docs/limitations.md), every image counting its soft tokens and its two markers; nothing is
+  truncated;
 - a token sequence longer than this device runs: the graph's largest intermediate grows with the
   length (EmbeddingGemma 2's per-layer-embedding projection, 49,152 B per token — 384 MiB at 8,192)
   and must fit one storage buffer, so the device's limit is the smaller of its
@@ -82,8 +130,9 @@ holding other special spellings (`<bos>`, the turn and tool markup, the media be
 is tokenized as upstream's tokenizer does and is not refused.
 
 `tokenize(input, { prompt })` returns the token ids `embed` would run for the same input and prompt
-(`Int32Array` — the prefix, the joined text parts, `<bos>` … `<eos>`), synchronously, on the host
-and without waiting for the calls in flight. It refuses what `embed` refuses before tokenizing (the
+(`Int32Array` — `<bos>`, the prefix and the parts, each image's soft rows as the placeholder id
+between its markers, `<eos>`; its length is the count the limits apply to), synchronously, on the
+host (an image read for its size only) and without waiting for the calls in flight. It refuses what `embed` refuses before tokenizing (the
 input, the parts, the prompt) with the same `ModelInputError`, and fails after `dispose`. A sequence
 over `maxTokens` and a text holding a placeholder id are returned, not refused, so a caller can show
 the count first; `embed` still refuses both.
@@ -101,9 +150,16 @@ the soft rows'),
 the graph's maximum of T — read from the `sym_prefix_slice` of its folded constants (the RoPE
 tables; the sliding window is a band declared on the attention, not a constant) — equal to
 `maxTokens`, and every symbolic value holding T on exactly one axis (the largest gives the bytes
-per token of the device's limit; a `[T, T]` value fails). Once the asset arrives, and before the GPU is acquired, the tokenizer must wrap the
-sequence in `<bos>` … `<eos>`, every placeholder id must be one of its added tokens, and its largest
-token id must lie inside the embedding table.
+per token of the device's limit; a `[T, T]` value fails). With `vision: true` it also checks the
+tower (`embeddingGemmaVisionContract` in `vision.ts`): `pipelineConfig.vision` is declared, its
+`hiddenSize` is the text graph's soft-row width and its three ids are rows of the text graph's table;
+the tower graph has one symbol n, exactly `pixels` f32 `[1, 9n, 768]`, `position_x` / `position_y`
+i32 `[1, 9n]` in that order, one f32 output `[1, n, hiddenSize]`, no state, and position tables
+(the `embedding` tables its positions gather — 840 rows) that cover the longest side the resize rule
+gives at the budget (`3 · budget` patches). Once the asset arrives, and before the GPU is acquired,
+the tokenizer must wrap the sequence in `<bos>` … `<eos>`, every placeholder id must be one of its
+added tokens (and the two image markers too, with the tower), and its largest token id must lie
+inside the embedding table.
 
 ## Numerics
 
@@ -118,8 +174,20 @@ holds bit for bit; `i8` against the i8 series' goldens, the quantized model's ow
 0.99993 at 768 — the torch-CPU screening's values for the same rounding,
 [research 2026-11-22](../../../../docs/research/2026-11-22-embeddinggemma2-quant-screen.md)).
 
+Images: the host preprocessing equals the vision series' io inputs byte for byte on its four images
+(`packages/models/tests/embeddinggemma2_image_input_test.ts` — the pixels and both position arrays;
+the 1190 × 17 rounding edge, 139 soft tokens, among them), and the pipeline e2e over the mirror
+(`packages/e2e/tests/e2e_embeddinggemma2_image_pipeline_test.ts`) runs the five inputs of
+upstream's SentenceTransformer fixture (an image alone, a text then an image, an image then a text,
+a `query`-prompted text with an image, two images): the token ids equal upstream's exactly, and on
+the RTX 3080 Ti the `bf16` vectors are within 5.44e-6 of upstream's (cosine at least
+0.999999999136; atol 2e-5 — the text graph fed upstream's own soft tokens is within 9.8e-7, the rest
+is the tower's GPU noise), the `i8` vectors at a cosine of 0.99976 to 0.99991 (floor 0.999), each
+pinned by a sha256 row per preset.
+
 | Files         | Contents                                                                                                                                                                                                                                                  |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config.ts`   | the pipeline name `embeddinggemma/1` and the `pipelineConfig` schema (`prompts`, `dimensions`, `maxTokens`, `placeholderTokens`)                                                                                                                          |
-| `input.ts`    | the public input types (`EmbedContentPart`, `EmbedOptions`, `TokenizeOptions`), the tokenizer checks (`embedTextRules`), the token ids of an input (`tokenizeEmbedInput`), a request on the host (`planEmbedRequest`) and the width (`truncateEmbedding`) |
-| `pipeline.ts` | the graph contract, the admission, the resident Session with its chain (`Embedder`) and the public `Pipeline` (`fromPretrained`, `fromAssets`, `embed`, `tokenize`, `dispose`)                                                                            |
+| `config.ts`   | the pipeline name `embeddinggemma/1` and the `pipelineConfig` schema (`prompts`, `dimensions`, `maxTokens`, `placeholderTokens`, the optional `vision`)                                                                                                     |
+| `input.ts`    | the public input types (`EmbedContentPart`, `EmbedOptions`, `TokenizeOptions`), the tokenizer checks (`embedTextRules`), the sequence of an input (`tokenizeEmbedInput`), a request on the host (`planEmbedRequest`) and the width (`truncateEmbedding`) |
+| `vision.ts`   | the image preprocessing (`imagePatchRows`), the tower graph's contract (`embeddingGemmaVisionContract`) and one tower run (`runVisionTower`)                                                                                                         |
+| `pipeline.ts` | the graph contract, the admission, the resident Sessions with their chain (`Embedder`) and the public `Pipeline` (`fromPretrained`, `fromAssets`, `embed`, `tokenize`, `dispose`)                                                                       |

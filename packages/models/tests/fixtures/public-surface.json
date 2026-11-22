@@ -307,6 +307,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      },
+      {
         "name": "TokenizeOptions",
         "kind": "typeAlias"
       }

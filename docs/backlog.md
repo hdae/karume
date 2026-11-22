@@ -765,12 +765,32 @@ maintainer's ruling of 2026-11-06).
      - `multimodal_reference.py`: upstream SentenceTransformer's token ids and vectors of five whole inputs holding an
        image, as the fixture `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`; Karume's two
        graphs composed in torch reproduce them to 1.8e-6.
-     Left, in order: the pipeline stage — image content parts in `embed` / `tokenize` (the placeholder expansion,
-     the count from the image's size alone), the host preprocessing in TypeScript (the resize rule with its rounding
-     edge, the torch bicubic port of `src/image/`, the patch rows in block order), the tower in the distribution
-     (a weights role per preset, the image fields of `pipelineConfig`, the admission of the tower graph, its row-block
-     budget) and the pipeline e2e against the fixture; then the Playground's image rows; then audio (the checkpoint's
-     audio tower is Gemma 4 E2B / E4B's, unchanged) and video (frames through the same tower).
+     Stage 2 built 2026-11-22 (the maintainer's approval of that day):
+     - `embeddinggemma.Pipeline` takes image parts (`{ type: "image", image }`, decoded RGB8 — the Gemma chat shape)
+       when built with `vision: true` (the Gemma family's option and manifest shape for its image embedder; without it
+       an image part is a `ModelInputError` that says how to build one, and a text call is unchanged — its vector keeps
+       the text pipeline's sha256 row). The sequence is upstream's sentence-transformers one: `<bos>`, each run of
+       adjacent text (the prefix glued to the first) tokenized as one string, each image as `<|image>` + n × 258880 +
+       `<image|>`, `<eos>`; the ids of the fixture's five inputs equal upstream's exactly, and `tokenize` returns them
+       (an image counts n + 2 toward both limits). The host preprocessing (`vision.ts`: the Gemma family's
+       `imageTargetSize`, the torch uint8 bicubic port, the patch rows in block order) equals the vision series' io
+       inputs byte for byte on its four images. One tower run per image, read back into `soft_embeds` with the mask set,
+       then the text graph once; the tower's Session takes the family's row-block budget (plan 135.1 MiB against
+       329.1 MiB at 280 soft tokens on the RTX 3080 Ti). The budget is upstream's default 280, fixed.
+     - The distribution carries the tower as the weights role `vision`, bf16 in both presets (series
+       `embeddinggemma-2-vision-bf16`; no rounded tower was screened — the card says so), and `pipelineConfig.vision`
+       (`softTokenBudget`, the three image ids, `hiddenSize`; the TS reader is the Gemma 4 family's); the recipe checks
+       the processor settings against what the host implements, the tower graph and its position tables against the
+       budget, and the vision series' record. The mirror was assembled again (the text containers byte-identical).
+     - The pipeline e2e over the mirror on the RTX 3080 Ti: `bf16` within 5.44e-6 of upstream's vectors (atol 2e-5; the
+       text graph fed upstream's own soft tokens is within 9.8e-7 — the rest is the tower's GPU noise), `i8` at a cosine
+       of 0.99976 to 0.99991 (floor 0.999), with sha256 rows per preset.
+     - The Playground page `/embeddinggemma`: an optional image per row on a model with the tower, the row's count with
+       its soft tokens, the record `karume-playground-embeddinggemma/2` (each image's name, size and RGB8 sha256). Not
+       checked in a browser yet.
+     Left: audio (the checkpoint's audio tower is Gemma 4 E2B / E4B's, unchanged) and video (frames through the same
+     tower); unordered and not chosen: the tower's runs in `onRunDiagnostics` (reported for the text graph only), other
+     soft-token budgets (they would need longer position tables), and a rounded tower (unscreened).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

@@ -38,7 +38,7 @@ measurements in `docs/research/`.
   family, today the text model of EmbeddingGemma 2 (pipeline `embeddinggemma/1`; its distribution is not published —
   a local one is passed as a source handle). `Pipeline.fromPretrained` / `fromAssets` build it with one resident
   Session; `embed(input, { prompt, dimension, signal })` returns a unit vector (`Float32Array`). `input` is a string
-  or an array of `EmbedContentPart`s (text parts today, concatenated in order); `prompt` names a prompt of the
+  or an array of `EmbedContentPart`s (text parts, concatenated in order; image parts with `vision: true` — the next entry); `prompt` names a prompt of the
   manifest (`"query"`, `"document"`, …) whose prefix goes before the text; `dimension` is one of the declared widths
   (768 / 512 / 256 / 128 — a shorter one is the leading slice re-normalised). A `ModelInputError` refuses, before the
   GPU, an empty part list, a part of another type, an unknown prompt or width, a text whose tokens include an image,
@@ -55,6 +55,17 @@ measurements in `docs/research/`.
   565 MiB; it needs no buffer or binding size above the WebGPU default, which holds up to 2,730 tokens); `quant` picks one.
   Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
   `ModelInputError`.
+- `@karume/models/embeddinggemma`: image input. `PipelineOptions.vision: true` (the option of `gemma.Pipeline`'s image
+  embedder) also fetches the distribution's vision tower (the weights role `vision`, the checkpoint's bf16 values in both
+  presets, about 320 MiB) and opens its Session; `embed` and `tokenize` then take image parts
+  `{ type: "image", image }` beside text parts, `image` decoded RGB8 pixels (`Rgb8Image`, now exported by the subpath too).
+  An input is upstream's sentence-transformers sequence — `<bos>`, each run of adjacent text (the prompt's prefix in front)
+  tokenized as one string, each image as `<|image>`, its 139 to 280 soft tokens (from its size alone, at upstream's
+  default budget of 280) and `<image|>`, `<eos>` — and an image counts its soft tokens and two markers toward the token
+  limits; `tokenize` returns the soft rows as the image placeholder id. Without `vision: true` an image part is refused
+  with a `ModelInputError` that says so, nothing of the tower is fetched, and a text call is unchanged. The manifest's
+  `pipelineConfig` gains the optional `vision` (the shape of `gemma.Pipeline`'s); `onRunDiagnostics` still reports the
+  text graph's runs only.
 - IR: the optional attr `band` (an integer ≥ 0) of `attention` without a states field — key column `n` is visible to
   query row `m` iff `|m − n| ≤ band` — which `@karume/runtime` checks inside the score kernel from positions, so a
   sliding-window band needs no mask tensor. On finite scores it gives the output of the same node fed the band as an

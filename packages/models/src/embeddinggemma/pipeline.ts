@@ -1,31 +1,46 @@
 /**
- * `Pipeline` — the one surface for text → sentence embedding of the EmbeddingGemma family
- * (today the text model of EmbeddingGemma 2 — distribution `karume-embeddinggemma-2`, model
- * `text`, pipeline `embeddinggemma/1`).
+ * `Pipeline` — the one surface for text (and image) → sentence embedding of the EmbeddingGemma
+ * family (today EmbeddingGemma 2 — distribution `karume-embeddinggemma-2`, model `text`, pipeline
+ * `embeddinggemma/1`; its vision tower is the optional weights role `vision`).
  *
  * Per call (every step in Karume, no torch):
  *
- * 1. Host: the input's content parts → one text, the prompt's prefix in front → token ids with
- *    `<bos>` … `<eos>` (the distribution's tokenizer asset, the Gemma tokenizer of
- *    `src/gemma/text/`); the limit and the placeholder refusal (`./input.ts`)
- * 2. Runs `model` once (`input_ids` `[1, T]`, `pool_mask` `[1, T]` of ones, and no soft row:
- *    `soft_embeds` `[1, T, H]` of zeros and `soft_mask` `[1, T, 1]` all false) → the unit vector
- *    `[1, D]` (the graph holds the text tower, the masked mean pooling and the L2 normalisation)
- * 3. Host: a shorter width is the leading slice re-normalised (`truncateEmbedding`)
+ * 1. Host: the input's content parts → the token ids, `<bos>`, the prompt's prefix and each run of
+ *    text tokenized as one string (the distribution's tokenizer asset, the Gemma tokenizer of
+ *    `src/gemma/text/`), each image as its marker block, `<eos>`; the limit and the placeholder
+ *    refusal (`./input.ts`). Each image is read at issue into the tower's patch rows
+ *    (`./vision.ts` — resize, patches in block order, positions)
+ * 2. Only with images, one `vision` run per image (`pixels` `[1, 9n, 768]`, `position_x` /
+ *    `position_y` `[1, 9n]` → the soft tokens `[1, n, 512]`), read back and written into
+ *    `soft_embeds` at the image's soft rows, with `soft_mask` set there
+ * 3. Runs `model` once (`input_ids` `[1, T]`, `pool_mask` `[1, T]` of ones, `soft_embeds`
+ *    `[1, T, H]` and `soft_mask` `[1, T, 1]` — zeros and all false for a text) → the unit vector
+ *    `[1, D]` (the graph holds the text tower, the masked mean pooling and the L2 normalisation; a
+ *    soft row runs on its soft token instead of its token's lookup, and the placeholder id stays
+ *    under it)
+ * 4. Host: a shorter width is the leading slice re-normalised (`truncateEmbedding`)
  *
  * One sequence per call, no padding and no batch (the graph's sliding window is a band declared on
- * its attention, with no run-time mask — docs/limitations.md). Concurrent calls queue on the
- * serialization chain.
+ * its attention, with no run-time mask — docs/limitations.md); the images of a call run one at a
+ * time. Concurrent calls queue on the serialization chain.
  *
- * ## MUST: one Session is opened at construction and kept until `dispose`
+ * ## The vision tower is chosen at construction ({@link PipelineOptions.vision})
+ *
+ * The Gemma family's precedent for its optional image embedder: `vision: true` fetches the
+ * distribution's `vision` weights too and opens their Session beside the text one; without it not a
+ * byte of them is fetched, image parts are refused with a `ModelInputError` that says how to build
+ * a pipeline that takes them, and a text call is what it was. With it, a text call runs no tower
+ * and binds the same inputs as without it.
+ *
+ * ## MUST: the Sessions are opened at construction and kept until `dispose`
  *
  * Embedding is normally called many times; opening a Session per call would upload the whole
  * weights each time (the same residency as siglip2 / umt5).
  *
  * MUST: it still goes on the serialization chain — concurrent `embed` calls would share one Session
  * between two runs, and `dispose` would destroy the GPU without waiting for in-flight work (a
- * flush-before-destroy violation). The chain, the Session and the release live in {@link Embedder},
- * the part a host test drives with a stand-in Session; `Pipeline` adds construction only.
+ * flush-before-destroy violation). The chain, the Sessions and the release live in {@link Embedder},
+ * the part a host test drives with stand-in Sessions; `Pipeline` adds construction only.
  *
  * ## The device's token limit
  *
@@ -37,7 +52,10 @@
  * 256 MiB). A longer input is refused with a `ModelInputError` that names both limits, before the
  * run (the runtime's own preflight of the intermediates stays behind it); a device whose limit is
  * at least `pipelineConfig.maxTokens` never sees it. It is not an admission check: the device still
- * runs every shorter text.
+ * runs every shorter text. An image counts its soft tokens and its two markers, as toward the model's
+ * limit. The tower's own intermediates are per patch row (at most `[1, 2520, 3072]` f32 at the
+ * 280-token budget, about 31 MB) apart from its attention scores, which the row-block budget below
+ * splits, so it adds no limit of its own.
  *
  * ## Cancellation (`signal`)
  *
@@ -50,8 +68,11 @@
  * It is guaranteed by the real-GPU e2e over the local distribution
  * (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts` — the ten golden texts against the
  * torch CPU goldens of the series, the token ids against the goldens' ids, and sha256 rows per
- * environment) and by the tokenizer's parity with upstream (`gemma4_tokenizer_test.ts`,
- * `embeddinggemma2_pipeline_test.ts`).
+ * environment; `packages/e2e/tests/e2e_embeddinggemma2_image_pipeline_test.ts` — five inputs
+ * holding images against upstream's SentenceTransformer vectors and token ids), by the tokenizer's
+ * parity with upstream (`gemma4_tokenizer_test.ts`, `embeddinggemma2_pipeline_test.ts`) and by the
+ * host preprocessing's byte identity with the tower series' inputs
+ * (`embeddinggemma2_image_input_test.ts`).
  */
 
 import {
@@ -116,21 +137,31 @@ import {
   embedTextRules,
   planEmbedRequest,
   type TokenizeOptions,
+  tokenCountIncludes,
   tokenizeEmbedInput,
   truncateEmbedding,
 } from "./input.ts";
+import {
+  type EmbeddingGemmaVisionContract,
+  embeddingGemmaVisionContract,
+  type ImagePatchRows,
+  imagePatchRows,
+  runVisionTower,
+} from "./vision.ts";
 
 /** The message prefix (the class name). */
 const OWNER = "embeddinggemma.Pipeline";
 
 /**
- * The component name in the manifest's weights table (also the role the replacement option accepts
- * — the graph name the dist recipe writes).
+ * The component names in the manifest's weights table (also the roles the replacement option
+ * accepts — the graph names the dist recipe writes): the text graph, and the vision tower, fetched
+ * only when {@link PipelineOptions.vision} asks for it.
  */
 const MODEL = "model";
+const VISION = "vision";
 
-/** This family's weights components. */
-const COMPONENT_KEYS = [MODEL] as const;
+/** This family's weights components for a pipeline with or without the vision tower. */
+const componentKeys = (vision: boolean): readonly string[] => (vision ? [MODEL, VISION] : [MODEL]);
 
 /** The key of the tokenizer asset (format `karume-gemma-tokenizer/1`). */
 const TOKENIZER = "tokenizer";
@@ -186,6 +217,11 @@ const SYM_PREFIX_SLICE = "sym_prefix_slice";
  * (about 912 MiB) is the per-layer-embedding intermediates, which no attention budget moves, and
  * 32 MiB moves nothing more for 35–40%. 128 MiB is also the WebGPU default binding limit, so the
  * split is the same on every device that binds at least that much.
+ *
+ * The vision tower's Session takes the same budget: its scores are 12 heads × (9n)² f32 — 290.7 MiB
+ * at the 280-token budget. Measured on the RTX 3080 Ti under Node (2026-11-22, an image of 280 soft
+ * tokens, the bf16 tower — 320.3 MiB of weights): plan backing 135.1 MiB with the budget against
+ * 329.1 MiB without it, the last two of four runs 131 / 131 ms against 125 / 128 ms.
  */
 const ATTENTION_ROW_BLOCK_BYTES = 128 * 2 ** 20;
 
@@ -202,11 +238,22 @@ export type PipelineOptions = {
   /** The execution configuration (a key of that model's quants). `defaultQuant` when omitted. */
   readonly quant?: string;
   /**
-   * An observation hook that receives the diagnostics of every run (one embedding = one `model`
-   * run). For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu`
+   * **Builds the vision tower alongside** (not built when omitted or `false` — the option name and
+   * the manifest shape of the Gemma family's image embedder).
+   *
+   * When `true`, the distribution's `vision` weights are fetched as well and one more Session is
+   * opened; `embed` and `tokenize` then take image parts (`{ type: "image", image }`, decoded RGB8).
+   * A model whose `pipelineConfig` declares no `vision`, or whose graphs do not match it, fails at
+   * construction, before any weight part is fetched. A non-boolean is a `ModelInputError`.
+   */
+  readonly vision?: boolean;
+  /**
+   * An observation hook that receives the diagnostics of every `model` run (one embedding = one
+   * `model` run; the vision tower's runs are not reported, as the Gemma family's image embedder's
+   * are not). For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu`
    * (ADR 0021 — no timing by default).
    *
-   * NOTE: no component name is passed — there is one graph (as in siglip2).
+   * NOTE: no component name is passed — only the one graph reports (as in siglip2).
    *
    * Exceptions from the callback are not swallowed (fail loudly — the embedding fails with it).
    */
@@ -215,7 +262,8 @@ export type PipelineOptions = {
 
 /**
  * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to the hub).
- * The component replacement option (`components`) has the single role `model`.
+ * The component replacement option (`components`) has the role `model`, and `vision` on a pipeline
+ * built with {@link PipelineOptions.vision}.
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
@@ -230,7 +278,8 @@ export type FromPretrainedOptions = PipelineOptions &
 /**
  * The input for building directly from an already-fetched manifest + assets (a shape that accepts
  * the hub's `fetchAssets` result as is): the component `model` (the key `model` of a single-form
- * `krm`, or the part list `model[0]` / `model[1]` / …) and the tokenizer asset `tokenizer`.
+ * `krm`, or the part list `model[0]` / `model[1]` / …), the tokenizer asset `tokenizer`, and — for
+ * {@link PipelineOptions.vision} — the component `vision` in the same forms.
  */
 export type Assets = {
   readonly manifest: Manifest;
@@ -337,14 +386,18 @@ export const embeddingGemmaDeviceLimit = (
 };
 
 /** Refuses an input longer than the device runs (nothing is truncated). */
-const assertDeviceTokenLimit = (count: number, limit: EmbeddingGemmaDeviceLimit): void => {
+const assertDeviceTokenLimit = (
+  count: number,
+  limit: EmbeddingGemmaDeviceLimit,
+  images: number,
+): void => {
   if (count <= limit.maxTokens) return;
   throw new ModelInputError(
-    `${OWNER}: the input is ${count} tokens (<bos> and <eos> included), over this device's limit of` +
+    `${OWNER}: the input is ${count} tokens (${tokenCountIncludes(images)}), over this device's limit of` +
       ` ${limit.maxTokens} — the graph's largest intermediate (${limit.bytesPerToken} B per token)` +
       ` must fit one storage buffer of ${limit.bindingBytes} B (the device's` +
-      " maxStorageBufferBindingSize / maxBufferSize); nothing is truncated — shorten the text or" +
-      " split it",
+      " maxStorageBufferBindingSize / maxBufferSize); nothing is truncated — " +
+      (images === 0 ? "shorten the text or split it" : "shorten the text or pass fewer images"),
   );
 };
 
@@ -539,12 +592,22 @@ export const embeddingGemmaGraphContract = (
 /** The part of a Session the embedder uses (narrow, so a host test can stand in for the GPU). */
 export type EmbeddingSession = Pick<Session, "run" | "diagnostics" | "dispose">;
 
+/** The vision tower of an {@link Embedder} (its Session and what it reads of the graph). */
+export type EmbedderTower = {
+  /** The Session of `vision`, opened once; the embedder disposes it. */
+  readonly session: EmbeddingSession;
+  readonly contract: EmbeddingGemmaVisionContract;
+};
+
 /** What an {@link Embedder} runs with (all of it checked before it is built). */
 export type EmbedderParts = {
   /** The Session of `model`, opened once; the embedder disposes it. */
   readonly session: EmbeddingSession;
   readonly contract: EmbeddingGemmaGraphContract;
+  /** The rules of the input; `rules.images` is set exactly when `tower` is. */
   readonly rules: EmbedTextRules;
+  /** The vision tower ({@link PipelineOptions.vision}); absent, image parts are refused. */
+  readonly tower?: EmbedderTower;
   /**
    * The limits of the Session's device; the embedder derives the longest input it runs from them and
    * `contract.bytesPerToken` ({@link embeddingGemmaDeviceLimit}), so the bytes per token have one
@@ -589,13 +652,16 @@ const readEmbedding = (
   return tensor.data;
 };
 
+/** One image of a run: its soft rows' first row and the tower's input (built at issue). */
+type ImageRun = { readonly start: number; readonly rows: ImagePatchRows };
+
 /**
- * The resident Session of one model with its serialization chain: plans each request on the host
- * (`planEmbedRequest`), runs it in turn, and disposes the Session (then `release`) after the work
- * in flight.
+ * The resident Sessions of one model with their serialization chain: plans each request on the
+ * host (`planEmbedRequest`), runs it in turn — the tower once per image, then the text graph — and
+ * disposes the Sessions (then `release`) after the work in flight.
  *
  * NOTE: internal — {@link Pipeline} is the public entry and the only one that builds it from a
- * distribution; the `export` is for the host test that drives it with a stand-in Session (not on
+ * distribution; the `export` is for the host test that drives it with stand-in Sessions (not on
  * `mod.ts` / the subpath surface — ADR 0008).
  */
 export class Embedder {
@@ -608,6 +674,17 @@ export class Embedder {
   #disposal: Promise<void> | undefined;
 
   constructor(parts: EmbedderParts) {
+    if ((parts.tower === undefined) !== (parts.rules.images === undefined)) {
+      throw new Error(
+        `${OWNER}: internal inconsistency: the image rules and the vision tower are not built together`,
+      );
+    }
+    if (parts.tower !== undefined && parts.tower.contract.width !== parts.contract.softWidth) {
+      throw new Error(
+        `${OWNER}: the vision graph's soft tokens are ${parts.tower.contract.width} wide, the text` +
+          ` graph's soft rows ${parts.contract.softWidth}`,
+      );
+    }
     this.#parts = parts;
     this.#deviceLimit = embeddingGemmaDeviceLimit(parts.contract, parts.deviceLimits);
   }
@@ -625,8 +702,26 @@ export class Embedder {
     if (this.#disposal !== undefined) throw new Error(`${OWNER}: cannot embed after dispose`);
     // Refusals return without waiting for the turn (the plan is pure).
     const request = planEmbedRequest(this.#parts.rules, input, options);
-    assertDeviceTokenLimit(request.ids.length, this.#deviceLimit);
-    return await this.#chain(() => this.#run(request, options.signal));
+    assertDeviceTokenLimit(request.ids.length, this.#deviceLimit, request.images.length);
+    // The images are read here, at issue: nothing written into their pixels afterwards reaches
+    // this call (the Gemma family's rule for its image rows).
+    const budget = this.#parts.rules.images?.softTokenBudget;
+    const images: ImageRun[] = request.images.map(({ image, start, softTokens }) => {
+      if (budget === undefined) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: an image was planned without image rules`,
+        );
+      }
+      const rows = imagePatchRows(image, budget);
+      if (rows.softTokens !== softTokens) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: the image's ${rows.softTokens} patch blocks are not the` +
+            ` ${softTokens} soft tokens its sequence holds`,
+        );
+      }
+      return { start, rows };
+    });
+    return await this.#chain(() => this.#run(request, images, options.signal));
   }
 
   /**
@@ -641,43 +736,65 @@ export class Embedder {
     return tokenizeEmbedInput(this.#parts.rules, input, options);
   }
 
-  /** One run (the abort check, the run, the output check, the width). */
+  /**
+   * One call: the abort check, one tower run per image (its soft tokens written into the soft rows),
+   * the text run, the output check, the width.
+   */
   async #run(
     request: EmbedRequest,
+    images: readonly ImageRun[],
     signal: AbortSignal | undefined,
   ): Promise<Float32Array<ArrayBuffer>> {
     // A cancellation that arrived while waiting for the turn also takes effect here (a run is
-    // indivisible — cancellation works only before it).
+    // indivisible — cancellation works only before it, and between the runs of one call).
     await settleAbort(signal);
-    const { session, contract, onRunDiagnostics } = this.#parts;
+    const { session, contract, tower, onRunDiagnostics } = this.#parts;
     const length = request.ids.length;
+    const width = contract.softWidth;
+    // A text binds no soft row: zeros and all false, which the graph runs as its token lookups
+    // alone (`SOFT_EMBEDS`).
+    const softEmbeds = new Float32Array(length * width);
+    const softMask = new Uint32Array(length);
+    for (const { start, rows } of images) {
+      if (tower === undefined) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: an image reached a run without the tower`,
+        );
+      }
+      const soft = await runVisionTower(tower.session, rows, tower.contract);
+      // Copied before the tower's next run (a readback lasts until then). The placeholder id stays
+      // under each soft row; the mask makes the graph take the soft token there, unscaled.
+      softEmbeds.set(soft, start * width);
+      softMask.fill(1, start, start + rows.softTokens);
+      signal?.throwIfAborted();
+    }
     const outputs = await session.run({
       [INPUT_IDS]: { dtype: "i32", shape: [1, length], data: request.ids },
-      // All ones: the pooling averages every token, the prompt's included (upstream's
-      // `include_prompt`); the mask is not wired to attention.
+      // All ones: the pooling averages every token, the prompt's and the soft ones included
+      // (upstream's `include_prompt`); the mask is not wired to attention.
       [POOL_MASK]: { dtype: "f32", shape: [1, length], data: new Float32Array(length).fill(1) },
-      // No soft row: a text runs on its scaled token lookups alone (`SOFT_EMBEDS`).
-      [SOFT_EMBEDS]: {
-        dtype: "f32",
-        shape: [1, length, contract.softWidth],
-        data: new Float32Array(length * contract.softWidth),
-      },
-      [SOFT_MASK]: { dtype: "bool", shape: [1, length, 1], data: new Uint32Array(length) },
+      [SOFT_EMBEDS]: { dtype: "f32", shape: [1, length, width], data: softEmbeds },
+      [SOFT_MASK]: { dtype: "bool", shape: [1, length, 1], data: softMask },
     });
     onRunDiagnostics?.(session.diagnostics());
     return truncateEmbedding(readEmbedding(outputs, contract), request.dimension);
   }
 
   /**
-   * Disposes the Session, then runs `release`, after the calls in flight (flush-before-destroy —
-   * the disposal is queued on the same chain). Later calls return the same completion.
+   * Disposes the Sessions (the text graph's, then the tower's), then runs `release`, after the calls
+   * in flight (flush-before-destroy — the disposal is queued on the same chain). Later calls return
+   * the same completion.
    *
-   * MUST: `release` runs even if `Session.dispose()` fails ({@link disposeSteps}) — a GPU acquired
-   * by the pipeline would otherwise never be returned.
+   * MUST: every step runs even if an earlier one fails ({@link disposeSteps}) — a GPU acquired by
+   * the pipeline would otherwise never be returned.
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() =>
-      disposeSteps([() => this.#parts.session.dispose(), () => this.#parts.release?.()]),
+      disposeSteps([
+        () => this.#parts.session.dispose(),
+        () => this.#parts.tower?.session.dispose(),
+        () => this.#parts.release?.(),
+      ]),
     );
     return this.#disposal;
   }
@@ -693,6 +810,17 @@ type EmbeddingGemmaAdmission = {
   readonly sessionOptions: SessionOptions;
   /** The quant declaration plus the features the effective settings need. */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
+  /** The tower graph's contract, settled only when {@link PipelineOptions.vision} asks for it. */
+  readonly vision?: EmbeddingGemmaVisionContract;
+};
+
+/** Whether {@link PipelineOptions.vision} asks for the tower (a non-boolean fails loudly). */
+const wantsVision = (where: string, options: PipelineOptions): boolean => {
+  const vision: unknown = options.vision;
+  if (vision !== undefined && typeof vision !== "boolean") {
+    throw new ModelInputError(`${where}: vision ${JSON.stringify(vision)} is not a boolean`);
+  }
+  return vision === true;
 };
 
 /**
@@ -701,13 +829,51 @@ type EmbeddingGemmaAdmission = {
  *
  * MUST: do not copy with `slice` ({@link readAssetBuffer}).
  */
-const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"], vision: boolean): Promise<ComponentOpener> =>
   assetComponentOpener(
     OWNER,
     assets,
     (key) => readAssetBuffer(OWNER, "weights / assets", assets, key),
-    COMPONENT_KEYS,
+    componentKeys(vision),
   );
+
+/**
+ * Checks a `vision: true` load against the declaration and the two graphs (before any weight part
+ * is fetched): `pipelineConfig.vision` is declared, the tower graph matches it
+ * ({@link embeddingGemmaVisionContract}), its soft tokens are the text graph's soft rows' width, and
+ * the three image ids are rows of the text graph's table.
+ *
+ * MUST: each mismatch fails here and not on the first image — a width disagreement would otherwise
+ * surface after the weights are uploaded, and an id outside the table would read another token's row.
+ */
+const admitVision = (
+  open: ComponentOpener,
+  config: EmbeddingGemmaPipelineConfig,
+  contract: EmbeddingGemmaGraphContract,
+): EmbeddingGemmaVisionContract => {
+  const { vision } = config;
+  if (vision === undefined) {
+    throw new Error(
+      `${OWNER}: vision was requested, but this model's pipelineConfig declares no 'vision' (its` +
+        " distribution ships no vision tower)",
+    );
+  }
+  if (vision.hiddenSize !== contract.softWidth) {
+    throw new Error(
+      `${OWNER}: pipelineConfig.vision.hiddenSize ${vision.hiddenSize} is not the width of the text` +
+        ` graph's soft rows (${contract.softWidth})`,
+    );
+  }
+  for (const key of ["imageTokenId", "beginImageTokenId", "endImageTokenId"] as const) {
+    if (vision[key] >= contract.vocabularySize) {
+      throw new Error(
+        `${OWNER}: pipelineConfig.vision.${key} ${vision[key]} is outside the embedding table's` +
+          ` ${contract.vocabularySize} rows`,
+      );
+    }
+  }
+  return embeddingGemmaVisionContract(open(VISION), vision);
+};
 
 /**
  * Checks whether this manifest and this graph can run as this family (the family admission hook of
@@ -777,6 +943,7 @@ const admitEmbeddingGemma = (
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const contract = embeddingGemmaGraphContract(open(MODEL), config);
+  const vision = wantsVision(OWNER, options) ? admitVision(open, config, contract) : undefined;
 
   // MUST: a shared GPU lacking a capability (feature / device limit) fails here — the only family
   // check that can tell before the weights are downloaded (the later check calls the same
@@ -789,12 +956,20 @@ const admitEmbeddingGemma = (
       `${OWNER}: quant '${quantName}'`,
     );
   }
-  return { config, contract, quantName, quant, sessionOptions, gpuFeatures };
+  return {
+    config,
+    contract,
+    quantName,
+    quant,
+    sessionOptions,
+    gpuFeatures,
+    ...(vision === undefined ? {} : { vision }),
+  };
 };
 
 /**
  * Builds the embedder from the admitted material + assets (parse and match the tokenizer asset →
- * acquire the GPU → open the Session).
+ * acquire the GPU → open the Session, and the tower's with {@link PipelineOptions.vision}).
  *
  * MUST: parse and match the asset **before acquiring the GPU** (so a different exception in an
  * environment without a GPU does not hide the real cause, a broken asset).
@@ -807,13 +982,13 @@ const buildEmbedder = async (
   open: ComponentOpener,
   options: PipelineOptions,
 ): Promise<Embedder> => {
-  const { config, contract, quantName, quant, sessionOptions, gpuFeatures } = admitted;
+  const { config, contract, quantName, quant, sessionOptions, gpuFeatures, vision } = admitted;
   const tokenizer = new Tokenizer(
     parseGemmaTokenizerAsset(
       new Uint8Array(readAssetBuffer(OWNER, "weights / assets", assets, TOKENIZER)),
     ),
   );
-  const rules = embedTextRules(tokenizer, config);
+  const rules = embedTextRules(tokenizer, config, { images: vision !== undefined });
   // An id past the table would read a valid row of another token on the GPU, not fail.
   if (tokenizer.maxTokenId >= contract.vocabularySize) {
     throw new Error(
@@ -823,9 +998,18 @@ const buildEmbedder = async (
   }
   // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
   const model = open(MODEL);
+  const towerGraph = vision === undefined ? undefined : open(VISION);
+  // Both Sessions split the attention scores in row blocks of the family's budget (the tower's are
+  // 12 heads × (9n)² f32, about 291 MiB unsplit at 280 soft tokens).
+  const sessionSettings: SessionOptions = {
+    ...sessionOptions,
+    attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
+  };
   // MUST: declared features can be requested only at device creation (ADR 0028).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
+  let session: Session | undefined;
+  let towerSession: Session | undefined;
   try {
     // The features and limits of the GPU in hand — one helper for every family.
     assertAcquiredGpuCapabilities(
@@ -834,13 +1018,16 @@ const buildEmbedder = async (
       gpu,
       `${OWNER}: quant '${quantName}'`,
     );
+    session = await model.createSession(gpu, sessionSettings);
+    if (towerGraph !== undefined)
+      towerSession = await towerGraph.createSession(gpu, sessionSettings);
     return new Embedder({
-      session: await model.createSession(gpu, {
-        ...sessionOptions,
-        attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
-      }),
+      session,
       contract,
       rules,
+      ...(towerSession === undefined || vision === undefined
+        ? {}
+        : { tower: { session: towerSession, contract: vision } }),
       deviceLimits: gpu.limits,
       release: () => {
         if (ownsGpu) gpu.destroy();
@@ -850,18 +1037,34 @@ const buildEmbedder = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     });
   } catch (error) {
-    // A GPU acquired internally can be released by no one else if construction fails.
-    if (ownsGpu) gpu.destroy();
+    // The Sessions opened before the failure and a GPU acquired internally can be released by no
+    // one else (the Sessions first — flush before destroy).
+    try {
+      await disposeSteps([
+        () => session?.dispose(),
+        () => towerSession?.dispose(),
+        () => {
+          if (ownsGpu) gpu.destroy();
+        },
+      ]);
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        `${OWNER}: construction failed, and so did its clean-up`,
+      );
+    }
     throw error;
   }
 };
 
 /**
- * EmbeddingGemma text → sentence embedding (one graph, resident Session).
+ * EmbeddingGemma text (and image) → sentence embedding (resident Sessions: the text graph, and the
+ * vision tower with {@link PipelineOptions.vision}).
  *
  * ```ts
- * const pipeline = await embeddinggemma.Pipeline.fromPretrained(ref, { gpu });
+ * const pipeline = await embeddinggemma.Pipeline.fromPretrained(ref, { gpu, vision: true });
  * const vector = await pipeline.embed("how do I reset my password", { prompt: "query" });
+ * const picture = await pipeline.embed([{ type: "image", image }]); // image: decoded RGB8
  * ```
  *
  * Construction has only two entries: {@link Pipeline.fromPretrained} (fetch from the
@@ -880,9 +1083,10 @@ export class Pipeline {
    * Fetches from the distribution and builds (`loadManifest` → `resolveSelection` → fetch **only the
    * component's descriptor (part 0)** and run admission → warm up the weight parts → `fetchAssets`
    * of the tokenizer asset → build). Blocks are read in part order at the moment the Session is built
-   * (ADR 0109 — `src/hub/components.ts`). To replace the component with the same role from another
-   * repository, use {@link FromPretrainedComponentOptions.components} (the single role `model` —
-   * the tokenizer is not replaced).
+   * (ADR 0109 — `src/hub/components.ts`). The weights fetched are the roles the pipeline runs:
+   * `model`, and `vision` only with {@link PipelineOptions.vision}. To replace a component with the
+   * same role from another repository, use {@link FromPretrainedComponentOptions.components} (those
+   * roles — the tokenizer is not replaced).
    *
    * **`ref` is required** (there is no default source — the MUST in `src/hub/repo-ref.ts`; this
    * family has no published distribution, so there is no pin table either). A string `ref` is read
@@ -896,16 +1100,21 @@ export class Pipeline {
     options: FromPretrainedOptions = {},
   ): Promise<Pipeline> {
     const source = toManifestSource(ref, `${OWNER}.fromPretrained`);
+    const vision = wantsVision(`${OWNER}.fromPretrained`, options);
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const selection = resolveSelection(loaded.manifest, choice);
+    // MUST: narrow the weights to fetch by role — every preset maps the `vision` role, so without
+    // this its descriptor and parts would be fetched for a pipeline that never runs them.
+    const keys = componentKeys(vision);
+    const selection = resolveSelection(loaded.manifest, { ...choice, weights: keys });
     const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
+      ...(vision ? { vision } : {}),
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -916,7 +1125,7 @@ export class Pipeline {
       `${OWNER}.fromPretrained`,
       loaded,
       selection,
-      COMPONENT_KEYS,
+      keys,
       async (open) => {
         const admitted = admitEmbeddingGemma(loaded.manifest, open, buildOptions);
         // The `requiredLimits` the distribution declares are checked here **before the weight parts
@@ -938,12 +1147,12 @@ export class Pipeline {
   }
 
   /**
-   * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the container, goes
-   * through the same admission and build as the fetching surface, and returns with **the `model`
-   * Session opened** (the MUST in the module doc).
+   * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the container (and the
+   * tower's with {@link PipelineOptions.vision}), goes through the same admission and build as the
+   * fetching surface, and returns with **the Sessions opened** (the MUST in the module doc).
    */
   static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
-    const open = await assetOpener(input.assets);
+    const open = await assetOpener(input.assets, wantsVision(`${OWNER}.fromAssets`, options));
     const admitted = admitEmbeddingGemma(input.manifest, open, options);
     return new Pipeline(await buildEmbedder(admitted, input.assets, open, options));
   }
@@ -951,16 +1160,20 @@ export class Pipeline {
   /**
    * Embeds one input and returns a unit vector (f32, of the requested width).
    *
-   * `input` is a string or an array of content parts (today text parts only, concatenated in order
-   * with nothing between them). `options.prompt` prepends a declared prompt's prefix,
-   * `options.dimension` asks for one of the declared widths (default the full width; a shorter one
-   * is the leading slice re-normalised to unit length), `options.signal` cancels before the run.
+   * `input` is a string or an array of content parts — text parts, and image parts
+   * (`{ type: "image", image }`, decoded RGB8) on a pipeline built with
+   * {@link PipelineOptions.vision}: `<bos>`, each run of adjacent text (the prompt's prefix in
+   * front) tokenized as one string, each image as its soft tokens between their two markers,
+   * `<eos>`. `options.prompt` prepends a declared prompt's prefix, `options.dimension` asks for one
+   * of the declared widths (default the full width; a shorter one is the leading slice re-normalised
+   * to unit length), `options.signal` cancels before the runs (and between them).
    *
    * Refused with a `ModelInputError`, before the GPU is touched: an empty part array, a part of a
-   * type the model does not accept, an unknown prompt, an undeclared width, a text whose tokens
-   * include an image / audio / video placeholder id, and a sequence longer than the model's limit
-   * or than this device runs (its storage-buffer limit — the module doc; `<bos>` and `<eos>`
-   * included — nothing is truncated).
+   * type the pipeline does not accept (an image part without the vision tower — the message says
+   * how to build one with it), an image that is not RGB8 pixels, an unknown prompt, an undeclared
+   * width, a text whose tokens include an image / audio / video placeholder id, and a sequence longer
+   * than the model's limit or than this device runs (its storage-buffer limit — the module doc;
+   * `<bos>`, `<eos>` and every image's soft tokens and markers included — nothing is truncated).
    *
    * Concurrent calls **wait and run in order** (one Session is never shared by two runs).
    */
@@ -972,9 +1185,10 @@ export class Pipeline {
   }
 
   /**
-   * Returns the token ids {@link embed} would run for the same input and prompt: the prompt's
-   * prefix, the joined text parts, `<bos>` … `<eos>`. Synchronous, on the host (no GPU) and not
-   * queued behind the calls in flight.
+   * Returns the token ids {@link embed} would run for the same input and prompt: `<bos>`, the
+   * prompt's prefix and the parts (each image's soft rows as the image placeholder id between its
+   * two markers), `<eos>` — its length is the count the limits apply to. Synchronous, on the host
+   * (no GPU, an image read for its size only) and not queued behind the calls in flight.
    *
    * Refused with the same `ModelInputError` as `embed`: an input that is neither a string nor an
    * array, an empty part array, a part of a type the model does not accept, an unknown prompt.
@@ -990,7 +1204,7 @@ export class Pipeline {
   }
 
   /**
-   * Releases. Always disposes the Session and destroys **only a GPU acquired internally** (a
+   * Releases. Always disposes the Sessions and destroys **only a GPU acquired internally** (a
    * GpuContext passed in `options.gpu` belongs to the caller and is not touched).
    *
    * MUST: waits for the calls in flight before destroying (flush-before-destroy). Later calls

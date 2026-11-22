@@ -6,7 +6,7 @@
 //
 // ## Checks
 //
-// 1. **The mirror's manifest and tokenizer** (no GPU): the `pipelineConfig` parses with the four
+// 1. **The mirror's manifest and tokenizer** (no GPU): the `pipelineConfig` parses with the five
 //    fields, the model declares exactly the presets of PRESETS below with `bf16` the default and
 //    each preset's `requiredLimits` (256 MiB of binding for `bf16`, for its token table; none for
 //    `i8`, whose largest buffer — the int8 table, 128 MiB — is the WebGPU default), and the
@@ -248,6 +248,7 @@ const MIRROR_ROOT = mirrorRoot("karume-embeddinggemma-2");
 const ASSEMBLE =
   "cd tools/export-recipes && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export" +
   " --dtype bf16 && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8" +
+  " && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16" +
   " && uv run python dist.py --pipeline embeddinggemma-2";
 const MIRROR = mirrorPresent(MIRROR_ROOT);
 if (!MIRROR) {
@@ -419,12 +420,16 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: the manifest and the tokenize
     assertEquals(rules.placeholders.size, 3);
   });
 
-  it("gives each preset its own storage of the model, an empty session and the binding its narrowed device is capped at", async () => {
+  it("gives each preset its own storage of the model, the one bf16 vision tower, an empty session and the binding its narrowed device is capped at", async () => {
     const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
     const entry = manifest.models["text"];
     for (const preset of PRESETS) {
       const quant = entry.quants[preset.quant];
-      assertEquals(quant.weights, { model: preset.quant }, `${preset.quant}: weights`);
+      assertEquals(
+        quant.weights,
+        { model: preset.quant, vision: "bf16" },
+        `${preset.quant}: weights`,
+      );
       assertEquals(quant.session, {}, `${preset.quant}: session`);
       assertEquals(
         quant.requiredLimits?.maxStorageBufferBindingSize ?? WEBGPU_DEFAULT_BINDING_BYTES,

@@ -1935,13 +1935,15 @@ implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` �
 only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
 is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
-## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one text per call, at most 8,192 tokens, text only, no batch
+## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text and images only, no batch
 
-The text model of the local distribution `karume-embeddinggemma-2` (not published), through
-`@karume/models/embeddinggemma`:
+The model `text` of the local distribution `karume-embeddinggemma-2` (not published) — the text tower,
+and the vision tower with `vision: true` — through `@karume/models/embeddinggemma`:
 
 - **One sequence per call, no batch, no padding.** `embed` takes one input and returns one vector;
-  concurrent calls queue on the pipeline. The graph runs the symbolic length T of one sequence with
+  concurrent calls queue on the pipeline, and the images of one call run through the tower one at a
+  time, each read back to the host before the text graph runs (no batching of images, no GPU-side
+  handoff). The graph runs the symbolic length T of one sequence with
   no run-time mask: the 20 sliding layers declare their window as `attrs.band` 512 on the attention
   (ADR [0155](decisions/0155-attention-band.md) — checked in the score kernel from positions; the
   "Attention band" section below), the 4 full layers see every position, and nothing marks a key as
@@ -1975,10 +1977,30 @@ The text model of the local distribution `karume-embeddinggemma-2` (not publishe
 - **Every score is still computed.** The band removes the mask tensor, not the quadratic work: on
   the sliding layers ①QK and ③PV compute all `T × T` scores, while each query row sees at most
   1,025 of the 8,192 keys at the bound (12.5%).
-- **Text only.** The distribution holds the text tower alone. A text whose tokens include the image,
-  audio or video placeholder id (258880 / 258881 / 258884) is refused: the text tower would embed
-  the id as an ordinary token, while upstream's composite model replaces it with the pad id and
-  sentence-transformers refuses the text.
+- **Text and images; no audio, no video yet.** The distribution holds the text tower and the vision
+  tower (the audio tower is not carried; a video, frames through the same tower, is not taken yet).
+  An image is an image part of decoded **RGB8** pixels (`Rgb8Image`) — the caller decodes it (no
+  PNG / JPEG decoder is included, alpha is not taken, colour management and EXIF orientation are the
+  decoder's); the host resizes it with torch's uint8 bicubic port, as upstream's processor does on a
+  CPU (upstream run on a GPU resizes in f32 and gives slightly other pixels). A text whose tokens
+  include the image, audio or video placeholder id (258880 / 258881 / 258884) is refused: the text
+  tower would embed the id as an ordinary token, while upstream's composite model replaces it with
+  the pad id and sentence-transformers refuses the text.
+- **The soft-token budget is fixed at upstream's default, 280** (`pipelineConfig.vision.softTokenBudget`,
+  not a caller option): an image becomes 139 to 280 soft tokens by its aspect (a square one 256), plus
+  its two markers, all counted toward the 8,192-token limit — at most 29 images of 282 tokens fit one
+  input. Upstream's other budgets (70 / 140 / 560 / 1120) are not offered; a larger one would also
+  need longer position tables in the tower graph (840 positions cover the 280 budget's longest side).
+- **The vision tower is fetched and resident only with `vision: true`** — 320.3 MiB of bf16 weights
+  more in either preset (the `i8` preset rounds the text tower alone: no rounded form of the vision
+  tower was screened, so none is distributed), and a second Session whose plan at 280 soft tokens is
+  135.1 MiB with the family's 128 MiB row-block budget (329.1 MiB without it; its attention scores are
+  12 × 2,520² f32 = 290.7 MiB unsplit), measured on the RTX 3080 Ti under Node (2026-11-22). The
+  tower's per-row intermediates stay under the WebGPU default binding size, so it adds no
+  `requiredLimits`: an image of 280 soft tokens embeds to the same bits on a device whose binding and
+  buffer limits are capped at 128 MiB (`i8`) or 256 MiB (`bf16`). Each image is also preprocessed on
+  the host (resize and patch rows in JS, about 7.7 MB of f32 rows at 280 soft tokens, built when
+  `embed` is called). `onRunDiagnostics` reports the text graph's runs only.
 - **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
   checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
   int8 — a 323,958,272-byte container against 592,932,991). The int8 rounding moves each embedding

@@ -6,10 +6,10 @@ staging/swap, verification) lives in `karume.dist`. What lives here is **the fac
 EmbeddingGemma 2** only.
 
 The repository `karume-embeddinggemma-2` holds one model today, `text` — the text tower of
-`google/embeddinggemma-2` (the other towers of the same checkpoint would be later keys of the same
-repository). Its contract is `embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the
+`google/embeddinggemma-2` and its vision tower (the audio tower of the same checkpoint is not
+carried). Its contract is `embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the
 first EmbeddingGemma will join later from a repository of its own (another licence, so another
-`Pipeline` with other root files). The model ships one graph in two storages and one asset:
+`Pipeline` with other root files). The model ships two graphs and one asset:
 
 - `model` — the text tower, mean pooling and L2 normalisation as one graph, `input_ids` /
   `pool_mask` `[1, T]` and the soft rows of a tower (`soft_embeds` `[1, T, 512]`, `soft_mask`
@@ -21,12 +21,18 @@ first EmbeddingGemma will join later from a repository of its own (another licen
     linear) rounded to per-row symmetric int8, each with its F32 scale; the rest as in bf16.
 
   Both containers carry the same graph ({@link assert_same_graph}) — only the storage differs.
+- `vision` — the vision tower with its projection (`embeddinggemma2/export_vision.py --dtype
+  bf16`, series {@link EMBEDDINGGEMMA2_VISION_SERIES}): an image's patch rows and positions in, its
+  soft tokens `[1, n, 512]` out — the text graph's soft rows. One dtype label, `bf16` (the
+  checkpoint's own values; the norms and the folded rotary tables f32), so every preset maps it
+  ({@link complete_quant_weights}): no rounded form of the tower was screened, and the int8
+  preset rounds the text tower alone. The pipeline fetches it only when asked for image input.
 - `tokenizer` — the compiled tokenizer asset (`embeddinggemma2/tokenizer.py`), held to the pinned
   `tokenizer.json` it was compiled from.
 
 Two quant presets, both with an empty `session` (f32 compute on the reference path): `bf16` (the
-original weights, the default — ADR 0128 decision 4) and `i8` (the int8 storage; the maintainer's
-choice of 2026-11-22, after the torch-CPU screening of
+original weights, the default — ADR 0128 decision 4) and `i8` (the int8 storage of the text tower;
+the maintainer's choice of 2026-11-22, after the torch-CPU screening of
 `docs/research/2026-11-22-embeddinggemma2-quant-screen.md`).
 
 `pipelineConfig` carries **the model's own values**, read from their sources at build time and
@@ -42,6 +48,11 @@ checked against each other ({@link embeddinggemma2_pipeline_config}):
   pinned `config.json` (`image_token_id` / `audio_token_id` / `video_token_id`). The upstream
   composite model replaces such an id with the pad id before the embedding; the text tower here
   does not, so a reader refuses a text that encodes to one.
+- `vision` — what the host needs for an image ({@link embeddinggemma2_vision_config}), in the
+  shape of the Gemma 4 family's `pipelineConfig.vision`: the soft-token budget
+  (`processor_config.json`'s `max_soft_tokens`), the ids of the soft token and of the two markers
+  around an image (`config.json`'s `image_token_id` / `boi_token_id` / `eoi_token_id`) and the
+  width of a soft token (`text_config.hidden_size`, held to both graphs).
 
 The public surface is the one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist
 driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
@@ -110,11 +121,22 @@ EMBEDDINGGEMMA2_SERIES: Mapping[str, str] = {
     EMBEDDINGGEMMA2_I8_DTYPE: "embeddinggemma-2-text-i8",
 }
 
+#: The weights role of the vision tower (= the tower graph's name, `export_vision.GRAPH_NAME`), its
+#: one storage, and the series it is read from (`export_vision.DEFAULT_OUT_DIRS["bf16"]` — that
+#: module imports torch; the tests hold the mirrors equal).
+EMBEDDINGGEMMA2_VISION_ROLE = "vision"
+EMBEDDINGGEMMA2_VISION_DTYPE = "bf16"
+EMBEDDINGGEMMA2_VISION_SERIES = "embeddinggemma-2-vision-bf16"
+
 
 def embeddinggemma2_role(dtype: str) -> str:
     """The artifact role of the graph in one storage (`model_bf16` — the one word the placements,
     the output paths and the storage checks share)."""
     return f"{EMBEDDINGGEMMA2_ROLE}_{dtype}"
+
+
+#: The artifact role of the vision tower's container (the form of {@link embeddinggemma2_role}).
+EMBEDDINGGEMMA2_VISION_ARTIFACT = f"{EMBEDDINGGEMMA2_VISION_ROLE}_{EMBEDDINGGEMMA2_VISION_DTYPE}"
 
 
 #: The representative container path inside a series and the asset file inside the tokenizer
@@ -130,15 +152,19 @@ EMBEDDINGGEMMA2_OUTPUT_PATHS: Mapping[str, str] = {
         embeddinggemma2_role(dtype): f"{EMBEDDINGGEMMA2_ROLE}/model.{dtype}.krm"
         for dtype in EMBEDDINGGEMMA2_SERIES
     },
+    EMBEDDINGGEMMA2_VISION_ARTIFACT: (
+        f"{EMBEDDINGGEMMA2_VISION_ROLE}/model.{EMBEDDINGGEMMA2_VISION_DTYPE}.krm"
+    ),
     EMBEDDINGGEMMA2_TOKENIZER_ROLE: (
         f"{EMBEDDINGGEMMA2_TOKENIZER_ROLE}/{EMBEDDINGGEMMA2_TOKENIZER_FILE}"
     ),
 }
 
 #: The storage each graph's binding table **must** hold ({@link assert_storage}) — the f32 series
-#: holds neither and fails here.
+#: holds none and fails here.
 EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    embeddinggemma2_role(dtype): dtype for dtype in EMBEDDINGGEMMA2_SERIES
+    **{embeddinggemma2_role(dtype): dtype for dtype in EMBEDDINGGEMMA2_SERIES},
+    EMBEDDINGGEMMA2_VISION_ARTIFACT: EMBEDDINGGEMMA2_VISION_DTYPE,
 }
 
 #: The storage each graph's binding table **must not** hold ({@link assert_storage_absent}). MUST:
@@ -146,17 +172,23 @@ EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: compressed storage also holds f32 parts (the norms, the folded constants, the int8 scales), so
 #: the requirement alone lets it through, and only this table tells the series apart (a mixed-up
 #: series root cannot be told apart by the numeric gates — ADR 0027 / 0029). The bf16 role
-#: forbidding i8 and the i8 role forbidding bf16 is what keeps the two presets from swapping.
+#: forbidding i8 and the i8 role forbidding bf16 is what keeps the two presets from swapping; the
+#: tower's role forbids every rounded layout (no rounded tower was screened).
 EMBEDDINGGEMMA2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE): ("f16", "i8", "i4", "i4f16", "i2"),
     embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE): ("f16", "bf16", "i4", "i4f16", "i2"),
+    EMBEDDINGGEMMA2_VISION_ARTIFACT: ("f16", "i8", "i4", "i4f16", "i2"),
 }
 
-#: The weights declaration (dtype label → role). Two labels, so every preset names its own.
+#: The weights declaration (dtype label → role). The text graph has two labels, so every preset
+#: names its own; the tower has one, which {@link complete_quant_weights} gives every preset.
 EMBEDDINGGEMMA2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     EMBEDDINGGEMMA2_ROLE: {
         dtype: WeightFiles(embeddinggemma2_role(dtype)) for dtype in EMBEDDINGGEMMA2_SERIES
-    }
+    },
+    EMBEDDINGGEMMA2_VISION_ROLE: {
+        EMBEDDINGGEMMA2_VISION_DTYPE: WeightFiles(EMBEDDINGGEMMA2_VISION_ARTIFACT)
+    },
 }
 
 #: The assets declaration (asset name → role).
@@ -223,11 +255,47 @@ EMBEDDINGGEMMA2_PLACEHOLDER_FIELDS: tuple[tuple[str, str], ...] = (
     ("video", "video_token_id"),
 )
 
+#: `pipelineConfig.vision`'s id fields → the `config.json` fields they are read from (the soft
+#: token is the image placeholder — the reader holds the two equal).
+EMBEDDINGGEMMA2_VISION_ID_FIELDS: tuple[tuple[str, str], ...] = (
+    ("imageTokenId", "image_token_id"),
+    ("beginImageTokenId", "boi_token_id"),
+    ("endImageTokenId", "eoi_token_id"),
+)
+
+#: The tower graph's inputs in order with their dtypes, and its symbol — the mirror of
+#: `export_vision.GRAPH_INPUTS` / `SYMBOL` (held equal by the tests). The patch axis is
+#: `pooling² · n` and a patch row `patch_size² · 3` values, both read from `processor_config.json`.
+EMBEDDINGGEMMA2_VISION_INPUTS: tuple[tuple[str, str], ...] = (
+    ("pixels", "f32"),
+    ("position_x", "i32"),
+    ("position_y", "i32"),
+)
+EMBEDDINGGEMMA2_VISION_SYMBOL = "n"
+
+#: The vision series' record (`export_vision.REFERENCE_FILE`, mirrored).
+EMBEDDINGGEMMA2_VISION_REFERENCE_FILE = "reference.json"
+
+#: What the host's image preprocessing implements (`packages/models/src/embeddinggemma/vision.ts`):
+#: the processor class and the settings it reads them with. MUST: the pinned
+#: `processor_config.json` states exactly these — a resize filter, a rescale or a normalisation
+#: the host does not apply would give other pixels with every check passing.
+EMBEDDINGGEMMA2_IMAGE_PROCESSOR: Mapping[str, Any] = {
+    "image_processor_type": "Gemma4ImageProcessor",
+    "do_convert_rgb": True,
+    "do_resize": True,
+    "resample": 3,
+    "do_rescale": True,
+    "rescale_factor": 1 / 255,
+    "do_normalize": False,
+}
+
 #: The snapshot files the plan reads (each checked against the pin before it is read).
 EMBEDDINGGEMMA2_READ_FILES: tuple[str, ...] = (
     "config.json",
     "config_sentence_transformers.json",
     "tokenizer.json",
+    "processor_config.json",
 )
 
 #: The format of the compiled tokenizer asset (the writer is `_shared/gemma_tokenizer.py`) and the
@@ -248,11 +316,13 @@ def embeddinggemma2_repo_name(_model: str) -> str:
 
 @dataclass(frozen=True)
 class EmbeddingGemma2Sources:
-    """The assembly inputs: the series of each storage (dtype label → directory), the tokenizer
-    series and the pinned upstream snapshot (`inputs/` — not a generated artifact; only its small
-    configuration files and `tokenizer.json` are read)."""
+    """The assembly inputs: the series of each storage of the text graph (dtype label →
+    directory), the vision tower's series, the tokenizer series and the pinned upstream snapshot
+    (`inputs/` — not a generated artifact; only its small configuration files and `tokenizer.json`
+    are read)."""
 
     series: Mapping[str, Path]
+    vision: Path
     tokenizer: Path
     snapshot: Path
 
@@ -262,13 +332,15 @@ def embeddinggemma2_sources(series_dir: Path) -> EmbeddingGemma2Sources:
     place (`embeddinggemma2.sources.SNAPSHOT_DIR`)."""
     return EmbeddingGemma2Sources(
         series={dtype: series_dir / name for dtype, name in EMBEDDINGGEMMA2_SERIES.items()},
+        vision=series_dir / EMBEDDINGGEMMA2_VISION_SERIES,
         tokenizer=series_dir / TOKENIZER_SERIES,
         snapshot=upstream_sources.SNAPSHOT_DIR,
     )
 
 
 def embeddinggemma2_placements(sources: EmbeddingGemma2Sources) -> dict[str, Path]:
-    """Role → source file. Anything not here stays out (the series' `io.*.safetensors`).
+    """Role → source file. Anything not here stays out (the series' `io.*.safetensors` and the
+    vision series' record).
 
     MUST: exactly the storages of {@link EMBEDDINGGEMMA2_SERIES} — a missing one would leave a
     preset pointing at no file, an extra one would ship a container no preset reads.
@@ -283,6 +355,7 @@ def embeddinggemma2_placements(sources: EmbeddingGemma2Sources) -> dict[str, Pat
             embeddinggemma2_role(dtype): sources.series[dtype] / EMBEDDINGGEMMA2_MODEL_FILE
             for dtype in EMBEDDINGGEMMA2_SERIES
         },
+        EMBEDDINGGEMMA2_VISION_ARTIFACT: sources.vision / EMBEDDINGGEMMA2_MODEL_FILE,
         EMBEDDINGGEMMA2_TOKENIZER_ROLE: sources.tokenizer / EMBEDDINGGEMMA2_TOKENIZER_FILE,
     }
 
@@ -345,8 +418,9 @@ def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> in
     return extents.pop()
 
 
-def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[int, int]:
-    """Check the graph's contract before placement and return `(vocabulary size, output width)`.
+def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[int, int, int]:
+    """Check the graph's contract before placement and return `(vocabulary size, output width,
+    soft-row width)` (the soft rows are the token table's width).
 
     The reader binds `input_ids` (i32) and `pool_mask` (f32) `[1, T]`, `soft_embeds` (f32)
     `[1, T, H]` with H the token table's width, and `soft_mask` (bool) `[1, T, 1]` by name and
@@ -411,7 +485,7 @@ def assert_embeddinggemma2_graph(graph: Mapping[str, Any], path: Path) -> tuple[
     ):
         raise DistError(f"{path}: the graph output '{outputs[0]}' is {output!r}, not f32 [1, D]")
     width = _positive_int(shape[1], f"{path}: the output width")
-    return _positive_int(table_shape[0], f"{path}: the vocabulary size"), width
+    return _positive_int(table_shape[0], f"{path}: the vocabulary size"), width, hidden
 
 
 def assert_same_graph(
@@ -538,15 +612,163 @@ def embeddinggemma2_prompts(config: Mapping[str, Any], where: str) -> dict[str, 
     return dict(prompts)
 
 
+@dataclass(frozen=True)
+class EmbeddingGemma2ImageProcessor:
+    """What the pinned `processor_config.json` says of images: the soft-token budget, the patch
+    side and the pooling (patches per side of one soft token)."""
+
+    budget: int
+    patch_size: int
+    pooling: int
+
+
+def embeddinggemma2_image_processor(
+    processor: Mapping[str, Any], where: str
+) -> EmbeddingGemma2ImageProcessor:
+    """Read the image processor's settings, held to what the host implements
+    ({@link EMBEDDINGGEMMA2_IMAGE_PROCESSOR})."""
+    image = processor.get("image_processor")
+    if not isinstance(image, dict):
+        raise DistError(f"{where}: no image_processor object")
+    for key, expected in EMBEDDINGGEMMA2_IMAGE_PROCESSOR.items():
+        if image.get(key) != expected:
+            raise DistError(
+                f"{where}: image_processor.{key} is {image.get(key)!r}, not {expected!r} — the"
+                " host's image preprocessing implements that setting only"
+            )
+    return EmbeddingGemma2ImageProcessor(
+        budget=_positive_int(image.get("max_soft_tokens"), f"{where}: max_soft_tokens"),
+        patch_size=_positive_int(image.get("patch_size"), f"{where}: patch_size"),
+        pooling=_positive_int(image.get("pooling_kernel_size"), f"{where}: pooling_kernel_size"),
+    )
+
+
+def assert_embeddinggemma2_vision_graph(
+    graph: Mapping[str, Any], path: Path, *, hidden: int, processor: EmbeddingGemma2ImageProcessor
+) -> None:
+    """Check the tower graph's contract before placement.
+
+    The reader binds `pixels` f32 `[1, pooling² · n, patch² · 3]` and `position_x` / `position_y`
+    i32 `[1, pooling² · n]` by name and reads one f32 `[1, n, hidden]` output — the text graph's
+    soft rows; one symbol, no state. MUST: the tables gathered by the positions cover the longest
+    side the resize rule gives at the budget (`pooling · budget` patches — the reader checks the
+    same), or a long thin image would read past their end on the user's machine.
+    """
+    symbol = EMBEDDINGGEMMA2_VISION_SYMBOL
+    rows = f"{processor.pooling * processor.pooling}{symbol}"
+    row_width = processor.patch_size * processor.patch_size * 3
+    expected = [
+        {"name": name, "dtype": dtype, "shape": [1, rows, row_width] if index == 0 else [1, rows]}
+        for index, (name, dtype) in enumerate(EMBEDDINGGEMMA2_VISION_INPUTS)
+    ]
+    inputs = graph.get("inputs")
+    found = (
+        [{key: item.get(key) for key in ("name", "dtype", "shape")} for item in inputs]
+        if isinstance(inputs, list)
+        else None
+    )
+    if found != expected:
+        raise DistError(f"{path}: the vision graph's inputs are {found}, not {expected}")
+    if graph.get("symbols") != [symbol]:
+        raise DistError(f"{path}: the vision graph's symbols are {graph.get('symbols')!r}")
+    if graph.get("states"):
+        raise DistError(f"{path}: the vision graph holds state slots")
+    outputs = graph.get("outputs")
+    values = graph.get("values")
+    if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(values, dict):
+        raise DistError(f"{path}: the vision graph does not have one output ({outputs!r})")
+    output = values.get(outputs[0], {})
+    if output.get("dtype") != "f32" or output.get("shape") != [1, symbol, hidden]:
+        raise DistError(
+            f"{path}: the vision graph's output is {output!r}, not f32 [1, {symbol!r}, {hidden}]"
+            " — the text graph's soft rows"
+        )
+    positions = [
+        values.get(node["ins"][0], {}).get("shape", [None])[0]
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict)
+        and node.get("op") == "embedding"
+        and node["ins"][1] in {name for name, _ in EMBEDDINGGEMMA2_VISION_INPUTS[1:]}
+    ]
+    if not positions or not all(isinstance(count, int) for count in positions):
+        raise DistError(
+            f"{path}: the vision graph gathers no table of static rows by the positions"
+        )
+    longest = processor.pooling * processor.budget
+    if min(positions) < longest:
+        raise DistError(
+            f"{path}: the vision graph's position tables cover {min(positions)} positions, but an"
+            f" image side reaches {longest} patches at the budget of {processor.budget}"
+        )
+
+
+def assert_embeddinggemma2_vision_series(
+    series: Path, budget: int, pin: upstream_sources.SourcePin
+) -> None:
+    """The vision series is a full one, taken at the budget this distribution declares, from the
+    pinned checkpoint.
+
+    MUST: its record ({@link EMBEDDINGGEMMA2_VISION_REFERENCE_FILE}) names this series, the budget
+    `pipelineConfig.vision` declares and the pin — goldens taken at another budget hold the host to
+    rows it never builds, and a series of another revision would ship under this pin.
+    """
+    record_path = series / EMBEDDINGGEMMA2_VISION_REFERENCE_FILE
+    record = _read_json(record_path, "the vision series' record")
+    if not isinstance(record, dict):
+        raise DistError(f"{record_path}: the top level is not an object")
+    for key, expected in (
+        ("series", EMBEDDINGGEMMA2_VISION_SERIES),
+        ("softTokenBudget", budget),
+        ("upstream", pin.label),
+    ):
+        if record.get(key) != expected:
+            raise DistError(f"{record_path}: {key} is {record.get(key)!r}, not {expected!r}")
+
+
+def embeddinggemma2_vision_config(
+    config: Mapping[str, Any],
+    tokenizer: Mapping[str, Any],
+    *,
+    vocab_size: int,
+    hidden: int,
+    budget: int,
+    where: str,
+) -> dict[str, int]:
+    """`pipelineConfig.vision` (the Gemma 4 family's shape — read by that family's TS reader).
+
+    MUST: each id is a special token of the tokenizer asset inside the graph's vocabulary and the
+    three differ — an id outside that would place an image the model never saw, with every integer
+    valid. The soft token is read from the field `placeholderTokens.image` is read from, so the two
+    agree by construction (the reader holds them equal: it refuses that id in text, which keeps a
+    soft row from being spelt without an image).
+    """
+    special = tokenizer.get("specialIds")
+    special_ids = set(special) if isinstance(special, list) else set()
+    declared: dict[str, int] = {"softTokenBudget": budget}
+    for field, key in EMBEDDINGGEMMA2_VISION_ID_FIELDS:
+        token = config.get(key)
+        if isinstance(token, bool) or not isinstance(token, int) or not 0 <= token < vocab_size:
+            raise DistError(f"{where}: {key} is {token!r}, not an id of the {vocab_size} rows")
+        if token not in special_ids:
+            raise DistError(f"{where}: {key} {token} is not a special token of the tokenizer asset")
+        declared[field] = token
+    ids = [declared[field] for field, _ in EMBEDDINGGEMMA2_VISION_ID_FIELDS]
+    if len(set(ids)) != len(ids):
+        raise DistError(f"{where}: the image token ids repeat ({ids})")
+    declared["hiddenSize"] = hidden
+    return declared
+
+
 def embeddinggemma2_pipeline_config(
     *,
     prompts: Mapping[str, str],
     width: int,
     graph_max_tokens: int,
     placeholders: Mapping[str, int],
+    vision: Mapping[str, int],
     where: str,
 ) -> dict[str, Any]:
-    """Build `pipelineConfig` (the four fields of the TypeScript schema, in this order).
+    """Build `pipelineConfig` (the five fields of the TypeScript schema, in this order).
 
     MUST: the full dimension equals the graph's output width, the dimensions descend, and the
     token bound equals both the graph's and the writer's ({@link EMBEDDINGGEMMA2_MAX_TOKENS}) — a
@@ -569,6 +791,7 @@ def embeddinggemma2_pipeline_config(
         "dimensions": dimensions,
         "maxTokens": EMBEDDINGGEMMA2_MAX_TOKENS,
         "placeholderTokens": dict(placeholders),
+        "vision": dict(vision),
     }
 
 
@@ -598,7 +821,7 @@ def embeddinggemma2_plan(
     # the same graph.
     container = placements[embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE)]
     graph = ir_graph(container)
-    vocab_size, width = assert_embeddinggemma2_graph(graph, container)
+    vocab_size, width, soft_width = assert_embeddinggemma2_graph(graph, container)
     for dtype in EMBEDDINGGEMMA2_SERIES:
         if dtype != EMBEDDINGGEMMA2_DTYPE:
             other = placements[embeddinggemma2_role(dtype)]
@@ -618,20 +841,50 @@ def embeddinggemma2_plan(
     prompts_config = _read_json(prompts_path, "the upstream prompts")
     if not isinstance(prompts_config, dict):
         raise DistError(f"{prompts_path}: the top level is not an object")
+    processor_path = sources.snapshot / "processor_config.json"
+    processor_config = _read_json(processor_path, "the upstream processor")
+    if not isinstance(processor_config, dict):
+        raise DistError(f"{processor_path}: the top level is not an object")
+    processor = embeddinggemma2_image_processor(processor_config, str(processor_path))
+    # The soft rows' width is the token table's (a soft row replaces a scaled lookup) and the
+    # upstream text config's hidden size; the tower's output must be that width too.
+    hidden = _positive_int(
+        text_config.get("hidden_size"), f"{config_path}: text_config.hidden_size"
+    )
+    if soft_width != hidden:
+        raise DistError(
+            f"{container}: soft_embeds is {soft_width} wide, upstream's text_config.hidden_size"
+            f" {hidden}"
+        )
+    vision_container = placements[EMBEDDINGGEMMA2_VISION_ARTIFACT]
+    assert_embeddinggemma2_vision_graph(
+        ir_graph(vision_container), vision_container, hidden=hidden, processor=processor
+    )
+    assert_embeddinggemma2_vision_series(sources.vision, processor.budget, pin)
     # Every container names the license and the commit it was exported from (the export bakes
     # them).
-    for dtype in EMBEDDINGGEMMA2_SERIES:
+    for role in (
+        *(embeddinggemma2_role(dtype) for dtype in EMBEDDINGGEMMA2_SERIES),
+        EMBEDDINGGEMMA2_VISION_ARTIFACT,
+    ):
         assert_upstream_provenance(
-            placements[embeddinggemma2_role(dtype)],
-            license=EMBEDDINGGEMMA2_LICENSE,
-            revision=pin.revision,
+            placements[role], license=EMBEDDINGGEMMA2_LICENSE, revision=pin.revision
         )
+    placeholders = embeddinggemma2_placeholder_tokens(
+        config, tokenizer, vocab_size, str(config_path)
+    )
     pipeline_config = embeddinggemma2_pipeline_config(
         prompts=embeddinggemma2_prompts(prompts_config, str(prompts_path)),
         width=width,
         graph_max_tokens=embeddinggemma2_graph_max_tokens(graph, container),
-        placeholders=embeddinggemma2_placeholder_tokens(
-            config, tokenizer, vocab_size, str(config_path)
+        placeholders=placeholders,
+        vision=embeddinggemma2_vision_config(
+            config,
+            tokenizer,
+            vocab_size=vocab_size,
+            hidden=hidden,
+            budget=processor.budget,
+            where=str(config_path),
         ),
         where=str(container),
     )
@@ -661,26 +914,33 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-#: On the day another tower of the checkpoint is added as a model, or a storage is added or
-#: dropped ({@link EMBEDDINGGEMMA2_SERIES}), this text changes with it.
+#: On the day the audio tower of the checkpoint is added, or a storage is added or dropped
+#: ({@link EMBEDDINGGEMMA2_SERIES}, {@link EMBEDDINGGEMMA2_VISION_DTYPE}), this text changes with
+#: it.
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
 
-- The **text tower only** was extracted; the vision and audio towers were never read, so images,
-  video and audio cannot be embedded from this repository.
+- The **text tower and the vision tower** (with its projection into the text tower's width) were
+  extracted; the audio tower was never read, so audio cannot be embedded from this repository.
 - The text tower, together with the mean pooling and the L2 normalisation of the
   SentenceTransformer pipeline, was re-expressed as one graph in the Karume container format (a
   `.krm` part sequence whose first part carries the graph and model descriptors). The
   sliding-window attention mask was replaced by a band declared on the attention of each sliding
   layer, which the runtime applies from the token positions; the rotary position tables are
   constants of the graph, which bound the input length it accepts (stated in `README.md`).
-- The weights ship in two forms. **The `bf16` form keeps the checkpoint's BF16 values unchanged**
-  (the parameters stored in float32, the norms among others, hold the same values widened). **The
-  `i8` form is an int8-quantized copy**: the token embedding table and every linear layer were
+- The text tower's weights ship in two forms.
+  **The `bf16` form keeps the checkpoint's BF16 values unchanged** (the parameters stored in
+  float32, the norms among others, hold the same values widened). **The `i8` form is an
+  int8-quantized copy**: the token embedding table and every linear layer of the text tower were
   rounded to symmetric int8 with one float32 scale per row; the other parameters are those of the
   `bf16` form.
+- The vision tower and its projection were re-expressed as a second graph: it reads an image's
+  real patches only, ordered so that the patches pooled into one soft token are adjacent, and its
+  two-dimensional rotary embedding is folded into tables of the graph gathered by the patch
+  positions. Its weights keep the checkpoint's BF16 values unchanged in both forms (its norms and
+  the folded tables are stored in float32); none of them was rounded.
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt
   prefixes of its `config_sentence_transformers.json` are carried in `karume.json`.
 

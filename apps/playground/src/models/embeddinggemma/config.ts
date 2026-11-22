@@ -120,3 +120,12 @@ export const effectiveDimension = (
   chosen: number | undefined,
 ): number =>
   chosen !== undefined && config.dimensions.includes(chosen) ? chosen : config.dimensions[0];
+
+/**
+ * Whether `model` ships the vision tower (the weights role `vision`), i.e. whether the page builds
+ * the pipeline with `vision: true` and offers an image per row — the Gemma 4 page's rule for its
+ * image embedder (every preset then maps the role). The pipeline checks the declaration that goes
+ * with it (`pipelineConfig.vision`) when it is built.
+ */
+export const hasVisionTower = (manifest: Manifest, model: string): boolean =>
+  Object.hasOwn(manifest.models, model) && manifest.models[model]?.weights["vision"] !== undefined;

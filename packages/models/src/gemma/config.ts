@@ -403,8 +403,12 @@ const parseSuppressTokens = (raw: unknown, where: string): readonly number[] => 
 /**
  * Reads `vision` (called only when the key is present). The vocabulary bound of the ids is checked
  * at admission, where the vocabulary is first known (`assertGemma4Vision` in `./admission.ts`).
+ *
+ * NOTE: the `export` is for the EmbeddingGemma family, whose `pipelineConfig.vision` has this shape
+ * (`src/embeddinggemma/config.ts` — one reader, so the two declarations cannot drift apart); not on
+ * `mod.ts` / the subpath surface (ADR 0008).
  */
-const parseVision = (raw: unknown, where: string): PipelineVisionConfig => {
+export const parseVision = (raw: unknown, where: string): PipelineVisionConfig => {
   if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, VISION_KEYS, where);
   const tokenId = (key: string): number =>

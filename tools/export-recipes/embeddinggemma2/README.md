@@ -3,9 +3,9 @@
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)); it writes series and the
 distribution `karume-embeddinggemma-2`, which is built as a local mirror only (nothing is
-published). The **text tower** of `google/embeddinggemma-2` is the distribution's one model; the
-**vision tower** is exported as series of its own (`export_vision.py`, stage 1 of image input — not
-in the distribution yet), and the audio tower is never built.
+published). The **text tower** of `google/embeddinggemma-2` is the distribution's one model, `text`;
+the **vision tower** is exported as series of its own (`export_vision.py`) and ships in the same
+model as the weights role `vision` (since 2026-11-22), and the audio tower is never built.
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstring of `export.py`; this file is the entry point only. Every file a
@@ -225,11 +225,13 @@ does not (max abs 9.25e-5 on one such text; 0 once the pad id is substituted).
 `dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (local only — no
 upload, no published pin): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
 family `embeddinggemma`) with the graph as the weights `model` in two storages — `bf16` from the bf16 series and `i8`
-from the i8 series, each container checked to carry the bf16 one's graph — and the compiled tokenizer as the asset
-`tokenizer`, two presets with an empty session (`bf16`, the original weights and the default; `i8`, the int8 storage),
-`LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice, which states the int8 copy). Its
-`pipelineConfig` carries the model's own values, each read from its source and checked against the
-others when the plan is built:
+from the i8 series, each container checked to carry the bf16 one's graph —, the vision tower as the weights `vision` in
+one storage, `bf16`, from the series `embeddinggemma-2-vision-bf16` (so both presets map it — no rounded tower was
+screened, and the card says so; the pipeline fetches it only with `vision: true`), and the compiled tokenizer as the
+asset `tokenizer`, two presets with an empty session (`bf16`, the original weights and the default; `i8`, the int8
+storage of the text tower), `LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice, which states
+the int8 copy and the vision graph). Its `pipelineConfig` carries the model's own values, each read from its source and
+checked against the others when the plan is built:
 
 | Field               | Value                                         | Source and check                                                                                      |
 | ------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -237,17 +239,25 @@ others when the plan is built:
 | `dimensions`        | `[768, 512, 256, 128]`                        | the upstream model card; the first equals the graph's output width                                    |
 | `maxTokens`         | `8192`                                        | the bound the graph's folded RoPE tables carry for `T`, held to the export's `SYM_MAX`               |
 | `placeholderTokens` | `{image: 258880, audio: 258881, video: 258884}` | `config.json` at the pin; each a special token of the tokenizer asset                                 |
+| `vision`            | `{softTokenBudget: 280, imageTokenId: 258880, beginImageTokenId: 255999, endImageTokenId: 258882, hiddenSize: 512}` (the Gemma 4 family's shape) | `processor_config.json`'s `max_soft_tokens`; `config.json`'s `image_token_id` / `boi_token_id` / `eoi_token_id` (each a special token of the asset, distinct); `text_config.hidden_size`, held to the text graph's soft rows and the tower's output |
 
 The plan also checks each storage (`model_bf16` must hold bf16 and none of the other compressed layouts, `model_i8`
-the same for i8 — so the f32 series, or the two series swapped, are refused), that the i8 container carries the bf16
-container's graph, the graph's inputs and output, the tokenizer asset against the pinned `tokenizer.json` and the
-graph's vocabulary, and each container's licence and upstream revision against the pin.
+the same for i8 — so the f32 series, or the two series swapped, are refused; `vision_bf16` bf16 and no rounded layout),
+that the i8 container carries the bf16 container's graph, the graph's inputs and output, the tokenizer asset against the
+pinned `tokenizer.json` and the graph's vocabulary, each container's licence and upstream revision against the pin, the
+processor's image settings against what the host implements (`Gemma4ImageProcessor`, bicubic, the 1/255 rescale, no
+normalisation), the tower graph (`pixels` f32 `[1, 9n, 768]`, `position_x` / `position_y` i32 `[1, 9n]`, one f32
+`[1, n, 512]`, position tables covering `3 · budget` patches) and the vision series' record (its series, its budget
+and the pin).
 
-Assembled again on 2026-11-22 with the soft inputs, the mirror holds 926,477,217 bytes (916,918,549 without the
-9,558,668-byte tokenizer): the `bf16` preset downloads 592,932,991 + 9,558,668 bytes, the `i8` preset 323,958,272 +
-9,558,668. The dist driver
+Assembled again on 2026-11-22 with the vision tower, the mirror holds 1,262,574,677 bytes in all (the containers
+592,932,991 + 323,958,272 + 336,093,696 and the 9,558,668-byte tokenizer); the text containers are byte-identical to the
+assembly before it. The `bf16` preset downloads 592,932,991 + 9,558,668 bytes, the `i8` preset 323,958,272 +
+9,558,668, and each 336,093,696 more for the tower with `vision: true`. Before the tower, with the soft inputs, it held
+926,477,217 bytes. The dist driver
 derives `requiredLimits` `{ maxStorageBufferBindingSize: 268435456 }` for `bf16` (its bf16 token table, 256 MiB) and
-none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out). Against the
+none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out; the tower's
+largest table, 15 MiB of bf16, adds none). Against the
 mirror before the soft inputs, only the first part of each container and the graph descriptor's length and digest
 in `karume.json` changed.
 
@@ -267,9 +277,9 @@ uv run --with 'transformers==5.23.0' python -m embeddinggemma2.tokenizer
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8
-uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16
+uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \

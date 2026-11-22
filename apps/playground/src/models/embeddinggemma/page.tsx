@@ -1,9 +1,15 @@
 /**
- * The EmbeddingGemma text → sentence embedding check: a list of text rows, each with its own prompt
- * from the manifest, one dimension for the run, every row embedded on the page's GPU (one `embed`
- * call per row, in order) and the similarity matrix of the rows (the dot product of the unit
- * vectors), with a saved record (per-row statistics and the sha256 of the raw f32 bytes, build and
- * embed seconds, the model Session's diagnostics).
+ * The EmbeddingGemma text (and image) → sentence embedding check: a list of rows, each a text with
+ * its own prompt from the manifest and — on a model that ships the vision tower — an optional image
+ * embedded after the text, one dimension for the run, every row embedded on the page's GPU (one
+ * `embed` call per row, in order) and the similarity matrix of the rows (the dot product of the unit
+ * vectors — an image row compares with a text row directly), with a saved record (per-row
+ * statistics and the sha256 of the raw f32 bytes, each image's size and the sha256 of its RGB8
+ * pixels, build and embed seconds, the model Session's diagnostics).
+ *
+ * On a model with the vision tower (the weights role `vision`) the page builds the pipeline with
+ * `vision: true` — the Gemma 4 page's rule for its image embedder — so the tower's weights are
+ * fetched with the text model's.
  *
  * A row the pipeline refuses (`ModelInputError`: an undeclared prompt, a text over the token limit,
  * a placeholder token in the text) shows the refusal as raised and the run goes on with the next
@@ -12,9 +18,10 @@
  * source, model and preset (the prompt and the dimension are per call).
  *
  * Once a pipeline is held, each row shows its token count against the model's limit `maxTokens`
- * (`tokenize` — on the host, recomputed as the row changes), marked when it is over; the record
- * keeps the count of each row as it was run. A device whose buffer limit is smaller runs fewer
- * tokens; the page does not know that limit, so such a row is refused only when it is run.
+ * (`tokenize` — on the host, recomputed as the row changes; an image counts its soft tokens and two
+ * markers), marked when it is over; the record keeps the count of each row as it was run. A device
+ * whose buffer limit is smaller runs fewer tokens; the page does not know that limit, so such a row
+ * is refused only when it is run.
  */
 
 import {
@@ -30,6 +37,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
 import { Field } from "@/components/field";
+import { ImageInput } from "@/components/image-input";
 import { KeyValueTable } from "@/components/key-value-table";
 import { PresetSelect } from "@/components/preset-select";
 import { RecordActions } from "@/components/record-actions";
@@ -59,12 +67,13 @@ import { useTimestampQuery } from "@/hooks/use-timestamp-query";
 import { downloadBlob, fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets, modelChoices } from "@/lib/presets";
-import { f32Bytes, f32Sha256, NO_SUBMITS, type SubmitCounts } from "@/lib/record";
+import { f32Bytes, f32Sha256, NO_SUBMITS, rgb8Sha256, type SubmitCounts } from "@/lib/record";
 
 import {
   dimensionChoices,
   effectiveDimension,
   type EmbeddingModelConfig,
+  hasVisionTower,
   promptChoices,
   promptOfValue,
   promptValue,
@@ -86,6 +95,7 @@ import {
   effectiveSelection,
   type PipelineKey,
   removeRow,
+  rowInput,
   rowTokenCount,
   runBlocker,
   SAMPLE_ROWS,
@@ -165,6 +175,12 @@ export const EmbeddingGemmaPage = () => {
   }
   const config = configState?.kind === "ready" ? configState.config : undefined;
   const dimension = config === undefined ? undefined : effectiveDimension(config, chosenDimension);
+  // Whether the selected model ships the vision tower: the pipeline is built with it, and each row
+  // offers an image.
+  const vision =
+    ready !== undefined &&
+    selection !== undefined &&
+    hasVisionTower(ready.manifest, selection.model);
 
   const [rows, setRows] = useState<readonly TextRow[]>(SAMPLE_ROWS);
 
@@ -213,7 +229,7 @@ export const EmbeddingGemmaPage = () => {
     return rows.map((row) =>
       counter === undefined
         ? undefined
-        : rowTokenCount((text, options) => counter.tokenize(text, options), row),
+        : rowTokenCount((input, options) => counter.tokenize(input, options), row),
     );
   }, [held, rows, selectedModel]);
   // Where `onRunDiagnostics` goes: the running run's report list (the pipeline outlives a run).
@@ -236,6 +252,7 @@ export const EmbeddingGemmaPage = () => {
     const runSource = source;
     const runDimension = dimension;
     const runRows = rows;
+    const runVision = vision;
     const { model, quant } = selection;
     const presetLabel = presets.presets.find(({ name }) => name === quant)?.label ?? quant;
     const directory = status?.directory ?? "";
@@ -271,6 +288,7 @@ export const EmbeddingGemmaPage = () => {
             gpu: runGpu,
             model,
             quant,
+            ...(runVision ? { vision: true } : {}),
             signal,
             onRunDiagnostics: (diagnostics) => {
               counters.latest = {
@@ -317,12 +335,12 @@ export const EmbeddingGemmaPage = () => {
           });
           // Counted before the row's embed, while the pipeline is certainly the one it runs on.
           const tokens = rowTokenCount(
-            (text, options) => active.pipeline.tokenize(text, options),
+            (input, options) => active.pipeline.tokenize(input, options),
             row,
           );
           const embedStart = performance.now();
           try {
-            const values = await active.pipeline.embed(row.text, {
+            const values = await active.pipeline.embed(rowInput(row), {
               prompt: row.prompt,
               dimension: runDimension,
               signal,
@@ -359,6 +377,16 @@ export const EmbeddingGemmaPage = () => {
         measured.push({
           text: row.text,
           prompt: row.prompt,
+          ...(row.image === undefined
+            ? {}
+            : {
+                image: {
+                  name: row.image.name,
+                  width: row.image.rgb.width,
+                  height: row.image.rgb.height,
+                  rgbSha256: await rgb8Sha256(row.image.rgb),
+                },
+              }),
           tokens: outcome.tokens,
           embedMs: outcome.embedMs,
           outcome:
@@ -439,8 +467,9 @@ export const EmbeddingGemmaPage = () => {
             <CardTitle>Request</CardTitle>
             <CardDescription>
               Each row becomes one unit vector (one <code>embed</code> call, in order). The prompt's
-              prefix goes before the row's text; the run compares every pair of rows by the dot
-              product of their vectors, which is their cosine similarity.
+              prefix goes before the row's text, and a row's image (on a model with the vision
+              tower) comes after it; the run compares every pair of rows by the dot product of their
+              vectors, which is their cosine similarity.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
@@ -546,6 +575,34 @@ export const EmbeddingGemmaPage = () => {
                         Shorten the text or split it.
                       </p>
                     ) : null}
+                    {vision || row.image !== undefined ? (
+                      <div className="flex flex-col gap-2">
+                        <ImageInput
+                          id={`embeddinggemma-row-${position}-image`}
+                          label="Image (embedded after the text; optional)"
+                          image={row.image}
+                          onImage={(image) =>
+                            setRows((current) => updateRow(current, row.id, { image }))
+                          }
+                          disabled={task.running}
+                        />
+                        {row.image === undefined ? null : (
+                          <Button
+                            id={`embeddinggemma-row-${position}-image-remove`}
+                            variant="outline"
+                            size="sm"
+                            className="self-start"
+                            onClick={() =>
+                              setRows((current) => updateRow(current, row.id, { image: undefined }))
+                            }
+                            disabled={task.running}
+                          >
+                            <Trash2Icon />
+                            Remove image
+                          </Button>
+                        )}
+                      </div>
+                    ) : null}
                     {config === undefined ? null : (
                       <Field id={`embeddinggemma-row-${position}-prompt`} label="Prompt">
                         <ChoiceSelect
@@ -580,8 +637,11 @@ export const EmbeddingGemmaPage = () => {
                   A row may be up to {config.maxTokens} tokens, prompt prefix, &lt;bos&gt; and
                   &lt;eos&gt; included, or fewer on a device whose buffer limit is smaller (such a
                   row is refused when it is run); a longer row is refused (nothing is truncated). A
-                  text holding an image, audio or video placeholder token is refused too. Each row
-                  shows its count once the first Run has built the pipeline.
+                  text holding an image, audio or video placeholder token is refused too.
+                  {vision
+                    ? " An image counts its soft tokens (from its size alone, at most the model's soft-token budget) and two markers; it is resized to keep its aspect."
+                    : " This model has no vision tower, so a row cannot hold an image."}{" "}
+                  Each row shows its count once the first Run has built the pipeline.
                 </p>
               )}
             </div>
@@ -721,6 +781,11 @@ const ResultCard = ({ result }: { result: RunResult }) => {
                   </TableCell>
                   <TableCell className="align-top text-xs break-words whitespace-normal">
                     {request?.text === "" ? <i>(empty)</i> : request?.text}
+                    {request?.image === undefined ? null : (
+                      <span className="block text-muted-foreground">
+                        + image {request.image.name} ({request.image.width}×{request.image.height})
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="align-top font-mono text-xs break-all whitespace-normal">
                     {output.kind === "refused" ? (

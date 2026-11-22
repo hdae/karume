@@ -20,6 +20,7 @@ original weights with its source).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from functools import partial
 from typing import Any
@@ -43,12 +44,20 @@ from karume.modelcard import (
 #: `embeddinggemma` reads it.
 EMBEDDINGGEMMA2_SUPPORTED_PIPELINE = "embeddinggemma/1"
 
-#: The HF pipeline tag: the upstream card's own (`feature-extraction`). The distribution carries the
-#: text tower only, and a text embedding is feature extraction too.
+#: The HF pipeline tag: the upstream card's own (`feature-extraction`) — a text or an image
+#: embedding is feature extraction too.
 EMBEDDINGGEMMA2_PIPELINE_TAG = "feature-extraction"
 
-#: The title names only what this distribution carries (the text tower — no image, video or audio).
+#: The title names only what this distribution carries: the text tower, and the vision tower when
+#: the manifest ships it ({@link _has_vision}) — never video or audio.
 EMBEDDINGGEMMA2_TITLE = "EmbeddingGemma 2 Text Embedding — Karume"
+EMBEDDINGGEMMA2_VISION_TITLE = "EmbeddingGemma 2 Text and Image Embedding — Karume"
+
+#: The weights role of the vision tower and its one storage (the spellings
+#: `embeddinggemma2.distribution` writes). MUST: every preset maps the tower to this storage — the
+#: card states that no preset rounds it ({@link _vision_storage_lines}).
+EMBEDDINGGEMMA2_VISION_ROLE = "vision"
+EMBEDDINGGEMMA2_VISION_DTYPE = "bf16"
 
 #: Model name → the HF repository ID of the upstream checkpoint. **This one table is the only record
 #: of "which model is which weights"**; a model name it does not list cannot be attributed, so the
@@ -183,28 +192,104 @@ def _input_length(max_tokens: int) -> list[str]:
     ]
 
 
+def _vision(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The default model's `pipelineConfig.vision` when the manifest ships the vision tower, else
+    `None`.
+
+    MUST: the tower's weights and the declaration come together, on every model, and every preset
+    maps the tower to its one bf16 storage — the card states both (no preset rounds the tower), so
+    a manifest where that is not so is not drawn.
+    """
+    shipped = {
+        name: EMBEDDINGGEMMA2_VISION_ROLE in model["weights"]
+        for name, model in manifest["models"].items()
+    }
+    for name, model in manifest["models"].items():
+        declared = "vision" in model["pipelineConfig"]
+        if declared != shipped[name]:
+            raise ValueError(
+                f"model '{name}': the vision weights are {'' if shipped[name] else 'not '}shipped"
+                f" but pipelineConfig.vision is {'' if declared else 'not '}declared"
+            )
+        if not shipped[name]:
+            continue
+        storages = list(model["weights"][EMBEDDINGGEMMA2_VISION_ROLE])
+        mapped = {
+            quant["weights"][EMBEDDINGGEMMA2_VISION_ROLE] for quant in model["quants"].values()
+        }
+        if storages != [EMBEDDINGGEMMA2_VISION_DTYPE] or mapped != {EMBEDDINGGEMMA2_VISION_DTYPE}:
+            raise ValueError(
+                f"model '{name}': the vision tower is stored as {storages} and mapped to"
+                f" {sorted(mapped)} — this card states that every preset ships its"
+                f" {EMBEDDINGGEMMA2_VISION_DTYPE} values"
+            )
+    if len(set(shipped.values())) > 1:
+        raise ValueError(f"the vision tower ships with some models only ({shipped})")
+    return default_model(manifest)["pipelineConfig"].get("vision")
+
+
+#: What the overview says of the scope of a manifest without the vision tower.
+_TEXT_ONLY_SCOPE: tuple[str, ...] = (
+    "- **Text only.** The upstream checkpoint also carries vision and audio towers; this",
+    "  distribution contains neither, and cannot embed images, video or audio. A text holding",
+    "  the image, audio or video placeholder token is refused.",
+)
+
+
+def _image_scope(budget: int) -> list[str]:
+    """What the overview says of images, for a manifest with the vision tower at `budget` soft
+    tokens (a square image resizes to `isqrt(budget)²` of them — the resize rule's `floor` of
+    `sqrt(budget)` blocks a side)."""
+    return [
+        "- **Text and images.** Built with `vision: true`, the pipeline also fetches the",
+        "  vision tower and takes image parts (decoded RGB8 pixels of any size) beside the text",
+        "  parts, in the order given. An image is resized to keep its aspect and becomes up to",
+        f"  {budget} soft tokens (a square one {math.isqrt(budget) ** 2}). The audio tower is not",
+        "  carried: neither video nor audio can be embedded. A text holding the image, audio or",
+        "  video placeholder token is refused.",
+    ]
+
+
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
     dimensions = config["dimensions"]
+    vision = _vision(manifest)
+    upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
+    if vision is None:
+        opening = [
+            f"A text embedding distribution: the **text tower** of `{upstream}`, with its mean"
+            " pooling and",
+        ]
+        runs = "a string in, a unit vector out."
+        graphs = "  of the prompt you name, tokenizes on the host and runs one graph."
+        scope = list(_TEXT_ONLY_SCOPE)
+    else:
+        opening = [
+            "A text and image embedding distribution: the **text and vision towers** of",
+            f"`{upstream}`, with the mean pooling and",
+        ]
+        runs = "a text, an image or both in, a unit vector out."
+        graphs = (
+            "  of the prompt you name, tokenizes on the host, runs the vision tower once per image"
+            " and the text graph once."
+        )
+        scope = _image_scope(vision["softTokenBudget"])
     return [
         "## What is this",
         "",
-        "A text embedding distribution: the **text tower** of"
-        f" `{EMBEDDINGGEMMA2_UPSTREAM[manifest['defaultModel']]}`, with its mean pooling and",
+        *opening,
         "L2 normalisation, converted into the WebGPU inference runtime **Karume**'s container",
         "format (a `.krm` part sequence whose first part carries the graph and model descriptors).",
-        "Runs as-is in the browser and in Deno — a string in, a unit vector out.",
+        f"Runs as-is in the browser and in Deno — {runs}",
         "",
         "- **The tokenizer and the prompts ship with the weights.** `embed()` prepends the prefix",
-        "  of the prompt you name, tokenizes on the host and runs one graph.",
+        graphs,
         f"- **Output**: a unit vector of {dimensions[0]} values. The model was trained with",
         "  Matryoshka Representation Learning, so a shorter vector of"
         f" {_spell(dimensions[1:])} values can be asked for:",
         "  the leading values, re-normalised to unit length.",
         *_input_length(config["maxTokens"]),
-        "- **Text only.** The upstream checkpoint also carries vision and audio towers; this",
-        "  distribution contains neither, and cannot embed images, video or audio. A text holding",
-        "  the image, audio or video placeholder token is refused.",
+        *scope,
         "- Not readable by transformers or sentence-transformers (it's a different container with",
         "  an embedded graph); the reader is a pipeline that implements"
         f" `{EMBEDDINGGEMMA2_SUPPORTED_PIPELINE}`.",
@@ -262,6 +347,22 @@ def _storage_lines(manifest: Mapping[str, Any]) -> list[str]:
         "distributed here. The weights of the text tower ship in the storage each quant names:",
         "",
         *(f"- `{dtype}`: {EMBEDDINGGEMMA2_STORAGES[dtype][1]}" for dtype in dtypes),
+        *_vision_storage_lines(manifest),
+    ]
+
+
+def _vision_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """What the vision tower's one storage holds (a paragraph after the storage list — none for a
+    manifest without the tower). The storage is checked by {@link _vision}."""
+    if _vision(manifest) is None:
+        return []
+    return [
+        "",
+        f"The vision tower (`{EMBEDDINGGEMMA2_VISION_ROLE}`) ships in every preset as the",
+        f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_VISION_DTYPE}; its norms and its folded",
+        "rotary tables in f32). No rounded form of the tower was measured, so no preset rounds it.",
+        "A pipeline built without `vision: true` does not fetch it (the Download column below",
+        "counts it).",
     ]
 
 
@@ -314,12 +415,23 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         if EMBEDDINGGEMMA2_I8_DTYPE in _stored_dtypes(manifest)
         else ["  checkpoint's bf16 values unchanged."]
     )
+    vision_change = (
+        []
+        if _vision(manifest) is None
+        else [
+            "  The vision tower and its projection were re-expressed as a second graph that",
+            "  reads an image's real patches, the patches of one soft token side by side, with",
+            "  its two-dimensional rotary embedding folded into tables gathered by the patch",
+            "  positions; its weights keep the checkpoint's bf16 values unchanged in every preset.",
+        ]
+    )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
         "  as one graph in the Karume container format; the sliding-window attention mask is a",
         "  band declared on the attention, applied from the token positions; the weights keep the",
         *weights_change,
+        *vision_change,
         "  No retraining and no fine-tuning.",
         *_precision_lines(manifest),
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
@@ -328,6 +440,24 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  before using it.",
     ]
     return lines
+
+
+#: What the usage section says of one call, without the vision tower and with it.
+_TEXT_CALLS: tuple[str, ...] = (
+    "`embed()` takes one text per call and returns an f32 unit vector. It keeps one GPU",
+    "session alive for the lifetime of the pipeline, so embedding many texts uploads the",
+    "weights once;",
+    "concurrent calls are queued rather than run side by side. A prompt name the repository",
+    "does not declare, a dimension it does not list or a text over the token limit is refused.",
+)
+_IMAGE_CALLS: tuple[str, ...] = (
+    "`embed()` takes one input per call (a text, or text and image parts) and returns an",
+    "f32 unit vector. It keeps its GPU sessions alive for the lifetime of the pipeline, so",
+    "embedding many inputs uploads the weights once;",
+    "concurrent calls are queued rather than run side by side. A prompt name the repository",
+    "does not declare, a dimension it does not list, an input over the token limit or an",
+    "image part on a pipeline built without `vision: true` is refused.",
+)
 
 
 def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
@@ -343,6 +473,22 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     model_names = " / ".join(sorted(manifest["models"]))
     quant_names = " / ".join(sorted(model["quants"]))
     dimensions = config["dimensions"]
+    vision = _vision(manifest) is not None
+    vision_option = (
+        ["  // vision: true, // also fetches the vision tower, for image parts"] if vision else []
+    )
+    image_example = (
+        [
+            "",
+            "// Built with `vision: true`, an image (decoded RGB8 pixels) is a content part,",
+            "// beside text parts if you like:",
+            "// const image = { data, width, height }; // Uint8Array of width × height × 3",
+            '// const picture = await pipeline.embed([{ type: "image", image }]);',
+        ]
+        if vision
+        else []
+    )
+    calls = _IMAGE_CALLS if vision else _TEXT_CALLS
     return [
         "## Usage",
         "",
@@ -355,6 +501,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
+                *vision_option,
             ],
             disposable="await using",
         ),
@@ -371,13 +518,10 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "// A shorter Matryoshka vector (queries and documents must share a dimension):",
         f'// await pipeline.embed(text, {{ prompt: "query", dimension: {dimensions[-1]} }});'
         f" // available: {_spell(dimensions)}",
+        *image_example,
         "```",
         "",
-        "`embed()` takes one text per call and returns an f32 unit vector. It keeps one GPU",
-        "session alive for the lifetime of the pipeline, so embedding many texts uploads the",
-        "weights once;",
-        "concurrent calls are queued rather than run side by side. A prompt name the repository",
-        "does not declare, a dimension it does not list or a text over the token limit is refused.",
+        *calls,
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
     ]
 
@@ -409,11 +553,19 @@ def _prompts_and_limits(model: Mapping[str, Any]) -> list[str]:
         # A table cell escapes the pipe, inside a code span too (GitHub Flavored Markdown).
         cell = prefix.replace("|", "\\|")
         lines.append(f"| `{cell}` | {', '.join(f'`{name}`' for name in names)} |")
+    vision = config.get("vision")
+    limit = config["maxTokens"]
+    tokens = (
+        f"- **tokens**: at most {limit:,} per text, `<bos>` and `<eos>` included"
+        if vision is None
+        else f"- **tokens**: at most {limit:,} per input, `<bos>` and `<eos>` included; each image"
+        f" counts its soft tokens (at most {vision['softTokenBudget']}) and its two markers"
+    )
     lines += [
         "",
         f"- **dimensions**: {_spell(config['dimensions'])} (the first is the full vector)",
-        f"- **tokens**: at most {config['maxTokens']:,} per text, `<bos>` and `<eos>` included",
-        f"- **refused tokens**: the multimodal placeholders ({placeholders})",
+        tokens,
+        f"- **refused tokens**: the multimodal placeholders ({placeholders}) in a text",
     ]
     return lines
 
@@ -443,7 +595,12 @@ def render_embeddinggemma2_model_card(
     return render(
         (
             frontmatter(metadata),
-            introduction(EMBEDDINGGEMMA2_TITLE, hf_upstreams(metadata.base_model)),
+            introduction(
+                EMBEDDINGGEMMA2_TITLE
+                if _vision(manifest) is None
+                else EMBEDDINGGEMMA2_VISION_TITLE,
+                hf_upstreams(metadata.base_model),
+            ),
             _overview(manifest),
             [""],
             _base_weights(manifest),

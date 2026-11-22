@@ -1,18 +1,25 @@
 /**
- * The page's form logic: the list of text rows (each with its own prompt), a row's token count,
- * which model and preset are in effect, whether the held pipeline serves a run, and why Run is
- * disabled. Pure, so `vp test` covers it.
+ * The page's form logic: the list of rows (each a text, its own prompt and, on a model that ships
+ * the vision tower, an optional image), what a row sends to the pipeline, its token count, which
+ * model and preset are in effect, whether the held pipeline serves a run, and why Run is disabled.
+ * Pure, so `vp test` covers it.
  */
 
 import type { Manifest } from "@karume/hub";
-import { ModelInputError } from "@karume/models/embeddinggemma";
+import { type EmbedContentPart, ModelInputError } from "@karume/models/embeddinggemma";
 
-/** One input of a run: a text and the prompt whose prefix goes before it (`undefined` = none). */
+import type { LoadedImage } from "@/lib/image";
+
+/**
+ * One input of a run: a text, the prompt whose prefix goes before it (`undefined` = none) and an
+ * image embedded after the text (`undefined` = none).
+ */
 export type TextRow = {
   /** Stable across edits and removals (the React key); never reused within one page. */
   readonly id: number;
   readonly text: string;
   readonly prompt?: string;
+  readonly image?: LoadedImage;
 };
 
 /**
@@ -48,37 +55,60 @@ export const addRow = (rows: readonly TextRow[]): readonly TextRow[] => [
 export const removeRow = (rows: readonly TextRow[], id: number): readonly TextRow[] =>
   rows.length <= 1 ? rows : rows.filter((row) => row.id !== id);
 
-/** `rows` with row `id` changed (`prompt: undefined` clears the prompt). */
+/**
+ * `rows` with row `id` changed (`prompt: undefined` clears the prompt, `image: undefined` the
+ * image).
+ */
 export const updateRow = (
   rows: readonly TextRow[],
   id: number,
-  change: { readonly text: string } | { readonly prompt: string | undefined },
+  change:
+    | { readonly text: string }
+    | { readonly prompt: string | undefined }
+    | { readonly image: LoadedImage | undefined },
 ): readonly TextRow[] =>
   rows.map((row) => {
     if (row.id !== id) return row;
     if ("text" in change) return { ...row, text: change.text };
+    // A cleared field leaves its key out (no prompt, no image), as a new row has none.
+    const next =
+      "prompt" in change ? { ...row, prompt: change.prompt } : { ...row, image: change.image };
     return {
-      id: row.id,
-      text: row.text,
-      ...(change.prompt === undefined ? {} : { prompt: change.prompt }),
+      id: next.id,
+      text: next.text,
+      ...(next.prompt === undefined ? {} : { prompt: next.prompt }),
+      ...(next.image === undefined ? {} : { image: next.image }),
     };
   });
 
+/**
+ * What a row sends to `embed` / `tokenize`: its text as a string, or — with an image — the text part
+ * then the image part (the RGB8 pixels; an empty text adds no token, so an image alone is that).
+ */
+export const rowInput = (row: TextRow): string | readonly EmbedContentPart[] =>
+  row.image === undefined
+    ? row.text
+    : [
+        { type: "text", text: row.text },
+        { type: "image", image: row.image.rgb },
+      ];
+
 /** What counts a row's tokens: a pipeline's `tokenize`, narrowed so a test can stand in for it. */
 export type RowTokenizer = (
-  text: string,
+  input: string | readonly EmbedContentPart[],
   options: { readonly prompt?: string },
 ) => { readonly length: number };
 
 /**
  * The number of tokens the pipeline would embed for `row` (the prompt's prefix, `<bos>` and `<eos>`
- * included), or `undefined` when it cannot tokenize the row at all (a `ModelInputError` — today a
- * prompt the model does not declare). A count over the limit is returned as is: `embed` refuses it.
- * Any other failure propagates.
+ * included, and an image's soft tokens with its two markers), or `undefined` when it cannot
+ * tokenize the row at all (a `ModelInputError` — a prompt the model does not declare, an image on a
+ * pipeline without the vision tower). A count over the limit is returned as is: `embed` refuses
+ * it. Any other failure propagates.
  */
 export const rowTokenCount = (tokenize: RowTokenizer, row: TextRow): number | undefined => {
   try {
-    return tokenize(row.text, row.prompt === undefined ? {} : { prompt: row.prompt }).length;
+    return tokenize(rowInput(row), row.prompt === undefined ? {} : { prompt: row.prompt }).length;
   } catch (error) {
     if (error instanceof ModelInputError) return undefined;
     throw error;

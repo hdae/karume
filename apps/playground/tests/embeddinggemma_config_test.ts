@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   dimensionChoices,
   effectiveDimension,
+  hasVisionTower,
   promptChoices,
   promptOfValue,
   promptValue,
@@ -137,5 +138,45 @@ describe("the dimension select", () => {
     expect(effectiveDimension(config, 256)).toBe(256);
     expect(effectiveDimension(config, undefined)).toBe(768);
     expect(effectiveDimension(config, 300)).toBe(768);
+  });
+});
+
+describe("hasVisionTower", () => {
+  it("is false for a model without the weights role vision, and for a model the manifest lacks", () => {
+    expect(hasVisionTower(manifestWith(CONFIG), "text")).toBe(false);
+    expect(hasVisionTower(manifestWith(CONFIG), "image")).toBe(false);
+  });
+
+  it("is true for a model that ships the tower (every preset maps it)", () => {
+    const container = (name: string) => ({
+      container: {
+        descriptor: {
+          graph: { length: 8, sha256: hex("d") },
+          model: { length: 8, sha256: hex("e") },
+        },
+        parts: [
+          { path: `text/${name}/model.bf16-00001-of-00002.krm`, size: 40, sha256: hex("a") },
+          { path: `text/${name}/model.bf16-00002-of-00002.krm`, size: 8, sha256: hex("b") },
+        ],
+      },
+    });
+    const manifest = parseManifest(
+      JSON.stringify({
+        format: "karume/6",
+        generator: "test",
+        defaultModel: "text",
+        models: {
+          text: {
+            pipeline: "embeddinggemma/1",
+            assets: {},
+            weights: { model: { bf16: container("model") }, vision: { bf16: container("vision") } },
+            quants: { bf16: { weights: { model: "bf16", vision: "bf16" }, session: {} } },
+            defaultQuant: "bf16",
+            pipelineConfig: CONFIG,
+          },
+        },
+      }),
+    );
+    expect(hasVisionTower(manifest, "text")).toBe(true);
   });
 });

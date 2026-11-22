@@ -10,7 +10,7 @@
  * pinned upstream files and checks them against the graph and the tokenizer asset) and read here,
  * never held as TS constants.
  *
- * The four fields:
+ * The four required fields and the optional fifth:
  *
  * - `prompts` — prompt name → the prefix prepended to the text (upstream's
  *   `config_sentence_transformers.json`, verbatim and in its order).
@@ -23,9 +23,16 @@
  *   alone cannot take them (upstream's composite model replaces them with the pad id before the
  *   lookup, and sentence-transformers refuses such a text), so a text whose tokens include one is
  *   refused.
+ * - `vision` (optional — a model whose distribution ships the vision tower as the weights role
+ *   `vision`) — what the host needs to turn an image into the tower's rows and the text graph's
+ *   soft rows: the soft-token budget of the resize rule, the ids of the soft token and of the two
+ *   markers around an image's soft tokens, and the width of a soft row. The shape is the Gemma 4
+ *   family's `pipelineConfig.vision`, read by its reader ({@link parseVision}); the pipeline checks
+ *   it against the two graphs and the tokenizer asset when the tower is asked for.
  *
- * MUST: unknown keys fail loudly, and so does a missing one (a misspelt field silently left out
- * would let the pipeline run with a limit or a prompt table the distributor did not intend).
+ * MUST: unknown keys fail loudly, and so does a missing required one (a misspelt field silently
+ * left out would let the pipeline run with a limit or a prompt table the distributor did not
+ * intend).
  * MUST: maps are read only through `Object.hasOwn` / own entries (cross-cutting invariant).
  *
  * This family has no table of public distribution repositories: nothing of it is published yet, so
@@ -36,13 +43,20 @@
  */
 
 import { assertAllowedKeys, isRecord, readNumber, readRecord } from "../config/readers.ts";
+import { type PipelineVisionConfig, parseVision } from "../gemma/config.ts";
 
 /** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
 export const EMBEDDINGGEMMA_PIPELINE_NAME = "embeddinggemma";
 export const EMBEDDINGGEMMA_PIPELINE_MAJOR = 1;
 
-/** The four fields, in the order the dist recipe writes them. */
-const ROOT_KEYS: readonly string[] = ["prompts", "dimensions", "maxTokens", "placeholderTokens"];
+/** The five fields, in the order the dist recipe writes them (`vision` is optional). */
+const ROOT_KEYS: readonly string[] = [
+  "prompts",
+  "dimensions",
+  "maxTokens",
+  "placeholderTokens",
+  "vision",
+];
 
 /**
  * The shortest token sequence: `<bos>` and `<eos>` alone (the empty text). The graph's symbolic
@@ -54,6 +68,9 @@ const MIN_TOKENS = 2;
 /** The largest token id (ids reach the graph as an `Int32Array`). */
 const MAX_TOKEN_ID = 2147483647;
 
+/** The modality key of `placeholderTokens` whose id `vision.imageTokenId` must be. */
+const IMAGE_MODALITY = "image";
+
 /** The checked `pipelineConfig` of one EmbeddingGemma model. */
 export type EmbeddingGemmaPipelineConfig = {
   /** Prompt name → prefix, in the declared order. */
@@ -64,6 +81,8 @@ export type EmbeddingGemmaPipelineConfig = {
   readonly maxTokens: number;
   /** Modality → the id of its placeholder token, in the declared order. */
   readonly placeholderTokens: ReadonlyMap<string, number>;
+  /** What the host needs for image input (absent: the distribution ships no vision tower). */
+  readonly vision?: PipelineVisionConfig;
 };
 
 const isSafeCount = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
@@ -138,7 +157,7 @@ export const parseEmbeddingGemmaPipelineConfig = (raw: unknown): EmbeddingGemmaP
   const where = "pipelineConfig";
   if (!isRecord(raw)) throw new Error(`${where}: missing / not an object`);
   assertAllowedKeys(raw, ROOT_KEYS, where);
-  return {
+  const config: EmbeddingGemmaPipelineConfig = {
     prompts: readPrompts(raw, where),
     dimensions: readDimensions(raw, where),
     maxTokens: readNumber(
@@ -150,4 +169,17 @@ export const parseEmbeddingGemmaPipelineConfig = (raw: unknown): EmbeddingGemmaP
     ),
     placeholderTokens: readPlaceholderTokens(raw, where),
   };
+  if (!Object.hasOwn(raw, "vision")) return config;
+  const vision = parseVision(raw["vision"], `${where}.vision`);
+  // MUST: the soft token is the image placeholder — the text path refuses that id in text, which
+  // is what keeps a soft row from being spelt without an image behind it.
+  const placeholder = config.placeholderTokens.get(IMAGE_MODALITY);
+  if (placeholder !== vision.imageTokenId) {
+    throw new Error(
+      `${where}.vision.imageTokenId ${vision.imageTokenId} is not placeholderTokens.${IMAGE_MODALITY}` +
+        ` (${placeholder === undefined ? "not declared" : placeholder}) — an image's soft tokens are` +
+        " its placeholder, which a text may not hold",
+    );
+  }
+  return { ...config, vision };
 };
