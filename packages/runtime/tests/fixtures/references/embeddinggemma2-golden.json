@@ -2,6 +2,36 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "embeddinggemma-2-text-i8/bare": {
+      "node-nvidia-geforce-rtx-3080-ti": "b866c16277349f0d1afaef3e8bc8643e024baeec02824ddc7f49784ecbd24e79"
+    },
+    "embeddinggemma-2-text-i8/document-1508": {
+      "node-nvidia-geforce-rtx-3080-ti": "38843f29a55fe676c24d64a6b250b2fb73c39e89d35099c17da63de47031b379"
+    },
+    "embeddinggemma-2-text-i8/document-2048": {
+      "node-nvidia-geforce-rtx-3080-ti": "2671fb4ab695c33a6811cacd81b9cdf264a130437d8d659b7ca52f64c9b9e9f7"
+    },
+    "embeddinggemma-2-text-i8/document-3062": {
+      "node-nvidia-geforce-rtx-3080-ti": "8d55efd68ab82dd0c0f1fbce5f096d526ed1eec83a390e74fc9dfe8f41613e88"
+    },
+    "embeddinggemma-2-text-i8/document-5935": {
+      "node-nvidia-geforce-rtx-3080-ti": "dfeca2afe2bb33c1f5890d2a52671bd40a66b92dbc338607753a2a881decf44b"
+    },
+    "embeddinggemma-2-text-i8/document-609": {
+      "node-nvidia-geforce-rtx-3080-ti": "c77d87c0f26bdbd20bdfeaec09834f267a1fc7308a6ecb49bbc54e8a7c12be76"
+    },
+    "embeddinggemma-2-text-i8/document-8192": {
+      "node-nvidia-geforce-rtx-3080-ti": "45ab5ee0ea2edbd63f352cb03ce5f7b5c1ccdb3aadeb641e46f2f84635399e8a"
+    },
+    "embeddinggemma-2-text-i8/document-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "f3caf9f5c81787b666ca53a42b0fca0ff54f64560f90469645a2a4f3802e9f65"
+    },
+    "embeddinggemma-2-text-i8/query-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "3cbe19ea3872a05f1ea730f91961c28d9b6bf011face4ac92255fbb6e81b48f6"
+    },
+    "embeddinggemma-2-text-i8/query-ja": {
+      "node-nvidia-geforce-rtx-3080-ti": "9e2c73859a45c13fb33d1d7e62f012fef89477a8ff5bec864312c340e74a796e"
+    },
     "embeddinggemma-2-text/bare": {
       "node-nvidia-geforce-rtx-3080-ti": "0c8b2f7bd087917349107de4323cc05b862c92d58be70d4989e8ad56f4cd540c"
     },

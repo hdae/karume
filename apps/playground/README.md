@@ -1050,7 +1050,8 @@ JSON.
 
 `embeddinggemma.Pipeline.embed` turns one text into a sentence embedding: a **unit vector**, so the
 dot product of two results is their cosine similarity. Today the family serves the text model of
-EmbeddingGemma 2 (the local mirror `models/karume-embeddinggemma-2`, model `text`, preset `bf16`).
+EmbeddingGemma 2 (the local mirror `models/karume-embeddinggemma-2`, model `text`, presets `bf16` — the default — and
+`i8`).
 The distribution is not published, so the mount has no HF-compatible route: the page reads it
 **direct** (plain `fetch` from `/models/embeddinggemma-2/`), and Cached is disabled with the reason.
 
@@ -1064,7 +1065,7 @@ disposes the old pipeline. A new GPU and leaving the page dispose it too.
 
 | Control | What it does |
 | --- | --- |
-| Model, Preset | The manifest's `models` and the chosen model's `quants` (today one each: `text`, `bf16`), the defaults marked "(default)". |
+| Model, Preset | The manifest's `models` and the chosen model's `quants` (today `text`, and `bf16` and `i8`), the defaults marked "(default)". The record carries the preset that ran. |
 | Source | **Direct** only for this mount (above). |
 | Dimension | The widths the model's `pipelineConfig.dimensions` declares (768, 512, 256, 128); the first is the full width and the default. A shorter one is the leading slice re-normalised by the pipeline. One width for every row of a run. |
 | Rows | Each row is a text and a **Prompt**: "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). Once a pipeline is built, each row shows its **token count** against the limit (`count / maxTokens tokens`, from `Pipeline.tokenize`: the prefix, `<bos>` and `<eos>` included), recomputed as its text or prompt changes; a row over the limit is marked in red with a note before Run. There is no count before the first Run (the page does not build a pipeline to count), while the held pipeline is another model's, or for a row the pipeline cannot tokenize (an undeclared prompt). |

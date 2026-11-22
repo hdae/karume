@@ -29,7 +29,8 @@ constant never reaches the container. The bound of `T` is carried by the folded 
 ```
 outputs/series/embeddinggemma-2-text/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
 outputs/series/embeddinggemma-2-text/io.<case>.safetensors      input tensors and expected outputs from torch CPU (f32)
-outputs/series/embeddinggemma-2-text-bf16/…                     the same with `--dtype bf16` (what the distribution ships)
+outputs/series/embeddinggemma-2-text-bf16/…                     the same with `--dtype bf16` (the distribution's `bf16` preset)
+outputs/series/embeddinggemma-2-text-i8/…                       `--dtype i8`, with its own goldens (the distribution's `i8` preset)
 ```
 
 Every run also writes the golden texts (case name, prompt name, body, T) to the git-tracked fixture
@@ -46,6 +47,18 @@ bit for bit to the f32 series' values (219 of them, 270,925,824 elements, stored
 graph descriptors were equal. Measured on 2026-11-22: the bf16 series holds 426 initializers (219
 bf16, 207 f32 — the band constant is gone) and is 592,932,727 bytes in 5 parts, and its ten io files
 are byte-identical to the f32 series'.
+
+`--dtype i8` rounds the same 219 weights (the token table and the 218 linears) to per-row symmetric int8 with
+`karume.quantize.fake_quant_int8` **before** the window evidence, the trace and the goldens, so the series' goldens are
+the quantized model's own outputs and its e2e tolerance measures implementation error alone (ADR
+[0006](../../../docs/decisions/0006-quantization.md)). The script checks that the rounding reached exactly the linears
+and the token table, and that the stored weight slots are exactly those weights as i8; the writer stores each with the
+scale its rounding used and checks that `q · scale` gives the rounded value back bit for bit. Measured on 2026-11-22:
+the i8 series holds 426 initializers (219 i8, 207 f32) in 323,958,008 bytes over 4 parts (the screening projected
+323,468,384 for the payload alone), its graph descriptor equals the bf16 series', the window evidence reads 1.11e-2 to
+4.97e-2 for the band and 0 against upstream's forward on the rounded model, and the cosine of each i8 golden to the f32
+golden equals the screening's `i8-all` value for that text to 2e-16 (the same rounding). One run of the i8 export took
+about 3 minutes on the development machine (CPU).
 
 Ten golden cases: four short ones with and without a prompt, and six long documents at T 609 and
 1,508 (past the first window cut at T = 514), 2,048 (the bound before the band was declared), 3,062,
@@ -101,9 +114,10 @@ does not (max abs 9.25e-5 on one such text; 0 once the pad id is substituted).
 
 `dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (local only — no
 upload, no published pin): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
-family `embeddinggemma`) with the bf16 series' graph as the weights `model` and the compiled
-tokenizer as the asset `tokenizer`, one preset `bf16` (the original weights, the default),
-`LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice). Its
+family `embeddinggemma`) with the graph as the weights `model` in two storages — `bf16` from the bf16 series and `i8`
+from the i8 series, each container checked to carry the bf16 one's graph — and the compiled tokenizer as the asset
+`tokenizer`, two presets with an empty session (`bf16`, the original weights and the default; `i8`, the int8 storage),
+`LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice, which states the int8 copy). Its
 `pipelineConfig` carries the model's own values, each read from its source and checked against the
 others when the plan is built:
 
@@ -114,9 +128,24 @@ others when the plan is built:
 | `maxTokens`         | `8192`                                        | the bound the graph's folded RoPE tables carry for `T`, held to the export's `SYM_MAX`               |
 | `placeholderTokens` | `{image: 258880, audio: 258881, video: 258884}` | `config.json` at the pin; each a special token of the tokenizer asset                                 |
 
-The plan also checks the bf16 storage (the f32 series is refused), the graph's inputs and output,
-the tokenizer asset against the pinned `tokenizer.json` and the graph's vocabulary, and the
-container's licence and upstream revision against the pin.
+The plan also checks each storage (`model_bf16` must hold bf16 and none of the other compressed layouts, `model_i8`
+the same for i8 — so the f32 series, or the two series swapped, are refused), that the i8 container carries the bf16
+container's graph, the graph's inputs and output, the tokenizer asset against the pinned `tokenizer.json` and the
+graph's vocabulary, and each container's licence and upstream revision against the pin.
+
+Assembled on 2026-11-22, the mirror holds 926,476,700 bytes (916,918,032 without the 9,558,668-byte tokenizer): the
+`bf16` preset downloads 592,932,727 + 9,558,668 bytes, the `i8` preset 323,958,008 + 9,558,668. The dist driver
+derives `requiredLimits` `{ maxStorageBufferBindingSize: 268435456 }` for `bf16` (its bf16 token table, 256 MiB) and
+none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out). The `bf16`
+entries of `karume.json` (its container and its quant) are unchanged from the one-preset mirror's.
+
+How far `i8` is from the original weights, as measured once on a small set (not a benchmark): the torch-CPU screening
+of [research 2026-11-22](../../../docs/research/2026-11-22-embeddinggemma2-quant-screen.md) (configuration `i8-all`,
+the rounding the i8 series stores) put the cosine to the original weights' embeddings at 0.999396 at the lowest and
+0.999842 on average over 58 texts at 768 values, with 0.74% of the 3,800 ranking triples inverted; on the GPU the
+cosine of each golden text's shipped `i8` vector to its `bf16` vector equals the screening's value for that text to
+the seventh digit (the per-text values are in the screening's untracked `report.json`). The card prints the
+screening's numbers with that source.
 
 ## Running
 
@@ -125,6 +154,7 @@ cd tools/export-recipes
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.tokenizer
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8
 uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity

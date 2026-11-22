@@ -7,6 +7,7 @@ commits by the repository root's `.gitignore` (the f32 weights are about 1.1 GB)
 
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
+    uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8
 
 transformers is **pinned to 5.23.0** (a change of the modeling code changes the graph's form, and
 EmbeddingGemma 2 first ships in 5.19.0). It is not added to pyproject.toml / uv.lock but added per
@@ -99,6 +100,9 @@ the cos / sin tables fold to constants.
   is really exercised), and equals the upstream model's own forward (attention_mask of ones,
   upstream's masking utilities, upstream's SDPA path) to f32 noise.
 - {@link _sanity} — unit norms, and a near pair beating a far pair in cosine.
+- {@link round_weights_to_i8} (`--dtype i8`) — the rounding reached exactly the linears and the
+  token table; {@link assert_storage_form} — the stored form is the storage asked for, and under i8
+  its weight slots are exactly the rounded weights.
 
 ## Numerics
 
@@ -107,19 +111,30 @@ The goldens come from torch on CPU in f32 with the bf16 weights upcast. The embe
 script ({@link embeddinggemma2.parity}) measures that gap and the agreement with
 SentenceTransformer.
 
-## Storage: f32, or the checkpoint's own bf16 values
+## Storage: f32, the checkpoint's own bf16 values, or per-row int8
 
 `--dtype` picks the storage of the weights, one series per storage (ADR 0019 — sharing a directory
 would put one storage's goldens on the other's assets):
 
 - `f32` (the default, {@link TEXT_SERIES}) — every weight widened to f32, the series the e2e
   check reads;
-- `bf16` (`<series>-bf16`) — what the distribution ships (ADR 0131): every weight in a weight slot
-  (the embedding and the linears) is stored as bf16, the rest (the norms, the per-layer scalars,
-  the folded constants) stays f32. The checkpoint is BF16, so nothing is rounded: the loaded f32
-  values are the checkpoint's bits, the writer stores a weight as bf16 only when the round trip is
-  exact and fails otherwise, and the goldens are the f32 series' own (the same values go through
-  the same code). {@link assert_storage_form} checks the stored form before anything is published.
+- `bf16` (`<series>-bf16`) — what the distribution's original-weights preset ships (ADR 0131):
+  every weight in a weight slot (the embedding and the linears) is stored as bf16, the rest (the
+  norms, the per-layer scalars, the folded constants) stays f32. The checkpoint is BF16, so nothing
+  is rounded: the loaded f32 values are the checkpoint's bits, the writer stores a weight as bf16
+  only when the round trip is exact and fails otherwise, and the goldens are the f32 series' own
+  (the same values go through the same code).
+- `i8` (`<series>-i8`) — the distribution's int8 preset: the same weights (the token table and
+  every linear — 219 tensors on the real model) are rounded to per-row symmetric int8
+  (`karume.quantize.fake_quant_int8`, one F32 scale per output row, per vocabulary row for the
+  table) **before** anything is traced or measured ({@link round_weights_to_i8}), so the window
+  evidence, the sanity check and the goldens all run on the rounded model: the series' goldens are
+  the quantized model's own outputs, and the e2e tolerance measures implementation error only (ADR
+  0006). The rest stays f32 as in bf16. The writer stores each rounded weight with the scale the
+  rounding used and checks that `q · scale` gives the rounded values back bit for bit. The graph,
+  the band declaration, the cases and the bound are the other series' own.
+
+{@link assert_storage_form} checks the stored form before anything is published.
 
 ## Multimodal placeholder ids
 
@@ -133,6 +148,7 @@ none ({@link build_cases} refuses them); what the host does with such ids is ope
     outputs/series/embeddinggemma-2-text/model-NNNNN-of-NNNNN.krm  weights, constants, descriptors
     outputs/series/embeddinggemma-2-text/io.<case>.safetensors     inputs + torch CPU expectation
     outputs/series/embeddinggemma-2-text-bf16/…                    the same with `--dtype bf16`
+    outputs/series/embeddinggemma-2-text-i8/…                      `--dtype i8` (its own goldens)
 
 The io tensor key convention is the first recipe's (`input.<graph input name>` /
 `output.<position>`). `pool_mask` is all ones, for the same reason as there.
@@ -147,7 +163,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,6 +192,7 @@ from karume.emit import eligible_compressed_initializers
 from karume.ir import IrGraph, IrNode
 from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
 from karume.pipeline import export_module, publish_model
+from karume.quantize import QUANT_MODULE_TYPES, Int8Report, fake_quant_int8, iter_quant_targets
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
 
@@ -183,14 +200,19 @@ from karume.shapes import declared_shape
 TEXT_SERIES = "embeddinggemma-2-text"
 
 #: The storage dtypes of the weights `--dtype` takes (module doc, "Storage").
-WEIGHT_DTYPES = ("f32", "bf16")
+WEIGHT_DTYPES = ("f32", "bf16", "i8")
 
 #: The default location of the artifacts, one series per storage dtype. MUST: one directory per
 #: dtype (ADR 0019 — sharing one puts one storage's goldens on the other's assets).
 DEFAULT_OUT_DIRS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / TEXT_SERIES,
     "bf16": SERIES_ROOT / f"{TEXT_SERIES}-bf16",
+    "i8": SERIES_ROOT / f"{TEXT_SERIES}-i8",
 }
+
+#: The module name of the token table inside the text tower (the one `nn.Embedding` the i8 series
+#: rounds besides the linears).
+TABLE_MODULE = "embed_tokens"
 
 #: The license identifier baked into the container (container-v1 §2.3) — the upstream model card's
 #: front matter at the pinned revision (`THIRD_PARTY_NOTICES.md`).
@@ -1056,30 +1078,99 @@ def _sanity(embeddings: Mapping[str, torch.Tensor]) -> dict[str, Any]:
     }
 
 
-def assert_storage_form(graph: IrGraph, dtype: str) -> dict[str, int]:
+def round_weights_to_i8(wrapper: nn.Module) -> Int8Report:
+    """Round, in place, the weights the bf16 series stores as bf16 — every `nn.Linear` weight and
+    the token table — to per-row symmetric int8, and return the scale ledger.
+
+    The ledger is keyed by the wrapper's FQNs (`model.<module>.weight`), the exported tensor keys
+    the writer looks each scale up by.
+
+    MUST: called before the reference, the window evidence and the goldens are taken (module doc,
+    "Storage") — the goldens are then the quantized model's outputs. MUST: the rounding reaches
+    exactly those weights, each once: a weight left out ships its f32 value under the int8 preset's
+    name, and a weight of another module type rounded changes a value every other series keeps.
+    The target set is decided before anything is rounded, so a refusal leaves the weights as they
+    were.
+    """
+    tables = sorted(
+        f"{name}.weight"
+        for name, module in wrapper.named_modules()
+        if isinstance(module, nn.Embedding)
+    )
+    if tables != [f"model.{TABLE_MODULE}.weight"]:
+        raise EmbeddingGemma2ExportError(
+            f"the embedding tables are {tables}, not the token table alone"
+        )
+    expected = {
+        f"{name}.weight"
+        for name, module in wrapper.named_modules()
+        if isinstance(module, nn.Linear | nn.Embedding)
+    }
+    quantizable = {fqn for fqn, _weight, _axis in iter_quant_targets(wrapper, QUANT_MODULE_TYPES)}
+    if quantizable != expected:
+        missing = sorted(expected - quantizable)[:3]
+        extra = sorted(quantizable - expected)[:3]
+        raise EmbeddingGemma2ExportError(
+            f"the int8 rounding would reach {len(quantizable)} weights, not the {len(expected)}"
+            f" linears and the token table (missing {missing} / extra {extra})"
+        )
+    report = fake_quant_int8(wrapper, lambda name: f"{name}.weight" in expected)
+    if set(report.scales) != expected:
+        missing = sorted(expected - set(report.scales))[:3]
+        extra = sorted(set(report.scales) - expected)[:3]
+        raise EmbeddingGemma2ExportError(
+            f"the int8 rounding reached {len(report.scales)} weights, not the {len(expected)}"
+            f" linears and the token table (missing {missing} / extra {extra})"
+        )
+    return report
+
+
+def assert_storage_form(
+    graph: IrGraph, dtype: str, rounded: Collection[str] = ()
+) -> dict[str, int]:
     """Check the storage the writer committed (the graph `publish_model` returns) and count it.
 
-    `f32`: every initializer is f32 (or i32). `bf16`: every initializer in a weight slot is bf16 and
-    every other one f32 / i32 — a weight slot left f32 would ship 2× its bytes without a word, and
-    a weight in another compressed storage would not be the checkpoint's values.
+    `f32`: every initializer is f32 (or i32). `bf16` / `i8`: every initializer in a weight slot is
+    stored as that dtype and every other one f32 / i32 — a weight slot left f32 would ship two
+    (four) times its bytes without a word, and a weight in another compressed storage would not
+    hold the values the series' goldens were taken with.
+
+    `rounded` is the tensor keys the int8 rounding reached ({@link round_weights_to_i8}); `i8`
+    needs it and the other storages take none. MUST: under `i8` the weight slots are exactly those
+    keys — a rounded weight outside a weight slot would ship its rounded values as f32, so the
+    preset would hold rounding it does not store.
     """
     if dtype not in WEIGHT_DTYPES:
         raise EmbeddingGemma2ExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
+    if (dtype == "i8") != bool(rounded):
+        raise EmbeddingGemma2ExportError(
+            f"the {dtype} storage form takes {'the' if dtype == 'i8' else 'no'} rounded weights"
+            f" ({len(rounded)} given)"
+        )
     eligible = eligible_compressed_initializers(graph)
     counts: dict[str, int] = {}
     wrong: list[str] = []
     for name, initializer in graph.initializers.items():
         stored = initializer.storage.dtype
         counts[stored] = counts.get(stored, 0) + 1
-        expected = {dtype} if dtype == "bf16" and name in eligible else {"f32", "i32"}
+        expected = {dtype} if dtype != "f32" and name in eligible else {"f32", "i32"}
         if stored not in expected:
             wrong.append(f"{name}: {stored} (expected {' / '.join(sorted(expected))})")
     if wrong:
         raise AssertionError(
             f"the {dtype} storage form does not hold for {len(wrong)} initializers: {wrong[:4]}"
         )
-    if dtype == "bf16" and counts.get("bf16", 0) == 0:
-        raise AssertionError("no initializer is stored as bf16 (the graph has no weight slot)")
+    if dtype != "f32" and counts.get(dtype, 0) == 0:
+        raise AssertionError(f"no initializer is stored as {dtype} (the graph has no weight slot)")
+    if dtype == "i8":
+        slots = {graph.initializers[name].tensor for name in eligible}
+        if slots != set(rounded):
+            unrounded = sorted(slots - set(rounded))[:3]
+            outside = sorted(set(rounded) - slots)[:3]
+            raise AssertionError(
+                f"the i8 weight slots are not the {len(rounded)} rounded weights (in a slot but"
+                f" not rounded {unrounded} / rounded but outside a slot {outside})"
+            )
     return dict(sorted(counts.items()))
 
 
@@ -1101,6 +1192,9 @@ def export_series(
     config = model.config
     window = int(config.sliding_window)
     wrapper = EmbeddingWrapper(model, window).eval()
+    # MUST: i8 rounds before anything below reads the weights (the window evidence, the trace, the
+    # goldens — module doc, "Storage").
+    rounding = round_weights_to_i8(wrapper) if dtype == "i8" else None
     cases = build_cases(directory, composite, sym_max)
     assert_case_coverage(cases, sym_max, window)
     assert_band_matches_upstream(sym_max, window)
@@ -1138,11 +1232,15 @@ def export_series(
             # single-component series), not the directory name.
             graph_name=GRAPH_NAME,
             # bf16: nothing to round first — the weights are the checkpoint's bf16 values, and
-            # the writer fails on one that bf16 cannot hold (module doc, "Storage").
+            # the writer fails on one that bf16 cannot hold. i8: the weights were rounded above,
+            # and each is stored with the scale its rounding used (module doc, "Storage").
             weight_dtype=dtype,
+            weight_scales=None if rounding is None else rounding.scales,
         )
         # MUST: checked before publishing (on failure the staging directory is removed).
-        storage = assert_storage_form(graph, dtype)
+        storage = assert_storage_form(
+            graph, dtype, () if rounding is None else tuple(rounding.scales)
+        )
         written, embeddings = _write_io(wrapper, graph, cases, staged)
         # MUST: evaluated before publishing (on failure the staging directory is removed).
         sanity = _sanity(embeddings)
@@ -1156,6 +1254,11 @@ def export_series(
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "storage": storage,
+        **(
+            {}
+            if rounding is None
+            else {"rounded": {"tensors": rounding.modules, "elements": rounding.elements}}
+        ),
         "form": form,
         "band_form": band_form,
         "window_evidence": evidence,
@@ -1173,7 +1276,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="storage dtype of the weights (bf16 = the checkpoint's own values in every weight"
-        " slot — the distribution's storage)",
+        " slot; i8 = the same weights rounded to per-row int8 before the goldens are taken — the"
+        " distribution's two storages)",
     )
     parser.add_argument(
         "--out",

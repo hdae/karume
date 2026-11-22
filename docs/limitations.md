@@ -1958,11 +1958,17 @@ The text model of the local distribution `karume-embeddinggemma-2` (not publishe
   is the per-layer-embedding intermediates, `[1, T, 12288]` f32 = 49,152 B per token, alive for
   almost the whole run. One 8,192-token run takes 0.93–1.19 s on that machine once its plan exists
   (0.97–1.58 s for the first run of that length; four runs of the lane and the budget measurement).
+  The `i8` preset holds 308.6 MiB of weights and the same plan backing: a fresh pipeline of either
+  preset (the workbench's preset A/B probes, 2026-11-22) read 236.1 MiB at 2,048 tokens and
+  944.0 MiB at 8,192.
 - **A device whose buffer limit cannot hold the per-layer-embedding intermediate refuses the
   length.** The largest intermediate must fit one storage buffer, so a device runs at most
-  `min(maxStorageBufferBindingSize, maxBufferSize) / 49,152` tokens — 5,461 on a device that binds
-  256 MiB (the distribution's `requiredLimits` asks for 256 MiB, for the token table), 43,690 at
-  2 GiB. A longer input gets a `ModelInputError` naming the count, the device's limit and the buffer,
+  `min(maxStorageBufferBindingSize, maxBufferSize) / 49,152` tokens — 2,730 at the WebGPU default
+  of 128 MiB, 5,461 on a device that binds 256 MiB, 43,690 at 2 GiB. The `bf16` preset's
+  `requiredLimits` asks for 256 MiB (its bf16 token table); the `i8` preset asks for nothing (its
+  int8 table is exactly 128 MiB): it needs no storage-buffer binding size and no buffer size above
+  the WebGPU default, and a device with those two limits at 128 MiB embeds up to 2,730 tokens (the
+  pipeline e2e caps only those two; the other limits stay the test device's). A longer input gets a `ModelInputError` naming the count, the device's limit and the buffer,
   before the run; the pipeline keeps running shorter texts. Decided 2026-11-22: accepted as is (the
   graph's per-layer embedding is not rewritten); nothing in the manifest states it, so such a device
   passes the checks before the download and learns its limit from the first long input.
@@ -1973,8 +1979,15 @@ The text model of the local distribution `karume-embeddinggemma-2` (not publishe
   audio or video placeholder id (258880 / 258881 / 258884) is refused: the text tower would embed
   the id as an ordinary token, while upstream's composite model replaces it with the pad id and
   sentence-transformers refuses the text.
-- **One preset, `bf16`** (the checkpoint's own weights, f32 compute). The output widths are the
-  model's Matryoshka widths (768 / 512 / 256 / 128); there is no other width.
+- **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
+  checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
+  int8 — a 323,958,008-byte container against 592,932,727). The int8 rounding moves each embedding
+  a little: on the ten golden texts its cosine to the `bf16` vector is 0.99940 to 0.99993 at 768
+  values (the pipeline e2e asserts at least 0.999 at every width), and the torch-CPU screening of
+  58 texts put its rank inversion rate at 0.74% ([research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md)) —
+  measurements on those small sets, not a benchmark. There is no activation-int8 and no 4-bit
+  preset. The output widths are the model's Matryoshka widths (768 / 512 / 256 / 128); there is no
+  other width.
 - **sha256 rows exist only for the RTX 3080 Ti under Node** (`node-nvidia-geforce-rtx-3080-ti`);
   another machine SKIPs those cases explicitly with a red reference guard until it writes its rows.
 

@@ -1,18 +1,19 @@
 """The EmbeddingGemma 2 distribution recipe (`embeddinggemma2.distribution`) — unit tests over one
 assembly pass.
 
-No real weights are used: the series holds a **valid minimal container** of the graph's contract
-(`input_ids` i32 / `pool_mask` f32 `[1, T]` in, one f32 `[1, 768]` out, a token table, a projection
-and a constant sliced by `T` at the bound), written through the core's own writer
-({@link _write_container}); the tokenizer asset and the upstream snapshot are synthetic JSON, held
-to a synthetic pin. Every check of the plan is exercised by shifting one input from that passing
-form. The card is covered by `test_card.py`; the cases that read the real pinned snapshot skip
-explicitly without it.
+No real weights are used: each storage's series (bf16 and i8) holds a **valid minimal container**
+of the graph's contract (`input_ids` i32 / `pool_mask` f32 `[1, T]` in, one f32 `[1, 768]` out, a
+token table, a projection and a constant sliced by `T` at the bound), written through the core's
+own writer ({@link _write_container} — the i8 one rounded first, as the export does); the tokenizer
+asset and the upstream snapshot are synthetic JSON, held to a synthetic pin. Every check of the
+plan is exercised by shifting one input from that passing form. The card is covered by
+`test_card.py`; the cases that read the real pinned snapshot skip explicitly without it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -35,11 +36,14 @@ from karume.dist import (
     MODEL_CARD_FILENAME,
     DistError,
     assemble_family,
+    ir_graph,
+    storage_dtypes,
     verify_dist,
 )
 from karume.emit import stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.publish import publish_container
+from karume.quantize import channel_scale, quantize_to_int8
 
 #: The synthetic vocabulary (16 rows) and its placeholder ids — numbers other than the real ones.
 VOCAB = 16
@@ -72,7 +76,8 @@ def _write_container(
     license: str = eg2.EMBEDDINGGEMMA2_LICENSE,
 ) -> None:
     """Write the smallest container of the graph's contract as a series component (numbered
-    parts at `path`'s place), through the core's writer."""
+    parts at `path`'s place), through the core's writer. Under i8 the two weights are rounded to
+    per-row int8 first and stored with their scales (the export's order)."""
     graph = IrGraph(symbols=[eg2.EMBEDDINGGEMMA2_SYMBOL])
     for name, dtype in inputs:
         graph.inputs.append(IrInput(name=name, dtype=dtype, shape=[1, eg2.EMBEDDINGGEMMA2_SYMBOL]))
@@ -111,8 +116,18 @@ def _write_container(
         IrNode(op="expand", ins=["seed"], outs=["embedding"], attrs={}),
     ]
     graph.outputs.append("embedding")
+    scales: dict[str, torch.Tensor] = {}
+    for name in ("table", "projection"):
+        if (overrides or {}).get(name, weight_dtype) == "i8":
+            scales[name] = channel_scale(tensors[name], 0)
+            tensors[name] = quantize_to_int8(tensors[name], scales[name]).to(torch.float32)
+            tensors[name] *= scales[name]
     stored = stored_model(
-        graph, tensors, weight_dtype=weight_dtype, weight_dtype_overrides=overrides or {}
+        graph,
+        tensors,
+        weight_dtype=weight_dtype,
+        weight_scales=scales,
+        weight_dtype_overrides=overrides or {},
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     publish_container(
@@ -157,14 +172,23 @@ class Fixture:
     def __init__(self, root: Path) -> None:
         self.series_root = root / "outputs" / "series"
         self.sources = eg2.EmbeddingGemma2Sources(
-            series=self.series_root / eg2.EMBEDDINGGEMMA2_BF16_SERIES,
+            series={
+                dtype: self.series_root / name for dtype, name in eg2.EMBEDDINGGEMMA2_SERIES.items()
+            },
             tokenizer=self.series_root / tokenizer.TOKENIZER_SERIES,
             snapshot=root / "inputs" / "embeddinggemma2" / "embeddinggemma-2",
         )
-        self.container = self.sources.series / eg2.EMBEDDINGGEMMA2_MODEL_FILE
-        _write_container(self.container)
-        # The series also holds the goldens, which must not be distributed.
-        (self.sources.series / "io.query-en.safetensors").write_bytes(b"io-fixture")
+        #: Dtype label → the series' container.
+        self.containers = {
+            dtype: series / eg2.EMBEDDINGGEMMA2_MODEL_FILE
+            for dtype, series in self.sources.series.items()
+        }
+        #: The original weights' container (the one the contract is read from).
+        self.container = self.containers[eg2.EMBEDDINGGEMMA2_DTYPE]
+        for dtype, container in self.containers.items():
+            _write_container(container, weight_dtype=dtype)
+            # A series also holds the goldens, which must not be distributed.
+            (container.parent / "io.query-en.safetensors").write_bytes(b"io-fixture")
         _write_json(self.sources.snapshot / "config.json", UPSTREAM_CONFIG)
         _write_json(self.sources.snapshot / "config_sentence_transformers.json", PROMPTS_CONFIG)
         (self.sources.snapshot / "tokenizer.json").write_text('{"fixture": true}', encoding="utf-8")
@@ -189,10 +213,18 @@ class Fixture:
         )
 
     def rewrite_container(self, **container: Any) -> None:
-        """Replace the series' container with one written with other arguments."""
-        for stale in sequence_siblings(self.container):
+        """Replace every storage's container with one written with other arguments (each in its
+        own storage — the presets keep one graph)."""
+        for dtype in self.containers:
+            self.rewrite_storage(dtype, **container)
+
+    def rewrite_storage(self, dtype: str, **container: Any) -> None:
+        """Replace the container of the series of `dtype` alone (written as `dtype` unless the
+        arguments say otherwise)."""
+        path = self.containers[dtype]
+        for stale in sequence_siblings(path):
             stale.unlink()
-        _write_container(self.container, **container)
+        _write_container(path, **{"weight_dtype": dtype, **container})
 
     def plan(self, model: str = eg2.EMBEDDINGGEMMA2_MODEL):
         return eg2.embeddinggemma2_plan(self.sources, model, self.pin)
@@ -240,7 +272,7 @@ class TestLayout:
         out_dir, _ = assembled
         assert list(out_dir.rglob("io.*")) == []
 
-    def test_the_manifest_declares_the_contract_the_roles_and_the_one_preset(
+    def test_the_manifest_declares_the_contract_the_roles_and_the_two_presets(
         self, assembled
     ) -> None:
         _, manifest = assembled
@@ -250,13 +282,37 @@ class TestLayout:
         assert list(manifest["models"]) == ["text"]
         assert model["pipeline"] == "embeddinggemma/1"
         assert list(model["weights"]) == ["model"]
-        assert list(model["weights"]["model"]) == ["bf16"]
+        assert list(model["weights"]["model"]) == ["bf16", "i8"]
         assert list(model["assets"]) == ["tokenizer"]
-        assert list(model["quants"]) == ["bf16"]
+        assert list(model["quants"]) == ["bf16", "i8"]
         assert model["defaultQuant"] == "bf16"
         assert model["quants"]["bf16"]["weights"] == {"model": "bf16"}
         assert model["quants"]["bf16"]["session"] == {}
         assert model["quants"]["bf16"]["label"] == "Original weights (bf16)"
+        assert model["quants"]["i8"]["weights"] == {"model": "i8"}
+        assert model["quants"]["i8"]["session"] == {}
+        assert model["quants"]["i8"]["label"] == "Half size (int8)"
+
+    def test_every_preset_carries_a_label_and_a_description_within_the_ui_limits(
+        self, assembled
+    ) -> None:
+        """Two presets, so both need both fields (ADR 0128 C3), within 64 / 200 characters."""
+        _, manifest = assembled
+        for quant in _model(manifest)["quants"].values():
+            assert 0 < len(quant["label"].strip()) <= 64
+            assert 0 < len(quant["description"].strip()) <= 200
+
+    def test_each_storage_ships_its_own_series_container(self, assembled, fixture) -> None:
+        out_dir, manifest = assembled
+        containers = _model(manifest)["weights"]["model"]
+
+        for dtype, series in fixture.containers.items():
+            parts = containers[dtype]["container"]["parts"]
+            assert parts[0]["path"].startswith(f"text/model/model.{dtype}-")
+            sources = sorted(sequence_siblings(series))
+            assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
+                source.read_bytes() for source in sources
+            ]
 
     def test_the_repository_is_karume_embeddinggemma_2(self) -> None:
         assert eg2.PIPELINE.repo_name("text") == "karume-embeddinggemma-2"
@@ -270,28 +326,104 @@ class TestLayout:
 class TestStorage:
     def test_the_f32_series_is_refused(self, fixture: Fixture) -> None:
         """The f32 series has the same graph and goldens — only its storage tells it apart."""
-        fixture.rewrite_container(weight_dtype="f32")
+        fixture.rewrite_storage("bf16", weight_dtype="f32")
 
-        with pytest.raises(DistError, match=r"model: storage of .* has no bf16"):
+        with pytest.raises(DistError, match=r"model_bf16: storage of .* has no bf16"):
+            fixture.plan()
+
+    def test_the_f32_series_in_the_int8_place_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_storage("i8", weight_dtype="f32")
+
+        with pytest.raises(DistError, match=r"model_i8: storage of .* has no i8"):
             fixture.plan()
 
     def test_a_weight_in_another_compressed_storage_is_refused(self, fixture: Fixture) -> None:
         """bf16 is there (the requirement passes) — the forbidden table catches the f16 weight."""
-        fixture.rewrite_container(overrides={"projection": "f16"})
+        fixture.rewrite_storage("bf16", overrides={"projection": "f16"})
 
-        with pytest.raises(DistError, match=r"model: .* has .*f16 \(actual"):
+        with pytest.raises(DistError, match=r"model_bf16: .* has .*f16 \(actual"):
+            fixture.plan()
+
+    def test_an_int8_weight_in_the_original_weights_is_refused(self, fixture: Fixture) -> None:
+        """bf16 is there — the forbidden table keeps an i8 series' weight out of the bf16 preset."""
+        fixture.rewrite_storage("bf16", overrides={"projection": "i8"})
+
+        with pytest.raises(DistError, match=r"model_bf16: .* has i8 \(actual"):
+            fixture.plan()
+
+    def test_a_bf16_weight_in_the_int8_series_is_refused(self, fixture: Fixture) -> None:
+        """i8 is there — the forbidden table keeps the original weights out of the i8 preset."""
+        fixture.rewrite_storage("i8", overrides={"table": "bf16"})
+
+        with pytest.raises(DistError, match=r"model_i8: .* has bf16 \(actual"):
+            fixture.plan()
+
+    def test_the_two_series_swapped_are_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_storage("bf16", weight_dtype="i8")
+        fixture.rewrite_storage("i8", weight_dtype="bf16")
+
+        with pytest.raises(DistError, match=r"model_bf16: storage of .* has no bf16"):
             fixture.plan()
 
     def test_an_i2_series_is_refused(self, fixture: Fixture) -> None:
         replace_component(fixture.container, i2_container(named=eg2.EMBEDDINGGEMMA2_ROLE))
 
-        with pytest.raises(DistError, match="model: "):
+        with pytest.raises(DistError, match="model_bf16: "):
             fixture.plan()
 
-    def test_the_forbidden_table_names_every_other_compressed_layout(self) -> None:
-        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", "bf16"}
+    def test_an_i2_series_in_the_int8_place_is_refused(self, fixture: Fixture) -> None:
+        replace_component(fixture.containers["i8"], i2_container(named=eg2.EMBEDDINGGEMMA2_ROLE))
 
-        assert set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.EMBEDDINGGEMMA2_ROLE]) == compressed
+        with pytest.raises(DistError, match="model_i8: "):
+            fixture.plan()
+
+    @pytest.mark.parametrize("dtype", sorted(eg2.EMBEDDINGGEMMA2_SERIES))
+    def test_the_forbidden_table_names_every_other_compressed_layout(self, dtype: str) -> None:
+        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", dtype}
+
+        assert (
+            set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.embeddinggemma2_role(dtype)])
+            == compressed
+        )
+
+    def test_every_storage_requires_itself(self) -> None:
+        assert eg2.EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS == {"model_bf16": "bf16", "model_i8": "i8"}
+
+    def test_a_missing_storage_is_refused(self, fixture: Fixture) -> None:
+        sources = eg2.EmbeddingGemma2Sources(
+            series={"bf16": fixture.sources.series["bf16"]},
+            tokenizer=fixture.sources.tokenizer,
+            snapshot=fixture.sources.snapshot,
+        )
+
+        with pytest.raises(DistError, match=r"given for \['bf16'\], not for the storages"):
+            eg2.embeddinggemma2_plan(sources, pin=fixture.pin)
+
+
+class TestOneGraph:
+    """Every preset runs one graph — the contract is read from the original weights' container."""
+
+    def test_an_int8_container_of_another_bound_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_storage("i8", bound=1024)
+
+        with pytest.raises(DistError, match="its graph is not the graph of"):
+            fixture.plan()
+
+    def test_an_int8_container_with_a_mask_input_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_storage(
+            "i8", inputs=(*eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS, ("attention_mask", "f32"))
+        )
+
+        with pytest.raises(DistError, match="its graph is not the graph of"):
+            fixture.plan()
+
+    def test_the_storage_alone_differs(self, fixture: Fixture) -> None:
+        graphs = {dtype: ir_graph(path) for dtype, path in fixture.containers.items()}
+
+        assert graphs["bf16"] == graphs["i8"]
+        assert storage_dtypes(fixture.containers["bf16"]) != storage_dtypes(
+            fixture.containers["i8"]
+        )
 
 
 class TestPipelineConfig:
@@ -513,6 +645,19 @@ class TestProvenance:
         with pytest.raises(DistError, match=r"provenance\.license is 'gemma'"):
             fixture.plan()
 
+    def test_an_int8_container_from_another_revision_is_refused(self, fixture: Fixture) -> None:
+        """The provenance is not part of the graph — each container is held to the pin itself."""
+        fixture.rewrite_storage("i8", revision=OTHER_REVISION)
+
+        with pytest.raises(DistError, match="built from a different revision"):
+            fixture.plan()
+
+    def test_an_int8_container_under_another_license_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_storage("i8", license="gemma")
+
+        with pytest.raises(DistError, match=r"provenance\.license is 'gemma'"):
+            fixture.plan()
+
 
 class TestLegalText:
     def test_it_ships_the_license_text_byte_identical(self, assembled) -> None:
@@ -526,11 +671,21 @@ class TestLegalText:
         for name in manifest["models"]:
             assert f"`{EMBEDDINGGEMMA2_UPSTREAM[name]}`" in notice
         assert "**text tower only**" in notice
-        assert "keep the checkpoint's BF16 values unchanged" in notice
+        assert "**The `bf16` form keeps the checkpoint's BF16 values unchanged**" in notice
         assert "replaced by a band declared on the attention" in notice
-        # The weights are not rounded, so no quantized form is claimed.
-        assert "quantiz" not in notice
-        assert "int8" not in notice
+        # The i8 form is the one quantized copy, and the notice says what was rounded.
+        assert "**The\n  `i8` form is an int8-quantized copy**" in notice
+        assert "rounded to symmetric int8 with one float32 scale per row" in notice
+        assert notice.count("quantiz") == 1
+
+    def test_the_notice_names_exactly_the_storages_the_manifest_ships(self, assembled) -> None:
+        """Both directions: a shipped form the notice leaves out, or a form it still describes
+        after it was dropped, fails."""
+        out_dir, manifest = assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        named = set(re.findall(r"`([a-z0-9]+)` form", notice))
+        assert named == set(_model(manifest)["weights"]["model"])
 
 
 class TestTheDriver:
@@ -564,8 +719,10 @@ class TestMirroredConstants:
     def test_the_token_bound_is_the_exports(self) -> None:
         assert export.SYM_MAX == eg2.EMBEDDINGGEMMA2_MAX_TOKENS
 
-    def test_the_series_is_the_exports_bf16_series(self) -> None:
-        assert export.DEFAULT_OUT_DIRS["bf16"].name == eg2.EMBEDDINGGEMMA2_BF16_SERIES
+    def test_the_series_are_the_exports_bf16_and_i8_series(self) -> None:
+        assert list(eg2.EMBEDDINGGEMMA2_SERIES) == ["bf16", "i8"]
+        for dtype, series in eg2.EMBEDDINGGEMMA2_SERIES.items():
+            assert export.DEFAULT_OUT_DIRS[dtype].name == series
 
     def test_the_role_is_the_exports_graph_name(self) -> None:
         assert eg2.EMBEDDINGGEMMA2_ROLE == export.GRAPH_NAME

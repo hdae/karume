@@ -50,7 +50,10 @@ measurements in `docs/research/`.
   1,648 MiB). `tokenize(input, { prompt })` returns, synchronously and without the GPU, the token ids (`Int32Array`)
   `embed` would run for the same input and prompt; it refuses the same unreadable inputs and unknown prompts, but
   returns a sequence over the limit or one holding a placeholder id, so the count can be shown before `embed` refuses
-  it. Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
+  it. The local distribution carries two presets, both with f32 compute: `bf16`, the default (the checkpoint's own
+  weights), and `i8` (the token table and every linear layer stored as per-row int8 — a 309 MiB container against
+  565 MiB; it needs no buffer or binding size above the WebGPU default, which holds up to 2,730 tokens); `quant` picks one.
+  Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
   `ModelInputError`.
 - IR: the optional attr `band` (an integer ≥ 0) of `attention` without a states field — key column `n` is visible to
   query row `m` iff `|m − n| ≤ band` — which `@karume/runtime` checks inside the score kernel from positions, so a

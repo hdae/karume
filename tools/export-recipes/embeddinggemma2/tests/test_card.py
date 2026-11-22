@@ -3,7 +3,8 @@
 The real `karume.json` is not used: the manifest here carries values **other** than the real ones
 (another token bound, other dimensions, other prompts and placeholder ids), so a hand-written
 number in the template shows as a mismatch. Besides the derivation from the manifest, it pins what
-the card must say plainly (text tower only, the token limit against upstream's context, bf16 only,
+the card must say plainly (text tower only, the token limit against upstream's context, what each
+storage holds, the int8 form's measured distance with its source and only beside an `i8` preset,
 the prompts, the Matryoshka dimensions, upstream's precision statement, the licence) and the
 manifests it refuses to describe.
 """
@@ -11,11 +12,15 @@ manifests it refuses to describe.
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 import pytest
 
+from _shared.paths import REPO_ROOT
 from embeddinggemma2.card import (
+    EMBEDDINGGEMMA2_I8_SCREENING,
+    EMBEDDINGGEMMA2_I8_SCREENING_SOURCE,
     EMBEDDINGGEMMA2_SUPPORTED_PIPELINE,
     EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS,
     render_embeddinggemma2_model_card,
@@ -90,6 +95,24 @@ def _manifest() -> dict[str, Any]:
     }
 
 
+def _with_i8(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The manifest with an `i8` preset beside `bf16` (its own container, the default unchanged)."""
+    manifest = copy.deepcopy(manifest or _manifest())
+    model = manifest["models"]["text"]
+    container = copy.deepcopy(model["weights"]["model"]["bf16"])
+    for index, part in enumerate(container["container"]["parts"]):
+        part["path"] = part["path"].replace(".bf16-", ".i8-")
+        part["size"] = 5 + index
+    model["weights"]["model"]["i8"] = container
+    model["quants"]["i8"] = {
+        "weights": {"model": "i8"},
+        "session": {},
+        "label": "Half size (int8)",
+        "description": "The token table and every linear layer stored as int8.",
+    }
+    return manifest
+
+
 def _render(manifest: dict[str, Any] | None = None) -> str:
     return render_embeddinggemma2_model_card(manifest or _manifest(), REPO)
 
@@ -124,8 +147,81 @@ class TestWhatTheCardSays:
 
     def test_it_states_the_bf16_storage(self) -> None:
         card = _render()
-        assert "its weights shipped unchanged (bf16)" in card
+        assert "- `bf16`: the checkpoint's weights unchanged (bf16)." in card
         assert "| `bf16` (default) | **Original weights (bf16)**" in card
+        assert "the original checkpoint files are not\ndistributed here" in card
+
+    def test_a_bf16_only_manifest_states_no_int8_form(self) -> None:
+        card = _render()
+        assert "int8" not in card
+        assert "quantized" not in card
+
+    def test_it_states_what_each_storage_holds_beside_an_i8_preset(self) -> None:
+        card = _render(_with_i8())
+        assert "- `bf16`: the checkpoint's weights unchanged (bf16)." in card
+        assert (
+            "- `i8`: the token table and every linear layer rounded to int8, one f32 scale per row;"
+        ) in card
+        assert "| `bf16` (default) | **Original weights (bf16)**" in card
+        assert "| `i8` | **Half size (int8)**" in card
+        assert "unchanged in `bf16`, and an int8-quantized copy (`i8`) was\n  added." in card
+        assert "computes in f32 over the stored bf16 or int8 weights" in card
+
+    def test_it_states_the_int8_forms_measured_distance_with_its_source(self) -> None:
+        card = _render(_with_i8())
+        assert "### How far the int8 weights are from the original ones" in card
+        assert "One measurement, not a benchmark" in card
+        assert "0.999396 at the lowest and\n  0.999842 on average" in card
+        assert "0.74% of the 3,800 (query, document, document) orders are flipped" in card
+        assert (
+            "Source: `docs/research/2026-11-22-embeddinggemma2-quant-screen.md` in the Karume"
+            " repository."
+        ) in card
+
+    def test_the_measured_numbers_are_the_i8_all_rows_of_the_source(self) -> None:
+        """Each number of the card's screening text is a cell of the `i8-all` rows of the research
+        record it cites (a frozen snapshot), or a count that record states."""
+        record = (REPO_ROOT / EMBEDDINGGEMMA2_I8_SCREENING_SOURCE).read_text(encoding="utf-8")
+        rows: dict[int, list[str]] = {}
+        sections = re.findall(r"^### Width (\d+)\n(.*?)(?=^### |\Z)", record, re.M | re.S)
+        for width, section in sections:
+            row = next(line for line in section.splitlines() if line.startswith("| i8-all "))
+            rows[int(width)] = [cell.strip() for cell in row.strip("|").split("|")]
+        assert sorted(rows) == [128, 256, 512, 768]
+        # Columns: config, cos min, cos mean, …, inversion (the ninth cell).
+        text = "\n".join(EMBEDDINGGEMMA2_I8_SCREENING)
+        assert f"is {rows[768][1]} at the lowest and\n  {rows[768][2]} on average" in text
+        assert f"and {rows[768][9]} of the 3,800 (query, document, document)" in text
+        assert (
+            f"(lowest cosine {rows[512][1]} / {rows[256][1]} / {rows[128][1]} at\n"
+            "  512 / 256 / 128 values)"
+        ) in text
+        cells = {rows[width][index] for width in rows for index in (1, 2, 9)}
+        assert set(re.findall(r"\d+\.\d+%?", text)) <= cells
+        assert "**Texts (58)**: the 10 golden cases" in record
+        assert "(T 12 to 8,192;" in record
+        assert "the 48 texts of the first EmbeddingGemma's" in record
+        assert "10 of the 48 in Japanese" in record
+        assert "the 20 × 190 = 3,800 (query, document" in record
+
+    def test_the_measured_distance_needs_an_i8_preset(self) -> None:
+        assert "How far the int8 weights are" not in _render()
+
+    def test_an_i8_preset_beside_the_default_keeps_the_relation_out(self) -> None:
+        """The default download is still the checkpoint's values."""
+        assert "base_model_relation" not in _render(_with_i8())
+
+    def test_the_storage_list_does_not_run_into_the_attribution_list(self) -> None:
+        """Two adjacent `-` lists would render as one list in CommonMark."""
+        for manifest in (_manifest(), _with_i8()):
+            lines = _render(manifest).splitlines()
+            storages = [
+                index
+                for index, line in enumerate(lines)
+                if line.startswith(("- `bf16`: ", "- `i8`: "))
+            ]
+            following = next(line for line in lines[storages[-1] + 1 :] if line.strip())
+            assert not following.startswith("- "), following
 
     def test_it_lists_every_prompt_grouped_by_prefix_with_the_pipe_escaped(self) -> None:
         card = _render()
@@ -184,6 +280,29 @@ class TestWhatTheCardRefuses:
         weights = manifest["models"]["text"]["weights"]["model"]
         weights["f16"] = weights.pop("bf16")
         with pytest.raises(ValueError, match=r"stored as \['f16'\]"):
+            _render(manifest)
+
+    def test_weights_in_an_undescribed_storage_beside_bf16_are_refused(self) -> None:
+        manifest = _manifest()
+        weights = manifest["models"]["text"]["weights"]["model"]
+        weights["f16"] = copy.deepcopy(weights["bf16"])
+        with pytest.raises(ValueError, match=r"stored as \['bf16', 'f16'\]"):
+            _render(manifest)
+
+    def test_weights_without_the_checkpoints_storage_are_refused(self) -> None:
+        manifest = _with_i8()
+        model = manifest["models"]["text"]
+        del model["weights"]["model"]["bf16"]
+        del model["quants"]["bf16"]
+        model["defaultQuant"] = "i8"
+        with pytest.raises(ValueError, match=r"stored as \['i8'\]"):
+            _render(manifest)
+
+    def test_an_int8_default_is_refused(self) -> None:
+        """The card carries no quantized relation on the ground that the default is bf16."""
+        manifest = _with_i8()
+        manifest["models"]["text"]["defaultQuant"] = "i8"
+        with pytest.raises(ValueError, match="the default quant 'i8' stores the text tower as i8"):
             _render(manifest)
 
     def test_a_limit_above_upstreams_context_is_refused(self) -> None:

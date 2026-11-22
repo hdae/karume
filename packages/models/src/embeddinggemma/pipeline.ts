@@ -228,10 +228,10 @@ export type Assets = {
 };
 
 /**
- * The execution knobs this family accepts (the manifest's quant declaration): none. The
- * distribution's preset runs its storage (the checkpoint's bf16 weights) with f32 compute and
- * declares no knob; a declaration is accepted only after it is checked against the reference values,
- * never passed to the runtime silently.
+ * The execution knobs this family accepts (the manifest's quant declaration): none. Each of the
+ * distribution's presets runs its storage (the checkpoint's bf16 weights, or the same weights
+ * stored as per-row int8) with f32 compute and declares no knob; a declaration is accepted only
+ * after it is checked against the reference values, never passed to the runtime silently.
  *
  * NOTE: the `export` is for the tests that cover the acceptance tables of every family and pin the
  * equivalence of the distribution mirror (not on `mod.ts` / the subpath surface — ADR 0008).

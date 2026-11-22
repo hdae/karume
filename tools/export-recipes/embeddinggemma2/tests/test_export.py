@@ -21,8 +21,14 @@ broken:
   attention, a band missing, of another width or on a full layer, anything else pruned and a graph
   whose bound of T is no longer readable at Tmax; the result passes the writer's rules
 - `--dtype` writes each storage to a series of its own, and {@link export.assert_storage_form}
-  rejects a weight slot left f32 under bf16, bf16 outside a weight slot and any other storage; a
-  weight bf16 cannot hold fails the bf16 write
+  rejects a weight slot left f32 under bf16 or i8, a compressed storage outside a weight slot, any
+  other storage, and under i8 weight slots that are not exactly the rounded weights; a weight bf16
+  cannot hold fails the bf16 write
+- {@link export.round_weights_to_i8} rounds exactly every linear and the token table to per-row
+  int8, keyed by the exported tensor keys, and refuses a model with another table or another
+  weight-slot module before it rounds anything (on a toy module shaped like the wrapper, without
+  transformers, and on the tiny tower); the rounded model is what the i8 write stores (each weight
+  with its scale), and an i8 write without the rounding fails
 
 The cases that need transformers at the pinned release, tokenizers or the snapshot SKIP explicitly
 without them (CI has none of them).
@@ -45,7 +51,7 @@ from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.emit import EmitError, eligible_compressed_initializers
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module, publish_model
-from karume.quantize import round_weights_to_bf16
+from karume.quantize import quantize_to_int8, round_weights_to_bf16
 from karume.rope import assert_rope_lifted
 
 #: The upstream SentenceTransformer declarations at the pin.
@@ -962,6 +968,55 @@ class TestStorageForm:
         with pytest.raises(export.EmbeddingGemma2ExportError, match="not one of"):
             export.assert_storage_form(_storage_graph(), "f16")
 
+    def test_i8_in_every_rounded_weight_slot_and_f32_elsewhere_passes(self) -> None:
+        graph = _storage_graph(table="i8", projection="i8")
+
+        assert export.assert_storage_form(graph, "i8", ("table", "projection")) == {
+            "f32": 1,
+            "i8": 2,
+        }
+
+    def test_a_weight_slot_left_f32_fails_the_i8_form(self) -> None:
+        graph = _storage_graph(table="i8", projection="f32")
+
+        with pytest.raises(AssertionError, match=r"projection: f32 \(expected i8\)"):
+            export.assert_storage_form(graph, "i8", ("table", "projection"))
+
+    def test_bf16_in_a_weight_slot_fails_the_i8_form(self) -> None:
+        graph = _storage_graph(table="bf16", projection="i8")
+
+        with pytest.raises(AssertionError, match=r"table: bf16 \(expected i8\)"):
+            export.assert_storage_form(graph, "i8", ("table", "projection"))
+
+    def test_i8_outside_a_weight_slot_fails(self) -> None:
+        graph = _storage_graph(table="i8", projection="i8", band="i8")
+
+        with pytest.raises(AssertionError, match=rf"{BAND}: i8 \(expected f32 / i32\)"):
+            export.assert_storage_form(graph, "i8", ("table", "projection"))
+
+    def test_a_rounded_weight_outside_a_weight_slot_fails_the_i8_form(self) -> None:
+        """The band is rounded but stays f32 — the preset would hold rounding it does not store."""
+        graph = _storage_graph(table="i8", projection="i8")
+
+        with pytest.raises(AssertionError, match=rf"rounded but outside a slot \['{BAND}'\]"):
+            export.assert_storage_form(graph, "i8", ("table", "projection", BAND))
+
+    def test_a_weight_slot_the_rounding_missed_fails_the_i8_form(self) -> None:
+        graph = _storage_graph(table="i8", projection="i8")
+
+        with pytest.raises(AssertionError, match=r"in a slot but not rounded \['projection'\]"):
+            export.assert_storage_form(graph, "i8", ("table",))
+
+    def test_the_i8_form_needs_the_rounded_weights(self) -> None:
+        graph = _storage_graph(table="i8", projection="i8")
+
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="takes the rounded weights"):
+            export.assert_storage_form(graph, "i8")
+
+    def test_the_other_forms_take_no_rounded_weights(self) -> None:
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="takes no rounded weights"):
+            export.assert_storage_form(_storage_graph(), "bf16", ("table",))
+
 
 class TestStorageOption:
     """`--dtype` picks the storage and, without `--out`, the series of that storage."""
@@ -989,6 +1044,12 @@ class TestStorageOption:
         assert calls == [(export.DEFAULT_OUT_DIRS["bf16"], "bf16")]
         assert export.DEFAULT_OUT_DIRS["bf16"].name == f"{export.TEXT_SERIES}-bf16"
 
+    def test_i8_writes_its_own_series(self, calls) -> None:
+        export.main(["--dtype", "i8"])
+
+        assert calls == [(export.DEFAULT_OUT_DIRS["i8"], "i8")]
+        assert export.DEFAULT_OUT_DIRS["i8"].name == f"{export.TEXT_SERIES}-i8"
+
     def test_out_overrides_the_series(self, calls, tmp_path: Path) -> None:
         export.main(["--dtype", "bf16", "--out", str(tmp_path)])
 
@@ -1007,7 +1068,7 @@ class TestStorageOption:
         self, tmp_path: Path
     ) -> None:
         with pytest.raises(export.EmbeddingGemma2ExportError, match="not one of"):
-            export.export_series(tmp_path / "missing", tmp_path / "out", dtype="i8")
+            export.export_series(tmp_path / "missing", tmp_path / "out", dtype="f16")
 
 
 class TestTinyModelBf16:
@@ -1057,5 +1118,193 @@ class TestTinyModelBf16:
                 provenance=Provenance(license=export.LICENSE),
                 graph_name=export.GRAPH_NAME,
                 weight_dtype="bf16",
+            )
+        assert not list(tmp_path.iterdir())
+
+
+class _ToyNorm(torch.nn.Module):
+    """A norm-style module: a `weight` the rounding must leave alone (not a weight-slot type)."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(width))
+
+
+class _ToyTower(torch.nn.Module):
+    """The shape of the text tower as the rounding sees it: the token table, linears with and
+    without a bias, and a norm."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(6, 4)
+        self.q_proj = torch.nn.Linear(4, 4, bias=False)
+        self.down_proj = torch.nn.Linear(4, 3)
+        self.norm = _ToyNorm(4)
+
+
+class _ToyWrapper(torch.nn.Module):
+    """`EmbeddingWrapper`'s layout: the tower as `model`, so the keys are
+    `model.<module>.weight`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _ToyTower()
+
+
+@pytest.fixture
+def toy_wrapper() -> _ToyWrapper:
+    torch.manual_seed(0)
+    return _ToyWrapper()
+
+
+def _state(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.clone() for key, value in module.state_dict().items()}
+
+
+class TestI8RoundingOnAToyTower:
+    """{@link export.round_weights_to_i8} on a module shaped like the wrapper (no transformers)."""
+
+    def test_it_rounds_exactly_the_linears_and_the_token_table(self, toy_wrapper) -> None:
+        before = _state(toy_wrapper)
+
+        report = export.round_weights_to_i8(toy_wrapper)
+
+        assert set(report.scales) == {
+            "model.embed_tokens.weight",
+            "model.q_proj.weight",
+            "model.down_proj.weight",
+        }
+        after = toy_wrapper.state_dict()
+        changed = {key for key in before if not torch.equal(before[key], after[key])}
+        assert changed == set(report.scales)
+        assert torch.equal(after["model.down_proj.bias"], before["model.down_proj.bias"])
+        assert torch.equal(after["model.norm.weight"], before["model.norm.weight"])
+
+    def test_each_weight_has_one_f32_scale_per_row(self, toy_wrapper) -> None:
+        report = export.round_weights_to_i8(toy_wrapper)
+
+        after = toy_wrapper.state_dict()
+        assert {key: list(scale.shape) for key, scale in report.scales.items()} == {
+            "model.embed_tokens.weight": [6, 1],
+            "model.q_proj.weight": [4, 1],
+            "model.down_proj.weight": [3, 1],
+        }
+        for key, scale in report.scales.items():
+            assert scale.dtype == torch.float32
+            levels = quantize_to_int8(after[key], scale)
+            assert torch.equal(levels.to(torch.float32) * scale, after[key])
+
+    def test_a_second_table_is_refused_and_nothing_is_rounded(self, toy_wrapper) -> None:
+        toy_wrapper.model.extra_table = torch.nn.Embedding(4, 2)
+        before = _state(toy_wrapper)
+
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="not the token table alone"):
+            export.round_weights_to_i8(toy_wrapper)
+
+        after = toy_wrapper.state_dict()
+        assert all(torch.equal(before[key], after[key]) for key in before)
+
+    def test_another_quantizable_module_type_is_refused_and_nothing_is_rounded(
+        self, toy_wrapper
+    ) -> None:
+        """A conv is a target of the core's rounding but none of the weights the bf16 series
+        stores as bf16."""
+        toy_wrapper.model.extra_conv = torch.nn.Conv1d(2, 2, 1)
+        before = _state(toy_wrapper)
+
+        with pytest.raises(
+            export.EmbeddingGemma2ExportError, match=r"extra \['model\.extra_conv\.weight'\]"
+        ):
+            export.round_weights_to_i8(toy_wrapper)
+
+        after = toy_wrapper.state_dict()
+        assert all(torch.equal(before[key], after[key]) for key in before)
+
+
+class TestTinyModelI8:
+    """The i8 rounding and write on the real export path (a tiny random text tower — transformers at
+    the pinned release)."""
+
+    def _export(self, wrapper) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+        ids = torch.randint(3, 64, (1, TINY_SYM_MAX))
+        pool = torch.ones_like(ids, dtype=torch.float32)
+        seq = torch.export.Dim("T", min=2, max=TINY_SYM_MAX)
+        return export_module(
+            wrapper,
+            (ids, pool),
+            dynamic_shapes=({1: seq}, {1: seq}),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+
+    def test_it_rounds_every_linear_and_the_token_table_and_nothing_else(
+        self, tiny_wrapper
+    ) -> None:
+        linears = {
+            f"{name}.weight"
+            for name, module in tiny_wrapper.named_modules()
+            if isinstance(module, torch.nn.Linear)
+        }
+        before = {key: value.clone() for key, value in tiny_wrapper.state_dict().items()}
+
+        report = export.round_weights_to_i8(tiny_wrapper)
+
+        assert set(report.scales) == linears | {f"model.{export.TABLE_MODULE}.weight"}
+        after = tiny_wrapper.state_dict()
+        changed = {key for key in before if not torch.equal(before[key], after[key])}
+        assert changed == set(report.scales)
+        for key, scale in report.scales.items():
+            # One F32 scale per output row (per vocabulary row for the table), and the rounded
+            # values are an int8 times it, bit for bit (what the writer checks before storing).
+            assert scale.dtype == torch.float32
+            assert list(scale.shape) == [after[key].shape[0], 1]
+            levels = quantize_to_int8(after[key], scale)
+            assert torch.equal(levels.to(torch.float32) * scale, after[key])
+
+    def test_another_table_is_refused(self, tiny_wrapper) -> None:
+        tiny_wrapper.model.extra_table = torch.nn.Embedding(4, 2)
+
+        with pytest.raises(export.EmbeddingGemma2ExportError, match="not the token table alone"):
+            export.round_weights_to_i8(tiny_wrapper)
+
+    def test_another_weight_slot_module_is_refused(self, tiny_wrapper) -> None:
+        """A conv is a target of the core's rounding but none of the weights the bf16 series
+        stores as bf16."""
+        tiny_wrapper.model.extra_conv = torch.nn.Conv1d(2, 2, 1)
+
+        with pytest.raises(export.EmbeddingGemma2ExportError, match=r"extra \['model\.extra_conv"):
+            export.round_weights_to_i8(tiny_wrapper)
+
+    def test_the_rounded_model_is_stored_as_i8_in_exactly_its_rounded_weight_slots(
+        self, tiny_wrapper, tmp_path: Path
+    ) -> None:
+        report = export.round_weights_to_i8(tiny_wrapper)
+        graph, tensors = self._export(tiny_wrapper)
+
+        stored = publish_model(
+            tmp_path / "model.krm",
+            graph,
+            tensors,
+            provenance=Provenance(license=export.LICENSE),
+            graph_name=export.GRAPH_NAME,
+            weight_dtype="i8",
+            weight_scales=report.scales,
+        )
+        counts = export.assert_storage_form(stored, "i8", tuple(report.scales))
+
+        assert counts["i8"] == len(report.scales)
+        assert counts["i8"] == len(eligible_compressed_initializers(stored))
+        assert set(counts) == {"f32", "i8"}
+
+    def test_an_i8_write_without_the_rounding_fails(self, tiny_wrapper, tmp_path: Path) -> None:
+        graph, tensors = self._export(tiny_wrapper)
+
+        with pytest.raises(EmitError, match="no per-channel scale"):
+            publish_model(
+                tmp_path / "model.krm",
+                graph,
+                tensors,
+                provenance=Provenance(license=export.LICENSE),
+                graph_name=export.GRAPH_NAME,
+                weight_dtype="i8",
             )
         assert not list(tmp_path.iterdir())

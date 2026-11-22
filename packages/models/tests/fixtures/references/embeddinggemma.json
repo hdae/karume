@@ -37,6 +37,42 @@
     },
     "embeddinggemma-2/bf16/query-ja": {
       "node-nvidia-geforce-rtx-3080-ti": "39c4748ea165647c5db9e7cfe9d7a8de67a7ab2ce8ba1bf1af02c682d5e085b0"
+    },
+    "embeddinggemma-2/i8/bare": {
+      "node-nvidia-geforce-rtx-3080-ti": "f533a4da290f1b67fddc94b0fa0ec6567f5aa1e2dc1318e8235a2e0913120ba2"
+    },
+    "embeddinggemma-2/i8/document-1508": {
+      "node-nvidia-geforce-rtx-3080-ti": "4e2cdc4be3a5cce7c224f3eed2b6ccf59650d0717c18c84f63e66f120db37f0c"
+    },
+    "embeddinggemma-2/i8/document-2048": {
+      "node-nvidia-geforce-rtx-3080-ti": "e1e70cb022ea6d4be9d8a3933924f63cedb00739bdc36f15fe887dbf44c6cbb3"
+    },
+    "embeddinggemma-2/i8/document-2048/128": {
+      "node-nvidia-geforce-rtx-3080-ti": "d9e4890c01205da2076806d0b6878946e4fca095bd019079c1dd1668eccbfe61"
+    },
+    "embeddinggemma-2/i8/document-3062": {
+      "node-nvidia-geforce-rtx-3080-ti": "b492bdc6f658f66a9ea782a366b46c4472cb713cb313415cd4140f879d8ca4ae"
+    },
+    "embeddinggemma-2/i8/document-5935": {
+      "node-nvidia-geforce-rtx-3080-ti": "64221f090fc57c75ed956abde4c2960844e8174613aa63a0afefbd02558e7a41"
+    },
+    "embeddinggemma-2/i8/document-609": {
+      "node-nvidia-geforce-rtx-3080-ti": "082436a9dcffdad6e2cc26e015489adf72b461504ccc3e69a28839892c8f239f"
+    },
+    "embeddinggemma-2/i8/document-8192": {
+      "node-nvidia-geforce-rtx-3080-ti": "e1c2ebd82af6da0b7803b71b6d0c6175de1b1a32c7ead6ffee2bf111b815b9a3"
+    },
+    "embeddinggemma-2/i8/document-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "ed87cfbd3c47a9b4b47ba97b130dedf2d6dee449ebfad3e0d2b1d8e50928de12"
+    },
+    "embeddinggemma-2/i8/query-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "d8b36c112596c8b194de8ab34258b147a0401ef371aede3e38535b6365524908"
+    },
+    "embeddinggemma-2/i8/query-en/256": {
+      "node-nvidia-geforce-rtx-3080-ti": "b8b33641fc14adea38c7939b4181daf97b453a50f45e1fa4d96770d8a924c036"
+    },
+    "embeddinggemma-2/i8/query-ja": {
+      "node-nvidia-geforce-rtx-3080-ti": "654f2c76fd1bc68888cc3bc4c63093323983cab6823956dfc30909ffafeabe4d"
     }
   }
 }

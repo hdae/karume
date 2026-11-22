@@ -95,9 +95,6 @@ WIDTHS: tuple[int, ...] = (768, 512, 256, 128)
 #: A text is long from this many tokens on (the bound of the series before the band was declared).
 LONG_FROM = 2048
 
-#: The module name of the token table inside the text tower.
-TABLE_MODULE = "embed_tokens"
-
 #: The storage forms a weight group can take here. `bf16` = left as the checkpoint's values.
 FORMS = ("bf16", "i8", "i4")
 
@@ -376,7 +373,7 @@ def apply_weights(model: nn.Module, config: Config, linear_modules: frozenset[st
     rounded: list[str] = []
     groups: tuple[tuple[str, Callable[[str], bool], tuple[type[nn.Module], ...]], ...] = (
         (config.linear, lambda name: name in linear_modules, (nn.Linear,)),
-        (config.table, lambda name: name == TABLE_MODULE, (nn.Embedding,)),
+        (config.table, lambda name: name == export.TABLE_MODULE, (nn.Embedding,)),
     )
     for form, include, op_types in groups:
         if form == "i8":
@@ -471,7 +468,7 @@ def run(directory: Path) -> dict[str, Any]:
 
     linear_targets = list(iter_quant_targets(model, (nn.Linear,)))
     table_targets = list(iter_quant_targets(model, (nn.Embedding,)))
-    if [fqn for fqn, _w, _a in table_targets] != [f"{TABLE_MODULE}.weight"]:
+    if [fqn for fqn, _w, _a in table_targets] != [f"{export.TABLE_MODULE}.weight"]:
         raise AssertionError(f"the embedding targets are {[t[0] for t in table_targets]}")
     every = {fqn for fqn, _w, _a in iter_quant_targets(model, QUANT_MODULE_TYPES)}
     linear_fqns = [fqn for fqn, _w, _a in linear_targets]

@@ -1185,7 +1185,7 @@ describe("Embedder: the device's token limit", () => {
   });
 });
 
-/** The policy accepts no execution knob (the distribution's preset declares none). */
+/** The policy accepts no execution knob (the distribution's presets declare none). */
 describe("EMBEDDINGGEMMA_SESSION_POLICY", () => {
   it("accepts no key", () => {
     assert(Object.values(EMBEDDINGGEMMA_SESSION_POLICY).every((accepted) => !accepted));
@@ -1364,6 +1364,73 @@ describe("Pipeline.fromAssets: admission fails before touching a GPU (the contai
       () => Pipeline.fromAssets({ manifest: manifestOf(), assets: COMPONENTS }, { gpu: fakeGpu() }),
       Error,
       "asset 'tokenizer' is missing",
+    );
+  });
+});
+
+/**
+ * The distribution's two presets (`bf16`, the default, and `i8` — each its own storage of `model`,
+ * both with an empty session). The i8 declaration reuses the test container's bytes: admission
+ * reads declarations only, so the stored dtype never matters before the GPU.
+ */
+const twoPresetPatch = (i8Session: Record<string, unknown> = {}): Record<string, unknown> => ({
+  weights: {
+    model: {
+      bf16: DECLARED,
+      i8: {
+        container: {
+          descriptor: DECLARED.container.descriptor,
+          parts: DECLARED.container.parts.map((part) => ({
+            ...part,
+            path: part.path.replace(".bf16-", ".i8-"),
+          })),
+        },
+      },
+    },
+  },
+  quants: {
+    bf16: { weights: { model: "bf16" }, session: {} },
+    i8: { weights: { model: "i8" }, session: i8Session },
+  },
+});
+
+describe("Pipeline.fromAssets with the distribution's two presets (bf16, i8)", () => {
+  const input = (patch: Record<string, unknown>) => ({
+    manifest: manifestOf(patch),
+    assets: { ...COMPONENTS, tokenizer: NOT_AN_ASSET },
+  });
+
+  it("each preset passes admission and stops at parsing the tokenizer asset, before the GPU", async () => {
+    for (const quant of [undefined, "bf16", "i8"]) {
+      await assertRejects(
+        () =>
+          Pipeline.fromAssets(input(twoPresetPatch()), {
+            gpu: fakeGpu(),
+            ...(quant === undefined ? {} : { quant }),
+          }),
+        Error,
+        "tokenizer.format: missing",
+      );
+    }
+  });
+
+  it("a misspelt quant lists both presets", async () => {
+    await assertRejects(
+      () => Pipeline.fromAssets(input(twoPresetPatch()), { quant: "i4", gpu: fakeGpu() }),
+      Error,
+      "quant 'i4' is not in the manifest (available: bf16 / i8)",
+    );
+  });
+
+  it("an execution knob in the i8 preset's session is refused like the default's", async () => {
+    await assertRejects(
+      () =>
+        Pipeline.fromAssets(input(twoPresetPatch({ linearCompute: "a8" })), {
+          quant: "i8",
+          gpu: fakeGpu(),
+        }),
+      Error,
+      "session.linearCompute is not supported",
     );
   });
 });
