@@ -734,7 +734,9 @@ maintainer's ruling of 2026-11-06).
        about 1.8× slower, found the same day to be a major GC of the Node process (the Dawn binding's polling while a
        readback waits), not the `bf16` preset (both presets take the same GPU time); at 2,048 tokens periodic
        stretches about 11× slower in both presets, in the GPU time itself (the slow mode's signature, cause not
-       investigated) — filed in [known issues](known-issues.md) with the fix candidates, none chosen.
+       investigated) — filed in [known issues](known-issues.md) with the fix candidates. The record now holds the
+       host's GCs per timed visit (`karume-embeddinggemma-preset-ab/2`: major GCs and their summed pause, the other
+       kinds apart), so a slow visit that held a major GC shows as one; the other candidates are not chosen.
      - Left: the first publication, awaiting the maintainer's go-ahead.
   4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
      `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is

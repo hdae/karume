@@ -3,8 +3,8 @@
  * two presets of one mirror timed against each other on one text through the public pipeline. The
  * runtime's `karume-session-ab/1` record is kept as it is, with the judgement of
  * `judgeSessionAb` without identity (the presets store the weights differently, so their vectors
- * differ by design), each arm's median embed time, each preset's probe and what the arms learned.
- * Pure, so `vp test` covers it.
+ * differ by design), each arm's median embed time, the host's GCs inside each of its timed visits,
+ * each preset's probe and what the arms learned. Pure, so `vp test` covers it.
  */
 
 import type { Manifest } from "@karume/hub";
@@ -13,13 +13,15 @@ import type { SessionAbJudgement, SessionAbRecord } from "@karume/runtime/tune";
 import { type DistributionFacts, type EntryResult, ParameterError } from "../entry.ts";
 import { modelPreset } from "../model-preset.ts";
 import { MODELS_VERSION } from "../session-ab/data.ts";
+import { runPositions } from "../session-ab/shared.ts";
 import { judgementLine } from "../session-ab/summary.ts";
 
-import type { PresetArmFacts, PresetProbe } from "./arm.ts";
+import type { PresetArmFacts, PresetProbe, RunSpan } from "./arm.ts";
+import { type GcEntry, type GcReading, type VisitGc, visitGc } from "./gc.ts";
 import { type CutText, LONGEST_CASE_TOKENS } from "./text.ts";
 
 /** The format of the entry's `data`. */
-export const PRESET_AB_FORMAT = "karume-embeddinggemma-preset-ab/1";
+export const PRESET_AB_FORMAT = "karume-embeddinggemma-preset-ab/2";
 
 /** The mount the entry reads: the local mirror of EmbeddingGemma 2. */
 export const PRESET_AB_MOUNT = "embeddinggemma-2";
@@ -121,13 +123,59 @@ export const cosine = (a: Float32Array<ArrayBuffer>, b: Float32Array<ArrayBuffer
   return dot / Math.sqrt(left * right);
 };
 
-/** One arm in the data: its name, its median embed time and what it learned. */
+/**
+ * The host's GCs in an arm's timed visits: `visits[r][v]` is round `r + 1`, visit `v + 1`, as the
+ * record's `timesMs`; or that the host cannot report GCs.
+ */
+export type ArmGc =
+  | { readonly observable: false }
+  | { readonly observable: true; readonly visits: readonly (readonly [VisitGc, VisitGc])[] };
+
+/**
+ * The GCs of each timed visit of the arm at `index` of `record`, from the arm's run spans (every
+ * run in the runner's order, the untimed ones included). A span count that is not the runner's
+ * runs of that arm is an error.
+ */
+export const armGc = (input: {
+  readonly name: string;
+  readonly index: number;
+  readonly spans: readonly RunSpan[];
+  readonly record: Pick<SessionAbRecord, "rounds" | "openPerVisit" | "arms">;
+  readonly entries: readonly GcEntry[];
+}): readonly (readonly [VisitGc, VisitGc])[] => {
+  const { name, index, spans, record, entries } = input;
+  const positions = runPositions(record.arms.length, record.rounds, record.openPerVisit).filter(
+    ({ arm }) => arm === index,
+  );
+  if (spans.length !== positions.length) {
+    throw new Error(
+      `The arm ${name} noted ${spans.length} runs; the record's ${record.rounds} rounds and the warm-up round make ${positions.length}`,
+    );
+  }
+  const timed = positions.flatMap((position, run) =>
+    position.timed ? [{ ...position, gc: visitGc(spans[run], entries) }] : [],
+  );
+  return Array.from({ length: record.rounds }, (_, round) => {
+    const of = (visit: 1 | 2): VisitGc => {
+      const found = timed.find((run) => run.round === round + 1 && run.visit === visit);
+      if (found === undefined) {
+        throw new Error(`The arm ${name} has no timed run in round ${round + 1}, visit ${visit}`);
+      }
+      return found.gc;
+    };
+    return [of(1), of(2)] as const;
+  });
+};
+
+/** One arm in the data: its name, its median embed time, the host's GCs and what it learned. */
 export type PresetAbArm = {
   readonly name: string;
   /** {@link medianRoundMs} of the arm's timed runs. */
   readonly medianMs: number;
   /** {@link minimumMs} of the arm's timed runs. */
   readonly minMs: number;
+  /** The host's GCs that began inside each timed visit's `embed`. */
+  readonly gc: ArmGc;
   /** Each open's wall time (`fromPretrained`); the probe of the preset had read its files once before. */
   readonly openMs: readonly number[];
   /** The runs compared with the arm's own first vector, and how many differed from it. */
@@ -157,7 +205,8 @@ export type PresetAbData = {
 
 /**
  * The data of one finished run. Refuses a record whose arms or round count are not the request's,
- * probes not of the request's presets, and an arm without a first vector.
+ * probes not of the request's presets, an arm without a first vector, and an arm whose run spans
+ * are not the record's runs.
  */
 export const presetAbData = (input: {
   readonly request: PresetAbRequest;
@@ -167,8 +216,10 @@ export const presetAbData = (input: {
   readonly arms: readonly [PresetArmFacts, PresetArmFacts];
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
+  /** What the GC observer saw over the whole A/B. */
+  readonly gc: GcReading;
 }): PresetAbData => {
-  const { request, record, probes, arms } = input;
+  const { request, record, probes, arms, gc } = input;
   const names = [request.base, request.compared];
   const recorded = record.arms.map(({ name }) => name);
   if (recorded.join(",") !== names.join(",") || record.rounds !== request.rounds) {
@@ -195,6 +246,18 @@ export const presetAbData = (input: {
     name: names[index],
     medianMs: medianRoundMs(record.arms[index].timesMs),
     minMs: minimumMs(record.arms[index].timesMs),
+    gc: gc.observable
+      ? {
+          observable: true,
+          visits: armGc({
+            name: names[index],
+            index,
+            spans: arms[index].runSpans,
+            record,
+            entries: gc.entries,
+          }),
+        }
+      : { observable: false },
     openMs: arms[index].openMs,
     runs: arms[index].runs,
     differingRuns: arms[index].differingRuns,
@@ -229,6 +292,30 @@ const probeLine = (probe: PresetProbe): string => {
   );
 };
 
+/** An arm's timed visits that held a major GC, and the range of those visits' summed pauses. */
+const majorGcText = (
+  arm: PresetAbArm,
+  visits: readonly (readonly [VisitGc, VisitGc])[],
+): string => {
+  const all = visits.flat();
+  const pauses = all.filter(({ major }) => major > 0).map(({ majorPauseMs }) => majorPauseMs);
+  const counted = `${arm.name} ${pauses.length} of ${all.length} visits`;
+  if (pauses.length === 0) return counted;
+  const low = Math.min(...pauses);
+  const high = Math.max(...pauses);
+  return `${counted} (${low === high ? ms(low) : `${ms(low)} to ${ms(high)}`} of pause each)`;
+};
+
+const gcLine = (arms: readonly PresetAbArm[]): string => {
+  const texts = arms.map((arm) =>
+    arm.gc.observable ? majorGcText(arm, arm.gc.visits) : undefined,
+  );
+  if (texts.some((text) => text === undefined)) {
+    return "Timed visits holding a major GC of the host: not observable (the host reports no gc performance entries)";
+  }
+  return `Timed visits holding a major GC of the host: ${texts.join(" · ")}`;
+};
+
 const selfText = (arm: PresetAbArm): string =>
   arm.differingRuns === 0
     ? `${arm.name} identical (${arm.runs} runs)`
@@ -243,6 +330,7 @@ export const presetAbResult = (data: PresetAbData): EntryResult => {
       `${request.tokens} tokens: a prefix of ${text.case} (${text.codePoints} code points, prompt ${text.prompt ?? "none"}), ${request.rounds} rounds`,
       `Median embed (each round's two visits averaged): ${base.name} ${ms(base.medianMs)} · ${compared.name} ${ms(compared.medianMs)}; fastest visit ${base.name} ${ms(base.minMs)} · ${compared.name} ${ms(compared.minMs)}`,
       `${judgementLine(judgement)} · median difference ${ms(judgement.medianDeltaMs)} · noise floor ${ms(judgement.noiseFloorMs)}`,
+      gcLine(arms),
       ...data.probes.map(probeLine),
       `Arm loads (fromPretrained after the probe read the files): ${arms.map((arm) => `${arm.name} ${arm.openMs.map(ms).join(", ")}`).join(" · ")}`,
       `Each arm against its own first vector: ${arms.map(selfText).join("; ")}`,

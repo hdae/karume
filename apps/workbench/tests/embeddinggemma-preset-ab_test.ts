@@ -9,6 +9,7 @@ import {
   probePreset,
 } from "../src/embeddinggemma-preset-ab/arm.ts";
 import {
+  armGc,
   cosine,
   medianRoundMs,
   minimumMs,
@@ -17,7 +18,21 @@ import {
   presetAbRequest,
   presetAbResult,
 } from "../src/embeddinggemma-preset-ab/data.ts";
-import { type PresetAbDevice, runPresetAb } from "../src/embeddinggemma-preset-ab/run.ts";
+import {
+  type GcEntry,
+  type GcHostEntry,
+  type GcObserverHost,
+  type GcReading,
+  globalPerformanceObserver,
+  MAJOR_GC_KIND,
+  observeGc,
+  visitGc,
+} from "../src/embeddinggemma-preset-ab/gc.ts";
+import {
+  type ObserveGc,
+  type PresetAbDevice,
+  runPresetAb,
+} from "../src/embeddinggemma-preset-ab/run.ts";
 import {
   cutText,
   GOLDEN_CASES,
@@ -278,6 +293,37 @@ describe("an arm", () => {
     expect(facts.first).toEqual(vector(1));
   });
 
+  it("notes the span of each embed on its clock, every run in order", async () => {
+    // The clock moves 10 ms inside each embed and 1 ms between runs.
+    let now = 0;
+    const inner = fakePipeline([vector(1)]);
+    const arm = presetArm({
+      name: "bf16",
+      text: CUT,
+      build: () =>
+        Promise.resolve({
+          ...inner,
+          embed: (text, options) => {
+            now += 10;
+            return inner.embed(text, options);
+          },
+        }),
+      signal: new AbortController().signal,
+      clock: () => now,
+    });
+    await arm.open();
+    expect(arm.facts().runSpans).toEqual([]);
+    for (let run = 0; run < 3; run += 1) {
+      now += 1;
+      await arm.run();
+    }
+    expect(arm.facts().runSpans).toEqual([
+      { startMs: 1, endMs: 11 },
+      { startMs: 12, endMs: 22 },
+      { startMs: 23, endMs: 33 },
+    ]);
+  });
+
   it("stops at the report after a cancel, outside the timed span", async () => {
     const controller = new AbortController();
     const arm = presetArm({
@@ -347,12 +393,19 @@ describe("a probe", () => {
 
 describe("the data and the summary", () => {
   const request = presetAbRequest(MANIFEST, { ...VALUES, rounds: 3 });
-  const facts = (first: Float32Array<ArrayBuffer>) => ({
+  /** Eight runs (the warm-up round and three timed rounds, two visits each), run i at 100·i to 100·i + 50 ms. */
+  const SPANS = Array.from({ length: 8 }, (_, run) => ({
+    startMs: 100 * run,
+    endMs: 100 * run + 50,
+  }));
+  const facts = (first: Float32Array<ArrayBuffer>, runSpans = SPANS) => ({
     openMs: [900],
     runs: 8,
     differingRuns: 0,
+    runSpans,
     first,
   });
+  const NOT_OBSERVABLE: GcReading = { observable: false };
   // Not parallel, so a pairing of an arm's vector with itself (cosine 1) would show.
   const BASE_FIRST = Float32Array.of(3, 4, 0, 0);
   const COMPARED_FIRST = Float32Array.of(4, 3, 0, 0);
@@ -417,6 +470,7 @@ describe("the data and the summary", () => {
       arms: [facts(BASE_FIRST), facts(COMPARED_FIRST)],
       record,
       judgements,
+      gc: NOT_OBSERVABLE,
     });
     expect(data.format).toBe(PRESET_AB_FORMAT);
     expect(data.text).toEqual({ case: "doc", prompt: "document", codePoints: 7, tokens: 6 });
@@ -450,6 +504,7 @@ describe("the data and the summary", () => {
       arms: [facts(BASE_FIRST), facts(COMPARED_FIRST)] as const,
       record,
       judgements,
+      gc: NOT_OBSERVABLE,
     };
     expect(() => presetAbData({ ...input, request: { ...request, rounds: 4 } })).toThrow(
       /is not the request's/,
@@ -460,9 +515,241 @@ describe("the data and the summary", () => {
     expect(() =>
       presetAbData({
         ...input,
-        arms: [facts(BASE_FIRST), { openMs: [], runs: 0, differingRuns: 0 }],
+        arms: [facts(BASE_FIRST), { openMs: [], runs: 0, differingRuns: 0, runSpans: [] }],
       }),
     ).toThrow("The arm i8 has no first vector");
+  });
+
+  /** A GC of `kind` at `startTime` holding the thread for `duration`. */
+  const gcAt = (startTime: number, duration: number, kind = MAJOR_GC_KIND): GcEntry => ({
+    startTime,
+    duration,
+    kind,
+  });
+  const NO_GC = { major: 0, majorPauseMs: 0, other: 0, otherPauseMs: 0 };
+
+  it("lines the GCs up with the record's timed visits, leaving the warm-up round and the gaps out", async () => {
+    const record = await recordOf();
+    const entries = [
+      gcAt(20, 999), // the warm-up round, visit 1
+      gcAt(180, 999), // between two runs
+      gcAt(210, 300), // round 1, visit 1
+      gcAt(240, 5, 8), // round 1, visit 1: incremental marking
+      gcAt(300, 1, 1), // round 1, visit 2, at the span's start: a scavenge
+      gcAt(750, 400), // round 3, visit 2, at the span's end
+    ];
+    expect(armGc({ name: "bf16", index: 0, spans: SPANS, record, entries })).toEqual([
+      [
+        { major: 1, majorPauseMs: 300, other: 1, otherPauseMs: 5 },
+        { major: 0, majorPauseMs: 0, other: 1, otherPauseMs: 1 },
+      ],
+      [NO_GC, NO_GC],
+      [NO_GC, { major: 1, majorPauseMs: 400, other: 0, otherPauseMs: 0 }],
+    ]);
+  });
+
+  it("refuses run spans that are not the record's runs of the arm", async () => {
+    const record = await recordOf();
+    expect(() =>
+      armGc({ name: "i8", index: 1, spans: SPANS.slice(1), record, entries: [] }),
+    ).toThrow("The arm i8 noted 7 runs; the record's 3 rounds and the warm-up round make 8");
+  });
+
+  it("says per arm how many timed visits held a major GC, and the range of their pauses", async () => {
+    const record = await recordOf();
+    const judgements = judgeSessionAb(record, { minGain: 0.01, requireIdentity: false });
+    // The compared arm's runs, between the base's: run i at 100·i + 60 to 100·i + 90 ms.
+    const LATER = SPANS.map(({ startMs }) => ({ startMs: startMs + 60, endMs: startMs + 90 }));
+    const data = presetAbData({
+      request,
+      distribution: { directory: "d", manifestSha256: hex("f"), read: "directory" },
+      text: CUT,
+      probes: [probe("bf16"), probe("i8")],
+      arms: [facts(BASE_FIRST), facts(COMPARED_FIRST, LATER)],
+      record,
+      judgements,
+      gc: {
+        observable: true,
+        // Base: round 1 visit 2 (two major GCs), round 2 visit 1. Compared: scavenges only, one in
+        // the warm-up round.
+        entries: [
+          gcAt(305, 200),
+          gcAt(320, 122.5),
+          gcAt(405, 350),
+          gcAt(465, 2, 1),
+          gcAt(75, 3, 1),
+        ],
+      },
+    });
+    expect(data.arms[0].gc).toEqual({
+      observable: true,
+      visits: [
+        [NO_GC, { major: 2, majorPauseMs: 322.5, other: 0, otherPauseMs: 0 }],
+        [{ major: 1, majorPauseMs: 350, other: 0, otherPauseMs: 0 }, NO_GC],
+        [NO_GC, NO_GC],
+      ],
+    });
+    expect(data.arms[1].gc).toEqual({
+      observable: true,
+      visits: [
+        [NO_GC, NO_GC],
+        [{ major: 0, majorPauseMs: 0, other: 1, otherPauseMs: 2 }, NO_GC],
+        [NO_GC, NO_GC],
+      ],
+    });
+    // The times and the judgement are the record's: GC data does not touch them.
+    expect(data.record).toBe(record);
+    expect(data.judgement).toBe(judgements[0]);
+    expect(presetAbResult(data).summary).toContain(
+      "Timed visits holding a major GC of the host: bf16 2 of 6 visits (322.5 ms to 350.0 ms of pause each) · i8 0 of 6 visits",
+    );
+  });
+
+  it("says that the host cannot observe GC, with no counts", async () => {
+    const record = await recordOf();
+    const data = presetAbData({
+      request,
+      distribution: { directory: "d", manifestSha256: hex("f"), read: "directory" },
+      text: CUT,
+      probes: [probe("bf16"), probe("i8")],
+      arms: [facts(BASE_FIRST), facts(COMPARED_FIRST)],
+      record,
+      judgements: judgeSessionAb(record, { minGain: 0.01, requireIdentity: false }),
+      gc: NOT_OBSERVABLE,
+    });
+    expect(data.arms.map(({ gc }) => gc)).toEqual([{ observable: false }, { observable: false }]);
+    const { summary } = presetAbResult(data);
+    expect(summary).toContain(
+      "Timed visits holding a major GC of the host: not observable (the host reports no gc performance entries)",
+    );
+    expect(summary.join("\n")).not.toMatch(/of \d+ visits/);
+  });
+});
+
+describe("a GC observer", () => {
+  it("attributes a GC to a span when the GC begins inside it, major GCs apart from the other kinds", () => {
+    const span = { startMs: 10, endMs: 20 };
+    const entries = [
+      { startTime: 9.9, duration: 50, kind: MAJOR_GC_KIND },
+      { startTime: 10, duration: 300, kind: MAJOR_GC_KIND },
+      { startTime: 15, duration: 1.5, kind: 1 },
+      { startTime: 16, duration: 2, kind: 16 },
+      { startTime: 20, duration: 25, kind: MAJOR_GC_KIND },
+      { startTime: 20.1, duration: 7, kind: 2 },
+    ];
+    expect(visitGc(span, entries)).toEqual({
+      major: 2,
+      majorPauseMs: 325,
+      other: 2,
+      otherPauseMs: 3.5,
+    });
+  });
+
+  it("reads as not observable on a host without the gc entry type, and on one without PerformanceObserver", async () => {
+    class MarksOnly {
+      static readonly supportedEntryTypes = ["mark", "measure"];
+      constructor() {
+        throw new Error("a host without gc entries is never observed");
+      }
+      observe(): void {}
+      takeRecords(): never[] {
+        return [];
+      }
+      disconnect(): void {}
+    }
+    for (const host of [MarksOnly, undefined]) {
+      const observer = observeGc(host);
+      await expect(observer.read()).resolves.toEqual({ observable: false });
+      observer.disconnect();
+    }
+  });
+
+  /**
+   * A host whose observers log their calls; `made` hands a test each observer's callback
+   * (`deliver`) and the entries its takeRecords returns (`pending`).
+   */
+  const fakeHost = (log: string[]) => {
+    const made: {
+      readonly deliver: (entries: readonly GcHostEntry[]) => void;
+      readonly pending: GcHostEntry[];
+    }[] = [];
+    class Host {
+      static readonly supportedEntryTypes = ["gc", "mark"];
+      readonly pending: GcHostEntry[] = [];
+      constructor(callback: (list: { getEntries(): readonly GcHostEntry[] }) => void) {
+        made.push({
+          deliver: (entries) => callback({ getEntries: () => entries }),
+          pending: this.pending,
+        });
+      }
+      observe(options: { readonly type: string }): void {
+        log.push(`observe ${options.type}`);
+      }
+      takeRecords(): readonly GcHostEntry[] {
+        log.push("takeRecords");
+        return this.pending.splice(0);
+      }
+      disconnect(): void {
+        log.push("disconnect");
+      }
+    }
+    return { host: Host satisfies GcObserverHost, made };
+  };
+
+  it("keeps every entry its callback received and the ones still pending when it is read", async () => {
+    const log: string[] = [];
+    const { host, made } = fakeHost(log);
+    const observer = observeGc(host);
+    expect(log).toEqual(["observe gc"]);
+    const [handle] = made;
+    handle.deliver([
+      { startTime: 1, duration: 2, detail: { kind: 1 } },
+      { startTime: 3, duration: 400, detail: { kind: 4, flags: 0 } },
+    ]);
+    handle.deliver([{ startTime: 5, duration: 6, detail: { kind: 8 } }]);
+    handle.pending.push({ startTime: 7, duration: 8, detail: { kind: 4 } });
+    await expect(observer.read()).resolves.toEqual({
+      observable: true,
+      entries: [
+        { startTime: 1, duration: 2, kind: 1 },
+        { startTime: 3, duration: 400, kind: 4 },
+        { startTime: 5, duration: 6, kind: 8 },
+        { startTime: 7, duration: 8, kind: 4 },
+      ],
+    });
+    observer.disconnect();
+    expect(log).toEqual(["observe gc", "takeRecords", "disconnect"]);
+  });
+
+  it("fails loudly on an entry without a numeric kind", async () => {
+    const { host, made } = fakeHost([]);
+    const observer = observeGc(host);
+    made[0].pending.push({ startTime: 1, duration: 2 });
+    await expect(observer.read()).rejects.toThrow(
+      "A gc performance entry has no numeric detail.kind",
+    );
+  });
+
+  it("sees, on Node, the GCs that allocation causes", async () => {
+    const observer = observeGc(globalPerformanceObserver());
+    try {
+      let kept: number[][] = [];
+      // About 400 MB of short-lived arrays: the young generation is collected many times.
+      for (let index = 0; index < 1_000_000; index += 1) {
+        kept.push(Array.from({ length: 50 }, () => index));
+        if (kept.length > 1000) kept = [];
+      }
+      const reading = await observer.read();
+      expect(reading.observable).toBe(true);
+      if (!reading.observable) return;
+      expect(reading.entries.length).toBeGreaterThan(0);
+      for (const entry of reading.entries) {
+        expect([1, 2, 4, 8, 16]).toContain(entry.kind);
+        expect(entry.duration).toBeGreaterThanOrEqual(0);
+      }
+    } finally {
+      observer.disconnect();
+    }
   });
 });
 
@@ -605,6 +892,96 @@ describe("the entry's run", () => {
       "probing bf16: loading, cutting query-en to 16 tokens, two embeds",
       "probing i8: loading, two embeds",
     ]);
+  });
+
+  /** An observer that logs its steps and reads as `reading` gives. */
+  const fakeObserver =
+    (log: string[], reading: () => GcReading): ObserveGc =>
+    () => {
+      log.push("observe gc");
+      return {
+        read: () => {
+          log.push("read gc");
+          return Promise.resolve(reading());
+        },
+        disconnect: () => {
+          log.push("disconnect gc");
+        },
+      };
+    };
+
+  it("observes the host's GCs over the A/B alone and keeps them per timed visit of each arm", async () => {
+    const log: string[] = [];
+    // A major GC of 12 ms inside every embed of the bf16 arm (warm-up included), none in a probe.
+    const gcTimes: number[] = [];
+    const device = fakeDevice(log);
+    const marking: PresetAbDevice = {
+      ...device,
+      pipeline: async (ref, options) => {
+        const pipeline = await device.pipeline(ref, options);
+        if (options.quant !== "bf16" || options.onRunDiagnostics !== undefined) return pipeline;
+        return {
+          ...pipeline,
+          embed: async (text, embedOptions) => {
+            const out = await pipeline.embed(text, embedOptions);
+            gcTimes.push(performance.now());
+            return out;
+          },
+        };
+      },
+    };
+    const result = await runPresetAb(
+      contextOf([]),
+      () => Promise.resolve(marking),
+      fakeObserver(log, () => ({
+        observable: true,
+        entries: gcTimes.map((startTime) => ({ startTime, duration: 12, kind: MAJOR_GC_KIND })),
+      })),
+    );
+    expect(gcTimes).toHaveLength(8);
+    const major = { major: 1, majorPauseMs: 12, other: 0, otherPauseMs: 0 };
+    const none = { major: 0, majorPauseMs: 0, other: 0, otherPauseMs: 0 };
+    expect(result.data).toMatchObject({
+      arms: [
+        { name: "bf16", gc: { observable: true, visits: Array(3).fill([major, major]) } },
+        { name: "i8", gc: { observable: true, visits: Array(3).fill([none, none]) } },
+      ],
+    });
+    expect(result.summary).toContain(
+      "Timed visits holding a major GC of the host: bf16 6 of 6 visits (12.0 ms of pause each) · i8 0 of 6 visits",
+    );
+    // Made after the probes, read after the arms closed, disconnected before the device goes.
+    expect(log.slice(0, 7)).toEqual([
+      "build bf16 with diagnostics",
+      "dispose bf16",
+      "build i8 with diagnostics",
+      "dispose i8",
+      "observe gc",
+      "build bf16",
+      "build i8",
+    ]);
+    expect(log.slice(7, 9).toSorted()).toEqual(["dispose bf16", "dispose i8"]);
+    expect(log.slice(9)).toEqual(["read gc", "disconnect gc", "destroy"]);
+  });
+
+  it("disconnects the GC observer when the A/B fails", async () => {
+    const log: string[] = [];
+    const device = fakeDevice(log);
+    const failing: PresetAbDevice = {
+      ...device,
+      pipeline: (ref, options) =>
+        options.onRunDiagnostics === undefined
+          ? Promise.reject(new Error("the arm cannot load"))
+          : device.pipeline(ref, options),
+    };
+    await expect(
+      runPresetAb(
+        contextOf([]),
+        () => Promise.resolve(failing),
+        fakeObserver(log, () => ({ observable: false })),
+      ),
+    ).rejects.toThrow("the arm cannot load");
+    expect(log.slice(4)).toEqual(["observe gc", "disconnect gc", "destroy"]);
   });
 
   it("refuses a compared preset whose pipeline reads the text as other ids, and releases the device", async () => {

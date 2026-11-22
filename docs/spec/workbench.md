@@ -246,26 +246,48 @@ whose rounds were taken kernel after kernel:
 
 ### The EmbeddingGemma preset A/B's record
 
-`karume-embeddinggemma-preset-ab/1`, the `data` of an `embeddinggemma-preset-ab` run:
+`karume-embeddinggemma-preset-ab/2`, the `data` of an `embeddinggemma-preset-ab` run. Nothing reads the records of
+`karume-embeddinggemma-preset-ab/1`, whose arms had no GC reading:
 
 | Field | Content |
 | --- | --- |
-| `format` | `karume-embeddinggemma-preset-ab/1` |
+| `format` | `karume-embeddinggemma-preset-ab/2` |
 | `request` | `mount`, `model` (the manifest's default), `base` and `compared` (the presets, the default resolved), `tokens`, `rounds`, `minGain` |
 | `distribution` | The mount's facts (directory, the sha256 of its manifest, how it was read) |
 | `text` | The golden case the text is a prefix of, its prompt (absent without one), the prefix's length in code points and its length in token ids; not the text itself |
 | `probes` | Per preset, base first: the wall time of `fromPretrained` (`loadMs`: the manifest, part 0, admission, reading and uploading the weight parts — under Node from the mirror's directory), of the first and the second `embed`, and from the second run's diagnostics the Session build's breakdown (`build`: `SessionBuildStats` — `supplyWaitMs` is the wait for the supply, the read of the parts), the weight arena (`weights`), the low-precision storage (`storage`), the plan backing (`planBacking`), the planned dispatches summed over the pipeline keys and the geometry profile |
-| `arms` | Per arm, base first: its preset's name, the median over the rounds of the mean of the round's two visits (`medianMs`; the base's is the judge's `baseMedianMs`), the fastest timed visit (`minMs`), each open's wall time (`openMs`, `fromPretrained` after the probe read the files once), the runs compared with the arm's own first vector and how many differed |
+| `arms` | Per arm, base first: its preset's name, the median over the rounds of the mean of the round's two visits (`medianMs`; the base's is the judge's `baseMedianMs`), the fastest timed visit (`minMs`), the host's garbage collections in each timed visit (`gc`, [below](#garbage-collections-of-the-host)), each open's wall time (`openMs`, `fromPretrained` after the probe read the files once), the runs compared with the arm's own first vector and how many differed |
 | `cosine` | The cosine of the compared arm's first vector against the base's |
 | `modelsVersion` | The version of `@karume/models` |
 | `record`, `judgement` | The runtime's `karume-session-ab/1` record, unchanged (its identity holds against the base's first vector, so the compared arm's differs), and `judgeSessionAb(record, { minGain, requireIdentity: false })` of the compared arm |
 
 - The record holds no GPU clock, power or thermal reading: WebGPU exposes none, and an entry holds no Node API. A
   reading belongs next to the run.
-- The record keeps the fastest visit beside the median. It holds no garbage-collection reading: under Node a major GC
-  of the process can fall on the same visit of every round. What the development machine showed in such runs (slow
-  stretches in both arms at 2,048 tokens, and one visit per round stalled by a major GC at 8,192) is in
+- The record keeps the fastest visit beside the median: under Node a major GC of the process can fall on the same
+  visit of every round. What the development machine showed in such runs (slow stretches in both arms at 2,048
+  tokens, and one visit per round stalled by a major GC at 8,192) is in
   [research 2026-11-22](../research/2026-11-22-embeddinggemma2-quant-screen.md).
+
+#### Garbage collections of the host
+
+- An observer of the Web-standard `PerformanceObserver` entry type `gc` runs from just before the runner opens the
+  arms until the runner has closed them. The type is feature-detected through `PerformanceObserver.supportedEntryTypes`:
+  Node reports it, browsers do not.
+- Each arm notes `performance.now()` (the entries' timeline) right before and right after the `embed` of every run.
+  A GC belongs to a visit when its `startTime` lies inside that span, both ends included; one that begins in the
+  runner's span but outside the `embed` (the call around it) is not counted.
+- On a host that reports GCs, an arm's `gc` is `{ "observable": true, "visits": … }`: `visits[r][v]` is round
+  `r + 1`, visit `v + 1`, the layout of the record's `timesMs`, each with `major` (the count of major GCs — Node's
+  `detail.kind` 4, V8's mark-sweep-compact), `majorPauseMs` (their durations summed), `other` and `otherPauseMs`
+  (every other kind together: scavenges, minor mark-sweeps, incremental marking, weak callbacks). The warm-up round
+  and the probes are not in it. Run spans that do not match the runner's runs of that arm are an error.
+- On a host that does not, it is `{ "observable": false }`, with no counts.
+- Node delivers a `gc` entry on a later task than the GC; the observer is read after the runner returns, two tasks of
+  the event loop later, and keeps every entry it was handed for its whole life.
+- The GC reading changes neither the times nor the judgement.
+- The summary's fourth line says per arm how many timed visits held a major GC and the range of those visits' summed
+  major pauses (`<preset> <n> of <visits> visits (<lowest> ms to <highest> ms of pause each)`, one value when
+  they are equal, no range when none held one), or that the host cannot observe GC.
 
 ## The record
 

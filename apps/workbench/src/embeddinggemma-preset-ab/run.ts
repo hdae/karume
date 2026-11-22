@@ -1,15 +1,21 @@
 /**
  * The run of an EmbeddingGemma preset A/B (`embeddinggemma-preset-ab`): the request read from the
  * mirror's manifest, the device acquired, each preset probed (the base's probe cuts the text, the
- * compared one checks that its pipeline reads the same ids), the two arms timed and judged, the
- * device released. The device and its pipelines come through {@link AcquirePresetAbDevice}, so
+ * compared one checks that its pipeline reads the same ids), the two arms timed and judged while
+ * an observer collects the host's GCs, the device released. The device and its pipelines come
+ * through {@link AcquirePresetAbDevice} and the observer through an {@link ObserveGc}, so
  * `vp test` drives the whole run with fakes; the entry passes `acquireGpu` and
- * `embeddinggemma.Pipeline.fromPretrained`.
+ * `embeddinggemma.Pipeline.fromPretrained`, and the observer is the global `PerformanceObserver`'s.
  */
 
 import { loadManifest } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { judgeSessionAb, runSessionAb, type SessionAbAdapter } from "@karume/runtime/tune";
+import {
+  judgeSessionAb,
+  runSessionAb,
+  type SessionAbAdapter,
+  type SessionAbRecord,
+} from "@karume/runtime/tune";
 
 import {
   type EntryResult,
@@ -31,6 +37,7 @@ import {
   promptOptions,
 } from "./arm.ts";
 import { PRESET_AB_MOUNT, presetAbData, presetAbRequest, presetAbResult } from "./data.ts";
+import { type GcObserver, type GcReading, globalPerformanceObserver, observeGc } from "./gc.ts";
 import { type CutText, cutText, GOLDEN_CASES, sourceCase } from "./text.ts";
 
 /** The mirror has the direct route only (no published repository behind `/hf/`). */
@@ -55,13 +62,20 @@ export type PresetAbDevice = {
 /** Acquires the device with the host's options (`acquireGpu` in the entry). */
 export type AcquirePresetAbDevice = (options: GpuOptions) => Promise<PresetAbDevice>;
 
+/** Starts observing the host's GCs ({@link observeGc} unless a test passes a fake). */
+export type ObserveGc = () => GcObserver;
+
 const sameIds = (a: Int32Array<ArrayBuffer>, b: Int32Array<ArrayBuffer>): boolean =>
   a.length === b.length && a.every((id, index) => id === b[index]);
 
-/** One run of the entry over `context`, the device from `acquire`. */
+/**
+ * One run of the entry over `context`, the device from `acquire`; the host's GCs from `observe`,
+ * made before the A/B's runner starts and disconnected when it is done.
+ */
 export const runPresetAb = async (
   context: RunContext,
   acquire: AcquirePresetAbDevice,
+  observe: ObserveGc = () => observeGc(globalPerformanceObserver()),
 ): Promise<EntryResult> => {
   const { parameters, gpuOptions, signal, progress, openDistribution, backend } = context;
   const opened = await openDistribution(PRESET_AB_MOUNT, SOURCE);
@@ -136,11 +150,19 @@ export const runPresetAb = async (
         signal,
       }),
     ];
-    const record = await runSessionAb({
-      arms: arms.map((arm) => steppedArm(arm, onStep)),
-      rounds: request.rounds,
-      environment: runnerEnvironment(device.adapterInfo, backend),
-    });
+    const observer = observe();
+    let record: SessionAbRecord;
+    let gc: GcReading;
+    try {
+      record = await runSessionAb({
+        arms: arms.map((arm) => steppedArm(arm, onStep)),
+        rounds: request.rounds,
+        environment: runnerEnvironment(device.adapterInfo, backend),
+      });
+      gc = await observer.read();
+    } finally {
+      observer.disconnect();
+    }
     const judgements = judgeSessionAb(record, {
       minGain: request.minGain,
       requireIdentity: false,
@@ -154,6 +176,7 @@ export const runPresetAb = async (
         arms: [arms[0].facts(), arms[1].facts()],
         record,
         judgements,
+        gc,
       }),
     );
   } finally {

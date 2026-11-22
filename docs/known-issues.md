@@ -710,7 +710,10 @@ preset itself (every other `bf16` embed at 8,192 tokens about 1.8× slower); the
   measurements under Node. The runtime's GPU work and the outputs are not affected: each preset's vector was
   bit-identical over every run of every record. At 8,192 tokens the two presets take the same GPU time; the 1.37 to
   1.39 times of the `bf16` mean over `i8`'s in the first two records is the stall's position, not the preset.
-- Fix candidates (none decided): an upstream report to the binding (one allocation per poll); recording the number of
-  major GCs and their pause per visit in the workbench A/B record, so a judgement can see which visits held one; and,
-  as a measurement option, not a default, a forced GC between visits outside the timed span (it removes the pattern,
-  e09, but hides a cost a Node caller pays).
+- Fix candidates: an upstream report to the binding (one allocation per poll; not decided); recording the number of
+  major GCs and their pause per visit in the workbench A/B record — built 2026-11-22: `karume-embeddinggemma-preset-ab/2`
+  holds, per arm and timed visit, the count of major GCs that began inside the visit's `embed` and their summed pause,
+  and the same for the other kinds together (or that the host cannot observe GC), and its summary says per arm how many
+  timed visits held a major GC and the range of their pauses ([the spec](spec/workbench.md#garbage-collections-of-the-host));
+  and, as a measurement option, not a default, a forced GC between visits outside the timed span (it removes the
+  pattern, e09, but hides a cost a Node caller pays; not decided).

@@ -1,11 +1,13 @@
 /**
  * The arms of an EmbeddingGemma preset A/B and the probe before it. An arm is one preset's
  * pipeline, built when the runner opens it and kept until it closes; a run is one `embed` of the
- * cut text, nothing else (no signal, so the pipeline takes no turn of the event loop before the
- * run; no diagnostics callback, so the run is the production path). Outside the timed span the
- * arm's report compares the run's vector with the arm's own first one, so the record says whether
- * each preset gave the same bits every time — the runner's identity holds against the base's first
- * vector, which the other preset differs from by design.
+ * cut text between two reads of the clock, nothing else (no signal, so the pipeline takes no turn
+ * of the event loop before the run; no diagnostics callback, so the run is the production path).
+ * Outside the timed span the arm's report compares the run's vector with the arm's own first one,
+ * so the record says whether each preset gave the same bits every time — the runner's identity
+ * holds against the base's first vector, which the other preset differs from by design. The two
+ * reads of the clock are the run's span, so the host's GCs inside a run can be told apart
+ * (`gc.ts`).
  *
  * The probe is a pipeline of its own, built with the diagnostics callback, timed while it loads and
  * while it runs the text once, then disposed: what the diagnostics say about the load, the resident
@@ -32,6 +34,9 @@ export const EMBEDDING_OUTPUT = "embedding";
 export const promptOptions = (text: Pick<CutText, "prompt">): { readonly prompt?: string } =>
   text.prompt === undefined ? {} : { prompt: text.prompt };
 
+/** When one run's `embed` began and ended, on the host clock (`performance.now`). */
+export type RunSpan = { readonly startMs: number; readonly endMs: number };
+
 /** What one arm learned while the runner drove it. */
 export type PresetArmFacts = {
   /** The wall time of each open (building the pipeline: `fromPretrained`), in order. */
@@ -40,6 +45,8 @@ export type PresetArmFacts = {
   readonly runs: number;
   /** The runs whose vector differs from the first in at least one word. */
   readonly differingRuns: number;
+  /** Every run's span in run order, the untimed ones (the warm-up round's) included. */
+  readonly runSpans: readonly RunSpan[];
   /** The arm's first vector, the one the others are compared with. */
   readonly first?: Float32Array<ArrayBuffer>;
 };
@@ -56,9 +63,10 @@ const sameWords = (a: Float32Array<ArrayBuffer>, b: Float32Array<ArrayBuffer>): 
 };
 
 /**
- * One preset's arm: `open` builds the pipeline (`build`, timed by `clock`), `run` embeds the text,
- * `report` checks the vector against the arm's first and then `signal` (a cancel takes effect
- * between two runs, outside the timed span), `close` disposes the pipeline.
+ * One preset's arm: `open` builds the pipeline (`build`, timed by `clock`), `run` embeds the text
+ * (the embed's span read from `clock` too), `report` checks the vector against the arm's first and
+ * then `signal` (a cancel takes effect between two runs, outside the timed span), `close` disposes
+ * the pipeline.
  */
 export const presetArm = (input: {
   readonly name: string;
@@ -70,6 +78,7 @@ export const presetArm = (input: {
   const { name, text, build, signal, clock = () => performance.now() } = input;
   const options = promptOptions(text);
   const openMs: number[] = [];
+  const runSpans: RunSpan[] = [];
   let pipeline: EmbeddingPipeline | undefined;
   let last: Float32Array<ArrayBuffer> | undefined;
   let first: Float32Array<ArrayBuffer> | undefined;
@@ -85,7 +94,9 @@ export const presetArm = (input: {
     },
     run: async () => {
       if (pipeline === undefined) throw new Error(`The arm ${name} runs before it is open`);
+      const startMs = clock();
       last = await pipeline.embed(text.text, options);
+      runSpans.push({ startMs, endMs: clock() });
       return { outputs: { [EMBEDDING_OUTPUT]: last } };
     },
     report: async () => {
@@ -105,6 +116,7 @@ export const presetArm = (input: {
       openMs: [...openMs],
       runs,
       differingRuns,
+      runSpans: [...runSpans],
       ...(first === undefined ? {} : { first }),
     }),
   };
