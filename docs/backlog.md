@@ -56,7 +56,7 @@ maintainer's ruling of 2026-11-06).
   - Put after the release by the maintainer's rulings of 2026-11-19: the GEMV derivation's evidence rules
     (perf-ledger K-113; built 2026-11-20; the registered tables derived again under them 2026-11-21), and the bf16 shapes
     that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
-    publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma";
+    publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma" (parked 2026-11-22);
     and EmbeddingGemma 2 ("EmbeddingGemma 2" below).
   - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
     Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
@@ -683,12 +683,6 @@ maintainer's ruling of 2026-11-06).
   two need ops outside the vocabulary. The point-in-time record of the candidate survey is
   [recon-2](research/2026-08-14-model-expansion-recon-2.md).
 - **Performance candidates**: the 🚧 rows of [perf-ledger](perf-ledger.md) are the source of truth for filing, adoption and order.
-- **Completing EmbeddingGemma** (models pipeline / distribution, batch>1 export, runtime attention_mask wiring) — after
-  the 0.23.0 release (the maintainer's ruling of 2026-11-19; the first item of `later`). The tokenizer is shared with
-  Gemma 4 and its assets are compiled separately (ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The
-  wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md). Its recipe must declare its
-  window with `karume.band.to_band_form`: the family `embeddinggemma` refuses a graph value holding the token length on
-  two axes, which the folded `[1, 1, T, T]` band mask is.
 - **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
   2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
@@ -879,6 +873,17 @@ maintainer's ruling of 2026-11-06).
   and its withdrawal of 2026-10-18). Order not ruled
 
 ## parked (with revival conditions)
+
+- **Completing EmbeddingGemma** (the first model, `google/embeddinggemma-300m`: models pipeline / distribution,
+  batch>1 export, runtime attention_mask wiring) — parked by the maintainer 2026-11-22: EmbeddingGemma 2 covers the use
+  (Apache-2.0, 8,192 tokens), and no fine-tune of the first model worth serving was found. Revival = a use for the first
+  model (an existing index of its vectors, a fine-tune worth serving), or the quant presets of EmbeddingGemma 2 turning
+  out much larger or slower than the first model's. What exists stays as it is (the recipe, its tests, the
+  limitations section). The tokenizer is shared with Gemma 4 and its assets are compiled separately (ADR
+  [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The wall in the conversion stage of the batch>1 export is
+  in [known-issues](known-issues.md). Its recipe must declare its window with `karume.band.to_band_form`: the family
+  `embeddinggemma` refuses a graph value holding the token length on two axes, which the folded `[1, 1, T, T]` band
+  mask is.
 
 - **Quantized weight delta as a way to ship or store a LoRA** (on hold, the maintainer 2026-11-15). The integer difference
   between `Q(W + ΔW)` and the distributed `Q(W)`; the measurement is
