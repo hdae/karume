@@ -65,7 +65,7 @@ const intervalText = (judgement: SessionAbJudgement): string =>
  * One compared arm's judgement in one line: the verdict, the gain and the interval of the median
  * difference.
  */
-const judgementLine = (judgement: SessionAbJudgement): string =>
+export const judgementLine = (judgement: SessionAbJudgement): string =>
   `${judgement.arm} against ${judgement.base}: ${VERDICT_LABELS[judgement.verdict]} · gain ${gainText(judgement)} · ${intervalLabel(judgement).toLowerCase()} ${intervalText(judgement)}`;
 
 const signed = (value: number): string => `${value >= 0 ? "+" : "−"}${Math.abs(value)}`;

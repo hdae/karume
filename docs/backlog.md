@@ -687,7 +687,8 @@ maintainer's ruling of 2026-11-06).
   2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
   token length up to 8,192 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
-  recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, preset `bf16`, nothing published),
+  recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, presets `bf16` (default) and `i8`
+  since 2026-11-22, nothing published),
   the series and its e2e, and step 1 of the order below: the TypeScript family `embeddinggemma`
   (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts, widths and token limit, no
   `SOURCES` until the first publication) with its pipeline e2e over the mirror, all in the lane
@@ -715,6 +716,24 @@ maintainer's ruling of 2026-11-06).
      also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
      with `hfRepo` from it.
      - Stage A, the torch-CPU screening of i8 / i4 weight forms and i8 + a8: [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md).
+     - Built 2026-11-22 (the maintainer's choice that day: one int8 preset, the default stays `bf16`): the preset `i8`
+       — the token table and every linear (219 tensors) as per-row symmetric int8, f32 compute, empty session — from the
+       series `embeddinggemma-2-text-i8` (`export.py --dtype i8`: rounded before the reference and the goldens, the same
+       graph, band, cases and bound); the mirror carries `bf16`★ and `i8` (323,958,008-byte container against
+       592,932,727; no `requiredLimits` for `i8`, whose int8 table is exactly the WebGPU default 128 MiB); the series
+       e2e of the i8 series against its own goldens (maxAbs at most 2.87e-7), the pipeline e2e over both presets with
+       sha256 rows per preset, and the GPU check that each golden text's `i8` vector keeps a cosine of at least 0.999 to
+       its `bf16` one at every width (measured 0.99940 to 0.99993 at 768, the screening's values to the seventh digit).
+       The card states the screening's numbers with their source.
+     - Left unbuilt, by the same choice: the activation-int8 preset `i8-a8` (the screening: lowest cosine 0.99563 and
+       2.39% of the ranking triples inverted at 768, against 0.99940 and 0.74% for `i8`), and every 4-bit preset (lowest
+       0.960 to 0.966, 8.2 to 8.5% inverted).
+     - Left as is: the folded RoPE tables, a fixed 48 MiB of f32 constants in every preset (cos and sin of
+       `[8192, 256]` and `[8192, 512]` — what bounds T at 8,192).
+     - Left: the two slow patterns the preset A/B measured on the RTX 3080 Ti (every other `bf16` embed at 8,192
+       tokens about 1.8× slower; periodic stretches about 11× slower at 2,048 tokens in both presets) — filed in
+       [known issues](known-issues.md), cause not investigated.
+     - Left: the first publication, awaiting the maintainer's go-ahead.
   4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
      `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is
      returned, not refused), and the Playground page `/embeddinggemma` shows each row's count against the limit once

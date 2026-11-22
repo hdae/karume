@@ -1,8 +1,9 @@
 > A point-in-time measurement record (2026-11-22): a torch-CPU screening of quantized weight forms for the text tower
 > of EmbeddingGemma 2, against the embeddings of the checkpoint's own weights. It is stage A of the model's quant
-> presets (step 3 of the EmbeddingGemma 2 item in [backlog](../backlog.md)). Every number below is copied from one run
-> of the script named beside it; nothing here is a design source of truth or a decision, and it is not edited to
-> follow later events.
+> presets (step 3 of the EmbeddingGemma 2 item in [backlog](../backlog.md)). Every number of the screening is copied
+> from one run of the script named beside it; the section on the speed of the shipped `i8` preset, added the same day,
+> copies its numbers from the GPU workbench records named there and from the `nvidia-smi` samples kept beside them.
+> Nothing here is a design source of truth or a decision, and it is not edited to follow later events.
 
 # EmbeddingGemma 2 quant screening (torch CPU fake-quant)
 
@@ -174,3 +175,137 @@ preset.
   topics, so this set does not separate the configurations at top-1; the inversion rate and the matrix change are the
   metrics that move here.
 - The golden case `bare` (12 tokens, no prompt) is the lowest cosine of every configuration.
+
+## Speed of the shipped `i8` preset against `bf16` (RTX 3080 Ti, Node + Dawn)
+
+Added the same day after the `i8` preset was built into the local mirror; every number below is copied from the
+workbench records named beside it, not from the screening script, except the clock, power, temperature and
+utilisation figures, which come from the `nvidia-smi` samples in `outputs/diag/eg2-preset-ab-2026-11-22/` (untracked:
+`t<T>.smi.csv` per run, `t8192-swap.smi.csv` for the swapped run, the console output beside them and the sampler's
+scripts in `scripts/`).
+
+### What was measured and how
+
+- **Entry**: the workbench's `embeddinggemma-preset-ab` (`apps/workbench/src/entries/local/embeddinggemma-preset-ab.ts`,
+  [the spec](../spec/workbench.md#the-embeddinggemma-preset-abs-record)), run as
+  `flock /tmp/karume-gpu.lock node apps/workbench/run.ts embeddinggemma-preset-ab --tokens=<T> --rounds=<R>` on the
+  development machine (RTX 3080 Ti, Dawn's Vulkan backend under Node, geometry profile `nvidia-ampere`), the mirror
+  `models/karume-embeddinggemma-2` with both presets, checkout `cd475469` with the uncommitted `i8` work (`dirty`).
+- **Arms**: `embeddinggemma.Pipeline.fromPretrained` of `bf16` (the base) and of `i8`, both on one device acquired
+  without features, opened once and resident for the whole A/B. A run is one `embed` of one text (no signal, no
+  diagnostics callback; the timed span is the whole call, so it holds the tokenization of the text on the host and
+  the readback of the vector besides the GPU work), timed by `runSessionAb` of `@karume/runtime/tune`: one untimed
+  warm-up round, then rounds that
+  visit the arms A B B A; `judgeSessionAb` without identity (the presets' vectors differ by design), minimum gain 1%.
+- **Texts**: a prefix of a golden case of the recipe whose ids (`Pipeline.tokenize` with the case's prompt, `<bos>`
+  and `<eos>` included) are exactly T: T = 16 is `query-en` whole, 512 the first 2,258 code points of
+  `document-609`, 2,048 `document-2048` (7,895 of 7,898 code points), 8,192 `document-8192` (29,544 of 29,547).
+- **One run per length**, in the order 16, 512, 2,048, 8,192, 90 s apart (the GPU back at 32 to 36 °C and idle
+  clocks before each). Rounds: 101 at 16 tokens, 61 at 512, 31 at 2,048, 15 at 8,192 — enough that the first
+  rounds, during which the GPU leaves its idle clocks, weigh little (at 16 tokens an earlier run of 21 rounds,
+  `…T11-52-49.json`, spent its first half second at 525 to 825 MHz — read from a side sampler whose samples were not
+  kept).
+- **Clocks**: the record cannot read them; `nvidia-smi` was sampled every 100 ms beside each run (SM and memory
+  clock, temperature, power, the power-cap and thermal reasons), and the figures below are the samples between the
+  first timed run and the closing of the pipelines.
+- **Probes**: before the A/B each preset was loaded once more by a pipeline of its own with the diagnostics callback,
+  the text embedded twice; load figures and bytes are that pipeline's (the second run's diagnostics). Loads read the
+  mirror from the local disk, so `supply wait` holds the disk read (the page cache warm after the first run of the
+  day), not a download.
+
+### Speed per length
+
+| T     | Rounds | Record (`outputs/workbench/node-nvidia-geforce-rtx-3080-ti/…`) | bf16 median | i8 median | bf16 fastest | i8 fastest | median Δ (i8 − bf16) | interval of the median Δ   | noise floor | judge        |
+| ----- | ------ | --------------------------------------------------------------- | ----------- | --------- | ------------ | ---------- | -------------------- | -------------------------- | ----------- | ------------ |
+| 16    | 101    | `embeddinggemma-preset-ab_2026-11-22T12-00-57.json`             | 13.4 ms     | 8.3 ms    | 12.7 ms      | 6.1 ms     | −5.25 ms (−39.25%)   | −5.30 to −5.21 ms (92.7%)  | 0.30 ms     | adopt        |
+| 512   | 61     | `embeddinggemma-preset-ab_2026-11-22T12-02-49.json`             | 30.4 ms     | 30.7 ms   | 27.1 ms      | 29.5 ms    | +0.35 ms (+1.15%)    | +0.23 to +0.51 ms (92.8%)  | 0.63 ms     | inconclusive |
+| 2,048 | 31     | `embeddinggemma-preset-ab_2026-11-22T12-05-37.json`             | 440.3 ms    | 119.2 ms  | 114.9 ms     | 115.5 ms   | −1.18 ms (−0.27%)    | −1.42 to +0.49 ms (92.9%)  | 1.15 ms     | inconclusive |
+| 8,192 | 15     | `embeddinggemma-preset-ab_2026-11-22T12-08-37.json`             | 1,378.5 ms  | 952.9 ms  | 936.5 ms     | 933.7 ms   | −424.25 ms (−30.78%) | −433.64 to −407.78 ms (96.5%) | 835.12 ms | inconclusive |
+
+"Median" is the median over the rounds of the mean of the round's two visits; "fastest" the fastest timed visit;
+Δ is the judge's paired difference per round (the percentage is the judge's gain against the bf16 median, with the
+sign of Δ); the interval is the order-statistic interval of the median Δ with its coverage. Each arm repeated its own
+first vector bit for bit in every run of every record, and the cosine of the `i8` vector against the `bf16` one was
+0.9999201 (16), 0.9997485 (512), 0.9997587 (2,048) and 0.9997382 (8,192).
+
+At 16 tokens `i8` is faster. At 512 it is not: both runs of that length read it slower (below). At 2,048 the two
+arms run at the same speed outside periodic stretches in which both are slow, and the arms' medians are those
+stretches' doing (next section). At 8,192 the `bf16` arm is slower on average, through an alternation that only
+`bf16` shows (next section).
+
+### What moved the long rows
+
+- **2,048 tokens: periodic stretches in which an embed takes about 11 times longer, in both arms.** Outside the
+  stretches every run took 114.9 to 124.7 ms (median 117.7 ms). A first stretch, from the first `i8` visit of round
+  4 to the second of round 7 (14 runs), held runs of 439 to 1,100 ms, rounds 5 and 6 wholly inside it at 439 to
+  447 ms. From round 11 on a stretch of eight consecutive runs recurs every 6 rounds (every 12 runs of each arm): it
+  starts at the last run of rounds 11, 17, 23 and 29 and covers rounds 12, 18, 24 and 30 whole. Inside it the first
+  run and every third one after it took 1,528 to 1,901 ms, the others 1,364 to 1,375 ms (11.6 times the median fast
+  run), so per stretch the extra-slow runs fall once on `bf16` and twice on `i8` — where the stretch starts in the
+  A B B A order decides it. The earlier run of the same length (`…T11-57-57.json`) shows the same pattern: a first
+  stretch from the last run of round 3 to the first of round 8 (18 runs, most at 301 to 305 ms), then eight-run
+  stretches from the first `i8` run of rounds 12, 18, 24 and 30 (the last cut short by the end of the run), there at
+  1,357 to 1,363 ms with the extra-slow runs at 1,539 to 2,152 ms — once on `i8` and twice on `bf16`. During the
+  stretches the GPU was at 100% utilisation, 1,770 to 1,965 MHz SM, 9,501 MHz memory and about 326 W: the clock does
+  not explain them. Of the 31 rounds of `…T12-05-37.json`, 14 have a paired difference beyond 100 ms (5 negative, 9
+  positive) and 17 are within 10 ms: the 15 rounds without a slow run and rounds 5 and 6. The median paired difference
+  (−1.18 ms) and its interval rest on those 17 clean rounds; the `bf16` arm's median (440.3 ms) is a round inside a
+  stretch.
+- **8,192 tokens: every other `bf16` run is about 1.8 times slower; `i8` is not.** With `bf16` as the base
+  (`…T12-08-37.json`), its first visit of each round took 1,731 to 1,816 ms from round 3 on (1,152 ms in round 2,
+  936 ms in round 1) and its second 942 to 974 ms, while both `i8` visits took 934 to 962 ms. Swapped
+  (`--base=i8 --compared=bf16`, `…T12-12-10.json`), `bf16`'s first visit took 1,514 to 1,730 ms in every round and its
+  second 938 to 971 ms, `i8` 936 to 964 ms. In run order the `bf16` runs alternate slow and fast in both arm orders
+  (from its third timed run with `bf16` as the base, from its first swapped), wherever the arm stands in the round;
+  the median slow run is 1.89 times the median fast one with `bf16` as the base and 1.74 times swapped. `i8` shows no
+  such alternation, and neither did the probes' two back-to-back runs of `bf16` (1,048 and 996 ms; 1,080 and 981 ms
+  swapped). Over the 30 timed runs of each arm the mean embed is 1,326 ms (`bf16`) against 951 ms (`i8`), and 1,307
+  against 954 ms swapped: `bf16`'s is 1.39 and 1.37 times `i8`'s. This is a measured, reproducible effect of running
+  the `bf16` preset at this length on this machine, not noise; its cause is unknown
+  ([known issues](../known-issues.md)). The judge calls both orders inconclusive because the `bf16` arm's own two
+  visits differ by 708 to 835 ms per round (its noise floor), more than the paired differences (−424 and +357 ms).
+  The fastest visits (936.5 against 933.7 ms) agree, but they leave out the slow half of the `bf16` runs.
+- Power was at the card's cap through the long runs: `sw_power_cap` active in 614 of 643 samples (2,048) and 607 of
+  670 (8,192), SM 1,635 to 1,965 MHz, memory at 9,501 MHz throughout; `sw_thermal` in 12 samples at 8,192 (up to
+  77.8 °C). At 512 tokens the cap was active in 75 of 88 samples at 1,785 to 1,965 MHz; at 16 tokens never (about
+  177 W). The arms are interleaved per round, so the cap applies to both alike.
+- The cause of either slow pattern was not investigated. The arms run the public pipeline and nothing else, so it
+  lies in the runtime, the driver or the device. The 2,048-token stretches reach both arms alike and leave the clean
+  rounds' paired differences as the reading; the 8,192-token alternation reaches only `bf16` and is part of what a
+  caller of that preset sees on this machine.
+
+### Load, resident weights and plan backing (the probes, 2026-11-22)
+
+| Preset | Load (`fromPretrained`) | supply wait | buffer create | write issue | upload fence | decode | uploaded       | weight arena           | low-precision as stored | first / second embed (16 · 512 · 2,048 · 8,192 tokens)        |
+| ------ | ----------------------- | ----------- | ------------- | ----------- | ------------ | ------ | -------------- | ---------------------- | ----------------------- | ------------------------------------------------------------- |
+| bf16   | 1,091 to 1,121 ms       | 384–412 ms  | 16.5–17.2 ms  | 147–154 ms  | 15–29 ms     | 0      | 592,560,232 B  | 592,562,268 B (565.1 MiB; 592,563,324 B at 8,192) | 541,851,648 B          | 84.0 / 30.4 · 104.7 / 52.5 · 207.4 / 137.5 · 1,047.6 / 995.9 ms |
+| i8     | 814 to 843 ms (1,208 ms once) | 222–243 ms (587 once) | 7.8–8.4 ms | 80.5–81.4 ms | 5.7–9.8 ms | 0 | 323,538,024 B | 323,540,060 B (308.6 MiB; 323,541,116 B at 8,192) | 272,829,440 B          | 50.1 / 24.0 · 81.5 / 52.4 · 167.9 / 136.4 · 1,001.2 / 995.2 ms   |
+
+- The ranges are over the four records of the table; the `i8` load of 1,208 ms (supply wait 587 ms) is the 8,192
+  record's, the second load of that run (the base's probe loads first). In the swapped 8,192 record the second probe,
+  there `bf16`'s, was slow too (1,521 ms, supply wait 669 ms); why was not looked into. The arms' own loads in the A/B
+  (the files read once already) were 1,019 to 1,063 ms (`bf16`) and 816 to 890 ms (`i8`).
+- The weight arena is the bytes the weights' buffers hold (the params cache's buffers too: 2,036 B, 3,092 B at 8,192
+  tokens); `i8` holds 54.6% of `bf16`'s. Nothing is decoded on the host for either preset.
+- Plan backing (the intermediates of one length, the same for both presets): 1.8 MiB at 16 tokens, 59.0 MiB at 512,
+  236.1 MiB at 2,048, 944.0 MiB at 8,192; dispatches 853 per run up to 2,048 tokens, 1,357 at 8,192 (the attention
+  row blocks).
+
+### What this shows and does not show
+
+- On this machine under Node, `i8` is faster at 16 tokens: 5.2 ms of 13.4 ms.
+- At 512 tokens `i8` is not faster. Both runs of that length read it slower: `…T12-02-49.json` by +0.35 ms (1.15%),
+  with the whole interval (+0.23 to +0.51 ms) on the slower side and judged inconclusive only because the difference
+  is under the noise floor; the earlier `…T11-55-27.json` by +1.24 ms (4.13%), judged reject. The fastest visits of
+  `…T12-02-49.json` were 27.1 ms (`bf16`) against 29.5 ms (`i8`); `…T11-55-27.json` predates the fastest-visit field.
+- At 2,048 tokens the clean rounds give a paired difference of −1.18 ms (0.27%), inconclusive: the same speed.
+- At 8,192 tokens `i8`'s mean embed is shorter, because every other `bf16` run is slow (the mean of `bf16` is 1.37 to
+  1.39 times that of `i8`); the fast `bf16` runs and the `i8` runs take the same time.
+- Its load is 251 to 298 ms shorter in three of the four probes (less to read and upload); in the 8,192 record the
+  `i8` probe, the second load, took 117 ms longer. Its first embed is 23 to 46 ms shorter and its weights 256.6 MiB
+  smaller on the GPU.
+- Not measured: any other GPU, any browser (Chrome's D3D12 or Metal backends), Deno, a device with the WebGPU default
+  limits (the `i8` preset's reason to exist on such devices; the pipeline e2e caps only the binding and buffer sizes
+  at the default, so it shows that `i8` needs no buffer or binding size above the default, not that every other
+  limit at its default suffices, and it measures no speed), batches of texts or any length other than these four, and
+  the cause of the two slow patterns above.

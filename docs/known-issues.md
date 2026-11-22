@@ -643,3 +643,32 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
 - Impact: wall-clock and per-dispatch numbers on this machine, and the sweep records the device tables are derived
   from. Outputs are not affected. Compare arms interleaved in one process, and read a median beside a minimum. Records
   made before 2026-11-20 were taken in the quiet mode.
+
+## EmbeddingGemma 2 on the RTX 3080 Ti: every other `bf16` embed at 8,192 tokens is about 1.8× slower, and 2,048-token embeds have periodic stretches about 11× slower (filed 2026-11-22; cause not investigated)
+
+Seen in the workbench's `embeddinggemma-preset-ab` (the `bf16` and `i8` presets of the local mirror resident on one
+device, A B B A rounds after a warm-up round) on the RTX 3080 Ti (Node + Dawn / Vulkan, geometry `nvidia-ampere`),
+checkout `cd475469` with the uncommitted `i8` work:
+
+- **8,192 tokens, `bf16` only**: in run order the `bf16` preset's embeds alternate slow and fast — 1,514 to 1,816 ms
+  against 938 to 974 ms (the median slow run 1.74 and 1.89 times the median fast one) — with `bf16` as the base and as
+  the compared arm alike, while every `i8` embed took 934 to 964 ms. The probe's two back-to-back embeds of `bf16`
+  before the A/B did not show it (1,048 then 996 ms; 1,080 then 981 ms). Over the A/B the mean `bf16` embed is 1.37
+  to 1.39 times `i8`'s.
+- **2,048 tokens, both presets**: outside the stretches an embed takes 114 to 125 ms. From round 11 on, a stretch of
+  eight consecutive embeds recurs every 6 rounds (every 12 runs of each arm); in it an embed takes 1,357 to 1,375 ms,
+  about 11 times as long, and its first embed and every third one after it 1,528 to 2,152 ms. An earlier, irregular
+  stretch near the start of each run holds embeds of about 300 ms in one run and about 440 ms in the other. Seen in
+  both runs of 31 rounds.
+- Records: `outputs/workbench/node-nvidia-geforce-rtx-3080-ti/embeddinggemma-preset-ab_2026-11-22T12-08-37.json` and
+  `…T12-12-10.json` (8,192 tokens, the two arm orders), `…T11-57-57.json` and `…T12-05-37.json` (2,048 tokens); the
+  `nvidia-smi` samples in `outputs/diag/eg2-preset-ab-2026-11-22/` (local, untracked); the reading in
+  [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md) (its section on the speed of the `i8`
+  preset).
+- **Not investigated**: the cause of either pattern. The power cap was active in most samples at both lengths, with
+  the SM clock at 1,635 to 1,965 MHz, but the arms are interleaved per round, so it applies to both. Hypothesis, not
+  checked: the 2,048-token stretches are the slow mode of the section above (episodes under sustained load); nothing
+  comparable is known for the `bf16`-only alternation. Not tried: another GPU, a browser, one pipeline resident alone.
+- **Impact**: speed only. Wall-clock embed times of the `bf16` preset at 8,192 tokens on this machine (about 1.4 times
+  `i8`'s on average), and the medians of long-text measurements on it. Outputs are not affected: each preset's vector
+  was bit-identical over every run of every record.
