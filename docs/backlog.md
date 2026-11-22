@@ -714,6 +714,7 @@ maintainer's ruling of 2026-11-06).
   3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead). The publication
      also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
      with `hfRepo` from it.
+     - Stage A, the torch-CPU screening of i8 / i4 weight forms and i8 + a8: [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md).
   4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
      `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is
      returned, not refused), and the Playground page `/embeddinggemma` shows each row's count against the limit once
