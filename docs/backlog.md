@@ -730,9 +730,11 @@ maintainer's ruling of 2026-11-06).
        0.960 to 0.966, 8.2 to 8.5% inverted).
      - Left as is: the folded RoPE tables, a fixed 48 MiB of f32 constants in every preset (cos and sin of
        `[8192, 256]` and `[8192, 512]` — what bounds T at 8,192).
-     - Left: the two slow patterns the preset A/B measured on the RTX 3080 Ti (every other `bf16` embed at 8,192
-       tokens about 1.8× slower; periodic stretches about 11× slower at 2,048 tokens in both presets) — filed in
-       [known issues](known-issues.md), cause not investigated.
+     - Left: the two slow patterns the preset A/B measured on the RTX 3080 Ti — at 8,192 tokens one visit per round
+       about 1.8× slower, found the same day to be a major GC of the Node process (the Dawn binding's polling while a
+       readback waits), not the `bf16` preset (both presets take the same GPU time); at 2,048 tokens periodic
+       stretches about 11× slower in both presets, in the GPU time itself (the slow mode's signature, cause not
+       investigated) — filed in [known issues](known-issues.md) with the fix candidates, none chosen.
      - Left: the first publication, awaiting the maintainer's go-ahead.
   4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
      `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is

@@ -632,7 +632,9 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
   §6), which spreads the rounds of a GEMV sweep's baseline — in the turbo mode too (216 of 690 groups of two `full`
   records of 2026-11-20 beyond ×1.25), so it is not the thermal throttling below; the derivation reads a reference at its fastest time
-  over the records for that reason (perf-ledger K-113).
+  over the records for that reason (perf-ledger K-113). The periodic stretches of EmbeddingGemma 2 at 2,048 tokens
+  ([below](#embeddinggemma-2-on-the-rtx-3080-ti-under-node--dawn-a-major-gc-stalls-some-long-embeds-on-the-host-and-2048-token-embeds-have-periodic-stretches-about-11-slower-on-the-gpu-filed-2026-11-22-the-host-cause-found-2026-11-22-the-stretches-cause-not-investigated))
+  show the same signature in its attention kernels.
 - **Clock changes under load** (thermal throttling identified 2026-11-17; mitigated 2026-11-20 by switching the card
   from its quiet mode to its turbo mode): in the quiet mode the card ran at 77–96 °C under long or shared load with its
   thermal slowdown flag set, and a long run after a quiet spell was slower than the same run warm. In the turbo mode
@@ -644,31 +646,71 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   from. Outputs are not affected. Compare arms interleaved in one process, and read a median beside a minimum. Records
   made before 2026-11-20 were taken in the quiet mode.
 
-## EmbeddingGemma 2 on the RTX 3080 Ti: every other `bf16` embed at 8,192 tokens is about 1.8× slower, and 2,048-token embeds have periodic stretches about 11× slower (filed 2026-11-22; cause not investigated)
+## EmbeddingGemma 2 on the RTX 3080 Ti under Node + Dawn: a major GC stalls some long embeds on the host, and 2,048-token embeds have periodic stretches about 11× slower on the GPU (filed 2026-11-22; the host cause found 2026-11-22; the stretches' cause not investigated)
 
 Seen in the workbench's `embeddinggemma-preset-ab` (the `bf16` and `i8` presets of the local mirror resident on one
 device, A B B A rounds after a warm-up round) on the RTX 3080 Ti (Node + Dawn / Vulkan, geometry `nvidia-ampere`),
-checkout `cd475469` with the uncommitted `i8` work:
+checkout `cd475469` with the uncommitted `i8` work, and investigated on 2026-11-22 at `943ad5c9` with a standalone
+script under plain Node and under the Vite module runner the workbench runs in. Filed first as a slowdown of the `bf16`
+preset itself (every other `bf16` embed at 8,192 tokens about 1.8× slower); the investigation showed it is not one.
 
-- **8,192 tokens, `bf16` only**: in run order the `bf16` preset's embeds alternate slow and fast — 1,514 to 1,816 ms
-  against 938 to 974 ms (the median slow run 1.74 and 1.89 times the median fast one) — with `bf16` as the base and as
-  the compared arm alike, while every `i8` embed took 934 to 964 ms. The probe's two back-to-back embeds of `bf16`
-  before the A/B did not show it (1,048 then 996 ms; 1,080 then 981 ms). Over the A/B the mean `bf16` embed is 1.37
-  to 1.39 times `i8`'s.
-- **2,048 tokens, both presets**: outside the stretches an embed takes 114 to 125 ms. From round 11 on, a stretch of
-  eight consecutive embeds recurs every 6 rounds (every 12 runs of each arm); in it an embed takes 1,357 to 1,375 ms,
-  about 11 times as long, and its first embed and every third one after it 1,528 to 2,152 ms. An earlier, irregular
-  stretch near the start of each run holds embeds of about 300 ms in one run and about 440 ms in the other. Seen in
-  both runs of 31 rounds.
+- **8,192 tokens: one visit position per round, stalled on the host.** In the four workbench records one visit of
+  each A B B A round took 1,514 to 1,816 ms against 930 to 986 ms for the others, and that visit was a `bf16` one in
+  all four (the round's first visit in `…T12-08-37.json`, its second in the swapped `…T12-12-10.json`, its fourth in
+  `…T13-47-24.json` and `…T13-57-58.json`). What the investigation observed:
+  - While a readback's `mapAsync` is pending, the Node binding of Dawn (npm `webgpu` 0.6.2) polls through
+    `setImmediate`, each poll a new native callback: 335 to 361 thousand polls per 8,192-token embed (the runs of e08
+    and e09 that held no major GC), and about 260 MiB of short-lived objects per embed under those callbacks (a heap
+    sampling of one embed, a01: 217 and 43 of 320 MiB).
+  - Every few embeds a major GC stops the main thread for 322 to 400 ms (e08, w02), and in most stalled runs another
+    213 to 223 ms (e08) or 236 to 293 ms (w02) pass after the readback resolves before the next embed begins.
+  - In the workbench process the major GC came about every 4.6 s (w01 `--trace-gc`: the heap at 1,040 to 1,126 MB,
+    back to 269 MB after), which is one A B B A round at this length, so it landed on the same visit every round.
+    Under plain Node the heap stayed smaller (383 to 421 MB), the major GC came every 1.5 to 1.7 s with pauses of 97
+    to 139 ms (e03), and a run was slow only when the GC met the end of its GPU wait.
+- **Evidence** (`outputs/diag/eg2-bf16-alternation-2026-11-22/logs/`; wall time of one `embed`, the first two runs
+  of each log left out; the runs of the slow mode, 11.5 to 21.4 s, also left out):
+
+  | Run | How | Slow runs | Other runs |
+  | --- | --- | --- | --- |
+  | e01 | Plain Node, `bf16` loaded alone | 6 of 18, every third, 1,181–1,211 ms | 932–943 ms |
+  | e02 | Plain Node, `i8` loaded alone | 6 of 18, every third, 1,114–1,167 ms | 925–937 ms |
+  | e08 | Vite module runner, both resident, A B B A (`bf16` first) | 10 of 38, every fourth run (a `bf16` visit), 1,162–1,381 ms | 923–974 ms |
+  | e15 | As e08, B A A B (`i8` first) | 5 of 20, every fourth run (now an `i8` visit), 1,100–1,710 ms | 925–974 ms |
+  | e09 | As e08, a forced full GC between visits, outside the timed span | none of 38 | 926–977 ms |
+  | e12 | As e08, with GPU timestamps (runs 2 to 17) | 3 (1,110–1,218 ms), GPU time 922–929 ms | 942–984 ms, GPU time 914–931 ms |
+
+  GPU time does not separate the presets either: in e12 the `bf16` runs took 917 to 931 ms of it, the `i8` runs 914
+  to 927 ms.
+- **2,048 tokens: a different thing, on the GPU.** Outside the stretches an embed takes 114 to 125 ms. From round 11
+  on, a stretch of eight consecutive embeds recurs every 6 rounds (every 12 runs of each arm); in it an embed takes
+  1,357 to 1,375 ms, about 11 times as long, and its first embed and every third one after it 1,528 to 2,152 ms. With
+  GPU timestamps (e14, 138 runs) the GPU time itself grows in a stretch, 1,363 to 1,368 ms against 113 to 119 ms, and
+  only in the attention kernels (median per run: the banded score kernel about 15 → 880 ms, the full-attention score
+  kernel 5.6 → 329 to 330 ms, the PV kernel 16 → 80 ms), while the linears keep 59 to 62 ms. That is the signature of
+  the slow mode in [the section above](#on-the-rtx-3080-ti-development-machine-two-slowdowns-distort-measurements-filed-2026-11-19-the-machine-not-a-product-bug).
+  Only the extra-slow runs inside a stretch are the GC stall above (e14: 2,169 and 2,065 ms of wall time on 1,366 and
+  1,368 ms of GPU time). An earlier, irregular stretch near the start of each run (embeds of about 300 ms in one run,
+  about 440 ms in the other) was a GPU wait too (a `mapAsync` wait of 435 to 438 ms, w03) and was not looked into
+  further. Seen in both runs of 31 rounds and in w03.
 - Records: `outputs/workbench/node-nvidia-geforce-rtx-3080-ti/embeddinggemma-preset-ab_2026-11-22T12-08-37.json` and
   `…T12-12-10.json` (8,192 tokens, the two arm orders), `…T11-57-57.json` and `…T12-05-37.json` (2,048 tokens); the
-  `nvidia-smi` samples in `outputs/diag/eg2-preset-ab-2026-11-22/` (local, untracked); the reading in
+  investigation's workbench runs `…T13-47-24.json`, `…T13-57-58.json` (8,192) and `…T14-11-18.json` (2,048); the
+  `nvidia-smi` samples in `outputs/diag/eg2-preset-ab-2026-11-22/`; the investigation's scripts and logs (e01 to e15,
+  w01 to w03, a01) in `outputs/diag/eg2-bf16-alternation-2026-11-22/` (all local, untracked); the reading in
   [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md) (its section on the speed of the `i8`
   preset).
-- **Not investigated**: the cause of either pattern. The power cap was active in most samples at both lengths, with
-  the SM clock at 1,635 to 1,965 MHz, but the arms are interleaved per round, so it applies to both. Hypothesis, not
-  checked: the 2,048-token stretches are the slow mode of the section above (episodes under sustained load); nothing
-  comparable is known for the `bf16`-only alternation. Not tried: another GPU, a browser, one pipeline resident alone.
-- **Impact**: speed only. Wall-clock embed times of the `bf16` preset at 8,192 tokens on this machine (about 1.4 times
-  `i8`'s on average), and the medians of long-text measurements on it. Outputs are not affected: each preset's vector
-  was bit-identical over every run of every record.
+- **Not verified**: the binding's source was not read — its polling is described from the observed behaviour (every
+  callback native, a new function each time, the count growing with the GPU wait); the reason for the stall after the
+  GC (in it `getMappedRange()` to `unmap()` took 113 to 195 ms in the stalled runs and 0.0 ms in the others, e11);
+  why the stalled position was a `bf16` visit in all four workbench records (e15 shows that the position decides, not
+  the preset); whether a browser shows it (it has no such polling loop: expected not, untested). Not tried: another
+  GPU. The cause of the slow mode: not investigated.
+- **Impact**: Node + Dawn runs and measurements only — the wall time of long embeds, and the medians of long-text
+  measurements under Node. The runtime's GPU work and the outputs are not affected: each preset's vector was
+  bit-identical over every run of every record. At 8,192 tokens the two presets take the same GPU time; the 1.37 to
+  1.39 times of the `bf16` mean over `i8`'s in the first two records is the stall's position, not the preset.
+- Fix candidates (none decided): an upstream report to the binding (one allocation per poll); recording the number of
+  major GCs and their pause per visit in the workbench A/B record, so a judgement can see which visits held one; and,
+  as a measurement option, not a default, a forced GC between visits outside the timed span (it removes the pattern,
+  e09, but hides a cost a Node caller pays).

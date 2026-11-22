@@ -262,8 +262,9 @@ whose rounds were taken kernel after kernel:
 
 - The record holds no GPU clock, power or thermal reading: WebGPU exposes none, and an entry holds no Node API. A
   reading belongs next to the run.
-- The record keeps the fastest visit beside the median. What the development machine showed in such runs (slow
-  stretches in both arms at 2,048 tokens, and every other `bf16` embed slow at 8,192) is in
+- The record keeps the fastest visit beside the median. It holds no garbage-collection reading: under Node a major GC
+  of the process can fall on the same visit of every round. What the development machine showed in such runs (slow
+  stretches in both arms at 2,048 tokens, and one visit per round stalled by a major GC at 8,192) is in
   [research 2026-11-22](../research/2026-11-22-embeddinggemma2-quant-screen.md).
 
 ## The record
