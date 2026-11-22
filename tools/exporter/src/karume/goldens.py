@@ -32,6 +32,7 @@ from torch import nn
 from torch.export import Dim
 
 from karume.artifacts import staged_publication
+from karume.band import BandAttentionSpec, to_band_form
 from karume.container import Provenance
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
@@ -46,6 +47,7 @@ from karume.golden_models import (
     Activations,
     ArgmaxPick,
     AttentionBlock,
+    BandAttention,
     BatchMatmul,
     BilinearResize,
     BroadcastBinary,
@@ -79,6 +81,7 @@ from karume.golden_models import (
     StaticQuantizeBlock,
     SymbolicTable,
     UnaryChain,
+    _band_attention_inputs,
     _band_mask,
     _fused_attention_inputs,
     _mask,
@@ -89,7 +92,7 @@ from karume.golden_models import (
 )
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
-from karume.pipeline import export_to_file
+from karume.pipeline import export_module, export_to_file, publish_model
 from karume.quantize import fake_quant_int8
 
 MODEL_FILE = "model.krm"
@@ -134,6 +137,24 @@ class GoldenSpec:
     #: golden that preserves SDPA to emit a fused `attention` replaces the default — adding it to
     #: the default would make SDPA with a mask a preservation target too.
     preserved: Sequence[str] = field(default=PRESERVED_OP_PREFIXES)
+    #: A recipe-style IR rewrite applied after export and before the container is written (the
+    #: band surgery of ADR 0155). `None` = the graph as exported (every other golden — its path
+    #: through `export_to_file` is unchanged). The tensors of initializers the rewrite pruned are
+    #: not stored.
+    rewrite: Callable[[IrGraph], IrGraph] | None = None
+
+
+def _declare_band(graph: IrGraph) -> IrGraph:
+    """The ledger's declaration for `band_attention`: every attention that takes a mask has the
+    band `BandAttention.BAND` (the model's own constant — the surgery never reads the mask)."""
+    return to_band_form(
+        graph,
+        [
+            BandAttentionSpec(output=node.outs[0], band=BandAttention.BAND)
+            for node in graph.nodes
+            if node.op == "attention" and len(node.ins) == 4
+        ],
+    )
 
 
 GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
@@ -292,6 +313,15 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
         # Only this golden preserves SDPA (adding it to the default 13 ops of
         # `PRESERVED_OP_PREFIXES` would make graphs with masked SDPA unexportable — ADR 0023).
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    ),
+    GoldenSpec(
+        name="band_attention",
+        build=lambda _: BandAttention(),
+        example_inputs=_band_attention_inputs,
+        # SDPA is preserved as for `fused_attention`; the exported mask input is then replaced by
+        # `attrs.band` (ADR 0155).
+        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        rewrite=_declare_band,
     ),
     GoldenSpec(
         name="embedding_lookup",
@@ -549,21 +579,43 @@ def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
     scales = fake_quant_int8(module).scales if spec.weight_dtype == "i8" else None
     with staged_publication(root / spec.name) as out_dir:
         out_dir.mkdir(parents=True)
-        graph = export_to_file(
-            module,
-            args,
-            out_dir / MODEL_FILE,
-            provenance=GOLDEN_PROVENANCE,
-            # The graph name is **the component name** (= the destination directory name = the
-            # name the TS side looks up). There is no default (the MUST of
-            # `pipeline._assert_graph_name`), so it is spelled here.
-            graph_name=spec.name,
-            dynamic_shapes=spec.dynamic_shapes,
-            symbol_names=spec.symbol_names,
-            weight_dtype=spec.weight_dtype,
-            weight_scales=scales,
-            preserved=spec.preserved,
-        )
+        if spec.rewrite is None:
+            graph = export_to_file(
+                module,
+                args,
+                out_dir / MODEL_FILE,
+                provenance=GOLDEN_PROVENANCE,
+                # The graph name is **the component name** (= the destination directory name =
+                # the name the TS side looks up). There is no default (the MUST of
+                # `pipeline._assert_graph_name`), so it is spelled here.
+                graph_name=spec.name,
+                dynamic_shapes=spec.dynamic_shapes,
+                symbol_names=spec.symbol_names,
+                weight_dtype=spec.weight_dtype,
+                weight_scales=scales,
+                preserved=spec.preserved,
+            )
+        else:
+            exported, tensors = export_module(
+                module,
+                args,
+                dynamic_shapes=spec.dynamic_shapes,
+                symbol_names=spec.symbol_names,
+                preserved=spec.preserved,
+            )
+            rewritten = spec.rewrite(exported)
+            # The tensors of the initializers the rewrite pruned are not stored (the same contract
+            # as the recipes' states surgery).
+            declared = {entry.tensor for entry in rewritten.initializers.values()}
+            graph = publish_model(
+                out_dir / MODEL_FILE,
+                rewritten,
+                {key: value for key, value in tensors.items() if key in declared},
+                provenance=GOLDEN_PROVENANCE,
+                graph_name=spec.name,
+                weight_dtype=spec.weight_dtype,
+                weight_scales=scales,
+            )
 
         with torch.no_grad():
             result = module(*args)

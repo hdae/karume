@@ -2,7 +2,7 @@
  * The kernel checks: the identity checks of `@karume/kernel-checks` — the same cases and criteria as
  * the runtime's node GPU tests — on this host's GPU. In a browser that reaches the backends the node
  * lanes (Dawn / Vulkan) do not: D3D12 in Chrome on Windows, Metal on macOS. This entry is the manual
- * procedure of the release runbook's subgroup checkbox (all thirteen checks).
+ * procedure of the release runbook's subgroup checkbox (all fourteen checks).
  */
 
 import { type CheckProgress, subgroup32Available } from "@karume/kernel-checks";
@@ -32,7 +32,7 @@ const entry: Entry = {
   id: "kernel-check",
   title: "Kernel checks",
   description:
-    "Word-for-word identity of the kernel rewrites the node GPU tests check (subgroup reductions, the states-attention rewrites, the integer and byte-plane GEMVs, f16 slots and scores, the expert linear, the built-in fusions) on this backend. A check the device cannot run is not available, never a pass.",
+    "Word-for-word identity of the kernel rewrites the node GPU tests check (subgroup reductions, the states-attention rewrites, the integer and byte-plane GEMVs, f16 slots and scores, the expert linear, the built-in fusions, the attention band) on this backend. A check the device cannot run is not available, never a pass.",
   parameters: [
     {
       kind: "choices",

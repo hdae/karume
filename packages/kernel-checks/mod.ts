@@ -195,3 +195,16 @@ export {
   checkAttentionOnlineTiled,
   tiledValueWords,
 } from "./src/attention-online-tiled.ts";
+export {
+  ATTENTION_BAND_CASES,
+  ATTENTION_BAND_GRID,
+  type AttentionBandCase,
+  attentionBandAttrs,
+  attentionBandFeeds,
+  attentionBandGraph,
+  attentionBandKeys,
+  attentionBandMask,
+  attentionBandOptions,
+  checkAttentionBand,
+  runAttentionBandCase,
+} from "./src/attention-band.ts";

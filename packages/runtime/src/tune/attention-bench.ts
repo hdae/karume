@@ -675,7 +675,7 @@ const benchS16 = async (
   const violation = fusedAttentionViolation(
     where,
     { heads, kvHeads: heads, depth, cols: keys },
-    { i8a8: true, mask: false, route },
+    { i8a8: true, mask: false, band: false, route },
   );
   if (violation !== undefined) return { eligible: false, reason: violation };
 
@@ -892,7 +892,7 @@ const benchOnline = async (
   const violation = fusedAttentionViolation(
     where,
     { heads, kvHeads: heads, depth, cols: keys },
-    { i8a8: true, mask: false, route },
+    { i8a8: true, mask: false, band: false, route },
   );
   if (violation !== undefined) return { eligible: false, reason: violation };
   const reduce = route.online;

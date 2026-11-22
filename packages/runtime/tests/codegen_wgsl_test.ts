@@ -296,6 +296,7 @@ import {
   ATTENTION_STATS_REG_CACHE_MAX,
   ATTENTION_STATS_WGSL,
   ATTENTION_STATS_WORKGROUP_SIZE,
+  attentionBandWord,
   attentionPvKey,
   attentionPvParams,
   attentionPvWgsl,
@@ -430,6 +431,14 @@ const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, tr
     ] as const,
   ],
 );
+/**
+ * The arguments after `v4` of ①QK's band variants (f32 compute and S; mask off; GQA / row window as
+ * named; default geometry; band on).
+ */
+const BAND_QK = ["f32", "f32", false, false, false, undefined, true] as const;
+const BAND_QK_RWA = ["f32", "f32", false, false, true, undefined, true] as const;
+const BAND_QK_GQA = ["f32", "f32", false, true, false, undefined, true] as const;
+const BAND_QK_GQA_RWA = ["f32", "f32", false, true, true, undefined, true] as const;
 const EMBEDDING_WGSL = embeddingWgsl("f32");
 const CONV1D_WGSL = conv1dWgsl("f32");
 const CONV1D_KEY = conv1dKey("f32");
@@ -583,6 +592,28 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["attention_qk_mask_rwa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", true, false, true)],
     ["attention_pv_rwc.wgsl", attentionPvWgsl(false, "f32", "f32", false, true)],
     ["attention_pv_rwc_v4.wgsl", attentionPvWgsl(true, "f32", "f32", false, true)],
+    // ①QK's **band variants** (`attrs.band` — ADR 0155: −inf outside |m − n| ≤ band, at the
+    // mask's place). The condition is placing them **with the GQA and row-window axes they combine
+    // with** (the predicate reads the absolute row, the one place besides the base lines where the
+    // row window shows) and with the f16 forms whose store rounds after the select. The main
+    // purpose is less adding these 10 than **attention_qk*.wgsl above not moving by a single byte**
+    // (a node without a band keeps its kernel).
+    ["attention_qk_band.wgsl", attentionQkWgsl(false, ...BAND_QK)],
+    ["attention_qk_band_v4.wgsl", attentionQkWgsl(true, ...BAND_QK)],
+    ["attention_qk_band_rwa.wgsl", attentionQkWgsl(false, ...BAND_QK_RWA)],
+    ["attention_qk_band_rwa_v4.wgsl", attentionQkWgsl(true, ...BAND_QK_RWA)],
+    ["attention_qk_band_gqa.wgsl", attentionQkWgsl(false, ...BAND_QK_GQA)],
+    ["attention_qk_band_gqa_v4.wgsl", attentionQkWgsl(true, ...BAND_QK_GQA)],
+    ["attention_qk_band_gqa_rwa.wgsl", attentionQkWgsl(false, ...BAND_QK_GQA_RWA)],
+    ["attention_qk_band_gqa_rwa_v4.wgsl", attentionQkWgsl(true, ...BAND_QK_GQA_RWA)],
+    [
+      "attention_qk_band_c16.wgsl",
+      attentionQkWgsl(false, "f16", "f32", false, false, false, undefined, true),
+    ],
+    [
+      "attention_qk_band_s16_v4.wgsl",
+      attentionQkWgsl(true, "f32", "f16", false, false, false, undefined, true),
+    ],
     ["gather.wgsl", GATHER_WGSL],
     ["strided_copy_f32.wgsl", stridedWgsl({ dtype: "f32" })],
     ["strided_copy_i32.wgsl", stridedWgsl({ dtype: "i32" })],
@@ -3689,6 +3720,111 @@ test("the row-window variants of fused attention change only one side's base and
   ]) {
     assertThrows(build, CodegenError, "exceed the full M");
   }
+});
+
+/**
+ * ①QK's band (`attrs.band` — ADR 0155). One key word at the end, two uniform words at the end, and
+ * a predicate at the mask's place; every existing key, uniform and WGSL keeps its bytes (the
+ * snapshots of attention_qk*.wgsl are the byte check; this pins the structure).
+ */
+test("①QK's band is one key word and two uniform words at the end, with the predicate at the mask's place", () => {
+  // Key: `:band` after every other word; absent keeps the key.
+  assertEquals(
+    attentionQkKey(true, "f32", "f16", false, true, true, undefined, true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:s16:gqa:rwa:band",
+  );
+  assertEquals(
+    attentionQkKey(false, "f16", "f32", false, false, false, undefined, true),
+    "attention_qk:v1:f32:reg128x128r8x8w16:c16:band",
+  );
+  assertEquals(
+    attentionQkKey(true, "f32", "f32", false, false, false, undefined, false),
+    attentionQkKey(true),
+  );
+  const keys = [false, true].flatMap((v4) =>
+    [false, true].flatMap((gqa) =>
+      [false, true].flatMap((window) =>
+        [false, true].map((band) =>
+          attentionQkKey(v4, "f32", "f32", false, gqa, window, undefined, band),
+        ),
+      ),
+    ),
+  );
+  assertEquals(new Set(keys).size, 16, "v4 × gqa × window × band are 16 keys");
+  for (const v4 of [false, true]) {
+    const where = `band v4=${v4}`;
+    const plain = attentionQkWgsl(v4);
+    const banded = attentionQkWgsl(v4, ...BAND_QK);
+    // The predicate replaces the score at every write, with no subtraction (u32 would wrap).
+    const selects = banded.split("\n").filter((line) => line.includes("let sv = select(neg_inf"));
+    const vecSelects = banded
+      .split("\n")
+      .filter((line) => line.includes("let sv = select(vec4<f32>(neg_inf)"));
+    assertEquals(
+      (v4 ? vecSelects : selects).length,
+      (plain.match(/\n\s+s\[/g) ?? []).length,
+      `${where}: one select per write`,
+    );
+    assertEquals(
+      banded.includes(
+        v4
+          ? "return (rows + band >= cols) & (cols + band >= rows);"
+          : "return row + dims.band >= col && col + dims.band >= row;",
+      ),
+      true,
+      `${where}: the subtraction-free predicate`,
+    );
+    // Under the row window the predicate reads the absolute row (the mask's row index rule).
+    const windowed = attentionQkWgsl(v4, ...BAND_QK_RWA);
+    assertEquals(
+      windowed.includes(
+        v4
+          ? "in_band4((orow0 + dims.row_offset), ocq0 * 4u)"
+          : "in_band((orow0 + dims.row_offset), ocol)",
+      ),
+      true,
+      `${where}: the absolute row under the row window`,
+    );
+    assertEquals(banded.includes("dims.row_offset"), false, `${where}: no offset without a window`);
+    // The fill and the reduction are the plain kernel's: only the header, the uniform, the
+    // predicate function and the write-out differ.
+    const loop = (text: string): string =>
+      text.slice(text.indexOf("for (var t = 0u"), text.lastIndexOf("workgroupBarrier();"));
+    assertEquals(loop(banded), loop(plain), `${where}: the K loop is byte-identical`);
+    // ②③ never look at it, and the band never sits beside the mask.
+    assertThrows(
+      () => attentionQkWgsl(v4, "f32", "f32", true, false, false, undefined, true),
+      CodegenError,
+      "never set together",
+    );
+  }
+
+  // params: the band word and −inf after every other extra word; 16-byte units.
+  const plainBand = attentionQkParams(5, 7, 4, 0.5, undefined, undefined, 2);
+  assertEquals(plainBand.byteLength, 32);
+  assertEquals([plainBand[4], plainBand[5]], [2, 0xff800000]);
+  const gqaBand = attentionQkParams(5, 7, 4, 0.5, 8, undefined, 2);
+  assertEquals([gqaBand[4], gqaBand[5], gqaBand[6]], [8, 2, 0xff800000]);
+  const window = { offset: 2, rowsFull: 9 } as const;
+  const all = attentionQkParams(5, 7, 4, 0.5, 8, window, 2);
+  assertEquals(all.byteLength, 48, "GQA × row window × band take 9 words in 48 bytes");
+  assertEquals([...all.slice(4, 9)], [8, 2, 9, 2, 0xff800000]);
+  assertEquals(new Float32Array(all.buffer)[3], 0.5);
+  // The words of every existing combination stay where they were.
+  assertEquals(
+    [...attentionQkParams(5, 7, 4, 0.5, 8, window)],
+    [...attentionQkParams(5, 7, 4, 0.5, 8, window, 2).slice(0, 8)].map((word, at) =>
+      at < 7 ? word : 0,
+    ),
+  );
+  // The band word: min(band, max(M, N)) over the full M — the same columns, sums that cannot wrap.
+  assertEquals(attentionBandWord(3, 9, 7), 3);
+  assertEquals(attentionBandWord(2 ** 40, 9, 7), 9);
+  assertEquals(attentionQkParams(5, 7, 4, 0.5, undefined, window, 2 ** 40)[6], 9);
+  assertEquals(attentionQkParams(5, 7, 4, 0.5, undefined, undefined, 2 ** 40)[4], 7);
+  assertThrows(() => attentionBandWord(-1, 9, 7), CodegenError, "non-negative integer");
+  assertThrows(() => attentionBandWord(1.5, 9, 7), CodegenError, "non-negative integer");
+  assertThrows(() => attentionBandWord(2 ** 32, 2 ** 31 + 1, 2), CodegenError, "M + band");
 });
 
 /**

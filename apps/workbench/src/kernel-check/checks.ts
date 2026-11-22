@@ -4,7 +4,9 @@
  */
 
 import {
+  ATTENTION_BAND_CASES,
   ATTENTION_ONLINE_TILED_CASES,
+  checkAttentionBand,
   checkAttentionOnlineTiled,
   checkExpertLinear,
   checkFusionTwins,
@@ -190,6 +192,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: await checkAttentionOnlineTiled(gpu, options),
       expectedCases: ATTENTION_ONLINE_TILED_CASES,
+    }),
+  },
+  // The band of plain attention (attrs.band) against the same node fed the band as an additive
+  // 0 / −inf mask: every O word identical, plus each side's ①QK key (ADR 0155).
+  {
+    id: "attention-band",
+    title: "Attention band vs the additive band mask",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkAttentionBand(gpu, options)],
+      expectedCases: ATTENTION_BAND_CASES,
     }),
   },
 ];

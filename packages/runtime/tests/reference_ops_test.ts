@@ -923,6 +923,68 @@ test("attention applies scale to both q and k and does not break large inputs wi
   );
 });
 
+// The band (ADR 0155): a column with |m − n| > band is −inf, at the mask's place. Against the same
+// node fed the band as an additive 0 / −inf mask the oracle gives the same words (S + 0 = S and
+// S + −inf = −inf for finite S), and it is refused beside a mask and on the states form.
+test("attention's band hides |m − n| > band, word for word the plain node with the equivalent additive mask", () => {
+  const rows = 6;
+  const cols = 5;
+  const q = t(
+    [1, 2, rows, 3],
+    Array.from({ length: 2 * rows * 3 }, (_, i) => (((i * 7) % 11) - 5) * 0.3),
+  );
+  const key = t(
+    [1, 1, cols, 3],
+    Array.from({ length: cols * 3 }, (_, i) => (((i * 5) % 13) - 6) * 0.2),
+  );
+  const value = t(
+    [1, 1, cols, 3],
+    Array.from({ length: cols * 3 }, (_, i) => (((i * 3) % 7) - 3) * 0.5),
+  );
+  const words = (tensor: RefTensor): number[] => [
+    ...new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length),
+  ];
+  for (const band of [0, 1, 2, 4, 5, 2 ** 40]) {
+    const mask = t(
+      [1, 1, rows, cols],
+      Array.from({ length: rows * cols }, (_, i) =>
+        Math.abs(Math.floor(i / cols) - (i % cols)) <= band ? 0 : Number.NEGATIVE_INFINITY,
+      ),
+    );
+    const banded = referenceAttention(q, key, value, { scale: 0.5, band });
+    assertEquals(
+      words(banded),
+      words(referenceAttention(q, key, value, { scale: 0.5 }, mask)),
+      `band ${band}`,
+    );
+    assertEquals(
+      words(applyReferenceOp("attention", [q, key, value], { scale: 0.5, band })),
+      words(banded),
+      `band ${band} through the unified entry point`,
+    );
+  }
+  // M > N: a row past N sees the columns within the band from its own index (row 5 sees column 4
+  // at band 1 and nothing at band 0 — an empty row is output 0, as for an all −inf mask row).
+  const empty = referenceAttention(q, key, value, { scale: 0.5, band: 0 });
+  assertEquals([...empty.data.slice(5 * 3, 6 * 3)], [0, 0, 0]);
+  // One mechanism per node, and the range is read.
+  assertThrows(
+    () =>
+      applyReferenceOp(
+        "attention",
+        [q, key, value, t([1, 1, rows, cols], Array(rows * cols).fill(0))],
+        { scale: 0.5, band: 1 },
+      ),
+    OpContractError,
+    "attrs.band and an additive mask together",
+  );
+  assertThrows(
+    () => referenceAttention(q, key, value, { scale: 0.5, band: -1 }),
+    OpContractError,
+    "attrs.band",
+  );
+});
+
 test("the unified entry point rejects attrs keys the contract rejects instead of using them (the same match as the node contract check)", () => {
   const q = t([1, 1, 1, 2], [1, 0]);
   const key = t([1, 1, 2, 2], [1, 0, 0, 1]);

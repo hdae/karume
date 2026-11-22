@@ -492,6 +492,33 @@ export const stateReadonly = (attrs: Readonly<Record<string, unknown>>, where: s
   return true;
 };
 
+/**
+ * The band of plain attention (the form without a states field): key column `n` is visible to
+ * query row `m` iff `|m − n| ≤ band`, row and column being the node's own M and N indices. **An
+ * optional attr**; the absence of the field means "no band". When declared, an integer of at least
+ * 0 (0 keeps the diagonal only).
+ *
+ * MUST: not filled with a default. "No field = every column visible" and "band ≥ max(M, N) − 1"
+ * hide the same columns, but they are different declarations (only the second goes through the
+ * predicate).
+ * MUST: declared only on the form without a states field, and never together with the additive
+ * mask (one mechanism per node — the contract layer, `plainOptionalAttrs` in ops/contracts.ts).
+ */
+export const ATTENTION_BAND_ATTRS: AttrSchema = {
+  band: (value, where) => {
+    assertIntegerAttr(value, where, 0);
+  },
+};
+
+/** The `band` of a plain attention (`undefined` when not declared = no band). */
+export const attentionBand = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): number | undefined =>
+  Object.hasOwn(attrs, "band")
+    ? assertIntegerAttr(attrs["band"], `${where} attrs.band`, 0)
+    : undefined;
+
 /** The `window` of a state-referencing node (`undefined` when not declared = the whole context). */
 export const stateWindow = (
   attrs: Readonly<Record<string, unknown>>,

@@ -416,6 +416,15 @@ It does not come out of the torch.export path (the decomposition of `scaled_dot_
 has no form "without the current step's k/v") — emitting it is the job of the exporter's surgery
 (`states.to_external_states_form`).
 
+NOTE: 2026-11-22 added the optional attrs **`band`** to `attention` without a states field (an integer ≥ 0: key column
+`n` visible to query row `m` iff `|m − n| ≤ band`). The contract's source of truth is ADR
+[0155](decisions/0155-attention-band.md). **Neither op names nor the vocabulary grow**: it is an attr of the existing
+op, equivalent on finite scores to the additive `[1,1,M,N]` mask of 0 / −inf, checked inside ①QK from positions so that no mask tensor
+exists (the states form's causal rule is the same kind of predicate — ADR 0067 decision 4). It is refused on the states
+form and beside the fourth input (the contract table's `plainOptionalAttrs`). It does not come out of the torch.export
+path (SDPA takes the band as a mask) — a recipe declares it after export with the exporter's surgery
+(`band.to_band_form`, which drops the mask input and never reads the mask's values).
+
 NOTE: The two holes of the layer table filed on 2026-08-13 (no place for a model-derived atomic op
 outside Core ATen / non-equivalent lines drawn for "does not hold up in capacity or performance") were
 **resolved by the revision to the entry-door model on 2026-08-14

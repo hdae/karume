@@ -1,6 +1,7 @@
 import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { STRIDED_RANK } from "../codegen/strided.ts";
 import {
+  attentionBand,
   attentionScale,
   catDim,
   conv1dAttrs,
@@ -980,6 +981,15 @@ export const computeOutputShape = (
       // reference that skip the attrs schema. The same role as rms_norm's eps / unary's
       // scalarParamValues).
       attentionScale(context.attrs ?? {}, where);
+      // MUST: the states forms (readonly included) take no band — their columns are logical
+      // positions under their own causal rule and `window`, while the band is a predicate over the
+      // plain form's M and N. The contract layer rejects it too; the CPU reference and the
+      // conformance table come here.
+      if (referencesStates(context) && attentionBand(context.attrs ?? {}, where) !== undefined) {
+        throw new OpContractError(
+          `${where}: states-form attention takes no band (its columns follow the causal rule and window)`,
+        );
+      }
       if (isReadonlyStateAttention(found, context, where)) {
         return sole(readonlyStateAttentionShape(inputShapes[0], context, where));
       }
@@ -1113,7 +1123,16 @@ export const computeOutputShape = (
         if (mask[2] !== q[2] || mask[3] !== k[2]) {
           throw new OpContractError(`${where}: attention mask M / N do not match q / k ${shown}`);
         }
+        // MUST: the band and the mask are never declared together (one mechanism per node — the
+        // contract layer rejects it too; the CPU reference and the conformance table come here).
+        if (attentionBand(context.attrs ?? {}, where) !== undefined) {
+          throw new OpContractError(
+            `${where}: attention declares attrs.band and an additive mask together (one way to hide key columns per node) ${shown}`,
+          );
+        }
       }
+      // The band's range (an integer ≥ 0) is read here too, for the same reason as `scale`.
+      attentionBand(context.attrs ?? {}, where);
       return sole([...q]);
     }
     // An effect op that defines no value (ADR 0067 decision 5). Returning **an empty list** without

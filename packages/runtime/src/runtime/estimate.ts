@@ -52,6 +52,7 @@ import {
   type StorageRoles,
 } from "../gpu/pipeline-cache.ts";
 import {
+  attentionBand,
   groupNormAttrs,
   numel,
   RUNTIME_SUPPORT,
@@ -1409,7 +1410,12 @@ const fusedAttentionProgram = (
   const violation = fusedAttentionViolation(
     where,
     { heads: q[1], kvHeads: k[1], depth: shape.depth, cols: shape.cols },
-    { i8a8: seats.attentionCompute === "a8", mask: maskRef !== undefined, route },
+    {
+      i8a8: seats.attentionCompute === "a8",
+      mask: maskRef !== undefined,
+      band: attentionBand(node.node.attrs, where) !== undefined,
+      route,
+    },
   );
   if (violation !== undefined) throw new ExecutionError(violation);
   const temps: TransientTempSpec[] = [];

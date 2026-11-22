@@ -41,7 +41,7 @@ const failed: CheckOutcome = {
 };
 
 describe("the kernel-check entry", () => {
-  it("declares one choices parameter over the thirteen check ids, all by default", () => {
+  it("declares one choices parameter over the fourteen check ids, all by default", () => {
     expect(kernelCheck.id).toBe("kernel-check");
     expect(kernelCheck.parameters).toHaveLength(1);
     expect(parseParameters(kernelCheck.parameters, {})).toEqual({ checks: [...KERNEL_CHECK_IDS] });
@@ -63,7 +63,7 @@ describe("entryVerdict", () => {
 describe("summaryLines", () => {
   it("is one PASS line with the counts when every check passed", () => {
     expect(summaryLines(allPassedExcept({}))).toEqual([
-      "PASS — checks: 13 passed, 0 failed, 0 incomplete, 0 not available, 0 error, 0 not run",
+      "PASS — checks: 14 passed, 0 failed, 0 incomplete, 0 not available, 0 error, 0 not run",
     ]);
   });
 
@@ -77,7 +77,7 @@ describe("summaryLines", () => {
       "attention-online-tiled": undefined,
     };
     expect(summaryLines(outcomes)).toEqual([
-      "FAIL — checks: 9 passed, 1 failed, 0 incomplete, 1 not available, 1 error, 1 not run",
+      "FAIL — checks: 10 passed, 1 failed, 0 incomplete, 1 not available, 1 error, 1 not run",
       "gemv-subgroup32: not available",
       "gemv-planes: FAIL — gemv-planes: worst failure in K=1536 M=8 — f64 band — word 7: expected 0x3f800000, actual 0xbf800000",
       "state-kv16: ERROR",
@@ -105,9 +105,9 @@ describe("summaryLines", () => {
   it("reads a run with no outcome at all as not run everywhere", () => {
     const lines = summaryLines({});
     expect(lines[0]).toBe(
-      "not run — checks: 0 passed, 0 failed, 0 incomplete, 0 not available, 0 error, 13 not run",
+      "not run — checks: 0 passed, 0 failed, 0 incomplete, 0 not available, 0 error, 14 not run",
     );
-    expect(lines).toHaveLength(14);
+    expect(lines).toHaveLength(15);
   });
 });
 

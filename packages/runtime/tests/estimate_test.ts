@@ -1467,6 +1467,34 @@ describe("counts the in-node temporaries of the fused attention op with the same
     assertEquals(runScenario(fusedAttentionModel(true).estimate()).workspaceBytes, 256 + 384 + 128);
   });
 
+  it("a band adds no temporary and no tensor: S and the row statistics are the plain node's, and the mask's [1,1,8,6] = 192B input is gone", () => {
+    const banded = openGraph(
+      singleOpDeclaration(
+        "attention",
+        [
+          [1, 2, 8, 4],
+          [1, 2, 6, 4],
+          [1, 2, 6, 4],
+        ],
+        [[1, 2, 8, 4]],
+        {
+          attrs: { scale: 0.5, band: 2 },
+        },
+      ),
+    );
+    const band = runScenario(banded.estimate());
+    const mask = runScenario(fusedAttentionModel(true).estimate());
+    assertEquals(band.workspaceBytes, 256 + 384 + 128);
+    assertEquals(band.workspaceBytes, mask.workspaceBytes);
+    assertEquals(mask.ioBytes - band.ioBytes, 1 * 1 * 8 * 6 * 4);
+    assertEquals(band.ioBytes, runScenario(fusedAttentionModel().estimate()).ioBytes);
+    // Split by a budget, one row block of S as without a band (the band word is a uniform).
+    assertEquals(
+      runScenario(banded.estimate({ attentionRowBlockMaxBytes: 96 })).workspaceBytes,
+      256 + 96 + 32,
+    );
+  });
+
   describe("returns no numbers for combinations execution rejects (the same decision and the same message as execution)", () => {
     it("mask × a8", () => {
       assertThrows(
@@ -1474,6 +1502,35 @@ describe("counts the in-node temporaries of the fused attention op with the same
         ExecutionError,
         "attention with an additive mask cannot be combined with attentionCompute 'a8'",
       );
+    });
+
+    it("band × a8 (the three a8 dispatches and the online kernel alike)", () => {
+      const banded = openGraph(
+        singleOpDeclaration(
+          "attention",
+          [
+            [1, 2, 8, 64],
+            [1, 2, 8, 64],
+            [1, 2, 8, 64],
+          ],
+          [[1, 2, 8, 64]],
+          { attrs: { scale: 0.5, band: 2 } },
+        ),
+      );
+      for (const options of [
+        { attentionCompute: "a8" },
+        {
+          attentionCompute: "a8",
+          attentionScoreStorage: "none",
+          attentionDevice: { subgroups: false, maxComputeWorkgroupStorageSize: 1 << 16 },
+        },
+      ] as const) {
+        assertThrows(
+          () => banded.estimate(options),
+          ExecutionError,
+          "attention with attrs.band cannot be combined with attentionCompute 'a8'",
+        );
+      }
     });
 
     it("states form × anything other than f32", () => {

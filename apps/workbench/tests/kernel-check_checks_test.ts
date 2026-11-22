@@ -25,6 +25,7 @@ describe("the kernel-check entry's checks", () => {
       "expert-linear": false,
       "fusion-twins": false,
       "attention-online-tiled": false,
+      "attention-band": false,
     });
   });
 });

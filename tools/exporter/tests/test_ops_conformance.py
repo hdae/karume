@@ -7,11 +7,11 @@ same table**. The table is read rather than copied because the moment a copy app
 that passes on one side only" is born (the same discipline as test_dims.py).
 
 Only the contract surfaces where the two implementations can silently diverge are checked: the full
-set of op names / arity / slot dtypes / the attrs key sets (both required and **optional** — ADR
-0067 decision 4) / attrs value ranges / the contract of the `states` field (key set and whether it
-is required — ADR 0067 decisions 4 / 5) / the output count and the per-output-slot dtype mapping
-(ADR 0068 decision 1) / the output shape rules (including the rank limit) / the slots eligible for
-low-precision storage (ADR 0018).
+set of op names / arity / slot dtypes / the attrs key sets (required, **optional** — ADR 0067
+decision 4 — and optional on the plain form — ADR 0155) / attrs value ranges / the contract of the
+`states` field (key set and whether it is required — ADR 0067 decisions 4 / 5) / the output count
+and the per-output-slot dtype mapping (ADR 0068 decision 1) / the output shape rules (including the
+rank limit) / the slots eligible for low-precision storage (ADR 0018).
 """
 
 from __future__ import annotations
@@ -39,7 +39,14 @@ SHAPES = OP_CONTRACT_TABLE["shapes"]
 #: Every attr with a value range (required + optional). Being optional is no reason for a looser
 #: value range, so the attr_values section looks up both on the same footing (the same split as the
 #: TS side's ops_conformance_test.ts).
-ATTR_KEYS = {entry["op"]: [*entry["attrs"], *entry.get("optional_attrs", [])] for entry in OPS}
+ATTR_KEYS = {
+    entry["op"]: [
+        *entry["attrs"],
+        *entry.get("optional_attrs", []),
+        *entry.get("plain_optional_attrs", []),
+    ]
+    for entry in OPS
+}
 
 #: Ops that **create** an output dimension **from attrs** instead of propagating it from the inputs.
 #: Staying symbolic even after the bindings are substituted is correct (prefix length
@@ -86,7 +93,11 @@ def _attr_check(entry):
     """The check function for one row of the attr_values section (it may come from either the
     required or the optional field)."""
     contract = resolve_op_contract(entry["op"])
-    check = contract.attrs.get(entry["attr"]) or contract.optional_attrs.get(entry["attr"])
+    check = (
+        contract.attrs.get(entry["attr"])
+        or contract.optional_attrs.get(entry["attr"])
+        or contract.plain_optional_attrs.get(entry["attr"])
+    )
     assert check is not None, (
         f"{entry['op']}: the contract table has no check function for attr '{entry['attr']}'"
     )
@@ -167,6 +178,16 @@ class TestDeclaredContract:
         contract = resolve_op_contract(entry["op"])
 
         assert sorted(contract.optional_attr_keys) == sorted(entry.get("optional_attrs", []))
+
+    @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
+    def test_plain_optional_attr_keys_match(self, entry):
+        """The optional attrs of the form without a states field (ADR 0155's `band`) are a
+        contract surface of their own, for the same reason as `optional_attrs`."""
+        contract = resolve_op_contract(entry["op"])
+
+        assert sorted(contract.plain_optional_attr_keys) == sorted(
+            entry.get("plain_optional_attrs", [])
+        )
 
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_states_field_contract_matches(self, entry):

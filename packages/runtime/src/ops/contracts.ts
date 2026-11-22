@@ -3,6 +3,7 @@ import { type IrDtype, type IrNode, SEMANTIC_DTYPES } from "../format/ir.ts";
 import {
   assertFiniteAttr,
   ATTENTION_ATTRS,
+  ATTENTION_BAND_ATTRS,
   type AttrSchema,
   attrValue,
   AXIS_ATTRS,
@@ -191,6 +192,20 @@ type ContractBase = {
    * is accepted but read by nobody".
    */
   readonly optionalAttrs?: AttrSchema;
+  /**
+   * **Optional attrs of the form without a states field** (currently one: attention's `band`).
+   * The same rules as {@link optionalAttrs} — range-checked when declared, the absence of the field
+   * itself carries meaning, never filled with a default — with the form reversed.
+   *
+   * MUST: for the form **without** a states field only ({@link assertAttrKeys}). The band is a
+   * predicate over the node's own row and column indices; the states form's columns are logical
+   * positions with a causal rule of their own (`window`), so a band written there would be "an attr
+   * that is accepted but read by nobody".
+   * MUST: never declared together with the optional trailing input ({@link assertNodeContract}).
+   * Both hide key columns, and a node carries one mechanism: with the two together, which one the
+   * kernel applies would be decided by the kernel, not by the IR.
+   */
+  readonly plainOptionalAttrs?: AttrSchema;
   /**
    * The **exact input count** of the states form that declares `attrs.readonly` (ADR 0096 stage 2
    * §1.2) (currently 1 = q only, for `attention`). Omitted = an op that cannot declare readonly.
@@ -735,6 +750,9 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       // 4 / ADR 0096 stage 2 §1.2). `state_append` shares only `window` (append has no readonly), so
       // they are combined here and STATE_WINDOW_ATTRS itself stays unchanged.
       optionalAttrs: { ...STATE_WINDOW_ATTRS, ...STATE_READONLY_ATTRS },
+      // `band` is the plain form's only optional attr (a key column hidden by |m − n| > band,
+      // checked inside ①QK from positions — no mask tensor); it never sits beside the mask.
+      plainOptionalAttrs: ATTENTION_BAND_ATTRS,
       readonlyArity: READONLY_ATTENTION_ARITY,
       states: { keys: ["k", "v"], required: false },
     },
@@ -896,6 +914,14 @@ export const optionalAttrKeysOf = (found: OpContract): readonly string[] =>
   found.optionalAttrs === undefined ? [] : Object.keys(found.optionalAttrs);
 
 /**
+ * The attrs keys the contract declares as **optional on the form without a states field**
+ * ({@link ContractBase.plainOptionalAttrs}). The capability projection carries them in the same
+ * union as {@link optionalAttrKeysOf}, for the same reason.
+ */
+export const plainOptionalAttrKeysOf = (found: OpContract): readonly string[] =>
+  found.plainOptionalAttrs === undefined ? [] : Object.keys(found.plainOptionalAttrs);
+
+/**
  * The **number of outputs** the contract declares. It is the list length of the output dtype
  * mapping as is (ADR 0068 decision 1).
  *
@@ -952,7 +978,11 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
           found.kind === "cast"
             ? [new Set(SEMANTIC_DTYPES)]
             : found.outputDtypes.map((slot) => new Set(slot.values())),
-        attrKeys: new Set([...attrKeysOf(found), ...optionalAttrKeysOf(found)]),
+        attrKeys: new Set([
+          ...attrKeysOf(found),
+          ...optionalAttrKeysOf(found),
+          ...plainOptionalAttrKeysOf(found),
+        ]),
       },
     ]),
   ),
@@ -1055,6 +1085,7 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
       );
     }
     assertArity(found, node.ins.length, "input count", where);
+    assertPlainOptionalAlone(found, node.attrs, node.ins.length, where);
   }
   if (node.outs.length !== outputCountOf(found)) {
     throw new OpContractError(
@@ -1086,8 +1117,8 @@ export const assertAttrValues = (
     }
     found.attrs[key](attrs[key], `${where} attrs.${key}`);
   }
-  const optional = found.optionalAttrs;
-  if (optional !== undefined) {
+  for (const optional of [found.optionalAttrs, found.plainOptionalAttrs]) {
+    if (optional === undefined) continue;
     for (const key of Object.keys(optional)) {
       if (!Object.hasOwn(attrs, key)) continue;
       optional[key](attrs[key], `${where} attrs.${key}`);
@@ -1096,9 +1127,36 @@ export const assertAttrValues = (
 };
 
 /**
- * Whether the **key set** of attrs fits the contract — two points: rejecting keys outside the
- * contract, and optional keys being for the states form only ({@link ContractBase.optionalAttrs}).
- * It does not look at ranges or at the presence of required keys.
+ * A plain-form optional attr ({@link ContractBase.plainOptionalAttrs}) is not declared together
+ * with the optional trailing input (attention's `band` and its additive mask: one mechanism per
+ * node).
+ *
+ * MUST: checked by the node contract check; the shape layer repeats it for attention, since the
+ * CPU reference and the conformance table reach the shape computation without the node check.
+ */
+const assertPlainOptionalAlone = (
+  found: OpContract,
+  attrs: Readonly<Record<string, unknown>>,
+  inputCount: number,
+  where: string,
+): void => {
+  const plain = found.plainOptionalAttrs;
+  if (plain === undefined || found.maxArity === undefined || inputCount <= found.arity) return;
+  for (const key of Object.keys(plain)) {
+    if (!Object.hasOwn(attrs, key)) continue;
+    throw new OpContractError(
+      `${where}: op '${found.name}' attrs.${key} cannot be declared together with the optional` +
+        ` trailing input (${inputCount} inputs given — one way to hide key columns per node)`,
+    );
+  }
+};
+
+/**
+ * Whether the **key set** of attrs fits the contract — three points: rejecting keys outside the
+ * contract, optional keys being for the states form only ({@link ContractBase.optionalAttrs}), and
+ * plain-form optional keys being for the form without a states field only
+ * ({@link ContractBase.plainOptionalAttrs}). It does not look at ranges or at the presence of
+ * required keys.
  *
  * One function shared by the node contract check ({@link assertNodeContract}) and the CPU reference
  * entry (`applyReferenceOpOutputs` in `reference/ops.ts` — which has no states). Without the same
@@ -1115,14 +1173,25 @@ export const assertAttrKeys = (
   where: string,
 ): void => {
   const optional = found.optionalAttrs;
+  const plain = found.plainOptionalAttrs;
   const unknown = Object.keys(attrs).filter(
     (key) =>
-      !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key)),
+      !Object.hasOwn(found.attrs, key) &&
+      (optional === undefined || !Object.hasOwn(optional, key)) &&
+      (plain === undefined || !Object.hasOwn(plain, key)),
   );
   if (unknown.length > 0) {
     throw new OpContractError(
       `${where}: op '${found.name}' has attrs outside the contract [${unknown.sort().join(", ")}]`,
     );
+  }
+  if (plain !== undefined && hasStates) {
+    for (const key of Object.keys(plain)) {
+      if (!Object.hasOwn(attrs, key)) continue;
+      throw new OpContractError(
+        `${where}: op '${found.name}' attrs.${key} can be declared only on a node without a states field`,
+      );
+    }
   }
   if (optional === undefined || hasStates) return;
   for (const key of Object.keys(optional)) {

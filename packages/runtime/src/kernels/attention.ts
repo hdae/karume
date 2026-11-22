@@ -45,6 +45,15 @@
  * MUST: ②③ **never look at** the mask (S is already masked). The snapshots pin that neither the
  * output nor the key moves by a single byte.
  *
+ * ## The band is the same epilogue as a predicate (`attrs.band`)
+ *
+ * A node with `attrs.band` (never beside a mask) writes **−inf for every column with
+ * `|m − n| > band`** at the place the mask's add sits (`select(−inf, acc, in_band)`, the absolute
+ * row under the row window), and acc itself inside the band. Against the plan that feeds the same
+ * band as an additive 0 / −inf mask, the scores differ only in the sign of a zero acc (`acc + 0`
+ * turns −0 into +0); ②③ are unchanged and read the same S. The band width and −inf travel in the
+ * uniform, and the key gains the one word `:band`.
+ *
  * ## The storage form of S is an independent axis (option γ, phase 1)
  *
  * The **storage form** of the S handed between the three kernels is **a separate knob**
@@ -125,9 +134,19 @@ const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
   rowWindow ? `:rw${side}` : "";
 
 /**
+ * Discriminator of ①QK's **band** (`attrs.band` — the predicate in the write-out epilogue).
+ *
+ * MUST: absent is the empty string (every existing key keeps its bytes). MUST: the word goes
+ * **after** the row window (the last word, fixed here in one place). MUST: the band width itself is
+ * not in the key (it travels in the uniform — a pipeline per distinct band otherwise).
+ */
+const bandKeyPart = (band: boolean): string => (band ? ":band" : "");
+
+/**
  * Key of ①QK. `geometry` is the explicit geometry (`GemmSpec` in src/kernels/gemm.ts — the
  * profile's value in a Session, a sweep candidate in measurement), and MUST: pass **the same value**
- * to {@link attentionQkWgsl} (omitted = the default geometry = the existing key).
+ * to {@link attentionQkWgsl} (omitted = the default geometry = the existing key). `band` comes last
+ * so that every existing call keeps its arguments.
  */
 export const attentionQkKey = (
   v4: boolean,
@@ -137,10 +156,11 @@ export const attentionQkKey = (
   gqa = false,
   rowWindow = false,
   geometry?: GemmGeometry,
+  band = false,
 ): string =>
   `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry, gemmTakesForm("attention_qk", v4, compute))}${gemmComputeKeyPart(compute)}${scoreKeyPart(
     score,
-  )}${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
+  )}${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}${bandKeyPart(band)}`;
 
 /** Key of ③PV (the `geometry` rule is the same as {@link attentionQkKey}). */
 export const attentionPvKey = (
@@ -200,7 +220,9 @@ export const attentionQkWgsl = (
   gqa = false,
   rowWindow = false,
   geometry?: GemmGeometry,
-): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa, rowWindow, geometry });
+  band = false,
+): string =>
+  gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa, rowWindow, geometry, band });
 
 export const attentionPvWgsl = (
   v4: boolean,
@@ -404,6 +426,12 @@ const assertKvRepeat = (where: string, kvRepeat: number): void => {
  * MUST: its position is **after** `kv_repeat` (the GQA word position does not move with the row
  * window — the generator's dimsExtra spells them in the same order). MUST: `m` is the block row
  * count (not the full M).
+ *
+ * `band` (`attrs.band`) adds the 2 last words **only for the band variant**: the band word and the
+ * bits of −inf (the score written outside the band). The struct is allocated in 16-byte units, so
+ * the plain band variant takes 32 bytes and band × GQA × row window 48. The band word is
+ * {@link attentionBandWord} — the same columns, in a value whose sums with a row or a column
+ * cannot wrap.
  */
 export const attentionQkParams = (
   m: number,
@@ -412,6 +440,7 @@ export const attentionQkParams = (
   scale: number,
   kvRepeat?: number,
   window?: GemmRowWindowSpan,
+  band?: number,
 ): Uint32Array<ArrayBuffer> => {
   // MUST: check finiteness **as f32** (the destination is an f32 word — `1e39`, finite in f64,
   // becomes `+Inf`, and `0 * Inf = NaN` silently breaks the scores. The same check as the
@@ -422,20 +451,40 @@ export const attentionQkParams = (
   if (kvRepeat !== undefined) assertKvRepeat("attention_qk params", kvRepeat);
   if (window !== undefined) assertGemmRowWindow("attention_qk row window params", m, window);
   const base = gemmParams("attention_qk", m, n, k);
-  if (kvRepeat === undefined && window === undefined) {
+  const extra: number[] = [];
+  if (kvRepeat !== undefined) extra.push(kvRepeat);
+  if (window !== undefined) extra.push(window.offset, window.rowsFull);
+  if (band !== undefined) {
+    extra.push(attentionBandWord(band, window?.rowsFull ?? m, n), SAFE_SOFTMAX_NEG_INF_BITS);
+  }
+  if (extra.length === 0) {
     new Float32Array(base.buffer)[3] = scale;
     return base;
   }
-  const params = new Uint32Array(8);
+  // 16-byte units: 8 words for every combination of GQA and the row window (as before the band),
+  // 8 or 12 with the band.
+  const params = new Uint32Array(Math.ceil((4 + extra.length) / 4) * 4);
   params.set(base.subarray(0, 3));
   new Float32Array(params.buffer)[3] = scale;
-  if (kvRepeat !== undefined) params[4] = kvRepeat;
-  if (window !== undefined) {
-    const at = kvRepeat === undefined ? 4 : 5;
-    params[at] = window.offset;
-    params[at + 1] = window.rowsFull;
-  }
+  params.set(extra, 4);
   return params;
+};
+
+/**
+ * The band word of ①QK's uniform: `min(band, max(M, N))` over the full M (a pure function).
+ *
+ * Every row and column index is below `max(M, N)`, so `|m − n| ≤ max(M, N) − 1` and any band of at
+ * least that hides nothing: the word hides exactly the columns `band` hides. MUST: checked so that
+ * the predicate's sums `row + band` and `col + band` (no subtraction — src/kernels/gemm.ts) stay in
+ * u32 for every row below M and column below N; a shape where they would not fails loudly.
+ */
+export const attentionBandWord = (band: number, rows: number, cols: number): number => {
+  if (!Number.isSafeInteger(band) || band < 0) {
+    throw new CodegenError(`attention_qk params: band must be a non-negative integer (${band})`);
+  }
+  const word = Math.min(band, Math.max(rows, cols));
+  assertU32Params("attention_qk band params", { "M + band": rows + word, "N + band": cols + word });
+  return word;
 };
 
 /**

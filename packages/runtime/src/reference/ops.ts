@@ -28,6 +28,7 @@ import {
   assertDtype,
   assertInputDtypes,
   assertSlotDtype,
+  attentionBand,
   attentionScale,
   type BinaryOpName,
   castTargetDtype,
@@ -1250,7 +1251,8 @@ export const referenceSafeSoftmax = (
  *
  * `mask` is an optional fourth input (an additive `[1,1,M,N]` term broadcast over all of B·H —
  * src/ops.ts). It is added **after S is rounded to f32** (the same position as the write-out
- * epilogue of the GPU side's ①QK).
+ * epilogue of the GPU side's ①QK). `attrs.band` (never beside a mask) replaces the score of a
+ * column with `|row − col| > band` by −inf at the same position.
  *
  * MUST: written as **three plain steps** (materialize S → materialize P with safe-softmax → PV).
  * The GPU side does not materialize P and evaluates `exp(S−m)·inv` while filling the A tile (a
@@ -1283,6 +1285,10 @@ export const referenceAttention = (
   // The GPU side carries it as an f32 word of params, so the oracle also uses the value rounded to
   // f32 (the same as masked_fill).
   const scale = Math.fround(attentionScale(attrs, "reference"));
+  // The band (`|row − col| ≤ band` keeps a column — the shape layer has already refused it beside a
+  // mask). MUST: written as a distance here, not as the kernel's subtraction-free predicate, so the
+  // two forms do not share an index computation.
+  const band = attentionBand(attrs, "reference");
   const [batches, heads, rows, depth] = shape;
   const cols = k.shape[2];
   // GQA repeat count `r = H / Hkv` (the derived value of ADR 0067 decision 1 — the shape check
@@ -1317,6 +1323,8 @@ export const referenceAttention = (
           mask === undefined
             ? Math.fround(acc)
             : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
+        // A column outside the band is −inf (the score is replaced, not added to).
+        if (band !== undefined && Math.abs(row - col) > band) scores[col] = -Infinity;
       }
       // ② safe-softmax (MUST: the amax-subtracted form — the same as referenceSoftmax). A row
       // with every column −inf (a fully masked row) fixes P at all 0 — the mirror of the empty-row

@@ -784,6 +784,26 @@ STATE_READONLY_ATTRS: AttrSchema = {
 }
 
 
+#: The band of plain attention (the form without a states field — ADR 0155): key column `n` is
+#: visible to query row `m` iff `|m − n| ≤ band`, row and column being the node's own M and N
+#: indices. An **optional attr**: the absence of the field means "no band". When declared, an
+#: integer of at least 0 (0 keeps the diagonal only).
+#:
+#: MUST: never filled with a default (the mirror of ATTENTION_BAND_ATTRS on the TS side).
+#: MUST: declared only on the form without a states field, and never together with the additive
+#: mask (one mechanism per node — OpContract.plain_optional_attrs).
+ATTENTION_BAND_ATTRS: AttrSchema = {
+    "band": lambda value, where: _assert_integer_attr(value, where, 0)
+}
+
+
+def attention_band(attrs: Mapping[str, Any], where: str) -> int | None:
+    """The `band` of a plain attention (`None` = no band when not declared)."""
+    if "band" not in attrs:
+        return None
+    return _assert_integer_attr(attrs["band"], f"{where} attrs.band", 0)
+
+
 def _assert_readonly_attr(value: Any, where: str) -> bool:
     """`attrs.readonly` is exactly the bool true (the MUST of {@link STATE_READONLY_ATTRS})."""
     if value is not True:
@@ -1220,6 +1240,15 @@ class OpContract:
     #: does not reference state — being able to write it in the old form would create "an attr that
     #: is accepted but read by nobody".
     optional_attrs: AttrSchema = field(default_factory=dict)
+    #: **Optional attrs of the form without a states field** (currently attention's `band` — ADR
+    #: 0155; the mirror of plainOptionalAttrs on the TS side). The same rules as `optional_attrs`
+    #: with the form reversed.
+    #:
+    #: MUST: for the form **without** a states field only (assert_node_contract) — the states
+    #: form's columns are logical positions under its own causal rule and `window`.
+    #: MUST: never declared together with the optional trailing input (both hide key columns; a
+    #: node carries one mechanism).
+    plain_optional_attrs: AttrSchema = field(default_factory=dict)
     #: Contract of the `states` field (None = **an op that cannot have a states field**).
     states: StateFieldContract | None = None
 
@@ -1259,6 +1288,12 @@ class OpContract:
         graph for missing capabilities.
         """
         return frozenset(self.optional_attrs)
+
+    @property
+    def plain_optional_attr_keys(self) -> frozenset[str]:
+        """Keys the schema declares as **optional on the form without a states field**
+        (`plain_optional_attrs`); capability matching takes them in the same union."""
+        return frozenset(self.plain_optional_attrs)
 
     @property
     def output_count(self) -> int:
@@ -1348,6 +1383,7 @@ def _contract(
     variadic: bool = False,
     max_arity: int | None = None,
     optional_attrs: AttrSchema | None = None,
+    plain_optional_attrs: AttrSchema | None = None,
     states: StateFieldContract | None = None,
 ) -> OpContract:
     return _slot_contract(
@@ -1359,6 +1395,7 @@ def _contract(
         variadic=variadic,
         max_arity=max_arity,
         optional_attrs=optional_attrs,
+        plain_optional_attrs=plain_optional_attrs,
         states=states,
     )
 
@@ -1373,6 +1410,7 @@ def _slot_contract(
     variadic: bool = False,
     max_arity: int | None = None,
     optional_attrs: AttrSchema | None = None,
+    plain_optional_attrs: AttrSchema | None = None,
     states: StateFieldContract | None = None,
 ) -> OpContract:
     return OpContract(
@@ -1385,6 +1423,7 @@ def _slot_contract(
         variadic=variadic,
         max_arity=max_arity,
         optional_attrs=optional_attrs if optional_attrs is not None else {},
+        plain_optional_attrs=plain_optional_attrs if plain_optional_attrs is not None else {},
         states=states,
     )
 
@@ -1470,6 +1509,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
         # stage 2). It follows the same rule as `window`: "declarable only on nodes with a states
         # field".
         optional_attrs={**STATE_WINDOW_ATTRS, **STATE_READONLY_ATTRS},
+        # `band` is the plain form's only optional attr (ADR 0155 — checked inside ①QK from
+        # positions, no mask tensor); it never sits beside the mask.
+        plain_optional_attrs=ATTENTION_BAND_ATTRS,
         states=StateFieldContract(keys=("k", "v"), required=False),
     ),
     # Write into a state slot (ADR 0067 decision 5). 1 input, **0 outputs** (the empty sequence in
@@ -1690,6 +1732,17 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
                 f"{where}: op '{node.op}' input count is {len(node.ins)}"
                 f" (the contract is {describe_arity(contract)})"
             )
+        # MUST: a plain-form optional attr is never declared together with the optional trailing
+        # input (OpContract.plain_optional_attrs — attention's band and its mask: one mechanism
+        # per node). The shape layer repeats it for attention.
+        if contract.max_arity is not None and len(node.ins) > contract.arity:
+            for key in contract.plain_optional_attrs:
+                if key in node.attrs:
+                    raise OpContractError(
+                        f"{where}: op '{node.op}' attrs.{key} cannot be declared together with"
+                        f" the optional trailing input ({len(node.ins)} inputs given — one way to"
+                        " hide key columns per node)"
+                    )
     if len(node.outs) != contract.output_count:
         raise OpContractError(
             f"{where}: op '{node.op}' output count is {len(node.outs)}"
@@ -1698,7 +1751,9 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
     unknown = sorted(
         key
         for key in node.attrs
-        if key not in contract.attrs and key not in contract.optional_attrs
+        if key not in contract.attrs
+        and key not in contract.optional_attrs
+        and key not in contract.plain_optional_attrs
     )
     if unknown:
         raise OpContractError(f"{where}: op '{node.op}' attrs outside the contract {unknown}")
@@ -1714,6 +1769,17 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
             raise OpContractError(
                 f"{where}: op '{node.op}' attrs.{key} can be declared only on a node with a states"
                 " field"
+            )
+        check(node.attrs[key], f"{where} attrs.{key}")
+    for key, check in contract.plain_optional_attrs.items():
+        if key not in node.attrs:
+            continue
+        # MUST: plain-form optional attrs are for the form without a states field only
+        # (OpContract.plain_optional_attrs).
+        if state_keys:
+            raise OpContractError(
+                f"{where}: op '{node.op}' attrs.{key} can be declared only on a node without a"
+                " states field"
             )
         check(node.attrs[key], f"{where} attrs.{key}")
     return contract

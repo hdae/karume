@@ -2,6 +2,7 @@ import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
+  ATTENTION_BAND_CASES,
   ATTENTION_ONLINE_TILED_CASES,
   FUSION_TWIN_CASES,
   GEMV_INTEGER_CASES,
@@ -168,6 +169,7 @@ describe("the expected case counts each check exports", () => {
       "attention-online-tiled-wg": 28,
       "attention-online-tiled-sg32": 28,
     });
+    assertEquals(ATTENTION_BAND_CASES, { "attention-band": 14 });
     assertEquals(FUSION_TWIN_CASES, {
       "fusion-gated-residual": 9,
       "fusion-silu": 3,

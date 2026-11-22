@@ -114,6 +114,12 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   decision 7, requested by MOSS-Image's untiled FLUX.2 decoder). **Arity fixed at 3**, attrs `num_groups` / `eps`;
   the exporter preserves `aten.group_norm`, so the default preserved list has 13 ops. No effect on existing IR
   (a GroupNorm failed before as an unsupported op).
+- Model expansion (2026-11-22): added the **optional attrs `band`** of `attention` without a `states` field (ADR
+  [0155](decisions/0155-attention-band.md) — the sliding layers of EmbeddingGemma 2 attend `|q − kv| ≤ 512`, which the
+  folded `[1,1,Tmax,Tmax]` mask could carry only up to Tmax ≈ 2,896). An integer ≥ 0: key column `n` is visible to query
+  row `m` iff `|m − n| ≤ band`. Refused on the states form and beside the fourth input. The exporter never emits it from
+  torch; a recipe declares it after export (`karume.band.to_band_form`, which drops the mask input). **A node without the
+  field is unaffected** (no effect on existing IR).
 
 ## Container
 
@@ -390,10 +396,11 @@ a graph without it (= every existing model) the accepted set does not change at 
   matching the output count in the contract table (writing `outs: []` for another op fails on the count mismatch).
 - `nodes` are stored in **topological order** (the parser checks it; a forward reference fails loudly).
 - `attrs` are checked against the per-op contract table. Unknown attrs and values outside the contract fail loudly
-  (no approximate execution). **The only optional attrs are `window` and `readonly`** (both
-  exclusive to the states form — "State-referencing nodes" below). They are fields whose absence is itself a different declaration (no `window` =
-  the whole context / no `readonly` = the form that also reads the current step's k/v); all other attrs are as before:
-  "every declared key is required, no default filled in".
+  (no approximate execution). **The only optional attrs are `window`, `readonly` and `band`**: the first two are
+  exclusive to the states form ("State-referencing nodes" below), `band` to the form of `attention` without a states field
+  (the `attention` entry of the op set). They are fields whose absence is itself a different declaration (no `window` =
+  the whole context / no `readonly` = the form that also reads the current step's k/v / no `band` = every key column
+  visible); all other attrs are as before: "every declared key is required, no default filled in".
 - **The `states` field** (optional, "State-referencing nodes" below): a field separate from `ins` / `outs` that references state
   slots by name. The keys are fixed by the op contract, and the values are slot names declared in `states{}`
   (a reference to an undeclared slot fails loudly).
@@ -630,6 +637,14 @@ The contract of nodes that read and write state slots (ADR
     [0044](decisions/0044-runtime-attention-mask.md) addendum 2026-08-31 — the fused-attention part of decision 3
     was withdrawn). An all −inf row is a contract violation (NaN contamination) only for the plain
     `softmax` of the decomposed path.
+    The optional attrs **`band`** (an integer ≥ 0; ADR [0155](decisions/0155-attention-band.md)) hides key columns by
+    position instead of by a tensor: key column `n` is visible to query row `m` **iff `|m − n| ≤ band`** (inclusive and
+    symmetric, `m` and `n` being the node's own row index in `[0, M)` and column index in `[0, N)`). On finite scores it
+    is equivalent to the additive mask `[1,1,M,N]` of 0 where `|m − n| ≤ band` and −inf elsewhere (a NaN or +inf score
+    outside the band is hidden by the band, where the mask would turn the row into NaN); absence of the field = every
+    column visible. `band` is declared only on a node **without** a `states` field (the states form keeps its causal rule and
+    `window`) and **never together with the fourth input** (one way to hide key columns per node); both fail loudly. A
+    row with no visible column (M > N and `m − (N − 1) > band`) is a valid input with output 0, as an all −inf mask row is.
     With the optional **`states` field** it becomes the autoregressive states form (the
     "State-referencing nodes" section above — a contract extension under the same op name, where the presence of the field determines the form).
     When the states form further declares the optional attrs **`readonly`**, it becomes **arity 1** (the q-only

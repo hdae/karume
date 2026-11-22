@@ -50,6 +50,7 @@ import {
   optionalAttrKeysOf,
   outputCountOf,
   permuteDims,
+  plainOptionalAttrKeysOf,
   REDUCE_OPS,
   resolveNodeDtypes,
   resolveOpContract,
@@ -88,6 +89,8 @@ type OpEntry = {
   readonly attrs: readonly string[];
   /** Optional attrs (`window` of ADR 0067; empty for ops without them). */
   readonly optionalAttrs: readonly string[];
+  /** Optional attrs of the form without a states field (attention's `band`; empty otherwise). */
+  readonly plainOptionalAttrs: readonly string[];
   /**
    * The contract of the states field (ADR 0067 decisions 4 / 5; undefined for ops that cannot have
    * the field).
@@ -235,6 +238,10 @@ const asOpEntry = (raw: unknown): OpEntry => {
     attrs: strings(field(raw, "attrs"), "attrs"),
     optionalAttrs:
       raw["optional_attrs"] === undefined ? [] : strings(raw["optional_attrs"], "optional_attrs"),
+    plainOptionalAttrs:
+      raw["plain_optional_attrs"] === undefined
+        ? []
+        : strings(raw["plain_optional_attrs"], "plain_optional_attrs"),
     states:
       states === undefined || typeof required !== "boolean"
         ? undefined
@@ -390,6 +397,13 @@ test("the arity / slot dtypes / attrs keys of the conformance table match the co
       [...entry.optionalAttrs].sort(),
       `${entry.op}: optional attrs key set`,
     );
+    // The plain form's optional attrs (attention's `band`) for the same reason: a key the exporter
+    // can write and the runtime rejects, or the reverse, if only one side moves.
+    assertEquals(
+      [...plainOptionalAttrKeysOf(contract)].sort(),
+      [...entry.plainOptionalAttrs].sort(),
+      `${entry.op}: plain-form optional attrs key set`,
+    );
     assertEquals(
       contract.states === undefined
         ? undefined
@@ -515,7 +529,10 @@ test("the contract table's check functions judge the attrs value ranges of the c
   // Required and optional attrs are judged on the same footing (there is one source of truth for
   // the value range — being optional is no reason for the range to be looser).
   const declared = new Map(
-    fixture.ops.map((entry) => [entry.op, [...entry.attrs, ...entry.optionalAttrs]]),
+    fixture.ops.map((entry) => [
+      entry.op,
+      [...entry.attrs, ...entry.optionalAttrs, ...entry.plainOptionalAttrs],
+    ]),
   );
   for (const entry of fixture.attrValues) {
     const contract = resolveOpContract(entry.op);
@@ -523,7 +540,10 @@ test("the contract table's check functions judge the attrs value ranges of the c
       declared.get(entry.op)?.includes(entry.attr) === true,
       `${entry.op}: attr '${entry.attr}' is not in the ops section`,
     );
-    const check = contract.attrs[entry.attr] ?? contract.optionalAttrs?.[entry.attr];
+    const check =
+      contract.attrs[entry.attr] ??
+      contract.optionalAttrs?.[entry.attr] ??
+      contract.plainOptionalAttrs?.[entry.attr];
     assert(
       check !== undefined,
       `${entry.op}: the contract table has no check function for attr '${entry.attr}'`,
@@ -550,7 +570,7 @@ test("the contract table's check functions judge the attrs value ranges of the c
   // Every attr with a value range is in the table (an attr left out would keep its range unchecked)
   const covered = new Set(fixture.attrValues.map((entry) => `${entry.op}.${entry.attr}`));
   for (const entry of fixture.ops) {
-    for (const attr of [...entry.attrs, ...entry.optionalAttrs]) {
+    for (const attr of [...entry.attrs, ...entry.optionalAttrs, ...entry.plainOptionalAttrs]) {
       assert(
         covered.has(`${entry.op}.${attr}`),
         `the value range of ${entry.op}.${attr} is not in the table`,
@@ -2078,6 +2098,7 @@ test("the optional attr `window` can be declared only on nodes with a states fie
   // The capability projection carries the **union** of required and optional (so that the
   // enumerating check does not reject the states form)
   assertEquals([...(RUNTIME_SUPPORT.ops.get("attention")?.attrKeys ?? [])].sort(), [
+    "band",
     "readonly",
     "scale",
     "window",
@@ -2088,5 +2109,46 @@ test("the optional attr `window` can be declared only on nodes with a states fie
     () => assertNodeContract(appendNode({ windows: 512 }), "t"),
     OpContractError,
     "attrs outside the contract [windows]",
+  );
+});
+
+test("the optional attr `band` can be declared only on plain attention, and never beside the mask", () => {
+  const states = { k: "kv.k", v: "kv.v" };
+  // The plain form takes it with 3 inputs (0 keeps the diagonal only)
+  assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, band: 512 }), "t");
+  assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, band: 0 }), "t");
+  // One mechanism per node: the band and the additive mask are never declared together
+  assertThrows(
+    () => assertNodeContract(node("attention", ["q", "k", "v", "m"], { scale: 0.5, band: 4 }), "t"),
+    OpContractError,
+    "attrs.band cannot be declared together with the optional trailing input",
+  );
+  // The states form keeps its own causal rule and `window` (a band there would be read by no one)
+  assertThrows(
+    () =>
+      assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, band: 4 }, states), "t"),
+    OpContractError,
+    "attrs.band can be declared only on a node without a states field",
+  );
+  assertThrows(
+    () =>
+      assertNodeContract(
+        node("attention", ["q"], { scale: 0.5, readonly: true, band: 4 }, states),
+        "t",
+      ),
+    OpContractError,
+    "attrs.band can be declared only on a node without a states field",
+  );
+  // The range applies at the node level too
+  assertThrows(
+    () => assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, band: -1 }), "t"),
+    OpContractError,
+    "attrs.band",
+  );
+  // state_append has no band
+  assertThrows(
+    () => assertNodeContract(appendNode({ band: 4 }), "t"),
+    OpContractError,
+    "attrs outside the contract [band]",
   );
 });

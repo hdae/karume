@@ -90,6 +90,9 @@ CORE_MODULES: tuple[str, ...] = (
     # IR surgery into the states form (ADR 0067). Used by decode scripts, but holds no model
     # knowledge.
     "states",
+    # IR surgery that declares a band in place of an attention's mask (ADR 0155). The recipe names
+    # the nodes and the width; no model knowledge.
+    "band",
     # The primitive of artifact publication (ADR 0052's staging → verify → swap). Knows only
     # paths.
     "artifacts",

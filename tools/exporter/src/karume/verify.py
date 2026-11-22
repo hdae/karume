@@ -1019,14 +1019,16 @@ def assert_runtime_support(graph: IrGraph) -> None:
             dtype = _declared_dtype(graph, name)
             if dtype not in accept:
                 bad_dtypes[name] = dtype
-        # MUST: check against **the union** of required and optional (ADR 0067's `window`).
-        # Dropping the optional ones would reject a correct states-form graph for a missing
-        # capability, as "unimplemented attrs" (the same projection as the union of
-        # RUNTIME_SUPPORT.attrKeys on the TS side).
+        # MUST: check against **the union** of required and optional (ADR 0067's `window`, ADR
+        # 0155's `band`). Dropping the optional ones would reject a correct states-form or band
+        # graph for a missing capability, as "unimplemented attrs" (the same projection as the
+        # union of RUNTIME_SUPPORT.attrKeys on the TS side).
         unknown = sorted(
             key
             for key in node.attrs
-            if key not in contract.attrs and key not in contract.optional_attrs
+            if key not in contract.attrs
+            and key not in contract.optional_attrs
+            and key not in contract.plain_optional_attrs
         )
         if unknown:
             bad_attrs.append(f"{where}: {', '.join(unknown)}")

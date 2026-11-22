@@ -49,6 +49,7 @@ from karume.ops import (
     OpContractError,
     arity_fits,
     assert_strided_rank,
+    attention_band,
     attention_readonly,
     attention_scale,
     axis_dim,
@@ -1072,6 +1073,14 @@ def _attention(
     while the states form's ins are only this step's chunk, so **M agrees across the three** and
     the past is held by the slot capacity C.
     """
+    # MUST: the states forms (readonly included) take no band (ADR 0155 — their columns are logical
+    # positions under their own causal rule and `window`; the mirror of computeOutputShape on the
+    # TS side). The contract layer rejects it too; the conformance table comes here directly.
+    if slots.referenced and attention_band(attrs, where) is not None:
+        raise OpContractError(
+            f"{where}: states-form attention takes no band (its columns follow the causal rule"
+            " and window)"
+        )
     # The readonly form (ADR 0096 stage 2) has no k / v for this step = **its only input is q**,
     # so unpacking q/k/v itself does not work. The branch MUST come before the unpacking.
     if slots.referenced and attention_readonly(attrs):
@@ -1113,6 +1122,15 @@ def _attention(
             raise OpContractError(
                 f"{where}: attention mask [{_show(mask)}] M / N do not match q / k {show}"
             )
+        # MUST: the band and the mask are never declared together (one mechanism per node — ADR
+        # 0155; the contract layer rejects it too).
+        if attention_band(attrs, where) is not None:
+            raise OpContractError(
+                f"{where}: attention declares attrs.band and an additive mask together (one way"
+                f" to hide key columns per node) {show}"
+            )
+    # The band's range (an integer ≥ 0) is read here too, for the same reason as `scale`.
+    attention_band(attrs, where)
     return list(q)
 
 

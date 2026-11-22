@@ -50,7 +50,7 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   The only runtime-specific subpaths are `hub/node` (`nodeDirectory`, `nodeCacheStorage`) and `hub/deno` (`denoDirectory`)
 - `packages/models/` — **both a barrel (mod.ts) and per-family subpath exports**
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)
-- `packages/kernel-checks/` (private) — the thirteen kernel identity checks (the subgroup GEMV / RMS, the state-attention
+- `packages/kernel-checks/` (private) — the fourteen kernel identity checks (the subgroup GEMV / RMS, the state-attention
   rewrites, the GEMV forms, the fusion twins and others) shared by the runtime GPU tests and the workbench's `kernel-check`
   entry; it drives runtime internals, so only those two may import it
 - `packages/candidate-rules/` (private) — candidate fusion rules written against `@karume/runtime/kernel`, measured (the

@@ -258,6 +258,7 @@ Current models and coverage:
 | `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                                                      |
 | `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                                          |
 | `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                                                |
+| `band_attention`           | none         | attention with `attrs.band` (SDPA with an additive sliding-band mask buffer, the mask replaced by the band after export — ADR 0155; GQA 4:2, M ≠ N)                     |
 | `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                                                   |
 | `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                                              |
 | `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked                          |

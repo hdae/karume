@@ -63,7 +63,7 @@ import {
 } from "../../codegen/strided.ts";
 import { type MaterialisedScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
 import { type AttentionRoute, attentionRoute, type AttentionSeats } from "../attention-route.ts";
-import { attentionScale, numel, stateWindow } from "../../ops.ts";
+import { attentionBand, attentionScale, numel, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { I8A8_PACK, type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
@@ -522,13 +522,15 @@ const permuteHeads = async (
  * estimate does not return a number for a combination execution rejects).
  *
  * - mask × a8: the i8a8 variant of ①QK has no mask epilogue (ADR 0023 / docs/limitations.md).
+ * - band × a8: refused exactly as mask × a8 (neither the i8a8 ①QK nor the online kernel has the
+ *   band predicate).
  * - GQA × a8: not supported (ADR 0067 decision 3).
  * - The i8a8 i32 reduction guard: when D (for ①) or N (for ③) exceeds {@link LINEAR_I8A8_MAX_K},
  *   the i32 wraps around.
  *
- * MUST: mask × a8 and GQA × a8 are checked against **the requested mode** (`i8a8`) — checking
- * `route` (which includes the D % 4 / N % 4 eligibility) would let only the shapes that fall back
- * slip past the rejection and run as a mix of f32 ①QK and i8a8 ③PV.
+ * MUST: mask × a8, band × a8 and GQA × a8 are checked against **the requested mode** (`i8a8`) —
+ * checking `route` (which includes the D % 4 / N % 4 eligibility) would let only the shapes that
+ * fall back slip past the rejection and run as a mix of f32 ①QK and i8a8 ③PV.
  * The reduction guard applies only to the stages that actually take i8a8 (`route`).
  */
 export const fusedAttentionViolation = (
@@ -544,16 +546,25 @@ export const fusedAttentionViolation = (
   request: {
     readonly i8a8: boolean;
     readonly mask: boolean;
+    /** Whether the node declares `attrs.band`. */
+    readonly band: boolean;
     readonly route: Pick<ReturnType<typeof attentionRoute>, "qk" | "pv">;
   },
 ): string | undefined => {
   const { heads, kvHeads, depth, cols } = shape;
-  const { i8a8, mask, route } = request;
+  const { i8a8, mask, band, route } = request;
   if (mask && i8a8) {
     return (
       `${where}: attention with an additive mask cannot be combined with attentionCompute 'a8'` +
       " (the i8a8 variant of ①QK has no mask epilogue — set attentionCompute to 'f32' or " +
       "'f16')"
+    );
+  }
+  if (band && i8a8) {
+    return (
+      `${where}: attention with attrs.band cannot be combined with attentionCompute 'a8'` +
+      " (neither the i8a8 variant of ①QK nor the online kernel has the band predicate — set " +
+      "attentionCompute to 'f32' or 'f16')"
     );
   }
   const kvRepeat = heads / kvHeads;
@@ -644,7 +655,9 @@ export const stateAttentionVariantViolation = (
  * its detectors).
  *
  * The optional fourth input `mask[1,1,M,N]` (additive) **only adds one binding to ①**; neither the
- * dispatch count nor the paths of ②③ change (S comes out already masked).
+ * dispatch count nor the paths of ②③ change (S comes out already masked). `attrs.band` (never
+ * beside a mask) adds no binding: one key word and two uniform words of ① only, and S comes out
+ * with the columns outside the band at −inf.
  *
  * GQA (`H % Hkv == 0` — ADR 0067) is an axis of **one key word and one uniform word of ①③ only**;
  * neither the dispatch count nor the allocation changes (only the K / V base maps to the kv-head
@@ -743,16 +756,19 @@ export const buildAttention = async (
   // The additive mask (an optional fourth input — the contract is in src/ops.ts). An axis of ①'s
   // epilogue only; to ②③ it looks like "S is already masked".
   const mask = binds[3];
-  // MUST: the combination guards (mask × a8, GQA × a8, the i8a8 i32 reduction) fail loudly **before
-  // any temporary buffer is taken**. i8a8's ①QK is a separate kernel
+  // The band (`attrs.band`, never beside a mask — the contract layer): the same epilogue as a
+  // predicate over positions, so no tensor is bound; ②③ see the same "S is already masked".
+  const band = attentionBand(step.node.attrs, where);
+  // MUST: the combination guards (mask × a8, band × a8, GQA × a8, the i8a8 i32 reduction) fail
+  // loudly **before any temporary buffer is taken**. i8a8's ①QK is a separate kernel
   // (src/kernels/attention-i8a8.ts) without an epilogue; dropping silently to the f32 path would
-  // give the silence of "asked for i8a8 and it has no effect", and dropping the mask would break
-  // the values. The decision is the one function shared with the estimate
+  // give the silence of "asked for i8a8 and it has no effect", and dropping the mask or the band
+  // would break the values. The decision is the one function shared with the estimate
   // ({@link fusedAttentionViolation} — the rule of checking the requested mode lives there too).
   const violation = fusedAttentionViolation(
     where,
     { heads: q[1], kvHeads, depth, cols },
-    { i8a8, mask: mask !== undefined, route },
+    { i8a8, mask: mask !== undefined, band: band !== undefined, route },
   );
   if (violation !== undefined) throw new ExecutionError(violation);
 
@@ -840,8 +856,18 @@ export const buildAttention = async (
   const qkGeometry = face.state.geometryProfile.attention.qk;
   const pvGeometry = face.state.geometryProfile.attention.pv;
   const hasMask = mask !== undefined;
+  const hasBand = band !== undefined;
   const qkV4 = gemmUsesVec4(depth, cols);
-  const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry);
+  const qkKey = attentionQkKey(
+    qkV4,
+    compute,
+    scoreStorage,
+    hasMask,
+    gqa,
+    windowed,
+    qkGeometry,
+    hasBand,
+  );
   // The i8a8 quantization (①'s k / ③'s Vᵀ = **the column side**) does not depend on the block, so
   // it runs **once, outside the loop**.
   // MUST: do not move it into the loop (same values, work multiplied by the block count — a pure
@@ -870,7 +896,16 @@ export const buildAttention = async (
           key: qkKey,
           ...(await face.state.cache.get(
             qkKey,
-            attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry),
+            attentionQkWgsl(
+              qkV4,
+              compute,
+              scoreStorage,
+              hasMask,
+              gqa,
+              windowed,
+              qkGeometry,
+              hasBand,
+            ),
           )),
         };
   const pvV4 = gemmUsesVec4(cols, depth);
@@ -952,7 +987,15 @@ export const buildAttention = async (
         layout: qk.layout,
         roles: qk.roles,
         params: face.writeParams(
-          attentionQkParams(block.rows, cols, depth, scale, gqa ? kvRepeat : undefined, window),
+          attentionQkParams(
+            block.rows,
+            cols,
+            depth,
+            scale,
+            gqa ? kvRepeat : undefined,
+            window,
+            band,
+          ),
           PARAMS_UNIFORM_USAGE,
         ),
         bindings: [

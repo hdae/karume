@@ -332,6 +332,54 @@ class FusedAttention(nn.Module):
         return torch.nn.functional.scaled_dot_product_attention(query, key, value)
 
 
+class BandAttention(nn.Module):
+    """The golden of attention's band (ADR 0155): SDPA with a sliding band `|m − n| ≤ BAND` given
+    as an additive 0 / −inf mask buffer, as a sliding-window model exports it. The ledger rewrites
+    the exported node into the band form (`karume.band.to_band_form`), so the golden compares the
+    runtime's band predicate with torch's own masked SDPA, and the folded mask is not stored.
+
+    MUST: M ≠ N and GQA (H = 4 over Hkv = 2) — the band reads the node's own row and column
+    indices, and the kv-head mapping is the one axis the band must not disturb. Every row keeps at
+    least one column (the band contains the diagonal and M < N), so no row is the empty-row case.
+    """
+
+    BATCH = 2
+    HEADS = 4
+    KV_HEADS = 2
+    QUERIES = 6
+    KEYS = 9
+    DEPTH = 8
+    BAND = 2
+
+    def __init__(self) -> None:
+        super().__init__()
+        rows = torch.arange(self.QUERIES).unsqueeze(1)
+        cols = torch.arange(self.KEYS).unsqueeze(0)
+        hidden = (rows - cols).abs() > self.BAND
+        mask = torch.zeros(1, 1, self.QUERIES, self.KEYS).masked_fill(hidden, float("-inf"))
+        self.register_buffer("band_mask", mask)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=self.band_mask, enable_gqa=True
+        )
+
+
+def _band_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, ...]:
+    """Inputs of `BandAttention` (q on H, k / v on Hkv)."""
+    shape = BandAttention
+    query = _uniform(
+        generator, shape.BATCH, shape.HEADS, shape.QUERIES, shape.DEPTH, low=-1.0, high=1.0
+    )
+    key = _uniform(
+        generator, shape.BATCH, shape.KV_HEADS, shape.KEYS, shape.DEPTH, low=-1.0, high=1.0
+    )
+    value = _uniform(
+        generator, shape.BATCH, shape.KV_HEADS, shape.KEYS, shape.DEPTH, low=-1.0, high=1.0
+    )
+    return query, key, value
+
+
 def _fused_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, ...]:
     """Inputs of `FusedAttention`. **Only the last query row has its logits dropped uniformly to
     −195**.

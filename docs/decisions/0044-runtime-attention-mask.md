@@ -122,3 +122,10 @@ A mask non-empty at symbol lengths 5 and 9 may be empty elsewhere: `arange(T) >=
 element for T = 2..4. The inactivity test of decision 2 never treats a symbol-dependent mask as
 proven; the rewrite to `safe_softmax` keeps the semantics. Removal for static masks and for paths
 without a source of non-finite values is kept.
+
+## Addendum (2026-11-22) — a band declared on the node (ADR 0155)
+
+Decision 1 kept the mask contract of fused attention unchanged. ADR [0155](0155-attention-band.md) adds one form beside it,
+for one need: a key band `|m − n| ≤ band` declared as `attrs.band` on plain attention and checked inside ①QK from positions,
+so that a sliding-window model needs no `[T, T]` mask tensor. It is refused beside the mask and on the states form; the
+additive mask, the bool-mask route of this record and every other decision here are unchanged.

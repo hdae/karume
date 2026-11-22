@@ -19,6 +19,9 @@
     "  is a different declaration, \"the full context\", appear here). Like the required attrs (`attrs`),",
     "  their value ranges are in the attr_values section. `states` is **the contract of the states field** (`keys` = the exact key set",
     "  when the field is non-empty / `required` = whether the field itself is required); omitted = an op that cannot have a states field.",
+    "  `optional_attrs` are declarable only on a node **with** a states field. `plain_optional_attrs` lists the optional attrs of the form",
+    "  **without** a states field (attention's `band` — ADR 0155), which are also never declared together with the optional trailing input",
+    "  (one way to hide key columns per node); their value ranges are in the attr_values section too.",
     "  out_dtypes is a **list**, **per output slot**, of mappings \"slot 0's input dtype → that output's dtype\"",
     "  (ADR 0068 decision 1). The list's length is the op's output count, and it is written **only for ops that are not the identity**",
     "  (omitted = one output, the identity mapping over slot 0's accepted set). A dtype whose element mapping is also the identity",
@@ -307,6 +310,7 @@
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
       "attrs": ["scale"],
       "optional_attrs": ["readonly", "window"],
+      "plain_optional_attrs": ["band"],
       "states": { "keys": ["k", "v"], "required": false }
     },
     {
@@ -584,6 +588,13 @@
       "why": "declares the past-only form (ADR 0096 stage 2 §1.2). **Optional, true only** — an absent field is \"the states form that also reads the current step's k/v\", and false would be a second spelling of the same meaning, so it is rejected",
       "accept": [true],
       "reject": [false, 0, 1, "true", null]
+    },
+    {
+      "op": "attention",
+      "attr": "band",
+      "why": "the band of plain attention (ADR 0155): key column n is visible to query row m iff |m − n| <= band. **Optional**; an absent field = no band. When declared, an integer of 0 or more (0 keeps the diagonal only; EmbeddingGemma 2's sliding layers use 512)",
+      "accept": [0, 1, 512, 9007199254740991],
+      "reject": [-1, 1.5, "512", null, true, [512], 1000000000000000000]
     },
     {
       "op": "state_append",
@@ -2092,6 +2103,52 @@
       "op": "attention",
       "ins": [
         [2, 3, 5, 4],
+        [2, 3, 7, 4],
+        [2, 3, 7, 4]
+      ],
+      "attrs": { "scale": 0.5, "band": 2 },
+      "outs": [[2, 3, 5, 4]],
+      "why": "the band (ADR 0155) with M != N: a predicate over the node's own row and column indices, so no shape changes and no input is added"
+    },
+    {
+      "op": "attention",
+      "ins": [
+        [1, 3, "T", 256],
+        [1, 1, "T", 256],
+        [1, 1, "T", 256]
+      ],
+      "bindings": { "T": 9 },
+      "attrs": { "scale": 0.25, "band": 512 },
+      "outs": [[1, 3, "T", 256]],
+      "why": "the band on a symbolic T with GQA 3:1 (the form of EmbeddingGemma 2's sliding layers — band 512, no [T,T] mask)"
+    },
+    {
+      "op": "attention",
+      "ins": [
+        [2, 3, 5, 4],
+        [2, 3, 7, 4],
+        [2, 3, 7, 4],
+        [1, 1, 5, 7]
+      ],
+      "attrs": { "scale": 0.5, "band": 2 },
+      "throws": true,
+      "why": "the band beside an additive mask (one way to hide key columns per node)"
+    },
+    {
+      "op": "attention",
+      "ins": [
+        [2, 3, 5, 4],
+        [2, 3, 7, 4],
+        [2, 3, 7, 4]
+      ],
+      "attrs": { "scale": 0.5, "band": -1 },
+      "throws": true,
+      "why": "a negative band (the range is read by the shape rule too, as scale is)"
+    },
+    {
+      "op": "attention",
+      "ins": [
+        [2, 3, 5, 4],
         [2, 3, 7, 4]
       ],
       "attrs": { "scale": 0.5 },
@@ -2463,6 +2520,28 @@
       "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
       "throws": true,
       "why": "readonly yet takes the current step's k / v (ins is exactly one q)"
+    },
+    {
+      "op": "attention",
+      "ins": [
+        [1, 8, 4, 128],
+        [1, 1, 4, 128],
+        [1, 1, 4, 128]
+      ],
+      "attrs": { "scale": 0.5, "band": 512 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "a band on the states form (its columns are logical positions under the causal rule and window — ADR 0155)"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128]],
+      "attrs": { "scale": 0.5, "readonly": true, "band": 512 },
+      "states": { "k": "layer1.k", "v": "layer1.v" },
+      "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "a band on the readonly form (the same reason as the states form)"
     },
     {
       "op": "attention",

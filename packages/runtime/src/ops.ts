@@ -66,6 +66,7 @@ export {
 export type { BinaryOpName, GruScanOpName, ReduceOpName, UnaryOpName } from "./ops/names.ts";
 
 export {
+  attentionBand,
   attentionScale,
   castTargetDtype,
   catDim,
@@ -122,6 +123,7 @@ export {
   OP_CONTRACTS,
   optionalAttrKeysOf,
   outputCountOf,
+  plainOptionalAttrKeysOf,
   outputDtypeOf,
   resolveNodeDtypes,
   resolveOpContract,

@@ -154,7 +154,7 @@ const onlineReduce = (
  *   store it). The online route also carries its Vᵀ key-axis form (`keyWords`): the profile's
  *   choice in the device facts, else N's own.
  *
- * MUST: the rejections of mask × a8 and GQA × a8 look at the **requested mode**
+ * MUST: the rejections of mask × a8, band × a8 and GQA × a8 look at the **requested mode**
  * (`attentionCompute === "a8"`), not at this return value (the MUST of buildAttention — looking at
  * the value after eligibility lets exactly the shapes that fall back slip past the rejection).
  */

@@ -348,6 +348,12 @@ type GemmSpec =
        */
       readonly mask?: boolean;
       /**
+       * Whether ①QK checks `attrs.band` (①QK only; when omitted, `false`, and the generated code
+       * does not move by a single byte). Never together with `mask`. ②③ do not look at it (S
+       * comes out with the columns outside the band at −inf).
+       */
+      readonly band?: boolean;
+      /**
        * The 1 bit of GQA (divisible broadcast — ADR 0067 decisions 1 / 2). When set, **only the
        * batch base** of the K / V side maps to the kv-head ({@link batchPrologue}). MUST: when
        * omitted (= `r` is 1) the generated code does not move by a single byte — the existing
@@ -1148,6 +1154,13 @@ ${rows}`;
  * bit identity).
  * MUST: never set together with `bias` (only linear / conv2d have a bias).
  *
+ * `band` is also set only by fused attention ① (`attrs.band`). At the same place as the mask's add,
+ * the score of a column outside the band is **replaced** by −inf: `S' = select(−inf, acc, in_band)`,
+ * with the **absolute** row (`row_offset` added under the row window, as for the mask's row) and the
+ * column the store writes. Inside the band the word is acc itself, so `outF16` / `score` round the
+ * same value the mask plan rounds after `acc + 0` (they differ only in the sign of a zero acc).
+ * MUST: never set together with `mask` (one mechanism per node — the generation entry rejects it).
+ *
  * Both rows and column quads are unrolled at codegen time and read `acc{row}_{column quad}`
  * statically (the reason given in {@link gemmAccumulatorInit}). The structure of the guards, the
  * order of adding the bias and the order of the words written are the same whatever the geometry.
@@ -1161,12 +1174,18 @@ const store = (
   outF16 = false,
   score: MaterialisedScoreStorage = "f32",
   mask = false,
-  maskRowOffset = false,
+  rowOffset = false,
+  band = false,
 ): string => {
   const base = batchBase(op, "cbase");
-  /** The mask row (turned back into an index into the full M only with the row window). */
-  const maskRow = (row: number): string =>
-    maskRowOffset ? `(orow${row} + dims.row_offset)` : `orow${row}`;
+  /**
+   * The absolute query row of the mask's row and the band's predicate (turned back into an index
+   * into the full M only with the row window).
+   */
+  const absoluteRow = (row: number): string =>
+    rowOffset ? `(orow${row} + dims.row_offset)` : `orow${row}`;
+  /** The −inf word of the band (from the uniform — a constant-expression bitcast does not compile). */
+  const bandPrologue = band ? "  let neg_inf = bitcast<f32>(dims.neg_inf);\n" : "";
   const quads = gemmQuadsPerThread(geometry);
   const rows = slots(geometry.regM)
     .map((row) =>
@@ -1198,16 +1217,22 @@ const store = (
         const rowStores = slots(geometry.regM)
           .map((row) => {
             const acc = `acc${row}_${quad}`;
-            const summed = mask ? "sv" : acc;
+            const summed = mask || band ? "sv" : acc;
             const value = bias ? `${summed} + biasv` : outF16 ? `vec4<f16>(${summed})` : summed;
             // The additive mask uses the flat index of row m, column n (no batch base). It is
             // counted in quads because v4's condition is the same `n % 4 == 0` as the output (mask
             // row starts are on quad boundaries too).
             const maskAdd = mask
-              ? `      let sv = ${acc} + mask[${maskRow(row)} * n4 + ocq${quad}];\n`
+              ? `      let sv = ${acc} + mask[${absoluteRow(row)} * n4 + ocq${quad}];\n`
+              : "";
+            // The band: the quad's four columns start at `ocq · 4`.
+            const bandSelect = band
+              ? `      let sv = select(vec4<f32>(neg_inf), ${acc}, in_band4(${absoluteRow(
+                  row,
+                )}, ocq${quad} * ${GEMM_QUAD}u));\n`
               : "";
             return `    if (orow${row} < dims.m) {
-${maskAdd}      ${scoreStoreQuad(name, score, `${base}orow${row} * n4 + ocq${quad}`, value)}
+${maskAdd}${bandSelect}      ${scoreStoreQuad(name, score, `${base}orow${row} * n4 + ocq${quad}`, value)}
     }`;
           })
           .join("\n");
@@ -1216,18 +1241,21 @@ ${rowStores}
   }`;
       })
       .join("\n");
-    return `${columns}
+    return `${bandPrologue}${columns}
 ${rows}
 ${blocks}`;
   }
   const write = (row: number, col: number): string => {
     const acc = `acc${row}_${Math.floor(col / GEMM_QUAD)}.${TILE_COMPONENTS[col % GEMM_QUAD]}`;
-    const summed = mask ? "sv" : acc;
+    const summed = mask || band ? "sv" : acc;
     // The additive mask reads one element by flat index from `mbase` (the row start without the
     // batch base)
     const maskAdd = mask ? `      let sv = ${acc} + mask[mbase + ocol${at(col)}];\n` : "";
+    const bandSelect = band
+      ? `      let sv = select(neg_inf, ${acc}, in_band(${absoluteRow(row)}, ocol${at(col)}));\n`
+      : "";
     return `    if (ocol${at(col)} < dims.n) {
-${maskAdd}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : summed}${
+${maskAdd}${bandSelect}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : summed}${
       bias ? ` + bias[ocol${at(col)}]` : ""
     };
     }`;
@@ -1237,13 +1265,13 @@ ${maskAdd}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : 
       (row) =>
         `  if (orow${row} < dims.m) {
     let obase = ${base}orow${row} * dims.n;
-${mask ? `    let mbase = ${maskRow(row)} * dims.n;\n` : ""}${slots(geometry.regN)
+${mask ? `    let mbase = ${absoluteRow(row)} * dims.n;\n` : ""}${slots(geometry.regN)
           .map((col) => write(row, col))
           .join("\n")}
   }`,
     )
     .join("\n");
-  return `  let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
+  return `${bandPrologue}  let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
 ${rows}
 ${rowStores}`;
 };
@@ -1426,6 +1454,43 @@ const GQA_DIMS_EXTRA = `  kv_repeat: u32,
 `;
 
 /**
+ * The extra uniform fields of ①QK's band variant: the band word and the bits of −inf.
+ *
+ * MUST: placed **after** every other extra field (`scale`, `kv_repeat`, `row_offset` /
+ * `rows_full`), so the words of the existing variants keep their positions; the order pairs with
+ * `attentionQkParams` (src/kernels/attention.ts).
+ * MUST: the band is a uniform value, not in the key (a pipeline per distinct band otherwise — the
+ * same discipline as `scale` / `kv_repeat`).
+ */
+const BAND_DIMS_EXTRA = `  band: u32,
+  neg_inf: u32,
+`;
+
+/**
+ * The band predicate of ①QK: key column `col` is visible to query row `row` iff
+ * `|row − col| ≤ band`, written without a subtraction (u32 would wrap). The host writes a band word
+ * no larger than `max(M, N)` and checks that `row + band` and `col + band` fit in u32, so neither
+ * sum wraps either (`attentionQkParams`).
+ */
+const bandPredicateWgsl = (v4: boolean): string =>
+  v4
+    ? `
+// The band (attrs.band): the four columns col..col+3 of a quad against one query row
+fn in_band4(row: u32, col: u32) -> vec4<bool> {
+  let cols = vec4<u32>(col) + vec4<u32>(0u, 1u, 2u, 3u);
+  let rows = vec4<u32>(row);
+  let band = vec4<u32>(dims.band);
+  return (rows + band >= cols) & (cols + band >= rows);
+}
+`
+    : `
+// The band (attrs.band): column col is visible to query row row iff |row - col| <= band
+fn in_band(row: u32, col: u32) -> bool {
+  return row + dims.band >= col && col + dims.band >= row;
+}
+`;
+
+/**
  * On the dense side only bmm can set `rowWindow` ({@link GemmRowWindow} — matmul has no batch axis).
  * `row_offset` / `rows_full` are added as words 4–5 of the uniform, and the difference in the
  * generated code is confined to the 2 base lines of {@link batchPrologue}.
@@ -1479,6 +1544,10 @@ ${fillBDense(geometry, "b", op, v4)}`,
  * The `rowWindow` variant (`"a"` of {@link GemmRowWindow}) differs only in **one base line of q and
  * the mask's row index**. S is written as a block from row 0, so the shape seen from ②③ is the same
  * as single-block execution.
+ *
+ * The `band` variant differs only in **the predicate in the write-out epilogue and two uniform
+ * words** (`attrs.band` — {@link store}): a column outside the band is written as −inf, at the
+ * mask's place, against the absolute row. Neither the fill nor the reduction moves by a character.
  */
 const attentionQkWgsl = (
   geometry: GemmGeometry,
@@ -1488,15 +1557,21 @@ const attentionQkWgsl = (
   mask = false,
   gqa = false,
   rowWindow = false,
+  band = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_qk", score, v4, f16);
+  if (mask && band) {
+    throw new CodegenError(
+      "attention_qk: the band and the additive mask are never set together (one mechanism per node)",
+    );
+  }
   const element = v4 ? "vec4<f32>" : "f32";
   return skeleton(
     geometry,
     `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ${
       mask ? " + mask[m,n]" : ""
-    }, f32${f16 ? ", f16 tile compute, S also f16" : ""}${scoreNote(score)}${
+    }${band ? ", −inf where |m − n| > band" : ""}, f32${f16 ? ", f16 tile compute, S also f16" : ""}${scoreNote(score)}${
       gqa ? ", GQA (k is mapped to the kv-head by integer division)" : ""
     }${rowWindow ? ", row window a" : ""}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> q: array<${element}>;
@@ -1511,7 +1586,7 @@ const attentionQkWgsl = (
 @group(0) @binding(${ATTENTION_QK_MASK_BINDING}) var<storage, read> mask: array<${element}>;`
         : ""
     }`,
-    scoreStoreWgsl("s", score),
+    `${scoreStoreWgsl("s", score)}${band ? bandPredicateWgsl(v4) : ""}`,
     `${quadDims(v4)}${batchPrologue("attention_qk", v4, rowWindow ? "a" : undefined, gqa)}${prologueA(
       geometry,
       "attention_qk",
@@ -1520,8 +1595,10 @@ const attentionQkWgsl = (
 ${prologueBAttentionQk(geometry)}`,
     `${fillA(geometry, "q", v4, (expr) => `${expr} * dims.scale`, compute)}
 ${fillBAttentionQk(geometry, v4, compute)}`,
-    store(geometry, "s", "attention_qk", v4, false, f16, score, mask, rowWindow),
-    `  scale: f32,\n${gqa ? GQA_DIMS_EXTRA : ""}${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}`,
+    store(geometry, "s", "attention_qk", v4, false, f16, score, mask, rowWindow, band),
+    `  scale: f32,\n${gqa ? GQA_DIMS_EXTRA : ""}${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}${
+      band ? BAND_DIMS_EXTRA : ""
+    }`,
     gemmAccumulatorInit(geometry),
     compute,
   );
@@ -3022,6 +3099,7 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.mask,
         spec.gqa,
         spec.rowWindow,
+        spec.band,
       );
     case "attention_state_qk":
       return attentionStateQkTiledWgsl(
