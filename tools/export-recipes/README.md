@@ -98,7 +98,7 @@ render, and so does one from our own account (`hdae/`).
 **Cross-repository references** (ADR [0038](../../docs/decisions/0038-manifest-v1.md) §7, addendum
 2026-10-28). A pipeline declares which roles of a model are byte-identical to another distribution
 repository's and are referenced there instead of stored (`Pipeline.references` — today
-`anima-extra` → `karume-anima`, `wan` / `wan-ti2v` → `karume-umt5-xxl`, and irodori `v4.1-small` →
+`anima-extra` → `karume-anima`, `wan-ti2v` → `karume-umt5-xxl`, and irodori `v4.1-small` →
 `karume-irodori-v4-small`). The driver reads the referenced repository's local mirror
 (`models/<repository name>/`) and takes the commit from exactly one source; a build that declares
 references and gets none fails before writing anything:

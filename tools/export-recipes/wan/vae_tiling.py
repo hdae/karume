@@ -165,10 +165,10 @@ def fixture_name(case_name: str, tile: int, default_tile: int) -> str:
 def default_tile_of(patch_size: int) -> int:
     """The series tile of the generation that `patch_size` names (`export_vae.VAE_SERIES`).
 
-    `write_fixture` already receives `patch_size` as the generation's identity (it picks the
-    `reference` string and the meta by it), so the default tile is looked up the same way instead of
-    being passed alongside. MUST: an ambiguous or unknown generation fails loudly — a guessed
-    default tile would put a non-default reference under a default name.
+    `write_fixture` already receives `patch_size` as the generation's identity (it checks it against
+    the upstream config and records it in the meta), so the default tile is looked up the same way
+    instead of being passed alongside. MUST: an ambiguous or unknown generation fails loudly — a
+    guessed default tile would put a non-default reference under a default name.
     """
     tiles = {
         series.tile for series in export_vae.VAE_SERIES.values() if series.patch_size == patch_size

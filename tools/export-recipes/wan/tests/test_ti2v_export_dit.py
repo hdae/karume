@@ -380,7 +380,9 @@ class TestTheSeriesWriter:
                 output = handle.get_tensor("output")
                 f64 = handle.get_tensor("output.f64")
             assert output.dtype == f64.dtype == torch.float32
-            assert not torch.equal(output, f64)
+            # The f64 forward differs from the f32 reference by the rounding only.
+            distance = float((f64 - output).abs().max())
+            assert 0 < distance < 1e-5 * float(f64.abs().max()), name
 
     def test_every_eager_report_passed_the_gate_and_records_the_per_token_path(
         self, written
