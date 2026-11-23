@@ -61,8 +61,15 @@ maintainer's ruling of 2026-11-06).
   - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
     Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
     parallel rows are faster than the default's but its sequential choices are not, and part of them were not compared
-    word for word there ([research 2026-11-19](research/2026-11-19-gemv-tables-across-devices.md) §7). A first table
-    needs the M5's geometry sweep records beside its GEMV ones (item 6 of "The move to maintained specs (ADR 0152)").
+    word for word there ([research 2026-11-19](research/2026-11-19-gemv-tables-across-devices.md) §7). Built
+    2026-11-23 in another form (ADR [0156](decisions/0156-shared-geometry-profile-tables.md)): the M5 has a measured
+    table, `apple-m5`, matched by its description, from its full geometry sweep; an Apple `metal-3` adapter that
+    reports no description gets the shared table `apple-metal-3-shared`, derived from the M5's sweep and three M2
+    records of the M5's geometries ([spec](spec/geometry-profiles.md#shared-tables)). Left, in item 6 of "The move to
+    maintained specs (ADR 0152)": the GEMV choices of `apple-m5` (its GEMV sweep records are being taken; both tables
+    run the default profile's GEMV choices until then — a shared table carries tile geometries only); an M2 full
+    geometry sweep, which re-derives `apple-metal-3`'s tile families and lets the shared table compare every candidate
+    on both devices; the M1, M3 and M4 are not measured.
   - Here without a ruling on their timing: the two items below.
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
     workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
@@ -219,7 +226,9 @@ maintainer's ruling of 2026-11-06).
        - `apple-metal-3` matches only the Apple M2's description, and stays so (the maintainer's ruling of
          2026-11-20, from the Apple M5's records of 2026-11-19 —
          [research](research/2026-11-19-gemv-tables-across-devices.md) §7): an Apple adapter that reports no
-         description gets a table of its own after the 0.23.0 release, which needs its geometry sweep records. On the M2 the default's 22
+         description gets the shared table `apple-metal-3-shared` (2026-11-23, ADR
+         [0156](decisions/0156-shared-geometry-profile-tables.md)), which carries no GEMV choices, and the M5 with its
+         description `apple-m5`, which has none yet (its GEMV sweep records are being taken). On the M2 the default's 22
          exceptions stay although per dispatch its records time the general variant faster on most of the shapes they
          time, because end to end they were faster (perf-ledger K-112); the per-dispatch comparison, the five
          exceptions `apple-metal-3` keeps and the shapes compared word for word on Metal are in
@@ -255,6 +264,12 @@ maintainer's ruling of 2026-11-06).
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
+       - the Apple tables (2026-11-23, ADR [0156](decisions/0156-shared-geometry-profile-tables.md)): `apple-m5`'s GEMV
+         choices from the M5's GEMV sweep records (being taken); an M2 full geometry sweep, which re-derives
+         `apple-metal-3`'s tile families (carried from records of `karume-geometry-sweep/3`, below) and the shared table
+         `apple-metal-3-shared` with every candidate timed on both devices (the M2's records of 2026-11-23 time only the
+         M5's adopted geometries); the M1, M3 and M4 are not measured; a rule for a shared table's GEMV choices and
+         attention key axis (a shared table derives neither);
        - the tile families of `nvidia-ampere` and `apple-metal-3` are carried over from records of
          `karume-geometry-sweep/3`, which no longer derive a table: each is derived again from a new sweep on its
          device, the `gemm` and `conv2d` families from one that measures the K-88 forms (on the RTX 3080 Ti a case of
@@ -412,7 +427,7 @@ maintainer's ruling of 2026-11-06).
   The finished records (registration of `nvidia-blackwell`, the 7 row-count buckets, integration into applications (ADR 0117, all 7 stages ✅), the Codex review follow-up, 4 small items) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   ② Regenerating the families `apple-metal-3` carries over from its earlier table (gemm, attention, conv2d, i8a8-linear, i8a8-attention — they mix Chrome 153 and 154; its GEMV rows are from Chrome 157) from the sweeps of one Chrome version happens the next time a sweep is taken on M2, with the workbench's `geometry-sweep` entry (ruling 2026-10-02)
   ③ The Pixel 10a (Mali-G715) table is not registered; the re-run on the new version has not been done (research K-70 §15)
-  ④ The `i8a8-linear` family of `apple-metal-3` (perf-ledger K-85, ADR [0115](decisions/0115-geometry-profiles.md) addendum decision 14): its buckets ≤ 256 and 257〜512 run the default geometry until a `full` sweep of that family alone is taken on an M2 (about 20,000 s; on hold) and derived with the table as `base`. A table for Apple adapters whose `description` Chrome leaves empty is decided after that sweep (an Apple M5 record of the family is kept as a record only). Whether `apple-metal-3`'s match widens beyond the M2 is decided from the Apple M5's records (item 6 of "The move to maintained specs (ADR 0152)")
+  ④ The `i8a8-linear` family of `apple-metal-3` (perf-ledger K-85, ADR [0115](decisions/0115-geometry-profiles.md) addendum decision 14): its buckets ≤ 256 and 257〜512 run the default geometry until a `full` sweep of that family alone is taken on an M2 (about 20,000 s; on hold) and derived with the table as `base`. The Apple adapters whose `description` Chrome leaves empty run the shared table `apple-metal-3-shared` (2026-11-23, ADR [0156](decisions/0156-shared-geometry-profile-tables.md)), and `apple-metal-3`'s match stays the M2's; that sweep also re-derives the shared table on both devices' full records (item 6 of "The move to maintained specs (ADR 0152)")
 - **Remainder of the container-format wave (ADR [0108](decisions/0108-container-format.md)) = stages 4 to 6** (upstream intake of the anima transformer f16 / LoRA runtime A/B / new bit widths, Range fetching and so on —
   the staged-decomposition table of ADR 0108 is the source of truth for what is built and how it is accepted). The records of stages 0 to 3 and up to the 0.13.0 publication (2026-09-25) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
