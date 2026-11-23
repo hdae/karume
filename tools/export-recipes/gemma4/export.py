@@ -5,8 +5,8 @@ A one-shot causal LM graph (`input_ids[1,T] → logits[1,T,262144]`, no KV cache
 has two focal points besides GQA:
 
 - the **band masks of the two layer types** (sliding / full — 28 / 7 layers for E2B, 35 / 7 for
-  E4B) both fold into a T-independent Tmax constant + `sym_prefix_slice` (ADR 0010 — the same
-  mechanism as the band mask of `embeddinggemma/export.py`, in two **causal** variants).
+  E4B) both fold into a T-independent Tmax constant + `sym_prefix_slice` (ADR 0010, in two
+  **causal** variants).
 - **mixed quantization** (embeddings i8 × linears i4 — ADR 0069 decision 5 /
   `weight_dtype_overrides`) runs through a real model. E2B has a vocabulary of 262144 × a PLE
   table of 8960 columns, a form in which "the embeddings are most of the weights", so neither i4

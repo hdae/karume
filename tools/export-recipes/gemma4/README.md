@@ -593,8 +593,8 @@ The same run also writes the git-tracked parity fixture
 calling upstream `tokenizers.Tokenizer` **independently**, so no preprocessing is shared with the
 TypeScript port (decision 7); the vocabulary and merges it carries are the subset the cases need.
 
-EmbeddingGemma runs through the same machinery (`embeddinggemma/tokenizer.py`): the implementation
-is shared, the assets are not.
+EmbeddingGemma 2 runs through the same machinery (`embeddinggemma2/tokenizer.py`): the
+implementation is shared, the assets are not.
 
 ## What `chat.py` emits
 

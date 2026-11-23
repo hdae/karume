@@ -11,7 +11,7 @@ the families). The series layout differs per family, and **a directory name is n
 name**:
 
 - one component directly under the series (siglip2 / birefnet / depth-anything / gemma4 /
-  gemma4-qat / embeddinggemma) — the directory name is the series name.
+  gemma4-qat) — the directory name is the series name.
 - components side by side in subdirectories (anima / sbv2 / irodori / dacvae / deberta) — some
   spellings do not match (`caption-proj` → `caption_proj`, `decoder` → `codec_decoder`, deberta's
   `full-24layer` → the `text_encoder` role SBV2 consumes).
@@ -58,7 +58,6 @@ from birefnet.distribution import BIREFNET_ROLE
 from deberta import export as deberta_export
 from depth_anything import export as depth_anything_export
 from depth_anything.distribution import DEPTH_ANYTHING_ROLE
-from embeddinggemma import export as embeddinggemma_export
 from gemma4 import export as gemma4_export
 from gemma4.distribution import GEMMA4_DRAFTER_ROLE, GEMMA4_DRAFTER_SUFFIX, GEMMA4_ROLE
 from gemma4_qat import export as gemma4_qat_export
@@ -334,17 +333,6 @@ FAMILIES: tuple[Family, ...] = (
         flat_role=lambda name: (
             GEMMA4_DRAFTER_ROLE if name.endswith(f"-{GEMMA4_DRAFTER_SUFFIX}") else GEMMA4_ROLE
         ),
-    ),
-    Family(
-        "embeddinggemma",
-        lambda name: name.startswith("embeddinggemma-"),
-        # The series name does not name the checkpoint (the script's default output path is a fixed
-        # spelling that does not follow `--model-dir`), so derive it from the default checkpoint
-        # that produces that default output.
-        lambda _: embeddinggemma_export.upstream_provenance(
-            embeddinggemma_export.DEFAULT_MODEL_DIR
-        ),
-        flat_role=lambda _: embeddinggemma_export.GRAPH_NAME,
     ),
 )
 

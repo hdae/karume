@@ -11,7 +11,7 @@ Two things are guarded:
 1. What is passed to `graph_name=` is **the component-name constant**, not a name derived from the
    path it is placed at. Directory names do not match component names: in the families that put
    the container directly under the series (siglip2 / birefnet / depth_anything / gemma4 /
-   embeddinggemma / gemma4_qat) the directory name is the **series name**
+   gemma4_qat) the directory name is the **series name**
    (`siglip2-so400m-patch14-384`); irodori has the keys `caption_proj` / `codec_decoder` for
    `caption-proj` / `decoder`, and deberta has the key `text_encoder` (SBV2's consuming slot) for
    `full-24layer`.
@@ -51,7 +51,6 @@ RECIPES_ROOT = Path(__file__).resolve().parent.parent
 ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("anima/export.py", "emit_target", "target", "TARGETS"),
     ("deberta/export.py", "export_variant", "GRAPH_NAME", "GRAPH_NAME"),
-    ("embeddinggemma/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export_vision.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("embeddinggemma2/export_audio.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
@@ -341,18 +340,6 @@ class TestTheNamesAreTheWeightsKeys:
         assert AUDIO == "audio"
         assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model", VISION, AUDIO}
         assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
-
-    @pytest.mark.parametrize("family", ["embeddinggemma"])
-    def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
-        """Pin the spelling of the families that build no distribution (they have no
-        `distribution.py`; EmbeddingGemma 2's text script, which has one, is pinned to the same
-        `model` by the test above).
-
-        So that the containers already in place can be used as is on the day one is built, they
-        use the convention of a single-component series (`model` — the same as gemma4 /
-        gemma4_qat).
-        """
-        assert self._named(family) == {"model"}
 
 
 class TestEveryCallSiteIsListed:

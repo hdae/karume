@@ -214,12 +214,10 @@ export const ALLOW_LIST: readonly Allowance[] = [
   },
   { path: "tools/export-recipes/deberta/tests/test_calib.py", why: TOKENIZER_CASES, maxLines: 1 },
   {
-    path: "tools/export-recipes/embeddinggemma/calib_texts.py",
+    path: "tools/export-recipes/embeddinggemma2/calib_texts.py",
     why: CALIBRATION_TEXT,
     maxLines: 14,
   },
-  { path: "tools/export-recipes/embeddinggemma/export.py", why: TOKENIZER_CASES, maxLines: 1 },
-  { path: "tools/export-recipes/embeddinggemma/tokenizer.py", why: TOKENIZER_CASES, maxLines: 1 },
   { path: "tools/export-recipes/embeddinggemma2/export.py", why: TOKENIZER_CASES, maxLines: 1 },
   {
     path: "tools/export-recipes/embeddinggemma2/multimodal_reference.py",

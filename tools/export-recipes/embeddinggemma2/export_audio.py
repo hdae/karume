@@ -171,10 +171,14 @@ from torch.export import Dim
 from torch.nn import functional
 
 from _shared.paths import SERIES_ROOT
-from embeddinggemma.export import INPUT_PREFIX, IO_PREFIX, IO_SUFFIX, MODEL_FILE, OUTPUT_PREFIX
 from embeddinggemma2 import sources
 from embeddinggemma2.export import (
+    INPUT_PREFIX,
+    IO_PREFIX,
+    IO_SUFFIX,
     LICENSE,
+    MODEL_FILE,
+    OUTPUT_PREFIX,
     WHERE_OP,
     EmbeddingGemma2ExportError,
     assert_transformers_version,

@@ -1,4 +1,4 @@
-"""Properties of the calibration corpus in `embeddinggemma/calib_texts.py`.
+"""Properties of the calibration corpus in `embeddinggemma2/calib_texts.py`.
 
 The wording itself is not under judgment (measurement answers for quality). What is pinned here is
 only the side that **changes the meaning of the measurements** when it breaks:
@@ -6,20 +6,19 @@ only the side that **changes the meaning of the measurements** when it breaks:
 - **Not a single text overlaps the evaluation texts** — with an overlap the cosine becomes "did the
   model embed a text the calibration already saw", a number that measures leakage, not the quality
   of the calibration
-- Exactly 48 texts with no duplicates (a reduced run with `--calib-limit` does not become "the same
-  text N times")
+- Exactly 48 texts with no duplicates (no text is measured twice)
 - Every prompt kind is either a key of `export.load_prompts` or `None` (with a misspelling only the
   leading token sequence of the calibration inputs drifts from real use)
-- Cutting the head still keeps the mix of roles (query / document / plain)
+- The first few texts already hold the mix of roles (query / document / plain)
 """
 
 from __future__ import annotations
 
-from embeddinggemma import export as eg
-from embeddinggemma.calib_texts import CALIB_TEXTS
+from embeddinggemma2 import export as eg
+from embeddinggemma2.calib_texts import CALIB_TEXTS
 
 #: The keys of `prompts` in `config_sentence_transformers.json` (spellings pinned without reading
-#: the real asset — the actual lookup in `calib_inputs` fails on a dict access).
+#: the real asset — the actual lookup in `measure_quant.tokenize` fails on a dict access).
 PROMPT_KEYS = {"query", "document"}
 
 
@@ -44,8 +43,7 @@ class TestCorpus:
         assert {prompt for prompt, _body in CALIB_TEXTS} <= PROMPT_KEYS | {None}
 
     def test_all_three_roles_appear_in_the_first_few_texts(self):
-        """An order in which a reduced run (`--calib-limit 3`) still has query / document /
-        plain."""
+        """An order in which the first three texts already have query / document / plain."""
         head = {prompt for prompt, _body in CALIB_TEXTS[:3]}
 
         assert head == PROMPT_KEYS | {None}

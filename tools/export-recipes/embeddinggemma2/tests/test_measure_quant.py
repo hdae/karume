@@ -17,9 +17,9 @@ import pytest
 import torch
 from torch import nn
 
-from embeddinggemma.calib_texts import CALIB_TEXTS
 from embeddinggemma2 import export
 from embeddinggemma2 import measure_quant as mq
+from embeddinggemma2.calib_texts import CALIB_TEXTS
 
 
 class TestQueryDocumentPairs:

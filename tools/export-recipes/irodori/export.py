@@ -11,7 +11,7 @@ separate script, `irodori/dacvae/export.py`.
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8
 
-transformers is **pinned at 5.14.1** (the same reason as `embeddinggemma/export.py` — when the
+transformers is **pinned at 5.14.1** (the same reason as `deberta/export.py` — when the
 modeling code changes, the graph shape changes; in addition `irodori.patch` replaces
 `ModernBertAttention.forward` as a class attribute). It is not put in pyproject.toml / uv.lock but
 added temporarily with `--with`.

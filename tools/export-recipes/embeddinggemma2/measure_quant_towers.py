@@ -130,7 +130,6 @@ from torch import nn
 from torch.nn import functional
 
 from _shared.paths import BENCH_ROOT, INPUTS_ROOT, SERIES_ROOT
-from embeddinggemma.export import MODEL_FILE
 from embeddinggemma2 import export, export_audio, export_vision, multimodal_reference, sources
 from embeddinggemma2 import measure_quant as mq
 from embeddinggemma2.images import IMAGES
@@ -1102,7 +1101,7 @@ def _series_bytes(series: str) -> int | None:
     directory = SERIES_ROOT / series
     if not directory.is_dir():
         return None
-    return sum(path.stat().st_size for path in container_parts(directory / MODEL_FILE))
+    return sum(path.stat().st_size for path in container_parts(directory / export.MODEL_FILE))
 
 
 def expected_rounded(config: TowerConfig, towers: Mapping[str, TowerWeights]) -> set[str]:

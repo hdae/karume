@@ -183,7 +183,7 @@ def embeddinggemma2_role(dtype: str, role: str = EMBEDDINGGEMMA2_ROLE) -> str:
 
 
 #: The representative container path inside a series and the asset file inside the tokenizer
-#: series (mirrors of `embeddinggemma.export.MODEL_FILE` and the name of
+#: series (mirrors of `embeddinggemma2.export.MODEL_FILE` and the name of
 #: `embeddinggemma2.tokenizer.ASSET_PATH` — held equal by the tests).
 EMBEDDINGGEMMA2_MODEL_FILE = "model.krm"
 EMBEDDINGGEMMA2_TOKENIZER_FILE = "tokenizer.json"

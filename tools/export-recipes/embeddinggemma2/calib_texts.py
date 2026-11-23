@@ -1,16 +1,14 @@
-"""The **calibration corpus** of EmbeddingGemma-300m (48 texts that produce the activations GPTQ /
-AWQ see).
+"""The **calibration corpus** (48 texts) — written for the GPTQ / AWQ calibration of the first
+EmbeddingGemma, and read here by the quant screening of EmbeddingGemma 2
+({@link embeddinggemma2.measure_quant}) as the texts after the golden cases.
 
-The calibrated rounding of `karume.quant_calib` re-chooses the rounding targets from "the
-activations that actually flow into that layer", so the character of the corpus becomes the bias of
-the rounding as is. This is the only input read by the calibrated configs of `measure_quant.py`
-({@link embeddinggemma.measure_quant.CALIB_CONFIGS}), and it is chosen by three rules:
+It is chosen by three rules:
 
 - **Keep it apart from the evaluation texts** — not a single text overlaps
-  {@link embeddinggemma.export.GOLDEN_CASES} (= the 5 cases that form the denominator of every
-  cosine). The topics do not overlap either (nothing on "the capital of France" and no pangram like
-  `bare`). With an overlap, the evaluation runs on texts the calibration has already seen, and the
-  cosine measures **leakage, not the quality of the calibration**.
+  {@link embeddinggemma2.export.GOLDEN_CASES}. The topics do not overlap either (nothing on "the
+  capital of France" and no pangram like `bare`). With an overlap, a text is measured twice, and a
+  calibration would be evaluated on texts it has already seen — the cosine would measure
+  **leakage, not the quality of the calibration**.
 - **Follow how retrieval uses the model** — EG has asymmetric query / document prompt prefixes
   (`prompts` in `config_sentence_transformers.json` is the source of truth). The calibration inputs
   carry the same prefixes, mixing short query-style questions, document-style explanations and
@@ -28,9 +26,10 @@ specific proper nouns).
 from __future__ import annotations
 
 #: The 48 calibration inputs (`(prompt kind | None, body)`). The kind is a key of the dict returned
-#: by {@link embeddinggemma.export.load_prompts} (`query` / `document`), and `None` means no prefix.
-#: They are used in this order from the start (`--calib-limit N` takes **the first N texts**) — the
-#: three kinds are interleaved, so a reduced run with a limit still keeps the mix of roles.
+#: by {@link embeddinggemma2.export.load_prompts} (`query` / `document`), and `None` means no
+#: prefix. The three kinds are interleaved (each query is followed by its document —
+#: {@link embeddinggemma2.measure_quant.query_document_pairs}), so the first few texts already
+#: hold the mix of roles.
 CALIB_TEXTS: tuple[tuple[str | None, str], ...] = (
     ("query", "how do i rotate log files without restarting the service"),
     (

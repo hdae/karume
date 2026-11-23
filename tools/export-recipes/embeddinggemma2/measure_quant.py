@@ -1,11 +1,10 @@
 """Screen quantized weight forms for the text tower of EmbeddingGemma 2 on torch CPU (stage A of its
 quant presets).
 
-The same idea as `embeddinggemma/measure_quant.py` (the first model's screening): **no GPU code** —
-the weights are rounded in place with the exporter's own fake-quant functions, so they are the
-values a series would ship, and the embeddings are taken from the export's own wrapper
-({@link embeddinggemma2.export.EmbeddingWrapper}). The reference is the same wrapper with the
-checkpoint's own weights (bf16 values upcast to f32, run in f32 — the goldens' arithmetic).
+**No GPU code** — the weights are rounded in place with the exporter's own fake-quant functions,
+so they are the values a series would ship, and the embeddings are taken from the export's own
+wrapper ({@link embeddinggemma2.export.EmbeddingWrapper}). The reference is the same wrapper with
+the checkpoint's own weights (bf16 values upcast to f32, run in f32 — the goldens' arithmetic).
 
     uv run --offline --with 'transformers==5.23.0' python -m embeddinggemma2.measure_quant
 
@@ -33,7 +32,7 @@ weights ({@link restore}), and a final restore must give the reference back bit 
 ## Texts
 
 The 10 golden cases of the export (with their prompts; T 12 to 8,192) and the 48 texts of the
-first model's calibration corpus ({@link embeddinggemma.calib_texts.CALIB_TEXTS}) with the prompt
+calibration corpus ({@link embeddinggemma2.calib_texts.CALIB_TEXTS}) with the prompt
 kind each one carries there (`query` / `document` / none), prefixed with EmbeddingGemma 2's own
 prompts of the same names. The corpus interleaves 20 query → document pairs (a query followed by
 its document — {@link query_document_pairs}) and 8 bare texts.
@@ -68,8 +67,8 @@ import torch
 from torch import nn
 
 from _shared.paths import BENCH_ROOT
-from embeddinggemma.calib_texts import CALIB_TEXTS
 from embeddinggemma2 import export, sources
+from embeddinggemma2.calib_texts import CALIB_TEXTS
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.quantize import (
     DEFAULT_GROUP_SIZE,

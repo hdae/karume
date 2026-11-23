@@ -1,6 +1,6 @@
 """Script that writes the real-weight SigLIP2 **vision tower** to a container (`krm`) + golden io.
 
-It plays the role of `embeddinggemma/export.py` (real weights, numeric match of a single vector
+It plays the role of `embeddinggemma2/export.py` (real weights, numeric match of a single vector
 output) on the image side. The output goes under `outputs/series/` and is kept out of commits by
 the `.gitignore` at the repository root (weights of 350MB to 1.7GB).
 
