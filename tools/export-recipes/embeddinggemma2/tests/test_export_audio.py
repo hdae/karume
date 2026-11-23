@@ -19,7 +19,11 @@ broken:
 - the traced form: two inputs on `4n`, one output `[1, n, 512]`, no fused attention and no
   `where`, the softmaxes on the window, one selector shared by every window copy, one bias prefix —
   and each broken form is refused
-- the storage: bf16 in every weight slot, f32 elsewhere
+- the storage: bf16 in every weight slot, f32 elsewhere; under i8 every weight slot i8 but the
+  two subsampling convolutions and the selector, which stay bf16
+- the i8 rounding: every linear and depthwise convolution, never the kept convolutions, and
+  upstream's forward — the goldens — runs the same rounded weights (the wrapper holds upstream's
+  own parameters, no copy)
 - the pins: the snapshot files the script reads are pinned, the bound is the front end's 30 s
 
 The cases that need transformers at the pinned release SKIP explicitly without it.
@@ -140,7 +144,18 @@ class TestConstants:
     def test_the_series_are_one_per_storage(self) -> None:
         assert export_audio.DEFAULT_OUT_DIRS["f32"].name == "embeddinggemma-2-audio"
         assert export_audio.DEFAULT_OUT_DIRS["bf16"].name == "embeddinggemma-2-audio-bf16"
+        assert export_audio.DEFAULT_OUT_DIRS["i8"].name == "embeddinggemma-2-audio-i8"
         assert sorted(export_audio.DEFAULT_OUT_DIRS) == sorted(export_audio.WEIGHT_DTYPES)
+
+    def test_the_i8_exceptions_are_the_two_subsampling_convolutions_and_the_selector(
+        self,
+    ) -> None:
+        assert export_audio.I8_KEPT_BF16_WEIGHTS == ("layer0.conv.weight", "layer1.conv.weight")
+        assert export_audio.i8_storage_overrides("layers.11.self_attn.window_selector") == {
+            "layer0.conv.weight": "bf16",
+            "layer1.conv.weight": "bf16",
+            "layers.11.self_attn.window_selector": "bf16",
+        }
 
     def test_the_soft_width_is_the_text_graphs(self) -> None:
         from embeddinggemma2 import distribution
@@ -151,7 +166,7 @@ class TestConstants:
 
     def test_another_storage_is_refused_before_anything_is_read(self, tmp_path: Path) -> None:
         with pytest.raises(export_audio.AudioExportError, match="not one of"):
-            export_audio.export_series(tmp_path / "missing", tmp_path / "out", dtype="i8")
+            export_audio.export_series(tmp_path / "missing", tmp_path / "out", dtype="f16")
 
 
 #: The tiny tower: 2 layers, hidden 16, 2 heads of 8 (the real window and subsampling).
@@ -257,6 +272,21 @@ class TestTinyTower:
         assert not any(isinstance(m, Gemma4AudioAttention) for m in wrapper.modules())
         after = tiny_tower.tower.state_dict()
         assert all(torch.equal(before[key], after[key]) for key in before)
+
+    def test_the_wrapper_holds_upstreams_own_weights(self, tiny_tower) -> None:
+        """No copy: every parameter of the wrapper is one of upstream's (the copied layers share
+        them), so a rounding of the wrapper's weights is a rounding of the modules the goldens
+        run."""
+        upstream = {
+            parameter.untyped_storage().data_ptr()
+            for module in (tiny_tower.tower, tiny_tower.embedder)
+            for parameter in module.parameters()
+        }
+
+        wrapper = _wrapper(tiny_tower)
+
+        for name, parameter in wrapper.named_parameters():
+            assert parameter.untyped_storage().data_ptr() in upstream, name
 
     def test_a_clipped_linear_without_finite_bounds_is_refused(self, tiny_tower) -> None:
         from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
@@ -481,6 +511,53 @@ class TestIrForm:
             export_audio.assert_ir_form(graph, tower.config)
 
 
+class TestInt8Rounding:
+    """`round_weights_to_i8` on the tiny tower: every linear and depthwise convolution becomes
+    per-row int8, the two subsampling convolutions stay as they are, and upstream's forward (the
+    goldens) runs the same rounded weights."""
+
+    def test_it_rounds_every_weight_but_the_two_subsampling_convolutions(self, tiny_tower) -> None:
+        wrapper = _wrapper(tiny_tower)
+        kept = {
+            name: wrapper.get_parameter(name).clone() for name in export_audio.I8_KEPT_BF16_WEIGHTS
+        }
+        selector = wrapper.layers[0].self_attn.window_selector.clone()
+
+        report = export_audio.round_weights_to_i8(wrapper)
+
+        linears = [m for m in wrapper.modules() if isinstance(m, torch.nn.Linear)]
+        depthwise = [m for m in wrapper.modules() if isinstance(m, torch.nn.Conv1d)]
+        # Per layer 10 clipped linears; the input projection, the output projection, the
+        # projector; per layer one depthwise convolution.
+        assert len(linears) == TINY_LAYERS * 10 + 3 and len(depthwise) == TINY_LAYERS
+        assert len(report.scales) == len(linears) + len(depthwise)
+        assert not set(report.scales) & set(export_audio.I8_KEPT_BF16_WEIGHTS)
+        for name, before in kept.items():
+            assert torch.equal(wrapper.get_parameter(name), before), name
+        assert torch.equal(wrapper.layers[0].self_attn.window_selector, selector)
+
+    def test_upstreams_forward_runs_the_rounded_weights(self, tiny_tower) -> None:
+        features, mask = _extracted(38, padding=1, seed=38)
+        frames = export_audio.host_frames(features, mask)
+        wrapper = _wrapper(tiny_tower)
+        before = export_audio.upstream_soft_tokens(tiny_tower, features, mask)
+
+        export_audio.round_weights_to_i8(wrapper)
+        golden = export_audio.upstream_soft_tokens(tiny_tower, features, mask)
+        with torch.no_grad():
+            ours = wrapper(frames.features, frames.frame_mask)
+
+        assert float((golden - before).abs().max()) > 1e-4
+        torch.testing.assert_close(ours[0], golden, atol=1e-5, rtol=0)
+
+    def test_a_kept_name_that_is_no_module_weight_is_refused(self, tiny_tower, monkeypatch) -> None:
+        wrapper = _wrapper(tiny_tower)
+        monkeypatch.setattr(export_audio, "I8_KEPT_BF16_WEIGHTS", ("layer0.conv.wieght",))
+
+        with pytest.raises(export_audio.AudioExportError, match="not module weights"):
+            export_audio.round_weights_to_i8(wrapper)
+
+
 def _round_weight_slots_to_bf16(wrapper: torch.nn.Module) -> None:
     """Round what the bf16 storage stores as bf16 — every linear and convolution weight — as the
     checkpoint's bf16 values are (the selector's 0 and 1 are bf16 values already)."""
@@ -523,3 +600,35 @@ class TestStorage:
         assert set(export_audio.assert_storage_form(stored, "f32")) == {"f32"}
         with pytest.raises(AssertionError, match=r"\(expected bf16\)"):
             export_audio.assert_storage_form(stored, "bf16")
+
+    def test_i8_but_the_two_subsampling_convolutions_and_the_selector(
+        self, tiny_tower, tmp_path
+    ) -> None:
+        wrapper = _wrapper(tiny_tower)
+        # The kept weights are the checkpoint's bf16 values (the real tower's are).
+        with torch.no_grad():
+            for name in export_audio.I8_KEPT_BF16_WEIGHTS:
+                weight = wrapper.get_parameter(name)
+                weight.copy_(weight.to(torch.bfloat16).to(torch.float32))
+        report = export_audio.round_weights_to_i8(wrapper)
+        graph, tensors = export_audio.trace(wrapper)
+        selector = export_audio.assert_ir_form(graph, tiny_tower.config)["window_selector"]
+        overrides = export_audio.i8_storage_overrides(selector)
+
+        stored = publish_model(
+            tmp_path / "model.krm",
+            graph,
+            tensors,
+            provenance=Provenance(license=export.LICENSE),
+            graph_name=export_audio.GRAPH_NAME,
+            weight_dtype="i8",
+            weight_scales=report.scales,
+            weight_dtype_overrides=overrides,
+        )
+        counts = export_audio.assert_storage_form(stored, "i8", tuple(report.scales), overrides)
+
+        assert selector == f"layers.{TINY_LAYERS - 1}.self_attn.window_selector"
+        assert counts["i8"] == TINY_LAYERS * (10 + 1) + 3
+        assert counts["bf16"] == 2 + 1
+        with pytest.raises(AssertionError, match=r"layer0.conv.weight: bf16 \(expected i8\)"):
+            export_audio.assert_storage_form(stored, "i8", tuple(report.scales), {})

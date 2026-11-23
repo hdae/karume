@@ -7,9 +7,12 @@ breakage makes the tables silently lie:
 - the resampler keeps a band-limited tone and the length rule, and the audio limits are the
   pipeline's
 - the retrieval metrics count a shared transcript as a hit for any of its clips
-- the bf16 set splits into module weights / tables / structural constants exactly once each
-- the rounding reaches exactly the intended weights (a table through its holder too), the tower
-  payload arithmetic
+- the clips are measured on the 16-bit grid of the files `--write-clips` writes, and the written
+  set is the same format at 16 kHz and reads back the same samples
+- the bf16 set splits into module weights / tables / kept tensors exactly once each
+- the rounding is each tower's export rounding (a table per row as an `embedding` weight, the
+  audio tower's declared convolutions kept), a restore gives the weights back, the tower payload
+  arithmetic
 """
 
 from __future__ import annotations
@@ -25,8 +28,10 @@ import pytest
 import torch
 from torch import nn
 
+from embeddinggemma2 import export_audio, export_vision
 from embeddinggemma2 import measure_quant as mq
 from embeddinggemma2 import measure_quant_towers as mt
+from karume.quantize import fake_quant_int8
 
 # ---- The quality set ---------------------------------------------------------------------------
 
@@ -197,6 +202,80 @@ class TestResample:
         mt.check_audio_length(samples, "x")
 
 
+class TestPcm16Clips:
+    def test_a_signal_is_rounded_to_the_16_bit_grid_and_clipped_samples_counted(self) -> None:
+        pcm, clipped = mt.to_pcm16(np.array([0.0, 0.5, -1.0, 1.0, -1.2, 0.25 / 32768 * 3]))
+
+        assert pcm.dtype == np.int16
+        assert pcm.tolist() == [0, 16384, -32768, 32767, -32768, 1]
+        assert clipped == 2
+
+    def test_a_clip_is_measured_on_the_grid_of_the_file_written(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(3)
+        _write_wav(tmp_path / "audio" / "a.wav", 44_100, rng.uniform(-0.5, 0.5, 4_410))
+
+        samples, info = mt.clip_samples(tmp_path / "audio" / "a.wav", 44_100)
+        pcm, _ = mt.clip_pcm16(tmp_path / "audio" / "a.wav", 44_100)
+
+        assert samples.dtype == np.float32
+        assert np.array_equal(samples * 32768, pcm.astype(np.float32))
+        assert info["samples"] == 1_600 and info["resampled"] and info["clippedSamples"] == 0
+
+    def test_a_clip_already_at_16_khz_mono_is_its_own_pcm(self, tmp_path: Path) -> None:
+        values = np.random.default_rng(4).uniform(-0.5, 0.5, 1_000)
+        _write_wav(tmp_path / "x.wav", 16_000, values)
+        source, _ = mt.read_wav_pcm16(tmp_path / "x.wav")
+
+        pcm, info = mt.clip_pcm16(tmp_path / "x.wav", 16_000)
+
+        assert np.array_equal(pcm, source[:, 0]) and not info["resampled"]
+
+
+class TestWriteClips:
+    def test_the_written_set_is_the_same_format_at_16_khz_and_reads_back_the_same_samples(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        document = _manifest(source)
+        _write_wav(source / "audio" / "a.wav", 44_100, np.sin(np.arange(4_410) / 7) * 0.3)
+        document["audio"][0]["sampleRate"] = 44_100
+        (source / mt.MANIFEST_FILE).write_text(json.dumps(document))
+        quality = mt.load_quality_set(source)
+
+        written = mt.write_clips(quality, tmp_path / "out")
+
+        again = mt.load_quality_set(tmp_path / "out")
+        assert written["audio"] == written["images"] == 2
+        assert [entry.sample_rate for entry in again.audio] == [16_000, 16_000]
+        assert [entry.transcript for entry in again.audio] == ["one", "two"]
+        assert again.images == quality.images
+        for image in quality.images:
+            assert (tmp_path / "out" / image.file).read_bytes() == (
+                source / image.file
+            ).read_bytes()
+        for before, after in zip(quality.audio, again.audio, strict=True):
+            pcm, rate = mt.read_wav_pcm16(tmp_path / "out" / after.file)
+            assert rate == 16_000 and pcm.shape[1] == 1
+            measured, _ = mt.clip_samples(source / before.file, before.sample_rate)
+            reread, _ = mt.clip_samples(tmp_path / "out" / after.file, after.sample_rate)
+            assert np.array_equal(measured, reread)
+
+    def test_a_failure_leaves_a_previous_directory_as_it_was(self, tmp_path: Path) -> None:
+        source = tmp_path / "source"
+        (source / mt.MANIFEST_FILE).parent.mkdir(parents=True)
+        (source / mt.MANIFEST_FILE).write_text(json.dumps(_manifest(source)))
+        quality = mt.load_quality_set(source)
+        previous = tmp_path / "out"
+        previous.mkdir()
+        (previous / "kept.txt").write_text("before")
+        (source / "audio" / "b.wav").write_bytes(b"not a wav")
+
+        with pytest.raises(wave.Error):
+            mt.write_clips(quality, previous)
+
+        assert [path.name for path in previous.iterdir()] == ["kept.txt"]
+
+
 # ---- Metrics -----------------------------------------------------------------------------------
 
 
@@ -299,63 +378,93 @@ class TestClassifyBf16Set:
             mt.classify_bf16_set(["t"], {"t"}, {"t"}, set())
 
 
-class TinyTower(nn.Module):
+class TinyVision(nn.Module):
+    """The vision tower's shape for its export rounding: linears, the two position tables read by
+    `embedding`, a RoPE buffer."""
+
     def __init__(self) -> None:
         super().__init__()
         self.fc = nn.Linear(32, 4, bias=False)
-        self.conv = nn.Conv1d(4, 4, 5, groups=4)
+        self.out = nn.Linear(4, 4)
         self.pos_x = nn.Parameter(torch.randn(6, 32), requires_grad=False)
+        self.pos_y = nn.Parameter(torch.randn(6, 32), requires_grad=False)
         self.register_buffer("rope", torch.randn(6, 8))
 
 
-def _tiny_weights(model: TinyTower) -> mt.TowerWeights:
+class TinyAudio(nn.Module):
+    """The audio tower's shape for its export rounding: the two subsampling convolutions it keeps
+    bf16 (`layer0.conv`, `layer1.conv`), a linear, a depthwise convolution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layer0 = nn.Module()
+        self.layer0.conv = nn.Conv2d(1, 4, 3, bias=False)
+        self.layer1 = nn.Module()
+        self.layer1.conv = nn.Conv2d(4, 2, 3, bias=False)
+        self.fc = nn.Linear(8, 4)
+        self.depthwise = nn.Conv1d(4, 4, 5, groups=4, bias=False)
+
+
+def _weights(name: str, model: nn.Module, rounded: list[str]) -> mt.TowerWeights:
+    parameters = dict(model.named_parameters())
     return mt.TowerWeights(
-        name="vision",
-        module_weights=["fc.weight", "conv.weight"],
-        tables=["pos_x"],
+        name=name,
+        module_weights=[key for key in rounded if key.endswith(".weight")],
+        tables=[key for key in rounded if not key.endswith(".weight")],
         kept_bf16=[],
-        rounded_stats=mq.GroupStats(3, 0, 0),
+        rounded_stats=mq.GroupStats(len(rounded), 0, 0),
         kept_stats=mq.GroupStats(0, 0, 0),
         remainder_elements=0,
         remainder_tensors=0,
-        live={
-            "vision:fc.weight": model.fc.weight,
-            "vision:conv.weight": model.conv.weight,
-            "vision:pos_x": model.pos_x,
-        },
+        live={f"{name}:{key}": parameters[key] for key in rounded},
     )
 
 
 class TestRoundTower:
-    def test_exactly_the_set_is_rounded_and_a_restore_gives_it_back(self) -> None:
+    """The screening rounds each tower with the rounding its i8 series ships (the export's own),
+    and a restore gives the pristine weights back."""
+
+    def test_the_vision_rounding_is_the_exports_and_a_restore_gives_it_back(self) -> None:
         torch.manual_seed(0)
-        model = TinyTower()
-        weights = _tiny_weights(model)
+        model = TinyVision()
+        weights = _weights("vision", model, ["fc.weight", "out.weight", "pos_x", "pos_y"])
         before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
         pristine = {key: tensor.detach().clone() for key, tensor in weights.live.items()}
 
         rounded = mt.round_tower(model, weights)
 
+        assert mt.ROUNDINGS["vision"] is export_vision.round_weights_to_i8
         mq.assert_rounded(rounded, set(weights.keys), "tiny")
         for name, tensor in model.state_dict().items():
-            assert torch.equal(tensor, before[name]) == (name in {"rope", "conv.bias"})
+            assert torch.equal(tensor, before[name]) == (name in {"rope", "out.bias"})
         mt.restore_all({"vision": weights}, pristine)
         for name, tensor in model.state_dict().items():
             assert torch.equal(tensor, before[name])
 
     def test_a_table_is_rounded_per_row_like_an_embedding(self) -> None:
         torch.manual_seed(1)
-        model = TinyTower()
+        model = TinyVision()
         embedding = nn.Embedding(6, 32)
         with torch.no_grad():
             embedding.weight.copy_(model.pos_x)
-        mq_holder = nn.Module()
-        mq_holder.add_module("table", embedding)
 
-        mt.round_tower(model, _tiny_weights(model))
-        mt.fake_quant_int8(mq_holder)
+        mt.round_tower(model, _weights("vision", model, []))
+        fake_quant_int8(embedding)
 
         assert torch.equal(model.pos_x, embedding.weight)
+
+    def test_the_audio_rounding_keeps_the_declared_convolutions(self) -> None:
+        torch.manual_seed(2)
+        model = TinyAudio()
+        kept = {
+            name: model.get_parameter(name).clone() for name in export_audio.I8_KEPT_BF16_WEIGHTS
+        }
+
+        rounded = mt.round_tower(model, _weights("audio", model, []))
+
+        assert sorted(rounded) == ["audio:depthwise.weight", "audio:fc.weight"]
+        for name, before in kept.items():
+            assert torch.equal(model.get_parameter(name), before), name
 
 
 class TestTowerPayload:

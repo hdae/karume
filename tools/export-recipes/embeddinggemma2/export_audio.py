@@ -3,6 +3,7 @@ tokens) to an IR v2 container + golden io.
 
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype bf16
+    uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype i8
 
 transformers is pinned to 5.23.0, as for the text tower ({@link embeddinggemma2.export}).
 
@@ -85,6 +86,10 @@ upstream's own modules make the goldens):
 - **The constants.** `softplus(per_dim_scale)` and the relative position table are computed at
   export time by upstream's own code (`cos` is not a run-time op).
 
+The layers are copied with upstream's parameters shared (every other module of the wrapper is
+upstream's own object): the wrapper holds no copy of a weight, so a rounding of its weights is the
+rounding of the modules the goldens run.
+
 The subsampling's frame mask is upstream's: the frames times the mask before the first
 convolution, every other mask value (`mask[:, ::2]`, a reshape and a slice) times its output before
 the second.
@@ -99,8 +104,11 @@ the second.
   state, no fused `attention` and no `where`, 12 softmaxes on `[8, n, 12]`, 24 window copies over
   one selector and 12 depthwise convolutions of width 5, one `sym_prefix_slice` of the `[750, 12]`
   bias, the two stride-2 convolutions.
+- {@link round_weights_to_i8} (`--dtype i8`) — the rounding reached exactly the linears and the
+  depthwise convolutions.
 - {@link assert_storage_form} — `f32`: every initializer f32; `bf16`: every weight slot bf16 (the
-  linears, the convolutions and the selector, whose 0 and 1 are bf16 values), the rest f32.
+  linears, the convolutions and the selector, whose 0 and 1 are bf16 values), the rest f32; `i8`:
+  the rounded weights i8, the two subsampling convolutions and the selector bf16, the rest f32.
 
 ## Storage
 
@@ -109,9 +117,21 @@ own dtype for the weights): every linear and convolution weight bf16 (nothing ro
 checkpoint is bf16), the norms, biases and folded constants f32. The goldens are the same for both.
 Activations are f32 throughout, as the text tower's.
 
+`--dtype i8` (`<series>-i8` — the distribution's int8 preset, the text tower's i8 method): every
+tensor the bf16 series stores as bf16 is rounded to per-row symmetric int8
+(`karume.quantize.fake_quant_int8`, one F32 scale per output channel) **before** the reference and
+the goldens are taken ({@link round_weights_to_i8}) — the 123 linears (`input_proj_linear`
+included) and the 12 depthwise convolutions — **except** the two subsampling convolutions, which
+stay bf16 ({@link I8_KEPT_BF16_WEIGHTS} holds the one declaration and its reason: rounded, they
+alone moved single soft tokens of real speech far), and the window selector, which is no weight
+and stays bf16 ({@link i8_storage_overrides}). The graph and the waveforms are the other series'
+own; the goldens are upstream's forward on the rounded weights (the wrapper shares them), so the
+series' goldens are the quantized tower's own outputs.
+
 ## Goldens
 
-Upstream's feature extractor and upstream's modules over the real weights in f32, on the synthetic
+Upstream's feature extractor and upstream's modules over the real weights in f32 (the rounded
+weights under i8), on the synthetic
 waveforms of {@link embeddinggemma2.waveforms.WAVEFORMS} (every residue of `L` mod 4, 1 s, 10 s and
 the 30 s maximum): `io.<waveform>.safetensors` holds `input.features` / `input.frame_mask` (the
 graph's frames) and `output.0` (upstream's soft tokens `[1, n, 512]` from the extractor's frames);
@@ -124,6 +144,7 @@ the extractor's frame count, the valid frames, the soft-token count and the meas
     outputs/series/embeddinggemma-2-audio/io.<waveform>.safetensors the goldens
     outputs/series/embeddinggemma-2-audio/reference.json            provenance and measurements
     outputs/series/embeddinggemma-2-audio-bf16/…                    the same with `--dtype bf16`
+    outputs/series/embeddinggemma-2-audio-i8/…                      `--dtype i8` (its own goldens)
 """
 
 from __future__ import annotations
@@ -172,18 +193,20 @@ from karume.emit import eligible_compressed_initializers
 from karume.ir import IrGraph
 from karume.ops import ATTENTION_OP
 from karume.pipeline import export_module, publish_model
+from karume.quantize import QUANT_MODULE_TYPES, Int8Report, fake_quant_int8, iter_quant_targets
 from karume.shapes import declared_shape
 
 #: The series this script writes.
 AUDIO_SERIES = "embeddinggemma-2-audio"
 
 #: The storage dtypes `--dtype` takes.
-WEIGHT_DTYPES = ("f32", "bf16")
+WEIGHT_DTYPES = ("f32", "bf16", "i8")
 
 #: One series per storage (ADR 0019).
 DEFAULT_OUT_DIRS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / AUDIO_SERIES,
     "bf16": SERIES_ROOT / f"{AUDIO_SERIES}-bf16",
+    "i8": SERIES_ROOT / f"{AUDIO_SERIES}-i8",
 }
 
 #: The graph name (the component name a distribution will give the tower).
@@ -265,6 +288,20 @@ EXAMPLE_TOKENS = 100
 
 #: The buffer name of the window's one-hot selector (one tensor shared by every attention).
 WINDOW_SELECTOR = "window_selector"
+
+#: The weights the i8 series keeps bf16 — the two subsampling convolutions (`layer0.conv`
+#: `[128, 1, 3, 3]`, `layer1.conv` `[32, 128, 3, 3]`). With the window selector (a weight slot of
+#: no weight — {@link i8_storage_overrides}) they are the audio tower's exceptions to "every tensor
+#: the bf16 series stores as bf16 is per-row int8 under i8": rounded alone, the two convolutions
+#: moved single soft tokens of real speech to a cosine of 0.66 (`layer0.conv` alone, clip M1-08
+#: token 68) and 0.20 (both, clip M2-02 token 26) against the bf16 tower, while everything else
+#: rounded with them kept those tokens at 0.9998 or more (torch-CPU screening of 2026-11-23, 32
+#: Japanese TTS clips — `docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md`). They
+#: hold 38,016 elements, so keeping them costs about 40 KB. `input_proj_linear` is rounded
+#: (rounded alone it moved nothing). MUST: the one declaration — the export's rounding
+#: ({@link round_weights_to_i8}) and storage overrides and the screening's rounded set
+#: (`embeddinggemma2/measure_quant_towers.py`) all read it.
+I8_KEPT_BF16_WEIGHTS: tuple[str, ...] = ("layer0.conv.weight", "layer1.conv.weight")
 
 #: The golden file names.
 REFERENCE_FILE = "reference.json"
@@ -539,7 +576,7 @@ class AudioTowerWrapper(nn.Module):
 
     MUST: the graph inputs carry these names (the host binds by name).
     MUST: upstream's modules are not changed — the layers are a copy with their attention and
-    clipped linears swapped (the goldens run upstream's own).
+    clipped linears swapped (the goldens run upstream's own), sharing upstream's parameters.
     """
 
     def __init__(self, tower: Tower) -> None:
@@ -555,7 +592,12 @@ class AudioTowerWrapper(nn.Module):
             dtype = model.output_proj.weight.dtype
             relative_positions = model.rel_pos_enc(torch.zeros(1, 1, hidden, dtype=dtype))
         selector = window_selector(hidden)
-        self.layers = copy.deepcopy(model.layers)
+        # MUST: the copy shares upstream's parameters (the memo maps each to itself) — the modules
+        # are copied so upstream's own keep their attention and linears, but every weight is one
+        # tensor, so a rounding of the wrapper's weights (`--dtype i8`) is the rounding of the
+        # modules the goldens run.
+        shared = {id(parameter): parameter for parameter in model.layers.parameters()}
+        self.layers = copy.deepcopy(model.layers, shared)
         for layer in self.layers:
             layer.self_attn = WindowAttention(layer.self_attn, relative_positions, selector)
         _replace_clipped_linears(self.layers)
@@ -782,8 +824,9 @@ def assert_ir_form(graph: IrGraph, config: Any) -> dict[str, Any]:
             f" {dict(expected_forms)} over one"
         )
     (selector,) = selectors
-    if not graph.initializers[selector].tensor.endswith(f".self_attn.{WINDOW_SELECTOR}"):
-        raise AssertionError(f"the window selector is {graph.initializers[selector].tensor}")
+    selector_key = graph.initializers[selector].tensor
+    if not selector_key.endswith(f".self_attn.{WINDOW_SELECTOR}"):
+        raise AssertionError(f"the window selector is {selector_key}")
     prefixes = [node for node in graph.nodes if node.op == "sym_prefix_slice"]
     bias_shapes = [declared_shape(graph, node.ins[0]) for node in prefixes]
     if bias_shapes != [[SOFT_TOKENS_MAX, WINDOW]]:
@@ -801,28 +844,102 @@ def assert_ir_form(graph: IrGraph, config: Any) -> dict[str, Any]:
         "inputs": found,
         "softmax_nodes": len(softmaxes),
         "window_copies": len(windows),
+        "window_selector": selector_key,
         "ops": dict(Counter(node.op for node in graph.nodes).most_common()),
     }
 
 
-def assert_storage_form(graph: IrGraph, dtype: str) -> dict[str, int]:
+def i8_storage_overrides(selector_key: str) -> dict[str, str]:
+    """The i8 series' storage overrides (tensor key → `bf16`): the weights it keeps bf16
+    ({@link I8_KEPT_BF16_WEIGHTS} — the reason is there) and the window selector, which sits in a
+    weight slot but is no weight (one-hot 0 / 1, exact in bf16 — never rounded). `selector_key` is
+    the selector's tensor key in the traced graph ({@link assert_ir_form}'s `window_selector`: one
+    buffer shared by every layer, whose key torch.export picks)."""
+    return {**{key: "bf16" for key in I8_KEPT_BF16_WEIGHTS}, selector_key: "bf16"}
+
+
+def round_weights_to_i8(wrapper: AudioTowerWrapper) -> Int8Report:
+    """Round, in place, every weight the bf16 series stores as bf16 but those it keeps bf16 under
+    i8 ({@link I8_KEPT_BF16_WEIGHTS}) — the linears and the depthwise convolutions — to per-row
+    symmetric int8, and return the scale ledger (keyed by the wrapper's FQNs, the exported tensor
+    keys).
+
+    MUST: called before the reference and the goldens are taken (module doc, "Storage"); the
+    wrapper shares every weight with upstream's modules, so the goldens are the rounded tower's.
+    MUST: the kept weights are module weights of the tower and nothing else is left out — a weight
+    left out ships its bf16 value under the int8 preset's name, and a kept name that matches
+    nothing would round what the declaration keeps. The target set is decided before anything is
+    rounded, so a refusal leaves the weights as they were.
+    """
+    targets = {fqn for fqn, _weight, _axis in iter_quant_targets(wrapper, QUANT_MODULE_TYPES)}
+    kept = set(I8_KEPT_BF16_WEIGHTS)
+    if not kept <= targets:
+        raise AudioExportError(
+            f"the weights kept bf16 {sorted(kept - targets)} are not module weights of the tower"
+        )
+    expected = targets - kept
+    report = fake_quant_int8(wrapper, lambda name: f"{name}.weight" in expected)
+    if set(report.scales) != expected:
+        missing = sorted(expected - set(report.scales))[:3]
+        extra = sorted(set(report.scales) - expected)[:3]
+        raise AudioExportError(
+            f"the int8 rounding reached {len(report.scales)} weights, not the {len(expected)}"
+            f" linears and convolutions (missing {missing} / extra {extra})"
+        )
+    return report
+
+
+def assert_storage_form(
+    graph: IrGraph,
+    dtype: str,
+    rounded: Collection[str] = (),
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, int]:
     """The storage the writer committed: under `bf16`, every weight slot bf16 and the rest f32;
-    under `f32`, every initializer f32 (or i32)."""
+    under `i8`, every weight slot i8 but the overrides' ({@link i8_storage_overrides}), which are
+    bf16, and the rest f32; under `f32`, every initializer f32 (or i32).
+
+    `rounded` is the tensor keys the int8 rounding reached ({@link round_weights_to_i8}); `i8`
+    needs it and its overrides, the other storages take neither. MUST: under `i8` the i8 weight
+    slots are exactly the rounded keys — a rounded weight outside a slot would ship its rounded
+    values as f32, and a weight slot neither rounded nor kept would ship unrounded.
+    """
     if dtype not in WEIGHT_DTYPES:
         raise AudioExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
+    if (dtype == "i8") != bool(rounded) or (dtype == "i8") != (overrides is not None):
+        raise AudioExportError(
+            f"the {dtype} storage form takes {'the' if dtype == 'i8' else 'no'} rounded weights"
+            f" and overrides ({len(rounded)} rounded given)"
+        )
+    kept = dict(overrides or {})
     eligible = eligible_compressed_initializers(graph)
     counts: dict[str, int] = {}
     wrong: list[str] = []
     for name, initializer in graph.initializers.items():
         stored = initializer.storage.dtype
         counts[stored] = counts.get(stored, 0) + 1
-        expected = {"bf16"} if dtype == "bf16" and name in eligible else {"f32", "i32"}
+        if dtype == "f32" or name not in eligible:
+            expected = {"f32", "i32"}
+        else:
+            expected = {kept.get(initializer.tensor, dtype)}
         if stored not in expected:
             wrong.append(
                 f"{initializer.tensor}: {stored} (expected {' / '.join(sorted(expected))})"
             )
     if wrong:
         raise AssertionError(f"the {dtype} storage form does not hold: {wrong[:4]}")
+    if dtype == "i8":
+        slots = {
+            initializer.tensor
+            for initializer in graph.initializers.values()
+            if initializer.storage.dtype == "i8"
+        }
+        if slots != set(rounded):
+            raise AssertionError(
+                f"the i8 weight slots are not the {len(rounded)} rounded weights (stored i8 but"
+                f" not rounded {sorted(slots - set(rounded))[:3]} / rounded but not stored i8"
+                f" {sorted(set(rounded) - slots)[:3]})"
+            )
     return dict(sorted(counts.items()))
 
 
@@ -883,6 +1000,9 @@ def export_series(
     tower = load_tower(directory)
     extractor = load_feature_extractor(directory)
     wrapper = AudioTowerWrapper(tower).eval()
+    # MUST: i8 rounds before anything below reads the weights (the reference, the trace, the
+    # goldens — module doc, "Storage").
+    rounding = round_weights_to_i8(wrapper) if dtype == "i8" else None
     processed = [process_audio(extractor, WAVEFORMS[name]) for name in waveforms]
     residues = {audio.frames.valid % FRAMES_PER_TOKEN for audio in processed}
     if residues != set(range(FRAMES_PER_TOKEN)):
@@ -895,6 +1015,7 @@ def export_series(
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     graph, tensors = trace(wrapper)
     form = assert_ir_form(graph, tower.config)
+    overrides = None if rounding is None else i8_storage_overrides(form["window_selector"])
     with staged_publication(out_dir) as staged:
         staged.mkdir()
         graph = publish_model(
@@ -904,8 +1025,12 @@ def export_series(
             provenance=Provenance(license=LICENSE, upstream_revision=sources.PIN.revision),
             graph_name=GRAPH_NAME,
             weight_dtype=dtype,
+            weight_scales=None if rounding is None else rounding.scales,
+            weight_dtype_overrides=overrides,
         )
-        storage = assert_storage_form(graph, dtype)
+        storage = assert_storage_form(
+            graph, dtype, () if rounding is None else tuple(rounding.scales), overrides
+        )
         written = [
             write_io(graph, audio, goldens[audio.waveform.name][0], staged) for audio in processed
         ]
@@ -928,6 +1053,14 @@ def export_series(
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "storage": storage,
+        **(
+            {}
+            if rounding is None
+            else {
+                "rounded": {"tensors": rounding.modules, "elements": rounding.elements},
+                "kept_bf16": sorted(overrides or {}),
+            }
+        ),
         "form": form,
         "io": written,
         "audios": {name: measured for name, (_, measured) in goldens.items()},

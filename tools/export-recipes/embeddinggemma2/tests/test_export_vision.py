@@ -14,7 +14,11 @@ broken:
   against)
 - the traced form: three inputs on `9n`, one output `[1, n, 512]`, the attention without a mask
   and with upstream's scale 1, the six lookups, no `where` — and each broken form is refused
-- the storage: bf16 in every weight slot but the RoPE tables, which stay f32
+- the storage: bf16 in every weight slot but the RoPE tables, which stay f32; under i8 the same
+  slots i8 and exactly the rounded weights
+- the i8 rounding: exactly the linears and the two position tables (per row, as an `embedding`
+  weight), and upstream's forward — the goldens — runs the same rounded weights (the wrapper holds
+  upstream's own parameters, no copy)
 - the pins: the snapshot files the script reads are pinned, the constants are the config's
 
 The cases that need transformers at the pinned release SKIP explicitly without it.
@@ -34,6 +38,7 @@ from embeddinggemma2 import export, export_vision, sources
 from karume.container import Provenance
 from karume.ir import IrGraph, IrNode
 from karume.pipeline import publish_model
+from karume.quantize import fake_quant_int8
 
 
 def _require_transformers() -> None:
@@ -177,6 +182,7 @@ class TestConstants:
     def test_the_series_are_one_per_storage(self) -> None:
         assert export_vision.DEFAULT_OUT_DIRS["f32"].name == "embeddinggemma-2-vision"
         assert export_vision.DEFAULT_OUT_DIRS["bf16"].name == "embeddinggemma-2-vision-bf16"
+        assert export_vision.DEFAULT_OUT_DIRS["i8"].name == "embeddinggemma-2-vision-i8"
         assert sorted(export_vision.DEFAULT_OUT_DIRS) == sorted(export_vision.WEIGHT_DTYPES)
 
     def test_the_soft_width_is_the_text_graphs(self) -> None:
@@ -188,7 +194,7 @@ class TestConstants:
 
     def test_another_storage_is_refused_before_anything_is_read(self, tmp_path: Path) -> None:
         with pytest.raises(export_vision.VisionExportError, match="not one of"):
-            export_vision.export_series(tmp_path / "missing", tmp_path / "out", dtype="i8")
+            export_vision.export_series(tmp_path / "missing", tmp_path / "out", dtype="f16")
 
 
 #: The tiny tower: 2 layers, hidden 16, 2 heads of 8, a 64-row position table.
@@ -284,6 +290,67 @@ class TestTinyTower:
 
         assert list(cos.shape) == list(sin.shape) == [5, 4]
         assert torch.equal(cos[0], torch.ones(4)) and torch.equal(sin[0], torch.zeros(4))
+
+    def test_the_wrapper_holds_upstreams_own_weights(self, tiny_tower) -> None:
+        """No copy: every parameter of the wrapper is in the storage of one of upstream's, so a
+        rounding of the wrapper's weights is a rounding of the modules the goldens run."""
+        upstream = {
+            parameter.untyped_storage().data_ptr()
+            for module in (tiny_tower.tower, tiny_tower.embedder)
+            for parameter in module.parameters()
+        }
+
+        wrapper = _wrapper(tiny_tower)
+
+        for name, parameter in wrapper.named_parameters():
+            assert parameter.untyped_storage().data_ptr() in upstream, name
+
+
+class TestInt8Rounding:
+    """`round_weights_to_i8` on the tiny tower: what the bf16 storage stores as bf16 becomes
+    per-row int8, and upstream's forward (the goldens) runs the same rounded weights."""
+
+    def test_it_rounds_exactly_the_linears_and_the_two_position_tables(self, tiny_tower) -> None:
+        wrapper = _wrapper(tiny_tower)
+        rope = wrapper.rope_cos.clone()
+
+        report = export_vision.round_weights_to_i8(wrapper)
+
+        linears = {
+            f"{name}.weight"
+            for name, module in wrapper.named_modules()
+            if isinstance(module, torch.nn.Linear)
+        }
+        assert set(report.scales) == linears | {"pos_x", "pos_y"}
+        # 2 layers × 7 linears, the input projection and the projector.
+        assert len(linears) == 2 * 7 + 2
+        assert list(report.scales["pos_x"].shape) == [TINY_POSITIONS, 1]
+        assert torch.equal(wrapper.rope_cos, rope)
+
+    def test_the_tables_are_rounded_per_row_like_an_embedding(self, tiny_tower) -> None:
+        wrapper = _wrapper(tiny_tower)
+        embedding = torch.nn.Embedding(TINY_POSITIONS, 16)
+        with torch.no_grad():
+            embedding.weight.copy_(wrapper.pos_y)
+
+        export_vision.round_weights_to_i8(wrapper)
+        fake_quant_int8(embedding)
+
+        assert torch.equal(wrapper.pos_y, embedding.weight)
+
+    def test_upstreams_forward_runs_the_rounded_weights(self, tiny_tower) -> None:
+        pixels, positions = _padded(6, 9, padding=27)
+        rows = export_vision.host_rows(pixels, positions)
+        wrapper = _wrapper(tiny_tower)
+        before = export_vision.upstream_soft_tokens(tiny_tower, pixels, positions)
+
+        export_vision.round_weights_to_i8(wrapper)
+        golden = export_vision.upstream_soft_tokens(tiny_tower, pixels, positions)
+        with torch.no_grad():
+            ours = wrapper(rows.pixels, rows.position_x, rows.position_y)
+
+        assert float((golden - before).abs().max()) > 1e-4
+        torch.testing.assert_close(ours[0], golden, atol=1e-5, rtol=0)
 
 
 @pytest.fixture
@@ -408,3 +475,26 @@ class TestStorage:
         assert set(export_vision.assert_storage_form(stored, "f32")) == {"f32"}
         with pytest.raises(AssertionError, match=r"pos_x: f32 \(expected bf16\)"):
             export_vision.assert_storage_form(stored, "bf16")
+
+    def test_i8_in_every_weight_slot_but_the_rope_tables(self, tiny_tower, tmp_path) -> None:
+        wrapper = _wrapper(tiny_tower, export_vision.ROPE_POSITIONS)
+        report = export_vision.round_weights_to_i8(wrapper)
+        graph, tensors = export_vision.trace(wrapper)
+
+        stored = publish_model(
+            tmp_path / "model.krm",
+            graph,
+            tensors,
+            provenance=Provenance(license=export.LICENSE),
+            graph_name=export_vision.GRAPH_NAME,
+            weight_dtype="i8",
+            weight_scales=report.scales,
+            weight_dtype_overrides={name: "f32" for name in export_vision.ROPE_TABLES},
+        )
+        counts = export_vision.assert_storage_form(stored, "i8", tuple(report.scales))
+
+        assert counts["i8"] == 2 * 7 + 2 + 2
+        with pytest.raises(AssertionError, match="not the 19 rounded weights"):
+            export_vision.assert_storage_form(stored, "i8", (*report.scales, "extra.weight"))
+        with pytest.raises(export_vision.VisionExportError, match="takes the rounded weights"):
+            export_vision.assert_storage_form(stored, "i8")

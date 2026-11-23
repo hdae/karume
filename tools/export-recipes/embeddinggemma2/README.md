@@ -115,6 +115,7 @@ outputs/series/embeddinggemma-2-vision/model-NNNNN-of-NNNNN.krm  the container (
 outputs/series/embeddinggemma-2-vision/io.<image>.safetensors   the graph's inputs and upstream's soft tokens
 outputs/series/embeddinggemma-2-vision/reference.json            per image: sizes, digests, soft tokens, measured differences
 outputs/series/embeddinggemma-2-vision-bf16/…                    `--dtype bf16`: the linears and the position tables as bf16
+outputs/series/embeddinggemma-2-vision-i8/…                      `--dtype i8`: the same tensors as per-row int8, its own goldens
 ```
 
 ### The io contract
@@ -187,6 +188,16 @@ values — and 107 f32: the norms and the two RoPE tables, which sit in an `embe
 are not bf16 values and are kept f32 explicitly). Its goldens are the f32 series' (the io files are
 byte-identical). One export takes about 35 s on the development machine (CPU).
 
+`--dtype i8` (the distribution's `i8` preset, the text tower's method) rounds the same 116 tensors to per-row
+symmetric int8 (`karume.quantize.fake_quant_int8`; the two position tables are bare parameters read by `embedding`,
+named to it as `embedding` weights through `functional_weights`, one scale per position row) **before** the reference
+and the goldens, so the series' goldens are upstream's forward on the rounded weights: the wrapper holds no copy of a
+weight (the position tables are views of upstream's table, every other module upstream's own), so the rounding is
+upstream's too. The RoPE tables stay f32. Measured on 2026-11-23: 169,138,366 bytes in 3 parts (116 initializers i8,
+107 f32 — 167,706,624 elements rounded), the wrapper within 1.19e-6 to 1.43e-6 of upstream on the same rows and
+1.86e-5 to 4.94e-5 of the golden. Making the wrapper share upstream's table left the bf16 series byte-identical (its
+four parts, five io files and record re-exported that day). The torch-CPU screening of the form: [research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md).
+
 ## What `export_audio.py` emits (the audio tower)
 
 Upstream's audio tower (`audio_config`, `model_type` `gemma4_audio` — Gemma 4 E2B / E4B's, every
@@ -202,6 +213,7 @@ outputs/series/embeddinggemma-2-audio/model-NNNNN-of-NNNNN.krm  the container (f
 outputs/series/embeddinggemma-2-audio/io.<waveform>.safetensors the graph's inputs and upstream's soft tokens
 outputs/series/embeddinggemma-2-audio/reference.json            per waveform: lengths, digests, soft tokens, measured differences
 outputs/series/embeddinggemma-2-audio-bf16/…                    `--dtype bf16`: every linear and convolution weight as bf16
+outputs/series/embeddinggemma-2-audio-i8/…                      `--dtype i8`: per-row int8 but the subsampling convolutions, its own goldens
 ```
 
 ### The io contract
@@ -297,6 +309,20 @@ parts (138 initializers bf16 — the 123 linears, the 2 subsampling and 12 depth
 the window selector, the checkpoint's own values or 0 and 1 — and 148 f32: the norms, the biases and
 the folded constants). Its goldens are the f32 series' (the io files are byte-identical). One export
 takes about 25 s on the development machine (CPU).
+
+`--dtype i8` (the distribution's `i8` preset, the text tower's method) rounds every tensor the bf16 series stores as
+bf16 to per-row symmetric int8 **before** the reference and the goldens — the 123 linears (`input_proj_linear`
+included) and the 12 depthwise convolutions — **except** the two subsampling convolutions (`layer0.conv`
+`[128, 1, 3, 3]`, `layer1.conv` `[32, 128, 3, 3]`), which stay bf16, and the window selector (no weight), which stays
+bf16 too. The exception is declared once, `export_audio.I8_KEPT_BF16_WEIGHTS`, with its reason: rounded alone, the
+two convolutions moved single soft tokens of real speech to a cosine of 0.66 and 0.20 against the bf16 tower, while
+everything else rounded with them kept those tokens at 0.9998 or more; keeping their 38,016 elements costs about
+40 KB (the decision of 2026-11-23, [research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md)).
+The wrapper's layers are copied with upstream's parameters shared, so the goldens are upstream's forward on the
+rounded weights. Measured on 2026-11-23: 295,640,914 bytes in 4 parts (135 initializers i8, 3 bf16, 148 f32 —
+292,876,288 elements rounded); the wrapper within 3.10e-6 (`click`) to 2.82e-4 (`long`) of the golden, against the
+bound of 3e-4 (the f32 series' worst is 1.01e-4). Sharing upstream's parameters left the bf16 series byte-identical
+(its five parts, six io files and record re-exported that day).
 
 ## What `multimodal_reference.py` writes (the reference vectors of whole inputs)
 
@@ -442,10 +468,15 @@ uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype i8
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype bf16
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype i8
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.audio_front_end
 uv run python dist.py --pipeline embeddinggemma-2
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.measure_quant_towers \
+    --quality-set ../../inputs/embeddinggemma2/quality-set \
+    --write-clips ../../inputs/embeddinggemma2/quality-set-16k
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \

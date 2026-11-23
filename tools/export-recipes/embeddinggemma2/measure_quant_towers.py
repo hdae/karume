@@ -3,11 +3,14 @@ A of the towers' quant presets) — the counterpart of {@link embeddinggemma2.me
 screened the text tower.
 
     uv run --offline --with 'transformers==5.23.0' python -m embeddinggemma2.measure_quant_towers \\
-        --quality-set ../../inputs/embeddinggemma2/quality-set --date 2026-11-23
+        --quality-set ../../inputs/embeddinggemma2/quality-set --date 2026-11-23 \\
+        [--write-clips ../../inputs/embeddinggemma2/quality-set-16k]
 
-The same method as the text screening: **no GPU code** — the weights are rounded in place with the
-exporter's own `karume.quantize.fake_quant_int8` (symmetric, one F32 scale per output row), so they
-are the values a series would ship, and every embedding is taken from the export's own wrappers
+The same method as the text screening: **no GPU code** — the weights are rounded in place by each
+tower's own export rounding (`round_weights_to_i8` of `export`, `export_vision` and `export_audio`,
+all through the exporter's `karume.quantize.fake_quant_int8`: symmetric, one F32 scale per output
+row), so they are the values the i8 series ship, and every embedding is taken from the export's own
+wrappers
 ({@link embeddinggemma2.export_vision.VisionTowerWrapper},
 {@link embeddinggemma2.export_audio.AudioTowerWrapper},
 {@link embeddinggemma2.export.EmbeddingWrapper}).
@@ -30,30 +33,34 @@ for an image it is "text + vision" and for a clip "text + audio".
 
 ## The towers' rounded sets ({@link tower_weights})
 
-The set is what each tower's bf16 series stores as bf16, derived from the export code itself: the
-tower wrapper is traced by the export's own `trace`, its storage planned by
-`karume.emit.stored_model` with the arguments `export_series` passes for `--dtype bf16` (nothing
-is written), and the export's own `assert_storage_form` holds the result to the bf16 series' form.
-Every tensor stored bf16 is then one of three kinds:
+The set is what each tower's bf16 series stores as bf16, less what the tower's i8 series keeps
+bf16, derived from the export code itself: the tower wrapper is traced by the export's own
+`trace`, its storage planned by `karume.emit.stored_model` with the arguments `export_series`
+passes for `--dtype bf16` (nothing is written), and the export's own `assert_storage_form` holds
+the result to the bf16 series' form. Every tensor stored bf16 is then one of three kinds:
 
-- **a module weight** (`nn.Linear`, `nn.Conv1d`, `nn.Conv2d` of the wrapper) — rounded by
-  `fake_quant_int8` over the wrapper, its include predicate naming exactly these modules. The audio
-  tower's subsampling `conv2d` weights and its depthwise `conv1d` weights are in it (both are bf16
-  weight slots of the series; one scale per output channel — for the depthwise ones a row of 5);
+- **a module weight** (`nn.Linear`, `nn.Conv1d`, `nn.Conv2d` of the wrapper) — the audio tower's
+  depthwise `conv1d` weights are in it (one scale per output channel, a row of 5);
 - **a learned table read by `embedding`** that is not an `nn.Embedding` — the vision tower's two
-  position tables `pos_x` / `pos_y` (`[10240, 768]`, the halves of upstream's table, bf16 in the
-  series): rounded by the same `fake_quant_int8` through a temporary `nn.Embedding` holding the
-  wrapper's own parameter (per position row, the `embedding` weight slot's axis);
-- **a structural constant** — the audio tower's one-hot window selector (one tensor shared by the
-  24 window copies): not a checkpoint weight, its 0 / 1 values exact in bf16, so it is not rounded
-  and stays bf16 in the i8 projection (rounding it per row would give 1.0 back exactly — 127 times
-  `f32(1/127)` is 1.0 — so this choice moves no number).
+  position tables `pos_x` / `pos_y` (`[10240, 768]`, the halves of upstream's table), which the
+  export rounds as `embedding` weights (per position row) through `fake_quant_int8`'s
+  `functional_weights`;
+- **kept bf16** — what the audio i8 series keeps: its two subsampling convolutions and its one-hot
+  window selector (`export_audio.i8_storage_overrides`, built on the one declaration
+  `export_audio.I8_KEPT_BF16_WEIGHTS`, which holds the reason). The selector is no weight (its 0 /
+  1 values are exact in bf16; rounding it per row would give 1.0 back exactly, so it moves no
+  number either way).
 
-A bf16 tensor of any other kind fails loudly. The vision tower's folded RoPE tables are f32 in the
+A bf16 tensor of any other kind fails loudly. The rounding is each export's own; the keys it
+reaches must equal the first two kinds ({@link mq.assert_rounded}), so the screening and the
+shipped series cannot round different sets. The vision tower's folded RoPE tables are f32 in the
 series ({@link embeddinggemma2.export_vision.ROPE_TABLES}) and untouched; norms, biases and every
 folded constant (the audio tower's relative keys, query scales and window bias) are f32 and
 untouched — the relative keys are `relative_k_proj` folded at export time, so that linear is not a
 stored weight and is not rounded.
+
+The first run of 2026-11-23 rounded the audio tower's two subsampling convolutions too; its report
+is kept beside the re-run's (`docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md`).
 
 MUST: configurations do not stack — every rounding is in place, so each starts from the pristine
 weights ({@link restore_all}), each rounds exactly its intended set once
@@ -70,8 +77,14 @@ and `audio-only` ids, and its vectors against the fixture's upstream ones). Imag
 upstream's image processor (PNG must be 8-bit RGB), clips through upstream's feature extractor at
 16 kHz mono: a clip at another rate is resampled by {@link resample} — a Kaiser-windowed sinc
 written here, because no resampling library is in the recipes' uv environment (no scipy, soxr,
-librosa or torchaudio). A clip of at most 160 samples or more than 480,000 at 16 kHz is an error,
-as in the pipeline.
+librosa or torchaudio) — and every clip is put on the 16-bit PCM grid after it ({@link to_pcm16};
+the count of clipped samples is in the report). A clip of at most 160 samples or more than 480,000
+at 16 kHz is an error, as in the pipeline.
+
+`--write-clips <dir>` also writes those clips as 16 kHz, 16-bit mono WAV files with the images
+under a manifest of the same format ({@link write_clips}): the library takes 16 kHz only, and these
+files hold exactly the samples measured here, so a run of the real pipeline on them reads the
+screening's inputs.
 
 The captions and transcripts are embedded as plain text with the `query` prompt
 (`task: search result | query: `) — the model card's convention for retrieval: the query prefix
@@ -101,6 +114,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import sys
 import time
 import wave
@@ -121,9 +135,10 @@ from embeddinggemma2 import export, export_audio, export_vision, multimodal_refe
 from embeddinggemma2 import measure_quant as mq
 from embeddinggemma2.images import IMAGES
 from embeddinggemma2.waveforms import PCM_SCALE, SAMPLE_RATE, WAVEFORMS, valid_frames
+from karume.artifacts import staged_publication
 from karume.container import container_parts
 from karume.emit import stored_model
-from karume.quantize import QUANT_MODULE_TYPES, fake_quant_int8, iter_quant_targets
+from karume.quantize import QUANT_MODULE_TYPES, Int8Report, iter_quant_targets
 
 #: The quality set's default home (untracked, outside git — assets-layout: `inputs/<family>/`).
 DEFAULT_QUALITY_SET = INPUTS_ROOT / "embeddinggemma2" / "quality-set"
@@ -396,15 +411,23 @@ def check_audio_length(samples: int, where: str) -> None:
         raise QualitySetError(f"{where}: {samples} samples at 16 kHz, more than {MAX_SAMPLES}")
 
 
-def clip_samples(path: Path, declared_rate: int) -> tuple[np.ndarray, dict[str, Any]]:
-    """A quality-set clip as the pipeline takes it: f32 mono at 16 kHz, within the limits."""
+def to_pcm16(values: np.ndarray) -> tuple[np.ndarray, int]:
+    """A signal at full scale ±1 on the 16-bit PCM grid: `rint(x · 32768)` clipped to the int16
+    range; returns the samples and how many of them were clipped."""
+    scaled = np.rint(values * PCM_SCALE)
+    clipped = int(((scaled < -PCM_SCALE) | (scaled > PCM_SCALE - 1)).sum())
+    return np.clip(scaled, -PCM_SCALE, PCM_SCALE - 1).astype(np.int16), clipped
+
+
+def clip_pcm16(path: Path, declared_rate: int) -> tuple[np.ndarray, dict[str, Any]]:
+    """A quality-set clip at 16 kHz mono as 16-bit PCM (resampled, then rounded to the grid),
+    within the limits."""
     pcm, rate = read_wav_pcm16(path)
     if rate != declared_rate:
         raise QualitySetError(
             f"{path}: the file is at {rate} Hz, the manifest says {declared_rate}"
         )
-    values = resample(pcm_to_mono(pcm), rate, SAMPLE_RATE)
-    samples = values.astype(np.float32)
+    samples, clipped = to_pcm16(resample(pcm_to_mono(pcm), rate, SAMPLE_RATE))
     check_audio_length(int(samples.shape[0]), str(path))
     info = {
         "sourceRate": rate,
@@ -412,8 +435,78 @@ def clip_samples(path: Path, declared_rate: int) -> tuple[np.ndarray, dict[str, 
         "sourceSamples": int(pcm.shape[0]),
         "samples": int(samples.shape[0]),
         "resampled": rate != SAMPLE_RATE,
+        "clippedSamples": clipped,
     }
     return samples, info
+
+
+def clip_samples(path: Path, declared_rate: int) -> tuple[np.ndarray, dict[str, Any]]:
+    """A quality-set clip as the pipeline takes it: f32 mono at 16 kHz, within the limits.
+
+    MUST: the samples are those of the 16-bit WAV {@link write_clips} writes (`pcm / 32768`, exact
+    in f32), so the real pipeline fed those files reads exactly what this screening measured; a
+    clip already at 16 kHz mono is its own PCM unchanged."""
+    pcm, info = clip_pcm16(path, declared_rate)
+    return pcm.astype(np.float32) / np.float32(PCM_SCALE), info
+
+
+def write_wav_pcm16(path: Path, pcm: np.ndarray, rate: int) -> None:
+    """A mono 16-bit PCM WAV (little-endian, the form {@link read_wav_pcm16} reads)."""
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(pcm.astype("<i2").tobytes())
+
+
+def write_clips(quality: QualitySet, directory: Path) -> dict[str, Any]:
+    """`--write-clips`: the quality set with every clip as this screening reads it — 16 kHz, 16-bit
+    mono WAV ({@link clip_pcm16}) — under a manifest of the same format whose clips say 16,000 Hz,
+    and its images copied byte for byte (the format holds both modalities). The library takes 16
+    kHz only, so these are the files a run of the real pipeline reads; this script run on the
+    directory reads the same samples again (an equal rate is not resampled). Staged — a failure
+    leaves a previous directory as it was."""
+    images: list[dict[str, Any]] = []
+    audio: list[dict[str, Any]] = []
+    clipped: dict[str, int] = {}
+    with staged_publication(directory) as staged:
+        (staged / "images").mkdir(parents=True)
+        (staged / "audio").mkdir()
+        for image in quality.images:
+            shutil.copyfile(quality.root / image.file, staged / image.file)
+            images.append(
+                {
+                    "file": image.file,
+                    "caption": image.caption,
+                    "generator": image.generator,
+                    "prompt": image.prompt,
+                    "seed": image.seed,
+                }
+            )
+        for clip in quality.audio:
+            pcm, info = clip_pcm16(quality.root / clip.file, clip.sample_rate)
+            write_wav_pcm16(staged / clip.file, pcm, SAMPLE_RATE)
+            clipped[clip.file] = info["clippedSamples"]
+            audio.append(
+                {
+                    "file": clip.file,
+                    "transcript": clip.transcript,
+                    "generator": clip.generator,
+                    "sampleRate": SAMPLE_RATE,
+                }
+            )
+        manifest = {"format": MANIFEST_FORMAT, "images": images, "audio": audio}
+        (staged / MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        validate_manifest(manifest, staged)
+    return {
+        "dir": str(directory),
+        "images": len(images),
+        "audio": len(audio),
+        "sampleRate": SAMPLE_RATE,
+        "clippedSamples": clipped,
+    }
 
 
 # ---- Retrieval and cosine metrics (pure) ---------------------------------------------------
@@ -642,10 +735,11 @@ def tower_weights(
     overrides: Mapping[str, str] | None,
     assert_storage_form: Callable[[Any, str], Any],
     tables: Collection[str],
-    structural_suffix: str | None,
+    kept_bf16: Collection[str],
 ) -> TowerWeights:
-    """The tower's rounded set (module doc, "The towers' rounded sets") from its traced graph and
-    the storage `stored_model` plans for the bf16 series."""
+    """The tower's rounded set (module doc, "The towers' rounded sets") from its traced graph, the
+    storage `stored_model` plans for the bf16 series, and the tensors the tower's i8 series keeps
+    bf16 (`kept_bf16` — the export's own declaration)."""
     stored = stored_model(graph, tensors, weight_dtype="bf16", weight_dtype_overrides=overrides)
     assert_storage_form(stored.graph, "bf16")
     storage: dict[str, str] = {}
@@ -656,11 +750,17 @@ def tower_weights(
     if set(storage.values()) - {"bf16", "f32", "i32"}:
         raise AssertionError(f"{name}: storage dtypes {sorted(set(storage.values()))}")
     bf16 = [key for key, dtype in storage.items() if dtype == "bf16"]
+    if not set(kept_bf16) <= set(bf16):
+        raise AssertionError(
+            f"{name}: the tensors kept bf16 {sorted(set(kept_bf16) - set(bf16))} are not bf16 in"
+            " the bf16 series"
+        )
     targets = {
         fqn: (weight, axis) for fqn, weight, axis in iter_quant_targets(wrapper, QUANT_MODULE_TYPES)
     }
-    structural = {key for key in bf16 if structural_suffix and key.endswith(structural_suffix)}
-    module_weights, table_keys, kept = classify_bf16_set(bf16, targets, tables, structural)
+    module_weights, table_keys, kept = classify_bf16_set(
+        bf16, set(targets) - set(kept_bf16), tables, kept_bf16
+    )
     if set(table_keys) != set(tables):
         raise AssertionError(
             f"{name}: the tables stored bf16 are {table_keys}, not {sorted(tables)}"
@@ -677,12 +777,7 @@ def tower_weights(
         table = parameters[key]
         live[f"{name}:{key}"] = table
         shapes.append((table, 0))
-    kept_tensors = []
-    for key in kept:
-        constant = buffers[key]
-        if not bool(((constant == 0) | (constant == 1)).all()):
-            raise AssertionError(f"{name}: the structural constant {key} is not 0 / 1")
-        kept_tensors.append((constant, 0))
+    kept_tensors = [(parameters[key] if key in parameters else buffers[key], 0) for key in kept]
     for key, (tensor, _axis) in zip(
         (*module_weights, *table_keys, *kept), (*shapes, *kept_tensors), strict=True
     ):
@@ -732,33 +827,19 @@ def text_weights(wrapper: nn.Module) -> TowerWeights:
     )
 
 
-def table_holder(wrapper: nn.Module, names: Sequence[str]) -> nn.Module:
-    """A module whose `nn.Embedding` children hold the wrapper's own table parameters (the same
-    objects), so `fake_quant_int8` rounds them in place per row."""
-    holder = nn.Module()
-    for name in names:
-        table = getattr(wrapper, name)
-        embedding = nn.Embedding(1, 1)
-        embedding.weight = table
-        holder.add_module(name, embedding)
-    return holder
+#: The rounding each tower's i8 series ships (the export's own function — module doc).
+ROUNDINGS: Mapping[str, Callable[[Any], Int8Report]] = {
+    TEXT_TOWER: export.round_weights_to_i8,
+    VISION_TOWER: export_vision.round_weights_to_i8,
+    AUDIO_TOWER: export_audio.round_weights_to_i8,
+}
 
 
 def round_tower(wrapper: nn.Module, weights: TowerWeights) -> list[str]:
-    """Round the tower's set in place with `fake_quant_int8`; returns the namespaced keys
-    rounded."""
-    if weights.name == TEXT_TOWER:
-        report = export.round_weights_to_i8(wrapper)
-        return [f"{TEXT_TOWER}:{fqn}" for fqn in report.scales]
-    modules = {key.removesuffix(".weight") for key in weights.module_weights}
-    rounded = [
-        f"{weights.name}:{fqn}"
-        for fqn in fake_quant_int8(wrapper, lambda name: name in modules).scales
-    ]
-    if weights.tables:
-        report = fake_quant_int8(table_holder(wrapper, weights.tables))
-        rounded += [f"{weights.name}:{fqn.removesuffix('.weight')}" for fqn in report.scales]
-    return rounded
+    """Round the tower's set in place with the rounding its i8 series ships; returns the
+    namespaced keys rounded."""
+    report = ROUNDINGS[weights.name](wrapper)
+    return [f"{weights.name}:{fqn}" for fqn in report.scales]
 
 
 def restore_all(towers: Mapping[str, TowerWeights], pristine: Mapping[str, torch.Tensor]) -> None:
@@ -776,6 +857,8 @@ class Models:
     audio: export_audio.AudioTowerWrapper
     processor: Any
     extractor: Any
+    #: The composite config with its audio part checked (`export_audio.load_config`).
+    audio_config: Any
     tokenizer: Any
     prompts: Mapping[str, str]
     hidden: int
@@ -802,13 +885,13 @@ def load_models(directory: Path) -> Models:
     vision = export_vision.VisionTowerWrapper(export_vision.load_tower(directory)).eval()
     audio = export_audio.AudioTowerWrapper(export_audio.load_tower(directory)).eval()
     config = export_vision.load_config(directory)
-    export_audio.load_config(directory)
     return Models(
         text=text,
         vision=vision,
         audio=audio,
         processor=export_vision.load_image_processor(directory),
         extractor=export_audio.load_feature_extractor(directory),
+        audio_config=export_audio.load_config(directory),
         tokenizer=Tokenizer.from_file(str(directory / "tokenizer.json")),
         prompts=export.load_prompts(directory),
         hidden=int(model.config.hidden_size),
@@ -1031,6 +1114,7 @@ def run(directory: Path, quality: QualitySet) -> dict[str, Any]:
     _log("[trace] the tower graphs and their bf16 storage")
     vision_graph, vision_tensors = export_vision.trace(models.vision)
     audio_graph, audio_tensors = export_audio.trace(models.audio)
+    selector = export_audio.assert_ir_form(audio_graph, models.audio_config)["window_selector"]
     towers: dict[str, TowerWeights] = {
         TEXT_TOWER: text_weights(models.text),
         VISION_TOWER: tower_weights(
@@ -1041,7 +1125,7 @@ def run(directory: Path, quality: QualitySet) -> dict[str, Any]:
             {name: "f32" for name in export_vision.ROPE_TABLES},
             export_vision.assert_storage_form,
             export_vision.POSITION_TABLES,
-            None,
+            (),
         ),
         AUDIO_TOWER: tower_weights(
             AUDIO_TOWER,
@@ -1051,7 +1135,8 @@ def run(directory: Path, quality: QualitySet) -> dict[str, Any]:
             None,
             export_audio.assert_storage_form,
             (),
-            f".{export_audio.WINDOW_SELECTOR}",
+            # MUST: the audio i8 series' own exceptions (the one declaration — module doc).
+            tuple(export_audio.i8_storage_overrides(selector)),
         ),
     }
     del vision_graph, vision_tensors, audio_graph, audio_tensors
@@ -1317,10 +1402,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--quality-set", type=Path, default=DEFAULT_QUALITY_SET)
     parser.add_argument("--date", type=date.fromisoformat, default=date.today())
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--write-clips",
+        type=Path,
+        default=None,
+        help="also write the quality set with its clips as measured (16 kHz, 16-bit mono WAV) and"
+        " its images to this directory, under a manifest of the same format",
+    )
     args = parser.parse_args(argv)
     out = args.out if args.out is not None else BENCH_DIR / f"{args.date.isoformat()}{OUT_SUFFIX}"
     quality = load_quality_set(args.quality_set)
-    report = run(args.snapshot_dir, quality)
+    written = None if args.write_clips is None else write_clips(quality, args.write_clips)
+    if written is not None:
+        _log(f"[clips] {written['audio']} clips, {written['images']} images → {written['dir']}")
+    report = {**run(args.snapshot_dir, quality), "writtenClips": written}
     out.mkdir(parents=True, exist_ok=True)
     (out / REPORT_FILE).write_text(
         json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"

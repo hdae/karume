@@ -3,6 +3,7 @@ to an IR v2 container + golden io.
 
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16
+    uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype i8
 
 transformers is pinned to 5.23.0, as for the text tower ({@link embeddinggemma2.export}).
 
@@ -56,7 +57,10 @@ GELU-tanh MLP), the pooler's `× sqrt(768)` in f32 and `embed_vision` (scale-fre
 
 - **The positions' tables.** Upstream reads `position_embedding_table[2, 10240, 768]` by its two
   axes; the wrapper holds the two halves as two tables read by `embedding` (the Gemma 4 12B
-  embedder's precedent), added first and then to the projection, as upstream groups it.
+  embedder's precedent), added first and then to the projection, as upstream groups it. The two
+  halves are views of upstream's table, and every other module of the wrapper is upstream's own
+  object: the wrapper holds no copy of a weight, so a rounding of its weights is the rounding of
+  the modules the goldens run.
 - **The 2-D RoPE.** Upstream computes `cos` / `sin` of `position · inv_freq` at run time; `cos` is
   not a run-time op. The wrapper folds upstream's own rotary module at the positions
   `0 … P − 1` into two tables `[P, 32]` ({@link rope_tables} — the 32 values of one axis, the same
@@ -82,9 +86,11 @@ patch, as upstream's mask does once the padding rows are gone.
 - {@link assert_ir_form} — the three inputs and the one output with their shapes, one symbol, no
   state, 16 attention nodes `[1, 12, 9n, 64]` with scale 1 and no mask, the six `embedding`
   lookups (the two learned tables and the two RoPE tables by both axes), and no `where`.
+- {@link round_weights_to_i8} (`--dtype i8`) — the rounding reached exactly the linears and the
+  two learned position tables.
 - {@link assert_storage_form} — `f32`: every initializer f32; `bf16`: every linear and the two
   learned position tables bf16 (the checkpoint's values, nothing rounded), the RoPE tables and the
-  norms f32.
+  norms f32; `i8`: the same weight slots i8 and exactly the rounded weights, the rest f32.
 
 ## Storage
 
@@ -94,11 +100,22 @@ The RoPE tables sit in an `embedding` weight slot but are not bf16 values, so th
 explicitly ({@link ROPE_TABLES}). The goldens are the same for both (the values are the same).
 Activations are f32 throughout, as the text tower's.
 
+`--dtype i8` (`<series>-i8` — the distribution's int8 preset, the text tower's i8 method): every
+tensor the bf16 series stores as bf16 — the 114 linear weights and the two learned position tables
+— is rounded to per-row symmetric int8 (`karume.quantize.fake_quant_int8`, one F32 scale per output
+row, per position row for the tables) **before** the reference and the goldens are taken
+({@link round_weights_to_i8}); the RoPE tables stay f32 as in bf16. The tables are bare parameters
+read by `embedding`, so the rounding names them as that op's weights (`functional_weights`) and
+stores each with its own scale. The graph and the images are the other series' own; the goldens
+are upstream's forward on the rounded weights (the wrapper shares them), so the series' goldens
+are the quantized tower's own outputs.
+
 ## Goldens
 
-Upstream's processor and upstream's modules over the real weights in f32, padded rows included as
-upstream runs them, on the synthetic images of {@link embeddinggemma2.images.IMAGES} (a square, a
-wide and a tall aspect, and the smallest soft-token count the resize rule produces):
+Upstream's processor and upstream's modules over the real weights in f32 (the rounded weights
+under i8), padded rows included as upstream runs them, on the synthetic images of
+{@link embeddinggemma2.images.IMAGES} (a square, a wide and a tall aspect, and the smallest
+soft-token count the resize rule produces):
 `io.<image>.safetensors` holds `input.pixels` / `input.position_x` / `input.position_y` (the rows
 in the graph's order) and `output.0` (upstream's soft tokens `[1, n, 512]`); `reference.json`
 records per image its size, the SHA-256 of its RGB8 bytes and of the processor's pixel rows, the
@@ -110,6 +127,7 @@ resized size, the soft-token count and the measured differences.
     outputs/series/embeddinggemma-2-vision/io.<image>.safetensors   the goldens
     outputs/series/embeddinggemma-2-vision/reference.json            provenance and measurements
     outputs/series/embeddinggemma-2-vision-bf16/…                    the same with `--dtype bf16`
+    outputs/series/embeddinggemma-2-vision-i8/…                      `--dtype i8` (its own goldens)
 """
 
 from __future__ import annotations
@@ -151,18 +169,20 @@ from karume.emit import eligible_compressed_initializers
 from karume.ir import IrGraph
 from karume.ops import ATTENTION_OP
 from karume.pipeline import export_module, publish_model
+from karume.quantize import QUANT_MODULE_TYPES, Int8Report, fake_quant_int8, iter_quant_targets
 from karume.shapes import declared_shape
 
 #: The series this script writes.
 VISION_SERIES = "embeddinggemma-2-vision"
 
 #: The storage dtypes `--dtype` takes.
-WEIGHT_DTYPES = ("f32", "bf16")
+WEIGHT_DTYPES = ("f32", "bf16", "i8")
 
 #: One series per storage (ADR 0019).
 DEFAULT_OUT_DIRS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / VISION_SERIES,
     "bf16": SERIES_ROOT / f"{VISION_SERIES}-bf16",
+    "i8": SERIES_ROOT / f"{VISION_SERIES}-i8",
 }
 
 #: The graph name (the component name a distribution will give the tower).
@@ -434,9 +454,12 @@ class VisionTowerWrapper(nn.Module):
         model = tower.tower
         patch = model.patch_embedder
         self.input_proj = patch.input_proj
+        # MUST: views of upstream's table, not copies — every parameter of the wrapper is
+        # upstream's own, so a rounding of the wrapper's weights (`--dtype i8`) is the rounding of
+        # the modules the goldens run.
         table = patch.position_embedding_table.detach()
-        self.pos_x = nn.Parameter(table[0].clone(), requires_grad=False)
-        self.pos_y = nn.Parameter(table[1].clone(), requires_grad=False)
+        self.pos_x = nn.Parameter(table[0], requires_grad=False)
+        self.pos_y = nn.Parameter(table[1], requires_grad=False)
         self.layers = model.encoder.layers
         cos, sin = rope_tables(model.encoder.rotary_emb, positions)
         self.register_buffer(ROPE_COS, cos)
@@ -704,19 +727,71 @@ def assert_ir_form(graph: IrGraph, config: Any) -> dict[str, Any]:
     }
 
 
-def assert_storage_form(graph: IrGraph, dtype: str) -> dict[str, int]:
-    """The storage the writer committed (module doc, "Storage"): under `bf16`, every weight slot but
-    the RoPE tables bf16 and the rest f32; under `f32`, every initializer f32 (or i32)."""
+def round_weights_to_i8(wrapper: VisionTowerWrapper) -> Int8Report:
+    """Round, in place, the weights the bf16 series stores as bf16 — every `nn.Linear` weight and
+    the two learned position tables — to per-row symmetric int8, and return the scale ledger
+    (keyed by the wrapper's FQNs, the exported tensor keys).
+
+    The tables are bare parameters read by `embedding`, rounded as that op's weights (per position
+    row) through `functional_weights`. MUST: called before the reference and the goldens are taken
+    (module doc, "Storage"); the wrapper shares every weight with upstream's modules, so the
+    goldens are the rounded tower's. MUST: the rounding reaches exactly those weights — a weight
+    left out ships its bf16 value under the int8 preset's name. The target set is decided before
+    anything is rounded, so a refusal leaves the weights as they were.
+    """
+    linears = {
+        f"{name}.weight"
+        for name, module in wrapper.named_modules()
+        if isinstance(module, nn.Linear)
+    }
+    quantizable = {fqn for fqn, _weight, _axis in iter_quant_targets(wrapper, QUANT_MODULE_TYPES)}
+    if quantizable != linears:
+        raise VisionExportError(
+            f"the module weights of the tower are {len(quantizable)}, not its {len(linears)}"
+            f" linears (other module types {sorted(quantizable - linears)[:3]})"
+        )
+    report = fake_quant_int8(
+        wrapper,
+        lambda name: f"{name}.weight" in linears,
+        functional_weights={table: nn.Embedding for table in POSITION_TABLES},
+    )
+    expected = linears | set(POSITION_TABLES)
+    if set(report.scales) != expected:
+        missing = sorted(expected - set(report.scales))[:3]
+        extra = sorted(set(report.scales) - expected)[:3]
+        raise VisionExportError(
+            f"the int8 rounding reached {len(report.scales)} weights, not the {len(expected)}"
+            f" linears and position tables (missing {missing} / extra {extra})"
+        )
+    return report
+
+
+def assert_storage_form(
+    graph: IrGraph, dtype: str, rounded: Collection[str] = ()
+) -> dict[str, int]:
+    """The storage the writer committed (module doc, "Storage"): under `bf16` / `i8`, every weight
+    slot but the RoPE tables in that dtype and the rest f32; under `f32`, every initializer f32 (or
+    i32).
+
+    `rounded` is the tensor keys the int8 rounding reached ({@link round_weights_to_i8}); `i8`
+    needs it and the other storages take none. MUST: under `i8` the i8 weight slots are exactly
+    those keys — a rounded weight outside a slot would ship its rounded values as f32.
+    """
     if dtype not in WEIGHT_DTYPES:
         raise VisionExportError(f"storage {dtype!r} is not one of {WEIGHT_DTYPES}")
+    if (dtype == "i8") != bool(rounded):
+        raise VisionExportError(
+            f"the {dtype} storage form takes {'the' if dtype == 'i8' else 'no'} rounded weights"
+            f" ({len(rounded)} given)"
+        )
     eligible = eligible_compressed_initializers(graph)
     counts: dict[str, int] = {}
     wrong: list[str] = []
     for name, initializer in graph.initializers.items():
         stored = initializer.storage.dtype
         counts[stored] = counts.get(stored, 0) + 1
-        compressed = dtype == "bf16" and name in eligible and initializer.tensor not in ROPE_TABLES
-        expected = {"bf16"} if compressed else {"f32", "i32"}
+        compressed = dtype != "f32" and name in eligible and initializer.tensor not in ROPE_TABLES
+        expected = {dtype} if compressed else {"f32", "i32"}
         if stored not in expected:
             wrong.append(
                 f"{initializer.tensor}: {stored} (expected {' / '.join(sorted(expected))})"
@@ -729,11 +804,23 @@ def assert_storage_form(graph: IrGraph, dtype: str) -> dict[str, int]:
         if initializer.tensor in (*POSITION_TABLES, *ROPE_TABLES)
     }
     expected_tables = {
-        **{name: "bf16" if dtype == "bf16" else "f32" for name in POSITION_TABLES},
+        **{name: dtype for name in POSITION_TABLES},
         **{name: "f32" for name in ROPE_TABLES},
     }
     if stored_tables != expected_tables:
         raise AssertionError(f"the tables are stored {stored_tables}, not {expected_tables}")
+    if dtype == "i8":
+        slots = {
+            initializer.tensor
+            for initializer in graph.initializers.values()
+            if initializer.storage.dtype == "i8"
+        }
+        if slots != set(rounded):
+            raise AssertionError(
+                f"the i8 weight slots are not the {len(rounded)} rounded weights (stored i8 but"
+                f" not rounded {sorted(slots - set(rounded))[:3]} / rounded but not stored i8"
+                f" {sorted(set(rounded) - slots)[:3]})"
+            )
     return dict(sorted(counts.items()))
 
 
@@ -800,6 +887,9 @@ def export_series(
     tower = load_tower(directory)
     processor = load_image_processor(directory)
     wrapper = VisionTowerWrapper(tower).eval()
+    # MUST: i8 rounds before anything below reads the weights (the reference, the trace, the
+    # goldens — module doc, "Storage").
+    rounding = round_weights_to_i8(wrapper) if dtype == "i8" else None
     processed = [process_image(processor, IMAGES[name]) for name in images]
     counts = sorted(image.soft_tokens for image in processed)
     if counts[0] != SOFT_TOKENS_MIN:
@@ -820,11 +910,14 @@ def export_series(
             provenance=Provenance(license=LICENSE, upstream_revision=sources.PIN.revision),
             graph_name=GRAPH_NAME,
             weight_dtype=dtype,
+            weight_scales=None if rounding is None else rounding.scales,
             weight_dtype_overrides={name: "f32" for name in ROPE_TABLES}
             if dtype != "f32"
             else None,
         )
-        storage = assert_storage_form(graph, dtype)
+        storage = assert_storage_form(
+            graph, dtype, () if rounding is None else tuple(rounding.scales)
+        )
         written = [
             write_io(graph, image, goldens[image.image.name][0], staged) for image in processed
         ]
@@ -845,6 +938,11 @@ def export_series(
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "storage": storage,
+        **(
+            {}
+            if rounding is None
+            else {"rounded": {"tensors": rounding.modules, "elements": rounding.elements}}
+        ),
         "form": form,
         "io": written,
         "images": {name: measured for name, (_, measured) in goldens.items()},
