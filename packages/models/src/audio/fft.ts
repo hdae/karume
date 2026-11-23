@@ -1,20 +1,23 @@
 /**
- * Iterative radix-2 FFT. It outputs only the 2 quantities the vowel detector's feature extraction
- * needs — the **power spectrum** and the **autocorrelation** of a real signal.
+ * Iterative radix-2 FFT. It outputs only the 2 quantities its users need — the **power spectrum**
+ * and the **autocorrelation** of a real signal.
  *
- * ## Why under the family and not in `src/audio/`
+ * ## Why in `src/audio/`
  *
  * It is not a general FFT (real signals, powers of 2, only the spectrum and the autocorrelation,
- * resident scratch). The only user is {@link ./features.ts}, and there is no ground for raising it
- * to the shared layer (`src/audio/wav.ts` sits in the shared layer because "audio models in
- * general read and write WAV"). It can be raised when a second user appears.
+ * resident scratch). It has two users, so it sits in the shared layer: the vowel detector's feature
+ * extraction (`src/vowel-detector/features.ts`, the power spectrum and the autocorrelation) and the
+ * log-mel front end of the EmbeddingGemma family's audio tower (`src/embeddinggemma/audio.ts`, the
+ * power spectrum of an f64 frame).
  *
  * ## MUST: run the transform in f64 (the upstream TS implementation uses f32)
  *
- * The canonical spec is the Python side (`features.py` / `dsp.py`), which goes through `np.fft` =
- * **always f64** (numpy's FFT promotes even f32 input to double precision). The upstream TS
- * implementation runs its butterflies in Float32Array and is that much further from the canonical
- * spec; its max abs diff against the Python reference is **5.42e-6** (measured). Making this f64
+ * The vowel detector's canonical spec is the Python side (`features.py` / `dsp.py`), which goes
+ * through `np.fft` = **always f64** (numpy's FFT promotes even f32 input to double precision). The
+ * upstream TS implementation runs its butterflies in Float32Array and is that much further from the
+ * canonical spec; its max abs diff against the Python reference is **5.42e-6** (measured). The
+ * EmbeddingGemma front end's upstream runs its FFT in f32 instead, and there too the f64 transform
+ * is the one nearer the exact values (`src/embeddinggemma/audio.ts`). Making this f64
  * aligns the dtype flow with Python step by step and shrinks it to **4.77e-7 = 2 ULP from storing
  * the reference in f32** (= numerically at the floor. The derivation is at the top of
  * `tests/vowel_detector_host_test.ts`).
@@ -76,9 +79,13 @@ export class Fft {
   /**
    * Writes the power spectrum `|X[k]|²` of a real signal (length ≤ `size`, the shortfall
    * zero-padded at the **end**) to `out[0..size/2]` (the same order as
-   * `np.abs(np.fft.rfft(x, n=size))**2`).
+   * `np.abs(np.fft.rfft(x, n=size))**2`). The signal may be f32 or f64; the transform is f64
+   * either way.
    */
-  powerSpectrum(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
+  powerSpectrum(
+    input: Float32Array<ArrayBuffer> | Float64Array<ArrayBuffer>,
+    out: Float64Array<ArrayBuffer>,
+  ): void {
     const bins = this.size / 2 + 1;
     if (input.length > this.size) {
       throw new RangeError(

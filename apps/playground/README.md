@@ -17,7 +17,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Irodori-TTS (v4 / v4.1 small, v4.1 small MF, v4-large) | `/irodori` | done (v4.1 small MF: built; not yet checked in a browser; v4-large: built; not yet checked in a browser) |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
-| Text | EmbeddingGemma — sentence embeddings of texts and images (EmbeddingGemma 2, `embeddinggemma-2`) | `/embeddinggemma` | checked in Chrome on an Apple M2 (the sample rows at 768 and 256, a placeholder refusal); Cancel, downloads, GPU timing, a row over the limit, the token count and image rows (built 2026-11-22) not yet |
+| Text | EmbeddingGemma — sentence embeddings of texts, images and audio (EmbeddingGemma 2, `embeddinggemma-2`) | `/embeddinggemma` | checked in Chrome on an Apple M2 (the sample rows at 768 and 256, a placeholder refusal); Cancel, downloads, GPU timing, a row over the limit, the token count, image rows and audio rows (built 2026-11-22) not yet |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1048,14 +1048,15 @@ JSON.
 
 ## The EmbeddingGemma page
 
-`embeddinggemma.Pipeline.embed` turns one text, image or both into a sentence embedding: a **unit
-vector**, so the dot product of two results is their cosine similarity — an image row compares with a
-text row directly. Today the family serves EmbeddingGemma 2 (the local mirror
+`embeddinggemma.Pipeline.embed` turns one text, image, audio or a mix into a sentence embedding: a
+**unit vector**, so the dot product of two results is their cosine similarity — an image or an audio
+row compares with a text row directly. Today the family serves EmbeddingGemma 2 (the local mirror
 `models/karume-embeddinggemma-2`, model `text`, presets `bf16` — the default — and `i8`, both with the
-bf16 vision tower). On a model whose weights include the role `vision` (`hasVisionTower` in
+bf16 vision and audio towers). On a model whose weights include the role `vision` (`hasVisionTower` in
 `config.ts` — the Gemma 4 page's rule for its image embedder), the page builds the pipeline with
 `vision: true`, so the tower's weights (about 320 MiB) are fetched with the text model's and every row
-offers an image.
+offers an image; on one whose weights include the role `audio` (`hasAudioTower`), likewise with
+`audio: true` (about 560 MiB more), and every row offers an audio file.
 The distribution is not published, so the mount has no HF-compatible route: the page reads it
 **direct** (plain `fetch` from `/models/embeddinggemma-2/`), and Cached is disabled with the reason.
 
@@ -1072,40 +1073,41 @@ disposes the old pipeline. A new GPU and leaving the page dispose it too.
 | Model, Preset | The manifest's `models` and the chosen model's `quants` (today `text`, and `bf16` and `i8`), the defaults marked "(default)". The record carries the preset that ran. |
 | Source | **Direct** only for this mount (above). |
 | Dimension | The widths the model's `pipelineConfig.dimensions` declares (768, 512, 256, 128); the first is the full width and the default. A shorter one is the leading slice re-normalised by the pipeline. One width for every row of a run. |
-| Rows | Each row is a text, a **Prompt** — "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix — and, on a model with the vision tower, an optional **Image** (the shared image field: any file the browser decodes, alpha dropped, with a preview; **Remove image** clears it). A row with an image sends the text part, then the image part (`rowInput` in `request.ts`); an empty text with an image is the image alone. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). Once a pipeline is built, each row shows its **token count** against the limit (`count / maxTokens tokens`, from `Pipeline.tokenize`: the prefix, `<bos>` and `<eos>` included, and an image's soft tokens — from its size alone, at most the model's soft-token budget — with its two markers), recomputed as its text, prompt or image changes; a row over the limit is marked in red with a note before Run. There is no count before the first Run (the page does not build a pipeline to count), while the held pipeline is another model's, or for a row the pipeline cannot tokenize (an undeclared prompt, an image on a pipeline without the tower). |
+| Rows | Each row is a text, a **Prompt** — "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix — and, on a model with the vision tower, an optional **Image** (the shared image field: any file the browser decodes, alpha dropped, with a preview; **Remove image** clears it), and on a model with the audio tower an optional **Audio** (any file the browser decodes: `decodeAudioData` on an `AudioContext` at the rate `pipelineConfig.audio.sampleRate` declares — 16 kHz — resamples it, and its channels are mixed to mono in f64 (`audio.ts`); the field then shows its name, duration and sample count; **Remove audio** clears it). A row sends the text part, then the image part, then the audio part (`rowInput` in `request.ts`); an empty text with an image or an audio is that alone. The page does not cut an audio: one over 30 s is kept and refused by the pipeline with its own message. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). Once a pipeline is built, each row shows its **token count** against the limit (`count / maxTokens tokens`, from `Pipeline.tokenize`: the prefix, `<bos>` and `<eos>` included, and an image's soft tokens — from its size alone, at most the model's soft-token budget — or an audio's — one per 40 ms, at most 750 — with its two markers), recomputed as its text, prompt, image or audio changes; a row over the limit is marked in red with a note before Run. A row the pipeline cannot tokenize (an undeclared prompt, an image or an audio on a pipeline without its tower, an audio over 30 s or at another rate) has no count and shows the pipeline's refusal under it, in the library's words (`rowTokens` in `request.ts`). There is no count before the first Run (the page does not build a pipeline to count) or while the held pipeline is another model's. |
 | Run / Cancel | Run builds the pipeline if needed, then embeds every row. Cancel stops the **fetch** at once; the **Session build** takes no signal, so Cancel is disabled during it. `embed` checks the signal before its run, so a Cancel during a row takes effect when that row ends: the rest are skipped and the run ends as cancelled with no result. |
 | GPU timing | As on the SigLIP 2 page: the GPU is acquired again with `gpuTiming: true`, the next run rebuilds the pipeline, and every embedded row records its GPU time per kernel. |
 
 A row the pipeline **refuses** (`ModelInputError` — a prompt the model does not declare, a text over
 `pipelineConfig.maxTokens` tokens with the prefix, `<bos>` and `<eos>`, or over what this device
 runs (its buffer limit over the graph's bytes per token — the count marks only `maxTokens`), a text
-holding the image, audio or video placeholder token, an image on a model without the vision tower)
-gets the refusal as its result, name and message as raised, and
+holding the image, audio or video placeholder token, an image or an audio on a model without its
+tower, an audio over 30 s) gets the refusal as its result, name and message as raised, and
 the run goes on with the next row. Any other failure (the GPU, the Session, the build) ends the run
 and the status card shows it in full.
 
 The result card shows the similarity matrix (`similarity[i][j]` at 4 decimals; "—" in the row and
 the column of a refused row), then one line per row: its prompt, its text (with the image's name and
-size when it held one), and its result (width,
+size, and the audio's name and duration, when it held them), and its result (width,
 L2 norm, embed seconds, the first 8 values and the sha256 of its f32 bytes) or its refusal. Below
 come the buttons and a summary: adapter, source, model, preset, dimension, rows embedded, build and
 wall seconds, the model Session's runs, weights, this run's submits and dispatches (with the
 Session's totals), geometry profile, build cost, and GPU time per op when timed. These are the text
-graph's Session only: the pipeline does not report the vision tower's runs, so an image row's tower
-time is in its embed seconds and in no GPU timing.
+graph's Session only: the pipeline does not report the towers' runs, so an image or audio row's tower
+time (and an audio's log-mel frames, computed on the host) is in its embed seconds and in no GPU
+timing.
 
-### The record (`format: "karume-playground-embeddinggemma/2"`)
+### The record (`format: "karume-playground-embeddinggemma/3"`)
 
 | Field | What |
 | --- | --- |
-| `format`, `page` | `karume-playground-embeddinggemma/2`, `embeddinggemma` (`/2` since rows may hold an image, whose soft tokens their `tokens` count; `/1` records hold text rows only) |
+| `format`, `page` | `karume-playground-embeddinggemma/3`, `embeddinggemma` (`/3` since rows may hold an audio, whose soft tokens their `tokens` count; `/2` since rows may hold an image; `/1` records hold text rows only) |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`, as on the other pages |
 | `distribution` | `directory` and `manifestSha256` (the sha256 of `karume.json`, which also pins the prompt prefixes) |
 | `source` | `{ "kind": "direct" }` (or the cached form once the mount has an HF-compatible route) |
 | `model`, `preset` | `name` / `quant`, `label`, `isDefault` |
-| `request` | `dimension` (every row's width) and `rows`: per row in order, `text` as typed, `prompt` (a name, or `null` for none), `image` (only for a row that held one: `name`, `width`, `height` and `rgbSha256`, the sha256 of the RGB8 pixels the pipeline was given) and `tokens` (the count `tokenize` gave when the row was run, prefix, `<bos>` and `<eos>` and an image's soft tokens with its markers included — over the limit for a row refused for its length; `null` when the row could not be tokenized). Records of `/1` before the token count have no `tokens` |
+| `request` | `dimension` (every row's width) and `rows`: per row in order, `text` as typed, `prompt` (a name, or `null` for none), `image` (only for a row that held one: `name`, `width`, `height` and `rgbSha256`, the sha256 of the RGB8 pixels the pipeline was given), `audio` (only for a row that held one: `name`, `sampleRate`, `samples` — the mono sample count — and `sha256`, the sha256 of the f32 samples the pipeline was given: the browser's resampler is not specified, so it identifies what was embedded, not the file) and `tokens` (the count `tokenize` gave when the row was run, prefix, `<bos>` and `<eos>` and an image's or an audio's soft tokens with its markers included — over the limit for a row refused for its length; `null` when the row could not be tokenized). Records of `/1` before the token count have no `tokens` |
 | `timings` | `pipelineReused`, `buildSeconds` (`null` when reused), `wallSeconds` (from Run to the last row, hashing excluded) |
-| `output.rows` | per row: `{ "kind": "embedding", dimension, nonFinite, l2Norm, first, sha256, embedSeconds }` (`embedSeconds` includes an image's preprocessing and tower run) (`l2Norm` is `null` with non-finite values; `first` spells a non-finite value as `"NaN"`, `"Infinity"` or `"-Infinity"`) or `{ "kind": "refused", "error": { "name", "message" }, embedSeconds }` |
+| `output.rows` | per row: `{ "kind": "embedding", dimension, nonFinite, l2Norm, first, sha256, embedSeconds }` (`embedSeconds` includes an image's preprocessing and an audio's log-mel frames, and their tower runs) (`l2Norm` is `null` with non-finite values; `first` spells a non-finite value as `"NaN"`, `"Infinity"` or `"-Infinity"`) or `{ "kind": "refused", "error": { "name", "message" }, embedSeconds }` |
 | `output.similarity` | the matrix of dot products at 6 decimals, accumulated in f64; `null` for a pair with a refused row or a vector holding non-finite values |
 | `diagnostics.model` | the model Session over this run's embedded rows, one report per row: as `diagnostics.vision` on the SigLIP 2 page (absent when every row was refused) |
 
@@ -1117,9 +1119,13 @@ sha256 covers. **Copy record** copies the JSON.
 
 - Checked by the maintainer in Chrome on an Apple M2 (2026-11-22): a run of the three sample rows at
   768 and at 256 dimensions, and the refusal of a row holding the image placeholder. Not checked in a
-  browser yet: Cancel, the downloads, GPU timing, a row over the limit and the token count, and the
-  image rows (built 2026-11-22 — the pipeline's image path is checked by the e2e over the mirror,
-  not the page).
+  browser yet: Cancel, the downloads, GPU timing, a row over the limit and the token count, the
+  image rows and the audio rows (built 2026-11-22 — the pipeline's image and audio paths are checked
+  by the e2e over the mirror, not the page; the page's decoding and resampling are not checked
+  anywhere).
+- An audio row's samples are the browser's resampling of the file (`AudioContext` at 16 kHz), which
+  no specification fixes: the same file can give other samples, and so another vector, in another
+  browser. The record's `audio.sha256` tells which samples were embedded.
 - The vector sha256 compares runs exactly; two GPUs, drivers or browsers can differ in the last
   bits while the similarities agree to many digits. Compare the downloaded `.f32` files then.
 - The per-run counts assume that the runtime's submit and dispatch counters start at 0 when the

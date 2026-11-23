@@ -299,6 +299,10 @@
         "kind": "class"
       },
       {
+        "name": "MonoAudio",
+        "kind": "typeAlias"
+      },
+      {
         "name": "Pipeline",
         "kind": "class"
       },

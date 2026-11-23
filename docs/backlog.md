@@ -795,7 +795,7 @@ maintainer's ruling of 2026-11-06).
      boundaries (spaces, newlines, tabs, an empty text between images, Japanese, a prompt before an image) checked
      on the host without the mirror, and the distribution's checks that both position axes are gathered and the
      folded RoPE tables are stored f32.
-     Left: audio (item 6) and video (frames through the same tower); unordered and not chosen: the tower's runs in
+     Left: video (frames through the same tower); unordered and not chosen: the tower's runs in
      `onRunDiagnostics` (reported for the text graph only), other soft-token budgets (they would need longer position
      tables), and a rounded tower (unscreened). Open couplings, not built: (a) a manifest whose
      `pipelineConfig.vision.softTokenBudget` is below the traced range is admitted — the reader takes 70 or 140,
@@ -825,11 +825,28 @@ maintainer's ruling of 2026-11-06).
        the `query` prompt, an image then an audio) as `audioCases` of the same fixture, with the samples and upstream's
        valid log-mel frames of each audio; the five image cases unchanged byte for byte; Karume's graphs composed in
        torch reproduce the audio cases to 1.2e-7.
-     Left, in order: the pipeline stage — audio content parts in `embed` / `tokenize` (16 kHz mono f32 samples, the
-     placeholder expansion from the sample count, the 30 s truncation), the host front end in TypeScript (the log-mel
-     frames of the recipe README, checked against the fixture's frames), the tower in the distribution (a weights role
-     per preset, the audio fields of `pipelineConfig`) and the pipeline e2e against the fixture; then the Playground's
-     audio rows.
+     Stage 2 built 2026-11-22:
+     - `embeddinggemma.Pipeline` takes audio parts `{ type: "audio", audio }` (`MonoAudio`, 16 kHz mono f32) with
+       `audio: true` (the weights role `audio`, fetched only then; `vision` and `audio` may be on together). The host
+       front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames in f64 with the FFT moved to
+       `src/audio/fft.ts` (the vowel detector's, its second user); its frames equal upstream's code run in f64 and
+       rounded to f32, value for value, and are up to 5.12e-4 from upstream's f32 frames. Refused, never adjusted:
+       another rate, over 30 s (upstream truncates silently), at most 160 samples, a non-finite sample.
+     - The distribution carries the tower as the weights role `audio`, bf16 in both presets (series
+       `embeddinggemma-2-audio-bf16`), and `pipelineConfig.audio` (the three audio ids, `hiddenSize`, `maxSoftTokens`
+       750, `sampleRate` 16000); the recipe holds the feature extractor's settings in `preprocessor_config.json` and
+       `processor_config.json` to the host's, the tower graph and its bound, and the audio series' record. The mirror
+       was assembled again (the text and vision containers byte-identical).
+     - The pipeline e2e over the mirror on the RTX 3080 Ti: upstream's ids for the four audio cases, `bf16` within
+       2.45e-5 of upstream's vectors (atol 7.5e-5 — the front end's difference carried through the tower; with
+       upstream's frames 3.3e-7), the text graph fed upstream's soft tokens within 1.12e-7 (atol 3.5e-7), `i8` at a
+       cosine of 0.99982 to 0.99991 (floor 0.999), a 30 s audio bit-identical on capped devices, ten new sha256 rows.
+     - The Playground page `/embeddinggemma`: an optional audio per row on a model with the tower (decoded, resampled
+       to 16 kHz and mixed to mono by the browser), its soft tokens in the row's count, the library's refusal of the
+       row shown under it, the record `karume-playground-embeddinggemma/3`. Not checked in a browser yet.
+     Left, unordered and not chosen: a resampler or decoder in the library (the caller resamples today), audio longer
+     than 30 s (upstream truncates; splitting is the caller's), the tower's runs in `onRunDiagnostics`, an
+     upstream-bit front end (numpy's f32 FFT rounding is not copied), and a rounded audio tower (unscreened).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

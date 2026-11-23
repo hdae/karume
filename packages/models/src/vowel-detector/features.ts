@@ -53,7 +53,7 @@
  */
 
 import { ModelInputError } from "../errors.ts";
-import { Fft } from "./fft.ts";
+import { Fft } from "../audio/fft.ts";
 
 /**
  * Sampling rate of the input waveform. No resampling (a different rate is rejected by the caller).

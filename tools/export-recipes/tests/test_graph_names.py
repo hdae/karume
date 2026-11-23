@@ -352,11 +352,9 @@ class TestTheNamesAreTheWeightsKeys:
 
     def test_embeddinggemma2_names_its_distribution_roles(self) -> None:
         """The text script names its graph with the weights key the distribution declares
-        (`model`, the single-component convention), and the vision tower's script its graph with
-        the distribution's weights key `vision` (the tower is a weights role of every preset).
-        The audio tower's script names its graph `audio`, a series only so far: the distribution
-        does not carry the tower yet, so it is the one name outside the weights keys (the shape of
-        gemma4's 12B vision above)."""
+        (`model`, the single-component convention), and each tower's script its graph with the
+        distribution's weights key, `vision` and `audio` (each tower is a weights role of every
+        preset)."""
         from embeddinggemma2.distribution import EMBEDDINGGEMMA2_WEIGHTS
         from embeddinggemma2.export_audio import GRAPH_NAME as AUDIO
         from embeddinggemma2.export_vision import GRAPH_NAME as VISION
@@ -364,9 +362,8 @@ class TestTheNamesAreTheWeightsKeys:
         assert _declared_values("embeddinggemma2/export.py", "GRAPH_NAME") == {"model"}
         assert VISION == "vision"
         assert AUDIO == "audio"
-        assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model", VISION}
-        assert self._named("embeddinggemma2") - {AUDIO} == set(EMBEDDINGGEMMA2_WEIGHTS)
-        assert AUDIO in self._named("embeddinggemma2")
+        assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model", VISION, AUDIO}
+        assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
 
     @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:

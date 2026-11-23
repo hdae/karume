@@ -10,7 +10,7 @@
  * pinned upstream files and checks them against the graph and the tokenizer asset) and read here,
  * never held as TS constants.
  *
- * The four required fields and the optional fifth:
+ * The four required fields and the two optional ones:
  *
  * - `prompts` — prompt name → the prefix prepended to the text (upstream's
  *   `config_sentence_transformers.json`, verbatim and in its order).
@@ -29,6 +29,14 @@
  *   markers around an image's soft tokens, and the width of a soft row. The shape is the Gemma 4
  *   family's `pipelineConfig.vision`, read by its reader ({@link parseVision}); the pipeline checks
  *   it against the two graphs and the tokenizer asset when the tower is asked for.
+ * - `audio` (optional — a model whose distribution ships the audio tower as the weights role
+ *   `audio`) — what the host needs to turn an audio into the tower's frames and the text graph's
+ *   soft rows ({@link PipelineAudioConfig}): the ids of the soft token and of the two markers around
+ *   an audio's soft tokens, the width of a soft row, the most soft tokens one audio may take (the
+ *   bound of the tower graph's symbol) and the sample rate of the samples. The front end's own
+ *   settings (frame, hop, transform, mel filters) are the host's constants (`./audio.ts`), held to
+ *   upstream's feature extractor by the dist recipe; the pipeline checks the declaration against the
+ *   two graphs and the tokenizer asset when the tower is asked for.
  *
  * MUST: unknown keys fail loudly, and so does a missing required one (a misspelt field silently
  * left out would let the pipeline run with a limit or a prompt table the distributor did not
@@ -44,18 +52,35 @@
 
 import { assertAllowedKeys, isRecord, readNumber, readRecord } from "../config/readers.ts";
 import { type PipelineVisionConfig, parseVision } from "../gemma/config.ts";
+import {
+  AUDIO_MAX_SAMPLES,
+  AUDIO_SAMPLE_RATE,
+  audioSoftTokens,
+  audioValidFrames,
+} from "./audio.ts";
 
 /** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
 export const EMBEDDINGGEMMA_PIPELINE_NAME = "embeddinggemma";
 export const EMBEDDINGGEMMA_PIPELINE_MAJOR = 1;
 
-/** The five fields, in the order the dist recipe writes them (`vision` is optional). */
+/** The six fields, in the order the dist recipe writes them (`vision` and `audio` are optional). */
 const ROOT_KEYS: readonly string[] = [
   "prompts",
   "dimensions",
   "maxTokens",
   "placeholderTokens",
   "vision",
+  "audio",
+];
+
+/** The fields of `audio`, in the order the dist recipe writes them (all required). */
+const AUDIO_KEYS: readonly string[] = [
+  "audioTokenId",
+  "beginAudioTokenId",
+  "endAudioTokenId",
+  "hiddenSize",
+  "maxSoftTokens",
+  "sampleRate",
 ];
 
 /**
@@ -70,6 +95,33 @@ const MAX_TOKEN_ID = 2147483647;
 
 /** The modality key of `placeholderTokens` whose id `vision.imageTokenId` must be. */
 const IMAGE_MODALITY = "image";
+/** The modality key of `placeholderTokens` whose id `audio.audioTokenId` must be. */
+const AUDIO_MODALITY = "audio";
+
+/**
+ * What the host needs for audio input (`pipelineConfig.audio`).
+ *
+ * An audio is `beginAudioTokenId`, its n soft tokens (each `audioTokenId`) and `endAudioTokenId`,
+ * no separator on either side (upstream's processor). n comes from the audio's length alone
+ * (`./audio.ts`).
+ */
+export type PipelineAudioConfig = {
+  /** The id under every soft row of an audio (= `placeholderTokens.audio`). */
+  readonly audioTokenId: number;
+  /** The marker before an audio's soft tokens (upstream's `boa_token_id`, `<|audio>`). */
+  readonly beginAudioTokenId: number;
+  /** The marker after them (upstream's `eoa_token_index`, `<audio|>`). */
+  readonly endAudioTokenId: number;
+  /** The width of a soft token (= the text graph's soft rows). */
+  readonly hiddenSize: number;
+  /**
+   * The most soft tokens one audio may take: the bound of the tower graph's symbol, at most the
+   * soft tokens of the front end's longest audio (750 for 30 s).
+   */
+  readonly maxSoftTokens: number;
+  /** The rate of the samples (16,000 — the only rate the host's front end is built for). */
+  readonly sampleRate: number;
+};
 
 /** The checked `pipelineConfig` of one EmbeddingGemma model. */
 export type EmbeddingGemmaPipelineConfig = {
@@ -83,6 +135,8 @@ export type EmbeddingGemmaPipelineConfig = {
   readonly placeholderTokens: ReadonlyMap<string, number>;
   /** What the host needs for image input (absent: the distribution ships no vision tower). */
   readonly vision?: PipelineVisionConfig;
+  /** What the host needs for audio input (absent: the distribution ships no audio tower). */
+  readonly audio?: PipelineAudioConfig;
 };
 
 const isSafeCount = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
@@ -152,6 +206,54 @@ const readPlaceholderTokens = (
   return tokens;
 };
 
+/**
+ * Reads `audio` (called only when the key is present). The vocabulary bound of the ids is checked
+ * at admission, where the vocabulary is first known (`admitAudio` in `./pipeline.ts`).
+ */
+const parseAudio = (raw: unknown, where: string): PipelineAudioConfig => {
+  if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
+  assertAllowedKeys(raw, AUDIO_KEYS, where);
+  // The soft tokens of the front end's longest audio (750 — `maxSoftTokens` may not exceed it).
+  // Computed here, not at module scope: a call there would survive tree-shaking.
+  const softTokensMax = audioSoftTokens(audioValidFrames(AUDIO_MAX_SAMPLES));
+  const tokenId = (key: string): number =>
+    readNumber(
+      raw,
+      key,
+      where,
+      (value) => Number.isSafeInteger(value) && value >= 0 && value <= MAX_TOKEN_ID,
+      `not a token id (an integer in 0..${MAX_TOKEN_ID})`,
+    );
+  const audio: PipelineAudioConfig = {
+    audioTokenId: tokenId("audioTokenId"),
+    beginAudioTokenId: tokenId("beginAudioTokenId"),
+    endAudioTokenId: tokenId("endAudioTokenId"),
+    hiddenSize: readNumber(raw, "hiddenSize", where, isSafeCount, "not a positive integer"),
+    maxSoftTokens: readNumber(
+      raw,
+      "maxSoftTokens",
+      where,
+      (value) => isSafeCount(value) && value <= softTokensMax,
+      `not an integer in 1..${softTokensMax} (the soft tokens of ${AUDIO_MAX_SAMPLES} samples, the longest audio the front end reads)`,
+    ),
+    // MUST: the host's front end (its hop, frame and mel range) is built for one rate — another
+    // declared rate would embed every audio through frames of other lengths.
+    sampleRate: readNumber(
+      raw,
+      "sampleRate",
+      where,
+      (value) => value === AUDIO_SAMPLE_RATE,
+      `not ${AUDIO_SAMPLE_RATE} (the only rate the host's audio front end is built for)`,
+    ),
+  };
+  // A soft token that is also its own marker would render a sequence the model never saw.
+  const ids = [audio.audioTokenId, audio.beginAudioTokenId, audio.endAudioTokenId];
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${where}: the three audio token ids are not distinct (${ids.join(", ")})`);
+  }
+  return audio;
+};
+
 /** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseEmbeddingGemmaPipelineConfig = (raw: unknown): EmbeddingGemmaPipelineConfig => {
   const where = "pipelineConfig";
@@ -169,8 +271,20 @@ export const parseEmbeddingGemmaPipelineConfig = (raw: unknown): EmbeddingGemmaP
     ),
     placeholderTokens: readPlaceholderTokens(raw, where),
   };
-  if (!Object.hasOwn(raw, "vision")) return config;
-  const vision = parseVision(raw["vision"], `${where}.vision`);
+  return {
+    ...config,
+    ...(Object.hasOwn(raw, "vision") ? { vision: readVision(raw["vision"], config, where) } : {}),
+    ...(Object.hasOwn(raw, "audio") ? { audio: readAudio(raw["audio"], config, where) } : {}),
+  };
+};
+
+/** Reads `vision` and ties its soft token to the image placeholder. */
+const readVision = (
+  raw: unknown,
+  config: EmbeddingGemmaPipelineConfig,
+  where: string,
+): PipelineVisionConfig => {
+  const vision = parseVision(raw, `${where}.vision`);
   // MUST: the soft token is the image placeholder — the text path refuses that id in text, which
   // is what keeps a soft row from being spelt without an image behind it.
   const placeholder = config.placeholderTokens.get(IMAGE_MODALITY);
@@ -181,5 +295,24 @@ export const parseEmbeddingGemmaPipelineConfig = (raw: unknown): EmbeddingGemmaP
         " its placeholder, which a text may not hold",
     );
   }
-  return { ...config, vision };
+  return vision;
+};
+
+/** Reads `audio` and ties its soft token to the audio placeholder. */
+const readAudio = (
+  raw: unknown,
+  config: EmbeddingGemmaPipelineConfig,
+  where: string,
+): PipelineAudioConfig => {
+  const audio = parseAudio(raw, `${where}.audio`);
+  // MUST: the soft token is the audio placeholder, for the image's reason.
+  const placeholder = config.placeholderTokens.get(AUDIO_MODALITY);
+  if (placeholder !== audio.audioTokenId) {
+    throw new Error(
+      `${where}.audio.audioTokenId ${audio.audioTokenId} is not placeholderTokens.${AUDIO_MODALITY}` +
+        ` (${placeholder === undefined ? "not declared" : placeholder}) — an audio's soft tokens are` +
+        " its placeholder, which a text may not hold",
+    );
+  }
+  return audio;
 };

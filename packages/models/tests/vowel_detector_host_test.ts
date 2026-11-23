@@ -25,7 +25,7 @@
 //  - upstream TS (f32 FFT)   max abs diff 5.424e-6 (same fixture, same mel basis)
 //
 // The port is an order of magnitude better because it follows `np.fft` running in f64 (the MUST in
-// `src/vowel-detector/fft.ts`). The check is therefore set at "twice 2 ULP" = {@link FEATURE_ATOL}.
+// `src/audio/fft.ts`). The check is therefore set at "twice 2 ULP" = {@link FEATURE_ATOL}.
 // The 5.42e-6 of upstream's TS implementation does **not pass** this check — the width keeps a change
 // back to an f32 FFT from slipping in silently.
 //

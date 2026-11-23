@@ -167,11 +167,11 @@ describe("pipelineConfig: the distribution's four fields", () => {
     );
   });
 
-  it("fails on an unknown key, naming the five it allows", () => {
+  it("fails on an unknown key, naming the six it allows", () => {
     assertThrows(
       () => parseEmbeddingGemmaPipelineConfig({ ...CONFIG_JSON, maxLength: 2048 }),
       Error,
-      "pipelineConfig: unknown key 'maxLength' (allowed: prompts / dimensions / maxTokens / placeholderTokens / vision)",
+      "pipelineConfig: unknown key 'maxLength' (allowed: prompts / dimensions / maxTokens / placeholderTokens / vision / audio)",
     );
   });
 

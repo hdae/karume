@@ -6,10 +6,10 @@ staging/swap, verification) lives in `karume.dist`. What lives here is **the fac
 EmbeddingGemma 2** only.
 
 The repository `karume-embeddinggemma-2` holds one model today, `text` — the text tower of
-`google/embeddinggemma-2` and its vision tower (the audio tower of the same checkpoint is not
-carried). Its contract is `embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the
-first EmbeddingGemma will join later from a repository of its own (another licence, so another
-`Pipeline` with other root files). The model ships two graphs and one asset:
+`google/embeddinggemma-2`, its vision tower and its audio tower. Its contract is
+`embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the first EmbeddingGemma will join
+later from a repository of its own (another licence, so another `Pipeline` with other root files).
+The model ships three graphs and one asset:
 
 - `model` — the text tower, mean pooling and L2 normalisation as one graph, `input_ids` /
   `pool_mask` `[1, T]` and the soft rows of a tower (`soft_embeds` `[1, T, 512]`, `soft_mask`
@@ -27,6 +27,13 @@ first EmbeddingGemma will join later from a repository of its own (another licen
   checkpoint's own values; the norms and the folded rotary tables f32), so every preset maps it
   ({@link complete_quant_weights}): no rounded form of the tower was screened, and the int8
   preset rounds the text tower alone. The pipeline fetches it only when asked for image input.
+- `audio` — the audio tower with its projection (`embeddinggemma2/export_audio.py --dtype bf16`,
+  series {@link EMBEDDINGGEMMA2_AUDIO_SERIES}): an audio's log-mel frames and their frame mask in,
+  its soft tokens `[1, n, 512]` out — the text graph's soft rows. One dtype label, `bf16` (the
+  checkpoint's own values; the norms, the biases and the folded constants f32), mapped by every
+  preset for the vision tower's reason. The pipeline fetches it only when asked for audio input;
+  the host computes the frames itself, with the feature extractor's settings held here to the
+  pinned `preprocessor_config.json` ({@link EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR}).
 - `tokenizer` — the compiled tokenizer asset (`embeddinggemma2/tokenizer.py`), held to the pinned
   `tokenizer.json` it was compiled from.
 
@@ -53,6 +60,11 @@ checked against each other ({@link embeddinggemma2_pipeline_config}):
   (`processor_config.json`'s `max_soft_tokens`), the ids of the soft token and of the two markers
   around an image (`config.json`'s `image_token_id` / `boi_token_id` / `eoi_token_id`) and the
   width of a soft token (`text_config.hidden_size`, held to both graphs).
+- `audio` — what the host needs for an audio ({@link embeddinggemma2_audio_config}): the ids of
+  the soft token and of the two markers around an audio (`config.json`'s `audio_token_id` /
+  `boa_token_id` / `eoa_token_index`), the width of a soft token, the most soft tokens one audio
+  takes (the audio graph's bound, held to the soft tokens of the feature extractor's longest audio
+  and to the series' record) and the sample rate (`preprocessor_config.json`'s `sampling_rate`).
 
 The public surface is the one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist
 driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
@@ -139,6 +151,14 @@ def embeddinggemma2_role(dtype: str) -> str:
 #: The artifact role of the vision tower's container (the form of {@link embeddinggemma2_role}).
 EMBEDDINGGEMMA2_VISION_ARTIFACT = f"{EMBEDDINGGEMMA2_VISION_ROLE}_{EMBEDDINGGEMMA2_VISION_DTYPE}"
 
+#: The weights role of the audio tower (= the tower graph's name, `export_audio.GRAPH_NAME`), its
+#: one storage, the series it is read from (`export_audio.DEFAULT_OUT_DIRS["bf16"]` — that module
+#: imports torch; the tests hold the mirrors equal) and its artifact role.
+EMBEDDINGGEMMA2_AUDIO_ROLE = "audio"
+EMBEDDINGGEMMA2_AUDIO_DTYPE = "bf16"
+EMBEDDINGGEMMA2_AUDIO_SERIES = "embeddinggemma-2-audio-bf16"
+EMBEDDINGGEMMA2_AUDIO_ARTIFACT = f"{EMBEDDINGGEMMA2_AUDIO_ROLE}_{EMBEDDINGGEMMA2_AUDIO_DTYPE}"
+
 
 #: The representative container path inside a series and the asset file inside the tokenizer
 #: series (mirrors of `embeddinggemma.export.MODEL_FILE` and the name of
@@ -156,6 +176,9 @@ EMBEDDINGGEMMA2_OUTPUT_PATHS: Mapping[str, str] = {
     EMBEDDINGGEMMA2_VISION_ARTIFACT: (
         f"{EMBEDDINGGEMMA2_VISION_ROLE}/model.{EMBEDDINGGEMMA2_VISION_DTYPE}.krm"
     ),
+    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: (
+        f"{EMBEDDINGGEMMA2_AUDIO_ROLE}/model.{EMBEDDINGGEMMA2_AUDIO_DTYPE}.krm"
+    ),
     EMBEDDINGGEMMA2_TOKENIZER_ROLE: (
         f"{EMBEDDINGGEMMA2_TOKENIZER_ROLE}/{EMBEDDINGGEMMA2_TOKENIZER_FILE}"
     ),
@@ -166,6 +189,7 @@ EMBEDDINGGEMMA2_OUTPUT_PATHS: Mapping[str, str] = {
 EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     **{embeddinggemma2_role(dtype): dtype for dtype in EMBEDDINGGEMMA2_SERIES},
     EMBEDDINGGEMMA2_VISION_ARTIFACT: EMBEDDINGGEMMA2_VISION_DTYPE,
+    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: EMBEDDINGGEMMA2_AUDIO_DTYPE,
 }
 
 #: The storage each graph's binding table **must not** hold ({@link assert_storage_absent}). MUST:
@@ -174,21 +198,25 @@ EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: the requirement alone lets it through, and only this table tells the series apart (a mixed-up
 #: series root cannot be told apart by the numeric gates — ADR 0027 / 0029). The bf16 role
 #: forbidding i8 and the i8 role forbidding bf16 is what keeps the two presets from swapping; the
-#: tower's role forbids every rounded layout (no rounded tower was screened).
+#: towers' roles forbid every rounded layout (no rounded tower was screened).
 EMBEDDINGGEMMA2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE): ("f16", "i8", "i4", "i4f16", "i2"),
     embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE): ("f16", "bf16", "i4", "i4f16", "i2"),
     EMBEDDINGGEMMA2_VISION_ARTIFACT: ("f16", "i8", "i4", "i4f16", "i2"),
+    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: ("f16", "i8", "i4", "i4f16", "i2"),
 }
 
 #: The weights declaration (dtype label → role). The text graph has two labels, so every preset
-#: names its own; the tower has one, which {@link complete_quant_weights} gives every preset.
+#: names its own; each tower has one, which {@link complete_quant_weights} gives every preset.
 EMBEDDINGGEMMA2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     EMBEDDINGGEMMA2_ROLE: {
         dtype: WeightFiles(embeddinggemma2_role(dtype)) for dtype in EMBEDDINGGEMMA2_SERIES
     },
     EMBEDDINGGEMMA2_VISION_ROLE: {
         EMBEDDINGGEMMA2_VISION_DTYPE: WeightFiles(EMBEDDINGGEMMA2_VISION_ARTIFACT)
+    },
+    EMBEDDINGGEMMA2_AUDIO_ROLE: {
+        EMBEDDINGGEMMA2_AUDIO_DTYPE: WeightFiles(EMBEDDINGGEMMA2_AUDIO_ARTIFACT)
     },
 }
 
@@ -291,12 +319,64 @@ EMBEDDINGGEMMA2_IMAGE_PROCESSOR: Mapping[str, Any] = {
     "do_normalize": False,
 }
 
+#: `pipelineConfig.audio`'s id fields → the `config.json` fields they are read from (the soft
+#: token is the audio placeholder — the reader holds the two equal; upstream spells the end
+#: marker's field `eoa_token_index`).
+EMBEDDINGGEMMA2_AUDIO_ID_FIELDS: tuple[tuple[str, str], ...] = (
+    ("audioTokenId", "audio_token_id"),
+    ("beginAudioTokenId", "boa_token_id"),
+    ("endAudioTokenId", "eoa_token_index"),
+)
+
+#: The audio tower graph's inputs in order with their dtypes, its symbol, and the mel frames per
+#: soft token — the mirror of `export_audio.GRAPH_INPUTS` / `SYMBOL` / `FRAMES_PER_TOKEN` (held
+#: equal by the tests). The frame axis is `4n` and a frame row `feature_size` values.
+EMBEDDINGGEMMA2_AUDIO_INPUTS: tuple[tuple[str, str], ...] = (
+    ("features", "f32"),
+    ("frame_mask", "f32"),
+)
+EMBEDDINGGEMMA2_AUDIO_SYMBOL = "n"
+EMBEDDINGGEMMA2_AUDIO_FRAMES_PER_TOKEN = 4
+
+#: The audio series' record (`export_audio.REFERENCE_FILE`, mirrored).
+EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE = "reference.json"
+
+#: The longest audio upstream's feature extractor reads (its `max_length` default — not a setting
+#: of the file, so the mirror of `export_audio.MAX_SAMPLES`, which `export_audio` holds to the
+#: signature; the host refuses a longer audio, `AUDIO_MAX_SAMPLES` of
+#: `packages/models/src/embeddinggemma/audio.ts`). Its soft tokens bound the audio graph's symbol.
+EMBEDDINGGEMMA2_AUDIO_MAX_SAMPLES = 480_000
+
+#: What the host's audio front end implements (`AUDIO_FEATURE_EXTRACTOR` of
+#: `packages/models/src/embeddinggemma/audio.ts`): the feature extractor's class and every setting
+#: that changes its frames. MUST: the pinned `preprocessor_config.json` — and the same block of
+#: `processor_config.json` — state exactly these: a preemphasis, a dither, a per-bin normalisation
+#: or another mel range the host does not apply would give other frames with every check passing.
+EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR: Mapping[str, Any] = {
+    "feature_extractor_type": "Gemma4AudioFeatureExtractor",
+    "sampling_rate": 16_000,
+    "feature_size": 128,
+    "frame_length": 320,
+    "hop_length": 160,
+    "fft_length": 512,
+    "fft_overdrive": False,
+    "min_frequency": 0.0,
+    "max_frequency": 8000.0,
+    "mel_floor": 0.001,
+    "preemphasis": 0.0,
+    "dither": 0.0,
+    "input_scale_factor": 1.0,
+    "per_bin_mean": None,
+    "per_bin_stddev": None,
+}
+
 #: The snapshot files the plan reads (each checked against the pin before it is read).
 EMBEDDINGGEMMA2_READ_FILES: tuple[str, ...] = (
     "config.json",
     "config_sentence_transformers.json",
     "tokenizer.json",
     "processor_config.json",
+    "preprocessor_config.json",
 )
 
 #: The format of the compiled tokenizer asset (the writer is `_shared/gemma_tokenizer.py`) and the
@@ -318,12 +398,13 @@ def embeddinggemma2_repo_name(_model: str) -> str:
 @dataclass(frozen=True)
 class EmbeddingGemma2Sources:
     """The assembly inputs: the series of each storage of the text graph (dtype label →
-    directory), the vision tower's series, the tokenizer series and the pinned upstream snapshot
-    (`inputs/` — not a generated artifact; only its small configuration files and `tokenizer.json`
-    are read)."""
+    directory), the vision tower's series, the audio tower's series, the tokenizer series and the
+    pinned upstream snapshot (`inputs/` — not a generated artifact; only its small configuration
+    files and `tokenizer.json` are read)."""
 
     series: Mapping[str, Path]
     vision: Path
+    audio: Path
     tokenizer: Path
     snapshot: Path
 
@@ -334,6 +415,7 @@ def embeddinggemma2_sources(series_dir: Path) -> EmbeddingGemma2Sources:
     return EmbeddingGemma2Sources(
         series={dtype: series_dir / name for dtype, name in EMBEDDINGGEMMA2_SERIES.items()},
         vision=series_dir / EMBEDDINGGEMMA2_VISION_SERIES,
+        audio=series_dir / EMBEDDINGGEMMA2_AUDIO_SERIES,
         tokenizer=series_dir / TOKENIZER_SERIES,
         snapshot=upstream_sources.SNAPSHOT_DIR,
     )
@@ -341,7 +423,7 @@ def embeddinggemma2_sources(series_dir: Path) -> EmbeddingGemma2Sources:
 
 def embeddinggemma2_placements(sources: EmbeddingGemma2Sources) -> dict[str, Path]:
     """Role → source file. Anything not here stays out (the series' `io.*.safetensors` and the
-    vision series' record).
+    towers' series records).
 
     MUST: exactly the storages of {@link EMBEDDINGGEMMA2_SERIES} — a missing one would leave a
     preset pointing at no file, an extra one would ship a container no preset reads.
@@ -357,6 +439,7 @@ def embeddinggemma2_placements(sources: EmbeddingGemma2Sources) -> dict[str, Pat
             for dtype in EMBEDDINGGEMMA2_SERIES
         },
         EMBEDDINGGEMMA2_VISION_ARTIFACT: sources.vision / EMBEDDINGGEMMA2_MODEL_FILE,
+        EMBEDDINGGEMMA2_AUDIO_ARTIFACT: sources.audio / EMBEDDINGGEMMA2_MODEL_FILE,
         EMBEDDINGGEMMA2_TOKENIZER_ROLE: sources.tokenizer / EMBEDDINGGEMMA2_TOKENIZER_FILE,
     }
 
@@ -377,17 +460,20 @@ def _positive_int(value: Any, where: str) -> int:
     return value
 
 
-def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> int:
-    """The upper bound of the token symbol `T`, read from the graph's folded constants.
+def embeddinggemma2_graph_max_tokens(
+    graph: Mapping[str, Any], path: Path, symbol: str = EMBEDDINGGEMMA2_SYMBOL
+) -> int:
+    """The upper bound of a symbol (the token symbol `T` unless named), read from the graph's
+    folded constants.
 
     The IR's `symbols` lists names only; the bound lives in the constants traced at the maximum and
-    sliced by `sym_prefix_slice` (the RoPE tables — the sliding window is a declared band, not a
-    constant). Every slice of `T` must read a prefix of one extent — that extent is the most rows
-    the graph can bind.
+    sliced by `sym_prefix_slice` (the text graph's RoPE tables — the sliding window is a declared
+    band, not a constant; the audio graph's window bias of `n`). Every slice of the symbol must read
+    a prefix of one extent — that extent is the most rows the graph can bind.
 
     MUST: fail on a slice whose form leaves the bound unreadable (a coefficient or an offset), on
-    disagreeing extents and on a graph without one — `maxTokens` would otherwise be a number
-    nothing in the asset backs.
+    disagreeing extents and on a graph without one — `maxTokens` / `maxSoftTokens` would otherwise
+    be a number nothing in the asset backs.
     """
     values = graph.get("values")
     nodes = graph.get("nodes")
@@ -398,7 +484,7 @@ def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> in
         if not isinstance(node, dict) or node.get("op") != "sym_prefix_slice":
             continue
         attrs = node.get("attrs", {})
-        if attrs.get("sym") != EMBEDDINGGEMMA2_SYMBOL:
+        if attrs.get("sym") != symbol:
             continue
         source = values.get(node["ins"][0], {})
         shape = source.get("shape") if isinstance(source, dict) else None
@@ -406,14 +492,14 @@ def embeddinggemma2_graph_max_tokens(graph: Mapping[str, Any], path: Path) -> in
             if cut.get("coeff") != 1 or cut.get("offset") != 0:
                 raise DistError(
                     f"{path}: a sym_prefix_slice of {node['ins'][0]} cuts {cut} — the bound of"
-                    f" {EMBEDDINGGEMMA2_SYMBOL} cannot be read from it"
+                    f" {symbol} cannot be read from it"
                 )
             if not isinstance(shape, list) or not 0 <= cut.get("dim", -1) < len(shape):
                 raise DistError(f"{path}: the sliced constant {node['ins'][0]} has no shape")
             extents.add(_positive_int(shape[cut["dim"]], f"{path}: {node['ins'][0]}'s extent"))
     if len(extents) != 1:
         raise DistError(
-            f"{path}: the folded constants sliced by {EMBEDDINGGEMMA2_SYMBOL} have the extents"
+            f"{path}: the folded constants sliced by {symbol} have the extents"
             f" {sorted(extents)} — exactly one bound is expected"
         )
     return extents.pop()
@@ -787,6 +873,157 @@ def embeddinggemma2_vision_config(
     return declared
 
 
+#: What a missing setting reads as in a refusal (no setting of the file has this value).
+_MISSING = "missing"
+
+
+def embeddinggemma2_audio_feature_extractor(
+    preprocessor: Mapping[str, Any], processor: Mapping[str, Any], where: str
+) -> int:
+    """Hold the feature extractor's settings to what the host implements
+    ({@link EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR}) in both places upstream states them —
+    `preprocessor_config.json` (what the feature extractor loads) and the `feature_extractor` block
+    of `processor_config.json` (what the processor loads) — and return the sample rate."""
+    block = processor.get("feature_extractor")
+    if not isinstance(block, dict):
+        raise DistError(f"{where}: processor_config.json has no feature_extractor object")
+    for name, settings in (
+        ("preprocessor_config.json", preprocessor),
+        ("processor_config.json feature_extractor", block),
+    ):
+        for key, expected in EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR.items():
+            found = settings.get(key, _MISSING)
+            # `0` and `0.0` are one setting (upstream writes both); `True` is not `1`.
+            if found != expected or isinstance(found, bool) != isinstance(expected, bool):
+                raise DistError(
+                    f"{where}: {name}: {key} is {found!r}, not {expected!r} — the host's audio"
+                    " front end implements that setting only"
+                )
+    return EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR["sampling_rate"]
+
+
+def embeddinggemma2_audio_soft_tokens(samples: int) -> int:
+    """The soft tokens of an audio of `samples` samples (`waveforms.valid_frames` and
+    `soft_tokens`, mirrored torch-free: `ceil(max(0, ceil(samples / 160) − 1) / 4)`)."""
+    hop = EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR["hop_length"]
+    frames = max(0, -(-samples // hop) - 1)
+    return -(-frames // EMBEDDINGGEMMA2_AUDIO_FRAMES_PER_TOKEN)
+
+
+def assert_embeddinggemma2_audio_graph(
+    graph: Mapping[str, Any], path: Path, *, hidden: int, mel_bins: int
+) -> int:
+    """Check the audio tower graph's contract before placement and return the bound of its
+    symbol (its most soft tokens).
+
+    The reader binds `features` f32 `[1, 4n, mel_bins]` and `frame_mask` f32 `[1, 4n]` by name and
+    reads one f32 `[1, n, hidden]` output — the text graph's soft rows; one symbol, no state.
+    MUST: the bound of `n` (its folded window bias) is the soft tokens of the feature extractor's
+    longest audio ({@link EMBEDDINGGEMMA2_AUDIO_MAX_SAMPLES}) — a lower one would refuse audios the
+    front end reads, and the reader holds `maxSoftTokens` to the same bound.
+    """
+    symbol = EMBEDDINGGEMMA2_AUDIO_SYMBOL
+    frames = f"{EMBEDDINGGEMMA2_AUDIO_FRAMES_PER_TOKEN}{symbol}"
+    expected = [
+        {
+            "name": name,
+            "dtype": dtype,
+            "shape": [1, frames, mel_bins] if index == 0 else [1, frames],
+        }
+        for index, (name, dtype) in enumerate(EMBEDDINGGEMMA2_AUDIO_INPUTS)
+    ]
+    inputs = graph.get("inputs")
+    found = (
+        [{key: item.get(key) for key in ("name", "dtype", "shape")} for item in inputs]
+        if isinstance(inputs, list)
+        else None
+    )
+    if found != expected:
+        raise DistError(f"{path}: the audio graph's inputs are {found}, not {expected}")
+    if graph.get("symbols") != [symbol]:
+        raise DistError(f"{path}: the audio graph's symbols are {graph.get('symbols')!r}")
+    if graph.get("states"):
+        raise DistError(f"{path}: the audio graph holds state slots")
+    outputs = graph.get("outputs")
+    values = graph.get("values")
+    if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(values, dict):
+        raise DistError(f"{path}: the audio graph does not have one output ({outputs!r})")
+    output = values.get(outputs[0], {})
+    if output.get("dtype") != "f32" or output.get("shape") != [1, symbol, hidden]:
+        raise DistError(
+            f"{path}: the audio graph's output is {output!r}, not f32 [1, {symbol!r}, {hidden}]"
+            " — the text graph's soft rows"
+        )
+    bound = embeddinggemma2_graph_max_tokens(graph, path, symbol)
+    longest = embeddinggemma2_audio_soft_tokens(EMBEDDINGGEMMA2_AUDIO_MAX_SAMPLES)
+    if bound != longest:
+        raise DistError(
+            f"{path}: the audio graph runs {symbol} up to {bound}, but the feature extractor's"
+            f" longest audio ({EMBEDDINGGEMMA2_AUDIO_MAX_SAMPLES} samples) has {longest} soft"
+            " tokens"
+        )
+    return bound
+
+
+def assert_embeddinggemma2_audio_series(
+    series: Path, *, sample_rate: int, max_soft_tokens: int, pin: upstream_sources.SourcePin
+) -> None:
+    """The audio series is a full one, taken at the sample rate and the bound this distribution
+    declares, from the pinned checkpoint.
+
+    MUST: its record ({@link EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE}) names this series, the pin,
+    the sample rate and the bound — goldens taken at another rate or bound hold the host to frames
+    it never builds, and a series of another revision would ship under this pin.
+    """
+    record_path = series / EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE
+    record = _read_json(record_path, "the audio series' record")
+    if not isinstance(record, dict):
+        raise DistError(f"{record_path}: the top level is not an object")
+    for key, expected in (
+        ("series", EMBEDDINGGEMMA2_AUDIO_SERIES),
+        ("upstream", pin.label),
+        ("sampleRate", sample_rate),
+        ("softTokensMax", max_soft_tokens),
+    ):
+        if record.get(key) != expected:
+            raise DistError(f"{record_path}: {key} is {record.get(key)!r}, not {expected!r}")
+
+
+def embeddinggemma2_audio_config(
+    config: Mapping[str, Any],
+    tokenizer: Mapping[str, Any],
+    *,
+    vocab_size: int,
+    hidden: int,
+    max_soft_tokens: int,
+    sample_rate: int,
+    where: str,
+) -> dict[str, int]:
+    """`pipelineConfig.audio` (read by the EmbeddingGemma family's TS reader).
+
+    MUST: each id is a special token of the tokenizer asset inside the graph's vocabulary and the
+    three differ, for the image ids' reason ({@link embeddinggemma2_vision_config}); the soft token
+    is read from the field `placeholderTokens.audio` is read from.
+    """
+    special = tokenizer.get("specialIds")
+    special_ids = set(special) if isinstance(special, list) else set()
+    declared: dict[str, int] = {}
+    for field, key in EMBEDDINGGEMMA2_AUDIO_ID_FIELDS:
+        token = config.get(key)
+        if isinstance(token, bool) or not isinstance(token, int) or not 0 <= token < vocab_size:
+            raise DistError(f"{where}: {key} is {token!r}, not an id of the {vocab_size} rows")
+        if token not in special_ids:
+            raise DistError(f"{where}: {key} {token} is not a special token of the tokenizer asset")
+        declared[field] = token
+    ids = [declared[field] for field, _ in EMBEDDINGGEMMA2_AUDIO_ID_FIELDS]
+    if len(set(ids)) != len(ids):
+        raise DistError(f"{where}: the audio token ids repeat ({ids})")
+    declared["hiddenSize"] = hidden
+    declared["maxSoftTokens"] = max_soft_tokens
+    declared["sampleRate"] = sample_rate
+    return declared
+
+
 def embeddinggemma2_pipeline_config(
     *,
     prompts: Mapping[str, str],
@@ -794,9 +1031,10 @@ def embeddinggemma2_pipeline_config(
     graph_max_tokens: int,
     placeholders: Mapping[str, int],
     vision: Mapping[str, int],
+    audio: Mapping[str, int],
     where: str,
 ) -> dict[str, Any]:
-    """Build `pipelineConfig` (the five fields of the TypeScript schema, in this order).
+    """Build `pipelineConfig` (the six fields of the TypeScript schema, in this order).
 
     MUST: the full dimension equals the graph's output width, the dimensions descend, and the
     token bound equals both the graph's and the writer's ({@link EMBEDDINGGEMMA2_MAX_TOKENS}) — a
@@ -820,6 +1058,7 @@ def embeddinggemma2_pipeline_config(
         "maxTokens": EMBEDDINGGEMMA2_MAX_TOKENS,
         "placeholderTokens": dict(placeholders),
         "vision": dict(vision),
+        "audio": dict(audio),
     }
 
 
@@ -874,6 +1113,13 @@ def embeddinggemma2_plan(
     if not isinstance(processor_config, dict):
         raise DistError(f"{processor_path}: the top level is not an object")
     processor = embeddinggemma2_image_processor(processor_config, str(processor_path))
+    preprocessor_path = sources.snapshot / "preprocessor_config.json"
+    preprocessor_config = _read_json(preprocessor_path, "the upstream feature extractor")
+    if not isinstance(preprocessor_config, dict):
+        raise DistError(f"{preprocessor_path}: the top level is not an object")
+    sample_rate = embeddinggemma2_audio_feature_extractor(
+        preprocessor_config, processor_config, str(sources.snapshot)
+    )
     # The soft rows' width is the token table's (a soft row replaces a scaled lookup) and the
     # upstream text config's hidden size; the tower's output must be that width too.
     hidden = _positive_int(
@@ -889,11 +1135,22 @@ def embeddinggemma2_plan(
         ir_graph(vision_container), vision_container, hidden=hidden, processor=processor
     )
     assert_embeddinggemma2_vision_series(sources.vision, processor.budget, pin)
+    audio_container = placements[EMBEDDINGGEMMA2_AUDIO_ARTIFACT]
+    max_soft_tokens = assert_embeddinggemma2_audio_graph(
+        ir_graph(audio_container),
+        audio_container,
+        hidden=hidden,
+        mel_bins=EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR["feature_size"],
+    )
+    assert_embeddinggemma2_audio_series(
+        sources.audio, sample_rate=sample_rate, max_soft_tokens=max_soft_tokens, pin=pin
+    )
     # Every container names the license and the commit it was exported from (the export bakes
     # them).
     for role in (
         *(embeddinggemma2_role(dtype) for dtype in EMBEDDINGGEMMA2_SERIES),
         EMBEDDINGGEMMA2_VISION_ARTIFACT,
+        EMBEDDINGGEMMA2_AUDIO_ARTIFACT,
     ):
         assert_upstream_provenance(
             placements[role], license=EMBEDDINGGEMMA2_LICENSE, revision=pin.revision
@@ -912,6 +1169,15 @@ def embeddinggemma2_plan(
             vocab_size=vocab_size,
             hidden=hidden,
             budget=processor.budget,
+            where=str(config_path),
+        ),
+        audio=embeddinggemma2_audio_config(
+            config,
+            tokenizer,
+            vocab_size=vocab_size,
+            hidden=hidden,
+            max_soft_tokens=max_soft_tokens,
+            sample_rate=sample_rate,
             where=str(config_path),
         ),
         where=str(container),
@@ -942,16 +1208,16 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-#: On the day the audio tower of the checkpoint is added, or a storage is added or dropped
-#: ({@link EMBEDDINGGEMMA2_SERIES}, {@link EMBEDDINGGEMMA2_VISION_DTYPE}), this text changes with
-#: it.
+#: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_SERIES},
+#: {@link EMBEDDINGGEMMA2_VISION_DTYPE}, {@link EMBEDDINGGEMMA2_AUDIO_DTYPE}), this text changes
+#: with it.
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
 
-- The **text tower and the vision tower** (with its projection into the text tower's width) were
-  extracted; the audio tower was never read, so audio cannot be embedded from this repository.
+- The **text tower, the vision tower and the audio tower** (each tower with its projection into
+  the text tower's width) were extracted.
 - The text tower, together with the mean pooling and the L2 normalisation of the
   SentenceTransformer pipeline, was re-expressed as one graph in the Karume container format (a
   `.krm` part sequence whose first part carries the graph and model descriptors). The
@@ -969,6 +1235,12 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
   two-dimensional rotary embedding is folded into tables of the graph gathered by the patch
   positions. Its weights keep the checkpoint's BF16 values unchanged in both forms (its norms and
   the folded tables are stored in float32); none of them was rounded.
+- The audio tower and its projection were re-expressed as a third graph: it reads an audio's
+  log-mel frames (computed from the samples outside the graph) with their frame mask, its
+  chunked local attention is computed over each query's window of 12 keys with the relative
+  position term folded into constants, and the bounds of its clipped linear layers are constants
+  of the graph. Its weights keep the checkpoint's BF16 values unchanged in both forms (its norms,
+  biases and folded constants are stored in float32); none of them was rounded.
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt
   prefixes of its `config_sentence_transformers.json` are carried in `karume.json`.
 

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   dimensionChoices,
   effectiveDimension,
+  hasAudioTower,
   hasVisionTower,
   promptChoices,
   promptOfValue,
@@ -178,5 +179,72 @@ describe("hasVisionTower", () => {
       }),
     );
     expect(hasVisionTower(manifest, "text")).toBe(true);
+  });
+});
+
+describe("pipelineConfig.audio and hasAudioTower", () => {
+  const AUDIO = {
+    audioTokenId: 258881,
+    beginAudioTokenId: 256000,
+    endAudioTokenId: 258883,
+    hiddenSize: 512,
+    maxSoftTokens: 750,
+    sampleRate: 16000,
+  };
+
+  it("reads the rate an audio is resampled to and the soft-token bound, and nothing without audio", () => {
+    expect(readEmbeddingConfig(manifestWith({ ...CONFIG, audio: AUDIO }), "text").audio).toEqual({
+      sampleRate: 16000,
+      maxSoftTokens: 750,
+    });
+    expect(Object.hasOwn(readEmbeddingConfig(manifestWith(CONFIG), "text"), "audio")).toBe(false);
+  });
+
+  it("refuses an audio block it cannot show, naming the field", () => {
+    expect(() => readEmbeddingConfig(manifestWith({ ...CONFIG, audio: 16000 }), "text")).toThrow(
+      /pipelineConfig\.audio is not an object/,
+    );
+    expect(() =>
+      readEmbeddingConfig(
+        manifestWith({ ...CONFIG, audio: { ...AUDIO, sampleRate: "16k" } }),
+        "text",
+      ),
+    ).toThrow(/audio\.sampleRate \/ maxSoftTokens are not positive integers/);
+  });
+
+  it("is true only for a model that ships the weights role audio", () => {
+    expect(hasAudioTower(manifestWith(CONFIG), "text")).toBe(false);
+    expect(hasAudioTower(manifestWith(CONFIG), "image")).toBe(false);
+    const container = (name: string) => ({
+      container: {
+        descriptor: {
+          graph: { length: 8, sha256: hex("d") },
+          model: { length: 8, sha256: hex("e") },
+        },
+        parts: [
+          { path: `text/${name}/model.bf16-00001-of-00002.krm`, size: 40, sha256: hex("a") },
+          { path: `text/${name}/model.bf16-00002-of-00002.krm`, size: 8, sha256: hex("b") },
+        ],
+      },
+    });
+    const manifest = parseManifest(
+      JSON.stringify({
+        format: "karume/6",
+        generator: "test",
+        defaultModel: "text",
+        models: {
+          text: {
+            pipeline: "embeddinggemma/1",
+            assets: {},
+            weights: { model: { bf16: container("model") }, audio: { bf16: container("audio") } },
+            quants: { bf16: { weights: { model: "bf16", audio: "bf16" }, session: {} } },
+            defaultQuant: "bf16",
+            pipelineConfig: { ...CONFIG, audio: AUDIO },
+          },
+        },
+      }),
+    );
+    expect(hasAudioTower(manifest, "text")).toBe(true);
+    expect(hasVisionTower(manifest, "text")).toBe(false);
   });
 });

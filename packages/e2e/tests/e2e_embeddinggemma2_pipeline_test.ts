@@ -249,6 +249,7 @@ const ASSEMBLE =
   "cd tools/export-recipes && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export" +
   " --dtype bf16 && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype i8" +
   " && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16" +
+  " && uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype bf16" +
   " && uv run python dist.py --pipeline embeddinggemma-2";
 const MIRROR = mirrorPresent(MIRROR_ROOT);
 if (!MIRROR) {
@@ -420,14 +421,14 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: the manifest and the tokenize
     assertEquals(rules.placeholders.size, 3);
   });
 
-  it("gives each preset its own storage of the model, the one bf16 vision tower, an empty session and the binding its narrowed device is capped at", async () => {
+  it("gives each preset its own storage of the model, the one bf16 vision tower and audio tower, an empty session and the binding its narrowed device is capped at", async () => {
     const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
     const entry = manifest.models["text"];
     for (const preset of PRESETS) {
       const quant = entry.quants[preset.quant];
       assertEquals(
         quant.weights,
-        { model: preset.quant, vision: "bf16" },
+        { model: preset.quant, vision: "bf16", audio: "bf16" },
         `${preset.quant}: weights`,
       );
       assertEquals(quant.session, {}, `${preset.quant}: session`);

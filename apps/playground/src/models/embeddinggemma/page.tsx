@@ -1,15 +1,20 @@
 /**
- * The EmbeddingGemma text (and image) → sentence embedding check: a list of rows, each a text with
- * its own prompt from the manifest and — on a model that ships the vision tower — an optional image
- * embedded after the text, one dimension for the run, every row embedded on the page's GPU (one
- * `embed` call per row, in order) and the similarity matrix of the rows (the dot product of the unit
- * vectors — an image row compares with a text row directly), with a saved record (per-row
+ * The EmbeddingGemma text (and image and audio) → sentence embedding check: a list of rows, each a
+ * text with its own prompt from the manifest and — on a model that ships the vision tower — an
+ * optional image, and — on one that ships the audio tower — an optional audio, embedded after the
+ * text in that order, one dimension for the run, every row embedded on the page's GPU (one `embed`
+ * call per row, in order) and the similarity matrix of the rows (the dot product of the unit vectors
+ * — an image or an audio row compares with a text row directly), with a saved record (per-row
  * statistics and the sha256 of the raw f32 bytes, each image's size and the sha256 of its RGB8
- * pixels, build and embed seconds, the model Session's diagnostics).
+ * pixels, each audio's sample count and the sha256 of its f32 samples, build and embed seconds, the
+ * model Session's diagnostics).
  *
  * On a model with the vision tower (the weights role `vision`) the page builds the pipeline with
  * `vision: true` — the Gemma 4 page's rule for its image embedder — so the tower's weights are
- * fetched with the text model's.
+ * fetched with the text model's; on one with the audio tower (`audio`) likewise with `audio: true`.
+ * An audio file is decoded, resampled to the model's rate (16 kHz) and mixed to mono by the browser
+ * (`./audio.ts` — the pipeline has no resampler); it is not cut, so one over 30 s is refused by the
+ * pipeline with its own message.
  *
  * A row the pipeline refuses (`ModelInputError`: an undeclared prompt, a text over the token limit,
  * a placeholder token in the text) shows the refusal as raised and the run goes on with the next
@@ -18,8 +23,9 @@
  * source, model and preset (the prompt and the dimension are per call).
  *
  * Once a pipeline is held, each row shows its token count against the model's limit `maxTokens`
- * (`tokenize` — on the host, recomputed as the row changes; an image counts its soft tokens and two
- * markers), marked when it is over; the record keeps the count of each row as it was run. A device
+ * (`tokenize` — on the host, recomputed as the row changes; an image or an audio counts its soft
+ * tokens and two markers), marked when it is over, or the pipeline's refusal of the row (an audio
+ * over 30 s, say) in the library's words; the record keeps the count of each row as it was run. A device
  * whose buffer limit is smaller runs fewer tokens; the page does not know that limit, so such a row
  * is refused only when it is run.
  */
@@ -69,10 +75,12 @@ import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets, modelChoices } from "@/lib/presets";
 import { f32Bytes, f32Sha256, NO_SUBMITS, rgb8Sha256, type SubmitCounts } from "@/lib/record";
 
+import { AudioInput } from "./audio-input";
 import {
   dimensionChoices,
   effectiveDimension,
   type EmbeddingModelConfig,
+  hasAudioTower,
   hasVisionTower,
   promptChoices,
   promptOfValue,
@@ -97,6 +105,7 @@ import {
   removeRow,
   rowInput,
   rowTokenCount,
+  rowTokens,
   runBlocker,
   SAMPLE_ROWS,
   type Selection,
@@ -181,6 +190,13 @@ export const EmbeddingGemmaPage = () => {
     ready !== undefined &&
     selection !== undefined &&
     hasVisionTower(ready.manifest, selection.model);
+  // Whether it ships the audio tower: the pipeline is built with it, and each row offers an audio
+  // (resampled to the rate its pipelineConfig.audio declares).
+  const audio =
+    ready !== undefined &&
+    selection !== undefined &&
+    hasAudioTower(ready.manifest, selection.model);
+  const audioRate = config?.audio?.sampleRate;
 
   const [rows, setRows] = useState<readonly TextRow[]>(SAMPLE_ROWS);
 
@@ -220,16 +236,17 @@ export const EmbeddingGemmaPage = () => {
       });
     };
   }, [gpu, track]);
-  // Each row's token count from the held pipeline's tokenizer, recomputed when a row's text or
-  // prompt changes. None before the first build (the page never builds a pipeline just to count)
-  // and none while the held pipeline is another model's (the next Run builds the selected one).
+  // Each row's token count — or the pipeline's refusal of it — from the held pipeline's tokenizer,
+  // recomputed when a row's text, prompt, image or audio changes. None before the first build (the
+  // page never builds a pipeline just to count) and none while the held pipeline is another model's
+  // (the next Run builds the selected one).
   const selectedModel = selection?.model;
   const tokenCounts = useMemo(() => {
     const counter = held !== undefined && held.model === selectedModel ? held.pipeline : undefined;
     return rows.map((row) =>
       counter === undefined
         ? undefined
-        : rowTokenCount((input, options) => counter.tokenize(input, options), row),
+        : rowTokens((input, options) => counter.tokenize(input, options), row),
     );
   }, [held, rows, selectedModel]);
   // Where `onRunDiagnostics` goes: the running run's report list (the pipeline outlives a run).
@@ -253,6 +270,7 @@ export const EmbeddingGemmaPage = () => {
     const runDimension = dimension;
     const runRows = rows;
     const runVision = vision;
+    const runAudio = audio;
     const { model, quant } = selection;
     const presetLabel = presets.presets.find(({ name }) => name === quant)?.label ?? quant;
     const directory = status?.directory ?? "";
@@ -289,6 +307,7 @@ export const EmbeddingGemmaPage = () => {
             model,
             quant,
             ...(runVision ? { vision: true } : {}),
+            ...(runAudio ? { audio: true } : {}),
             signal,
             onRunDiagnostics: (diagnostics) => {
               counters.latest = {
@@ -387,6 +406,16 @@ export const EmbeddingGemmaPage = () => {
                   rgbSha256: await rgb8Sha256(row.image.rgb),
                 },
               }),
+          ...(row.audio === undefined
+            ? {}
+            : {
+                audio: {
+                  name: row.audio.name,
+                  sampleRate: row.audio.audio.sampleRate,
+                  samples: row.audio.audio.data.length,
+                  sha256: await f32Sha256(row.audio.audio.data),
+                },
+              }),
           tokens: outcome.tokens,
           embedMs: outcome.embedMs,
           outcome:
@@ -468,8 +497,9 @@ export const EmbeddingGemmaPage = () => {
             <CardDescription>
               Each row becomes one unit vector (one <code>embed</code> call, in order). The prompt's
               prefix goes before the row's text, and a row's image (on a model with the vision
-              tower) comes after it; the run compares every pair of rows by the dot product of their
-              vectors, which is their cosine similarity.
+              tower) and audio (on one with the audio tower) come after it, in that order; the run
+              compares every pair of rows by the dot product of their vectors, which is their cosine
+              similarity.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
@@ -518,11 +548,13 @@ export const EmbeddingGemmaPage = () => {
             )}
             <div className="flex flex-col gap-3 sm:col-span-2">
               {rows.map((row, position) => {
-                const count = tokenCounts[position];
+                const counted = tokenCounts[position];
                 const tokens =
-                  count === undefined || config === undefined
+                  counted === undefined || !("count" in counted) || config === undefined
                     ? undefined
-                    : tokenCountView(count, config.maxTokens);
+                    : tokenCountView(counted.count, config.maxTokens);
+                const refusal =
+                  counted !== undefined && "refusal" in counted ? counted.refusal : undefined;
                 return (
                   <div
                     key={row.id}
@@ -575,6 +607,14 @@ export const EmbeddingGemmaPage = () => {
                         Shorten the text or split it.
                       </p>
                     ) : null}
+                    {refusal === undefined ? null : (
+                      <p
+                        id={`embeddinggemma-row-${position}-refused`}
+                        className="text-xs text-destructive"
+                      >
+                        The pipeline refuses this row: {refusal}
+                      </p>
+                    )}
                     {vision || row.image !== undefined ? (
                       <div className="flex flex-col gap-2">
                         <ImageInput
@@ -599,6 +639,42 @@ export const EmbeddingGemmaPage = () => {
                           >
                             <Trash2Icon />
                             Remove image
+                          </Button>
+                        )}
+                      </div>
+                    ) : null}
+                    {(audio && audioRate !== undefined) || row.audio !== undefined ? (
+                      <div className="flex flex-col gap-2">
+                        {audioRate === undefined ? (
+                          <p className="text-xs text-muted-foreground">
+                            This model declares no audio, so this row's audio is refused when it is
+                            run.
+                          </p>
+                        ) : (
+                          <AudioInput
+                            id={`embeddinggemma-row-${position}-audio`}
+                            label="Audio (embedded after the text and the image; optional)"
+                            sampleRate={audioRate}
+                            audio={row.audio}
+                            onAudio={(loaded) =>
+                              setRows((current) => updateRow(current, row.id, { audio: loaded }))
+                            }
+                            disabled={task.running}
+                          />
+                        )}
+                        {row.audio === undefined ? null : (
+                          <Button
+                            id={`embeddinggemma-row-${position}-audio-remove`}
+                            variant="outline"
+                            size="sm"
+                            className="self-start"
+                            onClick={() =>
+                              setRows((current) => updateRow(current, row.id, { audio: undefined }))
+                            }
+                            disabled={task.running}
+                          >
+                            <Trash2Icon />
+                            Remove audio
                           </Button>
                         )}
                       </div>
@@ -640,7 +716,10 @@ export const EmbeddingGemmaPage = () => {
                   text holding an image, audio or video placeholder token is refused too.
                   {vision
                     ? " An image counts its soft tokens (from its size alone, at most the model's soft-token budget) and two markers; it is resized to keep its aspect."
-                    : " This model has no vision tower, so a row cannot hold an image."}{" "}
+                    : " This model has no vision tower, so a row cannot hold an image."}
+                  {audio && config.audio !== undefined
+                    ? ` An audio counts one soft token per 40 ms (at most ${config.audio.maxSoftTokens}) and two markers; the browser resamples it to ${config.audio.sampleRate} Hz mono (its resampler is not specified, so the record keeps the sha256 of the samples), and one over 30 s is refused, not cut.`
+                    : " This model has no audio tower, so a row cannot hold an audio."}{" "}
                   Each row shows its count once the first Run has built the pipeline.
                 </p>
               )}
@@ -784,6 +863,12 @@ const ResultCard = ({ result }: { result: RunResult }) => {
                     {request?.image === undefined ? null : (
                       <span className="block text-muted-foreground">
                         + image {request.image.name} ({request.image.width}×{request.image.height})
+                      </span>
+                    )}
+                    {request?.audio === undefined ? null : (
+                      <span className="block text-muted-foreground">
+                        + audio {request.audio.name} (
+                        {(request.audio.samples / request.audio.sampleRate).toFixed(2)} s)
                       </span>
                     )}
                   </TableCell>

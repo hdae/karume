@@ -44,20 +44,31 @@ from karume.modelcard import (
 #: `embeddinggemma` reads it.
 EMBEDDINGGEMMA2_SUPPORTED_PIPELINE = "embeddinggemma/1"
 
-#: The HF pipeline tag: the upstream card's own (`feature-extraction`) — a text or an image
-#: embedding is feature extraction too.
+#: The HF pipeline tag: the upstream card's own (`feature-extraction`) — a text, an image or an
+#: audio embedding is feature extraction too.
 EMBEDDINGGEMMA2_PIPELINE_TAG = "feature-extraction"
 
-#: The title names only what this distribution carries: the text tower, and the vision tower when
-#: the manifest ships it ({@link _has_vision}) — never video or audio.
+#: The title names only what this distribution carries: the text tower, and each tower the
+#: manifest ships ({@link _tower}) — never video.
 EMBEDDINGGEMMA2_TITLE = "EmbeddingGemma 2 Text Embedding — Karume"
 EMBEDDINGGEMMA2_VISION_TITLE = "EmbeddingGemma 2 Text and Image Embedding — Karume"
+EMBEDDINGGEMMA2_AUDIO_TITLE = "EmbeddingGemma 2 Text and Audio Embedding — Karume"
+EMBEDDINGGEMMA2_VISION_AUDIO_TITLE = "EmbeddingGemma 2 Text, Image and Audio Embedding — Karume"
 
 #: The weights role of the vision tower and its one storage (the spellings
 #: `embeddinggemma2.distribution` writes). MUST: every preset maps the tower to this storage — the
-#: card states that no preset rounds it ({@link _vision_storage_lines}).
+#: card states that no preset rounds it ({@link _tower_storage_lines}).
 EMBEDDINGGEMMA2_VISION_ROLE = "vision"
 EMBEDDINGGEMMA2_VISION_DTYPE = "bf16"
+
+#: The weights role of the audio tower and its one storage, under the same MUST.
+EMBEDDINGGEMMA2_AUDIO_ROLE = "audio"
+EMBEDDINGGEMMA2_AUDIO_DTYPE = "bf16"
+
+#: The audio one soft token stands for, in milliseconds (upstream's `processor_config.json`,
+#: `audio_ms_per_token`: four mel frames of a 10 ms hop) — a fact of the front end, not of the
+#: manifest; the card turns `pipelineConfig.audio.maxSoftTokens` into seconds with it.
+EMBEDDINGGEMMA2_AUDIO_MS_PER_TOKEN = 40
 
 #: Model name → the HF repository ID of the upstream checkpoint. **This one table is the only record
 #: of "which model is which weights"**; a model name it does not list cannot be attributed, so the
@@ -192,40 +203,59 @@ def _input_length(max_tokens: int) -> list[str]:
     ]
 
 
-def _vision(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The default model's `pipelineConfig.vision` when the manifest ships the vision tower, else
-    `None`.
+def _tower(manifest: Mapping[str, Any], role: str, dtype: str) -> Mapping[str, Any] | None:
+    """The default model's `pipelineConfig.<role>` when the manifest ships the tower of that
+    weights role (`vision` / `audio` — the declaration has the role's name), else `None`.
 
     MUST: the tower's weights and the declaration come together, on every model, and every preset
-    maps the tower to its one bf16 storage — the card states both (no preset rounds the tower), so
-    a manifest where that is not so is not drawn.
+    maps the tower to its one `dtype` storage — the card states both (no preset rounds the tower),
+    so a manifest where that is not so is not drawn.
     """
-    shipped = {
-        name: EMBEDDINGGEMMA2_VISION_ROLE in model["weights"]
-        for name, model in manifest["models"].items()
-    }
+    shipped = {name: role in model["weights"] for name, model in manifest["models"].items()}
     for name, model in manifest["models"].items():
-        declared = "vision" in model["pipelineConfig"]
+        declared = role in model["pipelineConfig"]
         if declared != shipped[name]:
             raise ValueError(
-                f"model '{name}': the vision weights are {'' if shipped[name] else 'not '}shipped"
-                f" but pipelineConfig.vision is {'' if declared else 'not '}declared"
+                f"model '{name}': the {role} weights are {'' if shipped[name] else 'not '}shipped"
+                f" but pipelineConfig.{role} is {'' if declared else 'not '}declared"
             )
         if not shipped[name]:
             continue
-        storages = list(model["weights"][EMBEDDINGGEMMA2_VISION_ROLE])
-        mapped = {
-            quant["weights"][EMBEDDINGGEMMA2_VISION_ROLE] for quant in model["quants"].values()
-        }
-        if storages != [EMBEDDINGGEMMA2_VISION_DTYPE] or mapped != {EMBEDDINGGEMMA2_VISION_DTYPE}:
+        storages = list(model["weights"][role])
+        mapped = {quant["weights"][role] for quant in model["quants"].values()}
+        if storages != [dtype] or mapped != {dtype}:
             raise ValueError(
-                f"model '{name}': the vision tower is stored as {storages} and mapped to"
-                f" {sorted(mapped)} — this card states that every preset ships its"
-                f" {EMBEDDINGGEMMA2_VISION_DTYPE} values"
+                f"model '{name}': the {role} tower is stored as {storages} and mapped to"
+                f" {sorted(mapped)} — this card states that every preset ships its {dtype} values"
             )
     if len(set(shipped.values())) > 1:
-        raise ValueError(f"the vision tower ships with some models only ({shipped})")
-    return default_model(manifest)["pipelineConfig"].get("vision")
+        raise ValueError(f"the {role} tower ships with some models only ({shipped})")
+    return default_model(manifest)["pipelineConfig"].get(role)
+
+
+def _vision(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The default model's `pipelineConfig.vision` when the manifest ships the vision tower."""
+    return _tower(manifest, EMBEDDINGGEMMA2_VISION_ROLE, EMBEDDINGGEMMA2_VISION_DTYPE)
+
+
+def _audio(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The default model's `pipelineConfig.audio` when the manifest ships the audio tower."""
+    return _tower(manifest, EMBEDDINGGEMMA2_AUDIO_ROLE, EMBEDDINGGEMMA2_AUDIO_DTYPE)
+
+
+def _title(manifest: Mapping[str, Any]) -> str:
+    """The card's title, by the towers the manifest ships."""
+    vision, audio = _vision(manifest) is not None, _audio(manifest) is not None
+    if vision and audio:
+        return EMBEDDINGGEMMA2_VISION_AUDIO_TITLE
+    if audio:
+        return EMBEDDINGGEMMA2_AUDIO_TITLE
+    return EMBEDDINGGEMMA2_VISION_TITLE if vision else EMBEDDINGGEMMA2_TITLE
+
+
+def _audio_seconds(audio: Mapping[str, Any]) -> str:
+    """The longest audio, in seconds, from `pipelineConfig.audio.maxSoftTokens`."""
+    return f"{audio['maxSoftTokens'] * EMBEDDINGGEMMA2_AUDIO_MS_PER_TOKEN / 1000:g}"
 
 
 #: What the overview says of the scope of a manifest without the vision tower.
@@ -250,12 +280,49 @@ def _image_scope(budget: int) -> list[str]:
     ]
 
 
+def _audio_scope(audio: Mapping[str, Any]) -> list[str]:
+    """What the overview says of audio, for a manifest with the audio tower and without the vision
+    tower."""
+    rate = f"{audio['sampleRate']:,}"
+    per_token = EMBEDDINGGEMMA2_AUDIO_MS_PER_TOKEN
+    longest = f"{audio['maxSoftTokens']} ({_audio_seconds(audio)} s)"
+    return [
+        "- **Text and audio.** Built with `audio: true`, the pipeline also fetches the audio",
+        f"  tower and takes audio parts (mono f32 samples at {rate} Hz) beside the text parts,",
+        f"  in the order given. An audio becomes one soft token per {per_token} ms, up to",
+        f"  {longest}; a longer one is refused, never truncated, and so is another sample",
+        "  rate (resample first). The vision tower is not carried: neither images nor video can",
+        "  be embedded. A text holding the image, audio or video placeholder token is refused.",
+    ]
+
+
+def _image_and_audio_scope(vision: Mapping[str, Any], audio: Mapping[str, Any]) -> list[str]:
+    """What the overview says of images and audio, for a manifest with both towers."""
+    budget = vision["softTokenBudget"]
+    square = math.isqrt(budget) ** 2
+    rate = f"{audio['sampleRate']:,}"
+    per_token = EMBEDDINGGEMMA2_AUDIO_MS_PER_TOKEN
+    longest = f"{audio['maxSoftTokens']} ({_audio_seconds(audio)} s)"
+    return [
+        "- **Text, images and audio.** Built with `vision: true`, the pipeline also fetches the",
+        "  vision tower and takes image parts (decoded RGB8 pixels of any size); built with",
+        "  `audio: true`, it fetches the audio tower and takes audio parts (mono f32 samples at",
+        f"  {rate} Hz). Both may be on, and the parts go beside the text parts in the order",
+        "  given. An image is resized to keep its aspect and becomes up to",
+        f"  {budget} soft tokens (a square one {square}); an audio becomes one soft token per",
+        f"  {per_token} ms, up to {longest} — a longer audio or another sample rate is refused,",
+        "  never truncated or resampled. Video cannot be embedded. A text holding the image,",
+        "  audio or video placeholder token is refused.",
+    ]
+
+
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
     dimensions = config["dimensions"]
     vision = _vision(manifest)
+    audio = _audio(manifest)
     upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
-    if vision is None:
+    if vision is None and audio is None:
         opening = [
             f"A text embedding distribution: the **text tower** of `{upstream}`, with its mean"
             " pooling and",
@@ -263,7 +330,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         runs = "a string in, a unit vector out."
         graphs = "  of the prompt you name, tokenizes on the host and runs one graph."
         scope = list(_TEXT_ONLY_SCOPE)
-    else:
+    elif audio is None:
         opening = [
             "A text and image embedding distribution: the **text and vision towers** of",
             f"`{upstream}`, with the mean pooling and",
@@ -274,6 +341,28 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
             " and the text graph once."
         )
         scope = _image_scope(vision["softTokenBudget"])
+    elif vision is None:
+        opening = [
+            "A text and audio embedding distribution: the **text and audio towers** of",
+            f"`{upstream}`, with the mean pooling and",
+        ]
+        runs = "a text, an audio or both in, a unit vector out."
+        graphs = (
+            "  of the prompt you name, tokenizes and computes the log-mel frames on the host, runs"
+            " the audio tower once per audio and the text graph once."
+        )
+        scope = _audio_scope(audio)
+    else:
+        opening = [
+            "A text, image and audio embedding distribution: the **text, vision and audio towers**",
+            f"of `{upstream}`, with the mean pooling and",
+        ]
+        runs = "text, images and audio in any mix, a unit vector out."
+        graphs = (
+            "  of the prompt you name, tokenizes (and computes an audio's log-mel frames) on the"
+            " host, runs a tower once per image or audio and the text graph once."
+        )
+        scope = _image_and_audio_scope(vision, audio)
     return [
         "## What is this",
         "",
@@ -347,23 +436,36 @@ def _storage_lines(manifest: Mapping[str, Any]) -> list[str]:
         "distributed here. The weights of the text tower ship in the storage each quant names:",
         "",
         *(f"- `{dtype}`: {EMBEDDINGGEMMA2_STORAGES[dtype][1]}" for dtype in dtypes),
-        *_vision_storage_lines(manifest),
+        *_tower_storage_lines(manifest),
     ]
 
 
-def _vision_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
-    """What the vision tower's one storage holds (a paragraph after the storage list — none for a
-    manifest without the tower). The storage is checked by {@link _vision}."""
-    if _vision(manifest) is None:
-        return []
-    return [
-        "",
-        f"The vision tower (`{EMBEDDINGGEMMA2_VISION_ROLE}`) ships in every preset as the",
-        f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_VISION_DTYPE}; its norms and its folded",
-        "rotary tables in f32). No rounded form of the tower was measured, so no preset rounds it.",
-        "A pipeline built without `vision: true` does not fetch it (the Download column below",
-        "counts it).",
-    ]
+def _tower_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """What each tower's one storage holds (a paragraph per tower after the storage list — none
+    for a manifest without towers). The storages are checked by {@link _tower}."""
+    lines: list[str] = []
+    if _vision(manifest) is not None:
+        lines += [
+            "",
+            f"The vision tower (`{EMBEDDINGGEMMA2_VISION_ROLE}`) ships in every preset as the",
+            f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_VISION_DTYPE}; its norms and its"
+            " folded",
+            "rotary tables in f32). No rounded form of the tower was measured, so no preset rounds"
+            " it.",
+            "A pipeline built without `vision: true` does not fetch it (the Download column below",
+            "counts it).",
+        ]
+    if _audio(manifest) is not None:
+        lines += [
+            "",
+            f"The audio tower (`{EMBEDDINGGEMMA2_AUDIO_ROLE}`) ships in every preset as the",
+            f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_AUDIO_DTYPE}; its norms, biases and"
+            " folded",
+            "constants in f32). No rounded form of the tower was measured, so no preset rounds it.",
+            "A pipeline built without `audio: true` does not fetch it (the Download column below",
+            "counts it).",
+        ]
+    return lines
 
 
 def _precision_lines(manifest: Mapping[str, Any]) -> list[str]:
@@ -425,6 +527,16 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
             "  positions; its weights keep the checkpoint's bf16 values unchanged in every preset.",
         ]
     )
+    audio_change = (
+        []
+        if _audio(manifest) is None
+        else [
+            "  The audio tower and its projection were re-expressed as a graph of their own that",
+            "  reads an audio's log-mel frames (computed on the host) with their frame mask, its",
+            "  local attention computed over each query's window of 12 keys; its weights keep the",
+            "  checkpoint's bf16 values unchanged in every preset.",
+        ]
+    )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
@@ -432,6 +544,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  band declared on the attention, applied from the token positions; the weights keep the",
         *weights_change,
         *vision_change,
+        *audio_change,
         "  No retraining and no fine-tuning.",
         *_precision_lines(manifest),
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
@@ -458,6 +571,23 @@ _IMAGE_CALLS: tuple[str, ...] = (
     "does not declare, a dimension it does not list, an input over the token limit or an",
     "image part on a pipeline built without `vision: true` is refused.",
 )
+_AUDIO_CALLS: tuple[str, ...] = (
+    "`embed()` takes one input per call (a text, or text and audio parts) and returns an",
+    "f32 unit vector. It keeps its GPU sessions alive for the lifetime of the pipeline, so",
+    "embedding many inputs uploads the weights once;",
+    "concurrent calls are queued rather than run side by side. A prompt name the repository",
+    "does not declare, a dimension it does not list, an input over the token limit or an",
+    "audio part on a pipeline built without `audio: true` is refused.",
+)
+_IMAGE_AND_AUDIO_CALLS: tuple[str, ...] = (
+    "`embed()` takes one input per call (a text, or text, image and audio parts) and returns",
+    "an f32 unit vector. It keeps its GPU sessions alive for the lifetime of the pipeline, so",
+    "embedding many inputs uploads the weights once;",
+    "concurrent calls are queued rather than run side by side. A prompt name the repository",
+    "does not declare, a dimension it does not list, an input over the token limit, an image",
+    "part on a pipeline built without `vision: true` or an audio part on one built without",
+    "`audio: true` is refused.",
+)
 
 
 def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
@@ -474,8 +604,13 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     quant_names = " / ".join(sorted(model["quants"]))
     dimensions = config["dimensions"]
     vision = _vision(manifest) is not None
+    audio_config = _audio(manifest)
+    audio = audio_config is not None
     vision_option = (
         ["  // vision: true, // also fetches the vision tower, for image parts"] if vision else []
+    )
+    audio_option = (
+        ["  // audio: true, // also fetches the audio tower, for audio parts"] if audio else []
     )
     image_example = (
         [
@@ -488,7 +623,23 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         if vision
         else []
     )
-    calls = _IMAGE_CALLS if vision else _TEXT_CALLS
+    audio_example = []
+    if audio_config is not None:
+        rate = audio_config["sampleRate"]
+        audio_example = [
+            "",
+            f"// Built with `audio: true`, an audio (mono f32 samples at {rate} Hz) is a",
+            "// content part too:",
+            f"// const audio = {{ data, sampleRate: {rate} }}; // a Float32Array of at most"
+            f" {_audio_seconds(audio_config)} s",
+            '// const clip = await pipeline.embed([{ type: "audio", audio }]);',
+        ]
+    if vision and audio:
+        calls = _IMAGE_AND_AUDIO_CALLS
+    elif audio:
+        calls = _AUDIO_CALLS
+    else:
+        calls = _IMAGE_CALLS if vision else _TEXT_CALLS
     return [
         "## Usage",
         "",
@@ -502,6 +653,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
                 *vision_option,
+                *audio_option,
             ],
             disposable="await using",
         ),
@@ -519,6 +671,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         f'// await pipeline.embed(text, {{ prompt: "query", dimension: {dimensions[-1]} }});'
         f" // available: {_spell(dimensions)}",
         *image_example,
+        *audio_example,
         "```",
         "",
         *calls,
@@ -554,13 +707,26 @@ def _prompts_and_limits(model: Mapping[str, Any]) -> list[str]:
         cell = prefix.replace("|", "\\|")
         lines.append(f"| `{cell}` | {', '.join(f'`{name}`' for name in names)} |")
     vision = config.get("vision")
+    audio = config.get("audio")
     limit = config["maxTokens"]
-    tokens = (
-        f"- **tokens**: at most {limit:,} per text, `<bos>` and `<eos>` included"
-        if vision is None
-        else f"- **tokens**: at most {limit:,} per input, `<bos>` and `<eos>` included; each image"
-        f" counts its soft tokens (at most {vision['softTokenBudget']}) and its two markers"
-    )
+    if vision is None and audio is None:
+        tokens = f"- **tokens**: at most {limit:,} per text, `<bos>` and `<eos>` included"
+    elif audio is None:
+        tokens = (
+            f"- **tokens**: at most {limit:,} per input, `<bos>` and `<eos>` included; each image"
+            f" counts its soft tokens (at most {vision['softTokenBudget']}) and its two markers"
+        )
+    elif vision is None:
+        tokens = (
+            f"- **tokens**: at most {limit:,} per input, `<bos>` and `<eos>` included; each audio"
+            f" counts its soft tokens (at most {audio['maxSoftTokens']}) and its two markers"
+        )
+    else:
+        tokens = (
+            f"- **tokens**: at most {limit:,} per input, `<bos>` and `<eos>` included; each image"
+            f" and each audio counts its soft tokens (at most {vision['softTokenBudget']} for an"
+            f" image, {audio['maxSoftTokens']} for an audio) and its two markers"
+        )
     lines += [
         "",
         f"- **dimensions**: {_spell(config['dimensions'])} (the first is the full vector)",
@@ -595,12 +761,7 @@ def render_embeddinggemma2_model_card(
     return render(
         (
             frontmatter(metadata),
-            introduction(
-                EMBEDDINGGEMMA2_TITLE
-                if _vision(manifest) is None
-                else EMBEDDINGGEMMA2_VISION_TITLE,
-                hf_upstreams(metadata.base_model),
-            ),
+            introduction(_title(manifest), hf_upstreams(metadata.base_model)),
             _overview(manifest),
             [""],
             _base_weights(manifest),

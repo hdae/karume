@@ -354,7 +354,7 @@ describe("a row that held an image", () => {
 
   it("records the image's name, size and RGB8 sha256 beside the text, and no image for a text row", () => {
     const record = assemble([withImage, embedded("b", undefined, [0, 1], "4")], undefined);
-    expect(record.format).toBe("karume-playground-embeddinggemma/2");
+    expect(record.format).toBe("karume-playground-embeddinggemma/3");
     expect(record.request.rows).toEqual([
       {
         text: "a cat",
@@ -366,5 +366,37 @@ describe("a row that held an image", () => {
     ]);
     expect(Object.hasOwn(record.request.rows[1] ?? {}, "image")).toBe(false);
     expect(record.output.similarity[0]?.[1]).toBe(0.8);
+  });
+});
+
+describe("a row that held an audio", () => {
+  const withAudio: MeasuredRow = {
+    ...embedded("a click", undefined, [0.6, 0.8], "5", 33),
+    audio: { name: "click.wav", sampleRate: 16000, samples: 16100, sha256: hex("a") },
+  };
+
+  it("records the audio's name, rate, sample count and f32 sha256 beside the text, and no audio for a text row", () => {
+    const record = assemble([withAudio, embedded("b", undefined, [0, 1], "4")], undefined);
+    expect(record.format).toBe("karume-playground-embeddinggemma/3");
+    expect(record.request.rows).toEqual([
+      {
+        text: "a click",
+        prompt: null,
+        audio: { name: "click.wav", sampleRate: 16000, samples: 16100, sha256: hex("a") },
+        tokens: 33,
+      },
+      { text: "b", prompt: null, tokens: 7 },
+    ]);
+    expect(Object.hasOwn(record.request.rows[1] ?? {}, "audio")).toBe(false);
+  });
+
+  it("records an image and an audio of one row side by side", () => {
+    const both: MeasuredRow = {
+      ...withAudio,
+      image: { name: "cat.png", width: 640, height: 480, rgbSha256: hex("c") },
+    };
+    const [row] = assemble([both], undefined).request.rows;
+    expect(row?.image?.name).toBe("cat.png");
+    expect(row?.audio?.name).toBe("click.wav");
   });
 });

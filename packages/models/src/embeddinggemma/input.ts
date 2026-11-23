@@ -1,35 +1,46 @@
 /**
  * What one `embed` call becomes on the host before the GPU is touched: the input → its content
- * parts → the token ids (text runs and image blocks), the images' places, and the width of the
- * result; and, after the run, the leading slice of a shorter width.
+ * parts → the token ids (text runs, image blocks and audio blocks), the images' and the audios'
+ * places, and the width of the result; and, after the run, the leading slice of a shorter width.
  *
  * ## The input: a string, or an array of content parts
  *
- * A string is one text part. An array is read in order; its parts are `{ type: "text", text }` and
+ * A string is one text part. An array is read in order; its parts are `{ type: "text", text }`,
  * `{ type: "image", image }` (the shape of Gemma chat's content parts; the image is decoded RGB8 —
- * `Rgb8Image`). An empty array is refused, and so is a part of any type the pipeline does not
- * accept (the message names the type and the accepted ones): an image part is accepted only by a
- * pipeline built with the vision tower (`PipelineOptions.vision`), and its refusal says so.
+ * `Rgb8Image`) and `{ type: "audio", audio }` (mono f32 samples at 16 kHz — `MonoAudio`). An empty
+ * array is refused, and so is a part of any type the pipeline does not accept (the message names the
+ * type and the accepted ones): an image part is accepted only by a pipeline built with the vision
+ * tower (`PipelineOptions.vision`), an audio part only by one built with the audio tower
+ * (`PipelineOptions.audio`), and each refusal says so.
+ *
+ * An audio is refused unless it is 16,000 Hz (nothing is resampled — the caller resamples), at
+ * most 480,000 samples (30 s — upstream's feature extractor truncates a longer one silently; here
+ * nothing is truncated), long enough for one mel frame (more than 160 samples) and finite in every
+ * sample.
  *
  * ## The sequence (upstream's sentence-transformers path)
  *
  * `<bos>`, then the parts in order, then `<eos>`. Adjacent text parts — and the prompt's prefix in
  * front of the first part — are joined with nothing between them into one string, tokenized on its
  * own; an image is `<|image>`, its n soft tokens (each the image placeholder id) and `<image|>`, with
- * no separator on either side. The image ids are written by the host and never pass through the
- * tokenizer, and a text run is tokenized as upstream's whole string tokenizes it (its added
- * vocabulary splits around those spellings). An input that starts with an image under a prompt
+ * no separator on either side, and an audio is `<|audio>`, its n soft tokens (each the audio
+ * placeholder id) and `<audio|>` the same way. The ids of both are written by the host and never
+ * pass through the tokenizer, and a text run is tokenized as upstream's whole string tokenizes it
+ * (its added vocabulary splits around those spellings). An input that starts with an image under a prompt
  * gets the prefix as a run of its own before the image (sentence-transformers renders the prompt
  * as a leading system message, before the first part). For a text-only input the sequence is the
  * prefix and the joined text, tokenized once with `<bos>` … `<eos>` — the text path as it was.
  *
  * n comes from the image's size alone: the aspect-preserving resize rule at
- * `pipelineConfig.vision.softTokenBudget` (upstream's default, 280 — {@link imageSoftTokens}).
+ * `pipelineConfig.vision.softTokenBudget` (upstream's default, 280 — {@link imageSoftTokens}); and
+ * from the audio's length alone: `ceil(L / 4)` of its `L = ceil(samples / 160) − 1` mel frames
+ * (`./audio.ts` — 25 for 1 s, 750 for 30 s).
  *
  * Placeholders are never written in text: a text run whose tokens include a placeholder id is
  * refused (the text tower alone has no use for them — upstream's composite model replaces such an
  * id with the pad id before the lookup, and sentence-transformers refuses the text). The begin /
- * end markers of an image in text are tokens like any other, as upstream tokenizes them.
+ * end markers of an image or an audio in text are tokens like any other, as upstream tokenizes
+ * them.
  *
  * ## The rest of a request
  *
@@ -38,12 +49,12 @@
  * - `dimension` — one of the declared widths; default the full width. A shorter width is the
  *   leading slice of the unit vector, re-normalised to unit length ({@link truncateEmbedding}).
  * - The token sequence with `<bos>` and `<eos>` (the tokenizer asset's post-processor) may not
- *   exceed the declared maximum; every image counts its n soft tokens and its two markers. Nothing
- *   is truncated silently.
+ *   exceed the declared maximum; every image and every audio counts its n soft tokens and its two
+ *   markers. Nothing is truncated silently.
  *
  * `tokenize` takes the same step from the input and the prompt to the token ids
- * ({@link tokenizeEmbedInput} — an image's soft rows as the placeholder id) and stops there: the
- * limit and the placeholder refusal are `embed`'s.
+ * ({@link tokenizeEmbedInput} — the soft rows of an image or an audio as its placeholder id) and
+ * stops there: the limit and the placeholder refusal are `embed`'s.
  *
  * Every refusal of the request is a `ModelInputError` (fixing the input makes it pass — ADR 0107);
  * a tokenizer asset that does not fit the manifest is a plain `Error` raised at construction
@@ -58,16 +69,22 @@ import type { PipelineVisionConfig } from "../gemma/config.ts";
 import type { Tokenizer } from "../gemma/text/tokenizer.ts";
 import { imageSoftTokens } from "../gemma/vision.ts";
 import { assertRgb8, type Rgb8Image } from "../image/preprocess.ts";
-import type { EmbeddingGemmaPipelineConfig } from "./config.ts";
+import { AUDIO_MAX_SAMPLES, audioSoftTokens, audioValidFrames, type MonoAudio } from "./audio.ts";
+import type { EmbeddingGemmaPipelineConfig, PipelineAudioConfig } from "./config.ts";
 
 /** The message prefix (the class name). */
 const OWNER = "embeddinggemma.Pipeline";
 
-/** One part of an input given as an array: a text, or a decoded RGB8 image (Gemma chat's shape). */
+/**
+ * One part of an input given as an array: a text, a decoded RGB8 image or a mono 16 kHz audio
+ * (Gemma chat's shape).
+ */
 export type EmbedContentPart =
   | { readonly type: "text"; readonly text: string }
   /** Accepted by a pipeline built with the vision tower (`PipelineOptions.vision`). */
-  | { readonly type: "image"; readonly image: Rgb8Image };
+  | { readonly type: "image"; readonly image: Rgb8Image }
+  /** Accepted by a pipeline built with the audio tower (`PipelineOptions.audio`). */
+  | { readonly type: "audio"; readonly audio: MonoAudio };
 
 /** Options for one call of `embed`. */
 export type EmbedOptions = {
@@ -93,9 +110,12 @@ export type EmbedOptions = {
 /** Options for one call of `tokenize`: the prompt, as `embed` takes it. */
 export type TokenizeOptions = Pick<EmbedOptions, "prompt">;
 
-/** The part types of a pipeline without the vision tower, and of one with it. */
-const TEXT_PART_TYPES: readonly string[] = ["text"];
-const IMAGE_PART_TYPES: readonly string[] = ["text", "image"];
+/** The part types a pipeline accepts: text, then image with the vision tower, audio with the audio one. */
+const partTypes = (rules: EmbedTextRules): readonly string[] => [
+  "text",
+  ...(rules.images === undefined ? [] : ["image"]),
+  ...(rules.audio === undefined ? [] : ["audio"]),
+];
 
 /**
  * The divisor floor of the re-normalisation (upstream's `torch.nn.functional.normalize` default,
@@ -117,12 +137,25 @@ export type EmbedTextRules = {
    * image part is refused.
    */
   readonly images?: PipelineVisionConfig;
+  /**
+   * The audio rules (`pipelineConfig.audio`) when the pipeline holds the audio tower; absent, an
+   * audio part is refused.
+   */
+  readonly audio?: PipelineAudioConfig;
 };
 
 /** One image of a request: where its soft rows start in the sequence and how many there are. */
 export type EmbedImageBlock = {
   readonly image: Rgb8Image;
   /** The row of its first soft token (just after its `<|image>`). */
+  readonly start: number;
+  readonly softTokens: number;
+};
+
+/** One audio of a request: where its soft rows start in the sequence and how many there are. */
+export type EmbedAudioBlock = {
+  readonly audio: MonoAudio;
+  /** The row of its first soft token (just after its `<|audio>`). */
   readonly start: number;
   readonly softTokens: number;
 };
@@ -135,6 +168,8 @@ export type EmbedRequest = {
   readonly dimension: number;
   /** The images, in sequence order (none for a text). */
   readonly images: readonly EmbedImageBlock[];
+  /** The audios, in sequence order (none for a text). */
+  readonly audios: readonly EmbedAudioBlock[];
 };
 
 /** A value as a refusal message shows it. */
@@ -153,6 +188,7 @@ const shown = (value: unknown): string =>
  * MUST (`images`): the two image markers are added tokens of the asset too — they are upstream's
  * spellings of the ids the host writes around an image, so an id that is another token would be
  * a sequence upstream never sees.
+ * MUST (`audio`): the two audio markers likewise.
  */
 export const embedTextRules = (
   tokenizer: Tokenizer,
@@ -160,6 +196,8 @@ export const embedTextRules = (
   options: {
     /** The pipeline holds the vision tower: image parts are accepted (`pipelineConfig.vision`). */
     readonly images?: boolean;
+    /** The pipeline holds the audio tower: audio parts are accepted (`pipelineConfig.audio`). */
+    readonly audio?: boolean;
   } = {},
 ): EmbedTextRules => {
   if (tokenizer.postProcessor !== "bos-eos") {
@@ -197,15 +235,33 @@ export const embedTextRules = (
     );
   }
   const rules = { tokenizer, config, placeholders, bos, eos };
-  if (options.images !== true) return rules;
-  const { vision } = config;
-  if (vision === undefined) {
-    throw new Error(`${OWNER}: image input was asked for, but pipelineConfig declares no 'vision'`);
+  const images = options.images === true ? config.vision : undefined;
+  if (options.images === true) {
+    if (images === undefined) {
+      throw new Error(
+        `${OWNER}: image input was asked for, but pipelineConfig declares no 'vision'`,
+      );
+    }
+    for (const key of ["beginImageTokenId", "endImageTokenId"] as const) {
+      addedSpelling(images[key], `${OWNER}: pipelineConfig.vision.${key} (id ${images[key]})`);
+    }
   }
-  for (const key of ["beginImageTokenId", "endImageTokenId"] as const) {
-    addedSpelling(vision[key], `${OWNER}: pipelineConfig.vision.${key} (id ${vision[key]})`);
+  const audio = options.audio === true ? config.audio : undefined;
+  if (options.audio === true) {
+    if (audio === undefined) {
+      throw new Error(
+        `${OWNER}: audio input was asked for, but pipelineConfig declares no 'audio'`,
+      );
+    }
+    for (const key of ["beginAudioTokenId", "endAudioTokenId"] as const) {
+      addedSpelling(audio[key], `${OWNER}: pipelineConfig.audio.${key} (id ${audio[key]})`);
+    }
   }
-  return { ...rules, images: vision };
+  return {
+    ...rules,
+    ...(images === undefined ? {} : { images }),
+    ...(audio === undefined ? {} : { audio }),
+  };
 };
 
 /** The prefix of the requested prompt ("" without one). */
@@ -263,19 +319,104 @@ const imageOfPart = (part: Record<string, unknown>, where: string): Rgb8Image =>
   return pixels;
 };
 
+/**
+ * Why an audio part is refused by a pipeline without the audio tower: how to build one that takes
+ * it, or that the distribution has none.
+ */
+const audioRefusal = (config: EmbeddingGemmaPipelineConfig): string =>
+  config.audio === undefined
+    ? " (this model's distribution ships no audio tower)"
+    : "; audio parts need the audio tower — build the pipeline with { audio: true }" +
+      " (Pipeline.fromPretrained / Pipeline.fromAssets)";
+
+/** Whether `value` is f32 samples over an `ArrayBuffer` (what {@link MonoAudio} holds). */
+const isSampleArray = (value: unknown): value is Float32Array<ArrayBuffer> =>
+  value instanceof Float32Array && value.buffer instanceof ArrayBuffer;
+
+/**
+ * Reads the audio of an audio part (mono f32 samples and their rate) and refuses one the front end
+ * cannot take as it is (the module doc): another rate, longer than 30 s, too short for one frame,
+ * more soft tokens than the declared bound, or a non-finite sample.
+ */
+const audioOfPart = (
+  part: Record<string, unknown>,
+  where: string,
+  rules: PipelineAudioConfig,
+): MonoAudio => {
+  const audio = part["audio"];
+  const data = isRecord(audio) ? audio["data"] : undefined;
+  if (!isRecord(audio) || !isSampleArray(data)) {
+    throw new ModelInputError(
+      `${where} is an audio part whose audio is not mono f32 samples (data: a Float32Array over an` +
+        " ArrayBuffer, sampleRate)",
+    );
+  }
+  const { sampleRate } = audio;
+  if (typeof sampleRate !== "number") {
+    throw new ModelInputError(
+      `${where} is an audio part whose sampleRate is not a number (${shown(sampleRate)})`,
+    );
+  }
+  if (sampleRate !== rules.sampleRate) {
+    throw new ModelInputError(
+      `${where} is audio at ${sampleRate} Hz — this model takes ${rules.sampleRate} Hz mono samples` +
+        ` only, and nothing is resampled; resample it to ${rules.sampleRate} Hz first`,
+    );
+  }
+  const samples = data.length;
+  if (samples > AUDIO_MAX_SAMPLES) {
+    throw new ModelInputError(
+      `${where} is ${samples} samples (${(samples / sampleRate).toFixed(2)} s), over the` +
+        ` ${AUDIO_MAX_SAMPLES} (${AUDIO_MAX_SAMPLES / sampleRate} s) this model reads — nothing is` +
+        " truncated; shorten the audio or split it",
+    );
+  }
+  const frames = audioValidFrames(samples);
+  if (frames === 0) {
+    throw new ModelInputError(
+      `${where} is ${samples} samples, too short for one mel frame (more than 160 samples — 10 ms —` +
+        " are needed)",
+    );
+  }
+  const softTokens = audioSoftTokens(frames);
+  if (softTokens > rules.maxSoftTokens) {
+    throw new ModelInputError(
+      `${where} is ${samples} samples, ${softTokens} soft tokens — over the ${rules.maxSoftTokens}` +
+        " this model's audio tower takes; nothing is truncated — shorten the audio or split it",
+    );
+  }
+  for (let sample = 0; sample < samples; sample += 1) {
+    if (!Number.isFinite(data[sample])) {
+      throw new ModelInputError(
+        `${where} is an audio whose sample ${sample} is non-finite (${String(data[sample])})`,
+      );
+    }
+  }
+  return { data, sampleRate };
+};
+
 /** Reads one part of an array input. */
 const contentPart = (part: unknown, index: number, rules: EmbedTextRules): EmbedContentPart => {
   const where = `${OWNER}: content part ${index}`;
   if (!isRecord(part)) throw new ModelInputError(`${where} is not an object (${shown(part)})`);
   const type = part["type"];
-  const accepted = rules.images === undefined ? TEXT_PART_TYPES : IMAGE_PART_TYPES;
+  const accepted = partTypes(rules);
   if (typeof type !== "string" || !accepted.includes(type)) {
     throw new ModelInputError(
       `${where} has type ${shown(type)} — this model accepts ${accepted.map(shown).join(" / ")} parts` +
-        (type === "image" ? imageRefusal(rules.config) : ""),
+        (type === "image" ? imageRefusal(rules.config) : "") +
+        (type === "audio" ? audioRefusal(rules.config) : ""),
     );
   }
   if (type === "image") return { type: "image", image: imageOfPart(part, where) };
+  if (type === "audio") {
+    if (rules.audio === undefined) {
+      throw new Error(
+        `${OWNER}: internal inconsistency: an audio part was accepted without audio rules`,
+      );
+    }
+    return { type: "audio", audio: audioOfPart(part, where, rules.audio) };
+  }
   const text = part["text"];
   if (typeof text !== "string") {
     throw new ModelInputError(
@@ -302,7 +443,7 @@ const contentParts = (input: unknown, rules: EmbedTextRules): readonly EmbedCont
   return parts.map((part, index) => contentPart(part, index, rules));
 };
 
-/** Refuses a token sequence holding a declared placeholder id outside every image (module doc). */
+/** Refuses a token sequence holding a declared placeholder id outside every soft block (module doc). */
 const assertNoPlaceholder = (
   placeholders: ReadonlyMap<number, string>,
   sequence: InputSequence,
@@ -320,51 +461,73 @@ const assertNoPlaceholder = (
   }
 };
 
+/** The soft blocks of an input: how many images and audios it holds. */
+export type SoftBlockCounts = { readonly images: number; readonly audios: number };
+
 /**
- * How the token count of an input with `images` images is made up (the wording of the refusals of
- * the model's limit here and of the device's limit in `pipeline.ts`).
+ * How the token count of an input with these soft blocks is made up (the wording of the refusals
+ * of the model's limit here and of the device's limit in `pipeline.ts`).
  *
  * NOTE: the `export` is for the pipeline (not on `mod.ts` / the subpath surface — ADR 0008).
  */
-export const tokenCountIncludes = (images: number): string =>
-  images === 0
+export const tokenCountIncludes = ({ images, audios }: SoftBlockCounts): string => {
+  const blocks = [
+    ...(images === 0 ? [] : [images === 1 ? "the image" : `${images} images`]),
+    ...(audios === 0 ? [] : [audios === 1 ? "the audio" : `${audios} audios`]),
+  ];
+  return blocks.length === 0
     ? "<bos> and <eos> included"
-    : `<bos>, <eos> and the soft tokens of ${images === 1 ? "the image" : `${images} images`} with` +
-      " their two markers each included";
+    : `<bos>, <eos> and the soft tokens of ${blocks.join(" and ")} with their two markers each` +
+        " included";
+};
+
+/**
+ * What shortens an input over a token limit, by what it holds (the end of both refusals).
+ *
+ * NOTE: the `export` is for the pipeline (not on `mod.ts` / the subpath surface — ADR 0008).
+ */
+export const tokenLimitRemedy = ({ images, audios }: SoftBlockCounts): string => {
+  if (images === 0 && audios === 0) return "shorten the text or split it";
+  if (audios === 0) return "shorten the text or pass fewer images";
+  if (images === 0) return "shorten the text or pass fewer or shorter audios";
+  return "shorten the text or pass fewer images or audios";
+};
 
 /** Refuses a token sequence longer than the declared maximum (nothing is truncated). */
-const assertTokenLimit = (count: number, maxTokens: number, images: number): void => {
+const assertTokenLimit = (count: number, maxTokens: number, blocks: SoftBlockCounts): void => {
   if (count <= maxTokens) return;
   throw new ModelInputError(
-    `${OWNER}: the input is ${count} tokens (${tokenCountIncludes(images)}), over this model's limit of` +
-      ` ${maxTokens} — nothing is truncated; ${images === 0 ? "shorten the text or split it" : "shorten the text or pass fewer images"}`,
+    `${OWNER}: the input is ${count} tokens (${tokenCountIncludes(blocks)}), over this model's limit of` +
+      ` ${maxTokens} — nothing is truncated; ${tokenLimitRemedy(blocks)}`,
   );
 };
 
-/** An input as token ids: the whole sequence, where its text runs lie and where its images do. */
+/** An input as token ids: the whole sequence, where its text runs lie and where its soft blocks do. */
 type InputSequence = {
   readonly ids: readonly number[];
   /** `[start, end)` of every text run's ids (the placeholder refusal reads these only). */
   readonly textRanges: readonly (readonly [number, number])[];
   readonly images: readonly EmbedImageBlock[];
+  readonly audios: readonly EmbedAudioBlock[];
 };
 
 /**
  * The one step from an input to its token ids, shared by {@link tokenizeEmbedInput} and
  * {@link planEmbedRequest} (module doc, "The sequence"): `<bos>`, the prefix and the parts — each
- * run of adjacent text tokenized as one string, each image as its block — then `<eos>`. It refuses
- * only an input it cannot read (the parts, an image's size); the limit and the placeholders are the
- * request's checks.
+ * run of adjacent text tokenized as one string, each image and each audio as its block — then
+ * `<eos>`. It refuses only an input it cannot read (the parts, an image's size, an audio's rate,
+ * length and samples); the limit and the placeholders are the request's checks.
  */
 const inputSequence = (
   rules: EmbedTextRules,
   prefix: string,
   input: string | readonly EmbedContentPart[],
 ): InputSequence => {
-  const { tokenizer, images: vision } = rules;
+  const { tokenizer, images: vision, audio: audioRules } = rules;
   const ids: number[] = [rules.bos];
   const textRanges: (readonly [number, number])[] = [];
   const images: EmbedImageBlock[] = [];
+  const audios: EmbedAudioBlock[] = [];
   let run = prefix;
   const flush = (): void => {
     const start = ids.length;
@@ -376,6 +539,20 @@ const inputSequence = (
   for (const part of contentParts(input, rules)) {
     if (part.type === "text") {
       run += part.text;
+      continue;
+    }
+    if (part.type === "audio") {
+      if (audioRules === undefined) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: an audio part was read without audio rules`,
+        );
+      }
+      flush();
+      const softTokens = audioSoftTokens(audioValidFrames(part.audio.data.length));
+      ids.push(audioRules.beginAudioTokenId);
+      audios.push({ audio: part.audio, start: ids.length, softTokens });
+      for (let row = 0; row < softTokens; row += 1) ids.push(audioRules.audioTokenId);
+      ids.push(audioRules.endAudioTokenId);
       continue;
     }
     if (vision === undefined) {
@@ -392,7 +569,7 @@ const inputSequence = (
   }
   flush();
   ids.push(rules.eos);
-  return { ids, textRanges, images };
+  return { ids, textRanges, images, audios };
 };
 
 /**
@@ -413,9 +590,10 @@ export const tokenizeEmbedInput = (
   Int32Array.from(inputSequence(rules, promptPrefix(rules.config, options.prompt), input).ids);
 
 /**
- * Turns one request into token ids, its images' places and the result width, or refuses it with a
- * `ModelInputError` (the module doc). Pure: no GPU, no state — an image is read for its size only
- * (its pixels are the pipeline's, at issue).
+ * Turns one request into token ids, its images' and audios' places and the result width, or refuses
+ * it with a `ModelInputError` (the module doc). Pure: no GPU, no state — an image is read for its
+ * size only and an audio for its rate, its length and the finiteness of its samples (the pixels and
+ * the frames are the pipeline's, at issue).
  *
  * NOTE: the `export` is for the pipeline and its host tests (not on `mod.ts` / the subpath
  * surface — ADR 0008).
@@ -430,8 +608,16 @@ export const planEmbedRequest = (
   const dimension = outputDimension(config, options.dimension);
   const sequence = inputSequence(rules, prefix, input);
   assertNoPlaceholder(rules.placeholders, sequence);
-  assertTokenLimit(sequence.ids.length, config.maxTokens, sequence.images.length);
-  return { ids: Int32Array.from(sequence.ids), dimension, images: sequence.images };
+  assertTokenLimit(sequence.ids.length, config.maxTokens, {
+    images: sequence.images.length,
+    audios: sequence.audios.length,
+  });
+  return {
+    ids: Int32Array.from(sequence.ids),
+    dimension,
+    images: sequence.images,
+    audios: sequence.audios,
+  };
 };
 
 /**

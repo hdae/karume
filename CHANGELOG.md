@@ -38,7 +38,7 @@ measurements in `docs/research/`.
   family, today the text model of EmbeddingGemma 2 (pipeline `embeddinggemma/1`; its distribution is not published —
   a local one is passed as a source handle). `Pipeline.fromPretrained` / `fromAssets` build it with one resident
   Session; `embed(input, { prompt, dimension, signal })` returns a unit vector (`Float32Array`). `input` is a string
-  or an array of `EmbedContentPart`s (text parts, concatenated in order; image parts with `vision: true` — the next entry); `prompt` names a prompt of the
+  or an array of `EmbedContentPart`s (text parts, concatenated in order; image parts with `vision: true` and audio parts with `audio: true` — the next entries); `prompt` names a prompt of the
   manifest (`"query"`, `"document"`, …) whose prefix goes before the text; `dimension` is one of the declared widths
   (768 / 512 / 256 / 128 — a shorter one is the leading slice re-normalised). A `ModelInputError` refuses, before the
   GPU, an empty part list, a part of another type, an unknown prompt or width, a text whose tokens include an image,
@@ -66,6 +66,19 @@ measurements in `docs/research/`.
   with a `ModelInputError` that says so, nothing of the tower is fetched, and a text call is unchanged. The manifest's
   `pipelineConfig` gains the optional `vision` (the shape of `gemma.Pipeline`'s); `onRunDiagnostics` still reports the
   text graph's runs only.
+- `@karume/models/embeddinggemma`: audio input. `PipelineOptions.audio: true` also fetches the distribution's audio
+  tower (the weights role `audio`, the checkpoint's bf16 values in both presets, about 560 MiB) and opens its Session;
+  `embed` and `tokenize` then take audio parts `{ type: "audio", audio }` beside text and image parts, `audio` mono f32
+  samples at 16,000 Hz (`MonoAudio` — `{ data, sampleRate }`, the shape of `decodeWav`'s result —, now exported by the
+  subpath). The host computes the audio's log-mel frames itself (upstream's `Gemma4AudioFeatureExtractor` as the
+  checkpoint configures it, every step in f64), and the audio is `<|audio>`, one soft token per 40 ms
+  (`ceil(L / 4)` of its `L = ceil(samples / 160) − 1` frames — 750 for 30 s) and `<audio|>` in the sequence, counted
+  toward the token limits; one tower run per audio, in the order of the parts, image runs included. A
+  `ModelInputError` refuses, before the GPU, an audio at another rate (nothing is resampled), one over 480,000
+  samples (30 s; upstream's feature extractor truncates it silently, Karume does not truncate), one of at most 160
+  samples (no frame), one holding a non-finite sample, and an audio part on a pipeline built without `audio: true`.
+  The manifest's `pipelineConfig` gains the optional `audio` (the three audio ids, `hiddenSize`, `maxSoftTokens`,
+  `sampleRate`). `vision` and `audio` may be on together; a text call on such a pipeline keeps its vector bit for bit.
 - IR: the optional attr `band` (an integer ≥ 0) of `attention` without a states field — key column `n` is visible to
   query row `m` iff `|m − n| ≤ band` — which `@karume/runtime` checks inside the score kernel from positions, so a
   sliding-window band needs no mask tensor. On finite scores it gives the output of the same node fed the band as an

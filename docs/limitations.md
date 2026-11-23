@@ -1935,15 +1935,16 @@ implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` �
 only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
 is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
-## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text and images only, no batch
+## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text, images and 16 kHz audio of at most 30 s, no batch
 
 The model `text` of the local distribution `karume-embeddinggemma-2` (not published) — the text tower,
-and the vision tower with `vision: true` — through `@karume/models/embeddinggemma`:
+the vision tower with `vision: true` and the audio tower with `audio: true` — through
+`@karume/models/embeddinggemma`:
 
 - **One sequence per call, no batch, no padding.** `embed` takes one input and returns one vector;
-  concurrent calls queue on the pipeline, and the images of one call run through the tower one at a
-  time, each read back to the host before the text graph runs (no batching of images, no GPU-side
-  handoff). The graph runs the symbolic length T of one sequence with
+  concurrent calls queue on the pipeline, and the images and audios of one call run through their
+  towers one at a time, each read back to the host before the text graph runs (no batching of images
+  or audios, no GPU-side handoff). The graph runs the symbolic length T of one sequence with
   no run-time mask: the 20 sliding layers declare their window as `attrs.band` 512 on the attention
   (ADR [0155](decisions/0155-attention-band.md) — checked in the score kernel from positions; the
   "Attention band" section below), the 4 full layers see every position, and nothing marks a key as
@@ -1977,12 +1978,8 @@ and the vision tower with `vision: true` — through `@karume/models/embeddingge
 - **Every score is still computed.** The band removes the mask tensor, not the quadratic work: on
   the sliding layers ①QK and ③PV compute all `T × T` scores, while each query row sees at most
   1,025 of the 8,192 keys at the bound (12.5%).
-- **Text and images; no audio, no video yet.** The distribution holds the text tower and the vision
-  tower (a video, frames through the same tower, is not taken yet). The audio tower exists as series
-  only (`embeddinggemma-2-audio`, 1,173,714,150 bytes of f32 weights; `-bf16`, 587,590,521 bytes —
-  not carried by the distribution yet): its graph takes at most 750 soft tokens, the 30 s upstream's
-  front end truncates an audio to, and on the RTX 3080 Ti a 30 s audio runs in about 94 ms once its
-  plan (126.0 MiB) exists.
+- **Text, images and audio; no video yet.** The distribution holds the text tower and both other
+  towers (a video, frames through the vision tower, is not taken yet).
   An image is an image part of decoded **RGB8** pixels (`Rgb8Image`) — the caller decodes it (no
   PNG / JPEG decoder is included, alpha is not taken, colour management and EXIF orientation are the
   decoder's); the host resizes it with torch's uint8 bicubic port, as upstream's processor does on a
@@ -2009,12 +2006,47 @@ and the vision tower with `vision: true` — through `@karume/models/embeddingge
   `requiredLimits`: an image of 280 soft tokens embeds to the same bits on a device whose binding and
   buffer limits are capped at 128 MiB (`i8`) or 256 MiB (`bf16`). `onRunDiagnostics` reports the
   text graph's runs only.
+- **An audio is mono f32 samples at 16,000 Hz, at most 30 s.** An audio part holds `MonoAudio`
+  (`{ data, sampleRate }`): the caller decodes and resamples (no WAV / MP3 / Opus decoder and no
+  resampler in the pipeline — `decodeWav` of the barrel reads WAV but does not resample; the
+  Playground resamples with the browser's Web Audio, whose resampler is not specified, so another
+  browser can give other samples of the same file). Another rate is refused with a
+  `ModelInputError` that says to resample. More than 480,000 samples (30 s) is refused: upstream's
+  feature extractor cuts a longer audio to its first 30 s **silently**, Karume never truncates, so
+  an audio over 30 s embeds in upstream but is refused here (split it, or cut it yourself). An audio
+  of at most 160 samples (10 ms) has no complete mel frame and is refused (upstream gives it no soft
+  token); a non-finite sample is refused. One soft token stands for 40 ms (`ceil(L / 4)` of the
+  `L = ceil(samples / 160) − 1` valid frames — 25 for 1 s, 750 for 30 s), plus two markers, counted
+  toward the 8,192-token limit.
+- **The audio front end is computed on the host, in f64, so its frames are not upstream's bits.**
+  The log-mel frames are upstream's `Gemma4AudioFeatureExtractor` as the checkpoint configures it
+  (160 zeros prepended, frames of 320 by a hop of 160, a periodic Hann window, an rfft of 512, the
+  magnitude, 128 HTK mel filters 0–8,000 Hz, `ln(mel + 0.001)`), every step in f64 and rounded to
+  f32 once; upstream (numpy 2) runs the window and the FFT in f32. Measured on the fixture's three
+  waveforms (2026-11-22): the host frames equal upstream's code run in f64 then rounded to f32, value
+  for value, and differ from upstream's own frames by up to 5.12e-4 (log-mel values of −6.9 to about
+  5; the near-silent bins, where the logarithm magnifies numpy's f32 rounding) — through the tower
+  that is up to 2.6e-3 on the soft tokens and 2.45e-5 on the `bf16` vector (cosine 0.99999998; with
+  upstream's own frames the vector is within 3.3e-7). The other settings of the feature extractor
+  (preemphasis, dither, per-bin normalisation, FFT overdrive) are not implemented; the dist recipe
+  refuses a snapshot that turns one on. The frames of a 30 s audio take about 34 ms in V8 (Node, the
+  development machine) and 1.5 MiB.
+- **The audio tower is fetched and resident only with `audio: true`** — 560.4 MiB of weights more in
+  either preset (587,590,521 bytes: its linears and convolutions bf16 as the checkpoint stores them,
+  the norms, biases and folded constants f32; the `i8` preset rounds the text tower alone), and a
+  Session whose plan at 750 soft tokens is 126.0 MiB (4.2 MiB at 1 s), measured on the RTX 3080 Ti
+  under Node (2026-11-22). It adds no `requiredLimits`: its largest intermediate is 46.9 MiB at
+  30 s, and a 30 s audio embeds to the same bits on a device whose binding and buffer limits are
+  capped at 128 MiB (`i8`) or 256 MiB (`bf16`). A 30 s audio's tower run takes about 94 ms once its
+  plan exists. Its runs are not in `onRunDiagnostics` either.
 - **Each image is preprocessed synchronously when `embed` is called, and its rows are held while the
   call waits.** The resize and the patch rows run in JS on the caller's thread at issue (so a later
   write into the pixels does not reach the call), before the call takes its turn on the pipeline's
   queue: about 7.7 MB of f32 rows per image at 280 soft tokens (2,520 × 768), kept until the call
   has run. Many queued calls with large images block the event loop during each resize and hold their
   rows at once (20 queued calls of 29 such images would hold about 4.5 GB); nothing bounds the queue.
+  An audio is read the same way: its frames are computed at issue and held until the call runs
+  (1.5 MiB for 30 s).
 - **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
   checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
   int8 — a 323,958,272-byte container against 592,932,991). The int8 rounding moves each embedding

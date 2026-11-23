@@ -26,9 +26,10 @@ import { type EmbeddingStats, embeddingStats, similarityMatrix } from "./similar
 
 /**
  * The version of the saved record; bump it when a field changes meaning or goes away. `/2`: a row
- * may hold an image (`image`), and its `tokens` then count the image's soft tokens too.
+ * may hold an image (`image`), and its `tokens` then count the image's soft tokens too. `/3`: a
+ * row may hold an audio (`audio`), and its `tokens` then count the audio's soft tokens too.
  */
-export const RECORD_FORMAT = "karume-playground-embeddinggemma/2";
+export const RECORD_FORMAT = "karume-playground-embeddinggemma/3";
 
 /** The image a row sent (embedded after its text). */
 export type RowImageRecord = {
@@ -39,18 +40,31 @@ export type RowImageRecord = {
   readonly rgbSha256: string;
 };
 
+/** The audio a row sent (embedded after its text and image), as the pipeline got it. */
+export type RowAudioRecord = {
+  /** The file's name. */
+  readonly name: string;
+  /** The rate of the samples (the browser resampled the file to it). */
+  readonly sampleRate: number;
+  /** The number of mono samples. */
+  readonly samples: number;
+  /** sha256 of the mono f32 samples (little-endian) the pipeline was given. */
+  readonly sha256: string;
+};
+
 /**
- * One row as it was sent: the text as typed, the prompt name (null = none), its image (absent for a
- * text row) and the token count `tokenize` gave for them (the prefix, `<bos>` and `<eos>` and an
- * image's soft tokens with its two markers included — over `maxTokens` for a row the pipeline
- * refused for the model's limit, at or below it for a row refused for the device's smaller buffer
- * limit; null when the pipeline could not tokenize the row: an undeclared prompt, an image on a
- * pipeline without the vision tower).
+ * One row as it was sent: the text as typed, the prompt name (null = none), its image and its audio
+ * (absent when the row has none) and the token count `tokenize` gave for them (the prefix, `<bos>`
+ * and `<eos>` and an image's or an audio's soft tokens with its two markers included — over
+ * `maxTokens` for a row the pipeline refused for the model's limit, at or below it for a row refused
+ * for the device's smaller buffer limit; null when the pipeline could not tokenize the row: an
+ * undeclared prompt, an image or an audio on a pipeline without its tower, an audio it refuses).
  */
 export type RowRequestRecord = {
   readonly text: string;
   readonly prompt: string | null;
   readonly image?: RowImageRecord;
+  readonly audio?: RowAudioRecord;
   readonly tokens: number | null;
 };
 
@@ -64,8 +78,9 @@ export type RowOutputRecord =
       /** sha256 of the vector's raw f32 bytes (little-endian). */
       readonly sha256: string;
       /**
-       * Seconds of the `embed` call (host tokenization and image preprocessing, the vision tower's
-       * run for an image, the text Session's run, readback).
+       * Seconds of the `embed` call (host tokenization, image preprocessing and an audio's
+       * log-mel frames, the vision tower's run for an image and the audio tower's for an audio, the
+       * text Session's run, readback).
        */
       readonly embedSeconds: number;
     })
@@ -114,7 +129,7 @@ export type EmbeddingGemmaRecord = RecordEnvironment & {
   };
   /**
    * The model Session's diagnostics over this run's embeddings (one report per embedded row; the
-   * vision tower's runs are not reported by the pipeline, so they are not in it).
+   * towers' runs are not reported by the pipeline, so they are not in it).
    */
   readonly diagnostics: { readonly model?: ModelSessionRecord };
 };
@@ -153,8 +168,10 @@ export const modelDiagnostics = (
 export type MeasuredRow = {
   readonly text: string;
   readonly prompt: string | undefined;
-  /** The row's image (`undefined` for a text row). */
+  /** The row's image (`undefined` for a row without one). */
   readonly image?: RowImageRecord;
+  /** The row's audio (`undefined` for a row without one). */
+  readonly audio?: RowAudioRecord;
   /** The row's token count (`rowTokenCount`); `undefined` when it could not be tokenized. */
   readonly tokens: number | undefined;
   readonly embedMs: number;
@@ -209,10 +226,11 @@ export const assembleRecord = (input: {
     },
     request: {
       dimension: input.dimension,
-      rows: rows.map(({ text, prompt, image, tokens }) => ({
+      rows: rows.map(({ text, prompt, image, audio, tokens }) => ({
         text,
         prompt: prompt ?? null,
         ...(image === undefined ? {} : { image }),
+        ...(audio === undefined ? {} : { audio }),
         tokens: tokens ?? null,
       })),
     },

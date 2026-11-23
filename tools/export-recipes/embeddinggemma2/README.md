@@ -6,7 +6,8 @@ distribution `karume-embeddinggemma-2`, which is built as a local mirror only (n
 published). The **text tower** of `google/embeddinggemma-2` is the distribution's one model, `text`;
 the **vision tower** is exported as series of its own (`export_vision.py`) and ships in the same
 model as the weights role `vision` (since 2026-11-22), and the **audio tower** is exported as series
-of its own (`export_audio.py`, since 2026-11-22; not in the distribution yet).
+of its own (`export_audio.py`) and ships in the same model as the weights role `audio` (since
+2026-11-22).
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstring of `export.py`; this file is the entry point only. Every file a
@@ -186,15 +187,15 @@ values — and 107 f32: the norms and the two RoPE tables, which sit in an `embe
 are not bf16 values and are kept f32 explicitly). Its goldens are the f32 series' (the io files are
 byte-identical). One export takes about 35 s on the development machine (CPU).
 
-## What `export_audio.py` emits (the audio tower, stage 1 of audio input)
+## What `export_audio.py` emits (the audio tower)
 
 Upstream's audio tower (`audio_config`, `model_type` `gemma4_audio` — Gemma 4 E2B / E4B's, every
 tensor unchanged: a subsampling of two stride-2 convolutions, 12 conformer layers of 1024 with 8
 heads of 128, chunked local attention with a relative-position term and a soft cap of 50, clipped
 linears, `output_proj` to 1536) and its projector `embed_audio` (scale-free RMSNorm → linear
 1536 → 512) as **one graph** `audio`, whose output is ready to be the text graph's soft rows. The
-authority for the design is the module docstring of `export_audio.py`. The distribution does not
-carry it yet (stage 2).
+authority for the design is the module docstring of `export_audio.py`. The distribution carries
+the bf16 series as the weights role `audio` (below).
 
 ```
 outputs/series/embeddinggemma-2-audio/model-NNNNN-of-NNNNN.krm  the container (f32 weights)
@@ -219,7 +220,9 @@ by 4.2 (`edge`); at the other residues the mask changes no bit. A mask-free form
 frame counts `4s + 2` and one output token more than the audio's for half the residues, so the mask
 keeps the output at `n`. An audio of at most 160 samples has no valid frame and no soft token.
 
-The frames (the front end stage 2 implements; upstream's `Gemma4AudioFeatureExtractor`, f32 out):
+The frames (upstream's `Gemma4AudioFeatureExtractor`, f32 out — the host front end,
+`packages/models/src/embeddinggemma/audio.ts`, computes the same steps in f64 and rounds once, and
+refuses an audio over 30 s or at another rate instead of truncating or misreading it):
 
 - 16 kHz mono f32 samples, **not resampled** (an array is read as 16 kHz whatever its rate),
   **truncated at 480,000 samples (30 s)** without a word; zero-padded on the right to a multiple of
@@ -345,10 +348,12 @@ upload, no published pin): the model `text` (contract `embeddinggemma/1`, read b
 family `embeddinggemma`) with the graph as the weights `model` in two storages — `bf16` from the bf16 series and `i8`
 from the i8 series, each container checked to carry the bf16 one's graph —, the vision tower as the weights `vision` in
 one storage, `bf16`, from the series `embeddinggemma-2-vision-bf16` (so both presets map it — no rounded tower was
-screened, and the card says so; the pipeline fetches it only with `vision: true`), and the compiled tokenizer as the
-asset `tokenizer`, two presets with an empty session (`bf16`, the original weights and the default; `i8`, the int8
-storage of the text tower), `LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice, which states
-the int8 copy and the vision graph). Its `pipelineConfig` carries the model's own values, each read from its source and
+screened, and the card says so; the pipeline fetches it only with `vision: true`), the audio tower as the weights
+`audio` in one storage, `bf16`, from the series `embeddinggemma-2-audio-bf16` (likewise mapped by both presets, fetched
+only with `audio: true`), and the compiled tokenizer as the asset `tokenizer`, two presets with an empty session
+(`bf16`, the original weights and the default; `i8`, the int8 storage of the text tower), `LICENSE.md` (the Apache-2.0
+text) and `NOTICE.md` (the modification notice, which states the int8 copy and the two tower graphs). The card's title
+and text follow the towers the manifest ships. Its `pipelineConfig` carries the model's own values, each read from its source and
 checked against the others when the plan is built:
 
 | Field               | Value                                         | Source and check                                                                                      |
@@ -358,6 +363,7 @@ checked against the others when the plan is built:
 | `maxTokens`         | `8192`                                        | the bound the graph's folded RoPE tables carry for `T`, held to the export's `SYM_MAX`               |
 | `placeholderTokens` | `{image: 258880, audio: 258881, video: 258884}` | `config.json` at the pin; each a special token of the tokenizer asset                                 |
 | `vision`            | `{softTokenBudget: 280, imageTokenId: 258880, beginImageTokenId: 255999, endImageTokenId: 258882, hiddenSize: 512}` (the Gemma 4 family's shape) | `processor_config.json`'s `max_soft_tokens`; `config.json`'s `image_token_id` / `boi_token_id` / `eoi_token_id` (each a special token of the asset, distinct); `text_config.hidden_size`, held to the text graph's soft rows and the tower's output |
+| `audio`             | `{audioTokenId: 258881, beginAudioTokenId: 256000, endAudioTokenId: 258883, hiddenSize: 512, maxSoftTokens: 750, sampleRate: 16000}` | `config.json`'s `audio_token_id` / `boa_token_id` / `eoa_token_index` (each a special token of the asset, distinct); `text_config.hidden_size`, held to the tower's output; the audio graph's bound of `n` (its folded window bias), held to the soft tokens of the feature extractor's longest audio (480,000 samples, `export_audio.MAX_SAMPLES` mirrored) and to the audio series' record; `preprocessor_config.json`'s `sampling_rate` |
 
 The plan also checks each storage (`model_bf16` must hold bf16 and none of the other compressed layouts, `model_i8`
 the same for i8 — so the f32 series, or the two series swapped, are refused; `vision_bf16` bf16 and no rounded layout),
@@ -366,16 +372,23 @@ pinned `tokenizer.json` and the graph's vocabulary, each container's licence and
 processor's image settings against what the host implements (`Gemma4ImageProcessor`, bicubic, the 1/255 rescale, no
 normalisation), the tower graph (`pixels` f32 `[1, 9n, 768]`, `position_x` / `position_y` i32 `[1, 9n]`, one f32
 `[1, n, 512]`, position tables covering `3 · budget` patches) and the vision series' record (its series, its budget
-and the pin).
+and the pin); for the audio tower, `audio_bf16` bf16 and no rounded layout, the feature extractor's settings in both
+`preprocessor_config.json` and `processor_config.json`'s `feature_extractor` block against what the host front end
+implements (`Gemma4AudioFeatureExtractor`, 16 kHz, 128 mel filters 0–8,000 Hz, frames of 320 by 160, an FFT of 512, a
+mel floor of 0.001, and no preemphasis, dither, input scale, per-bin normalisation or FFT overdrive — a `False` is not
+taken for a `0`), the tower graph (`features` f32 `[1, 4n, 128]`, `frame_mask` f32 `[1, 4n]`, one f32 `[1, n, 512]`,
+the bound of `n` 750) and the audio series' record (its series, the pin, the sample rate and `softTokensMax`).
 
-Assembled again on 2026-11-22 with the vision tower, the mirror holds 1,262,574,677 bytes in all (the containers
-592,932,991 + 323,958,272 + 336,093,696 and the 9,558,668-byte tokenizer); the text containers are byte-identical to the
-assembly before it. The `bf16` preset downloads 592,932,991 + 9,558,668 bytes, the `i8` preset 323,958,272 +
+Assembled again on 2026-11-22 with the audio tower, the mirror holds 1,850,169,018 bytes in all (the audio
+container 587,590,521 more); the text and vision containers and the tokenizer are byte-identical to the assembly
+before it, and each preset downloads 587,590,521 bytes more for the tower with `audio: true`. Assembled before with
+the vision tower, it held 1,262,574,677 bytes (the containers 592,932,991 + 323,958,272 + 336,093,696 and the
+9,558,668-byte tokenizer); the text containers were byte-identical to the assembly before that. The `bf16` preset downloads 592,932,991 + 9,558,668 bytes, the `i8` preset 323,958,272 +
 9,558,668, and each 336,093,696 more for the tower with `vision: true`. Before the tower, with the soft inputs, it held
 926,477,217 bytes. The dist driver
 derives `requiredLimits` `{ maxStorageBufferBindingSize: 268435456 }` for `bf16` (its bf16 token table, 256 MiB) and
-none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out; the tower's
-largest table, 15 MiB of bf16, adds none). Against the
+none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out; the vision
+tower's largest table, 15 MiB of bf16, and the audio tower's, 8 MiB of bf16, add none). Against the
 mirror before the soft inputs, only the first part of each container and the graph descriptor's length and digest
 in `karume.json` changed.
 

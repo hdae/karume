@@ -3,6 +3,7 @@ import { ModelInputError } from "@karume/models/embeddinggemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { LoadedImage } from "../src/lib/image.ts";
+import type { LoadedAudio } from "../src/models/embeddinggemma/audio.ts";
 import { tokenCountView } from "../src/models/embeddinggemma/format.ts";
 
 import {
@@ -13,6 +14,7 @@ import {
   rowInput,
   rowTokenCount,
   type RowTokenizer,
+  rowTokens,
   runBlocker,
   SAMPLE_ROWS,
   type TextRow,
@@ -206,6 +208,67 @@ describe("a row with an image", () => {
         "image parts need the vision tower — build the pipeline with { vision: true }",
       );
     };
+    expect(rowTokenCount(refusing, row)).toBeUndefined();
+  });
+});
+
+describe("a row with an audio", () => {
+  const audio: LoadedAudio = {
+    name: "click.wav",
+    audio: { data: new Float32Array(16100), sampleRate: 16000 },
+    channels: 2,
+  };
+  const image: LoadedImage = {
+    name: "cat.png",
+    rgba: { data: new Uint8ClampedArray(2 * 1 * 4), width: 2, height: 1 },
+    rgb: { data: new Uint8Array(2 * 1 * 3), width: 2, height: 1 },
+  };
+  const row: TextRow = { id: 5, text: "a click", prompt: "query", audio };
+
+  it("sends the text part then the audio part, and the image between them when the row has both", () => {
+    expect(rowInput(row)).toEqual([
+      { type: "text", text: "a click" },
+      { type: "audio", audio: audio.audio },
+    ]);
+    expect(rowInput({ ...row, image })).toEqual([
+      { type: "text", text: "a click" },
+      { type: "image", image: image.rgb },
+      { type: "audio", audio: audio.audio },
+    ]);
+  });
+
+  it("sets and clears a row's audio, leaving the key out when cleared, and keeps it across other edits", () => {
+    const [set] = updateRow([{ id: 5, text: "a click", prompt: "query" }], 5, { audio });
+    expect(set).toEqual(row);
+    const [cleared] = updateRow([row], 5, { audio: undefined });
+    expect(cleared).toEqual({ id: 5, text: "a click", prompt: "query" });
+    expect(cleared !== undefined && Object.hasOwn(cleared, "audio")).toBe(false);
+    expect(updateRow([row], 5, { prompt: undefined })[0]?.audio).toBe(audio);
+    expect(updateRow([row], 5, { image })[0]?.audio).toBe(audio);
+    expect(updateRow([{ ...row, image }], 5, { audio: undefined })[0]?.image).toBe(image);
+  });
+
+  it("counts the audio's soft tokens and markers as tokenize gives them", () => {
+    const tokenize: RowTokenizer = (input) => {
+      if (typeof input === "string") return new Int32Array(2);
+      const count = input.reduce(
+        (sum, part) => sum + (part.type === "text" ? part.text.split(" ").length : 25 + 2),
+        2,
+      );
+      return new Int32Array(count);
+    };
+    expect(rowTokens(tokenize, row)).toEqual({ count: 2 + 2 + 27 });
+    expect(rowTokenCount(tokenize, row)).toBe(31);
+  });
+
+  it("gives the library's refusal of a row it cannot tokenize (an audio over 30 s) word for word", () => {
+    const message =
+      "embeddinggemma.Pipeline: content part 1 is 480001 samples (30.00 s), over the 480000 (30 s)" +
+      " this model reads — nothing is truncated; shorten the audio or split it";
+    const refusing: RowTokenizer = () => {
+      throw new ModelInputError(message);
+    };
+    expect(rowTokens(refusing, row)).toEqual({ refusal: message });
     expect(rowTokenCount(refusing, row)).toBeUndefined();
   });
 });

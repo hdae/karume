@@ -2,6 +2,21 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "embeddinggemma-2/bf16/audio/audio-only": {
+      "node-nvidia-geforce-rtx-3080-ti": "a0132299131c63a77468e9080ff68ebcd7434546ef4985300fc90bf808adfe16"
+    },
+    "embeddinggemma-2/bf16/audio/full-length": {
+      "node-nvidia-geforce-rtx-3080-ti": "9c1b14457fe5b4794adcf9d6fed113ddf0233e22d5e270edd35f9e43ff7bed27"
+    },
+    "embeddinggemma-2/bf16/audio/image-then-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "94225ef4e28a7a488b1174558b0734bbf025d75f92be238f038338022e64afe0"
+    },
+    "embeddinggemma-2/bf16/audio/query-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "dc70881aad073a07daec896f50052e08581635d8deff7d36328e710667eda74e"
+    },
+    "embeddinggemma-2/bf16/audio/text-then-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "809efa38e290da7e7afa9d12c6992fdf8d38afe969645cbfa82a37b9c6daad2c"
+    },
     "embeddinggemma-2/bf16/bare": {
       "node-nvidia-geforce-rtx-3080-ti": "933399d0c40625d0c33f520e01932eec211b58c76ac8af60d95942bee5cd7beb"
     },
@@ -55,6 +70,21 @@
     },
     "embeddinggemma-2/bf16/query-ja": {
       "node-nvidia-geforce-rtx-3080-ti": "39c4748ea165647c5db9e7cfe9d7a8de67a7ab2ce8ba1bf1af02c682d5e085b0"
+    },
+    "embeddinggemma-2/i8/audio/audio-only": {
+      "node-nvidia-geforce-rtx-3080-ti": "4de57a0bcae222de74a5f227af2e0b6b7acaa19f0f2e1699cdb0a864bca91a8f"
+    },
+    "embeddinggemma-2/i8/audio/full-length": {
+      "node-nvidia-geforce-rtx-3080-ti": "63bb92a9266119d2b2336b196ef9cb8d31adb347e8dac30aaf238588941649ff"
+    },
+    "embeddinggemma-2/i8/audio/image-then-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "1dda562b20f739559898dc2ad8804b9494a139203f48c5761e30ffb5da206608"
+    },
+    "embeddinggemma-2/i8/audio/query-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "85e7a545befd6dd193d3a3b922eb542355632955a6ba7bc9d6771dde1c36705f"
+    },
+    "embeddinggemma-2/i8/audio/text-then-audio": {
+      "node-nvidia-geforce-rtx-3080-ti": "f69de2ca2b520b94dc0130ab471cf67f6f5b7b39246af64d5817bddd9e4ba0b1"
     },
     "embeddinggemma-2/i8/bare": {
       "node-nvidia-geforce-rtx-3080-ti": "f533a4da290f1b67fddc94b0fa0ec6567f5aa1e2dc1318e8235a2e0913120ba2"

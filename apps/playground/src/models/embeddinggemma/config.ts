@@ -1,8 +1,9 @@
 /**
  * What the page reads from one model's `pipelineConfig` in an EmbeddingGemma manifest: the prompt
  * names with their prefixes (the prompt select of each row), the output dimensions (the dimension
- * select) and the token limit (a hint). The distribution owns these values — the page derives every
- * list from here and hard-codes none. `embeddinggemma.Pipeline` validates the whole block again
+ * select), the token limit (a hint) and, on a model that declares `audio`, the sample rate an audio
+ * is resampled to and its soft-token bound (a hint). The distribution owns these values — the page
+ * derives every list from here and hard-codes none. `embeddinggemma.Pipeline` validates the whole block again
  * when it is built; this reader only refuses a block it cannot show (fail loudly, never guess) and
  * leaves the fields it does not show (`placeholderTokens`) to the pipeline.
  */
@@ -21,6 +22,11 @@ export type EmbeddingModelConfig = {
   readonly dimensions: readonly [number, ...number[]];
   /** The longest token sequence one call accepts (`<bos>` and `<eos>` included). */
   readonly maxTokens: number;
+  /**
+   * `pipelineConfig.audio`'s sample rate (the rate the page resamples an audio file to) and its
+   * soft-token bound; absent when the model declares no audio.
+   */
+  readonly audio?: { readonly sampleRate: number; readonly maxSoftTokens: number };
 };
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -74,7 +80,17 @@ export const readEmbeddingConfig = (manifest: Manifest, model: string): Embeddin
       `${where}.maxTokens is not a positive integer (got ${JSON.stringify(maxTokens)})`,
     );
   }
-  return { prompts, dimensions, maxTokens };
+  if (!Object.hasOwn(config, "audio")) return { prompts, dimensions, maxTokens };
+  const audioBlock = ownField(config, "audio");
+  if (!isRecord(audioBlock)) throw new Error(`${where}.audio is not an object`);
+  const sampleRate = ownField(audioBlock, "sampleRate");
+  const maxSoftTokens = ownField(audioBlock, "maxSoftTokens");
+  if (!positiveInteger(sampleRate) || !positiveInteger(maxSoftTokens)) {
+    throw new Error(
+      `${where}.audio.sampleRate / maxSoftTokens are not positive integers (got ${JSON.stringify(sampleRate)} / ${JSON.stringify(maxSoftTokens)})`,
+    );
+  }
+  return { prompts, dimensions, maxTokens, audio: { sampleRate, maxSoftTokens } };
 };
 
 /** The value of the "no prompt" choice (a prompt's value is `prompt:<name>`, so the two never meet). */
@@ -129,3 +145,11 @@ export const effectiveDimension = (
  */
 export const hasVisionTower = (manifest: Manifest, model: string): boolean =>
   Object.hasOwn(manifest.models, model) && manifest.models[model]?.weights["vision"] !== undefined;
+
+/**
+ * Whether `model` ships the audio tower (the weights role `audio`), i.e. whether the page builds
+ * the pipeline with `audio: true` and offers an audio per row — the rule of
+ * {@link hasVisionTower}. The pipeline checks `pipelineConfig.audio` when it is built.
+ */
+export const hasAudioTower = (manifest: Manifest, model: string): boolean =>
+  Object.hasOwn(manifest.models, model) && manifest.models[model]?.weights["audio"] !== undefined;

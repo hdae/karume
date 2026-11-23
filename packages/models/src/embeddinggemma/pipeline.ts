@@ -1,18 +1,22 @@
 /**
- * `Pipeline` — the one surface for text (and image) → sentence embedding of the EmbeddingGemma
- * family (today EmbeddingGemma 2 — distribution `karume-embeddinggemma-2`, model `text`, pipeline
- * `embeddinggemma/1`; its vision tower is the optional weights role `vision`).
+ * `Pipeline` — the one surface for text (and image and audio) → sentence embedding of the
+ * EmbeddingGemma family (today EmbeddingGemma 2 — distribution `karume-embeddinggemma-2`, model
+ * `text`, pipeline `embeddinggemma/1`; its vision tower is the optional weights role `vision`, its
+ * audio tower the optional weights role `audio`).
  *
  * Per call (every step in Karume, no torch):
  *
  * 1. Host: the input's content parts → the token ids, `<bos>`, the prompt's prefix and each run of
  *    text tokenized as one string (the distribution's tokenizer asset, the Gemma tokenizer of
- *    `src/gemma/text/`), each image as its marker block, `<eos>`; the limit and the placeholder
- *    refusal (`./input.ts`). Each image is read at issue into the tower's patch rows
- *    (`./vision.ts` — resize, patches in block order, positions)
- * 2. Only with images, one `vision` run per image (`pixels` `[1, 9n, 768]`, `position_x` /
- *    `position_y` `[1, 9n]` → the soft tokens `[1, n, 512]`), read back and written into
- *    `soft_embeds` at the image's soft rows, with `soft_mask` set there
+ *    `src/gemma/text/`), each image and each audio as its marker block, `<eos>`; the limit and the
+ *    placeholder refusal (`./input.ts`). Each image is read at issue into the tower's patch rows
+ *    (`./vision.ts` — resize, patches in block order, positions), each audio into its log-mel
+ *    frames (`./audio.ts` — the front end in f64, the frames padded to `4n`, the frame mask)
+ * 2. Only with images or audios, one tower run per block, in sequence order: `vision` per image
+ *    (`pixels` `[1, 9n, 768]`, `position_x` / `position_y` `[1, 9n]` → the soft tokens
+ *    `[1, n, 512]`) and `audio` per audio (`features` `[1, 4n, 128]`, `frame_mask` `[1, 4n]` → the
+ *    soft tokens `[1, n, 512]`), each read back and written into `soft_embeds` at its block's soft
+ *    rows, with `soft_mask` set there
  * 3. Runs `model` once (`input_ids` `[1, T]`, `pool_mask` `[1, T]` of ones, `soft_embeds`
  *    `[1, T, H]` and `soft_mask` `[1, T, 1]` — zeros and all false for a text) → the unit vector
  *    `[1, D]` (the graph holds the text tower, the masked mean pooling and the L2 normalisation; a
@@ -21,16 +25,17 @@
  * 4. Host: a shorter width is the leading slice re-normalised (`truncateEmbedding`)
  *
  * One sequence per call, no padding and no batch (the graph's sliding window is a band declared on
- * its attention, with no run-time mask — docs/limitations.md); the images of a call run one at a
- * time. Concurrent calls queue on the serialization chain.
+ * its attention, with no run-time mask — docs/limitations.md); the images and the audios of a call
+ * run one at a time. Concurrent calls queue on the serialization chain.
  *
- * ## The vision tower is chosen at construction ({@link PipelineOptions.vision})
+ * ## The towers are chosen at construction ({@link PipelineOptions.vision} / {@link PipelineOptions.audio})
  *
  * The Gemma family's precedent for its optional image embedder: `vision: true` fetches the
  * distribution's `vision` weights too and opens their Session beside the text one; without it not a
  * byte of them is fetched, image parts are refused with a `ModelInputError` that says how to build
  * a pipeline that takes them, and a text call is what it was. With it, a text call runs no tower
- * and binds the same inputs as without it.
+ * and binds the same inputs as without it. `audio: true` does the same for the `audio` weights and
+ * audio parts; the two may be on together.
  *
  * ## MUST: the Sessions are opened at construction and kept until `dispose`
  *
@@ -52,10 +57,13 @@
  * 256 MiB). A longer input is refused with a `ModelInputError` that names both limits, before the
  * run (the runtime's own preflight of the intermediates stays behind it); a device whose limit is
  * at least `pipelineConfig.maxTokens` never sees it. It is not an admission check: the device still
- * runs every shorter text. An image counts its soft tokens and its two markers, as toward the model's
- * limit. The tower's own intermediates are per patch row (at most `[1, 2520, 3072]` f32 at the
- * 280-token budget, about 31 MB) apart from its attention scores, which the row-block budget below
- * splits, so it adds no limit of its own.
+ * runs every shorter text. An image or an audio counts its soft tokens and its two markers, as
+ * toward the model's limit. The vision tower's own intermediates are per patch row (at most
+ * `[1, 2520, 3072]` f32 at the 280-token budget, about 31 MB) apart from its attention scores, which
+ * the row-block budget below splits, so it adds no limit of its own. Nor does the audio tower: its
+ * largest intermediate is its first convolution's `[1, 128, 2n, 64]` f32 (46.9 MiB at 750 soft
+ * tokens, 30 s) and its attention scores are `[8n, 1, 12]` (each query sees 12 keys); a 30 s audio
+ * on a device capped at 128 MiB was measured bit-identical to the uncapped run.
  *
  * ## Cancellation (`signal`)
  *
@@ -69,10 +77,12 @@
  * (`packages/e2e/tests/e2e_embeddinggemma2_pipeline_test.ts` — the ten golden texts against the
  * torch CPU goldens of the series, the token ids against the goldens' ids, and sha256 rows per
  * environment; `packages/e2e/tests/e2e_embeddinggemma2_image_pipeline_test.ts` — five inputs
- * holding images against upstream's SentenceTransformer vectors and token ids), by the tokenizer's
- * parity with upstream (`gemma4_tokenizer_test.ts`, `embeddinggemma2_pipeline_test.ts`) and by the
- * host preprocessing's byte identity with the tower series' inputs
- * (`embeddinggemma2_image_input_test.ts`).
+ * holding images against upstream's SentenceTransformer vectors and token ids;
+ * `packages/e2e/tests/e2e_embeddinggemma2_audio_pipeline_test.ts` — four inputs holding an audio,
+ * the same way), by the tokenizer's parity with upstream (`gemma4_tokenizer_test.ts`,
+ * `embeddinggemma2_pipeline_test.ts`), by the host image preprocessing's byte identity with the
+ * vision series' inputs (`embeddinggemma2_image_input_test.ts`) and by the audio front end's frames
+ * against upstream's feature extractor's (`embeddinggemma2_audio_input_test.ts`).
  */
 
 import {
@@ -130,15 +140,24 @@ import {
   parseEmbeddingGemmaPipelineConfig,
 } from "./config.ts";
 import {
+  AudioFrontEnd,
+  type AudioTowerInput,
+  type EmbeddingGemmaAudioContract,
+  embeddingGemmaAudioContract,
+  runAudioTower,
+} from "./audio.ts";
+import {
   type EmbedContentPart,
   type EmbedOptions,
   type EmbedRequest,
   type EmbedTextRules,
   embedTextRules,
   planEmbedRequest,
+  type SoftBlockCounts,
   type TokenizeOptions,
   tokenCountIncludes,
   tokenizeEmbedInput,
+  tokenLimitRemedy,
   truncateEmbedding,
 } from "./input.ts";
 import {
@@ -154,14 +173,23 @@ const OWNER = "embeddinggemma.Pipeline";
 
 /**
  * The component names in the manifest's weights table (also the roles the replacement option
- * accepts — the graph names the dist recipe writes): the text graph, and the vision tower, fetched
- * only when {@link PipelineOptions.vision} asks for it.
+ * accepts — the graph names the dist recipe writes): the text graph, the vision tower, fetched only
+ * when {@link PipelineOptions.vision} asks for it, and the audio tower, fetched only when
+ * {@link PipelineOptions.audio} does.
  */
 const MODEL = "model";
 const VISION = "vision";
+const AUDIO = "audio";
 
-/** This family's weights components for a pipeline with or without the vision tower. */
-const componentKeys = (vision: boolean): readonly string[] => (vision ? [MODEL, VISION] : [MODEL]);
+/** The towers a pipeline is built with. */
+type Towers = { readonly vision: boolean; readonly audio: boolean };
+
+/** This family's weights components for a pipeline with the towers asked for. */
+const componentKeys = ({ vision, audio }: Towers): readonly string[] => [
+  MODEL,
+  ...(vision ? [VISION] : []),
+  ...(audio ? [AUDIO] : []),
+];
 
 /** The key of the tokenizer asset (format `karume-gemma-tokenizer/1`). */
 const TOKENIZER = "tokenizer";
@@ -221,7 +249,9 @@ const SYM_PREFIX_SLICE = "sym_prefix_slice";
  * The vision tower's Session takes the same budget: its scores are 12 heads × (9n)² f32 — 290.7 MiB
  * at the 280-token budget. Measured on the RTX 3080 Ti under Node (2026-11-22, an image of 280 soft
  * tokens, the bf16 tower — 320.3 MiB of weights): plan backing 135.1 MiB with the budget against
- * 329.1 MiB without it, the last two of four runs 131 / 131 ms against 125 / 128 ms.
+ * 329.1 MiB without it, the last two of four runs 131 / 131 ms against 125 / 128 ms. The audio
+ * tower's Session takes it too (the settings of every Session are one value); its scores, `[8n, 1,
+ * 12]`, never reach it.
  */
 const ATTENTION_ROW_BLOCK_BYTES = 128 * 2 ** 20;
 
@@ -248,9 +278,20 @@ export type PipelineOptions = {
    */
   readonly vision?: boolean;
   /**
+   * **Builds the audio tower alongside** (not built when omitted or `false`), as {@link vision}
+   * does for images; both may be on.
+   *
+   * When `true`, the distribution's `audio` weights are fetched as well and one more Session is
+   * opened; `embed` and `tokenize` then take audio parts (`{ type: "audio", audio }`, mono f32
+   * samples at 16,000 Hz, at most 30 s). A model whose `pipelineConfig` declares no `audio`, or
+   * whose graphs do not match it, fails at construction, before any weight part is fetched. A
+   * non-boolean is a `ModelInputError`.
+   */
+  readonly audio?: boolean;
+  /**
    * An observation hook that receives the diagnostics of every `model` run (one embedding = one
-   * `model` run; the vision tower's runs are not reported, as the Gemma family's image embedder's
-   * are not). For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu`
+   * `model` run; the towers' runs are not reported, as the Gemma family's image embedder's are
+   * not). For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu`
    * (ADR 0021 — no timing by default).
    *
    * NOTE: no component name is passed — only the one graph reports (as in siglip2).
@@ -262,8 +303,9 @@ export type PipelineOptions = {
 
 /**
  * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to the hub).
- * The component replacement option (`components`) has the role `model`, and `vision` on a pipeline
- * built with {@link PipelineOptions.vision}.
+ * The component replacement option (`components`) has the role `model`, `vision` on a pipeline
+ * built with {@link PipelineOptions.vision} and `audio` on one built with
+ * {@link PipelineOptions.audio}.
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
@@ -279,7 +321,8 @@ export type FromPretrainedOptions = PipelineOptions &
  * The input for building directly from an already-fetched manifest + assets (a shape that accepts
  * the hub's `fetchAssets` result as is): the component `model` (the key `model` of a single-form
  * `krm`, or the part list `model[0]` / `model[1]` / …), the tokenizer asset `tokenizer`, and — for
- * {@link PipelineOptions.vision} — the component `vision` in the same forms.
+ * {@link PipelineOptions.vision} / {@link PipelineOptions.audio} — the component `vision` / `audio`
+ * in the same forms.
  */
 export type Assets = {
   readonly manifest: Manifest;
@@ -389,15 +432,15 @@ export const embeddingGemmaDeviceLimit = (
 const assertDeviceTokenLimit = (
   count: number,
   limit: EmbeddingGemmaDeviceLimit,
-  images: number,
+  blocks: SoftBlockCounts,
 ): void => {
   if (count <= limit.maxTokens) return;
   throw new ModelInputError(
-    `${OWNER}: the input is ${count} tokens (${tokenCountIncludes(images)}), over this device's limit of` +
+    `${OWNER}: the input is ${count} tokens (${tokenCountIncludes(blocks)}), over this device's limit of` +
       ` ${limit.maxTokens} — the graph's largest intermediate (${limit.bytesPerToken} B per token)` +
       ` must fit one storage buffer of ${limit.bindingBytes} B (the device's` +
       " maxStorageBufferBindingSize / maxBufferSize); nothing is truncated — " +
-      (images === 0 ? "shorten the text or split it" : "shorten the text or pass fewer images"),
+      tokenLimitRemedy(blocks),
   );
 };
 
@@ -599,15 +642,27 @@ export type EmbedderTower = {
   readonly contract: EmbeddingGemmaVisionContract;
 };
 
+/** The audio tower of an {@link Embedder} (its Session and what it reads of the graph). */
+export type EmbedderAudioTower = {
+  /** The Session of `audio`, opened once; the embedder disposes it. */
+  readonly session: EmbeddingSession;
+  readonly contract: EmbeddingGemmaAudioContract;
+};
+
 /** What an {@link Embedder} runs with (all of it checked before it is built). */
 export type EmbedderParts = {
   /** The Session of `model`, opened once; the embedder disposes it. */
   readonly session: EmbeddingSession;
   readonly contract: EmbeddingGemmaGraphContract;
-  /** The rules of the input; `rules.images` is set exactly when `tower` is. */
+  /**
+   * The rules of the input; `rules.images` is set exactly when `tower` is, `rules.audio` exactly
+   * when `audioTower` is.
+   */
   readonly rules: EmbedTextRules;
   /** The vision tower ({@link PipelineOptions.vision}); absent, image parts are refused. */
   readonly tower?: EmbedderTower;
+  /** The audio tower ({@link PipelineOptions.audio}); absent, audio parts are refused. */
+  readonly audioTower?: EmbedderAudioTower;
   /**
    * The limits of the Session's device; the embedder derives the longest input it runs from them and
    * `contract.bytesPerToken` ({@link embeddingGemmaDeviceLimit}), so the bytes per token have one
@@ -652,13 +707,18 @@ const readEmbedding = (
   return tensor.data;
 };
 
-/** One image of a run: its soft rows' first row and the tower's input (built at issue). */
-type ImageRun = { readonly start: number; readonly rows: ImagePatchRows };
+/**
+ * One soft block of a run: its soft rows' first row and its tower's input (built at issue) — an
+ * image's patch rows or an audio's frames.
+ */
+type TowerRun =
+  | { readonly kind: "image"; readonly start: number; readonly rows: ImagePatchRows }
+  | { readonly kind: "audio"; readonly start: number; readonly input: AudioTowerInput };
 
 /**
  * The resident Sessions of one model with their serialization chain: plans each request on the
- * host (`planEmbedRequest`), runs it in turn — the tower once per image, then the text graph — and
- * disposes the Sessions (then `release`) after the work in flight.
+ * host (`planEmbedRequest`), runs it in turn — a tower once per image or audio, in sequence order,
+ * then the text graph — and disposes the Sessions (then `release`) after the work in flight.
  *
  * NOTE: internal — {@link Pipeline} is the public entry and the only one that builds it from a
  * distribution; the `export` is for the host test that drives it with stand-in Sessions (not on
@@ -672,6 +732,8 @@ export class Embedder {
   readonly #chain = createOperationChain();
   /** The single dispose. **Not undefined means "disposed"** (no separate flag to keep in step). */
   #disposal: Promise<void> | undefined;
+  /** The audio front end's tables, built on the first audio (`./audio.ts`). */
+  #frontEnd: AudioFrontEnd | undefined;
 
   constructor(parts: EmbedderParts) {
     if ((parts.tower === undefined) !== (parts.rules.images === undefined)) {
@@ -679,10 +741,24 @@ export class Embedder {
         `${OWNER}: internal inconsistency: the image rules and the vision tower are not built together`,
       );
     }
+    if ((parts.audioTower === undefined) !== (parts.rules.audio === undefined)) {
+      throw new Error(
+        `${OWNER}: internal inconsistency: the audio rules and the audio tower are not built together`,
+      );
+    }
     if (parts.tower !== undefined && parts.tower.contract.width !== parts.contract.softWidth) {
       throw new Error(
         `${OWNER}: the vision graph's soft tokens are ${parts.tower.contract.width} wide, the text` +
           ` graph's soft rows ${parts.contract.softWidth}`,
+      );
+    }
+    if (
+      parts.audioTower !== undefined &&
+      parts.audioTower.contract.width !== parts.contract.softWidth
+    ) {
+      throw new Error(
+        `${OWNER}: the audio graph's soft tokens are ${parts.audioTower.contract.width} wide, the` +
+          ` text graph's soft rows ${parts.contract.softWidth}`,
       );
     }
     this.#parts = parts;
@@ -702,11 +778,14 @@ export class Embedder {
     if (this.#disposal !== undefined) throw new Error(`${OWNER}: cannot embed after dispose`);
     // Refusals return without waiting for the turn (the plan is pure).
     const request = planEmbedRequest(this.#parts.rules, input, options);
-    assertDeviceTokenLimit(request.ids.length, this.#deviceLimit, request.images.length);
-    // The images are read here, at issue: nothing written into their pixels afterwards reaches
-    // this call (the Gemma family's rule for its image rows).
+    assertDeviceTokenLimit(request.ids.length, this.#deviceLimit, {
+      images: request.images.length,
+      audios: request.audios.length,
+    });
+    // The images and the audios are read here, at issue: nothing written into their pixels or
+    // samples afterwards reaches this call (the Gemma family's rule for its image rows).
     const budget = this.#parts.rules.images?.softTokenBudget;
-    const images: ImageRun[] = request.images.map(({ image, start, softTokens }) => {
+    const images: TowerRun[] = request.images.map(({ image, start, softTokens }) => {
       if (budget === undefined) {
         throw new Error(
           `${OWNER}: internal inconsistency: an image was planned without image rules`,
@@ -719,9 +798,22 @@ export class Embedder {
             ` ${softTokens} soft tokens its sequence holds`,
         );
       }
-      return { start, rows };
+      return { kind: "image", start, rows };
     });
-    return await this.#chain(() => this.#run(request, images, options.signal));
+    const audios: TowerRun[] = request.audios.map(({ audio, start, softTokens }) => {
+      this.#frontEnd ??= new AudioFrontEnd();
+      const frames = this.#frontEnd.towerInput(audio.data);
+      if (frames.softTokens !== softTokens) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: the audio's ${frames.softTokens} soft tokens of frames are` +
+            ` not the ${softTokens} its sequence holds`,
+        );
+      }
+      return { kind: "audio", start, input: frames };
+    });
+    // In sequence order: an image before an audio runs first, as it stands first.
+    const runs = [...images, ...audios].sort((left, right) => left.start - right.start);
+    return await this.#chain(() => this.#run(request, runs, options.signal));
   }
 
   /**
@@ -737,35 +829,32 @@ export class Embedder {
   }
 
   /**
-   * One call: the abort check, one tower run per image (its soft tokens written into the soft rows),
-   * the text run, the output check, the width.
+   * One call: the abort check, one tower run per image or audio (its soft tokens written into the
+   * soft rows), the text run, the output check, the width.
    */
   async #run(
     request: EmbedRequest,
-    images: readonly ImageRun[],
+    runs: readonly TowerRun[],
     signal: AbortSignal | undefined,
   ): Promise<Float32Array<ArrayBuffer>> {
     // A cancellation that arrived while waiting for the turn also takes effect here (a run is
     // indivisible — cancellation works only before it, and between the runs of one call).
     await settleAbort(signal);
-    const { session, contract, tower, onRunDiagnostics } = this.#parts;
+    const { session, contract, onRunDiagnostics } = this.#parts;
     const length = request.ids.length;
     const width = contract.softWidth;
     // A text binds no soft row: zeros and all false, which the graph runs as its token lookups
     // alone (`SOFT_EMBEDS`).
     const softEmbeds = new Float32Array(length * width);
     const softMask = new Uint32Array(length);
-    for (const { start, rows } of images) {
-      if (tower === undefined) {
-        throw new Error(
-          `${OWNER}: internal inconsistency: an image reached a run without the tower`,
-        );
-      }
-      const soft = await runVisionTower(tower.session, rows, tower.contract);
-      // Copied before the tower's next run (a readback lasts until then). The placeholder id stays
-      // under each soft row; the mask makes the graph take the soft token there, unscaled.
-      softEmbeds.set(soft, start * width);
-      softMask.fill(1, start, start + rows.softTokens);
+    for (const run of runs) {
+      const soft = await this.#runTower(run);
+      const softTokens = run.kind === "image" ? run.rows.softTokens : run.input.softTokens;
+      // Copied before the tower's next run (a readback lasts until then; its shape was checked
+      // against `softTokens`). The placeholder id stays under each soft row; the mask makes the
+      // graph take the soft token there, unscaled.
+      softEmbeds.set(soft, run.start * width);
+      softMask.fill(1, run.start, run.start + softTokens);
       signal?.throwIfAborted();
     }
     const outputs = await session.run({
@@ -780,10 +869,29 @@ export class Embedder {
     return truncateEmbedding(readEmbedding(outputs, contract), request.dimension);
   }
 
+  /** One soft block's tower run: its soft tokens `[n · width]` (shape-checked by the tower's run). */
+  async #runTower(run: TowerRun): Promise<Float32Array<ArrayBuffer>> {
+    const { tower, audioTower } = this.#parts;
+    if (run.kind === "image") {
+      if (tower === undefined) {
+        throw new Error(
+          `${OWNER}: internal inconsistency: an image reached a run without the vision tower`,
+        );
+      }
+      return await runVisionTower(tower.session, run.rows, tower.contract);
+    }
+    if (audioTower === undefined) {
+      throw new Error(
+        `${OWNER}: internal inconsistency: an audio reached a run without the audio tower`,
+      );
+    }
+    return await runAudioTower(audioTower.session, run.input, audioTower.contract);
+  }
+
   /**
-   * Disposes the Sessions (the text graph's, then the tower's), then runs `release`, after the calls
-   * in flight (flush-before-destroy — the disposal is queued on the same chain). Later calls return
-   * the same completion.
+   * Disposes the Sessions (the text graph's, then the vision tower's, then the audio tower's), then
+   * runs `release`, after the calls in flight (flush-before-destroy — the disposal is queued on the
+   * same chain). Later calls return the same completion.
    *
    * MUST: every step runs even if an earlier one fails ({@link disposeSteps}) — a GPU acquired by
    * the pipeline would otherwise never be returned.
@@ -793,6 +901,7 @@ export class Embedder {
       disposeSteps([
         () => this.#parts.session.dispose(),
         () => this.#parts.tower?.session.dispose(),
+        () => this.#parts.audioTower?.session.dispose(),
         () => this.#parts.release?.(),
       ]),
     );
@@ -809,7 +918,10 @@ export type EmbeddingGraph = {
 };
 
 /** What {@link openEmbedder} opens on the GPU in hand and builds the embedder from. */
-export type EmbedderOpening = Omit<EmbedderParts, "session" | "tower" | "deviceLimits"> & {
+export type EmbedderOpening = Omit<
+  EmbedderParts,
+  "session" | "tower" | "audioTower" | "deviceLimits"
+> & {
   readonly gpu: GpuContext;
   /** The checks of the GPU in hand, run before any Session is opened. */
   readonly assertGpu: () => void;
@@ -819,13 +931,19 @@ export type EmbedderOpening = Omit<EmbedderParts, "session" | "tower" | "deviceL
     readonly graph: EmbeddingGraph;
     readonly contract: EmbeddingGemmaVisionContract;
   };
-  /** The quant's effective settings; both Sessions take them with the row-block budget. */
+  /** The audio tower's graph and contract ({@link PipelineOptions.audio}). */
+  readonly audioTower?: {
+    readonly graph: EmbeddingGraph;
+    readonly contract: EmbeddingGemmaAudioContract;
+  };
+  /** The quant's effective settings; every Session takes them with the row-block budget. */
   readonly sessionOptions: SessionOptions;
 };
 
 /**
- * Opens the Sessions on the GPU in hand — the text graph's, then the tower's, both with the
- * family's row-block budget ({@link ATTENTION_ROW_BLOCK_BYTES}) — and builds the {@link Embedder}.
+ * Opens the Sessions on the GPU in hand — the text graph's, then the vision tower's, then the audio
+ * tower's, each with the family's row-block budget ({@link ATTENTION_ROW_BLOCK_BYTES}) — and builds
+ * the {@link Embedder}.
  *
  * MUST: on any failure (the GPU checks, a Session, the embedder itself) the Sessions opened so far
  * are disposed and then `release` runs — no one else holds them, and a GPU the pipeline acquired
@@ -836,25 +954,32 @@ export type EmbedderOpening = Omit<EmbedderParts, "session" | "tower" | "deviceL
  * the subpath surface — ADR 0008).
  */
 export const openEmbedder = async (opening: EmbedderOpening): Promise<Embedder> => {
-  const { gpu, assertGpu, model, tower, sessionOptions, ...parts } = opening;
-  // Both Sessions split the attention scores in row blocks of the family's budget (the tower's are
-  // 12 heads × (9n)² f32, about 291 MiB unsplit at 280 soft tokens).
+  const { gpu, assertGpu, model, tower, audioTower, sessionOptions, ...parts } = opening;
+  // Every Session splits the attention scores in row blocks of the family's budget (the vision
+  // tower's are 12 heads × (9n)² f32, about 291 MiB unsplit at 280 soft tokens).
   const settings: SessionOptions = {
     ...sessionOptions,
     attentionRowBlockMaxBytes: ATTENTION_ROW_BLOCK_BYTES,
   };
   let session: EmbeddingSession | undefined;
   let towerSession: EmbeddingSession | undefined;
+  let audioSession: EmbeddingSession | undefined;
   try {
     assertGpu();
     session = await model.createSession(gpu, settings);
     if (tower !== undefined) towerSession = await tower.graph.createSession(gpu, settings);
+    if (audioTower !== undefined) {
+      audioSession = await audioTower.graph.createSession(gpu, settings);
+    }
     return new Embedder({
       ...parts,
       session,
       ...(towerSession === undefined || tower === undefined
         ? {}
         : { tower: { session: towerSession, contract: tower.contract } }),
+      ...(audioSession === undefined || audioTower === undefined
+        ? {}
+        : { audioTower: { session: audioSession, contract: audioTower.contract } }),
       deviceLimits: gpu.limits,
     });
   } catch (error) {
@@ -863,6 +988,7 @@ export const openEmbedder = async (opening: EmbedderOpening): Promise<Embedder> 
       await disposeSteps([
         () => session?.dispose(),
         () => towerSession?.dispose(),
+        () => audioSession?.dispose(),
         () => parts.release?.(),
       ]);
     } catch (cleanup) {
@@ -887,15 +1013,23 @@ type EmbeddingGemmaAdmission = {
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
   /** The tower graph's contract, settled only when {@link PipelineOptions.vision} asks for it. */
   readonly vision?: EmbeddingGemmaVisionContract;
+  /** The audio graph's contract, settled only when {@link PipelineOptions.audio} asks for it. */
+  readonly audio?: EmbeddingGemmaAudioContract;
 };
 
-/** Whether {@link PipelineOptions.vision} asks for the tower (a non-boolean fails loudly). */
-const wantsVision = (where: string, options: PipelineOptions): boolean => {
-  const vision: unknown = options.vision;
-  if (vision !== undefined && typeof vision !== "boolean") {
-    throw new ModelInputError(`${where}: vision ${JSON.stringify(vision)} is not a boolean`);
-  }
-  return vision === true;
+/**
+ * The towers {@link PipelineOptions.vision} / {@link PipelineOptions.audio} ask for (a non-boolean
+ * fails loudly).
+ */
+const wantedTowers = (where: string, options: PipelineOptions): Towers => {
+  const asked = (name: "vision" | "audio"): boolean => {
+    const value: unknown = options[name];
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new ModelInputError(`${where}: ${name} ${JSON.stringify(value)} is not a boolean`);
+    }
+    return value === true;
+  };
+  return { vision: asked("vision"), audio: asked("audio") };
 };
 
 /**
@@ -904,12 +1038,12 @@ const wantsVision = (where: string, options: PipelineOptions): boolean => {
  *
  * MUST: do not copy with `slice` ({@link readAssetBuffer}).
  */
-const assetOpener = (assets: Assets["assets"], vision: boolean): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"], towers: Towers): Promise<ComponentOpener> =>
   assetComponentOpener(
     OWNER,
     assets,
     (key) => readAssetBuffer(OWNER, "weights / assets", assets, key),
-    componentKeys(vision),
+    componentKeys(towers),
   );
 
 /**
@@ -948,6 +1082,61 @@ const admitVision = (
     }
   }
   return embeddingGemmaVisionContract(open(VISION), vision);
+};
+
+/**
+ * Checks an `audio: true` load against the declaration and the two graphs (before any weight part
+ * is fetched): `pipelineConfig.audio` is declared, the tower graph matches it
+ * ({@link embeddingGemmaAudioContract}), its soft tokens are the text graph's soft rows' width, the
+ * three audio ids are rows of the text graph's table, and the graph's bound of its soft-token count
+ * (its folded constants) equals `pipelineConfig.audio.maxSoftTokens`.
+ *
+ * MUST: each mismatch fails here and not on the first audio, for the reasons of {@link admitVision};
+ * a declared bound above the graph's would let an audio through that fails only when the run is
+ * planned, one below it would refuse audios the graph runs.
+ */
+const admitAudio = (
+  open: ComponentOpener,
+  config: EmbeddingGemmaPipelineConfig,
+  contract: EmbeddingGemmaGraphContract,
+): EmbeddingGemmaAudioContract => {
+  const { audio } = config;
+  if (audio === undefined) {
+    throw new Error(
+      `${OWNER}: audio was requested, but this model's pipelineConfig declares no 'audio' (its` +
+        " distribution ships no audio tower)",
+    );
+  }
+  if (audio.hiddenSize !== contract.softWidth) {
+    throw new Error(
+      `${OWNER}: pipelineConfig.audio.hiddenSize ${audio.hiddenSize} is not the width of the text` +
+        ` graph's soft rows (${contract.softWidth})`,
+    );
+  }
+  for (const key of ["audioTokenId", "beginAudioTokenId", "endAudioTokenId"] as const) {
+    if (audio[key] >= contract.vocabularySize) {
+      throw new Error(
+        `${OWNER}: pipelineConfig.audio.${key} ${audio[key]} is outside the embedding table's` +
+          ` ${contract.vocabularySize} rows`,
+      );
+    }
+  }
+  const tower = open(AUDIO);
+  const audioContract = embeddingGemmaAudioContract(tower, audio);
+  const maximum = graphSymbolMaximum(tower, audioContract.symbol);
+  if (maximum === undefined) {
+    throw new Error(
+      `${OWNER}: no ${SYM_PREFIX_SLICE} of the audio graph bounds '${audioContract.symbol}', so its` +
+        " maximum soft-token count cannot be read to check pipelineConfig.audio.maxSoftTokens against",
+    );
+  }
+  if (maximum !== audio.maxSoftTokens) {
+    throw new Error(
+      `${OWNER}: pipelineConfig.audio.maxSoftTokens is ${audio.maxSoftTokens}, but the audio graph` +
+        ` runs '${audioContract.symbol}' up to ${maximum} (the bound of its folded constants)`,
+    );
+  }
+  return audioContract;
 };
 
 /**
@@ -1018,7 +1207,9 @@ const admitEmbeddingGemma = (
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const contract = embeddingGemmaGraphContract(open(MODEL), config);
-  const vision = wantsVision(OWNER, options) ? admitVision(open, config, contract) : undefined;
+  const towers = wantedTowers(OWNER, options);
+  const vision = towers.vision ? admitVision(open, config, contract) : undefined;
+  const audio = towers.audio ? admitAudio(open, config, contract) : undefined;
 
   // MUST: a shared GPU lacking a capability (feature / device limit) fails here — the only family
   // check that can tell before the weights are downloaded (the later check calls the same
@@ -1039,12 +1230,14 @@ const admitEmbeddingGemma = (
     sessionOptions,
     gpuFeatures,
     ...(vision === undefined ? {} : { vision }),
+    ...(audio === undefined ? {} : { audio }),
   };
 };
 
 /**
  * Builds the embedder from the admitted material + assets (parse and match the tokenizer asset →
- * acquire the GPU → open the Session, and the tower's with {@link PipelineOptions.vision}).
+ * acquire the GPU → open the Session, and the towers' with {@link PipelineOptions.vision} /
+ * {@link PipelineOptions.audio}).
  *
  * MUST: parse and match the asset **before acquiring the GPU** (so a different exception in an
  * environment without a GPU does not hide the real cause, a broken asset).
@@ -1057,13 +1250,17 @@ const buildEmbedder = async (
   open: ComponentOpener,
   options: PipelineOptions,
 ): Promise<Embedder> => {
-  const { config, contract, quantName, quant, sessionOptions, gpuFeatures, vision } = admitted;
+  const { config, contract, quantName, quant, sessionOptions, gpuFeatures, vision, audio } =
+    admitted;
   const tokenizer = new Tokenizer(
     parseGemmaTokenizerAsset(
       new Uint8Array(readAssetBuffer(OWNER, "weights / assets", assets, TOKENIZER)),
     ),
   );
-  const rules = embedTextRules(tokenizer, config, { images: vision !== undefined });
+  const rules = embedTextRules(tokenizer, config, {
+    images: vision !== undefined,
+    audio: audio !== undefined,
+  });
   // An id past the table would read a valid row of another token on the GPU, not fail.
   if (tokenizer.maxTokenId >= contract.vocabularySize) {
     throw new Error(
@@ -1087,6 +1284,7 @@ const buildEmbedder = async (
       ),
     model: open(MODEL),
     ...(vision === undefined ? {} : { tower: { graph: open(VISION), contract: vision } }),
+    ...(audio === undefined ? {} : { audioTower: { graph: open(AUDIO), contract: audio } }),
     sessionOptions,
     contract,
     rules,
@@ -1100,13 +1298,15 @@ const buildEmbedder = async (
 };
 
 /**
- * EmbeddingGemma text (and image) → sentence embedding (resident Sessions: the text graph, and the
- * vision tower with {@link PipelineOptions.vision}).
+ * EmbeddingGemma text (and image and audio) → sentence embedding (resident Sessions: the text graph,
+ * the vision tower with {@link PipelineOptions.vision} and the audio tower with
+ * {@link PipelineOptions.audio}).
  *
  * ```ts
- * const pipeline = await embeddinggemma.Pipeline.fromPretrained(ref, { gpu, vision: true });
+ * const pipeline = await embeddinggemma.Pipeline.fromPretrained(ref, { gpu, vision: true, audio: true });
  * const vector = await pipeline.embed("how do I reset my password", { prompt: "query" });
  * const picture = await pipeline.embed([{ type: "image", image }]); // image: decoded RGB8
+ * const clip = await pipeline.embed([{ type: "audio", audio }]); // audio: { data, sampleRate: 16000 }
  * ```
  *
  * Construction has only two entries: {@link Pipeline.fromPretrained} (fetch from the
@@ -1126,7 +1326,8 @@ export class Pipeline {
    * component's descriptor (part 0)** and run admission → warm up the weight parts → `fetchAssets`
    * of the tokenizer asset → build). Blocks are read in part order at the moment the Session is built
    * (ADR 0109 — `src/hub/components.ts`). The weights fetched are the roles the pipeline runs:
-   * `model`, and `vision` only with {@link PipelineOptions.vision}. To replace a component with the
+   * `model`, `vision` only with {@link PipelineOptions.vision} and `audio` only with
+   * {@link PipelineOptions.audio}. To replace a component with the
    * same role from another repository, use {@link FromPretrainedComponentOptions.components} (those
    * roles — the tokenizer is not replaced).
    *
@@ -1142,21 +1343,23 @@ export class Pipeline {
     options: FromPretrainedOptions = {},
   ): Promise<Pipeline> {
     const source = toManifestSource(ref, `${OWNER}.fromPretrained`);
-    const vision = wantsVision(`${OWNER}.fromPretrained`, options);
+    const towers = wantedTowers(`${OWNER}.fromPretrained`, options);
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    // MUST: narrow the weights to fetch by role — every preset maps the `vision` role, so without
-    // this its descriptor and parts would be fetched for a pipeline that never runs them.
-    const keys = componentKeys(vision);
+    // MUST: narrow the weights to fetch by role — every preset maps the `vision` and `audio` roles,
+    // so without this their descriptors and parts would be fetched for a pipeline that never runs
+    // them.
+    const keys = componentKeys(towers);
     const selection = resolveSelection(loaded.manifest, { ...choice, weights: keys });
     const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
-      ...(vision ? { vision } : {}),
+      ...(towers.vision ? { vision: true } : {}),
+      ...(towers.audio ? { audio: true } : {}),
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -1190,11 +1393,12 @@ export class Pipeline {
 
   /**
    * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the container (and the
-   * tower's with {@link PipelineOptions.vision}), goes through the same admission and build as the
-   * fetching surface, and returns with **the Sessions opened** (the MUST in the module doc).
+   * towers' with {@link PipelineOptions.vision} / {@link PipelineOptions.audio}), goes through the
+   * same admission and build as the fetching surface, and returns with **the Sessions opened** (the
+   * MUST in the module doc).
    */
   static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
-    const open = await assetOpener(input.assets, wantsVision(`${OWNER}.fromAssets`, options));
+    const open = await assetOpener(input.assets, wantedTowers(`${OWNER}.fromAssets`, options));
     const admitted = admitEmbeddingGemma(input.manifest, open, options);
     return new Pipeline(await buildEmbedder(admitted, input.assets, open, options));
   }
@@ -1202,20 +1406,24 @@ export class Pipeline {
   /**
    * Embeds one input and returns a unit vector (f32, of the requested width).
    *
-   * `input` is a string or an array of content parts — text parts, and image parts
+   * `input` is a string or an array of content parts — text parts, image parts
    * (`{ type: "image", image }`, decoded RGB8) on a pipeline built with
-   * {@link PipelineOptions.vision}: `<bos>`, each run of adjacent text (the prompt's prefix in
-   * front) tokenized as one string, each image as its soft tokens between their two markers,
-   * `<eos>`. `options.prompt` prepends a declared prompt's prefix, `options.dimension` asks for one
+   * {@link PipelineOptions.vision}, and audio parts (`{ type: "audio", audio }`, mono f32 samples
+   * at 16,000 Hz) on one built with {@link PipelineOptions.audio}: `<bos>`, each run of adjacent
+   * text (the prompt's prefix in front) tokenized as one string, each image and each audio as its
+   * soft tokens between their two markers, `<eos>`. `options.prompt` prepends a declared prompt's prefix, `options.dimension` asks for one
    * of the declared widths (default the full width; a shorter one is the leading slice re-normalised
    * to unit length), `options.signal` cancels before the runs (and between them).
    *
    * Refused with a `ModelInputError`, before the GPU is touched: an empty part array, a part of a
-   * type the pipeline does not accept (an image part without the vision tower — the message says
-   * how to build one with it), an image that is not RGB8 pixels, an unknown prompt, an undeclared
-   * width, a text whose tokens include an image / audio / video placeholder id, and a sequence longer
-   * than the model's limit or than this device runs (its storage-buffer limit — the module doc;
-   * `<bos>`, `<eos>` and every image's soft tokens and markers included — nothing is truncated).
+   * type the pipeline does not accept (an image part without the vision tower, an audio part
+   * without the audio tower — the message says how to build one with it), an image that is not RGB8
+   * pixels, an audio that is not 16,000 Hz (nothing is resampled), longer than 30 s (nothing is
+   * truncated), of at most 160 samples (no mel frame) or holding a non-finite sample, an unknown
+   * prompt, an undeclared width, a text whose tokens include an image / audio / video placeholder
+   * id, and a sequence longer than the model's limit or than this device runs (its storage-buffer
+   * limit — the module doc; `<bos>`, `<eos>` and every image's and audio's soft tokens and markers
+   * included — nothing is truncated).
    *
    * Concurrent calls **wait and run in order** (one Session is never shared by two runs).
    */
@@ -1228,9 +1436,10 @@ export class Pipeline {
 
   /**
    * Returns the token ids {@link embed} would run for the same input and prompt: `<bos>`, the
-   * prompt's prefix and the parts (each image's soft rows as the image placeholder id between its
-   * two markers), `<eos>` — its length is the count the limits apply to. Synchronous, on the host
-   * (no GPU, an image read for its size only) and not queued behind the calls in flight.
+   * prompt's prefix and the parts (each image's and each audio's soft rows as its placeholder id
+   * between its two markers), `<eos>` — its length is the count the limits apply to. Synchronous,
+   * on the host (no GPU, an image read for its size only, an audio for its rate, length and samples)
+   * and not queued behind the calls in flight.
    *
    * Refused with the same `ModelInputError` as `embed`: an input that is neither a string nor an
    * array, an empty part array, a part of a type the model does not accept, an unknown prompt.

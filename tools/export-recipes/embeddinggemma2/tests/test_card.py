@@ -4,10 +4,11 @@ The real `karume.json` is not used: the manifest here carries values **other** t
 (another token bound, other dimensions, other prompts and placeholder ids), so a hand-written
 number in the template shows as a mismatch. Besides the derivation from the manifest, it pins what
 the card must say plainly (text tower only — or, with the vision tower, text and images with its
-budget and its one bf16 storage —, the token limit against upstream's context, what each storage
-holds, the int8 form's measured distance with its source and only beside an `i8` preset,
-the prompts, the Matryoshka dimensions, upstream's precision statement, the licence) and the
-manifests it refuses to describe.
+budget and its one bf16 storage, with the audio tower text and audio with its rate, its longest
+audio and its one bf16 storage, or all three —, the token limit against upstream's context, what
+each storage holds, the int8 form's measured distance with its source and only beside an `i8`
+preset, the prompts, the Matryoshka dimensions, upstream's precision statement, the licence) and
+the manifests it refuses to describe.
 """
 
 from __future__ import annotations
@@ -402,4 +403,108 @@ class TestTheVisionTower:
         for quant in manifest["models"]["text"]["quants"].values():
             del quant["weights"]["vision"]
         with pytest.raises(ValueError, match="the vision weights are not shipped"):
+            _render(manifest)
+
+
+def _with_audio(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The manifest with the audio tower: its one bf16 container, mapped by every preset, and
+    `pipelineConfig.audio` (ids and a bound other than the real ones)."""
+    manifest = copy.deepcopy(manifest or _manifest())
+    model = manifest["models"]["text"]
+    container = copy.deepcopy(model["weights"]["model"]["bf16"])
+    for index, part in enumerate(container["container"]["parts"]):
+        part["path"] = part["path"].replace("text/model/", "text/audio/")
+        part["size"] = 29 + index
+    model["weights"]["audio"] = {"bf16": container}
+    for quant in model["quants"].values():
+        quant["weights"]["audio"] = "bf16"
+    model["pipelineConfig"]["audio"] = {
+        "audioTokenId": 72,
+        "beginAudioTokenId": 76,
+        "endAudioTokenId": 77,
+        "hiddenSize": 48,
+        "maxSoftTokens": 375,
+        "sampleRate": 16000,
+    }
+    return manifest
+
+
+class TestTheAudioTower:
+    def test_a_manifest_with_the_tower_says_text_and_audio(self) -> None:
+        card = _render(_with_audio())
+        assert "# EmbeddingGemma 2 Text and Audio Embedding — Karume" in card
+        assert "the **text and audio towers** of\n`google/embeddinggemma-2`" in card
+        assert "Built with `audio: true`, the pipeline also fetches the audio" in card
+        assert "The vision tower is not carried: neither images nor video can" in card
+        assert "cannot embed images, video or audio" not in card
+
+    def test_it_states_the_rate_and_the_longest_audio_from_the_manifest(self) -> None:
+        """375 soft tokens of 40 ms are 15 s; the real 750 (30 s) would show if hard-coded."""
+        card = _render(_with_audio())
+        assert "mono f32 samples at 16,000 Hz" in card
+        assert "one soft token per 40 ms, up to\n  375 (15 s)" in card
+        assert "each audio counts its soft tokens (at most 375) and its two markers" in card
+        assert "at most 1,234 per input" in card
+
+    def test_it_states_that_every_preset_ships_the_towers_bf16_values(self) -> None:
+        for manifest in (_with_audio(), _with_audio(_with_i8())):
+            card = _render(manifest)
+            assert "The audio tower (`audio`) ships in every preset as the" in card
+            assert "built without `audio: true` does not fetch it" in card
+            assert "The audio tower and its projection were re-expressed as a graph" in card
+            assert "checkpoint's bf16 values unchanged in every preset." in card
+
+    def test_the_usage_shows_the_audio_option_and_an_audio_part(self) -> None:
+        card = _render(_with_audio())
+        assert "  // audio: true, // also fetches the audio tower, for audio parts" in card
+        assert (
+            "// const audio = { data, sampleRate: 16000 }; // a Float32Array of at most 15 s"
+            in card
+        )
+        assert '// const clip = await pipeline.embed([{ type: "audio", audio }]);' in card
+        assert "audio part on a pipeline built without `audio: true` is refused" in card
+        assert "vision: true" not in card
+
+    def test_a_manifest_with_both_towers_says_text_images_and_audio(self) -> None:
+        card = _render(_with_audio(_with_vision(_with_i8())))
+        assert "# EmbeddingGemma 2 Text, Image and Audio Embedding — Karume" in card
+        assert "the **text, vision and audio towers**\nof `google/embeddinggemma-2`" in card
+        assert (
+            "becomes up to\n  70 soft tokens (a square one 64); an audio becomes one soft" in card
+        )
+        assert "  40 ms, up to 375 (15 s) — a longer audio or another sample rate" in card
+        assert "Video cannot be embedded." in card
+        assert "at most 70 for an image, 375 for an audio" in card
+        assert "The vision tower (`vision`) ships in every preset" in card
+        assert "The audio tower (`audio`) ships in every preset" in card
+        assert "  // vision: true, // also fetches the vision tower, for image parts" in card
+        assert "  // audio: true, // also fetches the audio tower, for audio parts" in card
+        assert "an image\npart on a pipeline built without `vision: true` or an audio part" in card
+        assert "neither video nor audio" not in card
+
+    def test_the_tower_paragraphs_keep_the_two_lists_apart(self) -> None:
+        for manifest in (_with_audio(_with_i8()), _with_audio(_with_vision(_with_i8()))):
+            lines = _render(manifest).splitlines()
+            last = max(index for index, line in enumerate(lines) if line.startswith("- `i8`: "))
+            following = next(line for line in lines[last + 1 :] if line.strip())
+            assert not following.startswith("- "), following
+
+    def test_a_rounded_tower_is_refused(self) -> None:
+        manifest = _with_audio(_with_i8())
+        model = manifest["models"]["text"]
+        model["weights"]["audio"]["i8"] = copy.deepcopy(model["weights"]["audio"]["bf16"])
+        model["quants"]["i8"]["weights"]["audio"] = "i8"
+        with pytest.raises(ValueError, match="the audio tower is stored as"):
+            _render(manifest)
+
+    def test_weights_without_the_declaration_and_the_other_way_round_are_refused(self) -> None:
+        manifest = _with_audio()
+        del manifest["models"]["text"]["pipelineConfig"]["audio"]
+        with pytest.raises(ValueError, match=r"pipelineConfig\.audio is not declared"):
+            _render(manifest)
+        manifest = _with_audio()
+        del manifest["models"]["text"]["weights"]["audio"]
+        for quant in manifest["models"]["text"]["quants"].values():
+            del quant["weights"]["audio"]
+        with pytest.raises(ValueError, match="the audio weights are not shipped"):
             _render(manifest)

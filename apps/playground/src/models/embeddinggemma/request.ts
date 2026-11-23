@@ -1,8 +1,9 @@
 /**
  * The page's form logic: the list of rows (each a text, its own prompt and, on a model that ships
- * the vision tower, an optional image), what a row sends to the pipeline, its token count, which
- * model and preset are in effect, whether the held pipeline serves a run, and why Run is disabled.
- * Pure, so `vp test` covers it.
+ * the vision tower, an optional image, on one that ships the audio tower, an optional audio), what a
+ * row sends to the pipeline, its token count or the pipeline's refusal of it, which model and preset
+ * are in effect, whether the held pipeline serves a run, and why Run is disabled. Pure, so `vp test`
+ * covers it.
  */
 
 import type { Manifest } from "@karume/hub";
@@ -10,9 +11,11 @@ import { type EmbedContentPart, ModelInputError } from "@karume/models/embedding
 
 import type { LoadedImage } from "@/lib/image";
 
+import type { LoadedAudio } from "./audio";
+
 /**
- * One input of a run: a text, the prompt whose prefix goes before it (`undefined` = none) and an
- * image embedded after the text (`undefined` = none).
+ * One input of a run: a text, the prompt whose prefix goes before it (`undefined` = none), an image
+ * embedded after the text and an audio after that (`undefined` = none).
  */
 export type TextRow = {
   /** Stable across edits and removals (the React key); never reused within one page. */
@@ -20,6 +23,7 @@ export type TextRow = {
   readonly text: string;
   readonly prompt?: string;
   readonly image?: LoadedImage;
+  readonly audio?: LoadedAudio;
 };
 
 /**
@@ -57,7 +61,7 @@ export const removeRow = (rows: readonly TextRow[], id: number): readonly TextRo
 
 /**
  * `rows` with row `id` changed (`prompt: undefined` clears the prompt, `image: undefined` the
- * image).
+ * image, `audio: undefined` the audio).
  */
 export const updateRow = (
   rows: readonly TextRow[],
@@ -65,32 +69,40 @@ export const updateRow = (
   change:
     | { readonly text: string }
     | { readonly prompt: string | undefined }
-    | { readonly image: LoadedImage | undefined },
+    | { readonly image: LoadedImage | undefined }
+    | { readonly audio: LoadedAudio | undefined },
 ): readonly TextRow[] =>
   rows.map((row) => {
     if (row.id !== id) return row;
     if ("text" in change) return { ...row, text: change.text };
-    // A cleared field leaves its key out (no prompt, no image), as a new row has none.
+    // A cleared field leaves its key out (no prompt, no image, no audio), as a new row has none.
     const next =
-      "prompt" in change ? { ...row, prompt: change.prompt } : { ...row, image: change.image };
+      "prompt" in change
+        ? { ...row, prompt: change.prompt }
+        : "image" in change
+          ? { ...row, image: change.image }
+          : { ...row, audio: change.audio };
     return {
       id: next.id,
       text: next.text,
       ...(next.prompt === undefined ? {} : { prompt: next.prompt }),
       ...(next.image === undefined ? {} : { image: next.image }),
+      ...(next.audio === undefined ? {} : { audio: next.audio }),
     };
   });
 
 /**
- * What a row sends to `embed` / `tokenize`: its text as a string, or — with an image — the text part
- * then the image part (the RGB8 pixels; an empty text adds no token, so an image alone is that).
+ * What a row sends to `embed` / `tokenize`: its text as a string, or — with an image or an audio —
+ * the text part, then the image part (the RGB8 pixels), then the audio part (the mono samples); an
+ * empty text adds no token, so an image or an audio alone is that.
  */
 export const rowInput = (row: TextRow): string | readonly EmbedContentPart[] =>
-  row.image === undefined
+  row.image === undefined && row.audio === undefined
     ? row.text
     : [
         { type: "text", text: row.text },
-        { type: "image", image: row.image.rgb },
+        ...(row.image === undefined ? [] : [{ type: "image", image: row.image.rgb } as const]),
+        ...(row.audio === undefined ? [] : [{ type: "audio", audio: row.audio.audio } as const]),
       ];
 
 /** What counts a row's tokens: a pipeline's `tokenize`, narrowed so a test can stand in for it. */
@@ -100,19 +112,31 @@ export type RowTokenizer = (
 ) => { readonly length: number };
 
 /**
- * The number of tokens the pipeline would embed for `row` (the prompt's prefix, `<bos>` and `<eos>`
- * included, and an image's soft tokens with its two markers), or `undefined` when it cannot
- * tokenize the row at all (a `ModelInputError` — a prompt the model does not declare, an image on a
- * pipeline without the vision tower). A count over the limit is returned as is: `embed` refuses
- * it. Any other failure propagates.
+ * What the pipeline makes of `row` on the host: the number of tokens it would embed (the prompt's
+ * prefix, `<bos>` and `<eos>` included, and an image's or an audio's soft tokens with its two
+ * markers), or its refusal when it cannot tokenize the row at all (a `ModelInputError` — a prompt
+ * the model does not declare, an image or an audio on a pipeline without its tower, an audio that is
+ * not 16 kHz or is longer than 30 s), with the library's message. A count over the limit is returned
+ * as is: `embed` refuses it. Any other failure propagates.
  */
-export const rowTokenCount = (tokenize: RowTokenizer, row: TextRow): number | undefined => {
+export const rowTokens = (
+  tokenize: RowTokenizer,
+  row: TextRow,
+): { readonly count: number } | { readonly refusal: string } => {
   try {
-    return tokenize(rowInput(row), row.prompt === undefined ? {} : { prompt: row.prompt }).length;
+    return {
+      count: tokenize(rowInput(row), row.prompt === undefined ? {} : { prompt: row.prompt }).length,
+    };
   } catch (error) {
-    if (error instanceof ModelInputError) return undefined;
+    if (error instanceof ModelInputError) return { refusal: error.message };
     throw error;
   }
+};
+
+/** The count of {@link rowTokens}, or `undefined` for a row the pipeline refuses. */
+export const rowTokenCount = (tokenize: RowTokenizer, row: TextRow): number | undefined => {
+  const tokens = rowTokens(tokenize, row);
+  return "count" in tokens ? tokens.count : undefined;
 };
 
 /** The model and preset a run builds with, and whether each is the manifest's default. */

@@ -1,4 +1,4 @@
-// Checks of the vowel detector's FFT (`src/vowel-detector/fft.ts`). Needs neither a GPU nor real
+// Checks of the vowel detector's FFT (`src/audio/fft.ts`). Needs neither a GPU nor real
 // assets.
 //
 // Today the only path that reaches this class is the one Python parity test through
@@ -24,7 +24,7 @@
 
 import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertThrows } from "@std/assert";
-import { Fft } from "../src/vowel-detector/fft.ts";
+import { Fft } from "../src/audio/fft.ts";
 
 /** `|X[k]|²` of a naive DFT (zero padding at the end, k = 0..size/2). */
 const naivePowerSpectrum = (input: Float32Array, size: number): number[] => {
