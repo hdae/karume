@@ -42,7 +42,7 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-from wan import dit_patch, dit_probe, dit_reference, export_dit, ti2v_export_dit
+from wan import dit_common, dit_patch, dit_probe, dit_reference, export_dit, ti2v_export_dit
 from wan.tests.test_dit_patch import EXPECTED_OPS, TINY_DIT
 
 #: The synthetic layer count (num_layers of TINY_DIT).
@@ -99,8 +99,8 @@ def _tiny_text(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
     )
     monkeypatch.setattr(dit_probe, "TEXT_EMBEDS_ASSET", asset)
     monkeypatch.setattr(dit_probe, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
-    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
@@ -388,7 +388,7 @@ class TestTheSeriesWriter:
     ) -> None:
         _, summary = written
         for report in summary["eager"]:
-            assert export_dit.eager_failures(report) == [], report["case"]
+            assert dit_common.eager_failures(report) == [], report["case"]
             assert report["trunk_bit_exact"] is True
             observed = "per_token_timestep_vs_reference_ratio" in report
             assert observed is report["case"].startswith("band-"), report["case"]
@@ -426,7 +426,7 @@ class TestTheSeriesWriter:
                 return real(block, hidden, text, condition, generation, mask, rope)
 
             monkeypatch.setattr(dit_patch, "_ti2v_block", swapped)
-            expected_error: type[Exception] = export_dit.EagerEquivalenceError
+            expected_error: type[Exception] = dit_common.EagerEquivalenceError
         else:
             monkeypatch.setattr(ti2v_export_dit, "EXPECTED_5B", {"linear_nodes": 1})
             expected_error = ti2v_export_dit.Ti2vExportError
@@ -448,7 +448,7 @@ def _point_eager_full_at(patch: pytest.MonkeyPatch, checkpoint: Path, series: Pa
         return WanTransformer3DModel.from_pretrained(checkpoint, torch_dtype=torch.float32).eval()
 
     _point_at_tiny(patch, checkpoint, series)
-    patch.setattr(export_dit, "load_transformer", load)
+    patch.setattr(dit_common, "load_transformer", load)
 
 
 class TestTheFullEager:
@@ -509,7 +509,7 @@ class TestTheFullEager:
         self, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
         _point_eager_full_at(monkeypatch, checkpoint, tmp_path / ti2v_export_dit.SERIES_NAME)
-        monkeypatch.setattr(export_dit, "load_transformer", _never_load)
+        monkeypatch.setattr(dit_common, "load_transformer", _never_load)
 
         with pytest.raises(
             ti2v_export_dit.Ti2vExportError, match="the installed goldens are incomplete"
@@ -521,7 +521,7 @@ class TestTheFullEager:
     ) -> None:
         target, _ = written
         _point_eager_full_at(monkeypatch, checkpoint, target.parent)
-        monkeypatch.setattr(export_dit, "load_transformer", _never_load)
+        monkeypatch.setattr(dit_common, "load_transformer", _never_load)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
 
         with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
@@ -651,12 +651,12 @@ class TestTheFullGoldenWriter:
         assert {name: after[name] for name in before} == before
         added = sorted(set(after) - set(before))
         assert added == sorted(
-            file for name in _full_names() for file in export_dit.case_file_names(name)
+            file for name in _full_names() for file in dit_common.case_file_names(name)
         )
         assert [row["status"] for row in summary["cases"]] == ["written"] * 3
         assert summary["passed"] is True
         for report in summary["eager"]:
-            assert export_dit.eager_failures(report) == [], report["case"]
+            assert dit_common.eager_failures(report) == [], report["case"]
             assert "per_token_timestep_vs_reference_ratio" not in report
         assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
 
@@ -725,13 +725,13 @@ class TestTheFullGoldenWriter:
 
         monkeypatch.setattr(dit_patch, "_ti2v_block", swapped)
 
-        with pytest.raises(export_dit.EagerEquivalenceError):
+        with pytest.raises(dit_common.EagerEquivalenceError):
             ti2v_export_dit.write_full()
 
         # The first T2V case is placed because a modulation mix-up has no effect on it (both sides
         # at the same time), and it stops at the second I2V case.
         assert sorted(set(_digests(full_series)) - set(before)) == sorted(
-            export_dit.case_file_names(_full_names()[0])
+            dit_common.case_file_names(_full_names()[0])
         )
         assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
 

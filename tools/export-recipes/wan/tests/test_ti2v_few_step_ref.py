@@ -35,8 +35,8 @@ import pytest
 import torch
 
 from wan import (
+    dit_common,
     dit_probe,
-    export_dit,
     export_vae,
     few_step_ref,
     prompts,
@@ -533,17 +533,17 @@ class TestQuantizedDit:
     @pytest.fixture
     def tiny_upstream(self, monkeypatch):
         monkeypatch.setattr(
-            ti2v_few_step_ref.export_dit, "load_transformer", lambda _model: _tiny_dit()
+            ti2v_few_step_ref.dit_common, "load_transformer", lambda _model: _tiny_dit()
         )
 
     def test_the_loaded_dit_is_on_the_i8_grid_with_the_real_pair_processors(self, tiny_upstream):
         # The raw randomly initialised weights are not on the i8 grid (the empty check below is
         # not vacuous).
-        assert export_dit.unrounded_weights("i8", _tiny_dit())
+        assert dit_common.unrounded_weights("i8", _tiny_dit())
 
         model = ti2v_few_step_ref.load_quantized_transformer()
 
-        assert export_dit.unrounded_weights("i8", model) == []
+        assert dit_common.unrounded_weights("i8", model) == []
         assert {type(block.attn1.processor).__name__ for block in model.blocks} == {
             "WanRealPairAttnProcessor"
         }

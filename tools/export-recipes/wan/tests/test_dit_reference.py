@@ -35,7 +35,7 @@ import pytest
 import torch
 from torch import nn
 
-from wan import dit_patch, dit_reference, export_dit
+from wan import dit_common, dit_patch, dit_reference, export_dit
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
 #: The synthetic layer count (num_layers of TINY_DIT).
@@ -58,7 +58,7 @@ def _inputs(seed: int = 11) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
 def _rounded(dtype: str, seed: int = 20261004) -> nn.Module:
     model = _tiny(seed)
-    export_dit.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
+    dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
     return model
 
 
@@ -203,7 +203,7 @@ def _container(model: nn.Module, dtype: str, directory: Path) -> Path:
     from karume.pipeline import export_to_file
 
     wrapper = dit_patch.WanDitTokens(model)
-    _, scales = export_dit.fake_quant(dtype, model, wrapper)
+    _, scales = dit_common.fake_quant(dtype, model, wrapper)
     latents, timestep, embeds = _inputs()
     inputs = (
         dit_patch.dit_patchify(latents, (1, 2, 2)),
@@ -347,7 +347,7 @@ class TestTheCheckpointSource:
         self, dtype: str, checkpoint: Path
     ) -> None:
         model = _upstream(checkpoint)
-        export_dit.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
+        dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
         source = dit_reference.CheckpointDitWeights(
             checkpoint, dtype, dit_reference.quant_keys(model.config)
         )
@@ -366,7 +366,7 @@ class TestTheCheckpointSource:
         """The quantization targets = the keys of the scale ledger of the export's
         `fake_quant_i8` (the linears and the patch embedding)."""
         model = _tiny()
-        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+        report = dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
 
         assert dit_reference.quant_keys(model.config) == frozenset(report.scales)
         assert "patch_embedding.weight" in report.scales
@@ -484,10 +484,10 @@ class TestTheExportDitRoute:
 
     def test_it_reproduces_the_whole_model_f64_reference(self, monkeypatch) -> None:
         model = _rounded("i8")
-        spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
-        monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-        monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
-        inputs = export_dit.case_inputs(model, spec)
+        spec = dit_common.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
+        monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+        monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+        inputs = dit_common.case_inputs(model, spec)
 
         references = export_dit.float64_references(model, [spec], "i8")
 
@@ -499,13 +499,13 @@ class TestTheExportDitRoute:
     def test_a_model_before_the_fake_quant_is_refused(self, dtype: str) -> None:
         """If the call order breaks and a model before rounding is passed, it stops (no unrounded
         f64 golden is written)."""
-        spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
+        spec = dit_common.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
 
         with pytest.raises(AssertionError, match="was given unrounded"):
             export_dit.float64_references(_tiny(), [spec], dtype)
 
     def test_cases_without_an_f64_reference_take_nothing(self) -> None:
-        spec = export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 2)
+        spec = dit_common.CaseSpec("band", TINY_LATENT, 999, 5, 2)
 
         assert export_dit.float64_references(_rounded("f16"), [spec], "f16") == {}
 
@@ -547,7 +547,7 @@ class TestTheProbe:
 
         assert _structure(meta_graph) == _structure(real_graph)
         assert len(targets) == len(
-            export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model)).scales
+            dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model)).scales
         )
         assert sorted(key for key, value in tensors.items() if value.is_meta) == sorted(
             dict(model.named_parameters())
@@ -560,7 +560,7 @@ class TestTheProbe:
 
         export, summary = dit_probe.prepare(checkpoint, stage=_stage, sym_max=256, chunk_rows=5)
         model = _upstream(checkpoint)
-        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+        report = dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
         state = model.state_dict()
 
         assert sorted(export.fixed) == sorted(report.scales)
@@ -605,7 +605,7 @@ class TestTheProbeMemory:
 
         monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
-        monkeypatch.setattr(export_dit, "load_transformer", never)
+        monkeypatch.setattr(dit_common, "load_transformer", never)
 
         with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
             dit_probe.run_eager("t2v-1.3b", tmp_path)
@@ -621,7 +621,7 @@ class TestTheProbeMemory:
         assert dit_reference.DEFAULT_OUT.parent.parent == BENCH_ROOT
 
 
-_PROBE_SPEC = export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 1)
+_PROBE_SPEC = dit_common.CaseSpec("band", TINY_LATENT, 999, 5, 1)
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
@@ -703,8 +703,8 @@ class TestTheBlockHooks:
 def _tiny_text(monkeypatch) -> None:
     from wan import dit_probe
 
-    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
     monkeypatch.setattr(dit_probe, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
@@ -726,14 +726,14 @@ class TestTheProbeDiagnosis:
         save_file({"boxing-cats": embeds}, str(asset), metadata={METADATA_KEY: "{}"})
         monkeypatch.setattr(dit_probe, "TEXT_EMBEDS_ASSET", asset)
         writer = dit_reference.LayerwiseDit(_tiny().config)
-        spec = export_dit.CaseSpec("probe", TINY_LATENT, 999, 5, 1)
+        spec = dit_common.CaseSpec("probe", TINY_LATENT, 999, 5, 1)
 
         synthetic = dit_probe.probe_inputs(writer, spec)
         named = dit_probe.probe_inputs(writer, spec, "boxing-cats")
 
         assert all(
             torch.equal(a, b)
-            for a, b in zip(synthetic, export_dit.case_inputs(writer, spec), strict=True)
+            for a, b in zip(synthetic, dit_common.case_inputs(writer, spec), strict=True)
         )
         assert torch.equal(named[0], synthetic[0])
         assert torch.equal(named[1], synthetic[1])

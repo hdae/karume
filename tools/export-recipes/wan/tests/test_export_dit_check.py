@@ -30,7 +30,7 @@ import pytest
 import torch
 from torch import nn
 
-from wan import export_dit
+from wan import dit_common, export_dit
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
 #: The synthetic patch (patch_size of TINY_DIT).
@@ -40,15 +40,15 @@ PATCH = (1, 2, 2)
 #: full-size grid is selected by replacing {@link export_dit.I8_FULL_LATENTS} with the synthetic
 #: grid).
 CASES = (
-    export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 1),
-    export_dit.CaseSpec("accept", TINY_LATENT, 500, 3, 2),
-    export_dit.CaseSpec("full-band", TINY_LATENT, 250, 4, 3, blocks=False),
+    dit_common.CaseSpec("band", TINY_LATENT, 999, 5, 1),
+    dit_common.CaseSpec("accept", TINY_LATENT, 500, 3, 2),
+    dit_common.CaseSpec("full-band", TINY_LATENT, 250, 4, 3, blocks=False),
 )
 
 
 def _tiny(_model_name: str = "") -> nn.Module:
     """A synthetic DiT with the same weights every time (stands in for
-    `export_dit.load_transformer` — the rewrite round gets the same values too)."""
+    `dit_common.load_transformer` — the rewrite round gets the same values too)."""
     transformer_wan = pytest.importorskip("diffusers.models.transformers.transformer_wan")
     torch.manual_seed(20261004)
     return transformer_wan.WanTransformer3DModel(**TINY_DIT).to(torch.float32).eval()
@@ -61,8 +61,8 @@ def _point_at_tiny(patch: pytest.MonkeyPatch, root: Path) -> None:
     patch.setattr(export_dit, "I8_SERIES", root / "i8")
     patch.setattr(export_dit, "PROBE_SERIES", root / "probe")
     patch.setattr(export_dit, "load_transformer", _tiny)
-    patch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    patch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    patch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    patch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
 def _digests(directory: Path) -> dict[str, str]:
@@ -120,7 +120,7 @@ class TestAnUnchangedWriter:
         summary = _check()
 
         names = [spec.name(PATCH) for spec in CASES]
-        golden = {file for name in names for file in export_dit.case_file_names(name)}
+        golden = {file for name in names for file in dit_common.case_file_names(name)}
         assert summary["check"]["skipped_existing"] == []
         assert golden <= set(summary["check"]["identical_files"])
         assert any(name.startswith("model-") for name in summary["check"]["identical_files"])
@@ -131,7 +131,7 @@ class TestAnUnchangedWriter:
     def test_no_full_skips_exactly_the_full_size_case_files(self, series: Path) -> None:
         summary = _check("--no-full")
 
-        full = set(export_dit.case_file_names(CASES[2].name(PATCH)))
+        full = set(dit_common.case_file_names(CASES[2].name(PATCH)))
         assert set(summary["check"]["skipped_existing"]) == full
         assert not full & set(summary["check"]["identical_files"])
 
@@ -150,15 +150,15 @@ class TestAChangedWriter:
             _check()
 
         message = str(caught.value)
-        io_name, reference_name = export_dit.case_file_names(CASES[1].name(PATCH))
+        io_name, reference_name = dit_common.case_file_names(CASES[1].name(PATCH))
         assert io_name in message
         assert reference_name in message
-        assert export_dit.case_file_names(CASES[0].name(PATCH))[0] not in message
+        assert dit_common.case_file_names(CASES[0].name(PATCH))[0] not in message
         assert _digests(series / export_dit.TARGET) == before
         assert sorted(path.name for path in series.iterdir()) == [export_dit.TARGET]
 
     def test_a_skipped_file_missing_from_the_series_is_named(self, series: Path) -> None:
-        _, reference_name = export_dit.case_file_names(CASES[2].name(PATCH))
+        _, reference_name = dit_common.case_file_names(CASES[2].name(PATCH))
         (series / export_dit.TARGET / reference_name).unlink()
 
         with pytest.raises(export_dit.SeriesMismatchError, match=reference_name):

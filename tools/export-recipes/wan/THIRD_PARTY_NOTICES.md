@@ -33,7 +33,7 @@ completed on that date.
   repository `karume-umt5-xxl` (`umt5_distribution.py`), whose encoder `karume-wan2.2` references.
 - **Model implementation** — the `diffusers` package (`WanTransformer3DModel`, `AutoencoderKLWan`,
   `WanPipeline`, `UniPCMultistepScheduler`), pinned `diffusers==0.39.0`. `dit_patch.py`,
-  `vae_patch.py`, `vae_tiling.py` and `few_step_ref.py` carry functions adapted from it, each under
+  `vae_patch.py`, `vae_tiling.py` and `ti2v_few_step_ref.py` carry functions adapted from it, each under
   a "Third-party code notice" comment that names the upstream function and copies its copyright
   line.
 - **Text encoder and tokenizer** — `UMT5EncoderModel` / `AutoTokenizer` from `transformers`

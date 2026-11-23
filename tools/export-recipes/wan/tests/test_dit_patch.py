@@ -45,7 +45,7 @@ from torch.nn import functional
 from torch.nn.attention import SDPBackend
 
 from _shared.paths import REPO_ROOT
-from wan import dit_patch, export_dit
+from wan import dit_common, dit_patch, export_dit
 
 #: The shape of the synthetic DiT (head_dim 24 → RoPE t / h / w of 8 / 8 / 8 dimensions).
 TINY_DIT = {
@@ -378,7 +378,7 @@ class TestDitTokens:
 
         Every parameter includes the conv patch embedding (the wrapper's Linear is a view of it).
         """
-        from wan.export_dit import round_to_f16
+        from wan.dit_common import round_to_f16
 
         model = _tiny_dit()
         rope_before = {name: buffer.clone() for name, buffer in model.rope.named_buffers()}
@@ -402,7 +402,8 @@ class TestExport:
         from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
         from karume.pipeline import export_module
         from karume.verify import assert_op_contracts, assert_runtime_support
-        from wan.export_dit import INPUT_NAMES, dynamic_shapes
+        from wan.dit_common import INPUT_NAMES
+        from wan.export_dit import dynamic_shapes
 
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
@@ -578,9 +579,9 @@ class TestFlashAttentionOnly:
 
     def test_every_reference_and_eager_attention_runs_with_math_disabled(self, monkeypatch) -> None:
         """The SDPA calls of the f32 reference, the f64 reference and the patched eager
-        (`export_dit.eager_report`) all run with MATH disabled (removing the pinning breaks
+        (`dit_common.eager_report`) all run with MATH disabled (removing the pinning breaks
         this)."""
-        from wan.export_dit import Case, CaseSpec, eager_report, round_to_f16
+        from wan.dit_common import Case, CaseSpec, eager_report, round_to_f16
 
         states: list[bool] = []
         original = functional.scaled_dot_product_attention
@@ -620,7 +621,7 @@ class TestFloat64Reference:
     """The full-size f64 reference (`dit_patch.float64_forward`) — all activations run in f64."""
 
     def _rounded_f64(self) -> nn.Module:
-        from wan.export_dit import round_to_f16
+        from wan.dit_common import round_to_f16
 
         model = _tiny_dit()
         round_to_f16(model, dit_patch.WanDitTokens(model))
@@ -675,7 +676,7 @@ class TestFloat64Reference:
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
 
-#: An eager summary that satisfies every assertion (the same fields as `export_dit.eager_report`).
+#: An eager summary that satisfies every assertion (the same fields as `dit_common.eager_report`).
 _PASSING_REPORT = {
     "case": "tiny",
     "reference_max_abs": 1.5,
@@ -689,13 +690,13 @@ _PASSING_REPORT = {
 
 
 class TestTheEagerGate:
-    """The eager-equivalence check of the writers (`export_dit.eager_failures`) — a summary that
+    """The eager-equivalence check of the writers (`dit_common.eager_failures`) — a summary that
     fails it never reaches publication."""
 
     def test_a_report_that_keeps_every_claim_passes(self) -> None:
-        assert export_dit.eager_failures(_PASSING_REPORT) == []
+        assert dit_common.eager_failures(_PASSING_REPORT) == []
         assert (
-            export_dit.eager_failures({**_PASSING_REPORT, "reference_f32_vs_f64_ratio": 3e-6}) == []
+            dit_common.eager_failures({**_PASSING_REPORT, "reference_f32_vs_f64_ratio": 3e-6}) == []
         )
 
     @pytest.mark.parametrize(
@@ -711,7 +712,7 @@ class TestTheEagerGate:
         ids=["trunk", "patch-bound", "output", "nan-diff", "inf-ratio", "missing-claim"],
     )
     def test_each_broken_claim_is_named(self, change: dict, named: str) -> None:
-        failures = export_dit.eager_failures({**_PASSING_REPORT, **change})
+        failures = dit_common.eager_failures({**_PASSING_REPORT, **change})
 
         assert len(failures) == 1
         assert named in failures[0]
@@ -721,7 +722,7 @@ class TestTheEagerGate:
             key: value for key, value in _PASSING_REPORT.items() if key != "trunk_max_abs_diff"
         }
 
-        assert export_dit.eager_failures(report) == [
+        assert dit_common.eager_failures(report) == [
             "trunk_max_abs_diff is not a finite number (None)"
         ]
 
@@ -734,7 +735,7 @@ class TestTheEagerGate:
         tokens = dit_patch.dit_patchify(latents, (1, 2, 2))
         with torch.no_grad():
             hidden = model.patch_embedding(latents).flatten(2).transpose(1, 2)
-            bound = export_dit.patch_embedding_error_bound(tokens, linear)
+            bound = dit_common.patch_embedding_error_bound(tokens, linear)
             within = (linear(tokens) - hidden).abs() <= bound
             misordered = (linear(tokens.flip(-1)) - hidden).abs() <= bound
 
@@ -745,9 +746,9 @@ class TestTheEagerGate:
 #: The writer cases run on the synthetic model (one per role-specific writing path — the full-size
 #: role has the f64 reference).
 _TINY_CASES = (
-    export_dit.CaseSpec("band", TINY_LATENT, 500, 7, 1),
-    export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False),
-    export_dit.CaseSpec("full-accept", TINY_LATENT, 600, 3, 3),
+    dit_common.CaseSpec("band", TINY_LATENT, 500, 7, 1),
+    dit_common.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False),
+    dit_common.CaseSpec("full-accept", TINY_LATENT, 600, 3, 3),
 )
 _TINY_NAMES = [spec.name((1, 2, 2)) for spec in _TINY_CASES]
 
@@ -766,8 +767,8 @@ def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
     # The full-size grid of the i8 series (33 frames for real) is pointed at the synthetic grid —
     # one round also covers the role-specific writing of the full-size role.
     monkeypatch.setattr(export_dit, "I8_FULL_LATENTS", (TINY_LATENT,))
-    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
 def _emit_args(dtype: str = "f16", *, no_full: bool = False) -> argparse.Namespace:
@@ -813,9 +814,9 @@ class TestTheCaseWriters:
         out_dir, summary = emitted
 
         expected = [
-            f"{prefix}{name}{export_dit.CASE_SUFFIX}"
+            f"{prefix}{name}{dit_common.CASE_SUFFIX}"
             for name in _TINY_NAMES
-            for prefix in (export_dit.IO_PREFIX, export_dit.REFERENCE_PREFIX)
+            for prefix in (dit_common.IO_PREFIX, dit_common.REFERENCE_PREFIX)
         ]
         assert summary["io"] == expected
         assert all((out_dir / name).is_file() for name in expected)
@@ -824,11 +825,11 @@ class TestTheCaseWriters:
     def test_the_io_file_holds_the_graph_inputs_and_the_patched_output(self, emitted) -> None:
         out_dir, _ = emitted
         for name in _TINY_NAMES:
-            io = load_file(out_dir / f"{export_dit.IO_PREFIX}{name}{export_dit.CASE_SUFFIX}")
+            io = load_file(out_dir / f"{dit_common.IO_PREFIX}{name}{dit_common.CASE_SUFFIX}")
 
             assert set(io) == {
-                *(f"{export_dit.INPUT_PREFIX}{key}" for key in export_dit.INPUT_NAMES),
-                f"{export_dit.OUTPUT_PREFIX}0",
+                *(f"{dit_common.INPUT_PREFIX}{key}" for key in dit_common.INPUT_NAMES),
+                f"{dit_common.OUTPUT_PREFIX}0",
             }, name
 
     def test_block_outputs_and_the_f64_reference_follow_the_case_role(self, emitted) -> None:
@@ -838,10 +839,10 @@ class TestTheCaseWriters:
         layers = TINY_DIT["num_layers"]
         for spec, name in zip(_TINY_CASES, _TINY_NAMES, strict=True):
             reference = load_file(
-                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+                out_dir / f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}"
             )
             blocks = {f"block.{index:02d}" for index in range(layers)} if spec.blocks else set()
-            f64 = {export_dit.REFERENCE_F64_KEY} if spec.full_size else set()
+            f64 = {dit_common.REFERENCE_F64_KEY} if spec.full_size else set()
 
             assert set(reference) == {"latents", "timestep", "output", *blocks, *f64}, name
 
@@ -856,9 +857,9 @@ class TestTheCaseWriters:
             if not spec.full_size:
                 continue
             reference = load_file(
-                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+                out_dir / f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}"
             )
-            f64, f32 = reference[export_dit.REFERENCE_F64_KEY], reference["output"]
+            f64, f32 = reference[dit_common.REFERENCE_F64_KEY], reference["output"]
             distance = float((f64 - f32).abs().max())
 
             assert f64.dtype == torch.float32, name
@@ -868,12 +869,12 @@ class TestTheCaseWriters:
         source = (REPO_ROOT / "packages/e2e/tests/e2e_wan_ti2v_dit_test.ts").read_text()
         declared = re.findall(r'^const REFERENCE_F64_KEY = "([^"]+)";$', source, re.MULTILINE)
 
-        assert declared == [export_dit.REFERENCE_F64_KEY]
+        assert declared == [dit_common.REFERENCE_F64_KEY]
 
     def test_every_eager_report_passed_the_gate(self, emitted) -> None:
         _, summary = emitted
 
-        assert all(export_dit.eager_failures(report) == [] for report in summary["eager"])
+        assert all(dit_common.eager_failures(report) == [] for report in summary["eager"])
 
 
 class TestTheWriterStopsBeforePublication:
@@ -890,7 +891,7 @@ class TestTheWriterStopsBeforePublication:
         _break_the_rope(monkeypatch)
 
         with pytest.raises(
-            export_dit.EagerEquivalenceError, match="is not bit-identical to upstream"
+            dit_common.EagerEquivalenceError, match="is not bit-identical to upstream"
         ):
             export_dit.emit(_emit_args())
 
@@ -922,7 +923,7 @@ def _weight_slots(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 class TestTheI8Rounding:
-    """`export_dit.fake_quant_i8` — rounding reaches every upstream weight slot, and everything else
+    """`dit_common.fake_quant_i8` — rounding reaches every upstream weight slot, and everything else
     keeps upstream's f32 values (decision 2 — no f16 rounding mixed in)."""
 
     def test_it_reaches_every_weight_slot_and_leaves_everything_else_at_the_source_value(
@@ -932,7 +933,7 @@ class TestTheI8Rounding:
 
         model = _tiny_dit()
         before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
-        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+        report = dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
 
         slots = _weight_slots(model)
         assert report.modules == len(slots)
@@ -964,7 +965,7 @@ class TestTheI8Rounding:
         monkeypatch.setattr(dit_patch, "patch_embedding_linear", copied)
         model = _tiny_dit()
         with pytest.raises(AssertionError, match=r"patch_embedding\.weight"):
-            export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+            dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
 
 
 class TestTheI8Cases:
@@ -1079,12 +1080,12 @@ class TestTheI8Writer:
         out_dir, summary = emitted_i8
         for name in _TINY_NAMES:
             reference = load_file(
-                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+                out_dir / f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}"
             )
 
-            assert export_dit.REFERENCE_F64_KEY in reference, name
+            assert dit_common.REFERENCE_F64_KEY in reference, name
         assert all("reference_f32_vs_f64_ratio" in report for report in summary["eager"])
-        assert all(export_dit.eager_failures(report) == [] for report in summary["eager"])
+        assert all(dit_common.eager_failures(report) == [] for report in summary["eager"])
 
     def test_no_full_writes_the_small_cases_only(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1115,7 +1116,7 @@ def wan_transformer(wan_snapshot) -> nn.Module:
     """The real-weight DiT (CPU f32, untouched). MUST: tests do not rewrite it (rounding and so
     on)."""
     pytest.importorskip("diffusers")
-    from wan.export_dit import load_transformer
+    from wan.dit_common import load_transformer
 
     return load_transformer()
 
@@ -1128,7 +1129,7 @@ class TestRealWeights:
         Only the Linear form of the patch embedding may differ from conv3d in reduction order (the
         measured difference is 0 with torch CPU on this machine), so the difference is bounded by
         the reduction-order bound `2·γ_{K+1}·Σ|w·x|` (`γ_n = n·u / (1 − n·u)`, `u = 2⁻²⁴`, K = 64
-        plus the bias — the same {@link wan.export_dit.patch_embedding_error_bound} as the writer's
+        plus the bias — the same {@link wan.dit_common.patch_embedding_error_bound} as the writer's
         check) — an implementation error (a mixed-up ordering) shows in the magnitude of the values
         themselves.
         """
@@ -1146,7 +1147,7 @@ class TestRealWeights:
             hidden = model.patch_embedding(latents).flatten(2).transpose(1, 2)
             trunk = wrapper.forward_hidden(hidden, *inputs[1:])
             embedded = wrapper.patch_embedding(inputs[0])
-            bound = export_dit.patch_embedding_error_bound(inputs[0], wrapper.patch_embedding)
+            bound = dit_common.patch_embedding_error_bound(inputs[0], wrapper.patch_embedding)
 
         assert torch.equal(dit_patch.dit_unpatchify(trunk, (2, 16, 24), (1, 2, 2)), expected)
         assert bool(((embedded - hidden).abs() <= bound).all())

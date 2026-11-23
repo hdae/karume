@@ -945,12 +945,12 @@ def _tokens(spec: Any, patch_size: tuple[int, int, int]) -> int:
 def _source(kind: str, dtype: str, existing: Path) -> WeightSource:
     """The comparison's weight source (container = the same path as 5B, module = the 1.3B path of
     `export_dit`)."""
-    from wan import export_dit
+    from wan import dit_common, export_dit
 
     if kind == "container":
         return ContainerDitWeights(existing / export_dit.MODEL_FILE)
-    model = export_dit.load_transformer(export_dit.DEFAULT_MODEL)
-    export_dit.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
+    model = dit_common.load_transformer(export_dit.DEFAULT_MODEL)
+    dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
     return ModuleWeights(model)
 
 
@@ -966,10 +966,10 @@ def _compare_case(
 ) -> dict[str, Any]:
     """Re-takes and writes one case, and returns the result row of the comparison with the
     existing golden."""
-    from wan import export_dit
+    from wan import dit_common, export_dit
 
     name = spec.name(writer.patch_size)
-    latents, timestep, encoder_hidden_states = export_dit.case_inputs(writer, spec)
+    latents, timestep, encoder_hidden_states = dit_common.case_inputs(writer, spec)
     long_case = _tokens(spec, writer.patch_size) >= PROGRESS_TOKENS
     seconds: dict[str, float] = {}
     reference32 = None
@@ -997,7 +997,7 @@ def _compare_case(
         seconds["f64"] = round(reference64.seconds, 1)
     if reference32 is None and reference64 is None:
         raise DitReferenceError(f"{name}: --f64-only on a case without an f64 reference")
-    tensors = export_dit.reference_tensors(
+    tensors = dit_common.reference_tensors(
         name,
         latents=latents,
         timestep=timestep,
@@ -1005,9 +1005,9 @@ def _compare_case(
         blocks=[] if reference32 is None else reference32.blocks,
         output_f64=None if reference64 is None else reference64.output,
     )
-    filename = f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+    filename = f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}"
     save_file(tensors, str(target / filename))
-    keys = [export_dit.REFERENCE_F64_KEY] if f64_only else None
+    keys = [dit_common.REFERENCE_F64_KEY] if f64_only else None
     comparison = compare_tensors(tensors, existing / filename, keys)
     return {
         "case": name,

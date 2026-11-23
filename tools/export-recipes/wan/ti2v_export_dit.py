@@ -57,7 +57,7 @@ the module doc of `wan.dit_reference`).
 - `io.<case>`: the 7 graph inputs (`input.*` — the condition mask as u32 0 / 1) and the patched
   eager output `output.0` (the S-form wrapper run with the same layer-by-layer weights)
 
-The eager-equivalence check (the same judgment as `export_dit.eager_failures`): the T2V form is
+The eager-equivalence check (the same judgment as `dit_common.eager_failures`): the T2V form is
 bit-identical in the trunk to the upstream path with the one-dimensional timestep, and the I2V form
 to the reference wrapper. If even one fails, it stops inside the working directory (the series does
 not change by a single byte). Both sides read the same layer-by-layer weights, so an error common to
@@ -110,7 +110,7 @@ the form decision 4 describes:
   layer-by-layer path is involved)
 - for each case, the eager of the patched graph ({@link dit_patch.WanDitTokensTi2v} — the T2V /
   I2V form) is compared with the upstream (T2V with the forward of the one-dimensional timestep,
-  I2V with the reference wrapper) (the same judgment as `export_dit.eager_failures` — bit
+  I2V with the reference wrapper) (the same judgment as `dit_common.eager_failures` — bit
   identity of the trunk)
 - it is also compared with the installed goldens: the upstream reference = `output` of
   `reference.<case>`, the patched output = `output.0` of `io.<case>` (both bit-identical — the
@@ -170,7 +170,7 @@ from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_module, publish_model
 from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
-from wan import dit_patch, dit_probe, dit_reference, export_dit
+from wan import dit_common, dit_patch, dit_probe, dit_reference, export_dit
 from wan.sources import local_snapshot
 from wan.umt5_export import MemoryMonitor
 
@@ -190,12 +190,12 @@ MODEL_FILE = "model.krm"
 
 #: The graph input names (the arguments of the wrapper's forward become the IR input names as is —
 #: the first 5 are the same as in 2.1).
-INPUT_NAMES = (*export_dit.INPUT_NAMES, "timesteps_proj_condition", "condition_mask")
+INPUT_NAMES = (*dit_common.INPUT_NAMES, "timesteps_proj_condition", "condition_mask")
 
 #: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — decision 3) and the lower bound (the same
 #: as in 2.1).
 SYM_MAX = 27_280
-SYM_MIN = export_dit.DIT_SYM_MIN
+SYM_MIN = dit_common.DIT_SYM_MIN
 
 #: The number of linears of the time MLP (the 2 of `time_embedder` + `time_proj`) — it runs twice
 #: with M = 1, so there are this many more linear nodes than quantization targets (decision 2).
@@ -260,11 +260,11 @@ class Ti2vCase:
         frames, height, width = self.latent_shape
         return (frames // patch_size[0]) * (height // patch_size[1]) * (width // patch_size[2])
 
-    def spec(self) -> export_dit.CaseSpec:
-        """The form that draws the random latents (`export_dit.case_inputs` — the latents are drawn
+    def spec(self) -> dit_common.CaseSpec:
+        """The form that draws the random latents (`dit_common.case_inputs` — the latents are drawn
         first, so the synthetic text's valid length (1 here) does not affect the latent values.
         `probe_inputs` replaces the context with the prompt)."""
-        return export_dit.CaseSpec(
+        return dit_common.CaseSpec(
             self.role, self.latent_shape, self.timestep, 1, self.seed, blocks=False
         )
 
@@ -543,7 +543,7 @@ def rope_base_asset(writer: dit_reference.LayerwiseDit) -> dict[str, AssetInput]
     slot and format as in 2.1)."""
     payload = save(dit_patch.dit_rope_base_tables(writer.rope))
     return {
-        export_dit.ROPE_BASE_ASSET: AssetInput(export_dit.ROPE_BASE_ROLE, len(payload), payload)
+        dit_common.ROPE_BASE_ASSET: AssetInput(dit_common.ROPE_BASE_ROLE, len(payload), payload)
     }
 
 
@@ -564,7 +564,7 @@ def write_container(
         path,
         export.graph,
         dict(export.tensors),
-        provenance=export_dit.provenance(model),
+        provenance=dit_common.provenance(model),
         graph_name=TARGET,
         fixed_weights=export.fixed,
         assets=assets,
@@ -631,7 +631,7 @@ def patched_eager(
 ) -> tuple[dict[str, Any], torch.Tensor]:
     """Run the eager of the patched graph ({@link dit_patch.WanDitTokensTi2v}) with the same
     layer-by-layer weights and return a summary of its difference from the reference (the same
-    fields as `export_dit.eager_report` — judged by `export_dit.eager_failures`) and the graph
+    fields as `dit_common.eager_report` — judged by `dit_common.eager_failures`) and the graph
     output `[1,S,pt·ph·pw·C]`.
 
     The trunk is the path with the patch embedding replaced by the upstream conv3d output (claimed
@@ -646,7 +646,7 @@ def patched_eager(
         with dit_patch.flash_attention_only():
             hidden = model.patch_embedding(inputs.latents).flatten(2).transpose(1, 2)
             embedded = wrapper.patch_embedding(tokens)
-            bound = export_dit.patch_embedding_error_bound(tokens, wrapper.patch_embedding)
+            bound = dit_common.patch_embedding_error_bound(tokens, wrapper.patch_embedding)
             started = time.perf_counter()
             tokens_out = wrapper(*inputs.graph_inputs)
             seconds = time.perf_counter() - started
@@ -732,29 +732,29 @@ def golden_case(
             "form": case.form,
             "reference_f32_seconds": round(reference32.seconds, 1),
             "reference_f64_seconds": round(reference64.seconds, 1),
-            "reference_f32_vs_f64_ratio": export_dit._ratio(reference32.output, reference64.output),
+            "reference_f32_vs_f64_ratio": dit_common._ratio(reference32.output, reference64.output),
         }
     )
     if case.role in OBSERVED_ROLES:
         observed = writer.forward(
             source, torch.float32, inputs.latents, per_token_timestep(inputs), common[2]
         )
-        report["per_token_timestep_vs_reference_ratio"] = export_dit._ratio(
+        report["per_token_timestep_vs_reference_ratio"] = dit_common._ratio(
             observed.output, reference32.output
         )
         report["per_token_timestep_bit_exact"] = torch.equal(observed.output, reference32.output)
-    failures = export_dit.eager_failures(report)
+    failures = dit_common.eager_failures(report)
     print(f"[eager] {json.dumps(report, ensure_ascii=False)}", flush=True)
     if failures:
-        raise export_dit.EagerEquivalenceError(f"{name}: {failures}")
+        raise dit_common.EagerEquivalenceError(f"{name}: {failures}")
     io = {
-        f"{export_dit.INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name} input '{key}'")
+        f"{dit_common.INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name} input '{key}'")
         for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True)
     }
-    io[f"{export_dit.OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
+    io[f"{dit_common.OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
         tokens_out.contiguous(), f"{name} output"
     )
-    reference = export_dit.reference_tensors(
+    reference = dit_common.reference_tensors(
         name,
         latents=inputs.latents,
         timestep=inputs.timestep,
@@ -765,9 +765,9 @@ def golden_case(
     reference[CONDITION_TIMESTEP_KEY] = normalize_boundary_tensor(
         inputs.condition_timestep, f"{name} condition-side timestep"
     )
-    save_file(io, str(out_dir / f"{export_dit.IO_PREFIX}{name}{export_dit.CASE_SUFFIX}"))
+    save_file(io, str(out_dir / f"{dit_common.IO_PREFIX}{name}{dit_common.CASE_SUFFIX}"))
     save_file(
-        reference, str(out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}")
+        reference, str(out_dir / f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}")
     )
     return report
 
@@ -859,8 +859,8 @@ def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> di
 _STORED_REFERENCE_INPUTS = ("latents", "timestep", CONDITION_TIMESTEP_KEY)
 
 #: The output keys an installed case's files must hold (`io` / `reference`).
-_STORED_IO_OUTPUT = f"{export_dit.OUTPUT_PREFIX}0"
-_STORED_REFERENCE_OUTPUTS = ("output", export_dit.REFERENCE_F64_KEY)
+_STORED_IO_OUTPUT = f"{dit_common.OUTPUT_PREFIX}0"
+_STORED_REFERENCE_OUTPUTS = ("output", dit_common.REFERENCE_F64_KEY)
 
 #: What {@link stored_case_state} returns.
 StoredState = Literal["absent", "partial", "present"]
@@ -880,7 +880,7 @@ def stored_case_state(
     human decision).
     """
     name = case.name(writer.patch_size)
-    io_name, reference_name = export_dit.case_file_names(name)
+    io_name, reference_name = dit_common.case_file_names(name)
     present = [(target / file).is_file() for file in (io_name, reference_name)]
     if not any(present):
         return "absent"
@@ -898,7 +898,7 @@ def stored_case_state(
     with safe_open(str(target / io_name), "pt") as handle:
         keys = set(handle.keys())
         for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True):
-            stored = f"{export_dit.INPUT_PREFIX}{key}"
+            stored = f"{dit_common.INPUT_PREFIX}{key}"
             built = normalize_boundary_tensor(value, f"{name} input '{key}'")
             if stored not in keys or not torch.equal(handle.get_tensor(stored), built):
                 differing.append(stored)
@@ -927,10 +927,10 @@ def _stored_ratio(target: Path, name: str) -> float:
     the TS r check's normalization (the ratio in `golden_case`'s summary is against f64 before
     rounding, and differs by a few % on cases with a small denominator).
     """
-    _, reference_name = export_dit.case_file_names(name)
+    _, reference_name = dit_common.case_file_names(name)
     with safe_open(str(target / reference_name), "pt") as handle:
-        return export_dit._ratio(
-            handle.get_tensor("output"), handle.get_tensor(export_dit.REFERENCE_F64_KEY)
+        return dit_common._ratio(
+            handle.get_tensor("output"), handle.get_tensor(dit_common.REFERENCE_F64_KEY)
         )
 
 
@@ -1003,7 +1003,7 @@ def write_full(
                 report = golden_case(writer, source, case, Path(scratch))
                 # Only a case that passed the checks is moved into the component directory (a
                 # rename within the same file system).
-                for file in export_dit.case_file_names(name):
+                for file in dit_common.case_file_names(name):
                     os.replace(Path(scratch) / file, target / file)
             elapsed.append(time.perf_counter() - started)
             row = {
@@ -1066,12 +1066,12 @@ def golden_agreement(
     The 7 graph inputs are also compared bit by bit with the golden's `input.*` (if the same case
     was not built, comparing the outputs means nothing).
     """
-    io_name, reference_name = export_dit.case_file_names(name)
+    io_name, reference_name = dit_common.case_file_names(name)
     with safe_open(str(golden_dir / io_name), "pt") as handle:
         stored_inputs = {
-            key: handle.get_tensor(f"{export_dit.INPUT_PREFIX}{key}") for key in INPUT_NAMES
+            key: handle.get_tensor(f"{dit_common.INPUT_PREFIX}{key}") for key in INPUT_NAMES
         }
-        stored_output = handle.get_tensor(f"{export_dit.OUTPUT_PREFIX}0")
+        stored_output = handle.get_tensor(f"{dit_common.OUTPUT_PREFIX}0")
     with safe_open(str(golden_dir / reference_name), "pt") as handle:
         stored_reference = handle.get_tensor("output")
     differing = [
@@ -1084,9 +1084,9 @@ def golden_agreement(
     record = {
         "golden_inputs_bit_exact": not differing,
         "golden_reference_bit_exact": torch.equal(reference, stored_reference),
-        "golden_reference_ratio": export_dit._ratio(reference, stored_reference),
+        "golden_reference_ratio": dit_common._ratio(reference, stored_reference),
         "golden_output_bit_exact": torch.equal(tokens_out, stored_output),
-        "golden_output_ratio": export_dit._ratio(tokens_out, stored_output),
+        "golden_output_ratio": dit_common._ratio(tokens_out, stored_output),
     }
     failures = []
     if differing:
@@ -1132,7 +1132,7 @@ def full_eager_case(
             inputs.condition,
         )
         seconds = time.perf_counter() - started
-    built = export_dit.Case(
+    built = dit_common.Case(
         name=name,
         spec=case.spec(),
         inputs=inputs.graph_inputs,
@@ -1142,10 +1142,10 @@ def full_eager_case(
         reference_blocks=[],
         reference_seconds=seconds,
     )
-    report, tokens_out = export_dit.eager_report(wrapper, upstream, built)
+    report, tokens_out = dit_common.eager_report(wrapper, upstream, built)
     golden, mismatches = golden_agreement(name, inputs, reference, tokens_out, golden_dir)
     report.update({"form": case.form, **golden})
-    report["failures"] = export_dit.eager_failures(report) + mismatches
+    report["failures"] = dit_common.eager_failures(report) + mismatches
     print(f"[eager-full] {json.dumps(report, ensure_ascii=False)}", flush=True)
     return report
 
@@ -1165,7 +1165,7 @@ def eager_full(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     missing = [
         file
         for case in CASES
-        for file in export_dit.case_file_names(case.name(writer.patch_size))
+        for file in dit_common.case_file_names(case.name(writer.patch_size))
         if not (target / file).is_file()
     ]
     if missing:
@@ -1178,11 +1178,11 @@ def eager_full(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
     with MemoryMonitor() as monitor:
         with monitor.stage("load") as record:
-            upstream = export_dit.load_transformer(model)
+            upstream = dit_common.load_transformer(model)
             record.details["parameters"] = sum(p.numel() for p in upstream.parameters())
         with monitor.stage("fake-quant") as record:
             wrapper = dit_patch.WanDitTokensTi2v(upstream)
-            record.details["rounded"] = export_dit.fake_quant_i8(upstream, wrapper).describe()
+            record.details["rounded"] = dit_common.fake_quant_i8(upstream, wrapper).describe()
         for case in CASES:
             with monitor.stage(f"eager {case.name(writer.patch_size)}"):
                 reports.append(full_eager_case(upstream, wrapper, writer, case, target))
@@ -1233,7 +1233,7 @@ ESCALATE_FACTOR = 2.0
 
 def _observe_cases(
     model: str, patch: tuple[int, int, int]
-) -> list[tuple[str, export_dit.CaseSpec, Form, str]]:
+) -> list[tuple[str, dit_common.CaseSpec, Form, str]]:
     """The observation cases (name, latent shape, T2V / I2V form, context prompt).
 
     For the 5B, the 6 decision cases of {@link CASES}. For the 1.3B, the 6 decision cases of the i8
@@ -1283,7 +1283,7 @@ def observe_quant(models: Sequence[str] = OBSERVE_MODELS) -> dict[str, Any]:
             rounded = writer.forward(
                 quantized, torch.float32, latents, timestep, text, condition=condition
             )
-            ratio = export_dit._ratio(rounded.output, plain.output)
+            ratio = dit_common._ratio(rounded.output, plain.output)
             rows.append({"case": name, "form": form, "text": prompt, "ratio": ratio})
             print(f"[observe] {model} {name}: {ratio:.3e}", flush=True)
         ratios = [row["ratio"] for row in rows]

@@ -46,7 +46,7 @@ from torch import nn
 
 from _shared.paths import REPO_ROOT
 from wan import dit_patch
-from wan.export_dit import load_transformer
+from wan.dit_common import load_transformer
 from wan.pipeline_ref import NUM_INFERENCE_STEPS
 from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 

@@ -598,7 +598,7 @@ const difference = (actual: Float32Array, expected: Float32Array): Difference =>
 const ratioOf = (diff: Difference): number => diff.maxAbs / diff.referenceMaxAbs;
 
 /**
- * The key of the f64 reference (`REFERENCE_F64_KEY` of `wan/export_dit.py` — upstream's output run with f64
+ * The key of the f64 reference (`REFERENCE_F64_KEY` of `wan/dit_common.py` — upstream's output run with f64
  * activations too, rounded to f32).
  */
 const REFERENCE_F64_KEY = "output.f64";

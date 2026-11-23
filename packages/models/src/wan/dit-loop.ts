@@ -42,7 +42,7 @@ export const TRANSFORMER = "transformer";
 /** The asset name of the RoPE base table declared by the `transformer` container (role `rope-base`). */
 export const ROPE_BASE = "rope_base";
 
-/** Input names of the DiT's S-shaped graph (forward argument names of recipe `wan/export_dit.py`). */
+/** Input names of the DiT's S-shaped graph (forward argument names of recipe `wan/dit_common.py`). */
 const DIT_TOKENS = "tokens";
 const DIT_TIMESTEPS_PROJ = "timesteps_proj";
 export const DIT_CONTEXT = "encoder_hidden_states";

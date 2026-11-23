@@ -68,8 +68,9 @@ from safetensors.torch import save_file
 from _shared.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
 from wan import dit_patch, export_vae, pipeline_ref, prompts, text_embeds, vae_tiling
-from wan.export_dit import round_to_f16
+from wan.dit_common import round_to_f16
 from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS
+from wan.ti2v_few_step_ref import FIXTURE_PREFIX, FIXTURE_SUFFIX, denormalize_latents
 
 if TYPE_CHECKING:
     from diffusers import WanPipeline
@@ -79,10 +80,6 @@ STEPS = 2
 
 #: The latent `[C, F, H, W]` (832×480, 33 frames — the first target).
 LATENT_SHAPE = (16, 9, 60, 104)
-
-#: The reference file name (at the series root — `pipeline_steps.<case>.safetensors`).
-FIXTURE_PREFIX = "pipeline_steps."
-FIXTURE_SUFFIX = ".safetensors"
 
 
 @dataclass(frozen=True)
@@ -118,28 +115,6 @@ def load_rounded_pipeline(model: str = DEFAULT_MODEL) -> WanPipeline:
     print(f"[fake-quant] transformer: {rounded}", flush=True)
     print(f"[fake-quant] vae: {round_weights_to_f16(pipeline.vae.eval()).describe()}", flush=True)
     return pipeline
-
-
-# Third-party code notice. `denormalize_latents` below is adapted from `WanPipeline.__call__` in
-# huggingface/diffusers (`src/diffusers/pipelines/wan/pipeline_wan.py`, `diffusers==0.39.0`):
-# the de-normalization before `vae.decode` is verbatim.
-# License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream
-# copyright notice, copied verbatim from the header of that file:
-#
-#   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
-def denormalize_latents(pipeline: WanPipeline, latents: torch.Tensor) -> torch.Tensor:
-    """The de-normalization right before upstream's decode (`latents / (1 / std) + mean` — the
-    order of operations is also upstream's)."""
-    latents = latents.to(pipeline.vae.dtype)
-    latents_mean = (
-        torch.tensor(pipeline.vae.config.latents_mean)
-        .view(1, pipeline.vae.config.z_dim, 1, 1, 1)
-        .to(latents.device, latents.dtype)
-    )
-    latents_std = 1.0 / torch.tensor(pipeline.vae.config.latents_std).view(
-        1, pipeline.vae.config.z_dim, 1, 1, 1
-    ).to(latents.device, latents.dtype)
-    return latents / latents_std + latents_mean
 
 
 def _peak_rss_gib() -> float:
