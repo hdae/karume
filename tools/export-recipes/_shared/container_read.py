@@ -1,9 +1,9 @@
 """Read a written container (`krm`) back **as stored** (the recipe-side reader; ADR 0065
 decision 2).
 
-Scripts and distribution recipes cross-check their own output (typical cases: byte equality with
-the upstream checkpoint ⟨vowel_detector⟩, reading weights back from an i4 series ⟨irodori⟩, the
-QAT storage audit ⟨gemma4_qat⟩ — find every caller with rg). All of them need "tensor key →
+Scripts and distribution recipes cross-check their own output (typical cases: reading weights
+back from an i4 series ⟨irodori⟩, the QAT storage audit ⟨gemma4_qat⟩ — find every caller with
+rg). All of them need "tensor key →
 declared storage form and raw payload", the shape before it is turned back into semantic f32.
 
 It only folds the supply plan that core (`karume.verify.verify_container`) has already merged, so

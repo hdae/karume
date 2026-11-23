@@ -10,8 +10,8 @@ The series mode is **not added** to core's `karume migrate` because only a famil
 the families). The series layout differs per family, and **a directory name is not a component
 name**:
 
-- one component directly under the series (siglip2 / birefnet / depth-anything / vowel-detector /
-  gemma4 / gemma4-qat / minicpm5 / embeddinggemma) — the directory name is the series name.
+- one component directly under the series (siglip2 / birefnet / depth-anything / gemma4 /
+  gemma4-qat / minicpm5 / embeddinggemma) — the directory name is the series name.
 - components side by side in subdirectories (anima / sbv2 / irodori / dacvae / deberta) — some
   spellings do not match (`caption-proj` → `caption_proj`, `decoder` → `codec_decoder`, deberta's
   `full-24layer` → the `text_encoder` role SBV2 consumes).
@@ -81,8 +81,6 @@ from sbv2 import export as sbv2_export
 from sbv2.distribution import SBV2_FRONT_ROLE, SBV2_SERIES_PREFIX, SBV2_VOICE_ROLE
 from siglip2 import export as siglip2_export
 from siglip2.distribution import SIGLIP2_ROLE
-from vowel_detector import export as vowel_detector_export
-from vowel_detector.distribution import VOWEL_DETECTOR_GRAPH_ROLE
 
 #: The representative name of an old shard list (`model` in every family — the stem of the
 #: writer's `MODEL_FILE`).
@@ -292,12 +290,6 @@ FAMILIES: tuple[Family, ...] = (
             input_checkpoint(siglip2_export.MODELS_ROOT, name)
         ),
         flat_role=lambda _: SIGLIP2_ROLE,
-    ),
-    Family(
-        "vowel-detector",
-        lambda name: name.startswith("vowel-detector-"),
-        lambda _: vowel_detector_export.PROVENANCE,
-        flat_role=lambda _: VOWEL_DETECTOR_GRAPH_ROLE,
     ),
     Family(
         "deberta",

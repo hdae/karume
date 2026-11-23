@@ -123,7 +123,6 @@ from karume.dist import main as dist_main
 from moss import distribution as moss_distribution
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
-from vowel_detector import distribution as vowel_detector_distribution
 from wan import distribution as wan_distribution
 from wan import umt5_distribution
 from wan.umt5_intake import ALLOW_UNDECLARED_LICENSE_FLAG, Umt5IntakeError, load_intake
@@ -147,7 +146,6 @@ PIPELINES: Mapping[str, Pipeline] = {
     # repository root differs, so the Pipeline is a separate entry too.
     "lucida": birefnet_distribution.LUCIDA_PIPELINE,
     "depth-anything": depth_anything_distribution.PIPELINE,
-    "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
     # The q4_0 QAT line of the `gemma4/1` contract (`karume-gemma4-qat` — E2B / E4B / 12B with
     # their QAT drafters) and the mobile QAT family (`karume-gemma4-qat-mobile` — contract

@@ -279,11 +279,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
     maxLines: 4,
   },
   {
-    path: "tools/export-recipes/vowel_detector/card.py",
-    why: "upstream's voice-model names, copied verbatim from its NOTICE into the card attribution",
-    maxLines: 1,
-  },
-  {
     path: "tools/export-recipes/wan/prompts.py",
     why: "Wan's Chinese negative prompt, quoted verbatim from upstream",
     maxLines: 4,

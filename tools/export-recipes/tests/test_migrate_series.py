@@ -101,23 +101,23 @@ class TestFlatSeries:
     differently from the series name)."""
 
     def test_the_graph_is_named_after_the_weights_key(self, tmp_path: Path) -> None:
-        series = tmp_path / "vowel-detector-fixture"
-        before = place(series, mark="vowel")
+        series = tmp_path / "gemma4-fixture-product"
+        before = place(series, mark="gemma")
         run(tmp_path)
-        assert graph_names(series / "model.krm") == ["crnn"]
+        assert graph_names(series / "model.krm") == ["model"]
         assert_untouched(series, before)
 
     def test_the_old_shards_stay_next_to_the_container(self, tmp_path: Path) -> None:
-        series = tmp_path / "vowel-detector-fixture"
-        before = place(series, mark="vowel")
+        series = tmp_path / "gemma4-fixture-product"
+        before = place(series, mark="gemma")
         run(tmp_path)
         placed = {path.name for path in series.iterdir()}
         assert set(before) <= placed
         assert any(name.endswith(".krm") for name in placed)
 
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
-        series = tmp_path / "vowel-detector-fixture"
-        before = place(series, mark="vowel")
+        series = tmp_path / "gemma4-fixture-product"
+        before = place(series, mark="gemma")
         run(tmp_path, "--dry-run")
         assert {path.name for path in series.iterdir()} == set(before)
 
@@ -285,23 +285,23 @@ class TestGatesThatFailLoudly:
             run(tmp_path)
 
     def test_a_safetensors_with_nowhere_to_go_stops(self, tmp_path: Path) -> None:
-        component = tmp_path / "vowel-detector-fixture"
-        place(component, mark="vowel")
-        (component / "mel_basis.safetensors").write_bytes(b"unknown")
-        with pytest.raises(migrate_series.SeriesMigrationError, match="mel_basis"):
+        component = tmp_path / "gemma4-fixture-product"
+        place(component, mark="gemma")
+        (component / "stray.safetensors").write_bytes(b"unknown")
+        with pytest.raises(migrate_series.SeriesMigrationError, match="stray"):
             run(tmp_path)
 
     def test_the_diagnostic_names_the_directory_once(self, tmp_path: Path) -> None:
         """A flat series does not become `<series>/<series>` (the component path is relative to the
         series)."""
-        component = tmp_path / "vowel-detector-fixture"
-        place(component, mark="vowel")
-        (component / "mel_basis.safetensors").write_bytes(b"unknown")
+        component = tmp_path / "gemma4-fixture-product"
+        place(component, mark="gemma")
+        (component / "stray.safetensors").write_bytes(b"unknown")
 
         with pytest.raises(migrate_series.SeriesMigrationError) as raised:
             run(tmp_path)
 
-        assert str(raised.value).startswith("vowel-detector-fixture: 'mel_basis.safetensors'")
+        assert str(raised.value).startswith("gemma4-fixture-product: 'stray.safetensors'")
 
     def test_a_sidecar_only_subdirectory_is_examined_too(self, tmp_path: Path) -> None:
         """MUST: the check covers **every directory of the series** (including those without an
@@ -367,7 +367,7 @@ class TestGatesThatFailLoudly:
             run(tmp_path)
 
     def test_a_second_run_refuses_to_overwrite(self, tmp_path: Path) -> None:
-        place(tmp_path / "vowel-detector-fixture", mark="vowel")
+        place(tmp_path / "gemma4-fixture-product", mark="gemma")
         run(tmp_path)
         with pytest.raises(MigrateError, match="remain"):
             run(tmp_path)

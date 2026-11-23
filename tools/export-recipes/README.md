@@ -90,14 +90,13 @@ uv run python dist.py --pipeline sbv2 \
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `irodori-large` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md). The house non-endorsement sentence every card
 opens with names, for each upstream HF repository, the publisher that `_shared/upstream.py`'s
 `UPSTREAM_AUTHORS` lists for its account; an upstream from an account missing there fails the card
-render, and so does one from our own account (`hdae/` — the vowel detector's card, whose upstream
-is our own release, is the one card without the sentence).
+render, and so does one from our own account (`hdae/`).
 
 **Cross-repository references** (ADR [0038](../../docs/decisions/0038-manifest-v1.md) §7, addendum
 2026-10-28). A pipeline declares which roles of a model are byte-identical to another distribution
@@ -156,7 +155,6 @@ release gate, and this reorganization only creates its precondition.
 | `birefnet` (image segmentation)       | matte logits as one graph per model × resolution (BiRefNet_HR / Lucida)                                                                                                                                                                                                                                                                                                                   | [birefnet/README.md](birefnet/README.md)             |
 | `depth-anything` (depth estimation)   | relative depth as one graph at the pretrained 518² point (Small is the only distributable license)                                                                                                                                                                                                                                                                                        | [depth_anything/README.md](depth_anything/README.md) |
 | `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                                                                                                                                                                                                                                                                                       | [embeddinggemma/README.md](embeddinggemma/README.md) |
-| `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                                                                                                                                                                                                                                                                                              | [vowel_detector/README.md](vowel_detector/README.md) |
 | `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                                                                                                                                                                                                                                                                              | [minicpm5/README.md](minicpm5/README.md)             |
 | `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B / E4B / 12B: E2B's 1-shot / states-form decode / token-only exit fixtures (the mixed i8 × i4 one included), the product series (bf16 original weights, q4_0 QAT), the MTP drafters (regular and q4_0 QAT) and the tokenizers, plus the `karume-gemma4` (`dist.py --pipeline gemma4`) and `karume-gemma4-qat` (`--pipeline gemma4-qat`, the q4_0 QAT line) distributions | [gemma4/README.md](gemma4/README.md)                 |
 | `gemma4-qat` (causal LM, mobile QAT)  | the official Gemma 4 E2B / E4B mobile QAT text decoders with their fixed INT2/INT4/INT8 payloads and PLE (directory `gemma4_qat/`), plus the `karume-gemma4-qat-mobile` distribution (`dist.py --pipeline gemma4-qat-mobile` — `--pipeline gemma4-qat` builds the q4_0 QAT line of the `gemma4` recipe)                                                                                   | [gemma4_qat/README.md](gemma4_qat/README.md)         |

@@ -54,7 +54,6 @@ from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
-from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
 from wan.distribution import PIPELINE as WAN_PIPELINE
 from wan.distribution import TI2V_PIPELINE as WAN_TI2V_PIPELINE
 from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
@@ -73,7 +72,6 @@ RECIPE_PIPELINES = {
     "birefnet": BIREFNET_PIPELINE,
     "lucida": LUCIDA_PIPELINE,
     "depth-anything": DEPTH_ANYTHING_PIPELINE,
-    "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
     "gemma4-qat": GEMMA4_QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": GEMMA4_QAT_PIPELINE,
@@ -180,12 +178,8 @@ class TestRegistry:
         They are named one by one so that a new family appearing silently without the bundled texts
         shows up as "missing from the table".
 
-        vowel-detector is not among them: MIT requires only "the full text + the copyright lines",
-        and a modification notice (`NOTICE.md`) has nobody to address (the upstream and the
-        copyright holder are the same). The permission notice itself is checked by
-        `test_the_mit_only_pipeline_still_ships_its_permission_notice` below. `sbv2-fn` is not
-        among them either: its HF publication is on hold, and the upstream's written terms (the
-        Booth distribution page) have no license text that can be bundled
+        `sbv2-fn` is not among them: its HF publication is on hold, and the upstream's written terms
+        (the Booth distribution page) have no license text that can be bundled
         ({@link sbv2.distribution.FN_PIPELINE}).
         """
         expected = {
@@ -213,20 +207,6 @@ class TestRegistry:
             if set(spec.root_files) == {"LICENSE.md", "NOTICE.md"}
         }
         assert carried == expected
-
-    def test_the_mit_only_pipeline_still_ships_its_permission_notice(self) -> None:
-        """MUST: an MIT entry does not drop the permission notice either (a separate matter from
-        having no `NOTICE.md`).
-
-        `karume.dist.LEGAL_PATHS` is an accepted set and **does not require presence**, so if
-        `root_files` were built empty, neither `verify_dist` nor the manifest check would say
-        anything.
-        """
-        root_files = dist.PIPELINES["vowel-detector"].root_files
-
-        assert set(root_files) == {"LICENSE.md"}
-        assert "MIT License" in root_files["LICENSE.md"]
-        assert "Copyright (c) " in root_files["LICENSE.md"]
 
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
         """A card is a per-pipeline template — its renderer refuses another pipeline's
@@ -376,10 +356,6 @@ HOUSE_SENTENCE = re.compile(
     .replace(re.escape("{author}"), "(?P<author>.+)")
 )
 
-#: The pipelines whose card carries no house sentence: their upstream is our own release
-#: (`vowel_detector.card`), and the sentence would disclaim ourselves.
-FIRST_PARTY_PIPELINES = frozenset({"vowel-detector"})
-
 
 def _mirrors_built_by(name: str) -> list[Path]:
     """The local distribution mirrors `--pipeline name` builds: those whose models the pipeline
@@ -411,9 +387,6 @@ class TestTheHouseSentenceOnEveryCard:
             for render_card in dist.PIPELINES[name].card_profiles.values():
                 lines = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}").split("\n")
                 sentences = [line for line in lines if HOUSE_SENTENCE.fullmatch(line)]
-                if name in FIRST_PARTY_PIPELINES:
-                    assert sentences == [], manifest_path
-                    continue
                 title = next(index for index, line in enumerate(lines) if line.startswith("# "))
                 assert sentences == [lines[title + 2]], manifest_path
 

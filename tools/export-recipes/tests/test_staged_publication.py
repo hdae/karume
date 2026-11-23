@@ -109,7 +109,6 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("siglip2/export.py", "export_series"),
     ("birefnet/export.py", "export_series"),
     ("depth_anything/export.py", "export_series"),
-    ("vowel_detector/export.py", "export_series"),
     ("irodori/dacvae/export.py", "export_series"),
     ("wan/export_dit.py", "emit"),
     ("wan/export_vae.py", "emit_targets"),

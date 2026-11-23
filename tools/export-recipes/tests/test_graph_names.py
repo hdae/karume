@@ -10,8 +10,8 @@ Two things are guarded:
 
 1. What is passed to `graph_name=` is **the component-name constant**, not a name derived from the
    path it is placed at. Directory names do not match component names: in the families that put
-   the container directly under the series (siglip2 / birefnet / depth_anything / vowel_detector /
-   gemma4 / minicpm5 / embeddinggemma / gemma4_qat) the directory name is the **series name**
+   the container directly under the series (siglip2 / birefnet / depth_anything / gemma4 /
+   minicpm5 / embeddinggemma / gemma4_qat) the directory name is the **series name**
    (`siglip2-so400m-patch14-384`); irodori has the keys `caption_proj` / `codec_decoder` for
    `caption-proj` / `decoder`, and deberta has the key `text_encoder` (SBV2's consuming slot) for
    `full-24layer`.
@@ -24,10 +24,7 @@ matches the real containers before assembly, but that is reached only after an e
 weights — this check catches the mismatched spelling at the source level.
 
 The source is read as an AST because checking it by running would need the real weights (several
-GB) or a tiny model per family (the same reason as `tests/test_staged_publication.py`). The
-counterpart that writes the real thing and reads it back is the one
-{@link vowel_detector.tests.test_export.TestGraphNameIsThePartName} in
-`vowel_detector/tests/test_export.py`.
+GB) or a tiny model per family (the same reason as `tests/test_staged_publication.py`).
 """
 
 from __future__ import annotations
@@ -90,12 +87,6 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("siglip2/export.py", "export_series", "SIGLIP2_ROLE", "SIGLIP2_ROLE"),
     ("birefnet/export.py", "export_series", "BIREFNET_ROLE", "BIREFNET_ROLE"),
     ("depth_anything/export.py", "export_series", "DEPTH_ANYTHING_ROLE", "DEPTH_ANYTHING_ROLE"),
-    (
-        "vowel_detector/export.py",
-        "export_series",
-        "VOWEL_DETECTOR_GRAPH_ROLE",
-        "VOWEL_DETECTOR_GRAPH_ROLE",
-    ),
     ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
     ("wan/export_vae.py", "emit_shared_targets", "name", "SHARED_TARGETS"),
@@ -282,13 +273,6 @@ class TestTheNamesAreTheWeightsKeys:
 
         for checkpoint in BIREFNET_CHECKPOINTS:
             assert self._named("birefnet") == set(birefnet_weights(checkpoint)), checkpoint
-
-    def test_vowel_detector_covers_exactly_its_weights_keys(self) -> None:
-        """`VOWEL_DETECTOR_WEIGHTS` is not spelled after the family name, so it is checked by
-        name."""
-        from vowel_detector.distribution import VOWEL_DETECTOR_WEIGHTS
-
-        assert self._named("vowel_detector") == set(VOWEL_DETECTOR_WEIGHTS)
 
     def test_sbv2_covers_the_distributed_seats_and_nothing_else(self) -> None:
         """In SBV2, `dp` / `flow` / `dec` are only for golden verification (not in the
