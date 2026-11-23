@@ -1,30 +1,25 @@
 /**
- * Iterative radix-2 FFT. It outputs only the 2 quantities its users need — the **power spectrum**
- * and the **autocorrelation** of a real signal.
+ * Iterative radix-2 FFT. It outputs only the quantity its user needs — the **power spectrum** of a
+ * real signal.
  *
  * ## Why in `src/audio/`
  *
- * It is not a general FFT (real signals, powers of 2, only the spectrum and the autocorrelation,
- * resident scratch). It has two users, so it sits in the shared layer: the vowel detector's feature
- * extraction (`src/vowel-detector/features.ts`, the power spectrum and the autocorrelation) and the
- * log-mel front end of the EmbeddingGemma family's audio tower (`src/embeddinggemma/audio.ts`, the
- * power spectrum of a windowed frame of f32 values, transformed in f64).
+ * It is not a general FFT (real signals, powers of 2, only the power spectrum, resident scratch).
+ * It is an audio primitive rather than a part of one family, so it sits in the shared layer; its
+ * user is the log-mel front end of the EmbeddingGemma family's audio tower
+ * (`src/embeddinggemma/audio.ts`, the power spectrum of a windowed frame of f32 values, transformed
+ * in f64).
  *
- * ## MUST: run the transform in f64 (the upstream TS implementation uses f32)
+ * ## MUST: run the transform in f64
  *
- * The vowel detector's canonical spec is the Python side (`features.py` / `dsp.py`), which goes
- * through `np.fft` = **always f64** (numpy's FFT promotes even f32 input to double precision). The
- * upstream TS implementation runs its butterflies in Float32Array and is that much further from the
- * canonical spec; its max abs diff against the Python reference is **5.42e-6** (measured). The
- * EmbeddingGemma front end's upstream runs its FFT in f32 (complex64) instead; there the f64
- * transform of the same frames is at most one ulp of a log-mel value from upstream's
+ * numpy's FFT promotes even f32 input to double precision, so a canonical spec written against
+ * `np.fft` is f64. The EmbeddingGemma front end's upstream runs its FFT in f32 (complex64) instead;
+ * there the f64 transform of the same frames is at most one ulp of a log-mel value from upstream's
  * (`src/embeddinggemma/audio.ts` — the frames themselves are upstream's f32 product, reproduced
- * exactly, since that product is upstream's arithmetic and not an implementation detail). Making this f64
- * aligns the dtype flow with Python step by step and shrinks it to **4.77e-7 = 2 ULP from storing
- * the reference in f32** (= numerically at the floor. The derivation is at the top of
- * `tests/vowel_detector_host_test.ts`).
+ * exactly, since that product is upstream's arithmetic and not an implementation detail), and the
+ * front end's digests pin the bits of upstream's arithmetic with an f64 FFT.
  *
- * The choice of **computing at the same precision as the canonical spec and measuring the
+ * The choice of **computing at a precision at least that of the canonical spec and measuring the
  * difference** rather than copying its rounding to fake a match is the same as in
  * `src/irodori/host/loudness.ts` (there, conversely, upstream is an f32 IIR, and copying it would
  * not give a bit match either, so f64 was chosen).
@@ -48,9 +43,8 @@ const bitReverseTable = (size: number): Uint32Array<ArrayBuffer> => {
  * FFT of transform length `size` (a power of 2). It carries the twiddle factors and the scratch,
  * so it is not rebuilt per frame.
  *
- * The only state is the scratch (there is no point carrying it over between calls).
- * `powerSpectrum` / `autocorrelation` clobber each other's scratch, so each call takes its result
- * fully into `out`.
+ * The only state is the scratch (there is no point carrying it over between calls), so each call
+ * takes its result fully into `out`.
  */
 export class Fft {
   readonly size: number;
@@ -59,7 +53,6 @@ export class Fft {
   readonly #sin: Float64Array<ArrayBuffer>;
   readonly #re: Float64Array<ArrayBuffer>;
   readonly #im: Float64Array<ArrayBuffer>;
-  readonly #scratch: Float64Array<ArrayBuffer>;
 
   constructor(size: number) {
     if (!Number.isInteger(size) || size < 2 || (size & (size - 1)) !== 0) {
@@ -75,7 +68,6 @@ export class Fft {
     }
     this.#re = new Float64Array(size);
     this.#im = new Float64Array(size);
-    this.#scratch = new Float64Array(size);
   }
 
   /**
@@ -104,43 +96,6 @@ export class Fft {
     for (let bin = 0; bin < bins; bin += 1) {
       out[bin] = this.#re[bin] * this.#re[bin] + this.#im[bin] * this.#im[bin];
     }
-  }
-
-  /**
-   * Writes the linear autocorrelation of a real signal (lag 0..`out.length − 1`) to `out`.
-   *
-   * MUST: the transform length is **at least twice** the signal length (the zero-padding condition
-   * under which circular correlation equals linear correlation).
-   * MUST: lags are below the signal length (`out.length ≤ input.length`). Lags at or above the
-   * signal length are 0 in linear autocorrelation, and in the inverse transform's result the
-   * values of negative lags wrap around into indices above "transform length − signal length"
-   * (passing `[1, 2]` with transform length 4 gives 0 at index 2, as linear correlation says, but
-   * the 2 of lag −1 at index 3). The two are not told apart; lags are limited to below the signal
-   * length. The power spectrum is real and even-symmetric, so the inverse transform is obtained by
-   * applying the same butterflies and dividing by `size` (equivalent to `np.fft.irfft(S·conj(S))`).
-   */
-  autocorrelation(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
-    if (input.length * 2 > this.size) {
-      throw new RangeError(
-        `Fft: autocorrelation requires a transform length of at least twice the signal length ${input.length} (only ${this.size})`,
-      );
-    }
-    if (out.length > input.length) {
-      throw new RangeError(
-        `Fft: lag ${
-          out.length - 1
-        } is >= the signal length ${input.length} (it is 0 linearly, and negative lags wrap around into` +
-          " indices beyond transform length − signal length — they are not told apart, so lags stay below the signal length)",
-      );
-    }
-    this.#load(input);
-    this.#butterflies();
-    for (let bin = 0; bin < this.size; bin += 1) {
-      this.#scratch[bin] = this.#re[bin] * this.#re[bin] + this.#im[bin] * this.#im[bin];
-    }
-    this.#load(this.#scratch);
-    this.#butterflies();
-    for (let lag = 0; lag < out.length; lag += 1) out[lag] = this.#re[lag] / this.size;
   }
 
   /** Loads the input in bit-reversed order (missing indices are zero = zero padding at the end). */
