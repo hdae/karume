@@ -70,10 +70,11 @@ Output (default `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`; with `--d
 | `full-accept` | `[1,16,21,60,104]` | 32,760 | 600 | 77 | 777009 |
 
 The band metric is "max absolute difference ÷ max absolute value of the reference" (the shape of
-the guideline in decision 8), and the band = the worst ratio of the 6 `band` cases × 5
-(`DIT_RATIO_BAND` in the TS `e2e_wan_dit_test.ts`). The 3 `accept` cases differ from `band` in seed
-and, except for one (600), in timestep too (the one at 600 reproduces as is the unseen case of the
-check that exceeded the old band `atol` 3.2e-4 — seed 777001, valid length 45).
+the guideline in decision 8), and the band = the worst ratio of the 6 `band` cases × 5 (no TS
+test holds the bands of this series; the Wan2.2 DiT e2e derives its own). The 3 `accept` cases
+differ from `band` in seed and, except for one (600), in timestep too (the one at 600 reproduces
+as is the unseen case of the check that exceeded the old band `atol` 3.2e-4 — seed 777001,
+valid length 45).
 
 MUST: do not add or remove `band` cases after looking at the `accept` results (that breaks the
 independence of the band decision from acceptance). If acceptance falls outside the band,
@@ -81,9 +82,9 @@ investigate the cause instead of widening the band.
 
 The `full-band` / `full-accept` cases at S = 14,040 derive the band at full size (832×480,
 33 frames — ADR 0118 step 3) **independently** of the S = 192 band (the extrapolation discipline of
-decision 8). The band = the worst normalized ratio of the 6 `full-band` cases × 5
-(`DIT_FULL_NORMALIZED_BAND` on the TS side), accepted on the 2 `full-accept` cases. The band cases
-spread their timesteps over 999 (the first generation step — 2 seeds) / 750 / 500 / 250 / 113.
+decision 8). The band = the worst normalized ratio of the 6 `full-band` cases × 5, accepted on
+the 2 `full-accept` cases. The band cases spread their timesteps over 999 (the first generation
+step — 2 seeds) / 750 / 500 / 250 / 113.
 Acceptance is at 999 and 600, and its seeds (777006 / 777007) differ from every step-2 case and
 from the band cases. The acceptance seeds were renewed when the metric changed to the normalized
 ratio (the old 777004 / 777005 had been seen before the metric was decided, which broke the
@@ -824,8 +825,7 @@ def reference_tensors(
         # by the smallest denominator: for the band cases (`full-band`) alone, under 2% with the
         # S = 14,040 minimum of 3.72e-6 and about 2.9% with the S = 32,760 minimum of 2.07e-6;
         # including acceptance, about 3.3% with the minimum 1.83e-6 (`full-accept-s14040-t0600`).
-        # It does not affect the band verdict (worst × 5) (the measured table is at
-        # `REFERENCE_F64_KEY` and `DIT_FULL_NORMALIZED_BAND` in the TS `e2e_wan_dit_test.ts`).
+        # It does not affect the band verdict (worst × 5).
         reference[REFERENCE_F64_KEY] = output_f64.to(torch.float32).contiguous()
     return reference
 

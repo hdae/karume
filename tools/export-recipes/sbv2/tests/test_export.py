@@ -1901,8 +1901,8 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         """`upstreamRevision` is the upstream checkpoint's revision (container-v1 §2.3).
 
         The config's `version` (`2.0-JP-Extra`) is shared by every model of the same generation,
-        so it cannot identify a checkpoint — since minicpm5 writes a SHA into the same field, the
-        field's meaning is not split (W-RC5-3).
+        so it cannot identify a checkpoint — since the Wan recipe writes a SHA into the same field,
+        the field's meaning is not split (W-RC5-3).
         """
         provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / "F1")
 

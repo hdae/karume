@@ -2,12 +2,11 @@
  * The `pipeline` contract name of the EmbeddingGemma family and the schema check of its
  * `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and validates its schema).
  *
- * One family serves the EmbeddingGemma models: today the text model of EmbeddingGemma 2
- * (distribution `karume-embeddinggemma-2`, model `text`); the first EmbeddingGemma joins it later
- * with its own manifest values. So **every model value lives in the manifest** — the prompt names
- * and prefixes, the output dimensions, the token limit and the placeholder ids are declared by the
- * dist recipe (`tools/export-recipes/embeddinggemma2/distribution.py`, which reads them from the
- * pinned upstream files and checks them against the graph and the tokenizer asset) and read here,
+ * The family serves the text model of EmbeddingGemma 2 (distribution `karume-embeddinggemma-2`,
+ * model `text`), and **every model value lives in the manifest** — the prompt names and prefixes,
+ * the output dimensions, the token limit and the placeholder ids are declared by the dist recipe
+ * (`tools/export-recipes/embeddinggemma2/distribution.py`, which reads them from the pinned
+ * upstream files and checks them against the graph and the tokenizer asset) and read here,
  * never held as TS constants.
  *
  * The four required fields and the two optional ones:

@@ -96,7 +96,7 @@ for compressed storage (`emit.eligible_compressed_initializers`).
     outputs/series/gemma4-<model>/model.krm             weights, constants + the 2 descriptors
     outputs/series/gemma4-<model>/io.<case>.safetensors inputs and torch CPU expected outputs
 
-The io tensor key convention is the same as tiny golden / DeBERTa / EmbeddingGemma / MiniCPM5
+The io tensor key convention is the same as tiny golden / DeBERTa / EmbeddingGemma 2
 (`input.<graph input name>` / `output.<position>`). The logits have a vocabulary of 262144, so each
 case takes `T × 1.05MB` (627MB for `context-en` at T=598) — disk is plentiful, so every row is
 written.
@@ -294,7 +294,7 @@ CONTEXT_EN = (
 
 #: The fixed golden texts (`(case name, text)`). T, `<bos>` included, is spread to 6 / 10 / 598
 #: (far from the 0/1 specialization, on both sides of `sliding_window` 512, inside the bound 768).
-#: `capital-ja` has the same **paired structure** as minicpm5 (the lead-in
+#: `capital-ja` has a **paired structure** (the lead-in
 #: 「フランスの首都はパリ、」), a form whose continuation is more determined than the plain
 #: 「日本の首都は」.
 GOLDEN_CASES: tuple[tuple[str, str], ...] = (

@@ -171,9 +171,8 @@ const FAMILIES: readonly Family[] = [
   {
     name: "wan.SOURCES",
     sources: wan.SOURCES,
-    // A generation gets its own repository (ADR 0092 decision 1). Wan2.1 (`karume-wan2.1`) is not
-    // published on HF, so it has no key (ADR 0118 addendum (2026-10-15)) — the table holds only
-    // Wan2.2, which `wan.Ti2vPipeline` reads.
+    // A generation gets its own repository (ADR 0092 decision 1); the table holds Wan2.2, the one
+    // generation distributed, which `wan.Ti2vPipeline` reads.
     keys: ["wan2.2"],
     load: (ref, options) => wan.Ti2vPipeline.fromPretrained(ref, options),
   },

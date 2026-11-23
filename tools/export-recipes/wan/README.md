@@ -1,15 +1,21 @@
-# Wan2.1 export recipe
+# Wan export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)). The design is ADR
-[0118](../../../docs/decisions/0118-wan21-video-generation.md). Scripts are started as modules from
-`tools/export-recipes/` (`uv run --group wan python -m wan.<module> …`).
+[0118](../../../docs/decisions/0118-wan21-video-generation.md), with ADR
+[0121](../../../docs/decisions/0121-wan22-ti2v-5b.md) for Wan2.2. Scripts are started as modules
+from `tools/export-recipes/` (`uv run --group wan python -m wan.<module> …`).
 
 ## Overview
 
-Text-to-video with Wan2.1 T2V 1.3B: the DiT (S form, one symbol for the token length), the video VAE
-decoder (two chunk graphs with the causal cache as resident tensors) and host-side reference
-pipelines. The reference is diffusers 0.39.0 `WanPipeline` on CPU f32, built with
+Text and image to video with Wan2.2 TI2V 5B (the `ti2v_*` scripts, the `--model ti2v-5b` modes of
+`export_vae` / `vae_tiling` and `export_vae_encoder`): the DiT (S form, one symbol for the token
+length), the video VAE decoder (two chunk graphs with the causal cache as resident tensors), the VAE
+encoder for the condition image and host-side reference pipelines. The Wan2.1 T2V 1.3B scripts that
+remain (`export_dit`, `pipeline_ref`, `few_step_ref`, `text_embeds` and the default model of
+`export_vae`) feed no distribution of their own: they are the source of the shared text assets the
+Wan2.2 distribution ships (made from the Wan2.1 pin) and of helpers the `ti2v_*` scripts import.
+The reference is diffusers 0.39.0 `WanPipeline` on CPU f32, built with
 `text_encoder=None` / `tokenizer=None` and fed precomputed text embeddings (`wan/pipeline_ref.py`).
 
 ```bash

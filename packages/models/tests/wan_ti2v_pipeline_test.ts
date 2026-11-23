@@ -80,7 +80,7 @@ import { stubModel } from "./helpers/stub-model.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-/** The message prefix of the 2.2 class (F3 — not mixed up with 2.1's `wan.Pipeline:`). */
+/** The message prefix of the Wan2.2 class `wan.Ti2vPipeline` (F3). */
 const OWNER = "wan.Ti2vPipeline:";
 
 /** The shape of the series' `pipelineConfig` (the default shift is the upstream scheduler's `flow_shift` 5.0). */

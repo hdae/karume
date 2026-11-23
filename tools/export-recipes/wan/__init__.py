@@ -1,5 +1,6 @@
-"""The Wan2.1 (text-to-video) export recipe (ADR 0118 / ADR 0065 decision 2 — outside the wheel,
-repository only).
+"""The Wan export recipe — Wan2.2 TI2V 5B, text and image to video (ADR 0118 / ADR 0121 / ADR 0065
+decision 2 — outside the wheel, repository only). The Wan2.1 T2V 1.3B scripts that remain are the
+source of the text assets the Wan2.2 distribution ships and of helpers the `ti2v_*` scripts import.
 
 Only **what cannot live in the general-purpose exporter core** goes here: the pins of the upstream
 sources ({@link wan.sources}), the diffusers reference pipeline ({@link wan.pipeline_ref}), the

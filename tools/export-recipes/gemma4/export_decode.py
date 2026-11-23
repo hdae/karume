@@ -249,7 +249,7 @@ MARGIN_FLOOR = 2.5e-2
 #: The cases greedy goldens are taken for (a subset of {@link gemma4.export.GOLDEN_CASES}).
 #: io goldens are taken for all three cases (they cover one step, so they need no margin check).
 #:
-#: NOTE: currently **a provisional all-cases selection** (minicpm5 has a set fixed after
+#: NOTE: currently **a provisional all-cases selection** (not yet a set fixed after
 #: measurement). Cases {@link assert_greedy_margins} rejects in a real run with w4 are removed
 #: from here and the run repeated — the check applies once after every case is measured, so one
 #: real run collects every case to remove.

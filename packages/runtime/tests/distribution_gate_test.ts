@@ -15,8 +15,7 @@
 // The reach of the absence check (a whole mirror missing) is **every published mirror** (ruling of
 // 2026-09-25). Mirrors that no e2e reads yet (siglip2 and others) are listed too — matching the
 // guard's reach to "what the e2e reads today" would bring the silent SKIP back the day an e2e is
-// added and the guard update is forgotten. The unpublished vowel-detector is not listed (it is
-// listed once its distribution exists). A mirror that the e2e roots on is listed even when
+// added and the guard update is forgotten. A mirror that the e2e roots on is listed even when
 // unpublished (embeddinggemma-2).
 //
 // It checks **more than presence** (ADR 0108 stage 3, acceptance item ②). A `karume.json` that is
@@ -37,7 +36,7 @@
 // `models/`**, not from the roster (ruling of 2026-10-11). `models/` is a root that holds only
 // distributions (docs/assets-layout.md), so every child directory goes through hub's parser.
 // Relying on the roster would let a new distribution that `karume dist` built but nobody added to
-// the roster (such as the unpublished vowel-detector) pass as "built but unreadable by hub". The
+// the roster pass as "built but unreadable by hub". The
 // roster {@link DISTRIBUTIONS} is responsible only for detecting "something that should be there is
 // missing", which cannot be derived from the layout.
 //

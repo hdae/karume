@@ -15,8 +15,8 @@
  * graph before any rule sees it, and the runtime declines a chain that is not all f32 by itself.
  *
  * What the rule computes is checked against the unfused plan on the GPU in
- * `e2e_vae_rms_silu_rule_test.ts`; its hits on the Wan2.1, Wan2.2 and anima VAE graphs are pinned
- * in those families' fusion-count tests.
+ * `e2e_vae_rms_silu_rule_test.ts`; its hits on the Wan2.2 and anima VAE graphs are pinned in
+ * those families' fusion-count tests.
  */
 
 import { describe, it } from "vite-plus/test";

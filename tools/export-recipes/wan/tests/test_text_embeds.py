@@ -2,8 +2,8 @@
 its reproducibility.
 
 No test runs umT5 (bf16, about 11 GiB, 2.5 minutes a prompt). The generated asset is checked
-(shapes, valid lengths, normalized strings) as the Wan2.1 distribution ships it — read from the
-mirror `models/karume-wan2.1/` through its manifest (ADR 0139 decision 1; SKIP without it).
+(shapes, valid lengths, normalized strings) as the Wan2.2 distribution ships it — read from the
+mirror `models/karume-wan2.2/` through its manifest (ADR 0139 decision 1; SKIP without it).
 Generation: `uv run --group wan --inexact python -m wan.text_embeds`.
 """
 

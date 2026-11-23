@@ -851,7 +851,7 @@ maintainer's ruling of 2026-11-06).
      - `embeddinggemma.Pipeline` takes audio parts `{ type: "audio", audio }` (`MonoAudio`, 16 kHz mono f32) with
        `audio: true` (the weights role `audio`, fetched only then; `vision` and `audio` may be on together). The host
        front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames with the FFT moved to `src/audio/fft.ts`
-       (the vowel detector's, its second user): the windowed product in f32 as upstream's (since 2026-11-23 — the
+       (first written for the vowel detector): the windowed product in f32 as upstream's (since 2026-11-23 — the
        review found that the 5.12e-4 gap of the first build was upstream's f32 product, not its f32 FFT), the FFT and
        the rest in f64; its frames are within one ulp (4.77e-7) of upstream's f32 frames, and their bits equal
        upstream's arithmetic with an f64 FFT (the recipe's `audio-front-end.json`). Refused, never adjusted:

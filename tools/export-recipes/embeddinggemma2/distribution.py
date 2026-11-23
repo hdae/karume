@@ -7,9 +7,8 @@ EmbeddingGemma 2** only.
 
 The repository `karume-embeddinggemma-2` holds one model today, `text` — the text tower of
 `google/embeddinggemma-2`, its vision tower and its audio tower. Its contract is
-`embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the first EmbeddingGemma will join
-later from a repository of its own (another licence, so another `Pipeline` with other root files).
-The model ships three graphs and one asset:
+`embeddinggemma/1`, the TypeScript family `embeddinggemma`. The model ships three graphs and one
+asset:
 
 - `model` — the text tower, mean pooling and L2 normalisation as one graph, `input_ids` /
   `pool_mask` `[1, T]` and the soft rows of a tower (`soft_embeds` `[1, T, 512]`, `soft_mask`

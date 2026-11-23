@@ -4,8 +4,8 @@ decisions 4 / 5 / 5b).
 torch.export cannot trace KV state. A recipe exports "chunk-local causal self-attention" (the
 previous form, where attention takes a mask as its fourth input), and this module rewrites that IR
 into the states form (the past in state slots, this step's k/v in `ins`). It is a
-**model-independent mechanism**, so it lives in the generic core (Gemma 4 and MiniCPM5 go through
-the same surgery).
+**model-independent mechanism**, so it lives in the generic core (the Gemma 4 recipes, the QAT and
+drafter exports included, go through it; nothing in it is specific to that model).
 
 The surgery is three operations:
 

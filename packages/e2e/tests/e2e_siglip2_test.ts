@@ -117,12 +117,12 @@ import {
  * even at the \|ref\| max of 7.147, 1/7 of atol, so it does not drive the decision.
  *
  * atol 5e-5 is about 4.8× the worst measured 1.05e-5 (checker / ramp-dim). **It is 2 orders of
- * magnitude looser than EmbeddingGemma's `EMBEDDINGGEMMA_TOLERANCE` (atol 1e-6) only because of the
- * value range** — that output is an L2-normalized unit vector (\|ref\| max 0.25), and the error
- * relative to the value range is about 1.5e-6 for both (1.05e-5 / 7.15 ≈ 1.5e-6 vs 2.8e-7 / 0.25 ≈
- * 1.1e-6). The sources of error are the same too (fma fusion, a linear / attention reduction order
- * that differs from torch, implementation differences of the transcendental functions (tanh / exp /
- * rsqrt)), and all 13 SDPAs go through the decomposed path (mul×2 + bmm + softmax + bmm).
+ * magnitude looser than EmbeddingGemma 2's `EMBEDDINGGEMMA2_TOLERANCE` (atol 1e-6) only because of
+ * the value range** — that output is an L2-normalized unit vector (\|ref\| max 0.409), and the
+ * error relative to the value range is about 1e-6 for both (1.05e-5 / 7.15 ≈ 1.5e-6 vs 4.10e-7 /
+ * 0.409 ≈ 1.0e-6). The sources of error are the same too (fma fusion, a linear / attention
+ * reduction order that differs from torch, implementation differences of the transcendental
+ * functions (tanh / exp / rsqrt)), and all 13 SDPAs go through the decomposed path (mul×2 + bmm + softmax + bmm).
  *
  * NOTE: the difference from the patch that makes the MAP head's q/k/v explicit (measured 7.75e-7 to
  * 2.38e-6 by `export_siglip2.py --verify`) **is not included here** — the golden's expected values

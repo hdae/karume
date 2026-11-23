@@ -26,7 +26,7 @@
 // ignore would make "the gate works" indistinguishable from "the gate is gone" (the same reason as
 // the GPU gate).
 //
-// NOTE: it looks only at the one root `outputs/series/` shared by the 11 real-weight e2e tests. The
+// NOTE: it looks only at the one root `outputs/series/` shared by the real-weight e2e tests. The
 // distribution mirrors (`models/`) belong to distribution_gate_test.ts; their SKIPs are outside
 // this gate's reach.
 //
