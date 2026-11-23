@@ -51,8 +51,8 @@
  * suspect this first.
  * NOTE (measured on M2, 2026-08-31): on Metal this check does break (1–64 ULP at H=128; the same
  * signature before and after the tanh_stable change = pre-existing; the Metal section of
- * docs/known-issues.md). Real quality is covered by the vowel-detector golden being green on M2 —
- * strengthening the barrier's expression form is filed as a root-cause candidate.
+ * docs/known-issues.md). No tolerance check on real weights covers it there (no distributed model
+ * uses the op) — strengthening the barrier's expression form is filed as a root-cause candidate.
  *
  * ## The scan decision (for correctness, not performance)
  *

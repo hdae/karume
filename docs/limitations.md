@@ -1197,7 +1197,7 @@ paid with a re-run, so the output is bit-identical to full residency. Its constr
 ## Auxiliary-asset safetensors require coverage of the data section and element alignment (may be rejected even when the official `safe_open` reads them)
 
 The strict reader `parseSafetensors`, which reads auxiliary assets that are not containers (sbv2's
-style table, anima's rope base table, vowel-detector's tables and so on), requires that the data
+style table, anima's rope base table and so on), requires that the data
 section be "covered with no gaps, and the absolute offset of each tensor aligned to the element size of
 its dtype", and rejects violations with `SafetensorsError` (the canonical ruling is ADR
 [0063](decisions/0063-safetensors-physical-layout.md)). A file that places a 4-byte type right after
@@ -1412,6 +1412,8 @@ section** (Codex deep review R2B-001).
   `aten.gru` does not fit in the IR).
 - **LSTM is not in the vocabulary** (`aten.lstm` fails loudly as an unsupported op). The points for an
   extension are in ADR [0056](decisions/0056-gru-scan.md) decision 8.
+- Execution time is proportional to the sequence length (the time loop is sequential within one
+  workgroup — performance not measured).
 
 ## The gated delta rule scan runs head dims 128 only on the GPU, has no state slots, and leaves positive g unspecified (ADR 0135)
 
@@ -1434,29 +1436,6 @@ section** (Codex deep review R2B-001).
   that is `B · Hv > 16,383`) the dispatch fails loudly (there is no grid-stride).
 - Measured only on the RTX 3080 Ti under Node + Dawn (Vulkan) at B = 1: other GPUs and backends,
   B > 1 on the GPU and the real MOSS `A_log` / `dt_bias` are not measured (ADR 0135 open point 10).
-
-## Vowel detection: the input's 10ms frame count is **even**, and the limit is the distribution's declaration (ADR 0056 / 0057)
-
-- The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd
-  lengths are not accepted** — `bindSymbols` fails with `actual 285 does not have the declared form '2T'`
-  (no rounding). The caller **truncates** the last frame before passing it
-  (`vowelDetector.Pipeline.detect` and the real-weight E2E do so).
-  Matching the length with right zero padding is **forbidden** (the backward GRU carries state back
-  from the pad, and the `.lab` changes anywhere in the utterance — measurements in the ADR 0056
-  addendum).
-- The length range is `pipelineConfig.minFrames` / `maxFrames` (the distribution's declaration = the
-  range of the symbolic dimension `T` at bake time, converted to input-side 10ms frame units — **twice**
-  the numbers of `Dim(min, max)`, not those numbers themselves). **The IR does not carry symbol
-  ranges**, so this check in the pipeline is the only thing that can stop out-of-range values. Both
-  exceeding the upper limit **and falling below the lower limit** fail loudly (no truncation — a
-  `.lab` whose tail was silently dropped cannot be told apart from a normal result. Filling the lower
-  side with right zero padding is forbidden for the same reason — the backward GRU carries state back
-  from the pad). The current distribution is 60,000 frames = 10 minutes, based on the largest
-  intermediate tensor = the gates on the GRU input side `[T,1,384]` f32 = 1,536 B/20ms frame → 46.1MB
-  (a 2.9× margin against the spec default `maxStorageBufferBindingSize` of 128MiB = 134.2MB).
-  **Longer lengths are not measured**.
-- Even within the limit, execution time is proportional to the length (the time loop is sequential
-  within one workgroup — performance not measured).
 
 ## The relative-position tables of flow / voice are graph inputs — generating them is the host's responsibility
 
@@ -2543,8 +2522,8 @@ tiny numeric differences). This measurement was the direct motivation for moving
 directory (`outputs/verify/`) are defined by ADR [0106](decisions/0106-device-keyed-references.md).
 
 The series with rows (2026-11-19): in `packages/models/tests/fixtures/references/` the PNG / WAV of anima / sbv2 /
-irodori (the three Irodori lines in one file), the real images of birefnet / depth-anything, the f32 output of the
-whole chain of vowel-detector (safetensors), the token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat /
+irodori (the three Irodori lines in one file), the real images of birefnet / depth-anything, the
+token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat /
 gemma4-qat-mobile, the hidden states and logits of the Gemma 4 26B cut model, MOSS-Image, its Qwen3.5 text encoder,
 and Wan2.1 / Wan2.2; in `packages/runtime/tests/fixtures/references/` the goldens of siglip2 and gemma4 (runtime-side
 e2e — `<series>-golden.json`). The rows of anima, whose artifact is a PNG, are the sha of the pixels before compression (RGB8); the bytes of the PNG

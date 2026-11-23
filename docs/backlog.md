@@ -463,8 +463,8 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
     0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
     [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
-    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`,
-    `vowel-detector` and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`
+    and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
     `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
     `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
@@ -605,7 +605,7 @@ maintainer's ruling of 2026-11-06).
 - **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
   stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
   would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
-  umT5, BiRefNet, Depth Anything, SigLIP2, vowel-detector, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
+  umT5, BiRefNet, Depth Anything, SigLIP2, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
   Gemma 4 26B and the q4_0 QAT line, and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report
   already binds and plans those with a local mirror.
 
@@ -890,12 +890,12 @@ maintainer's ruling of 2026-11-06).
   binding / checking EP partitioning, recording native EP or JSEP) have their source of truth in
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md).
 - **Rolling generation events out to other families (waiting for demand)**: stage events for sbv2 / birefnet / depth /
-  siglip2 / vowel (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the
+  siglip2 (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the
   **generation loop** of anima / irodori (today a throw from onEvent is the step-granular means of cancellation — the
   slot is kept in reserve). MOSS-Image's generation entry has neither events nor cancellation. **AbortSignal on the
   construction path is implemented for anima / irodori / Wan / MOSS** (`anima.PipelineOptions.signal` — checked at stage
   boundaries, passed through to the fetch layer, `signal.reason` propagated as is), so that is the precedent for the
-  style (the construction `signal` of sbv2 / birefnet / depth / siglip2 / vowel / gemma / umT5 is only passed through to
+  style (the construction `signal` of sbv2 / birefnet / depth / siglip2 / gemma / umT5 is only passed through to
   the fetch layer, with no checks at stage boundaries). **The generation-loop slot is implemented on the LLM surface**
   (ADR [0083](decisions/0083-generation-api-surface.md) decision 5) **and on Wan** (`wan.GenerateRequest.signal`) —
   rolling it out to other families still waits for demand.
@@ -1004,7 +1004,7 @@ maintainer's ruling of 2026-11-06).
   is outdated by the additions of the gemma4 generation API, the GEMV family and the tokenizer)
 - Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open (the per-family ledgers,
   `tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`, hold more `Unverified` rows than this list — for example
-  vowel_detector's and Irodori v4-Large's):
+  Irodori v4-Large's):
   rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF** — its publication is held in
@@ -1012,7 +1012,7 @@ maintainer's ruling of 2026-11-06).
   The Code license of the code-dependency block is still Unverified in the deberta, minicpm5 and embeddinggemma ledgers
   (deberta's Attribution too).
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
-  ([container-v1](container-v1.md) §2.3). The recipes of anima, irodori (main and dacvae) and vowel_detector, and
+  ([container-v1](container-v1.md) §2.3). The recipes of anima and irodori (main and dacvae), and
   gemma4's `export.py`, still declare a `PROVENANCE` without it, so they **start filling it at their next re-export**
   (through `tools/export-recipes/_shared/upstream.py`; on the same occasion as the `sym_max` field of W-G4-4, which
   `Provenance` does not have yet)
@@ -1088,6 +1088,3 @@ maintainer's ruling of 2026-11-06).
   [research 2026-08-03](research/2026-08-03-demo-w8-perf-recon.md)), regenerating the f32 anima series
 - The by-design constraints (rank≤4 / OOB NaN / non-finite input / zero-element dimensions / cancellation granularity and others) have their source of truth in
   limitations.md — only items with real demand are promoted here
-- **Prerequisite for the first publication of vowel-detector (filed 2026-09-24)** (first publication on hold — maintainer's ruling 2026-10-15): the recipe reads the upstream `feature_config.json`
-  directly under `inputs/vowel-detector/`. This development machine holds the whole upstream repository, so before assembly
-  run `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` once.

@@ -134,10 +134,9 @@ uv run python dist.py --pipeline lucida \
     --model 1024 --model 2048 \
     --out ../../models/karume-lucida                 # a derivative = a separate repository; the same two models
 uv run python dist.py --pipeline depth-anything      # → models/karume-depth-anything-v2/
-uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- **Not yet published for the first time: `vowel-detector`.** Of the three Wan repositories, `karume-umt5-xxl` and `karume-wan2.2` were first published with 0.14.0, and `karume-wan2.1` is not published (ADR [0118](decisions/0118-wan21-video-generation.md) addendum 2026-10-15)
+- Of the three Wan repositories, `karume-umt5-xxl` and `karume-wan2.2` were first published with 0.14.0, and `karume-wan2.1` is not published (ADR [0118](decisions/0118-wan21-video-generation.md) addendum 2026-10-15)
   (siglip2 and depth-anything were first published with 0.9.0, birefnet / lucida on 2026-09-05 in the two-model form 1024² + 2048²).
   The two Wan repositories reference `karume-umt5-xxl` across repositories, so umT5 is published first (procedure: [release-runbook](release-runbook.md) "First publication of a family" — the runbook describes
   the 0.14.0 round of umT5 and Wan2.2).
@@ -198,7 +197,7 @@ Only when the mirror itself is missing do they fetch the verified published revi
 If an existing directory has no `karume.json`, it is an error, as an incomplete distribution.
 An explicit `--source` takes top priority, and the actual source is printed at startup.
 Gemma 4 defaults to local as before; fetching from the public repository is requested with `--repo`.
-SBV2 and vowel-detector name the distribution to use explicitly with `--source`.
+SBV2 names the distribution to use explicitly with `--source`.
 
 The experimental CLIs for additional LLMs are MiniCPM5 (`examples/minicpm5/README.md` (removed in 0.15)) /
 Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public distribution exists yet, so they read the converted

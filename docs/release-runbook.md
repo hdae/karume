@@ -417,7 +417,7 @@ They live in the per-family mapping tables of `packages/models` — `SOURCES` of
 
 ### First publication of a family (creating the mapping table itself — the most recent case: 0.14.0's umT5 = `karume-umt5-xxl` and Wan2.2 = `karume-wan2.2`)
 
-A family without a public repository has no mapping table (ADR 0073 decision 1 — the same as `vowel-detector`). In the release that
+A family without a public repository has no mapping table (ADR 0073 decision 1). In the release that
 creates the table, in addition to "add 1 entry" above, put the checks that bind the table's completeness in the same commit (forgetting one of them
 makes that check fail, or goes green while the table is not on the public surface). In 0.14.0, 2 families were published for the first time at once:
 umT5 (TS entry `Umt5Encoder` — `@karume/models/umt5`) got `UMT5_SOURCES`, and Wan got `WAN_SOURCES` (0.15.0 spells

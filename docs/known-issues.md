@@ -86,8 +86,9 @@ is not known. What Chrome on Metal (Dawn / Tint) does with the kernel rewrites i
   fused side, and **the rounding barrier of the workgroup memory round trip does not act as a barrier on Metal** (the
   form that the doc of src/kernels/gru-scan.ts anticipated — "the rounding barrier is not a guarantee of the WGSL
   specification"). It surfaces when H=128 = the reduction length grows.
-  The real harm, as elsewhere, is only that "the cross-path atol=0 check does not hold on Metal" — the actual quality is
-  ensured by the vowel-detector golden (a tolerance check) being green on M2. Root-cause candidate = strengthening the
+  The observed harm, as elsewhere, is only that "the cross-path atol=0 check does not hold on Metal" (1–64 ULP, no
+  NaN). No tolerance check on real weights covers the op on M2: no distributed model uses `gru_scan` (the one that did
+  was removed before 0.24.0). Root-cause candidate = strengthening the
   expression form of the rounding barrier
   (a bitcast round trip was measured to be ineffective, so another means — grouped with the root-cause candidate below;
   needs a real-M2 loop; not started).
@@ -415,7 +416,7 @@ The acquisition of the actual run is not matched.
   `KARUME_REFERENCE` can record another adapter's output into that row. It does not happen on single-GPU machines.
 - Of the e2e tests with sha256 rows, those that acquire the GPU themselves (the Wan pipeline / swap files, MOSS-Image's
   pipeline and generate files, the Qwen3.5 encoder, the Gemma 4 26B cut model, the runtime-side real-asset e2e, the
-  real-asset e2e of depth_anything / birefnet / vowel_detector in `packages/e2e`) match the actual GPU itself right after
+  real-asset e2e of depth_anything / birefnet in `packages/e2e`) match the actual GPU itself right after
   acquisition (`verifyRunningGpu` / `assertAdapterMatchesEnvironment`). The Wan e2e tests without sha256 rows (the dit /
   umt5 / ab / vae files) match it too.
 - Fix candidates: inject the GPU from the test (it must be acquired with the same features the pipeline requests
