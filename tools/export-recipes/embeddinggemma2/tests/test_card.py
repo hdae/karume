@@ -525,7 +525,7 @@ class TestTheAudioTower:
             " `bf16` the checkpoint's weights unchanged, in `i8` every linear layer and depthwise"
             " convolution rounded to int8 with one f32 scale per row; its norms, biases and folded"
             " constants stay f32. In `i8` its two subsampling convolutions keep their bf16 values:"
-            " rounded, they alone moved single soft tokens of real speech far from the original."
+            " rounded, they alone moved single soft tokens of speech far from the original."
         ) in card
         assert card.count("subsampling convolutions") == 1
         assert "- 32 clips of Japanese synthetic speech (8 sentences): 0.999493 at" in card

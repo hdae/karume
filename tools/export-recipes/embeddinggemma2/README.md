@@ -318,7 +318,7 @@ bf16 to per-row symmetric int8 **before** the reference and the goldens — the 
 included) and the 12 depthwise convolutions — **except** the two subsampling convolutions (`layer0.conv`
 `[128, 1, 3, 3]`, `layer1.conv` `[32, 128, 3, 3]`), which stay bf16, and the window selector (no weight), which stays
 bf16 too. The exception is declared once, `export_audio.I8_KEPT_BF16_WEIGHTS`, with its reason: rounded alone, the
-two convolutions moved single soft tokens of real speech to a cosine of 0.66 and 0.20 against the bf16 tower, while
+two convolutions moved single soft tokens of speech to a cosine of 0.66 and 0.20 against the bf16 tower, while
 everything else rounded with them kept those tokens at 0.9998 or more; keeping their 38,016 elements costs about
 40 KB (the decision of 2026-11-23, [research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md)).
 The wrapper's layers are copied with upstream's parameters shared, so the goldens are upstream's forward on the

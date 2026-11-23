@@ -86,7 +86,7 @@ EMBEDDINGGEMMA2_TOWER_F32: Mapping[str, str] = {
 #: torch-CPU screening of 2026-11-23 as its reason) — one sentence, only beside an `i8` storage.
 EMBEDDINGGEMMA2_AUDIO_I8_EXCEPTION = (
     "In `i8` its two subsampling convolutions keep their bf16 values: rounded, they alone moved"
-    " single soft tokens of real speech far from the original."
+    " single soft tokens of speech far from the original."
 )
 
 #: The audio one soft token stands for, in milliseconds (upstream's `processor_config.json`,

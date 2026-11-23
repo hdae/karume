@@ -2050,7 +2050,7 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   bf16 as the checkpoint stores them, the norms, biases and folded constants f32) and 295,640,914
   (281.9 MiB) with `i8` (its linears and depthwise convolutions as per-row int8; its two subsampling
   convolutions and its window selector stay bf16, because rounding the two convolutions alone moved
-  single soft tokens of real speech far — [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md)) —,
+  single soft tokens of speech far — [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md)) —,
   and a Session whose plan at 750 soft tokens is 126.0 MiB (4.2 MiB at 1 s), measured on the RTX
   3080 Ti under Node (2026-11-22, with the bf16 tower in both presets). It adds no `requiredLimits`:
   its largest intermediate is 46.9 MiB at 30 s, and a 30 s audio embeds to the same bits on a device

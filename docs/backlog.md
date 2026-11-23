@@ -730,7 +730,7 @@ maintainer's ruling of 2026-11-06).
        (`export_vision.py --dtype i8`: the 114 linears and the two learned position tables as per-row int8, the RoPE
        tables f32; 169,138,366 bytes against 336,093,696) and `embeddinggemma-2-audio-i8` (`export_audio.py --dtype
        i8`: the 123 linears and the 12 depthwise convolutions as per-row int8, the two subsampling convolutions and the
-       window selector kept bf16 — rounded, the two convolutions alone moved single soft tokens of real speech to a
+       window selector kept bf16 — rounded, the two convolutions alone moved single soft tokens of speech to a
        cosine of 0.20; 295,640,914 bytes against 587,590,521), each rounded before its reference and goldens with the
        other series' graph and cases. The exporter's `fake_quant_int8` takes `functional_weights` (a table read by
        `functional.embedding` rounded as an `embedding` weight), and the tower wrappers share every weight with
@@ -752,7 +752,7 @@ maintainer's ruling of 2026-11-06).
        set through the real pipeline (`tools/embeddinggemma2-quality-set/compare-presets.ts`,
        [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-i8-gpu.md)): every item's cosine of `i8` to
        `bf16` equals the screening's to within 4.4e-8 (lowest 0.999648 over the images and 0.999493 over the clips at
-       768), the same top-1 hits as `bf16` in both directions, and the same median time per item.
+       768), the same top-1 hits as `bf16` in both directions, and median times per item within 3% for images and clips.
      - Left unbuilt, by the same choice: the activation-int8 preset `i8-a8` (the screening: lowest cosine 0.99563 and
        2.39% of the ranking triples inverted at 768, against 0.99940 and 0.74% for `i8`), and every 4-bit preset (lowest
        0.960 to 0.966, 8.2 to 8.5% inverted).

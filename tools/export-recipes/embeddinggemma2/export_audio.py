@@ -123,7 +123,7 @@ tensor the bf16 series stores as bf16 is rounded to per-row symmetric int8
 the goldens are taken ({@link round_weights_to_i8}) — the 123 linears (`input_proj_linear`
 included) and the 12 depthwise convolutions — **except** the two subsampling convolutions, which
 stay bf16 ({@link I8_KEPT_BF16_WEIGHTS} holds the one declaration and its reason: rounded, they
-alone moved single soft tokens of real speech far), and the window selector, which is no weight
+alone moved single soft tokens of speech far), and the window selector, which is no weight
 and stays bf16 ({@link i8_storage_overrides}). The graph and the waveforms are the other series'
 own; the goldens are upstream's forward on the rounded weights (the wrapper shares them), so the
 series' goldens are the quantized tower's own outputs.
@@ -293,7 +293,7 @@ WINDOW_SELECTOR = "window_selector"
 #: `[128, 1, 3, 3]`, `layer1.conv` `[32, 128, 3, 3]`). With the window selector (a weight slot of
 #: no weight — {@link i8_storage_overrides}) they are the audio tower's exceptions to "every tensor
 #: the bf16 series stores as bf16 is per-row int8 under i8": rounded alone, the two convolutions
-#: moved single soft tokens of real speech to a cosine of 0.66 (`layer0.conv` alone, clip M1-08
+#: moved single soft tokens of speech to a cosine of 0.66 (`layer0.conv` alone, clip M1-08
 #: token 68) and 0.20 (both, clip M2-02 token 26) against the bf16 tower, while everything else
 #: rounded with them kept those tokens at 0.9998 or more (torch-CPU screening of 2026-11-23, 32
 #: Japanese TTS clips — `docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md`). They
