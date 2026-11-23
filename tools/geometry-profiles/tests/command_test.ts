@@ -159,7 +159,7 @@ describe("a new adapter's first table", () => {
     assertEquals(
       stdout.some((line) =>
         line.includes(
-          "becomes: [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL, APPLE_M5, TEST_GPU].map(freezeGeometryProfile)",
+          "become: [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL, APPLE_M5, APPLE_METAL_3_SHARED, TEST_GPU].map(freezeGeometryProfile),",
         ),
       ),
       true,

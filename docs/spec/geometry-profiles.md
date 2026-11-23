@@ -20,7 +20,9 @@ time.
   is the driver's version, and Chrome without its flag reports none). No table is matched by vendor alone. The
   default is the default profile: no table matches.
 - The Apple tables: `apple-metal-3` is measured, matched by `Apple M2`; `apple-m5` is measured, matched by
-  `Apple M5`. No Apple table is predicted: an Apple adapter without a description runs the default.
+  `Apple M5`; `apple-metal-3-shared` is predicted, matched by `apple` / `metal-3`, for every such adapter no
+  table names by its description — the M2 and the M5 in Chrome without the flag, and every Apple device of that
+  architecture not measured (an adapter that reports `Apple M3` among them).
 - Nothing is matched by similarity: a description no table names gets the predicted table of its vendor and
   architecture, never the table of the nearest measured device. The sha256 reference rows are kept per environment
   key, and each must say which table that machine ran with.
@@ -74,8 +76,12 @@ time.
   matches.
 - `nvidia-blackwell` carries them: a form in its four `gemmRows` rules above 64 rows, and a form with the decode in
   both `conv2d` fields. `apple-m5` carries a form in its five `gemmRows` rules from 17 to 512 rows and a form with the
+  decode in both `conv2d` fields; `apple-metal-3-shared` a form in its rule of 33 to 64 rows and a form with the
   decode in both `conv2d` fields. `nvidia-ampere` and `apple-metal-3` carry none; a table takes one when its family is
   derived from a sweep that measured it.
+- `quick+` takes every registered table's geometries, so registering a table can grow it: with `apple-m5` and
+  `apple-metal-3-shared` registered the sweep's 78 cases measure 152 more rows in `quick+` and 27 more in the
+  evaluation set `k88` than without them (counted as the sweep forms its rows: 1,504 to 1,656 and 222 to 249).
 
 ## A record
 
@@ -145,6 +151,13 @@ matched without a description: the predicted table of [the three levels](#the-th
 - **The verdict lines** give, per field, each device's number of cases; for an adopted geometry its geometric mean
   over the devices and each device's geometric mean, smallest and largest ratio; for every geometry not taken each
   device's ratios or the reason it is not eligible there.
+- `apple-metal-3-shared` is derived from the Apple M5's full sweep of 2026-11-23 and three Apple M2 records of the same
+  day that time the geometries the M5 adopts (`i8a8-linear`, `conv2d`, and `gemm`). Of the nine fields the M5's own
+  table adopts, it takes four: `gemmRows` 33 to 64 rows `reg64x32r4x4w8:tas-tb-un` (M5 ×1.688, M2 ×1.337), both
+  `conv2d` fields `igemm64x64:wg16x8:tas-tb-un:dec` (×1.368, ×1.634) and `igemm32x64:wg16x8:tas-tb-un:dec` (×1.488,
+  ×1.722), and `i8a8.linear` up to 256 rows `tile16x64r4x4w16x4k32` (×2.188, ×2.274). The M5's other five are slower
+  than the default on the M2 in some case or screened out there by the quick look. The fused attention, the i8a8
+  attention and conv3d keep the default: the M2's records have no case of them.
 
 ## The GEMV choices of linear
 
@@ -175,7 +188,7 @@ matched without a description: the predicted table of [the three levels](#the-th
   profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
   the record (`geometryProfile`). Every other kernel of the sweep reads nothing of the profile.
 - `nvidia-ampere`, `nvidia-blackwell` and `apple-metal-3` carry them; `apple-m5` (its GEMV sweep records are not
-  taken yet) does not. A table without them
+  taken yet) and `apple-metal-3-shared` (a shared table carries tile geometries only) do not. A table without them
   (an injected one, a first table derived without GEMV records, a shared table) runs with the default profile's, and
   so does an adapter no table matches: the Session fills them in once, where it selects its profile, so the linear
   selection, the fusion pass and the recipe builder all read the same choices.
@@ -212,8 +225,8 @@ matched without a description: the predicted table of [the three levels](#the-th
   no GEMV choices of its own runs it. A row that one device gains from and another loses with is a row of the first
   one's table. The devices measured are the RTX 3080 Ti, the RTX 5070 Ti and an Apple M2, and each has a table with
   GEMV choices of its own, so the default's choices run on adapters no table matches and on those whose table carries
-  none (`apple-m5`) — an Apple adapter whose description is empty among the first: `apple-metal-3` matches
-  `Apple M2`. The 17 bf16 parallel rows were adopted over
+  none (`apple-m5`, and `apple-metal-3-shared` — every Apple adapter whose description is empty among them:
+  `apple-metal-3` matches `Apple M2`). The 17 bf16 parallel rows were adopted over
   the records of all three devices. The 22 bf16 exceptions were adopted over those of the RTX 3080 Ti and the RTX
   5070 Ti; the Apple M2's records, taken since, time the general variant against the default's exception on 13 of
   their shapes and read it ×1.01 to ×1.26 faster on 11 of them (×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to ×0.87
@@ -491,7 +504,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   the refusals (one adapter, a description, no architecture, an injection-only target, attention-bench records) and
   the measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
   and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table; the
-  generator's `--shared` refusals and a shared table written, its header and the module it exports.
+  generator's `--shared` refusals and a shared table written, its header and the module it exports. The Apple tables
+  of the built-in list are selected as [the three levels](#the-three-levels) say (`Apple M2`, `Apple M5`, an empty, absent or
+  unmeasured description, another architecture).
 - The skeleton form and the counter decode as candidates (core lane): what each case measures in each set, that no
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter

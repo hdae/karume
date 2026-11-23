@@ -56,7 +56,8 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
       );
     }
     // The three device tables with GEMV records carry the field, apple-m5 (no GEMV records yet)
-    // does not; one taken out of a table prints nothing of it
+    // and the shared table (tile geometries only) do not; one taken out of a table prints nothing of
+    // it
     assertEquals(
       BUILTIN_GEOMETRY_PROFILES.map(({ id, linearGemv }) => [id, linearGemv !== undefined]),
       [
@@ -64,6 +65,7 @@ describe("the printer and the GEMV choices of a table (linearGemv)", () => {
         ["nvidia-ampere", true],
         ["nvidia-blackwell", true],
         ["apple-m5", false],
+        ["apple-metal-3-shared", false],
       ],
     );
     const registered = BUILTIN_GEOMETRY_PROFILES[0];
