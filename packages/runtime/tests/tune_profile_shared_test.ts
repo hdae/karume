@@ -455,6 +455,24 @@ describe("a shared table's provenance where it is read", () => {
     );
   });
 
+  it("geometryProfileMismatch: a list that repeats one device or holds an adapter without a description is a mismatch", () => {
+    const profile = shared();
+    const { provenance } = profile;
+    assert(provenance?.adapters !== undefined);
+    const withAdapters = (adapters: readonly GeometryProfileAdapter[]): GeometryProfile => ({
+      ...profile,
+      provenance: { ...provenance, adapters },
+    });
+    assertEquals(
+      geometryProfileMismatch(withAdapters([M5, { ...M5, device: "0x1111" }]), M5),
+      `Table 'apple-shared': its provenance.adapters [0] and [1] are one device (both "Apple M5" — a shared table tells its devices apart by their descriptions and names each once)`,
+    );
+    assertEquals(
+      geometryProfileMismatch(withAdapters([M5, { ...M2, device: "", description: "" }]), M5),
+      "Table 'apple-shared': its provenance.adapters [1] has no description (a shared table tells its devices apart by their descriptions)",
+    );
+  });
+
   it("the JSON reader gives a shared table back, and refuses one adapter in the list and both forms at once", () => {
     const profile = shared();
     assertEquals(parseGeometryProfileJson(geometryProfileJson(profile)), profile);
@@ -476,6 +494,53 @@ describe("a shared table's provenance where it is read", () => {
       Error,
       "provenance has both adapter and adapters",
     );
+  });
+
+  it("the JSON reader refuses an empty list, a list that repeats one device and an adapter without a description", () => {
+    const profile = shared();
+    const { provenance } = profile;
+    assert(provenance?.adapters !== undefined);
+    const read = (adapters: readonly GeometryProfileAdapter[]) => () =>
+      parseGeometryProfileJson(
+        infinityJson({ ...profile, provenance: { ...provenance, adapters } }),
+      );
+    assertThrows(
+      read([]),
+      Error,
+      "provenance.adapters names 0 adapters (a shared table is derived from two or more)",
+    );
+    assertThrows(
+      read([M5, M2, M5]),
+      Error,
+      'provenance.adapters [0] and [2] are one device (both "Apple M5"',
+    );
+    assertThrows(
+      read([{ ...M5, description: "" }, M2]),
+      Error,
+      "provenance.adapters [0] has no description",
+    );
+  });
+
+  it("the injection check refuses a list of fewer than two adapters, one that repeats one device and an adapter without a description", () => {
+    const profile = shared();
+    const { provenance } = profile;
+    assert(provenance?.adapters !== undefined);
+    const inject = (adapters: readonly GeometryProfileAdapter[]) => () =>
+      assertGeometryProfile({ ...profile, provenance: { ...provenance, adapters } });
+    for (const [adapters, message] of [
+      [[], "provenance.adapters names 0 adapters (a shared table is derived from two or more)"],
+      [[M5], "provenance.adapters names 1 adapter (a shared table is derived from two or more)"],
+      [
+        [M5, { ...M5, device: "0x1111" }],
+        'provenance.adapters [0] and [1] are one device (both "Apple M5" — a shared table tells its devices apart by their descriptions and names each once)',
+      ],
+      [
+        [M5, { ...M2, device: "", description: "" }],
+        "provenance.adapters [1] has no description (a shared table tells its devices apart by their descriptions)",
+      ],
+    ] as const) {
+      assertThrows(inject(adapters), CodegenError, message);
+    }
   });
 
   it("the injection check refuses both forms at once and a list that is not one", () => {

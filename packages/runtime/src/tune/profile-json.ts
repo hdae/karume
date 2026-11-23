@@ -344,8 +344,9 @@ const readAdapter = (value: unknown, path: string): GeometryProfileAdapter => {
 };
 
 /**
- * The adapters of `provenance`: a measured table's `adapter`, or a shared table's `adapters` — two
- * or more (the derivation never writes fewer), never both.
+ * The adapters of `provenance`: a measured table's `adapter`, or a shared table's `adapters`, never
+ * both. Which lists a shared table may hold (two or more devices told apart by their descriptions)
+ * is {@link assertGeometryProfile}'s job.
  * SPEC: docs/spec/geometry-profiles.md#shared-tables
  */
 const readAdapters = (fields: Record<string, unknown>, path: string): GeometryProfileAdapters => {
@@ -360,15 +361,10 @@ const readAdapters = (fields: Record<string, unknown>, path: string): GeometryPr
     );
   }
   const adaptersPath = child(path, "adapters");
-  const adapters = readArray(fields.adapters, adaptersPath);
-  if (adapters.length < 2) {
-    return fail(
-      adaptersPath,
-      `names ${adapters.length} adapter${adapters.length === 1 ? "" : "s"} (a shared table is derived from two or more)`,
-    );
-  }
   return {
-    adapters: adapters.map((adapter, index) => readAdapter(adapter, `${adaptersPath}[${index}]`)),
+    adapters: readArray(fields.adapters, adaptersPath).map((adapter, index) =>
+      readAdapter(adapter, `${adaptersPath}[${index}]`),
+    ),
   };
 };
 

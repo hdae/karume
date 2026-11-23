@@ -148,8 +148,9 @@ matched without a description: the predicted table of [the three levels](#the-th
   of `provenance.adapter`. A family's entry cites every record with a row of it, of every device.
   `geometryProfileMismatch` compares the vendor and the architecture of each of the table's adapters with the
   adapter's — not the device or the description, which the table predicts for —, then every family's keys as for a
-  measured table; a measured table is compared on all four fields as before. A list of fewer than two adapters is a
-  mismatch, and `parseGeometryProfileJson` and the injection check refuse it together with a provenance that has
+  measured table; a measured table is compared on all four fields as before. A list that names fewer than two
+  devices — fewer than two adapters, an adapter without a description, or two adapters of one description — is a
+  mismatch, and `parseGeometryProfileJson` and the injection check refuse it, as they refuse a provenance that has
   both forms.
 - **Regenerating**: a registered shared table is the base of a shared derivation only, onto records of the same
   adapters (as a set); each device's records cover a family they have a row of completely. A family the records cover
@@ -515,7 +516,8 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   the refusals (the records of one description only, a record without a description, records of one description
   with two device ids, a description, no architecture, an injection-only target, attention-bench records) and the
   measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
-  and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table; the
+  and the injection check of the several-adapter form, each refusing a list of fewer than two adapters, one that
+  names one description twice and one with an adapter without a description; `deriveLinearGemvChoices` refusing a shared table; the
   generator's `--shared` refusals and a shared table written, its header and the module it exports. The Apple tables
   of the built-in list are selected as [the three levels](#the-three-levels) say (`Apple M2`, `Apple M5`, an empty, absent or
   unmeasured description, another architecture).

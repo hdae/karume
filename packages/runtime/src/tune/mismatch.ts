@@ -13,6 +13,7 @@ import {
   type GeometryProfile,
   type GeometryProfileAdapter,
   type GeometryProfileFamily,
+  sharedAdaptersViolation,
 } from "../kernels/geometry-profile.ts";
 import {
   attentionBenchKernelsId,
@@ -140,9 +141,10 @@ const measuredAdapterMismatch = (
 /**
  * A shared table: vendor and architecture of each adapter it was derived from (undefined when they
  * match). Device and description are not compared: the table predicts for the adapters of that
- * vendor and architecture it was not measured on. A list of fewer than two adapters is not a shared
- * table's (the derivation refuses one adapter), so it is a mismatch rather than a weaker check of a
- * measured one.
+ * vendor and architecture it was not measured on. A list that names fewer than two devices — fewer
+ * than two adapters, or adapters a shared derivation would not tell apart
+ * (`sharedAdaptersViolation`) — is not a shared table's (the derivation refuses one device), so it
+ * is a mismatch rather than a weaker check of a measured one.
  */
 const sharedAdapterMismatch = (
   id: string,
@@ -155,6 +157,8 @@ const sharedAdapterMismatch = (
   if (!Array.isArray(listed) || listed.length < 2) {
     return `Table '${id}': its provenance.adapters is ${JSON.stringify(listed)} (a shared table names two or more adapters)`;
   }
+  const violation = sharedAdaptersViolation(adapters);
+  if (violation !== undefined) return `Table '${id}': its provenance.adapters ${violation}`;
   for (const adapter of adapters) {
     for (const field of SHARED_ADAPTER_FIELDS) {
       if (adapter[field] !== adapterInfo[field]) {
