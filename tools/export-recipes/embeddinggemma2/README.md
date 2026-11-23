@@ -261,7 +261,7 @@ misreading it):
 
 Before anything is published the script checks, on six synthetic waveforms (`waveforms.py`: every
 residue of `L` mod 4, 1 s, 10 s and the 30 s maximum), that the wrapper's soft tokens equal
-upstream's within 3e-4, that the all-ones mask is bit-identical at the other residues and far off at
+upstream's within 3e-4 (8e-4 for the i8 series, below), that the all-ones mask is bit-identical at the other residues and far off at
 2, the traced form (two inputs on `4n`, no fused attention and no `where`, 12 softmaxes on the
 12-key window, 24 window copies over one selector, one `[750, 12]` bias prefix) and the storage.
 Measured on 2026-11-22 (CPU, f32; soft tokens reach 5.5 to 6.1):
@@ -323,8 +323,14 @@ everything else rounded with them kept those tokens at 0.9998 or more; keeping t
 40 KB (the decision of 2026-11-23, [research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md)).
 The wrapper's layers are copied with upstream's parameters shared, so the goldens are upstream's forward on the
 rounded weights. Measured on 2026-11-23: 295,640,914 bytes in 4 parts (135 initializers i8, 3 bf16, 148 f32 —
-292,876,288 elements rounded); the wrapper within 3.10e-6 (`click`) to 2.82e-4 (`long`) of the golden, against the
-bound of 3e-4 (the f32 series' worst is 1.01e-4). Sharing upstream's parameters left the bf16 series byte-identical
+292,876,288 elements rounded); the wrapper within 3.10e-6 (`click`) to 2.82e-4 (`long`) of the golden (the f32
+series' worst is 1.01e-4). That difference is f32 noise of the rounded weights, not the rewrite: in f64 (upstream's
+f32 casts lifted, as above) the wrapper equals upstream to 6.3e-13, while upstream's own f32 run is up to 4.0e-4 from
+that f64 run (`long`) and the wrapper's up to 1.8e-4 (`noise`). So the series has a bound of its own, derived as the
+f32 series' was — three times its worst difference, 8e-4 (`export_audio.UPSTREAM_TOLERANCE_I8`) — instead of sitting
+at 94% of the bf16 weights' 3e-4. Re-exported with it that day, the series changed only the bound its
+`reference.json` records (its four parts and six io files byte-identical), and the bf16 series exported again kept
+every file byte-identical. Sharing upstream's parameters left the bf16 series byte-identical
 (its five parts, six io files and record re-exported that day). On the RTX 3080 Ti (the same real-GPU check,
 2026-11-23) the series sits 1.03e-5 to 2.49e-4 from its own goldens — the f32 series' order — and is held at about
 three times each waveform's error, with sha256 rows of its own; its 30 s golden on the 128 MiB device is bit-identical
