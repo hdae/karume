@@ -20,6 +20,24 @@
     "embeddinggemma-2-audio-bf16/tones": {
       "node-nvidia-geforce-rtx-3080-ti": "24702249bebb934bc60faa8ef1026dbfb2c4135ec1cf6c549dfa2aabcdbd5a90"
     },
+    "embeddinggemma-2-audio-i8/click": {
+      "node-nvidia-geforce-rtx-3080-ti": "665b6e8d3d1c4cdd0a102a46b95c0a8b5d0e55e652802f32bd718d74483a847d"
+    },
+    "embeddinggemma-2-audio-i8/edge": {
+      "node-nvidia-geforce-rtx-3080-ti": "42985dac02f1341bacb9113bd0bc5ff1ca3b3ca332fe2bb29953ba25ed3bca49"
+    },
+    "embeddinggemma-2-audio-i8/long": {
+      "node-nvidia-geforce-rtx-3080-ti": "4e945f93e6d7ecd154012562f86a8b027ba3faef95894aff71c141de28c7d403"
+    },
+    "embeddinggemma-2-audio-i8/noise": {
+      "node-nvidia-geforce-rtx-3080-ti": "7010c4b2303572e7b2732249198a69793f90475272e98375e6779e803a1bba4a"
+    },
+    "embeddinggemma-2-audio-i8/sweep": {
+      "node-nvidia-geforce-rtx-3080-ti": "17c50e342c5ab0defabc991f98749b9dc11e58c37046831b3dee34a1486eaeea"
+    },
+    "embeddinggemma-2-audio-i8/tones": {
+      "node-nvidia-geforce-rtx-3080-ti": "3b698c52afbc14becb852623c743ea32b9d5107c39c8e4b3f447722ec82f400c"
+    },
     "embeddinggemma-2-audio/click": {
       "node-nvidia-geforce-rtx-3080-ti": "03ec7b7a35c24a48c30affd0cebeb2a2393ce6df5d051951e208816ebf071045"
     },

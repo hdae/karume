@@ -198,6 +198,8 @@ upstream's too. The RoPE tables stay f32. Measured on 2026-11-23: 169,138,366 by
 107 f32 — 167,706,624 elements rounded), the wrapper within 1.19e-6 to 1.43e-6 of upstream on the same rows and
 1.86e-5 to 4.94e-5 of the golden. Making the wrapper share upstream's table left the bf16 series byte-identical (its
 four parts, five io files and record re-exported that day). The torch-CPU screening of the form: [research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md).
+On the RTX 3080 Ti (the same real-GPU check, 2026-11-23) the series sits 5.15e-5 to 3.56e-4 from its own goldens — the
+f32 series' order — and is held at about three times each image's error, with sha256 rows of its own.
 
 ## What `export_audio.py` emits (the audio tower)
 
@@ -323,7 +325,10 @@ The wrapper's layers are copied with upstream's parameters shared, so the golden
 rounded weights. Measured on 2026-11-23: 295,640,914 bytes in 4 parts (135 initializers i8, 3 bf16, 148 f32 —
 292,876,288 elements rounded); the wrapper within 3.10e-6 (`click`) to 2.82e-4 (`long`) of the golden, against the
 bound of 3e-4 (the f32 series' worst is 1.01e-4). Sharing upstream's parameters left the bf16 series byte-identical
-(its five parts, six io files and record re-exported that day).
+(its five parts, six io files and record re-exported that day). On the RTX 3080 Ti (the same real-GPU check,
+2026-11-23) the series sits 1.03e-5 to 2.49e-4 from its own goldens — the f32 series' order — and is held at about
+three times each waveform's error, with sha256 rows of its own; its 30 s golden on the 128 MiB device is bit-identical
+to the uncapped run.
 
 ## What `multimodal_reference.py` writes (the reference vectors of whole inputs)
 
