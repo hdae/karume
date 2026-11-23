@@ -98,6 +98,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("embeddinggemma/export.py", "export_series"),
     ("embeddinggemma2/export.py", "export_series"),
     ("embeddinggemma2/export_vision.py", "export_series"),
+    ("embeddinggemma2/export_audio.py", "export_series"),
     ("deberta/export.py", "export_variant"),
     ("anima/export.py", "emit_target"),
     ("sbv2/export.py", "export_dp"),
