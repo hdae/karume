@@ -329,26 +329,6 @@ release decision, **it is accepted that 1 census check of verify stays red on M2
 equivalence of parallel and sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does
 not require timing).
 
-## EmbeddingGemma batch>1 export does not pass the conversion stage
-
-`python -m embeddinggemma.export --batch N` (N>1, on the tools/export-recipes side — the launch form follows the
-recipe separation of ADR 0065) fails loudly in core's `karume/convert.py`
-(B=1 succeeds as before). The mechanism has 2 stages:
-
-1. transformers (the 5.14 line) `masking_utils.find_packed_sequence_indices` enters the packed-sequence branch during
-   tracing because of the mismatch between `position_ids [1,T]` inside `Gemma3TextModel` and `batch_size=N`, and
-   `aten.eq.Tensor` / `aten.index.Tensor` / `aten.ne.Scalar` survive into the IR (at B=1 this mismatch does not occur,
-   and it is absorbed by the existing Tmax constant + `sym_prefix_slice` folding).
-2. Removing this branch with a monkeypatch then hits, for the band mask's `aten.bitwise_or.Tensor`, the constraint that
-   **a bool constant cannot be an IR v1 initializer** (f32 / i32 only). Moreover, the same
-   patch **triggers the same error even at B=1** — the existence of the packed-sequence branch itself is a premise of the
-   current band-mask constant-folding pattern, and even a patch meant to be eager-equivalent is not
-   safe (measured A/B, 2026-08-11).
-
-The root fix is a generalisation on the convert/normalize side (turning bool constants into f32/i32, or extending
-initializer dtypes + supporting mask folding for batch>1), which needs a design decision on the core conversion
-foundation. The `--batch` flag itself is kept in a form that can be used as is once the generalisation lands.
-
 ## hub: narrowing weights to `drafter` only in `evictCachedAssets` still deletes the shared assets (tokenizer)
 
 `evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` can be written with the intent "keep the main model,

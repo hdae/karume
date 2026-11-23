@@ -1889,31 +1889,6 @@ Every input-caused rejection is a `ModelInputError` before any GPU work.
 - **sha256 rows exist only for the RTX 3080 Ti under Node** (`node-nvidia-geforce-rtx-3080-ti`); another machine
   SKIPs those cases explicitly with a red reference guard until it writes its rows.
 
-## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
-
-The exported graph (script `tools/export-recipes/embeddinggemma/export.py`) has no `attention_mask`
-input. The bidirectional + sliding-window band mask is baked in as **a constant of Tmax=512**
-(the first T is cut out with `sym_prefix_slice`), and there is no path that hides padding from attention.
-For a sequence with padding, **the caller packs it to shorten T** (for a single sequence this is strictly
-equivalent to torch eager).
-
-Mechanism: ADR 0016's proof that the safe-softmax guard is inactive requires evaluating the actual mask values, which does
-not hold for a run-time input placeholder (`_eval_static` rejects it — "single sequence assumed" is not a workaround
-but a consequence of the design). The graph input `pool_mask` is **for pooling only** and is not wired to attention
-(mixing in 0 would give a shape eager does not have, "the model sees it but the pooling discards it" —
-always pass all ones).
-
-Related: since `SYM_MAX = 512`, T > 512 fails at Session construction (the config's
-max_position_embeddings is 2048). Raising it is to be done together with a ruling on the band mask constant growing with Tmax²
-(512 → 2MB / 2048 → 32MB). The attention band ([below](#attention-band-dense-routes-only-never-beside-the-mask-every-score-still-computed))
-removes that constant, but it cannot sit beside a padding mask yet.
-
-The design for lifting it (run-time mask support) is settled in
-[decisions/0044](decisions/0044-runtime-attention-mask.md) (accepted), and **the mechanism is
-implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` — 2026-08-11). What remains is
-only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
-is kept as is or lowered to its decomposition — ADR 0044 Consequences).
-
 ## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text, images and 16 kHz audio of at most 30 s, no batch
 
 The model `text` of the local distribution `karume-embeddinggemma-2` (not published) — the text tower,
@@ -2063,7 +2038,7 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
 
 ## Irodori text side (backbone / projector): no run-time attention_mask; an empty caption and T=1 are not representable
 
-The same static scheme as EmbeddingGemma (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
+A static scheme (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
 is measured on every emit by a standing check in the export script (`_static_scheme_evidence` in
 `tools/export-recipes/irodori/export.py` — measured at most 8.3e-6, check 1e-3. If it breaks, the whole export fails).
 The T5Gemma 2 backbone of v4-Large follows the same scheme under the same check; its sliding window is a constant in
