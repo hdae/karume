@@ -52,7 +52,6 @@ from karume.dist import (
 from sbv2.card import SBV2_JVNV_CORPUS_PAGE, SBV2_JVNV_PROFILE, SBV2_TEXT_ENCODER_MODEL
 from sbv2.distribution import (
     EXPORT_PROVENANCE_FILE,
-    FN_PIPELINE,
     PIPELINE,
     SBV2_DEFAULT_MODEL,
     SBV2_DEFAULT_QUANT,
@@ -1374,10 +1373,10 @@ class TestSbv2Family:
 
 class TestSbv2Sources:
     def test_it_derives_the_two_series_from_the_model_name(self, tmp_path: Path) -> None:
-        sources = sbv2_sources(tmp_path, "FN7")
-        assert sources.series_f16 == tmp_path / "sbv2-FN7-f16"
-        assert sources.series_i8 == tmp_path / "sbv2-FN7-i8"
-        assert sources.model.name == "FN7"
+        sources = sbv2_sources(tmp_path, "M2")
+        assert sources.series_f16 == tmp_path / "sbv2-M2-f16"
+        assert sources.series_i8 == tmp_path / "sbv2-M2-i8"
+        assert sources.model.name == "M2"
         # DeBERTa does not depend on the model name (a family keeps a single one in shared/).
         assert sources.text_encoder == tmp_path / "deberta-i8" / "sbv2-22layer"
         # A **separate series** per storage form (ADR 0019) — only the variant name is the same.
@@ -1476,15 +1475,15 @@ class TestSbv2Cli:
     def test_the_model_flag_moves_the_series_and_the_default_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _, sources = self._sources(tmp_path, "FN7")
+        _, sources = self._sources(tmp_path, "M2")
         self._reroot(tmp_path, monkeypatch)
 
         main(
             [
                 "--pipeline",
-                "sbv2-fn",
+                "sbv2",
                 "--model",
-                "FN7",
+                "M2",
                 "--series",
                 str(sources.series_f16.parent),
             ]
@@ -1492,9 +1491,9 @@ class TestSbv2Cli:
 
         # The default output location is the family's repository (no per-speaker repository is
         # created — W-RC5-2).
-        out_dir = tmp_path / "models" / "karume-sbv2-fn"
+        out_dir = tmp_path / "models" / "karume-sbv2-jvnv"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        assert list(manifest["models"]) == ["FN7"]
+        assert list(manifest["models"]) == ["M2"]
         assert verify_dist(out_dir)
 
     def test_repeating_the_model_flag_assembles_one_family_repository(
@@ -1533,18 +1532,18 @@ class TestSbv2Cli:
         assert "## Model: F1" in card
         assert "## Model: F2" in card
         assert '  repo: "hdae/karume-sbv2-jvnv",' in card
-        # The attribution is the chosen family's (not a single word of FN's source is mixed in).
+        # The attribution is the chosen family's.
         assert "base_model:\n  - litagin/style_bert_vits2_jvnv\n" in card
         assert "license: cc-by-sa-4.0" in card
-        assert "rufflet17" not in card
 
-    @pytest.mark.parametrize(("pipeline", "model"), [("sbv2", "FN4"), ("sbv2-fn", "F1")])
-    def test_it_refuses_a_voice_of_the_other_family_before_assembling(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline: str, model: str
+    @pytest.mark.parametrize("model", ["FN4", "F3"])
+    def test_it_refuses_a_voice_outside_the_family_before_assembling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
     ) -> None:
         """The license text and the attribution at the repository root are decided by the family —
-        a voice of another family fails **before assembling** (no leftovers). Letting it through
-        would produce a distribution in which an FN voice claims the CC BY-SA license text.
+        a voice outside it fails **before assembling** (no leftovers). Letting it through would
+        produce a distribution in which a voice of unknown provenance claims the CC BY-SA license
+        text.
         """
         _, sources = self._sources(tmp_path, model)
         self._reroot(tmp_path, monkeypatch)
@@ -1553,7 +1552,7 @@ class TestSbv2Cli:
             main(
                 [
                     "--pipeline",
-                    pipeline,
+                    "sbv2",
                     "--model",
                     model,
                     "--series",
@@ -1638,50 +1637,31 @@ class TestSbv2LegalText:
             assert source_dir not in SBV2_JVNV_NOTICE_MARKDOWN, source_dir
         assert "(`README.md`) lists which ones this repository holds" in SBV2_JVNV_NOTICE_MARKDOWN
 
-    def test_the_fn_repository_carries_no_legal_text(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The FN line has no license text that can be bundled (only Booth's distribution terms) —
-        it must not claim CC BY-SA."""
-        out_dir = self._assemble(tmp_path, monkeypatch, "sbv2-fn", "FN4")
-
-        assert not (out_dir / "LICENSE.md").exists()
-        assert not (out_dir / "NOTICE.md").exists()
-        assert verify_dist(out_dir)
-
 
 class TestSbv2CardProfile:
     """Attribution profiles — each family's Pipeline holds **exactly one**.
 
     The engine-side rule (with one it passes when omitted / with 2 or more it must be explicit) is
     held by `TestCardProfile` in `tools/exporter/tests/test_dist.py` with a synthetic pipeline.
-    This checks that **each slot's attribution belongs to its own family** and that the names of
-    other families are not accepted.
+    This checks that **the slot's attribution belongs to its own family** and that other profile
+    names are not accepted.
     """
 
-    @pytest.mark.parametrize(("pipeline", "family"), [(PIPELINE, "jvnv"), (FN_PIPELINE, "fn")])
-    def test_each_family_resolves_to_its_own_attribution_without_a_choice(
-        self, pipeline, family: str
-    ) -> None:
-        assert sorted(pipeline.card_profiles) == [family]
-        assert resolve_card_renderer(pipeline, None) is pipeline.card_profiles[family]
-        assert resolve_card_renderer(pipeline, family) is pipeline.card_profiles[family]
+    def test_the_family_resolves_to_its_own_attribution_without_a_choice(self) -> None:
+        assert sorted(PIPELINE.card_profiles) == ["jvnv"]
+        assert resolve_card_renderer(PIPELINE, None) is PIPELINE.card_profiles["jvnv"]
+        assert resolve_card_renderer(PIPELINE, "jvnv") is PIPELINE.card_profiles["jvnv"]
 
-    @pytest.mark.parametrize(("pipeline", "other"), [(PIPELINE, "fn"), (FN_PIPELINE, "jvnv")])
-    def test_it_refuses_the_other_familys_attribution(self, pipeline, other: str) -> None:
-        """`--pipeline sbv2 --card-profile fn` would draw FN's attribution on JVNV voices — it
-        fails."""
-        with pytest.raises(DistError, match=f"'{other}' does not exist"):
-            resolve_card_renderer(pipeline, other)
-
-    def test_the_two_families_render_different_cards(self) -> None:
-        """Bundled the wrong way, the 2 families would draw the same card."""
-        assert PIPELINE.card_profiles["jvnv"] is not FN_PIPELINE.card_profiles["fn"]
+    def test_it_refuses_another_profile_name(self) -> None:
+        """`--pipeline sbv2 --card-profile <other>` would draw another attribution on JVNV voices
+        — it fails."""
+        with pytest.raises(DistError, match="'other' does not exist"):
+            resolve_card_renderer(PIPELINE, "other")
 
 
 class TestSbv2PipelineEntry:
-    """What the one line of `--pipeline sbv2` / `sbv2-fn` points to (the slot the driver merges into
-    core's table)."""
+    """What the one line of `--pipeline sbv2` points to (the slot the driver merges into core's
+    table)."""
 
     def test_it_carries_the_default_model_and_the_repo_name(self) -> None:
         assert PIPELINE.default_model == SBV2_DEFAULT_MODEL
@@ -1689,10 +1669,7 @@ class TestSbv2PipelineEntry:
 
     @pytest.mark.parametrize(
         ("pipeline", "models", "repo"),
-        [
-            (PIPELINE, ("F1", "F2", "M1", "M2"), "karume-sbv2-jvnv"),
-            (FN_PIPELINE, ("FN4", "FN7"), "karume-sbv2-fn"),
-        ],
+        [(PIPELINE, ("F1", "F2", "M1", "M2"), "karume-sbv2-jvnv")],
     )
     def test_every_voice_of_a_family_names_the_family_repository(
         self, pipeline, models: tuple[str, ...], repo: str
@@ -1703,11 +1680,10 @@ class TestSbv2PipelineEntry:
         """
         assert {pipeline.repo_name(model) for model in models} == {repo}
 
-    def test_each_default_model_belongs_to_its_own_family(self) -> None:
+    def test_the_default_model_belongs_to_its_own_family(self) -> None:
         """If the default model were a voice of another family, a pass that omits `--model` would
         always fail at the gate."""
         assert PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["jvnv"])
-        assert FN_PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["fn"])
 
     def test_its_card_refuses_another_pipelines_manifest(self) -> None:
         manifest = {"models": {"m": {"pipeline": "sbv2/0"}}}

@@ -1871,13 +1871,11 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
     loudly.
     """
 
-    @pytest.mark.parametrize(
-        ("name", "family"), [("FN4", "fn"), ("FN", "fn"), ("F1", "jvnv"), ("M2", "jvnv")]
-    )
+    @pytest.mark.parametrize(("name", "family"), [("F1", "jvnv"), ("M2", "jvnv")])
     def test_a_known_prefix_resolves_to_its_family(self, name: str, family: str) -> None:
         assert export_sbv2.sbv2_family(Path("inputs/sbv2") / name) == family
 
-    @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4"])
+    @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4", "FN4"])
     def test_an_unknown_directory_name_fails_loudly(self, name: str) -> None:
         # Fails with a dedicated type (with a plain `ValueError`, the caller's `except` could not
         # tell this legal-fact check from a generic "bad argument" — the repository's convention is
@@ -1892,7 +1890,7 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         only one grows)."""
         assert set(export_sbv2.SBV2_FAMILY_DIRS) == set(SBV2_CARD_PROFILES)
 
-    @pytest.mark.parametrize(("name", "family"), [("FN4", "fn"), ("F1", "jvnv")])
+    @pytest.mark.parametrize(("name", "family"), [("F1", "jvnv")])
     def test_the_license_comes_from_the_card_profile(self, name: str, family: str) -> None:
         provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / name)
 

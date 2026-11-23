@@ -4,16 +4,15 @@ The real distribution's `karume.json` is not used — the job here is to see tha
 fake manifest appear in the text as they are (= that not a single hand-written number is mixed
 in), so building it with values that **differ** from the real ones detects more. For the same
 reason the style table and the speaker table use different names and a different order from the
-real FN4 weights (baking a table in would fail).
+real weights (baking a table in would fail).
 
 Since manifest v2 (`karume/2` — ADR 0041) a card describes several models of one repository. The
 fake manifest defaults to the family shape (2 models, with shared files) so that rendering that
 only works for a single model does not slip through.
 
-Attribution is a per-family profile (`fn` / `jvnv`). The sections that look at what is derived from
-the manifest need only `fn` (a profile affects only the attribution section and the frontmatter),
-so the profile-specific facts and the detection of mix-ups are gathered in `TestSbv2CardProfiles`
-at the end.
+Attribution is a per-family profile (`jvnv`). The sections that look at what is derived from the
+manifest need only one profile (a profile affects only the attribution section and the
+frontmatter), so the profile-specific facts are gathered in `TestSbv2CardProfiles` at the end.
 
 NOTE: only this test imports `siglip2.card` (the only code coupling between recipes) —
 {@link TestSbv2PipelineGate.test_the_two_templates_do_not_answer_for_each_other} asserts that "2
@@ -33,7 +32,6 @@ import pytest
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_DEMO_TEXT,
-    SBV2_FN_PROFILE,
     SBV2_JVNV_PROFILE,
     SBV2_QUANT_ROUNDING,
     SBV2_SUPPORTED_PIPELINE,
@@ -197,9 +195,11 @@ def _sbv2_manifest() -> dict[str, Any]:
 
 @pytest.fixture
 def sbv2_card() -> str:
-    """The card rendered with the `fn` profile (what is derived from the manifest does not depend
+    """The card rendered with the `jvnv` profile (what is derived from the manifest does not depend
     on the profile)."""
-    return render_sbv2_model_card(_sbv2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+    return render_sbv2_model_card(
+        _sbv2_manifest(), REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
+    )
 
 
 class TestSbv2Frontmatter:
@@ -207,11 +207,11 @@ class TestSbv2Frontmatter:
         head = sbv2_card.split("---")[1]
         assert "library_name: karume" in head
         assert "pipeline_tag: text-to-speech" in head
-        assert "base_model: rufflet17/voice_models" in head
+        assert "base_model:\n  - litagin/style_bert_vits2_jvnv\n" in head
         # A quantized distribution, so not merge / finetune (the same ruling as Anima).
         assert "base_model_relation: quantized" in head
-        assert "license: other" in head
-        assert [line for line in head.splitlines() if line.startswith("  - ")] == [
+        assert "license: cc-by-sa-4.0" in head
+        assert head.partition("tags:\n")[2].splitlines() == [
             "  - text-to-speech",
             "  - webgpu",
             "  - japanese",
@@ -244,8 +244,8 @@ class TestSbv2Sections:
     def test_it_attributes_both_upstream_models(self, sbv2_card: str) -> None:
         """Attribution is a fact the manifest does not have — both where the voice comes from and
         the text encoder that is redistributed."""
-        assert "rufflet17/voice_models" in sbv2_card
-        assert "2.6.1-JP-Extra" in sbv2_card
+        assert "litagin/style_bert_vits2_jvnv" in sbv2_card
+        assert "2.0-JP-Extra" in sbv2_card
         assert "ku-nlp/deberta-v2-large-japanese-char-wwm" in sbv2_card
         assert "cc-by-sa-4.0" in sbv2_card
 
@@ -342,7 +342,7 @@ class TestSbv2QuantRounding:
         model["defaultQuant"] = "i8"
 
         notes = self._notes(
-            render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+            render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         )
 
         for name in SBV2_QUANTS:
@@ -356,7 +356,7 @@ class TestSbv2QuantRounding:
 
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["defaultQuant"] = "i8"
-        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        moved = render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "- `i8` (default) —" in self._notes(moved)
 
 
@@ -387,7 +387,7 @@ class TestSbv2Derivation:
         manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["container"]["parts"][0][
             "size"
         ] = 12345
-        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        moved = render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "| 2.17 KiB (" in sbv2_card
         assert "| 2.17 KiB (" not in moved
         assert "| 13.7 KiB (" in moved
@@ -402,7 +402,9 @@ class TestSbv2Derivation:
         """No sorting in between — changing the manifest's order changes the table's order too."""
 
         def style_rows(manifest: dict[str, Any]) -> list[str]:
-            card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+            card = render_sbv2_model_card(
+                manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
+            )
             head, _, rest = card.partition("### Styles")
             assert head  # if the section disappeared, the extraction below would be meaningless
             return [line for line in rest.splitlines() if line.startswith("| `")]
@@ -431,7 +433,7 @@ class TestSbv2Derivation:
         del manifest["models"]["ZB"]
         manifest["models"]["ZA"]["pipelineConfig"]["styles"] = {"Angry": 0}
         manifest["models"]["ZA"]["pipelineConfig"]["defaults"]["style"] = "Angry"
-        card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        card = render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "| `Angry` | 0 |" in card
         for gone in ("Shout", "Calm", "Whisper"):
             assert gone not in card, gone
@@ -520,7 +522,7 @@ class TestSbv2Derivation:
         manifest = _sbv2_manifest()
         manifest["defaultModel"] = "ZB"  # a model without noiseScaleW and the like
         usage = render_sbv2_model_card(
-            manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+            manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
         ).partition("## Usage")[2]
         snippet = usage.partition("## Model:")[0]
         assert "  // lengthScale: 1.0, //" in snippet
@@ -531,12 +533,12 @@ class TestSbv2Derivation:
 class TestSbv2Determinism:
     def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
         first = render_sbv2_model_card(
-            _sbv2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+            _sbv2_manifest(), REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
         )
         second = render_sbv2_model_card(
             json.loads(json.dumps(_sbv2_manifest())),
             REPO,
-            SBV2_FN_PROFILE,
+            SBV2_JVNV_PROFILE,
             SBV2_QUANT_ABBREVIATIONS,
         )
         assert first.encode("utf-8") == second.encode("utf-8")
@@ -544,7 +546,7 @@ class TestSbv2Determinism:
     def test_it_does_not_mutate_the_manifest(self) -> None:
         manifest = _sbv2_manifest()
         before = copy.deepcopy(manifest)
-        render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert manifest == before
 
 
@@ -553,7 +555,7 @@ class TestSbv2PipelineGate:
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["pipeline"] = SIGLIP2_SUPPORTED_PIPELINE
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
-            render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+            render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
 
     def test_the_two_templates_do_not_answer_for_each_other(self) -> None:
         """A template is pipeline-specific — a mix-up gives "the table matches but the description
@@ -562,11 +564,11 @@ class TestSbv2PipelineGate:
             render_siglip2_model_card(_sbv2_manifest(), REPO)
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
             render_sbv2_model_card(
-                _siglip2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+                _siglip2_manifest(), REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
             )
 
 
-# ---- Attribution profiles (fn / jvnv) --------------------------------------
+# ---- Attribution profiles (jvnv) ------------------------------------------
 
 
 def _profile_card(profile: Sbv2CardProfile) -> str:
@@ -578,13 +580,11 @@ class TestSbv2CardProfiles:
     differs per family.
 
     A wrong attribution happens while the tables and the usage stay correct, so nobody can notice
-    until it has been shipped — it observes in both directions that "not a single word of the other
-    family's facts is mixed in".
+    until it has been shipped.
     """
 
     def test_it_offers_exactly_the_families_it_can_attribute(self) -> None:
-        assert sorted(SBV2_CARD_PROFILES) == ["fn", "jvnv"]
-        assert SBV2_CARD_PROFILES["fn"] is SBV2_FN_PROFILE
+        assert sorted(SBV2_CARD_PROFILES) == ["jvnv"]
         assert SBV2_CARD_PROFILES["jvnv"] is SBV2_JVNV_PROFILE
 
     def test_it_refuses_to_draw_a_card_without_naming_the_family(self) -> None:
@@ -667,16 +667,6 @@ class TestSbv2CardProfiles:
         ):
             assert required in card, required
 
-    def test_neither_family_carries_the_others_attribution(self) -> None:
-        """Not a single word of one family's facts leaks into the other (observing this in both
-        directions is the core of catching wrong attribution)."""
-        fn = _profile_card(SBV2_FN_PROFILE)
-        jvnv = _profile_card(SBV2_JVNV_PROFILE)
-        for leaked in ("jvnv", "litagin", "2.0-JP-Extra", "CC BY-SA 4.0", "arxiv"):
-            assert leaked not in fn, leaked
-        for leaked in ("rufflet17", "2.6.1-JP-Extra", "`FN/`", "license: other"):
-            assert leaked not in jvnv, leaked
-
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_every_profile_renders_the_same_bytes_for_the_same_manifest(self, name: str) -> None:
         profile = SBV2_CARD_PROFILES[name]
@@ -722,11 +712,6 @@ class TestSbv2HouseSentence:
                 "This is an unofficial conversion of litagin/style_bert_vits2_jvnv and"
                 " ku-nlp/deberta-v2-large-japanese-char-wwm for Karume. It is not affiliated with"
                 " or endorsed by litagin and ku-nlp.",
-            ),
-            (
-                SBV2_FN_PROFILE,
-                "This is an unofficial conversion of rufflet17/voice_models for Karume. It is not"
-                " affiliated with or endorsed by rufflet17.",
             ),
         ],
     )

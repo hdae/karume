@@ -26,15 +26,14 @@ built from these 2 tables, and the name → row mapping is held by `styles` / `s
 is referenced (there is no code import — the shared seat shares assets, it does not couple the
 code).
 
-The public surface is **two, one per voice family** (`karume.dist.Pipeline`) — {@link PIPELINE}
-(`--pipeline sbv2` = JVNV, public repository `karume-sbv2-jvnv`) and {@link FN_PIPELINE}
-(`--pipeline sbv2-fn` = FN, publication on hold). The repository's dist driver
-(`tools/export-recipes/dist.py`) merges them into the core's PIPELINES. They are split for the same
-reason as anima's official / fine-tuned ones: `root_files` (`LICENSE.md` / `NOTICE.md` at the root
-of the distribution repository) is one fixed set per Pipeline, and the license differs per family
-(JVNV is CC BY-SA 4.0, FN is Booth's distribution terms). Folding them into one would make one
-family's repository declare legal text and attribution that are not its own — still valid prose,
-so `verify_dist` and the manifest checks pass it, and nobody can notice until after shipping.
+The public surface is **one Pipeline per voice family** (`karume.dist.Pipeline`) — today only
+{@link PIPELINE} (`--pipeline sbv2` = JVNV, public repository `karume-sbv2-jvnv`). The repository's
+dist driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES. Families are
+split for the same reason as anima's official / fine-tuned ones: `root_files` (`LICENSE.md` /
+`NOTICE.md` at the root of the distribution repository) is one fixed set per Pipeline, and the
+license differs per family. Folding two families into one would make one family's repository
+declare legal text and attribution that are not its own — still valid prose, so `verify_dist` and
+the manifest checks pass it, and nobody can notice until after shipping.
 """
 
 from __future__ import annotations
@@ -80,14 +79,10 @@ from sbv2.card import (
 #: directory name of `--model-dir`, so this reading side builds from the same word.
 SBV2_DEFAULT_MODEL = "F1"
 
-#: The default model name of the FN Pipeline ({@link FN_PIPELINE}) (the speaker `sbv2/README.md`
-#: uses in its steps).
-SBV2_FN_DEFAULT_MODEL = "FN4"
-
 #: Model name (= the directory name of `--model-dir`) prefix → voice family (exactly the
-#: convention of the README's "the default `--model-dir` is `inputs/sbv2/F1`" and
-#: "`inputs/sbv2/FN*`"). Export (`sbv2.export.sbv2_family` — the license baked into the container)
-#: and assembly (the models each family's Pipeline accepts) both read this one table.
+#: convention of the README's "the default `--model-dir` is `inputs/sbv2/F1`"). Export
+#: (`sbv2.export.sbv2_family` — the license baked into the container) and assembly (the models
+#: each family's Pipeline accepts) both read this one table.
 #:
 #: MUST: decided by an **allow-list**. Back when it was the binary "jvnv unless it starts with
 #: `FN`", an unexpected directory name (a new speaker, the name of a local copy, another spelling of
@@ -99,7 +94,6 @@ SBV2_FN_DEFAULT_MODEL = "FN4"
 #: upstream repository** (`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …); on the jvnv
 #: side it is the speaker id alone.
 SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
-    "fn": ("FN",),
     "jvnv": ("F1", "F2", "M1", "M2"),
 }
 
@@ -1062,8 +1056,8 @@ def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPla
 
     MUST: anything other than that family's models ({@link SBV2_FAMILY_DIRS}) fails **before
     assembly**. The legal text, attribution and card at the repository root are fixed by the family,
-    so assembling an FN voice with the JVNV Pipeline would produce a distribution in which FN
-    weights declare the CC BY-SA 4.0 text and JVNV's attribution.
+    so assembling another family's voice with the JVNV Pipeline would produce a distribution in
+    which those weights declare the CC BY-SA 4.0 text and JVNV's attribution.
     """
     prefixes = SBV2_FAMILY_DIRS[family]
     if not model.startswith(prefixes):
@@ -1183,12 +1177,6 @@ def _sbv2_pipeline(family: str, default_model: str, root_files: Mapping[str, str
 
 #: The row of `--pipeline sbv2` (JVNV — public repository `karume-sbv2-jvnv`).
 #:
-#: MUST: a **separate Pipeline** from FN — the reason is in the last paragraph of the module doc.
+#: MUST: another voice family gets a **separate Pipeline** — the reason is in the last paragraph of
+#: the module doc.
 PIPELINE = _sbv2_pipeline("jvnv", SBV2_DEFAULT_MODEL, sbv2_jvnv_root_files())
-
-#: The row of `--pipeline sbv2-fn` (FN — HF publication on hold, only the card machinery is kept).
-#:
-#: No legal texts: upstream's written terms exist only on the Booth distribution page, and there is
-#: no license text to bundle (checked on the source for `sbv2.card.SBV2_FN_METADATA`). On the day
-#: publication is decided, fill this in to match those terms.
-FN_PIPELINE = _sbv2_pipeline("fn", SBV2_FN_DEFAULT_MODEL, {})

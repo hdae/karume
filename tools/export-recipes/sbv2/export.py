@@ -173,7 +173,7 @@ class Sbv2FamilyError(ValueError):
 
 
 def sbv2_family(model_dir: Path) -> str:
-    """The directory name of `--model-dir` → voice family (`fn` / `jvnv`).
+    """The directory name of `--model-dir` → voice family (`jvnv`).
 
     The decision uses only the allow-list of {@link SBV2_FAMILY_DIRS}; a name that matches none
     **fails loudly** (the MUST of that constant — {@link Sbv2FamilyError}).
@@ -195,8 +195,8 @@ def sbv2_family(model_dir: Path) -> str:
 def sbv2_provenance(model_dir: Path) -> Provenance:
     """The provenance baked into the series' containers (container-v1 §2.3).
 
-    SBV2 has **a different legal fact** per voice family (`sbv2.card.SBV2_CARD_PROFILES` — FN is
-    `other` + Booth's distribution terms, jvnv is `cc-by-sa-4.0` from the JVNV corpus). The source
+    SBV2 has **a different legal fact** per voice family (`sbv2.card.SBV2_CARD_PROFILES` — jvnv is
+    `cc-by-sa-4.0` from the JVNV corpus). The source
     of truth for the identifier is the card side, so this only decides **which family it is**
     ({@link sbv2_family}).
     """
