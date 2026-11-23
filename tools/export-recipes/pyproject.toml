@@ -201,7 +201,7 @@ depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
 # spellings or the form of the rounding, the copies of the fixed values silently become something
 # else.
 gemma4-qat = ["transformers==5.14.1"]
-# NOTE: the EmbeddingGemma / MiniCPM5 recipes have no dependency group — they add it temporarily
+# NOTE: the EmbeddingGemma recipe has no dependency group — it adds it temporarily
 # with `uv run --with 'transformers==5.14.1' python -m <family>.export` (each script's docstring).
 
 [tool.pytest.ini_options]

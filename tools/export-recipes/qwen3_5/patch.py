@@ -33,14 +33,14 @@ rotary module), which the host now supplies.
    the offset to exactly the keys {@link prepare_text_tower} reports ({@link
    Qwen35TextTower.unit_offset_keys}).
 5. **The attention implementation**: transformers' `sdpa` materialises `repeat_kv` whenever a mask
-   is passed; {@link gqa_attention} (registered under {@link ATTENTION_NAME} — the `minicpm5` /
-   `gemma4` precedent) calls SDPA with `enable_gqa=True`, so the IR attention reads k / v with
+   is passed; {@link gqa_attention} (registered under {@link ATTENTION_NAME} — the `gemma4`
+   precedent) calls SDPA with `enable_gqa=True`, so the IR attention reads k / v with
    their 4 heads. It never lets `is_causal` reach SDPA: a missing mask fails loudly.
 
 ## The causal mask: built in the graph from `positions`
 
 The runtime's `attention` has no causal field (`aten_handlers._h_attention` rejects
-`is_causal=True`), and the folded form of the precedents (`minicpm5` / `gemma4`: arange-only leaves
+`is_causal=True`), and the folded form of the precedent (`gemma4`: arange-only leaves
 folded to a Tmax×Tmax f32 constant + `sym_prefix_slice`) would be 64 MiB at Tmax = 4096. The
 wrapper instead builds the bool mask `positions[:, None] >= positions[None, :]` ({@link
 causal_mask}) from the host-supplied `positions` (f32 `[T]`, 0 … T−1): a run-time `ge` that the
@@ -93,7 +93,7 @@ FULL_ATTENTION = "full_attention"
 
 #: The name {@link gqa_attention} is registered under. MUST NOT contain `sdpa` / `flash_attention`
 #: / `flex_attention`: transformers branches into backend-specific dispatch checks on a substring
-#: match of the name (the `minicpm5` / `gemma4` precedent).
+#: match of the name (the `gemma4` precedent).
 ATTENTION_NAME = "karume_qwen3_5"
 
 #: The l2-normalisation's epsilon (upstream `l2norm(x, dim=-1, eps=1e-6)`, called by both

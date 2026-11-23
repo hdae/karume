@@ -1,6 +1,6 @@
 """Script-level contract of `gemma4/export.py` (the part that needs no real weights).
 
-Emitting with real weights is manual (the same discipline as the tests of `minicpm5` /
+Emitting with real weights is manual (the same discipline as the tests of
 `embeddinggemma`). What is pinned here is only the discipline whose breakage would give a **false
 PASS**:
 

@@ -11,7 +11,7 @@ the families). The series layout differs per family, and **a directory name is n
 name**:
 
 - one component directly under the series (siglip2 / birefnet / depth-anything / gemma4 /
-  gemma4-qat / minicpm5 / embeddinggemma) — the directory name is the series name.
+  gemma4-qat / embeddinggemma) — the directory name is the series name.
 - components side by side in subdirectories (anima / sbv2 / irodori / dacvae / deberta) — some
   spellings do not match (`caption-proj` → `caption_proj`, `decoder` → `codec_decoder`, deberta's
   `full-24layer` → the `text_encoder` role SBV2 consumes).
@@ -76,7 +76,6 @@ from karume.migrate import (
     read_ple_index,
 )
 from karume.ple import PLE_INDEX_ASSET
-from minicpm5 import export as minicpm5_export
 from sbv2 import export as sbv2_export
 from sbv2.distribution import SBV2_FRONT_ROLE, SBV2_SERIES_PREFIX, SBV2_VOICE_ROLE
 from siglip2 import export as siglip2_export
@@ -199,7 +198,7 @@ def input_checkpoint(root: Path, series: str) -> Path:
     """Series name → where the real weights that produced the series live (the reverse lookup of the
     default output path of the scripts with one component directly under the series).
 
-    The siglip2 / birefnet / depth-anything / minicpm5 scripts build the default output path from
+    The siglip2 / birefnet / depth-anything scripts build the default output path from
     the directory name of `--model-dir` (lowercased, `_` → `-`, possibly followed by a suffix such
     as `-<resolution>`). The container's provenance (license and revision) is derived from that
     checkpoint itself (each script's `upstream_provenance`), so the migration looks up the same
@@ -335,14 +334,6 @@ FAMILIES: tuple[Family, ...] = (
         flat_role=lambda name: (
             GEMMA4_DRAFTER_ROLE if name.endswith(f"-{GEMMA4_DRAFTER_SUFFIX}") else GEMMA4_ROLE
         ),
-    ),
-    Family(
-        "minicpm5",
-        lambda name: name.startswith("minicpm5-"),
-        lambda name: minicpm5_export.upstream_provenance(
-            input_checkpoint(minicpm5_export.DEFAULT_MODEL_DIR.parent, name)
-        ),
-        flat_role=lambda _: minicpm5_export.GRAPH_NAME,
     ),
     Family(
         "embeddinggemma",

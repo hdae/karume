@@ -92,8 +92,6 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4_qat/export.py", "export_qat"),
     ("gemma4/export_drafter.py", "export_series"),
     ("gemma4/export_drafter_qat.py", "export_series"),
-    ("minicpm5/export.py", "export_series"),
-    ("minicpm5/export_decode.py", "export_series"),
     ("qwen3_5/export.py", "write"),
     ("embeddinggemma/export.py", "export_series"),
     ("embeddinggemma2/export.py", "export_series"),

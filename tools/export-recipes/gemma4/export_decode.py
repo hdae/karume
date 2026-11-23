@@ -8,11 +8,10 @@ named state slots) /
 (attention with state references and `state_append`) /
 [0068](../../../docs/decisions/0068-decode-exit-multi-output.md) decision 4 (the decode exit) /
 [0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed w4) on a real model that has
-**sliding + KV sharing + mixed quantization** at once. The same frame without KV sharing is
-`minicpm5/export_decode.py`. The model-independent checks (how greedy is taken, the margin check,
-the capacity check) have their source of truth in {@link _shared.decode_series}, and the one-shot
-helpers are in {@link gemma4.export}; both are imported and reused (one rule is not written in two
-places).
+**sliding + KV sharing + mixed quantization** at once. The model-independent checks (how greedy is
+taken, the margin check, the capacity check) have their source of truth in {@link
+_shared.decode_series}, and the one-shot helpers are in {@link gemma4.export}; both are imported
+and reused (one rule is not written in two places).
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode              # E2B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b  # E4B

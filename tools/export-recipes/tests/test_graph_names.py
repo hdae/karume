@@ -11,7 +11,7 @@ Two things are guarded:
 1. What is passed to `graph_name=` is **the component-name constant**, not a name derived from the
    path it is placed at. Directory names do not match component names: in the families that put
    the container directly under the series (siglip2 / birefnet / depth_anything / gemma4 /
-   minicpm5 / embeddinggemma / gemma4_qat) the directory name is the **series name**
+   embeddinggemma / gemma4_qat) the directory name is the **series name**
    (`siglip2-so400m-patch14-384`); irodori has the keys `caption_proj` / `codec_decoder` for
    `caption-proj` / `decoder`, and deberta has the key `text_encoder` (SBV2's consuming slot) for
    `full-24layer`.
@@ -76,8 +76,6 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
         "IRODORI_CODEC_ROLES",
     ),
     ("irodori/export.py", "export_series", "IRODORI_SERIES_ROLES[target]", "IRODORI_SERIES_ROLES"),
-    ("minicpm5/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
-    ("minicpm5/export_decode.py", "export_series", "one_shot.GRAPH_NAME", "GRAPH_NAME"),
     ("qwen3_5/export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
     ("sbv2/export.py", "export_dec", "TARGET_DEC", "TARGET_DEC"),
     ("sbv2/export.py", "export_dp", "TARGET_DP", "TARGET_DP"),
@@ -96,10 +94,6 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("moss/export_dit.py", "write_container", "name", "GRAPHS"),
     ("moss/export_vae.py", "write_graphs", "name", "GRAPHS"),
 )
-
-#: Where to look up the value constant of a script whose constant lives in **another module**,
-#: like `minicpm5/export_decode.py`.
-VALUE_MODULES: Mapping[str, str] = {"minicpm5/export_decode.py": "minicpm5.export"}
 
 
 def _module_name(script: str) -> str:
@@ -143,7 +137,7 @@ def _derived_from_a_path(expression: ast.expr) -> bool:
 def _declared_values(script: str, constant: str) -> set[str]:
     """The set of spellings a script can pass to `graph_name=` (the constant is read from the
     module itself)."""
-    module = importlib.import_module(VALUE_MODULES.get(script, _module_name(script)))
+    module = importlib.import_module(_module_name(script))
     value = getattr(module, constant)
     if isinstance(value, str):
         return {value}
@@ -179,7 +173,6 @@ def _scanned_call_sites() -> set[tuple[str, str]]:
 FORWARDERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("gemma4/export_decode.py", "_write_container"),
-        ("minicpm5/export_decode.py", "_write_container"),
     }
 )
 
@@ -349,7 +342,7 @@ class TestTheNamesAreTheWeightsKeys:
         assert set(EMBEDDINGGEMMA2_WEIGHTS) == {"model", VISION, AUDIO}
         assert self._named("embeddinggemma2") == set(EMBEDDINGGEMMA2_WEIGHTS)
 
-    @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
+    @pytest.mark.parametrize("family", ["embeddinggemma"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
         """Pin the spelling of the families that build no distribution (they have no
         `distribution.py`; EmbeddingGemma 2's text script, which has one, is pinned to the same

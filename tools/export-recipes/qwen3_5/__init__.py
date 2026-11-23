@@ -13,7 +13,7 @@ package-level import would pull it into every reader of a submodule. Callers imp
 submodules by name.
 
 Scripts start from the export-recipes root, with transformers pinned for the run (no dependency
-group of its own, like `minicpm5` / `embeddinggemma`):
+group of its own, like `embeddinggemma`):
 
     uv run --with 'transformers==5.14.1' --inexact python -m qwen3_5.export --help
 """

@@ -256,14 +256,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
     maxLines: 39,
   },
   { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 98 },
-  { path: "tools/export-recipes/minicpm5/calib_texts.py", why: CALIBRATION_TEXT, maxLines: 16 },
-  { path: "tools/export-recipes/minicpm5/export.py", why: MODEL_OUTPUT, maxLines: 11 },
-  { path: "tools/export-recipes/minicpm5/README.md", why: MODEL_OUTPUT, maxLines: 1 },
-  {
-    path: "tools/export-recipes/minicpm5/tests/test_calib_texts.py",
-    why: "the kana / kanji class bounds that detect Japanese text",
-    maxLines: 1,
-  },
   {
     path: "tools/export-recipes/sbv2/card.py",
     why: "the Japanese TTS demo sentence of the generated card",
