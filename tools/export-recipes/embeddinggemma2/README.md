@@ -450,7 +450,9 @@ Assembled again on 2026-11-23 with the towers' i8 storages, the mirror holds 2,3
 i8 container 169,138,366 more, the audio i8 container 295,640,914): every file of the `bf16` preset (its fourteen
 container parts and the tokenizer) and the text tower's i8 container are byte-identical to the assembly before it,
 and in `karume.json` every entry of the `bf16` preset is unchanged; the `i8` preset now maps both towers to their i8
-containers and downloads 798,296,220 bytes with both towers (333,516,940 without them). Assembled on 2026-11-22 with
+containers and downloads 798,296,220 bytes with both towers (333,516,940 without them). Assembled once more that day
+with the `i8` preset's description reworded to cover the towers, only `karume.json` (that one string) and `README.md`
+(its quants row) changed; every container part and the tokenizer kept its sha256 (2,314,952,503 bytes in all). Assembled on 2026-11-22 with
 the audio tower, the mirror held 1,850,169,018 bytes in all (the audio
 container 587,590,521 more); the text and vision containers and the tokenizer are byte-identical to the assembly
 before it, and each preset downloads 587,590,521 bytes more for the tower with `audio: true`. Assembled before with

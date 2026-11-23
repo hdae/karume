@@ -277,8 +277,9 @@ EMBEDDINGGEMMA2_QUANTS: Mapping[str, Any] = {
         "weights": {role: EMBEDDINGGEMMA2_I8_DTYPE for role in EMBEDDINGGEMMA2_GRAPH_SERIES},
         "session": {},
         "label": "Half size (int8)",
-        "description": "The token table and every linear layer stored as int8 (one scale per row)"
-        " and computed in f32.",
+        "description": "The token table, image position tables and every linear layer and"
+        " convolution stored as int8 (one scale per row), computed in f32; the audio tower's two"
+        " subsampling convolutions stay bf16.",
     },
 }
 EMBEDDINGGEMMA2_DEFAULT_QUANT = EMBEDDINGGEMMA2_DTYPE
