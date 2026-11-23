@@ -206,13 +206,6 @@ test("fromPretrained: umT5 and Wan2.2 point at their source tables when ref is m
     "wan.Ti2vPipeline.fromPretrained: repo is required",
   );
   assertMatch(wan22.message, /(?<![\w.])SOURCES\["wan2\.2"\] \(@karume\/models\/wan\)/);
-  const wan21 = await assertRejects(
-    () => wan.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
-    Error,
-    "wan.Pipeline.fromPretrained: repo is required",
-  );
-  assertStringIncludes(wan21.message, "pass a repo name string (= tracks main)");
-  assertEquals(wan21.message.includes("SOURCES"), false, wan21.message);
 });
 
 test("fromPretrained: MOSS-Image points at its source table when ref is missing", async () => {

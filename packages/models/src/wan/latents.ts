@@ -5,42 +5,15 @@
 const f32 = Math.fround;
 
 /**
- * The VAE's per-channel latent mean / standard deviation (upstream
- * `AutoencoderKLWan.config.latents_mean` / `latents_std` — `vae/config.json` of the pinned
- * revision).
+ * The per-channel latent mean of the Wan2.2 (TI2V 5B) VAE (48 channels — upstream
+ * `AutoencoderKLWan.config.latents_mean`, `vae/config.json` of the pinned revision).
  *
- * They are constants on the pipeline side for the same reason as in anima (`anima/latents.ts`): the
- * two lists exist only in the VAE config and are in neither the IR nor the distribution assets (the
+ * It is a constant on the pipeline side for the same reason as in anima (`anima/latents.ts`): the
+ * statistics exist only in the VAE config and are in neither the IR nor the distribution assets (the
  * VAE chunk graphs take **already denormalized** latents). Each value is the shortest decimal form of
- * the config's 4-digit decimal rounded to f32 (exactly the f32 that denormalization uses).
- *
- * NOTE: the values equal anima's constants (QwenImage's VAE — a fine-tune of Wan's VAE), but the
- * families do not import each other (each family's assets have their own provenance — so that
- * replacing one does not move the other).
+ * the config's decimal (at most 4 digits) rounded to f32 (exactly the f32 that denormalization uses).
  *
  * MUST: no TypedArray at module scope (cross-cutting invariant "every module is side-effect free").
- */
-export const WAN_LATENTS_MEAN: readonly number[] = [
-  -0.757099986076355, -0.708899974822998, -0.911300003528595, 0.10750000178813934,
-  -0.1745000034570694, 0.9653000235557556, -0.1517000049352646, 1.5507999658584595,
-  0.41339999437332153, -0.07150000333786011, 0.5516999959945679, -0.36320000886917114,
-  -0.19220000505447388, -0.9496999979019165, 0.25029999017715454, -0.2921000123023987,
-];
-
-/** The standard deviation paired with {@link WAN_LATENTS_MEAN}. */
-export const WAN_LATENTS_STD: readonly number[] = [
-  2.8183999061584473, 1.4541000127792358, 2.327500104904175, 2.6558001041412354, 1.219599962234497,
-  1.770799994468689, 2.6052000522613525, 2.0743000507354736, 3.268699884414673, 2.152600049972534,
-  2.8652000427246094, 1.5578999519348145, 1.638200044631958, 1.1253000497817993, 2.8250999450683594,
-  1.9160000085830688,
-];
-
-/**
- * The per-channel latent mean of the Wan2.2 (TI2V 5B) VAE (48 channels — upstream
- * `AutoencoderKLWan.config.latents_mean`, `vae/config.json` of the pinned revision). The reason for
- * keeping it here and the value convention (shortest decimal form of the config's decimal (at most 4
- * digits) rounded to f32) are the same as {@link WAN_LATENTS_MEAN}.
- *
  * MUST: when changing a value, change `tests/fixtures/wan-latents/wan22-ti2v.json` to the same value —
  * the tests on both sides of the fixture (the TS host test, and the recipe's
  * `wan/tests/test_ti2v_generation_stats.py` which matches it against the pinned config) turn a

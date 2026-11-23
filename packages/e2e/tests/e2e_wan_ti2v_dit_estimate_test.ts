@@ -92,7 +92,7 @@ test.skipIf(!GPU_AVAILABLE || manifestText === undefined)(
       WAN_TI2V_ONLINE_QUANT,
     ).session;
     const options = effectiveSessionOptions(
-      "wan",
+      "wan-ti2v",
       declared,
       {},
       `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${WAN_TI2V_ONLINE_QUANT}`,

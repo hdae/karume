@@ -1,5 +1,5 @@
 /**
- * A mirror of Wan2.1's preprocessing `prompt_clean` (diffusers 0.39.0) — ADR 0119 decision 2
+ * A mirror of Wan's preprocessing `prompt_clean` (diffusers 0.39.0's `pipeline_wan.py`) — ADR 0119 decision 2
  * (option b').
  *
  * Upstream is `ftfy.fix_text → html.unescape × 2 → strip → \s+ to one U+0020 → strip`. ftfy 6.3.1's

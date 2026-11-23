@@ -497,7 +497,7 @@ const TEXT_EMBEDS = "text_embeds";
  * the same mirror as 2.1).
  */
 const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
-/** The manifest's component name (`TEXT_ENCODER` of `src/wan/pipeline.ts`). */
+/** The manifest's component name (`TEXT_ENCODER` of `src/wan/text-stage.ts`). */
 const TEXT_ENCODER = "text_encoder";
 
 const fixtureUrl = (name: string): URL => new URL(`pipeline_steps.${name}.safetensors`, STEPS_ROOT);

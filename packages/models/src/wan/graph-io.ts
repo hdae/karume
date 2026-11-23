@@ -2,10 +2,9 @@
  * Small helpers that read Wan's graph declarations and graph outputs (value declarations, shape
  * matching, output dtype, scan for non-finite values).
  *
- * They live here because the shared stages (`./text-stage.ts` / `./dit-loop.ts` / `./tile-decode.ts`
- * — used by the Wan2.1 / 2.2 classes through `./family.ts`) read the same helpers (ADR 0121
- * decision 10). `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1, `"wan.Ti2vPipeline"` for
- * Wan2.2).
+ * They live here because the stages (`./text-stage.ts` / `./dit-loop.ts` / `./tile-decode.ts`
+ * — run through `./family.ts`) read the same helpers (ADR 0121 decision 10). `owner` is the
+ * message prefix (`"wan.Ti2vPipeline"`).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).

@@ -316,7 +316,7 @@ const practicalSessionOptions = (seat: DeclaredSeat): SessionOptions => {
   }
   const where = `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${seat}`;
   const declared = quantOf(parseManifest(distManifestText), WAN_TI2V_DIST_MODEL, seat).session;
-  return effectiveSessionOptions("wan", declared, {}, where);
+  return effectiveSessionOptions("wan-ti2v", declared, {}, where);
 };
 
 const GIB = 2 ** 30;

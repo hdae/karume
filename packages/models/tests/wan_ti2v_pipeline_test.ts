@@ -2,8 +2,8 @@
 // public entry points, that family.ts really passes the per-class values (`WanFamilySpec`'s owner, pipeline and
 // generation):
 //
-// - the manifest checks (pipeline name / major, quant, `pipelineConfig`) — the 2.1 and 2.2 classes reject each
-//   other's manifests
+// - the manifest checks (pipeline name / major, quant, `pipelineConfig`) — a `wan/1` (Wan2.1) manifest is
+//   rejected
 // - the 48-ch path of the family admission (`fromAssets` runs to the end of construction on tensorless
 //   containers) — replacing the VAE with 2.1's 16 ch or the DiT with 2.1's 5 inputs fails the generation
 //   comparison (pins against a regression where admission falls back to 2.1's shapes)
@@ -39,12 +39,7 @@ import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "../wan.ts";
 import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
-import {
-  type Assets,
-  type GenerateRequest,
-  Pipeline,
-  type PipelineOptions,
-} from "../src/wan/pipeline.ts";
+import type { Assets, GenerateRequest, PipelineOptions } from "../src/wan/types.ts";
 import { type Ti2vGenerateRequest, Ti2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { planWanGeneration, WAN22_TI2V_FAMILY } from "../src/wan/family.ts";
 import { ditContract, wanDitPatch, withWanFirstFrameCondition } from "../src/wan/dit-loop.ts";
@@ -411,19 +406,6 @@ describe("Ti2vPipeline.fromAssets: manifest checks (pipeline name / major, quant
       !(error instanceof ModelInputError),
       "an asset mismatch must not be classified as an input error",
     );
-  });
-
-  it("the reverse: Pipeline rejects a wan-ti2v/1 manifest with a wan.Pipeline: message", async () => {
-    const error = await assertRejects(
-      () =>
-        Pipeline.fromAssets(
-          { manifest: ti2vManifest(), assets: VALID_ASSETS },
-          { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
-        ),
-      Error,
-      "wan.Pipeline: the manifest's pipeline is 'wan-ti2v/1' ('wan/1' is required)",
-    );
-    assert(!error.message.startsWith(OWNER), error.message);
   });
 
   it("rejects major 2, saying that this implementation reads wan-ti2v/1", async () => {

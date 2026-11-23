@@ -80,11 +80,7 @@ const STEPS = 2;
  */
 const PASSES_TO_STEP1 = 2;
 
-/**
- * The pipeline surface the A/B needs (`Pipeline` and `Ti2vPipeline` satisfy it structurally). The request is taken as the
- * wider type (`Ti2vGenerateRequest`, with 2.2's I2V fields) — 2.1's `generate` takes the narrower type, but parameters are
- * contravariant, so it satisfies the surface.
- */
+/** The pipeline surface the A/B needs (`Ti2vPipeline` satisfies it structurally). */
 export type WanAbPipeline = AsyncDisposable & {
   readonly prompts: readonly Prompt[];
   generate(request: Ti2vGenerateRequest): Promise<GeneratedVideo>;
@@ -95,7 +91,7 @@ export type WanAbSubject = {
   /** The log prefix (`[e2e] <label> A/B …`). */
   readonly label: string;
   /** The family of the census table and the acceptance table (the manifest's pipeline name). */
-  readonly family: "wan" | "wan-ti2v";
+  readonly family: "wan-ti2v";
   /** The model under test (explicit, because a band is declared per model × preset × frame count). */
   readonly model: string;
   /** The practical preset under test. */
@@ -106,15 +102,15 @@ export type WanAbSubject = {
   readonly manifestText: string;
   /** Where the measurements and outcomes are recorded. */
   readonly results: Results;
-  /** The generation's pipeline constructor (`Pipeline.fromPretrained` / `Ti2vPipeline.fromPretrained`). */
+  /** The generation's pipeline constructor (`Ti2vPipeline.fromPretrained`). */
   readonly fromPretrained: (
     source: DistributionSource,
     options: FromPretrainedOptions,
   ) => Promise<WanAbPipeline>;
   /**
    * The fixed request values (the size, and the guidance / shift that determine the step 1 latent — plus the conditioning
-   * image for I2V). Omitted, the generation's defaults apply (the manifest's `pipelineConfig` and the default size) — 2.1 uses
-   * the defaults, like its sha rows. A generation that sets them sets all of them (setting only the size and leaving σ and the
+   * image for I2V). Omitted, the generation's defaults apply (the manifest's `pipelineConfig` and the default size). A
+   * generation that sets them sets all of them (setting only the size and leaving σ and the
    * CFG pass count at the defaults would silently move the band's assumptions when a default moves). The I2V step 1 latent is
    * the scheduler state of `copyLatents` (before the first latent frame is replaced by the condition — the doc of
    * `GenerateEvent`).
@@ -125,10 +121,9 @@ export type WanAbSubject = {
     readonly guidance: number;
     readonly shift: number;
     /**
-     * The I2V conditioning image (Wan2.2 only — omitted means T2V). The size is set explicitly by `width` / `height` above
-     * (not left to the selection by the image's aspect ratio — so the size the band assumes does not silently move with the
-     * image). Passed to a 2.1 pipeline, `generate` rejects it with `ModelInputError` (fail loudly — one type shared by both
-     * generations). When passed, each observation checks that runs of the encoder's 3 graphs arrived (catching, outside the band
+     * The I2V conditioning image (omitted means T2V). The size is set explicitly by `width` / `height` above (not left to
+     * the selection by the image's aspect ratio — so the size the band assumes does not silently move with the image).
+     * When passed, each observation checks that runs of the encoder's 3 graphs arrived (catching, outside the band
      * and the census, a regression where the image is silently dropped and the run goes T2V).
      */
     readonly image?: Ti2vGenerateRequest["image"];
@@ -271,7 +266,7 @@ const assertPracticalCensus = (
  * catches one dispatch too many or too few on the real census).
  */
 const shiftedLinearRow = (row: BundleCensusRow, delta: number): BundleCensusRow => {
-  if (row.family !== "wan" && row.family !== "wan-ti2v") {
+  if (row.family !== "wan-ti2v") {
     throw new Error(`the census table row is not of a wan family (${row.family})`);
   }
   const pass = row.census.transformer?.pass;
@@ -312,15 +307,6 @@ export const observeOverridden = (
     (source) => observeStep1(gpu, subject, source, subject.practical, frames, SEED),
   );
 
-/** The observations {@link registerWanAbCase} returns to the caller (2.1's per-knob records reuse the A/B observations). */
-export type WanAbRun = {
-  /** The reference partner's name (derived from the manifest). */
-  readonly reference: string;
-  readonly referenceRun: WanStep1Observation;
-  /** The practical preset's first run. */
-  readonly first: WanStep1Observation;
-};
-
 /** The specification of one case. */
 export type WanAbCase = {
   /** The `cases[].id` in the results (the caller builds the same value as the test's name). */
@@ -348,7 +334,12 @@ export const assigned = <T>(value: T | undefined, what: string): T => {
 };
 
 /** What the case's `beforeAll` derives and observes before its its run. */
-type WanAbCaseState = WanAbRun & {
+type WanAbCaseState = {
+  /** The reference partner's name (derived from the manifest). */
+  readonly reference: string;
+  readonly referenceRun: WanStep1Observation;
+  /** The practical preset's first run. */
+  readonly first: WanStep1Observation;
   readonly effective: SessionOptions;
   readonly row: BundleCensusRow;
   /** The practical preset's second run. */
@@ -361,13 +352,12 @@ type WanAbCaseState = WanAbRun & {
  * caller owns the device (acquiring it, checking the adapter, releasing it) in its own
  * `beforeAll` / `afterAll`, registered before this call — Vitest runs a suite's `beforeAll` hooks
  * sequentially in registration order (`sequence.hooks: "stack"`, the default), so the device is
- * there when the observations start. Returns an accessor for the observations, valid inside its
- * registered after this call.
+ * there when the observations start.
  */
 export const registerWanAbCase = (
   scope: WanAbScope,
   { id, frames, band, faults }: WanAbCase,
-): (() => WanAbRun) => {
+): void => {
   let state: WanAbCaseState | undefined;
   beforeAll(async () => {
     const gpu = scope.gpu();
@@ -410,7 +400,7 @@ export const registerWanAbCase = (
     });
   });
 
-  if (!faults) return current;
+  if (!faults) return;
 
   // --- Fault injection (showing that each check is not vacuous — ADR 0110 decision 5-5) -----------
   // Each asserts that "the check turns red" (green = the check missed the fault). ①–③ are the 3 of ADR 0120 decision 4;
@@ -537,6 +527,4 @@ export const registerWanAbCase = (
       );
     }
   });
-
-  return current;
 };

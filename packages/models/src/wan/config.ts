@@ -1,5 +1,5 @@
 /**
- * Schema validation of Wan2.1's `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns
+ * Schema validation of Wan's `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns
  * and validates its schema).
  *
  * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
@@ -10,7 +10,7 @@
  * Only the generation defaults are declared (ADR 0118 decision 5 — the product defaults start in the
  * manifest's `pipelineConfig.scheduler`, and the visual A/B decides whether to change them):
  *
- * - `scheduler.shift` — the flow matching shift (reference setting — 3.0 for Wan2.1, 5.0 for Wan2.2)
+ * - `scheduler.shift` — the flow matching shift (reference setting — 5.0 for Wan2.2)
  * - `defaults.steps` / `defaults.guidance` — the denoise step count and CFG strength (reference
  *   setting 50 / 5.0)
  *
@@ -32,13 +32,10 @@ import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "./scheduler.ts";
 
-/** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
-export const WAN_PIPELINE_NAME = "wan";
-export const WAN_PIPELINE_MAJOR = 1;
-
 /**
- * The `pipeline` contract name and major of Wan2.2 TI2V (`Ti2vPipeline` — ADR 0121 decision 10).
- * The `pipelineConfig` schema is the same single one as Wan2.1 ({@link parseWanPipelineConfig}).
+ * The `pipeline` contract name and the major of Wan2.2 TI2V that this implementation accepts
+ * (`Ti2vPipeline` — ADR 0038 §1, ADR 0121 decision 10). Its `pipelineConfig` schema is
+ * {@link parseWanPipelineConfig}.
  */
 export const WAN_TI2V_PIPELINE_NAME = "wan-ti2v";
 export const WAN_TI2V_PIPELINE_MAJOR = 1;
@@ -54,10 +51,6 @@ export const WAN_TI2V_PIPELINE_MAJOR = 1;
  *
  * - `"wan2.2"` = `hdae/karume-wan2.2` (Wan2.2 TI2V 5B — read by `Ti2vPipeline`; umT5's
  *   text_encoder is a cross-repository reference to `karume-umt5-xxl`)
- *
- * Wan2.1 (`karume-wan2.1`) is not published on HF (ADR 0118 addendum (2026-10-15)), so it **has no
- * key** — a key without a public repository can only give a 404 (the reason of ADR 0073 decision 1).
- * Pass a local distribution to `Pipeline`.
  *
  * Pass it **as an opt-in to follow the package version automatically** — to pin reproducibility
  * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no

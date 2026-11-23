@@ -1,26 +1,23 @@
 /**
- * `@karume/models/wan` — the subpath surface of the Wan2.1 / 2.2 (text → video) family (ADR 0118
- * decision 7, ADR 0121 decision 10).
+ * `@karume/models/wan` — the subpath surface of the Wan (text (+ a conditioning image) → video)
+ * family: Wan2.2 TI2V 5B (ADR 0118 decision 7, ADR 0121 decision 10).
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
- * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained} /
- * {@link Pipeline.fromAssets}; for Wan2.2 the two methods of the same names on
- * {@link Ti2vPipeline}; the text encoder path `textEncoder`) / choose a source
- * ({@link SOURCES} — Wan2.2 only) / look up the example prompts (`prompts`) / generate
- * (`generate` — Wan2.2 also from a conditioning image: {@link Ti2vGenerateRequest}) / subscribe
- * to generation progress (`onEvent` — {@link GenerateEvent}) / abort (the `signal` of
- * construction and generation) / turn frames into pixels ({@link frameToRgba}) / release
- * (`dispose`) / build Sessions of the VAE decoder graphs with their fusion rule
- * ({@link VAE_RMS_SILU_RULE}, experimental).
+ * wholesale. The surface follows the user's stories — build ({@link Ti2vPipeline.fromPretrained} /
+ * {@link Ti2vPipeline.fromAssets}; the text encoder path `textEncoder`) / choose a source
+ * ({@link SOURCES}) / look up the example prompts (`prompts`) / generate (`generate` — also from a
+ * conditioning image: {@link Ti2vGenerateRequest}) / subscribe to generation progress (`onEvent` —
+ * {@link GenerateEvent}) / abort (the `signal` of construction and generation) / turn frames into
+ * pixels ({@link frameToRgba}) / release (`dispose`) / build Sessions of the VAE decoder graphs with
+ * their fusion rule ({@link VAE_RMS_SILU_RULE}, experimental).
  *
  * There are two text encoder paths (ADR 0119 decision 7): the default `"gpu"` runs umT5 (i8, by
  * cross-repository reference to umT5's distribution repository) on the GPU and accepts any prompt;
  * `"precomputed"` does not fetch umT5 and accepts only the fixed prompts of the text embedding
  * asset.
  *
- * The source table ({@link SOURCES}) holds only Wan2.2 (`karume-wan2.2`) — the Wan2.1
- * distribution `karume-wan2.1` is not published on Hugging Face (ADR 0118 addendum (2026-10-15)). A
- * local distribution is passed to `fromPretrained` with `nodeDirectory` of `@karume/hub/node` or
+ * The source table ({@link SOURCES}) holds the published distribution `karume-wan2.2`. A local
+ * distribution is passed to `fromPretrained` with `nodeDirectory` of `@karume/hub/node` or
  * `denoDirectory` of `@karume/hub/deno`, and on the `"gpu"` path umT5's distribution
  * (`karume-umt5-xxl`) is passed through that source's `crossRepo` mapping.
  *
@@ -28,14 +25,11 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { Pipeline } from "./src/wan/pipeline.ts";
 /**
- * Wan2.2 TI2V 5B: text (+ a conditioning image) → video (T2V and I2V). The surface for
- * construction, generation, abort and release and the public types (results, events, construction
- * options) are the same as {@link Pipeline}; the accepted set (1280×704 / 704×1280, 5 to 121
- * frames), the latent shape and the fps are the generation's values (ADR 0121 decision 10). Only the
- * request type is specific to 2.2 ({@link Ti2vGenerateRequest} — the I2V conditioning image
- * `image` and how it is fitted to the size, `fit`; ADR 0121 decision 11). The distribution is
+ * Wan2.2 TI2V 5B: text (+ a conditioning image) → video (T2V and I2V). The accepted set (1280×704 /
+ * 704×1280, 5 to 121 frames), the latent shape and the fps are the generation's values (ADR 0121
+ * decision 10); the request type {@link Ti2vGenerateRequest} adds the I2V conditioning image
+ * `image` and how it is fitted to the size, `fit` (ADR 0121 decision 11). The distribution is
  * `karume-wan2.2` (ADR 0121 stage 8 — built by the recipe `dist.py --pipeline wan-ti2v`; the public
  * Hugging Face repository is `"wan2.2"` of {@link SOURCES}).
  */
@@ -44,13 +38,10 @@ export type { Ti2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
- * Each generation is a separate repository, and only Wan2.2 is published:
+ * Each generation is a separate repository:
  *
  * - `SOURCES["wan2.2"]` = `hdae/karume-wan2.2` (read by {@link Ti2vPipeline.fromPretrained} —
  *   umT5 comes from `karume-umt5-xxl` by cross-repository reference)
- *
- * Wan2.1 is not published on Hugging Face, so it has no key (pass a local distribution to
- * {@link Pipeline}).
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
  * is as the first argument of {@link Ti2vPipeline.fromPretrained}. To pin reproducibility
@@ -80,11 +71,11 @@ export type {
   LatentSnapshot,
   PipelineOptions,
   RunComponent,
-} from "./src/wan/pipeline.ts";
+} from "./src/wan/types.ts";
 
 /**
- * One prompt line of the text embedding asset (the asset's metadata — an element of the class's
- * `prompts`, `Pipeline.prompts` / `Ti2vPipeline.prompts`) and the vocabulary of its role.
+ * One prompt line of the text embedding asset (the asset's metadata — an element of
+ * `Ti2vPipeline.prompts`) and the vocabulary of its role.
  * On the `"precomputed"` path they are the accepted set itself (a string outside the set is a
  * `ModelInputError`); on the `"gpu"` path they are examples. Either way, CLIs / UIs need this type to
  * offer choices.
@@ -102,8 +93,8 @@ export { frameToRgba } from "./src/wan/frames.ts";
 /**
  * **Experimental**: the fusion rule `models/vae_rms_silu` ({@link VAE_RMS_SILU_RULE_NAME} — the
  * VAE's channel RMS norm and the SiLU after it in one dispatch, u32-identical to the unfused plan),
- * which both classes ({@link Pipeline}, {@link Ti2vPipeline}) pass by default to the Sessions of
- * their VAE decoder chunk graphs (not the DiT's, umT5's or the VAE encoder's). Wan and anima share
+ * which {@link Ti2vPipeline} passes by default to the Sessions of its VAE decoder chunk graphs (not
+ * the DiT's, umT5's or the VAE encoder's). Wan and anima share
  * it (the same norm in both VAEs; `@karume/models/anima` exports the same rule). Exported for code
  * that builds its own Sessions from the family's components — to pass it as
  * `SessionOptions.fusionRules`, or to compare a Session with and without it; its name is its

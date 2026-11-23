@@ -21,7 +21,7 @@
  * by `normalizeWanLatents` into the DiT's condition latent.
  *
  * The stage order and Session lifetimes (encoder → text → DiT → VAE, each created and closed one stage
- * at a time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one
+ * at a time) are defined by the doc at the top of `./ti2v-pipeline.ts`; this module only runs the one
  * encoder stage. `owner` is the message prefix (`"wan.Ti2vPipeline"`).
  *
  * NOTE: `export` is for the pipeline internals and for tests that pin the checks without a GPU (not on
@@ -38,7 +38,7 @@ import { disposeSteps } from "../session/dispose-steps.ts";
 import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { GenerateEvent, RunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./types.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import type { PlanLayout } from "./plan.ts";
 import { assertDims, firstNonFinite, valueOf } from "./graph-io.ts";

@@ -1091,10 +1091,6 @@
         "kind": "class"
       },
       {
-        "name": "Pipeline",
-        "kind": "class"
-      },
-      {
         "name": "PipelineOptions",
         "kind": "typeAlias"
       },

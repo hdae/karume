@@ -1,5 +1,6 @@
 /**
- * Reader of Wan2.1's text embedding asset (stage 1 = precomputed embeddings — ADR 0118 decision 4).
+ * Reader of Wan's text embedding asset (stage 1 = precomputed embeddings — ADR 0118 decision 4; the
+ * asset is built from the umT5 of Wan2.1 T2V 1.3B, which Wan2.2 uses unchanged — ADR 0121 decision 9).
  *
  * The asset is one safetensors file written by the recipe `tools/export-recipes/wan/text_embeds.py`:
  *

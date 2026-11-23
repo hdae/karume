@@ -1,19 +1,16 @@
 /**
- * The body of Wan's family admission, construction and generation (ADR 0121 decision 10 — one body
- * shared by the Wan2.1 / 2.2 classes).
+ * The body of Wan's family admission, construction and generation (ADR 0121 decision 10).
  *
- * The public classes (`Pipeline` in `./pipeline.ts`, `Ti2vPipeline` in `./ti2v-pipeline.ts`) are
- * thin shells (private constructor, serialization chain, `dispose`);
- * the manifest checks, component matching, GPU acquisition and the stage order ((encoder →) text → DiT
- * → VAE) live here. The stage order, Session lifetimes and the cancellation MUSTs are defined by the
- * doc at the top of `./pipeline.ts`. Every value that differs by generation is carried by
- * {@link WanFamilySpec} (message prefix, pipeline name and major, generation descriptor). Whether the
- * I2V encoder components exist is also decided by the generation descriptor (a DiT input form of
- * `"ti2v"`).
+ * The public class (`Ti2vPipeline` in `./ti2v-pipeline.ts`) is a thin shell (private constructor,
+ * serialization chain, `dispose`); the manifest checks, component matching, GPU acquisition and the
+ * stage order ((encoder →) text → DiT → VAE) live here. The stage order, Session lifetimes and the
+ * cancellation MUSTs are defined by the doc at the top of `./ti2v-pipeline.ts`. Every value of the
+ * generation is carried by {@link WanFamilySpec} (message prefix, pipeline name and major,
+ * generation descriptor), so the GPU-free tests run this body on test generations too.
  *
  * NOTE: internal only (not on the `mod.ts` / subpath surface — ADR 0008). The public types are taken
- * from `./pipeline.ts` and `./ti2v-pipeline.ts` with `import type` only (no value imports — both use
- * values from here, so no value import cycle is created).
+ * from `./types.ts` and `./ti2v-pipeline.ts` with `import type` only (no value imports —
+ * `./ti2v-pipeline.ts` uses values from here, so no value import cycle is created).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
@@ -58,18 +55,12 @@ import { toManifestSource } from "../hub/repo-ref.ts";
 import { hubLoadOptions } from "../hub/load-options.ts";
 import {
   parseWanPipelineConfig,
-  WAN_PIPELINE_MAJOR,
-  WAN_PIPELINE_NAME,
   WAN_TI2V_PIPELINE_MAJOR,
   WAN_TI2V_PIPELINE_NAME,
   type WanPipelineConfig,
 } from "./config.ts";
 import { parseWanRopeBase, type WanRopeBase } from "./dit-rope.ts";
-import {
-  WAN21_GENERATION,
-  WAN22_TI2V_GENERATION,
-  type WanGenerationDescriptor,
-} from "./descriptor.ts";
+import { WAN22_TI2V_GENERATION, type WanGenerationDescriptor } from "./descriptor.ts";
 import {
   type DitContract,
   ditContract,
@@ -94,7 +85,7 @@ import type {
   GenerateRequest,
   PipelineOptions,
   RunComponent,
-} from "./pipeline.ts";
+} from "./types.ts";
 import type { Ti2vGenerateRequest } from "./ti2v-pipeline.ts";
 import {
   admitWanText,
@@ -138,28 +129,21 @@ import {
 } from "./vae-encoder.ts";
 
 /**
- * The components fetched per generation and path (`componentKeys` of the fetch surface, the
- * components the full-asset surface opens). A generation whose DiT input form is `"ti2v"` (Wan2.2)
- * fetches the three I2V VAE encoder components even for use without an image (no extra construction
- * entry point — the distribution always carries them).
+ * The components fetched per path (`componentKeys` of the fetch surface, the components the
+ * full-asset surface opens). The three I2V VAE encoder components are fetched even for use without
+ * an image (no extra construction entry point — the distribution always carries them).
  *
  * MUST: `"precomputed"` does not open the umT5 component — opening it would add the umT5 fetch (about
  * 5.3 GiB in i8) to the light use as well (decision 7's "light use without umT5" would be lost).
- * MUST: for a generation of input form `"t2v"` (Wan2.1) the component order stays as before the
- * encoder was added (2.1's fetch does not change).
  * The 32-latent decoder pair (ADR 0134) is fetched only when the preset's weights carry it
  * (`vaeTile32` — {@link presetCarriesVaeTile32}); a preset without it fetches what it did before.
  */
-const wanComponentKeys = (
-  generation: WanGenerationDescriptor,
-  route: WanTextEncoderRoute,
-  vaeTile32: boolean,
-): readonly string[] => [
+const wanComponentKeys = (route: WanTextEncoderRoute, vaeTile32: boolean): readonly string[] => [
   TRANSFORMER,
   VAE_DECODER_FIRST,
   VAE_DECODER_NEXT,
   ...(vaeTile32 ? [VAE_DECODER_FIRST_32, VAE_DECODER_NEXT_32] : []),
-  ...(generation.ditInputForm === "ti2v" ? WAN_VAE_ENCODER_KEYS : []),
+  ...WAN_VAE_ENCODER_KEYS,
   ...(route === "gpu" ? [TEXT_ENCODER] : []),
 ];
 
@@ -217,18 +201,9 @@ export type WanFamilySpec = {
   readonly generation: WanGenerationDescriptor;
   /**
    * The spelling of the table that the diagnostic points to when `ref` is omitted (the third argument
-   * of `toManifestSource` — `src/hub/repo-ref.ts`). Omitted for a generation without a public
-   * distribution repository (Wan2.1 — `SOURCES` has no key for it) (no pointing at a key that does
-   * not exist).
+   * of `toManifestSource` — `src/hub/repo-ref.ts`).
    */
-  readonly sourcesExample?: string;
-};
-
-/** Wan2.1 T2V 1.3B (`Pipeline` — pipeline `wan/1`, {@link WAN21_GENERATION}). */
-export const WAN21_FAMILY: WanFamilySpec = {
-  owner: "wan.Pipeline",
-  pipeline: { name: WAN_PIPELINE_NAME, major: WAN_PIPELINE_MAJOR },
-  generation: WAN21_GENERATION,
+  readonly sourcesExample: string;
 };
 
 /** Wan2.2 TI2V 5B (`Ti2vPipeline` — pipeline `wan-ti2v/1`, {@link WAN22_TI2V_GENERATION}). */
@@ -330,11 +305,8 @@ type WanAdmission = {
   readonly dit: DitContract;
   /** The path (`"gpu"` comes with the umT5 graph contract). */
   readonly textEncoder: WanTextAdmission;
-  /**
-   * The contract of the three I2V VAE encoder graphs (only for a generation whose DiT input form is
-   * `"ti2v"` — otherwise undefined).
-   */
-  readonly vaeEncoder: WanVaeEncoderContract | undefined;
+  /** The contract of the three I2V VAE encoder graphs. */
+  readonly vaeEncoder: WanVaeEncoderContract;
 };
 
 /** Internal state of a Wan class (built by {@link loadWanFromPretrained} / {@link loadWanFromAssets}). */
@@ -348,8 +320,8 @@ export type WanState = {
   readonly transformer: ModelComponent;
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
-  /** The I2V VAE encoder (only for a generation whose DiT input form is `"ti2v"`; else undefined). */
-  readonly vaeEncoder: WanVaeEncoder | undefined;
+  /** The I2V VAE encoder (its Sessions are created only for a request that passes an image). */
+  readonly vaeEncoder: WanVaeEncoder;
   readonly layout: WanVaeChunkLayout;
   /** The 32-latent decoder pair (ADR 0134 — undefined when the preset's weights carry no `_32` roles). */
   readonly vaeTile32: WanVaeTile32 | undefined;
@@ -369,7 +341,7 @@ export type WanState = {
 
 /**
  * Fetches from the distribution and builds (the body of the class's `fromPretrained` — the procedure
- * and MUSTs are in the doc of `Pipeline.fromPretrained`).
+ * and MUSTs are in the doc of `Ti2vPipeline.fromPretrained`).
  */
 export const loadWanFromPretrained = async (
   spec: WanFamilySpec,
@@ -408,7 +380,7 @@ export const loadWanFromPretrained = async (
     `${spec.owner}.fromPretrained`,
     loaded,
     selection,
-    wanComponentKeys(spec.generation, route, vaeTile32),
+    wanComponentKeys(route, vaeTile32),
     async (open) => {
       const admitted = await admitWan(spec, loaded.manifest, open, buildOptions);
       // The `requiredLimits` the distribution declares are checked here, **before the weight parts are
@@ -451,11 +423,7 @@ export const loadWanFromAssets = async (
     spec.owner,
     input.assets,
     buffer,
-    wanComponentKeys(
-      spec.generation,
-      route,
-      selectionCarriesVaeTile32(input.manifest, options, spec.owner),
-    ),
+    wanComponentKeys(route, selectionCarriesVaeTile32(input.manifest, options, spec.owner)),
   );
   const admitted = await admitWan(spec, input.manifest, open, options);
   return await buildWan(spec, admitted, input.assets, open, options);
@@ -463,7 +431,7 @@ export const loadWanFromAssets = async (
 
 /**
  * Checks whether this manifest and the components' graph declarations can run as the generation of
- * `spec` (Wan2.1 for {@link WAN21_FAMILY}) (the family admission — on the fetch surface it is called
+ * `spec` (Wan2.2 TI2V for {@link WAN22_TI2V_FAMILY}) (the family admission — on the fetch surface it is called
  * **before a single byte of the weight parts is fetched**).
  *
  * MUST: the family checks are gathered in this one function (pipeline name / major,
@@ -573,20 +541,16 @@ const admitWan = async (
   const textEncoder = admitWanText(route, open, dit, spec.owner);
   // The I2V encoder is checked against the decoder's latent and spatial compression (including
   // coverage of the accepted sizes — `wanVaeEncoderContract`).
-  // An unknown DiT input form has already failed in ditContract.
-  const vaeEncoder =
-    spec.generation.ditInputForm === "ti2v"
-      ? wanVaeEncoderContract(
-          {
-            pre: open(VAE_ENCODER_PRE),
-            attn: open(VAE_ENCODER_ATTN),
-            post: open(VAE_ENCODER_POST),
-          },
-          layout,
-          spec.generation,
-          spec.owner,
-        )
-      : undefined;
+  const vaeEncoder = wanVaeEncoderContract(
+    {
+      pre: open(VAE_ENCODER_PRE),
+      attn: open(VAE_ENCODER_ATTN),
+      post: open(VAE_ENCODER_POST),
+    },
+    layout,
+    spec.generation,
+    spec.owner,
+  );
   return {
     config,
     quantName,
@@ -609,7 +573,7 @@ const admitWan = async (
  *
  * MUST: parsing and matching the assets come **before the GPU is acquired** (the true cause of a broken
  * asset is not masked by another exception on a machine without a GPU — the same order as the other
- * families). No Session is created (the VRAM MUST — the doc at the top of `./pipeline.ts`).
+ * families). No Session is created (the VRAM MUST — the doc at the top of `./ti2v-pipeline.ts`).
  */
 const buildWan = async (
   spec: WanFamilySpec,
@@ -663,15 +627,12 @@ const buildWan = async (
       transformer: open(TRANSFORMER),
       vaeFirst: open(VAE_DECODER_FIRST),
       vaeNext: open(VAE_DECODER_NEXT),
-      vaeEncoder:
-        admitted.vaeEncoder === undefined
-          ? undefined
-          : {
-              pre: open(VAE_ENCODER_PRE),
-              attn: open(VAE_ENCODER_ATTN),
-              post: open(VAE_ENCODER_POST),
-              contract: admitted.vaeEncoder,
-            },
+      vaeEncoder: {
+        pre: open(VAE_ENCODER_PRE),
+        attn: open(VAE_ENCODER_ATTN),
+        post: open(VAE_ENCODER_POST),
+        contract: admitted.vaeEncoder,
+      },
       layout,
       vaeTile32:
         admitted.vaeTile32 === undefined
@@ -720,7 +681,7 @@ export const ownWanRequestLatents = <Request extends GenerateRequest>(request: R
 /**
  * Generates one video from a prompt (and the I2V condition image) (the body the class's `generate` puts
  * on the serialization chain — the stage order, Session lifetimes and cancellation are in the doc at
- * the top of `./pipeline.ts`).
+ * the top of `./ti2v-pipeline.ts`).
  *
  * MUST (caller's precondition): `request` is the return value of {@link ownWanRequestLatents} — this
  * function uses `request.latents` without copying (the DiT stage's precondition in `dit-loop.ts`).
@@ -784,18 +745,10 @@ export const generateWanVideo = async (
   // without an image has no such stage.
   let condition: Float32Array<ArrayBuffer> | undefined;
   if (knobs.conditionImage !== undefined) {
-    const { vaeEncoder } = state;
-    if (vaeEncoder === undefined) {
-      // The check (plan.ts) lets an image through only for a generation of input form "ti2v", and that
-      // generation builds the encoder at construction, so reaching here means broken wiring.
-      throw new Error(
-        `${spec.owner}: received a condition image but the VAE encoder component is not built`,
-      );
-    }
     // A stage boundary (entry → encoder).
     await settleAbort(signal);
     condition = await encodeWanImageStage(
-      { ...state, vaeEncoder },
+      state,
       knobs.conditionImage,
       spec.generation,
       emit,

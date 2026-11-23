@@ -1,10 +1,10 @@
 /**
- * Exercises the **component replacement** of Wan2.1's umT5 (`text_encoder`) (`components` — ADR 0122
- * decision 7 item 3, ADR 0108 decision 19) through the `Pipeline.fromPretrained` entry. Needs neither
- * a GPU nor real assets (it stands up mock HF repositories and in-memory directories, and observes the
- * (repository, path) pairs requested).
+ * Exercises the **component replacement** of Wan's umT5 (`text_encoder`) (`components` — ADR 0122
+ * decision 7 item 3, ADR 0108 decision 19) through the `Ti2vPipeline.fromPretrained` entry. Needs
+ * neither a GPU nor real assets (it stands up mock HF repositories and in-memory directories, and
+ * observes the (repository, path) pairs requested).
  *
- * The distribution skeleton is the same as the real one (`models/karume-wan2.1`): the `text_encoder`
+ * The distribution skeleton is the same as the real one (`models/karume-wan2.2`): the `text_encoder`
  * of the Wan repository is a **cross-repository reference** to the umT5 distribution repository
  * (`repo` + `revision` per part), and the replacement is the same role in another repository. Four
  * things are pinned:
@@ -48,7 +48,8 @@ import {
   type HubRepoRef,
   localDirectory,
 } from "@karume/hub";
-import { type FromPretrainedOptions, Pipeline } from "../src/wan/pipeline.ts";
+import { Ti2vPipeline } from "../src/wan/ti2v-pipeline.ts";
+import type { FromPretrainedOptions } from "../src/wan/types.ts";
 import type { ModelInput, TensorInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { parseIrDeclarationValue } from "./helpers/container-fixture.ts";
@@ -82,12 +83,15 @@ const REPLACEMENT_REPO = "karume-test/umt5-compatible";
  */
 const STOPPED_AT_EMBEDS = "Cannot parse the header JSON";
 
-/** The raw RoPE table (the asset `rope_base` of the `transformer` container — the same widths 22 / 21 / 21 as the real 1.3B). */
+/** The raw RoPE table (the asset `rope_base` of the `transformer` container — widths 22 / 21 / 21 for head_dim 128). */
 const ROPE_BASE = await readFile(
   new URL("./fixtures/wan-dit/rope_base.safetensors", import.meta.url),
 );
 
-/** The DiT declaration (the same as the valid form of `ditContract` in `wan_pipeline_test.ts` — never run). */
+/**
+ * The DiT declaration (the 7 inputs of the recipe `wan/ti2v_export_dit.py` — latent 48 ch → `tokens`
+ * width 192; never run).
+ */
 const transformerInput = (): ModelInput => ({
   graphs: {
     transformer: parseIrDeclarationValue({
@@ -96,15 +100,17 @@ const transformerInput = (): ModelInput => ({
       requires: { ops: ["mul"] },
       symbols: ["S"],
       inputs: [
-        { name: "tokens", dtype: "f32", shape: [1, "S", 64] },
+        { name: "tokens", dtype: "f32", shape: [1, "S", 192] },
         { name: "timesteps_proj", dtype: "f32", shape: [1, 256] },
         { name: "encoder_hidden_states", dtype: "f32", shape: [1, 512, 4096] },
         { name: "rope_cos", dtype: "f32", shape: [1, "S", 1, 128] },
         { name: "rope_sin", dtype: "f32", shape: [1, "S", 1, 128] },
+        { name: "timesteps_proj_condition", dtype: "f32", shape: [1, 256] },
+        { name: "condition_mask", dtype: "bool", shape: [1, "S", 1] },
       ],
       outputs: ["out"],
       initializers: {},
-      values: { out: { dtype: "f32", shape: [1, "S", 64] } },
+      values: { out: { dtype: "f32", shape: [1, "S", 192] } },
       states: {},
       nodes: [{ op: "mul", ins: ["tokens", "tokens"], outs: ["out"], attrs: {} }],
     }),
@@ -115,7 +121,10 @@ const transformerInput = (): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** The declaration of the VAE chunk graph (latent tile 32, scale 8, one cache — the same geometry as the distribution). */
+/**
+ * The declaration of the VAE chunk graph (latent 48, tile 16, scale 8, exit 12 = RGB 3 × 2², one cache
+ * — the same geometry as the distribution).
+ */
 const vaeInput = (graph: string, frames: number): ModelInput => ({
   graphs: {
     [graph]: parseIrDeclarationValue({
@@ -124,13 +133,13 @@ const vaeInput = (graph: string, frames: number): ModelInput => ({
       requires: { ops: ["mul"] },
       symbols: [],
       inputs: [
-        { name: "latent", dtype: "f32", shape: [16, 1, 32, 32] },
+        { name: "latent", dtype: "f32", shape: [48, 1, 16, 16] },
         { name: "cache_00", dtype: "f32", shape: [4, 2, 8, 8] },
       ],
       outputs: ["frame", "cache_out_00"],
       initializers: {},
       values: {
-        frame: { dtype: "f32", shape: [3, frames, 256, 256] },
+        frame: { dtype: "f32", shape: [12, frames, 128, 128] },
         cache_out_00: { dtype: "f32", shape: [4, 2, 8, 8] },
       },
       states: {},
@@ -138,6 +147,57 @@ const vaeInput = (graph: string, frames: number): ModelInput => ({
         { op: "mul", ins: ["latent", "latent"], outs: ["frame"], attrs: {} },
         { op: "mul", ins: ["cache_00", "cache_00"], outs: ["cache_out_00"], attrs: {} },
       ],
+    }),
+  },
+  consts: [],
+  weights: [],
+  assets: [],
+  provenance: { license: "test" },
+});
+
+/** The declaration of one I2V VAE encoder graph (one input → one output, symbolic lengths). */
+type EncoderGraph = {
+  readonly symbols: readonly string[];
+  readonly input: { readonly name: string; readonly shape: readonly (number | string)[] };
+  readonly output: readonly (number | string)[];
+};
+
+/**
+ * The three graphs with the inputs, outputs and symbols of the recipe `wan/export_vae_encoder.py`
+ * (latent 48, mid block 640, patchified image `[12, 1, 8h, 8w]`).
+ */
+const ENCODER_GRAPHS: Readonly<Record<string, EncoderGraph>> = {
+  vae_encoder_pre: {
+    symbols: ["h", "w"],
+    input: { name: "image", shape: [12, 1, "8h", "8w"] },
+    output: [640, 1, "h", "w"],
+  },
+  vae_encoder_attn: {
+    symbols: ["S"],
+    input: { name: "tokens", shape: [640, "S"] },
+    output: [640, "S"],
+  },
+  vae_encoder_post: {
+    symbols: ["h", "w"],
+    input: { name: "hidden", shape: [640, 1, "h", "w"] },
+    output: [48, 1, "h", "w"],
+  },
+};
+
+/** The content of one encoder graph's container (declarations only). */
+const encoderInput = (graph: string, spec: EncoderGraph): ModelInput => ({
+  graphs: {
+    [graph]: parseIrDeclarationValue({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["mul"] },
+      symbols: spec.symbols,
+      inputs: [{ name: spec.input.name, dtype: "f32", shape: spec.input.shape }],
+      outputs: ["out"],
+      initializers: {},
+      values: { out: { dtype: "f32", shape: spec.output } },
+      states: {},
+      nodes: [{ op: "mul", ins: [spec.input.name, spec.input.name], outs: ["out"], attrs: {} }],
     }),
   },
   consts: [],
@@ -298,6 +358,12 @@ const prepareWanRepos = async (options: WanRigOptions = {}) => {
     "test/vae_decoder_next/model.f32",
     vaeInput("vae_decoder_next", 4),
   );
+  const encoders = await Promise.all(
+    Object.entries(ENCODER_GRAPHS).map(
+      async ([name, spec]) =>
+        [name, await serveContainer(`test/${name}/model.f32`, encoderInput(name, spec))] as const,
+    ),
+  );
   // The block is sized to hold one vocabulary-embedding row (4096 bytes in i8).
   const umt5Write = { partBytes: 16 * 1024, blockBytes: 4096 };
   const umt5 = await serveContainer("xxl/text_encoder/model.i8", umt5Input("i8", 1), umt5Write);
@@ -326,11 +392,12 @@ const prepareWanRepos = async (options: WanRigOptions = {}) => {
     repo: WAN_REPO,
     models: {
       test: {
-        pipeline: "wan/1",
+        pipeline: "wan-ti2v/1",
         weights: {
           transformer: { f32: transformer.entry },
           vae_decoder_first: { f32: first.entry },
           vae_decoder_next: { f32: next.entry },
+          ...Object.fromEntries(encoders.map(([name, served]) => [name, { f32: served.entry }])),
           text_encoder: { i8: crossRepoEntry(umt5) },
         },
         assets: { text_embeds: embedsRef, umt5_tokenizer: tokenizerRef },
@@ -340,19 +407,21 @@ const prepareWanRepos = async (options: WanRigOptions = {}) => {
               transformer: "f32",
               vae_decoder_first: "f32",
               vae_decoder_next: "f32",
+              ...Object.fromEntries(encoders.map(([name]) => [name, "f32"])),
               text_encoder: "i8",
             },
             session: {},
           },
         },
         defaultQuant: "f32",
-        pipelineConfig: { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } },
+        pipelineConfig: { scheduler: { shift: 5 }, defaults: { steps: 50, guidance: 5 } },
       },
     },
     files: [
       ...transformer.files,
       ...first.files,
       ...next.files,
+      ...encoders.flatMap(([, served]) => served.files),
       [embedsRef.path, embeds],
       [tokenizerRef.path, tokenizer],
     ],
@@ -396,7 +465,7 @@ const prepareWanRepos = async (options: WanRigOptions = {}) => {
     repos: { wan, umt5: umt5Repo, replacement: replacementRepo },
     parts: {
       transformer: transformer.parts,
-      vae: [...first.parts, ...next.parts],
+      vae: [...first.parts, ...next.parts, ...encoders.flatMap(([, served]) => served.parts)],
       umt5: umt5.parts,
       replacement: replacement.parts,
       replacementI4: replacementI4.parts,
@@ -424,7 +493,7 @@ const overHttp = (rig: WanRig) => {
     hubUrl: HUB_URL,
   };
   const load = (options: FromPretrainedOptions = {}) =>
-    Pipeline.fromPretrained(
+    Ti2vPipeline.fromPretrained(
       { repo: WAN_REPO, revision: SHA, hubUrl: HUB_URL },
       { ...BASE_OPTIONS, ...hubOptions, ...options },
     );
@@ -544,7 +613,7 @@ describe("replacing Wan's text_encoder (mock HF — a cross-referenced slot)", (
   });
 });
 
-describe("Wan2.1's components carry no 32-latent decoder pair (ADR 0134 — its distribution has no _32 roles)", () => {
+describe("a preset without the 32-latent decoder pair does not list its roles (ADR 0134 — its weights carry no _32 roles)", () => {
   it("replacing 'vae_decoder_first_32' is rejected as not a component of this family, before any container is fetched", async () => {
     const rig = await prepareWanRepos();
     const http = overHttp(rig);
@@ -552,9 +621,10 @@ describe("Wan2.1's components carry no 32-latent decoder pair (ADR 0134 — its 
       () => http.load({ components: { vae_decoder_first_32: { source: http.replacementSource } } }),
       Error,
       "'vae_decoder_first_32' in components is not a component of this family" +
-        " (replaceable roles: transformer / vae_decoder_first / vae_decoder_next / text_encoder)",
+        " (replaceable roles: transformer / vae_decoder_first / vae_decoder_next / vae_encoder_pre /" +
+        " vae_encoder_attn / vae_encoder_post / text_encoder)",
     );
-    assertStringIncludes(error.message, "wan.Pipeline.fromPretrained");
+    assertStringIncludes(error.message, "wan.Ti2vPipeline.fromPretrained");
     assertEquals(http.asked(WAN_REPO), [MANIFEST_PATH]);
     assertEquals(http.asked(REPLACEMENT_REPO), []);
   });
@@ -566,7 +636,7 @@ describe("replacing Wan's text_encoder (a local distribution — no mapping for 
     const wan = memoryDirectory(rig.repos.wan);
 
     const error = await assertRejects(
-      () => Pipeline.fromPretrained(wan.source, BASE_OPTIONS),
+      () => Ti2vPipeline.fromPretrained(wan.source, BASE_OPTIONS),
       Error,
       `${rig.parts.umt5[0].path}: prefetch failed (repo ${UMT5_REPO} @ ${UMT5_REVISION})`,
     );
@@ -593,7 +663,7 @@ describe("replacing Wan's text_encoder (a local distribution — no mapping for 
 
     await assertRejects(
       () =>
-        Pipeline.fromPretrained(wan.source, {
+        Ti2vPipeline.fromPretrained(wan.source, {
           ...BASE_OPTIONS,
           components: { text_encoder: { source: replacement.source } },
         }),
@@ -619,7 +689,7 @@ describe("replacing Wan's text_encoder (a local distribution — no mapping for 
 
     await assertRejects(
       () =>
-        Pipeline.fromPretrained(wan.source, {
+        Ti2vPipeline.fromPretrained(wan.source, {
           ...BASE_OPTIONS,
           fetch: http.fetch,
           caches: new MemoryCacheStorage(),

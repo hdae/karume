@@ -1,5 +1,5 @@
 /**
- * The accepted set of Wan2.1 / Wan2.2 × the fused attention route (the runtime's `attentionRoute` —
+ * The accepted set of Wan2.2 × the fused attention route (the runtime's `attentionRoute` —
  * the same decision as at execution). Needs neither a GPU nor assets.
  *
  * The practical preset (`f16+dit8-a8-attn8-s16` — tools/export-recipes/wan/distribution.py) declares
@@ -19,11 +19,7 @@ import {
   type AttentionSeats,
 } from "../../runtime/src/runtime/attention-route.ts";
 import type { WanPipelineConfig } from "../src/wan/config.ts";
-import {
-  WAN21_GENERATION,
-  WAN22_TI2V_GENERATION,
-  type WanGenerationDescriptor,
-} from "../src/wan/descriptor.ts";
+import { WAN22_TI2V_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
 import { wanDitPatch } from "../src/wan/dit-loop.ts";
 import { wanTokenGrid } from "../src/wan/dit-tokens.ts";
 import {
@@ -55,12 +51,6 @@ const GENERATIONS: readonly {
   /** The self key length at the default 33 frames (the same value as recorded by the census of ADR 0118 / 0121 — a detector for a wrong derivation). */
   readonly defaultKeys: number;
 }[] = [
-  {
-    name: "Wan2.1",
-    generation: WAN21_GENERATION,
-    layout: { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 3 },
-    defaultKeys: 14040,
-  },
   {
     name: "Wan2.2",
     generation: WAN22_TI2V_GENERATION,

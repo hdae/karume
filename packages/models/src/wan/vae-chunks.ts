@@ -1,8 +1,7 @@
 /**
  * The host side that runs the Wan video VAE decoder as **two chunk graphs** (`vae_decoder_first` /
  * `vae_decoder_next`) with a resident causal cache (ADR 0118 decision 2 and the addendum of
- * 2026-10-02). The same code serves Wan2.1 and Wan2.2 (TI2V-5B, tile 16 and the ADR 0134 tile-32
- * pair). It covers up to the chunk sequence of one tile — tile planning, blending, pasting and
+ * 2026-10-02). It serves Wan2.2 TI2V-5B (tile 16 and the ADR 0134 tile-32 pair). It covers up to the chunk sequence of one tile — tile planning, blending, pasting and
  * the clamp are the step 5 layer.
  *
  * ## Graph contract (the form written by recipe `tools/export-recipes/wan/vae_patch.py`)

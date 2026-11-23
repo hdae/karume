@@ -35,6 +35,10 @@ measurements in `docs/research/`.
   `Assets`, `FromPretrainedOptions`, `PipelineOptions`, `Result`, `LabSegment` and its re-export of `ModelInputError`)
   and the barrel namespace `vowelDetector`. Its distribution was never published. `ModelInputError` and `decodeWav`
   stay in the barrel; the `gru_scan` / `gru_scan_reverse` ops stay in `@karume/runtime`.
+- `@karume/models/wan`: the Wan2.1 T2V 1.3B class `Pipeline` (pipeline `wan/1`) is removed, and with it
+  `wan.Pipeline` in the barrel. Its distribution `karume-wan2.1` was never published. `Ti2vPipeline` (Wan2.2 TI2V
+  5B, pipeline `wan-ti2v/1`) and the public types it uses (`GenerateRequest`, `GenerateEvent`, `GeneratedVideo`,
+  `LatentSnapshot`, `PipelineOptions`, `FromPretrainedOptions`, `Assets`, `RunComponent`) stay unchanged.
 
 ### Added
 

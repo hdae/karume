@@ -145,7 +145,7 @@ export * as siglip2 from "./siglip2.ts";
 export * as umt5 from "./umt5.ts";
 
 /**
- * Wan2.1 / 2.2 — text (+ a conditioning image) → video. This namespace is the module of the subpath
+ * Wan2.2 — text (+ a conditioning image) → video. This namespace is the module of the subpath
  * `@karume/models/wan`; its members and their docs are on that page:
  * https://jsr.io/@karume/models/doc/wan
  */

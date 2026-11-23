@@ -1,8 +1,9 @@
 /**
- * The host side of Wan2.1's sampler — flow matching UniPC (diffusers 0.39.0's
+ * The host side of Wan's sampler — flow matching UniPC (diffusers 0.39.0's
  * `UniPCMultistepScheduler`) and the CFG combination (ADR 0118 decision 5).
  *
- * Only the branches Wan2.1's scheduler config takes are ported: `use_flow_sigmas`, static shift,
+ * Only the branches Wan's scheduler config takes (the config of Wan2.1 T2V 1.3B the port was
+ * fixtured on — {@link WAN_UNIPC_CONFIG}) are ported: `use_flow_sigmas`, static shift,
  * `prediction_type = flow_prediction`, `predict_x0`, `final_sigmas_type = zero`,
  * `lower_order_final`, `disable_corrector = []`, no `thresholding`, no `solver_p`.
  * `solver_order` accepts 1 / 2 and `solver_type` bh1 / bh2 (Wan's values are 2 / bh2 —

@@ -1,5 +1,5 @@
 /**
- * The host side of the sinusoidal stage of Wan2.1's DiT timestep embedding (graph input
+ * The host side of the sinusoidal stage of Wan's DiT timestep embedding (graph input
  * `timesteps_proj [1,freq_dim]` — ADR 0118 decision 3). The MLP (`freq_dim → dim → dim → 6·dim`)
  * stays inside the graph.
  *
