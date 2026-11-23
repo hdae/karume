@@ -65,9 +65,11 @@ maintainer's ruling of 2026-11-06).
     2026-11-23 in another form (ADR [0156](decisions/0156-shared-geometry-profile-tables.md)): the M5 has a measured
     table, `apple-m5`, matched by its description, from its full geometry sweep; an Apple `metal-3` adapter that
     reports no description gets the shared table `apple-metal-3-shared`, derived from the M5's sweep and three M2
-    records of the M5's geometries ([spec](spec/geometry-profiles.md#shared-tables)). Left, in item 6 of "The move to
-    maintained specs (ADR 0152)": the GEMV choices of `apple-m5` (its GEMV sweep records are being taken; both tables
-    run the default profile's GEMV choices until then — a shared table carries tile geometries only); an M2 full
+    records of the M5's geometries ([spec](spec/geometry-profiles.md#shared-tables)). `apple-m5` carries the M5's
+    own GEMV choices, derived from its two GEMV sweep records of 2026-11-23 (43 sequential exceptions, 66 parallel rows
+    changed or added — [spec](spec/geometry-profiles.md#the-gemv-choices-of-linear)); `apple-metal-3-shared` runs the
+    default profile's (a shared table carries tile geometries only). Left, in item 6 of "The move to maintained specs
+    (ADR 0152)": a rule for a shared table's GEMV choices; an M2 full
     geometry sweep, which re-derives `apple-metal-3`'s tile families and lets the shared table compare every candidate
     on both devices; the M1, M3 and M4 are not measured.
   - Here without a ruling on their timing: the two items below.
@@ -228,8 +230,8 @@ maintainer's ruling of 2026-11-06).
          [research](research/2026-11-19-gemv-tables-across-devices.md) §7): an Apple adapter that reports no
          description gets the shared table `apple-metal-3-shared` (2026-11-23, ADR
          [0156](decisions/0156-shared-geometry-profile-tables.md)), which carries no GEMV choices, and the M5 with its
-         description `apple-m5`, which has none yet (its GEMV sweep records are being taken). On the M2 the default's 22
-         exceptions stay although per dispatch its records time the general variant faster on most of the shapes they
+         description `apple-m5`, which carries the M5's own (from its GEMV sweep records of 2026-11-23). On the M2
+         the default's 22 exceptions stay although per dispatch its records time the general variant faster on most of the shapes they
          time, because end to end they were faster (perf-ledger K-112); the per-dispatch comparison, the five
          exceptions `apple-metal-3` keeps and the shapes compared word for word on Metal are in
          [limitations](limitations.md) (the section on the linear GEMV family);
@@ -264,9 +266,9 @@ maintainer's ruling of 2026-11-06).
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
-       - the Apple tables (2026-11-23, ADR [0156](decisions/0156-shared-geometry-profile-tables.md)): `apple-m5`'s GEMV
-         choices from the M5's GEMV sweep records (being taken); an M2 full geometry sweep, which re-derives
-         `apple-metal-3`'s tile families (carried from records of `karume-geometry-sweep/3`, below) and the shared table
+       - the Apple tables (2026-11-23, ADR [0156](decisions/0156-shared-geometry-profile-tables.md); `apple-m5`'s GEMV
+         choices are derived from the M5's GEMV sweep records, done 2026-11-23): an M2 full geometry sweep, which
+         re-derives `apple-metal-3`'s tile families (carried from records of `karume-geometry-sweep/3`, below) and the shared table
          `apple-metal-3-shared` with every candidate timed on both devices (the M2's records of 2026-11-23 time only the
          M5's adopted geometries); the M1, M3 and M4 are not measured; a rule for a shared table's GEMV choices and
          attention key axis (a shared table derives neither);

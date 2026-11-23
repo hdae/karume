@@ -83,18 +83,19 @@ slower, or screened out by the quick look, in some case of the other five.
   M5's records do not support.
 - **Deriving the attention key axis and the GEMV choices** of a shared table: there is no rule yet for combining those
   across devices (the GEMV derivation reads a reference time repeated within one adapter's records), and the M5's GEMV
-  records are still being taken.
+  records were still being taken when this was decided.
 
 ## Consequences
 
 - An Apple `metal-3` adapter with an empty or unmeasured description runs `apple-metal-3-shared`: four fields differ from
   the default (`gemmRows` 33 to 64 rows, both `conv2d` fields, `i8a8.linear` up to 256 rows). The M2 and the M5 with
   Chrome's flag run their measured tables. No NVIDIA adapter's table changes.
-- `apple-m5` and `apple-metal-3-shared` carry no `linearGemv`; their adapters run the default profile's GEMV choices, as
-  every Apple adapter without a description did before.
+- `apple-metal-3-shared` carries no `linearGemv`; its adapters run the default profile's GEMV choices, as every Apple
+  adapter without a description did before. `apple-m5` carries the M5's own, derived from its GEMV sweep records
+  (taken after this decision, the same day).
 - The sweep's `quick+` and evaluation set `k88` measure the new tables' geometries too (more rows per sweep).
 - `geometryProfileMismatch` does not tell the devices of a shared table's architecture apart; that is the table's
   purpose. A list of fewer than two adapters is a mismatch.
-- Left: the M5's GEMV choices for `apple-m5` (its GEMV records are being taken); an M2 full sweep, which re-derives
+- Left: an M2 full sweep, which re-derives
   `apple-metal-3`'s tile families and lets the shared table compare every candidate on both devices; the M1, M3 and M4
   are not measured.

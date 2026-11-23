@@ -5,2340 +5,282 @@
  * The runtime only selects the table by the adapter's match; nothing is measured at run time.
  * To change a value, take a sweep with the workbench's `geometry-sweep` entry and regenerate the
  * table with `node tools/geometry-profiles/generate.ts apple-m5 --records=<path>[,<path>…]`.
+ * The GEMV choices of linear (`linearGemv`) come from records of the `gemv-sweep` entry
+ * (`--gemv-records=<path>,<path>[,…]`).
  *
- * Derived in this generation: gemm, attention, conv2d, i8a8-linear, i8a8-attention, i8a8-conv3d.
+ * Derived in this generation: the GEMV choices of linear (GEMV sweep records).
  *
- * - outputs/workbench/browser-apple-m5/geometry-sweep_2026-11-23T15-06-54.json (sha256 afc2d8e55efba83fe92e394f78bc9f065d5597d3ad3cc88071b8d0bdb46f36ad, 2026-11-23T15:06:51.706Z)
+ * - outputs/workbench/browser-apple-m5/gemv-sweep_2026-11-23T16-43-29.json (sha256 7b776b0e1e10f7e570b52653f13630d250302753841a4df9e205819a0d8c6d70, 2026-11-23T16:43:28.766Z)
+ *   workbench; Chrome 158 on macOS; backend metal (declared); timestamps not quantised; checkout 8c9364d8481f83e45f18cc29d813ffd3350d1841
+ * - outputs/workbench/browser-apple-m5/gemv-sweep_2026-11-23T18-03-03.json (sha256 5cbb8dbf059130b14f565fe7492f6382b74a6ce287f6f119d646d8a993181355, 2026-11-23T18:03:02.056Z)
  *   workbench; Chrome 158 on macOS; backend metal (declared); timestamps not quantised; checkout 8c9364d8481f83e45f18cc29d813ffd3350d1841
  *
- * Adoption: a geometry replaces the default of a field only when, on every case of the field,
- * its output is identical to the default geometry's and it is at least ×1.050 faster;
- * among those, the one with the largest geometric mean of the ratios is taken, else the default
- * stays.
- * A case whose default re-measurement ratio lies outside 0.9–1.1 (or whose re-measurement failed
- * or is missing) is dropped from that record's ratios, as is an observation whose timestamp
- * rounding could move its ratio by more than 1%; output mismatches and failures still count.
+ * Carried over from the registered table at commit 80ca34104c3d6d6a5e74add5c8f6e3bfb1319071: gemm, attention, conv2d, i8a8-linear, i8a8-attention, i8a8-conv3d.
+ * Their adoption lines are in `git show 80ca34104c3d6d6a5e74add5c8f6e3bfb1319071:packages/runtime/src/kernels/geometry-profiles/apple-m5.ts`.
  *
- * - gemmRows ≤ 16 (linear / matmul / bmm row count ≤ 16, 4 cases): keeps the default reg16x16r1x4w4 (no geometry matches the output in every case at ×1.050 or faster)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: linear-m16-n3072-k1024: ×0.981 < ×1.050
- *   - reg16x16r1x4w4:tb-un: linear-m16-n3072-k1024: ×1.019 < ×1.050
- *   - reg16x16r2x4w4: bmm-b16-m16-n64-k128: ×0.826 < ×1.050
- *   - reg16x16r2x4w4:tas-tb-un: bmm-b16-m16-n64-k64: ×0.889 < ×1.050
- *   - reg16x16r2x4w4:tb-un: bmm-b16-m16-n64-k64: ×0.879 < ×1.050
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4:tas-tb-un: bmm-b16-m16-n64-k64: ×0.964 < ×1.050
- *   - reg16x32r1x8w4:tb-un: bmm-b16-m16-n64-k64: ×0.955 < ×1.050
- *   - reg16x32r2x4w8: bmm-b16-m16-n64-k128: ×0.886 < ×1.050
- *   - reg16x32r2x4w8:tas-tb-un: bmm-b16-m16-n64-k64: ×1.007 < ×1.050
- *   - reg16x32r2x4w8:tb-un: bmm-b16-m16-n64-k64: ×0.977 < ×1.050
- *   - reg16x32r2x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x4w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tas-tb-un: linear-m16-n3072-k1024: ×0.851 < ×1.050
- *   - reg32x16r2x4w4:tb-un: linear-m16-n3072-k1024: ×0.819 < ×1.050
- *   - reg32x16r4x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r2x4w8: bmm-b16-m16-n64-k128: ×0.810 < ×1.050
- *   - reg32x32r2x4w8:tas-tb-un: bmm-b16-m16-n64-k128: ×0.860 < ×1.050
- *   - reg32x32r2x4w8:tb-un: bmm-b16-m16-n64-k128: ×0.843 < ×1.050
- *   - reg32x32r2x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r4x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r4x4w8:tas-tb-un: bmm-b16-m16-n64-k64: ×0.816 < ×1.050
- *   - reg32x32r4x4w8:tb-un: bmm-b16-m16-n64-k128: ×0.803 < ×1.050
- *   - reg32x32r4x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r4x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r4x4w16:tas-tb-un: bmm-b16-m16-n64-k128: ×0.829 < ×1.050
- *   - reg32x64r4x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r4x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m16-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m16-n64-k128 (no timing to compare)
- * - gemmRows 17〜32 (linear / matmul / bmm row count 17〜32, 4 cases): adopted reg32x64r4x4w16:tas-tb-un ×1.317 (×1.067–×1.656)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: bmm-b16-m32-n64-k128: ×0.966 < ×1.050
- *   - reg16x16r1x4w4:tb-un: bmm-b16-m32-n64-k128: ×0.990 < ×1.050
- *   - reg16x16r2x4w4: bmm-b16-m32-n64-k128: ×0.984 < ×1.050
- *   - reg16x16r2x4w4:tas-tb-un: linear-m32-n3072-k1024: ×1.039 < ×1.050
- *   - reg16x16r2x4w4:tb-un: bmm-b16-m32-n64-k128: ×1.014 < ×1.050
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4: bmm-b16-m32-n64-k128: ×0.857 < ×1.050
- *   - reg16x32r1x8w4:tas-tb-un: linear-m32-n3072-k1024: ×0.949 < ×1.050
- *   - reg16x32r1x8w4:tb-un: linear-m32-n3072-k1024: ×0.972 < ×1.050
- *   - reg16x32r2x4w8: bmm-b16-m32-n64-k128: ×1.044 < ×1.050
- *   - reg16x32r2x4w8:tas-tb-un: geometric mean ×1.174 (below the adopted ×1.317)
- *   - reg16x32r2x4w8:tb-un: geometric mean ×1.179 (below the adopted ×1.317)
- *   - reg16x32r2x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: bmm-b16-m32-n64-k128: ×0.843 < ×1.050
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: bmm-b16-m32-n64-k128: ×0.896 < ×1.050
- *   - reg16x32r4x4w8:tb-un: bmm-b16-m32-n64-k128: ×0.840 < ×1.050
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: bmm-b16-m32-n64-k128: ×0.895 < ×1.050
- *   - reg16x64r2x8w8:tb-un: bmm-b16-m32-n64-k128: ×0.920 < ×1.050
- *   - reg16x64r4x4w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: bmm-b16-m32-n64-k64: ×0.934 < ×1.050
- *   - reg16x64r4x4w16:tb-un: bmm-b16-m32-n64-k64: ×0.940 < ×1.050
- *   - reg16x64r4x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x16r2x4w4: bmm-b16-m32-n64-k64: ×0.993 < ×1.050
- *   - reg32x16r2x4w4:tas-tb-un: geometric mean ×1.252 (below the adopted ×1.317)
- *   - reg32x16r2x4w4:tb-un: geometric mean ×1.237 (below the adopted ×1.317)
- *   - reg32x16r4x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: bmm-b16-m32-n64-k128: ×0.868 < ×1.050
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r2x4w8: geometric mean ×1.260 (below the adopted ×1.317)
- *   - reg32x32r2x4w8:tas-tb-un: geometric mean ×1.297 (below the adopted ×1.317)
- *   - reg32x32r2x4w8:tb-un: geometric mean ×1.270 (below the adopted ×1.317)
- *   - reg32x32r2x8w4: bmm-b16-m32-n64-k128: ×0.806 < ×1.050
- *   - reg32x32r2x8w4:tas-tb-un: bmm-b16-m32-n64-k128: ×0.970 < ×1.050
- *   - reg32x32r2x8w4:tb-un: bmm-b16-m32-n64-k128: ×0.972 < ×1.050
- *   - reg32x32r4x4w8: bmm-b16-m32-n64-k128: ×0.804 < ×1.050
- *   - reg32x32r4x4w8:tas-tb-un: bmm-b16-m32-n64-k128: ×1.025 < ×1.050
- *   - reg32x32r4x4w8:tb-un: bmm-b16-m32-n64-k128: ×1.015 < ×1.050
- *   - reg32x32r4x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8: bmm-b16-m32-n64-k128: ×0.845 < ×1.050
- *   - reg32x64r2x8w8:tas-tb-un: bmm-b16-m32-n64-k128: ×1.040 < ×1.050
- *   - reg32x64r2x8w8:tb-un: bmm-b16-m32-n64-k128: ×1.022 < ×1.050
- *   - reg32x64r4x4w16: bmm-b16-m32-n64-k128: ×0.853 < ×1.050
- *   - reg32x64r4x4w16:tb-un: geometric mean ×1.278 (below the adopted ×1.317)
- *   - reg32x64r4x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k64 (no timing to compare)
- *   - reg64x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m32-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m32-n64-k128 (no timing to compare)
- * - gemmRows 33〜64 (linear / matmul / bmm row count 33〜64, 4 cases): adopted reg64x32r4x4w8:tas-tb-un ×1.688 (×1.442–×2.104)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x16r8x4w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x16r8x4w4:tas-tb-un: bmm-b16-m64-n64-k128: ×0.815 < ×1.050
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x32r8x4w8: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8:tas-tb-un: bmm-b16-m64-n64-k128: ×0.824 < ×1.050
- *   - reg128x32r8x4w8:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x64r8x4w16: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x64r8x4w16:tas-tb-un: bmm-b16-m64-n64-k128: ×0.836 < ×1.050
- *   - reg128x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x64r8x8w8: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg128x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: bmm-b16-m64-n64-k128: ×0.802 < ×1.050
- *   - reg16x16r1x4w4:tas-tb-un: linear-m64-n3072-k1024: ×0.983 < ×1.050
- *   - reg16x16r1x4w4:tb-un: linear-m64-n3072-k1024: ×0.998 < ×1.050
- *   - reg16x16r2x4w4: geometric mean ×1.188 (below the adopted ×1.688)
- *   - reg16x16r2x4w4:tas-tb-un: geometric mean ×1.219 (below the adopted ×1.688)
- *   - reg16x16r2x4w4:tb-un: geometric mean ×1.189 (below the adopted ×1.688)
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg16x32r1x8w4: linear-m64-n3072-k1024: ×1.002 < ×1.050
- *   - reg16x32r1x8w4:tas-tb-un: linear-m64-n3072-k1024: ×1.011 < ×1.050
- *   - reg16x32r1x8w4:tb-un: linear-m64-n3072-k1024: ×1.029 < ×1.050
- *   - reg16x32r2x4w8: geometric mean ×1.277 (below the adopted ×1.688)
- *   - reg16x32r2x4w8:tas-tb-un: geometric mean ×1.277 (below the adopted ×1.688)
- *   - reg16x32r2x4w8:tb-un: geometric mean ×1.290 (below the adopted ×1.688)
- *   - reg16x32r2x8w4: linear-m64-n3072-k1024: ×0.902 < ×1.050
- *   - reg16x32r2x8w4:tas-tb-un: linear-m64-n3072-k1024: ×0.935 < ×1.050
- *   - reg16x32r2x8w4:tb-un: linear-m64-n3072-k1024: ×0.926 < ×1.050
- *   - reg16x32r4x4w8: linear-m64-n3072-k1024: ×0.919 < ×1.050
- *   - reg16x32r4x4w8:tas-tb-un: linear-m64-n3072-k1024: ×0.951 < ×1.050
- *   - reg16x32r4x4w8:tb-un: linear-m64-n3072-k1024: ×0.923 < ×1.050
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8: linear-m64-n3072-k1024: ×0.906 < ×1.050
- *   - reg16x64r2x8w8:tas-tb-un: linear-m64-n3072-k1024: ×0.909 < ×1.050
- *   - reg16x64r2x8w8:tb-un: linear-m64-n3072-k1024: ×0.916 < ×1.050
- *   - reg16x64r4x4w16: linear-m64-n3072-k1024: ×0.913 < ×1.050
- *   - reg16x64r4x4w16:tas-tb-un: linear-m64-n3072-k1024: ×0.934 < ×1.050
- *   - reg16x64r4x4w16:tb-un: linear-m64-n3072-k1024: ×0.935 < ×1.050
- *   - reg16x64r4x8w8: bmm-b16-m64-n64-k128: ×0.908 < ×1.050
- *   - reg16x64r4x8w8:tas-tb-un: bmm-b16-m64-n64-k128: ×0.959 < ×1.050
- *   - reg16x64r4x8w8:tb-un: bmm-b16-m64-n64-k128: ×0.922 < ×1.050
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x16r2x4w4: geometric mean ×1.338 (below the adopted ×1.688)
- *   - reg32x16r2x4w4:tas-tb-un: geometric mean ×1.408 (below the adopted ×1.688)
- *   - reg32x16r2x4w4:tb-un: geometric mean ×1.358 (below the adopted ×1.688)
- *   - reg32x16r4x4w4: geometric mean ×1.243 (below the adopted ×1.688)
- *   - reg32x16r4x4w4:tas-tb-un: geometric mean ×1.418 (below the adopted ×1.688)
- *   - reg32x16r4x4w4:tb-un: geometric mean ×1.290 (below the adopted ×1.688)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x32r2x4w8: geometric mean ×1.434 (below the adopted ×1.688)
- *   - reg32x32r2x4w8:tas-tb-un: geometric mean ×1.458 (below the adopted ×1.688)
- *   - reg32x32r2x4w8:tb-un: geometric mean ×1.444 (below the adopted ×1.688)
- *   - reg32x32r2x8w4: geometric mean ×1.402 (below the adopted ×1.688)
- *   - reg32x32r2x8w4:tas-tb-un: geometric mean ×1.505 (below the adopted ×1.688)
- *   - reg32x32r2x8w4:tb-un: geometric mean ×1.505 (below the adopted ×1.688)
- *   - reg32x32r4x4w8: geometric mean ×1.439 (below the adopted ×1.688)
- *   - reg32x32r4x4w8:tas-tb-un: geometric mean ×1.587 (below the adopted ×1.688)
- *   - reg32x32r4x4w8:tb-un: geometric mean ×1.569 (below the adopted ×1.688)
- *   - reg32x32r4x8w4: bmm-b16-m64-n64-k128: ×0.976 < ×1.050
- *   - reg32x32r4x8w4:tas-tb-un: bmm-b16-m64-n64-k128: ×1.046 < ×1.050
- *   - reg32x32r4x8w4:tb-un: bmm-b16-m64-n64-k128: ×0.960 < ×1.050
- *   - reg32x32r8x4w8: bmm-b16-m64-n64-k128: ×1.003 < ×1.050
- *   - reg32x32r8x4w8:tas-tb-un: bmm-b16-m64-n64-k128: ×1.022 < ×1.050
- *   - reg32x32r8x4w8:tb-un: bmm-b16-m64-n64-k128: ×0.930 < ×1.050
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg32x64r2x8w8: geometric mean ×1.383 (below the adopted ×1.688)
- *   - reg32x64r2x8w8:tas-tb-un: geometric mean ×1.445 (below the adopted ×1.688)
- *   - reg32x64r2x8w8:tb-un: geometric mean ×1.450 (below the adopted ×1.688)
- *   - reg32x64r4x4w16: geometric mean ×1.437 (below the adopted ×1.688)
- *   - reg32x64r4x4w16:tas-tb-un: geometric mean ×1.589 (below the adopted ×1.688)
- *   - reg32x64r4x4w16:tb-un: geometric mean ×1.541 (below the adopted ×1.688)
- *   - reg32x64r4x8w8: geometric mean ×1.381 (below the adopted ×1.688)
- *   - reg32x64r4x8w8:tas-tb-un: geometric mean ×1.488 (below the adopted ×1.688)
- *   - reg32x64r4x8w8:tb-un: geometric mean ×1.462 (below the adopted ×1.688)
- *   - reg32x64r8x4w16: geometric mean ×1.371 (below the adopted ×1.688)
- *   - reg32x64r8x4w16:tas-tb-un: geometric mean ×1.519 (below the adopted ×1.688)
- *   - reg32x64r8x4w16:tb-un: bmm-b16-m64-n64-k128: ×1.027 < ×1.050
- *   - reg32x64r8x8w8: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4: geometric mean ×1.385 (below the adopted ×1.688)
- *   - reg64x16r4x4w4:tas-tb-un: geometric mean ×1.546 (below the adopted ×1.688)
- *   - reg64x16r4x4w4:tb-un: geometric mean ×1.429 (below the adopted ×1.688)
- *   - reg64x16r8x4w4: bmm-b16-m64-n64-k128: ×0.871 < ×1.050
- *   - reg64x16r8x4w4:tas-tb-un: bmm-b16-m64-n64-k128: ×0.910 < ×1.050
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8: geometric mean ×1.532 (below the adopted ×1.688)
- *   - reg64x32r4x4w8:tb-un: geometric mean ×1.603 (below the adopted ×1.688)
- *   - reg64x32r4x8w4: bmm-b16-m64-n64-k128: ×1.024 < ×1.050
- *   - reg64x32r4x8w4:tas-tb-un: geometric mean ×1.549 (below the adopted ×1.688)
- *   - reg64x32r4x8w4:tb-un: geometric mean ×1.512 (below the adopted ×1.688)
- *   - reg64x32r8x4w8: geometric mean ×1.426 (below the adopted ×1.688)
- *   - reg64x32r8x4w8:tas-tb-un: geometric mean ×1.557 (below the adopted ×1.688)
- *   - reg64x32r8x4w8:tb-un: bmm-b16-m64-n64-k128: ×0.998 < ×1.050
- *   - reg64x32r8x8w4: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16: geometric mean ×1.519 (below the adopted ×1.688)
- *   - reg64x64r4x4w16:tas-tb-un: geometric mean ×1.677 (below the adopted ×1.688)
- *   - reg64x64r4x4w16:tb-un: geometric mean ×1.607 (below the adopted ×1.688)
- *   - reg64x64r4x8w8: geometric mean ×1.498 (below the adopted ×1.688)
- *   - reg64x64r4x8w8:tas-tb-un: geometric mean ×1.615 (below the adopted ×1.688)
- *   - reg64x64r4x8w8:tb-un: geometric mean ×1.556 (below the adopted ×1.688)
- *   - reg64x64r8x4w16: geometric mean ×1.457 (below the adopted ×1.688)
- *   - reg64x64r8x4w16:tas-tb-un: geometric mean ×1.638 (below the adopted ×1.688)
- *   - reg64x64r8x4w16:tb-un: geometric mean ×1.494 (below the adopted ×1.688)
- *   - reg64x64r8x8w8: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m64-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m64-n128-k64 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in linear-m64-n3072-k1024 (no timing to compare)
- * - gemmRows 65〜128 (linear / matmul / bmm row count 65〜128, 4 cases): adopted reg64x32r4x4w8:tas-tb-un ×1.110 (×1.077–×1.138)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4: screened out by the quick look in matmul-m128-n2048-k1024 (no timing to compare)
- *   - reg128x16r8x4w4:tas-tb-un: matmul-m128-n2048-k1024: ×0.893 < ×1.050
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8: bmm-b16-m128-n64-k128: ×0.860 < ×1.050
- *   - reg128x32r8x4w8:tas-tb-un: bmm-b16-m128-n64-k64: ×0.961 < ×1.050
- *   - reg128x32r8x4w8:tb-un: bmm-b16-m128-n64-k128: ×0.883 < ×1.050
- *   - reg128x32r8x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x64r8x4w16: bmm-b16-m128-n64-k128: ×0.872 < ×1.050
- *   - reg128x64r8x4w16:tas-tb-un: bmm-b16-m128-n64-k64: ×0.960 < ×1.050
- *   - reg128x64r8x4w16:tb-un: matmul-m128-n2048-k1024: ×0.869 < ×1.050
- *   - reg128x64r8x8w8: bmm-b16-m128-n64-k64: ×0.853 < ×1.050
- *   - reg128x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg128x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x16r2x4w4:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r1x8w4:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x32r2x4w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4:tas-tb-un: linear-m128-n2048-k1024: ×0.822 < ×1.050
- *   - reg32x32r2x8w4:tb-un: linear-m128-n2048-k1024: ×0.806 < ×1.050
- *   - reg32x32r4x4w8: linear-m128-n2048-k1024: ×0.788 < ×1.050
- *   - reg32x32r4x4w8:tas-tb-un: linear-m128-n2048-k1024: ×0.860 < ×1.050
- *   - reg32x32r4x4w8:tb-un: linear-m128-n2048-k1024: ×0.835 < ×1.050
- *   - reg32x32r4x8w4: linear-m128-n2048-k1024: ×0.824 < ×1.050
- *   - reg32x32r4x8w4:tas-tb-un: linear-m128-n2048-k1024: ×0.852 < ×1.050
- *   - reg32x32r4x8w4:tb-un: linear-m128-n2048-k1024: ×0.814 < ×1.050
- *   - reg32x32r8x4w8: linear-m128-n2048-k1024: ×0.808 < ×1.050
- *   - reg32x32r8x4w8:tas-tb-un: linear-m128-n2048-k1024: ×0.838 < ×1.050
- *   - reg32x32r8x4w8:tb-un: linear-m128-n2048-k1024: ×0.856 < ×1.050
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x8w8: linear-m128-n2048-k1024: ×0.814 < ×1.050
- *   - reg32x64r4x8w8:tas-tb-un: linear-m128-n2048-k1024: ×0.843 < ×1.050
- *   - reg32x64r4x8w8:tb-un: linear-m128-n2048-k1024: ×0.824 < ×1.050
- *   - reg32x64r8x4w16: linear-m128-n2048-k1024: ×0.814 < ×1.050
- *   - reg32x64r8x4w16:tas-tb-un: linear-m128-n2048-k1024: ×0.849 < ×1.050
- *   - reg32x64r8x4w16:tb-un: linear-m128-n2048-k1024: ×0.856 < ×1.050
- *   - reg32x64r8x8w8: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4: matmul-m128-n2048-k1024: ×0.908 < ×1.050
- *   - reg64x16r4x4w4:tas-tb-un: bmm-b16-m128-n64-k64: ×1.031 < ×1.050
- *   - reg64x16r4x4w4:tb-un: linear-m128-n2048-k1024: ×0.929 < ×1.050
- *   - reg64x16r8x4w4: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k64 (no timing to compare)
- *   - reg64x32r4x4w8:tb-un: bmm-b16-m128-n64-k128: ×1.038 < ×1.050
- *   - reg64x32r4x8w4: bmm-b16-m128-n64-k128: ×0.942 < ×1.050
- *   - reg64x32r4x8w4:tas-tb-un: bmm-b16-m128-n64-k64: ×0.982 < ×1.050
- *   - reg64x32r4x8w4:tb-un: bmm-b16-m128-n64-k128: ×0.996 < ×1.050
- *   - reg64x32r8x4w8: matmul-m128-n2048-k1024: ×0.885 < ×1.050
- *   - reg64x32r8x4w8:tas-tb-un: matmul-m128-n2048-k1024: ×0.928 < ×1.050
- *   - reg64x32r8x4w8:tb-un: bmm-b16-m128-n64-k128: ×0.917 < ×1.050
- *   - reg64x32r8x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x64r4x4w16: bmm-b16-m128-n64-k128: ×0.897 < ×1.050
- *   - reg64x64r4x4w16:tas-tb-un: linear-m128-n2048-k1024: ×0.989 < ×1.050
- *   - reg64x64r4x4w16:tb-un: bmm-b16-m128-n64-k128: ×0.951 < ×1.050
- *   - reg64x64r4x8w8: bmm-b16-m128-n64-k128: ×0.915 < ×1.050
- *   - reg64x64r4x8w8:tas-tb-un: bmm-b16-m128-n64-k128: ×0.992 < ×1.050
- *   - reg64x64r4x8w8:tb-un: bmm-b16-m128-n64-k64: ×0.950 < ×1.050
- *   - reg64x64r8x4w16: bmm-b16-m128-n64-k128: ×0.896 < ×1.050
- *   - reg64x64r8x4w16:tas-tb-un: bmm-b16-m128-n64-k64: ×1.011 < ×1.050
- *   - reg64x64r8x4w16:tb-un: bmm-b16-m128-n64-k128: ×0.923 < ×1.050
- *   - reg64x64r8x8w8: bmm-b16-m128-n64-k64: ×0.833 < ×1.050
- *   - reg64x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg64x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m128-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m128-n64-k128 (no timing to compare)
- * - gemmRows 129〜256 (linear / matmul / bmm row count 129〜256, 4 cases): adopted reg64x32r4x4w8:tas-tb-un ×1.138 (×1.100–×1.194)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg128x16r8x4w4: bmm-b16-m256-n64-k64: ×0.791 < ×1.050
- *   - reg128x16r8x4w4:tas-tb-un: bmm-b16-m256-n64-k64: ×0.895 < ×1.050
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg128x32r8x4w8: bmm-b16-m256-n64-k64: ×0.910 < ×1.050
- *   - reg128x32r8x4w8:tas-tb-un: bmm-b16-m256-n64-k64: ×1.022 < ×1.050
- *   - reg128x32r8x4w8:tb-un: bmm-b16-m256-n64-k64: ×0.899 < ×1.050
- *   - reg128x32r8x8w4: bmm-b16-m256-n64-k64: ×0.818 < ×1.050
- *   - reg128x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg128x64r8x4w16: bmm-b16-m256-n64-k64: ×0.764 < ×1.050
- *   - reg128x64r8x4w16:tas-tb-un: bmm-b16-m256-n64-k64: ×0.925 < ×1.050
- *   - reg128x64r8x4w16:tb-un: bmm-b16-m256-n64-k64: ×0.819 < ×1.050
- *   - reg128x64r8x8w8: bmm-b16-m256-n64-k64: ×0.821 < ×1.050
- *   - reg128x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg128x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x16r2x4w4:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: linear-m256-n2048-k1024: ×0.819 < ×1.050
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x32r2x4w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4:tas-tb-un: linear-m256-n2048-k1024: ×0.834 < ×1.050
- *   - reg32x32r2x8w4:tb-un: linear-m256-n2048-k1024: ×0.819 < ×1.050
- *   - reg32x32r4x4w8: linear-m256-n2048-k1024: ×0.808 < ×1.050
- *   - reg32x32r4x4w8:tas-tb-un: linear-m256-n2048-k1024: ×0.885 < ×1.050
- *   - reg32x32r4x4w8:tb-un: linear-m256-n2048-k1024: ×0.852 < ×1.050
- *   - reg32x32r4x8w4: linear-m256-n2048-k1024: ×0.813 < ×1.050
- *   - reg32x32r4x8w4:tas-tb-un: linear-m256-n2048-k1024: ×0.835 < ×1.050
- *   - reg32x32r4x8w4:tb-un: linear-m256-n2048-k1024: ×0.804 < ×1.050
- *   - reg32x32r8x4w8: linear-m256-n2048-k1024: ×0.806 < ×1.050
- *   - reg32x32r8x4w8:tas-tb-un: linear-m256-n2048-k1024: ×0.827 < ×1.050
- *   - reg32x32r8x4w8:tb-un: linear-m256-n2048-k1024: ×0.842 < ×1.050
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16: linear-m256-n2048-k1024: ×0.787 < ×1.050
- *   - reg32x64r4x4w16:tas-tb-un: linear-m256-n2048-k1024: ×0.815 < ×1.050
- *   - reg32x64r4x4w16:tb-un: linear-m256-n2048-k1024: ×0.813 < ×1.050
- *   - reg32x64r4x8w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x8w8:tas-tb-un: linear-m256-n2048-k1024: ×0.821 < ×1.050
- *   - reg32x64r4x8w8:tb-un: linear-m256-n2048-k1024: ×0.803 < ×1.050
- *   - reg32x64r8x4w16: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r8x4w16:tas-tb-un: linear-m256-n2048-k1024: ×0.814 < ×1.050
- *   - reg32x64r8x4w16:tb-un: linear-m256-n2048-k1024: ×0.809 < ×1.050
- *   - reg32x64r8x8w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x16r4x4w4: matmul-m256-n2048-k1024: ×0.898 < ×1.050
- *   - reg64x16r4x4w4:tas-tb-un: matmul-m256-n2048-k1024: ×1.043 < ×1.050
- *   - reg64x16r4x4w4:tb-un: matmul-m256-n2048-k1024: ×0.922 < ×1.050
- *   - reg64x16r8x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: bmm-b16-m256-n64-k128: ×0.783 < ×1.050
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg64x32r4x4w8:tb-un: geometric mean ×1.070 (below the adopted ×1.138)
- *   - reg64x32r4x8w4: bmm-b16-m256-n64-k64: ×0.956 < ×1.050
- *   - reg64x32r4x8w4:tas-tb-un: bmm-b16-m256-n64-k64: ×1.025 < ×1.050
- *   - reg64x32r4x8w4:tb-un: linear-m256-n2048-k1024: ×0.996 < ×1.050
- *   - reg64x32r8x4w8: matmul-m256-n2048-k1024: ×0.921 < ×1.050
- *   - reg64x32r8x4w8:tas-tb-un: geometric mean ×1.107 (below the adopted ×1.138)
- *   - reg64x32r8x4w8:tb-un: bmm-b16-m256-n64-k64: ×0.972 < ×1.050
- *   - reg64x32r8x8w4: bmm-b16-m256-n64-k64: ×0.804 < ×1.050
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg64x64r4x4w16: bmm-b16-m256-n64-k64: ×0.936 < ×1.050
- *   - reg64x64r4x4w16:tas-tb-un: bmm-b16-m256-n64-k64: ×1.047 < ×1.050
- *   - reg64x64r4x4w16:tb-un: bmm-b16-m256-n64-k64: ×1.020 < ×1.050
- *   - reg64x64r4x8w8: bmm-b16-m256-n64-k64: ×0.936 < ×1.050
- *   - reg64x64r4x8w8:tas-tb-un: bmm-b16-m256-n64-k64: ×0.979 < ×1.050
- *   - reg64x64r4x8w8:tb-un: bmm-b16-m256-n64-k64: ×0.950 < ×1.050
- *   - reg64x64r8x4w16: bmm-b16-m256-n64-k64: ×0.919 < ×1.050
- *   - reg64x64r8x4w16:tas-tb-un: bmm-b16-m256-n64-k64: ×1.048 < ×1.050
- *   - reg64x64r8x4w16:tb-un: bmm-b16-m256-n64-k64: ×0.964 < ×1.050
- *   - reg64x64r8x8w8: bmm-b16-m256-n64-k64: ×0.867 < ×1.050
- *   - reg64x64r8x8w8:tas-tb-un: bmm-b16-m256-n64-k64: ×0.867 < ×1.050
- *   - reg64x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m256-n64-k64 (no timing to compare)
- *   - reg8x16r1x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m256-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m256-n64-k128 (no timing to compare)
- * - gemmRows 257〜512 (linear / matmul / bmm row count 257〜512, 5 cases): adopted reg128x32r8x4w8:tas-tb-un ×1.135 (×1.057–×1.262)
- *   - reg128x128r8x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x16r8x4w4: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x16r8x4w4:tas-tb-un: bmm-b16-m512-n64-k512: ×0.903 < ×1.050
- *   - reg128x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x32r8x4w8: bmm-b16-m512-n64-k64: ×0.921 < ×1.050
- *   - reg128x32r8x4w8:tb-un: bmm-b16-m512-n64-k64: ×0.832 < ×1.050
- *   - reg128x32r8x8w4: bmm-b16-m512-n64-k512: ×0.924 < ×1.050
- *   - reg128x32r8x8w4:tas-tb-un: bmm-b16-m512-n64-k512: ×0.877 < ×1.050
- *   - reg128x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg128x64r8x4w16: bmm-b16-m512-n512-k64: ×0.861 < ×1.050
- *   - reg128x64r8x4w16:tas-tb-un: bmm-b16-m512-n64-k64: ×0.875 < ×1.050
- *   - reg128x64r8x4w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k64 (no timing to compare)
- *   - reg128x64r8x8w8: bmm-b16-m512-n64-k64: ×0.946 < ×1.050
- *   - reg128x64r8x8w8:tas-tb-un: bmm-b16-m512-n64-k64: ×0.934 < ×1.050
- *   - reg128x64r8x8w8:tb-un: bmm-b16-m512-n64-k64: ×0.875 < ×1.050
- *   - reg16x128r4x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x16r1x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x4w8:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x4w8:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r2x8w8:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x4w16:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: linear-m512-n2048-k1024: ×0.811 < ×1.050
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x32r2x4w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x4w8:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x32r2x8w4:tas-tb-un: linear-m512-n2048-k1024: ×0.830 < ×1.050
- *   - reg32x32r2x8w4:tb-un: linear-m512-n2048-k1024: ×0.807 < ×1.050
- *   - reg32x32r4x4w8: linear-m512-n2048-k1024: ×0.805 < ×1.050
- *   - reg32x32r4x4w8:tas-tb-un: linear-m512-n2048-k1024: ×0.882 < ×1.050
- *   - reg32x32r4x4w8:tb-un: linear-m512-n2048-k1024: ×0.842 < ×1.050
- *   - reg32x32r4x8w4: matmul-m512-n2048-k1024: ×0.785 < ×1.050
- *   - reg32x32r4x8w4:tas-tb-un: linear-m512-n2048-k1024: ×0.816 < ×1.050
- *   - reg32x32r4x8w4:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x32r8x4w8: linear-m512-n2048-k1024: ×0.785 < ×1.050
- *   - reg32x32r8x4w8:tas-tb-un: linear-m512-n2048-k1024: ×0.822 < ×1.050
- *   - reg32x32r8x4w8:tb-un: linear-m512-n2048-k1024: ×0.827 < ×1.050
- *   - reg32x32r8x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r2x8w8:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x4w16:tas-tb-un: linear-m512-n2048-k1024: ×0.797 < ×1.050
- *   - reg32x64r4x4w16:tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x8w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r4x8w8:tas-tb-un: linear-m512-n2048-k1024: ×0.830 < ×1.050
- *   - reg32x64r4x8w8:tb-un: linear-m512-n2048-k1024: ×0.797 < ×1.050
- *   - reg32x64r8x4w16: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r8x4w16:tas-tb-un: linear-m512-n2048-k1024: ×0.859 < ×1.050
- *   - reg32x64r8x4w16:tb-un: linear-m512-n2048-k1024: ×0.850 < ×1.050
- *   - reg32x64r8x8w8: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg64x128r4x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x128r4x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x128r4x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x128r8x8w16: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x128r8x8w16:tas-tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x128r8x8w16:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg64x16r4x4w4: bmm-b16-m512-n512-k64: ×0.833 < ×1.050
- *   - reg64x16r4x4w4:tas-tb-un: bmm-b16-m512-n512-k64: ×0.976 < ×1.050
- *   - reg64x16r4x4w4:tb-un: bmm-b16-m512-n64-k64: ×0.913 < ×1.050
- *   - reg64x16r8x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: bmm-b16-m512-n64-k512: ×0.722 < ×1.050
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg64x32r4x4w8:tas-tb-un: bmm-b16-m512-n64-k512: ×1.049 < ×1.050
- *   - reg64x32r4x4w8:tb-un: bmm-b16-m512-n64-k512: ×1.034 < ×1.050
- *   - reg64x32r4x8w4: matmul-m512-n2048-k1024: ×0.974 < ×1.050
- *   - reg64x32r4x8w4:tas-tb-un: bmm-b16-m512-n64-k512: ×0.920 < ×1.050
- *   - reg64x32r4x8w4:tb-un: linear-m512-n2048-k1024: ×1.009 < ×1.050
- *   - reg64x32r8x4w8: bmm-b16-m512-n64-k512: ×0.905 < ×1.050
- *   - reg64x32r8x4w8:tas-tb-un: matmul-m512-n2048-k1024: ×1.046 < ×1.050
- *   - reg64x32r8x4w8:tb-un: bmm-b16-m512-n64-k512: ×0.812 < ×1.050
- *   - reg64x32r8x8w4: bmm-b16-m512-n64-k512: ×0.878 < ×1.050
- *   - reg64x32r8x8w4:tas-tb-un: bmm-b16-m512-n64-k512: ×0.854 < ×1.050
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg64x64r4x4w16: bmm-b16-m512-n64-k64: ×0.969 < ×1.050
- *   - reg64x64r4x4w16:tas-tb-un: bmm-b16-m512-n64-k64: ×0.994 < ×1.050
- *   - reg64x64r4x4w16:tb-un: bmm-b16-m512-n64-k64: ×1.016 < ×1.050
- *   - reg64x64r4x8w8: matmul-m512-n2048-k1024: ×0.989 < ×1.050
- *   - reg64x64r4x8w8:tas-tb-un: bmm-b16-m512-n64-k64: ×1.008 < ×1.050
- *   - reg64x64r4x8w8:tb-un: bmm-b16-m512-n64-k64: ×0.914 < ×1.050
- *   - reg64x64r8x4w16: bmm-b16-m512-n64-k512: ×0.955 < ×1.050
- *   - reg64x64r8x4w16:tas-tb-un: bmm-b16-m512-n64-k64: ×1.015 < ×1.050
- *   - reg64x64r8x4w16:tb-un: bmm-b16-m512-n64-k64: ×0.825 < ×1.050
- *   - reg64x64r8x8w8: bmm-b16-m512-n512-k64: ×0.881 < ×1.050
- *   - reg64x64r8x8w8:tas-tb-un: bmm-b16-m512-n64-k64: ×0.980 < ×1.050
- *   - reg64x64r8x8w8:tb-un: bmm-b16-m512-n64-k512: ×0.863 < ×1.050
- *   - reg8x16r1x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m512-n2048-k1024 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in bmm-b16-m512-n64-k512 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in bmm-b16-m512-n512-k64 (no timing to compare)
- * - gemmRows > 512 (linear / matmul / bmm row count > 512, 7 cases): keeps the default reg128x128r8x8w16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - Sweep outputs/workbench/browser-apple-m5/geometry-sweep_2026-11-23T15-06-54.json: linear-m4096-n2048-k2048 dropped from the ratio material due to default re-measurement ratio ×1.108 out of range (output matches and failures are still checked)
- *   - reg128x128r8x8w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x128r8x8w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x16r8x4w4: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x16r8x4w4:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x16r8x4w4:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x4w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x4w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x4w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x8w4: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x8w4:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x32r8x8w4:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x4w16: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x4w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x4w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x8w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x8w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg128x64r8x8w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg16x128r4x8w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x128r4x8w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x128r4x8w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r1x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r1x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r2x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r4x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x16r4x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r1x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r2x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x32r4x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r2x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x4w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg16x64r4x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r4x8w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r4x8w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r8x8w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x128r8x8w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r2x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r4x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r4x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r8x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x16r8x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r2x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r4x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x32r8x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r2x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x4w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x4w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x4w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r4x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x4w16: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x4w16:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x4w16:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg32x64r8x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x16r1x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg4x32r1x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x128r4x8w16: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x128r4x8w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x128r4x8w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x128r8x8w16: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x128r8x8w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x128r8x8w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x16r4x4w4: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x16r4x4w4:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x16r4x4w4:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x16r8x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x16r8x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x16r8x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x32r4x4w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r4x4w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r4x4w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r4x8w4: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r4x8w4:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r4x8w4:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r8x4w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r8x4w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r8x4w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x32r8x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x32r8x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x32r8x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg64x64r4x4w16: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r4x4w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r4x4w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r4x8w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r4x8w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r4x8w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x4w16: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x4w16:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x4w16:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x8w8: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x8w8:tas-tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg64x64r8x8w8:tb-un: not measured in linear-m4096-n2048-k2048 (dropped from the ratio material in every sweep)
- *   - reg8x16r1x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x16r1x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x16r1x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x16r2x4w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x16r2x4w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r1x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r1x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x4w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x4w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x8w4:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x32r2x8w4:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x64r2x8w8:tas-tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- *   - reg8x64r2x8w8:tb-un: screened out by the quick look in linear-m1024-n2048-k2048 (no timing to compare)
- * - attention.qk (fused attention f32 ①QK, 4 cases): keeps the default reg128x128r8x8w16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - reg128x16r8x4w4: attention-qk-cross-m4096-n512: ×0.819 < ×1.050
- *   - reg128x32r8x4w8: attention-qk-cross-m4096-n512: ×0.949 < ×1.050
- *   - reg128x32r8x8w4: attention-qk-cross-m4096-n512: ×0.938 < ×1.050
- *   - reg128x64r8x4w16: attention-qk-cross-m4096-n512: ×0.956 < ×1.050
- *   - reg128x64r8x8w8: attention-qk-cross-m4096-n512: ×1.016 < ×1.050
- *   - reg16x128r4x8w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x16r1x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r4x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r4x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x64r2x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x64r4x4w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg16x64r4x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x128r4x8w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x128r8x8w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x16r2x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r2x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r2x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r4x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r4x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r8x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r8x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r2x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r4x4w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r4x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r8x4w16: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r8x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg4x16r1x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg64x128r4x8w16: attention-qk-cross-m4096-n512: ×0.884 < ×1.050
- *   - reg64x128r8x8w16: attention-qk-cross-m4096-n512: ×0.882 < ×1.050
- *   - reg64x16r4x4w4: screened out by the quick look in attention-qk-self-m4096-n4096 (no timing to compare)
- *   - reg64x16r8x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg64x32r4x4w8: attention-qk-cross-m4096-n512: ×0.861 < ×1.050
- *   - reg64x32r4x8w4: attention-qk-cross-m4096-n512: ×0.878 < ×1.050
- *   - reg64x32r8x4w8: attention-qk-self-m1024-n1024: ×0.865 < ×1.050
- *   - reg64x32r8x8w4: screened out by the quick look in attention-qk-cross-m4096-n512 (no timing to compare)
- *   - reg64x64r4x4w16: attention-qk-cross-m4096-n512: ×0.867 < ×1.050
- *   - reg64x64r4x8w8: attention-qk-cross-m4096-n512: ×0.907 < ×1.050
- *   - reg64x64r8x4w16: attention-qk-cross-m4096-n512: ×0.879 < ×1.050
- *   - reg64x64r8x8w8: attention-qk-self-m1024-n1024: ×0.878 < ×1.050
- *   - reg8x16r1x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in attention-qk-cross-m1024-n512 (no timing to compare)
- * - attention.pv (fused attention f32 ③PV, 4 cases): keeps the default reg128x128r8x8w16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - reg128x16r8x4w4: screened out by the quick look in attention-pv-self-m1024-n1024 (no timing to compare)
- *   - reg128x32r8x4w8: attention-pv-self-m4096-n4096: ×0.860 < ×1.050
- *   - reg128x32r8x8w4: attention-pv-self-m1024-n1024: ×0.862 < ×1.050
- *   - reg128x64r8x4w16: attention-pv-self-m4096-n4096: ×0.890 < ×1.050
- *   - reg128x64r8x8w8: attention-pv-self-m1024-n1024: ×0.960 < ×1.050
- *   - reg16x128r4x8w16: attention-pv-self-m4096-n4096: ×0.855 < ×1.050
- *   - reg16x16r1x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg16x16r2x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg16x16r4x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r1x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg16x32r2x4w8: screened out by the quick look in attention-pv-self-m1024-n1024 (no timing to compare)
- *   - reg16x32r2x8w4: screened out by the quick look in attention-pv-self-m1024-n1024 (no timing to compare)
- *   - reg16x32r4x4w8: attention-pv-self-m4096-n4096: ×0.790 < ×1.050
- *   - reg16x32r4x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg16x64r2x8w8: attention-pv-self-m4096-n4096: ×0.819 < ×1.050
- *   - reg16x64r4x4w16: attention-pv-self-m4096-n4096: ×0.829 < ×1.050
- *   - reg16x64r4x8w8: attention-pv-self-m4096-n4096: ×0.816 < ×1.050
- *   - reg32x128r4x8w16: attention-pv-self-m4096-n4096: ×0.912 < ×1.050
- *   - reg32x128r8x8w16: attention-pv-cross-m4096-n512: ×0.934 < ×1.050
- *   - reg32x16r2x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg32x16r4x4w4: screened out by the quick look in attention-pv-self-m1024-n1024 (no timing to compare)
- *   - reg32x16r8x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg32x32r2x4w8: attention-pv-self-m4096-n4096: ×0.834 < ×1.050
- *   - reg32x32r2x8w4: attention-pv-self-m4096-n4096: ×0.832 < ×1.050
- *   - reg32x32r4x4w8: attention-pv-self-m4096-n4096: ×0.840 < ×1.050
- *   - reg32x32r4x8w4: attention-pv-self-m4096-n4096: ×0.853 < ×1.050
- *   - reg32x32r8x4w8: attention-pv-self-m4096-n4096: ×0.829 < ×1.050
- *   - reg32x32r8x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg32x64r2x8w8: attention-pv-self-m4096-n4096: ×0.866 < ×1.050
- *   - reg32x64r4x4w16: attention-pv-self-m4096-n4096: ×0.877 < ×1.050
- *   - reg32x64r4x8w8: attention-pv-self-m4096-n4096: ×0.891 < ×1.050
- *   - reg32x64r8x4w16: attention-pv-cross-m4096-n512: ×0.859 < ×1.050
- *   - reg32x64r8x8w8: attention-pv-self-m1024-n1024: ×0.886 < ×1.050
- *   - reg4x16r1x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg4x32r1x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg64x128r4x8w16: attention-pv-self-m4096-n4096: ×0.926 < ×1.050
- *   - reg64x128r8x8w16: attention-pv-self-m1024-n1024: ×0.918 < ×1.050
- *   - reg64x16r4x4w4: screened out by the quick look in attention-pv-self-m1024-n1024 (no timing to compare)
- *   - reg64x16r8x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg64x32r4x4w8: attention-pv-self-m4096-n4096: ×0.850 < ×1.050
- *   - reg64x32r4x8w4: attention-pv-self-m4096-n4096: ×0.876 < ×1.050
- *   - reg64x32r8x4w8: attention-pv-self-m4096-n4096: ×0.845 < ×1.050
- *   - reg64x32r8x8w4: attention-pv-self-m4096-n4096: ×0.811 < ×1.050
- *   - reg64x64r4x4w16: attention-pv-self-m4096-n4096: ×0.890 < ×1.050
- *   - reg64x64r4x8w8: attention-pv-self-m4096-n4096: ×0.920 < ×1.050
- *   - reg64x64r8x4w16: attention-pv-self-m1024-n1024: ×0.904 < ×1.050
- *   - reg64x64r8x8w8: attention-pv-cross-m1024-n512: ×0.811 < ×1.050
- *   - reg8x16r1x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg8x16r2x4w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r1x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r2x4w8: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg8x32r2x8w4: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- *   - reg8x64r2x8w8: screened out by the quick look in attention-pv-cross-m1024-n512 (no timing to compare)
- * - conv2d.rows64 (conv2d implicit GEMM m tile of 64 rows, 2 cases): adopted igemm64x64:wg16x8:tas-tb-un:dec ×1.368 (×1.311–×1.427)
- *   - igemm128x128:wg16x16: conv2d-c192-256x256: ×0.861 < ×1.050
- *   - igemm128x128:wg16x16:dec: conv2d-c192-256x256: ×0.961 < ×1.050
- *   - igemm128x128:wg16x16:tas-tb-un: conv2d-c192-256x256: ×0.866 < ×1.050
- *   - igemm128x128:wg16x16:tas-tb-un:dec: conv2d-c192-256x256: ×0.922 < ×1.050
- *   - igemm128x128:wg16x16:tb-un: conv2d-c192-256x256: ×0.815 < ×1.050
- *   - igemm128x128:wg16x16:tb-un:dec: conv2d-c192-256x256: ×0.882 < ×1.050
- *   - igemm128x64:wg16x16: conv2d-c192-256x256: ×0.821 < ×1.050
- *   - igemm128x64:wg16x16:dec: conv2d-c192-256x256: ×0.904 < ×1.050
- *   - igemm128x64:wg16x16:tas-tb-un: conv2d-c192-256x256: ×0.945 < ×1.050
- *   - igemm128x64:wg16x16:tas-tb-un:dec: conv2d-c192-256x256: ×0.980 < ×1.050
- *   - igemm128x64:wg16x16:tb-un: conv2d-c192-256x256: ×0.860 < ×1.050
- *   - igemm128x64:wg16x16:tb-un:dec: conv2d-c192-256x256: ×0.947 < ×1.050
- *   - igemm128x64:wg8x16: conv2d-c192-256x256: ×0.900 < ×1.050
- *   - igemm128x64:wg8x16:dec: conv2d-c192-256x256: ×0.967 < ×1.050
- *   - igemm128x64:wg8x16:tas-tb-un: conv2d-c192-256x256: ×0.892 < ×1.050
- *   - igemm128x64:wg8x16:tas-tb-un:dec: conv2d-c192-256x256: ×0.969 < ×1.050
- *   - igemm128x64:wg8x16:tb-un: conv2d-c192-256x256: ×0.813 < ×1.050
- *   - igemm128x64:wg8x16:tb-un:dec: conv2d-c192-256x256: ×0.852 < ×1.050
- *   - igemm16x128:wg16x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x128:wg16x4:dec: conv2d-c192-256x256: ×0.861 < ×1.050
- *   - igemm16x128:wg16x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x128:wg16x4:tas-tb-un:dec: conv2d-c192-256x256: ×0.921 < ×1.050
- *   - igemm16x128:wg16x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x128:wg16x4:tb-un:dec: conv2d-c192-256x256: ×0.877 < ×1.050
- *   - igemm16x64:wg16x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg16x4:dec: conv2d-c192-256x256: ×0.841 < ×1.050
- *   - igemm16x64:wg16x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg16x4:tas-tb-un:dec: conv2d-c192-256x256: ×0.985 < ×1.050
- *   - igemm16x64:wg16x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg16x4:tb-un:dec: conv2d-c192-256x256: ×0.961 < ×1.050
- *   - igemm16x64:wg8x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x4:dec: conv2d-c192-256x256: ×0.886 < ×1.050
- *   - igemm16x64:wg8x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x4:tas-tb-un:dec: conv2d-c192-256x256: ×0.894 < ×1.050
- *   - igemm16x64:wg8x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x4:tb-un:dec: conv2d-c192-256x256: ×0.859 < ×1.050
- *   - igemm16x64:wg8x8: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x8:dec: conv2d-c192-256x256: ×0.849 < ×1.050
- *   - igemm16x64:wg8x8:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x8:tas-tb-un:dec: conv2d-c192-256x256: ×0.921 < ×1.050
- *   - igemm16x64:wg8x8:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm16x64:wg8x8:tb-un:dec: conv2d-c192-256x256: ×0.928 < ×1.050
- *   - igemm32x128:wg16x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x128:wg16x4:dec: geometric mean ×1.142 (below the adopted ×1.368)
- *   - igemm32x128:wg16x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x128:wg16x4:tas-tb-un:dec: conv2d-c192-256x256: ×0.951 < ×1.050
- *   - igemm32x128:wg16x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x128:wg16x4:tb-un:dec: conv2d-c192-256x256: ×0.847 < ×1.050
- *   - igemm32x128:wg16x8: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x128:wg16x8:dec: geometric mean ×1.116 (below the adopted ×1.368)
- *   - igemm32x128:wg16x8:tas-tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x128:wg16x8:tas-tb-un:dec: geometric mean ×1.184 (below the adopted ×1.368)
- *   - igemm32x128:wg16x8:tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x128:wg16x8:tb-un:dec: geometric mean ×1.240 (below the adopted ×1.368)
- *   - igemm32x64:wg16x4: conv2d-c384-128x128: ×0.765 < ×1.050
- *   - igemm32x64:wg16x4:dec: geometric mean ×1.151 (below the adopted ×1.368)
- *   - igemm32x64:wg16x4:tas-tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x64:wg16x4:tas-tb-un:dec: geometric mean ×1.217 (below the adopted ×1.368)
- *   - igemm32x64:wg16x4:tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x64:wg16x4:tb-un:dec: geometric mean ×1.230 (below the adopted ×1.368)
- *   - igemm32x64:wg16x8: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg16x8:dec: conv2d-c192-256x256: ×1.000 < ×1.050
- *   - igemm32x64:wg16x8:tas-tb-un: conv2d-c384-128x128: ×0.886 < ×1.050
- *   - igemm32x64:wg16x8:tas-tb-un:dec: geometric mean ×1.202 (below the adopted ×1.368)
- *   - igemm32x64:wg16x8:tb-un: conv2d-c384-128x128: ×0.873 < ×1.050
- *   - igemm32x64:wg16x8:tb-un:dec: geometric mean ×1.177 (below the adopted ×1.368)
- *   - igemm32x64:wg8x16: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg8x16:dec: conv2d-c192-256x256: ×0.986 < ×1.050
- *   - igemm32x64:wg8x16:tas-tb-un: conv2d-c192-256x256: ×0.843 < ×1.050
- *   - igemm32x64:wg8x16:tas-tb-un:dec: geometric mean ×1.097 (below the adopted ×1.368)
- *   - igemm32x64:wg8x16:tb-un: conv2d-c192-256x256: ×0.854 < ×1.050
- *   - igemm32x64:wg8x16:tb-un:dec: geometric mean ×1.105 (below the adopted ×1.368)
- *   - igemm32x64:wg8x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg8x4:dec: geometric mean ×1.144 (below the adopted ×1.368)
- *   - igemm32x64:wg8x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg8x4:tas-tb-un:dec: conv2d-c192-256x256: ×0.865 < ×1.050
- *   - igemm32x64:wg8x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg8x4:tb-un:dec: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm32x64:wg8x8: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x64:wg8x8:dec: geometric mean ×1.101 (below the adopted ×1.368)
- *   - igemm32x64:wg8x8:tas-tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x64:wg8x8:tas-tb-un:dec: geometric mean ×1.214 (below the adopted ×1.368)
- *   - igemm32x64:wg8x8:tb-un: screened out by the quick look in conv2d-c384-128x128 (no timing to compare)
- *   - igemm32x64:wg8x8:tb-un:dec: geometric mean ×1.215 (below the adopted ×1.368)
- *   - igemm64x128:wg16x16: conv2d-c384-128x128: ×0.987 < ×1.050
- *   - igemm64x128:wg16x16:dec: geometric mean ×1.204 (below the adopted ×1.368)
- *   - igemm64x128:wg16x16:tas-tb-un: geometric mean ×1.084 (below the adopted ×1.368)
- *   - igemm64x128:wg16x16:tas-tb-un:dec: geometric mean ×1.249 (below the adopted ×1.368)
- *   - igemm64x128:wg16x16:tb-un: geometric mean ×1.131 (below the adopted ×1.368)
- *   - igemm64x128:wg16x16:tb-un:dec: geometric mean ×1.271 (below the adopted ×1.368)
- *   - igemm64x128:wg16x8:dec: geometric mean ×1.247 (below the adopted ×1.368)
- *   - igemm64x128:wg16x8:tas-tb-un: conv2d-c192-256x256: ×0.984 < ×1.050
- *   - igemm64x128:wg16x8:tas-tb-un:dec: geometric mean ×1.335 (below the adopted ×1.368)
- *   - igemm64x128:wg16x8:tb-un: conv2d-c384-128x128: ×0.851 < ×1.050
- *   - igemm64x128:wg16x8:tb-un:dec: geometric mean ×1.131 (below the adopted ×1.368)
- *   - igemm64x64:wg16x16: conv2d-c192-256x256: ×0.937 < ×1.050
- *   - igemm64x64:wg16x16:dec: geometric mean ×1.126 (below the adopted ×1.368)
- *   - igemm64x64:wg16x16:tas-tb-un: geometric mean ×1.073 (below the adopted ×1.368)
- *   - igemm64x64:wg16x16:tas-tb-un:dec: geometric mean ×1.283 (below the adopted ×1.368)
- *   - igemm64x64:wg16x16:tb-un: conv2d-c192-256x256: ×1.016 < ×1.050
- *   - igemm64x64:wg16x16:tb-un:dec: geometric mean ×1.225 (below the adopted ×1.368)
- *   - igemm64x64:wg16x8: conv2d-c192-256x256: ×0.967 < ×1.050
- *   - igemm64x64:wg16x8:dec: geometric mean ×1.226 (below the adopted ×1.368)
- *   - igemm64x64:wg16x8:tas-tb-un: geometric mean ×1.157 (below the adopted ×1.368)
- *   - igemm64x64:wg16x8:tb-un: geometric mean ×1.075 (below the adopted ×1.368)
- *   - igemm64x64:wg16x8:tb-un:dec: geometric mean ×1.312 (below the adopted ×1.368)
- *   - igemm64x64:wg8x16: conv2d-c192-256x256: ×1.010 < ×1.050
- *   - igemm64x64:wg8x16:dec: geometric mean ×1.228 (below the adopted ×1.368)
- *   - igemm64x64:wg8x16:tas-tb-un: conv2d-c192-256x256: ×1.021 < ×1.050
- *   - igemm64x64:wg8x16:tas-tb-un:dec: geometric mean ×1.322 (below the adopted ×1.368)
- *   - igemm64x64:wg8x16:tb-un: geometric mean ×1.119 (below the adopted ×1.368)
- *   - igemm64x64:wg8x16:tb-un:dec: geometric mean ×1.337 (below the adopted ×1.368)
- *   - igemm64x64:wg8x8: conv2d-c384-128x128: ×1.027 < ×1.050
- *   - igemm64x64:wg8x8:dec: geometric mean ×1.243 (below the adopted ×1.368)
- *   - igemm64x64:wg8x8:tas-tb-un: conv2d-c192-256x256: ×0.969 < ×1.050
- *   - igemm64x64:wg8x8:tas-tb-un:dec: geometric mean ×1.285 (below the adopted ×1.368)
- *   - igemm64x64:wg8x8:tb-un: conv2d-c384-128x128: ×0.842 < ×1.050
- *   - igemm64x64:wg8x8:tb-un:dec: conv2d-c192-256x256: ×0.997 < ×1.050
- *   - igemm8x64:wg8x4: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm8x64:wg8x4:dec: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm8x64:wg8x4:tas-tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm8x64:wg8x4:tas-tb-un:dec: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm8x64:wg8x4:tb-un: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- *   - igemm8x64:wg8x4:tb-un:dec: screened out by the quick look in conv2d-c192-256x256 (no timing to compare)
- * - conv2d.rows32 (conv2d implicit GEMM m tile of 32 rows, 1 cases): adopted igemm32x64:wg16x8:tas-tb-un:dec ×1.488 (×1.488–×1.488)
- *   - igemm128x128:wg16x16: geometric mean ×1.137 (below the adopted ×1.488)
- *   - igemm128x128:wg16x16:dec: geometric mean ×1.159 (below the adopted ×1.488)
- *   - igemm128x128:wg16x16:tas-tb-un: geometric mean ×1.121 (below the adopted ×1.488)
- *   - igemm128x128:wg16x16:tas-tb-un:dec: geometric mean ×1.209 (below the adopted ×1.488)
- *   - igemm128x128:wg16x16:tb-un: geometric mean ×1.105 (below the adopted ×1.488)
- *   - igemm128x128:wg16x16:tb-un:dec: geometric mean ×1.133 (below the adopted ×1.488)
- *   - igemm128x64:wg16x16: conv2d-c96-512x512: ×1.042 < ×1.050
- *   - igemm128x64:wg16x16:dec: geometric mean ×1.110 (below the adopted ×1.488)
- *   - igemm128x64:wg16x16:tas-tb-un: geometric mean ×1.156 (below the adopted ×1.488)
- *   - igemm128x64:wg16x16:tas-tb-un:dec: geometric mean ×1.253 (below the adopted ×1.488)
- *   - igemm128x64:wg16x16:tb-un: geometric mean ×1.138 (below the adopted ×1.488)
- *   - igemm128x64:wg16x16:tb-un:dec: geometric mean ×1.192 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16: geometric mean ×1.175 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16:dec: geometric mean ×1.144 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16:tas-tb-un: geometric mean ×1.152 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16:tas-tb-un:dec: geometric mean ×1.249 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16:tb-un: geometric mean ×1.122 (below the adopted ×1.488)
- *   - igemm128x64:wg8x16:tb-un:dec: geometric mean ×1.089 (below the adopted ×1.488)
- *   - igemm16x128:wg16x4: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x128:wg16x4:dec: geometric mean ×1.211 (below the adopted ×1.488)
- *   - igemm16x128:wg16x4:tas-tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x128:wg16x4:tas-tb-un:dec: geometric mean ×1.193 (below the adopted ×1.488)
- *   - igemm16x128:wg16x4:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x128:wg16x4:tb-un:dec: geometric mean ×1.134 (below the adopted ×1.488)
- *   - igemm16x64:wg16x4: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg16x4:dec: geometric mean ×1.094 (below the adopted ×1.488)
- *   - igemm16x64:wg16x4:tas-tb-un: conv2d-c96-512x512: ×0.828 < ×1.050
- *   - igemm16x64:wg16x4:tas-tb-un:dec: geometric mean ×1.278 (below the adopted ×1.488)
- *   - igemm16x64:wg16x4:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg16x4:tb-un:dec: geometric mean ×1.244 (below the adopted ×1.488)
- *   - igemm16x64:wg8x4: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x4:dec: geometric mean ×1.145 (below the adopted ×1.488)
- *   - igemm16x64:wg8x4:tas-tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x4:tas-tb-un:dec: geometric mean ×1.152 (below the adopted ×1.488)
- *   - igemm16x64:wg8x4:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x4:tb-un:dec: geometric mean ×1.085 (below the adopted ×1.488)
- *   - igemm16x64:wg8x8: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x8:dec: geometric mean ×1.098 (below the adopted ×1.488)
- *   - igemm16x64:wg8x8:tas-tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x8:tas-tb-un:dec: geometric mean ×1.194 (below the adopted ×1.488)
- *   - igemm16x64:wg8x8:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm16x64:wg8x8:tb-un:dec: geometric mean ×1.200 (below the adopted ×1.488)
- *   - igemm32x128:wg16x4:dec: geometric mean ×1.384 (below the adopted ×1.488)
- *   - igemm32x128:wg16x4:tas-tb-un: conv2d-c96-512x512: ×1.009 < ×1.050
- *   - igemm32x128:wg16x4:tas-tb-un:dec: geometric mean ×1.213 (below the adopted ×1.488)
- *   - igemm32x128:wg16x4:tb-un: conv2d-c96-512x512: ×0.812 < ×1.050
- *   - igemm32x128:wg16x4:tb-un:dec: geometric mean ×1.081 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8: geometric mean ×1.125 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8:dec: geometric mean ×1.355 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8:tas-tb-un: geometric mean ×1.121 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8:tas-tb-un:dec: geometric mean ×1.472 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8:tb-un: geometric mean ×1.159 (below the adopted ×1.488)
- *   - igemm32x128:wg16x8:tb-un:dec: geometric mean ×1.363 (below the adopted ×1.488)
- *   - igemm32x64:wg16x4: geometric mean ×1.137 (below the adopted ×1.488)
- *   - igemm32x64:wg16x4:dec: geometric mean ×1.434 (below the adopted ×1.488)
- *   - igemm32x64:wg16x4:tas-tb-un: geometric mean ×1.152 (below the adopted ×1.488)
- *   - igemm32x64:wg16x4:tas-tb-un:dec: geometric mean ×1.460 (below the adopted ×1.488)
- *   - igemm32x64:wg16x4:tb-un: conv2d-c96-512x512: ×1.021 < ×1.050
- *   - igemm32x64:wg16x4:tb-un:dec: geometric mean ×1.471 (below the adopted ×1.488)
- *   - igemm32x64:wg16x8: geometric mean ×1.050 (below the adopted ×1.488)
- *   - igemm32x64:wg16x8:dec: geometric mean ×1.286 (below the adopted ×1.488)
- *   - igemm32x64:wg16x8:tas-tb-un: geometric mean ×1.186 (below the adopted ×1.488)
- *   - igemm32x64:wg16x8:tb-un: geometric mean ×1.166 (below the adopted ×1.488)
- *   - igemm32x64:wg16x8:tb-un:dec: geometric mean ×1.448 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16: geometric mean ×1.052 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16:dec: geometric mean ×1.263 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16:tas-tb-un: geometric mean ×1.125 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16:tas-tb-un:dec: geometric mean ×1.355 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16:tb-un: geometric mean ×1.141 (below the adopted ×1.488)
- *   - igemm32x64:wg8x16:tb-un:dec: geometric mean ×1.363 (below the adopted ×1.488)
- *   - igemm32x64:wg8x4: conv2d-c96-512x512: ×0.986 < ×1.050
- *   - igemm32x64:wg8x4:dec: geometric mean ×1.375 (below the adopted ×1.488)
- *   - igemm32x64:wg8x4:tas-tb-un: conv2d-c96-512x512: ×0.880 < ×1.050
- *   - igemm32x64:wg8x4:tas-tb-un:dec: geometric mean ×1.126 (below the adopted ×1.488)
- *   - igemm32x64:wg8x4:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm32x64:wg8x4:tb-un:dec: conv2d-c96-512x512: ×1.026 < ×1.050
- *   - igemm32x64:wg8x8: geometric mean ×1.095 (below the adopted ×1.488)
- *   - igemm32x64:wg8x8:dec: geometric mean ×1.360 (below the adopted ×1.488)
- *   - igemm32x64:wg8x8:tas-tb-un: geometric mean ×1.114 (below the adopted ×1.488)
- *   - igemm32x64:wg8x8:tas-tb-un:dec: geometric mean ×1.469 (below the adopted ×1.488)
- *   - igemm32x64:wg8x8:tb-un: geometric mean ×1.136 (below the adopted ×1.488)
- *   - igemm32x64:wg8x8:tb-un:dec: geometric mean ×1.473 (below the adopted ×1.488)
- *   - igemm64x128:wg16x16: conv2d-c96-512x512: ×0.992 < ×1.050
- *   - igemm64x128:wg16x16:dec: conv2d-c96-512x512: ×1.036 < ×1.050
- *   - igemm64x128:wg16x16:tas-tb-un: geometric mean ×1.088 (below the adopted ×1.488)
- *   - igemm64x128:wg16x16:tas-tb-un:dec: geometric mean ×1.197 (below the adopted ×1.488)
- *   - igemm64x128:wg16x16:tb-un: geometric mean ×1.079 (below the adopted ×1.488)
- *   - igemm64x128:wg16x16:tb-un:dec: geometric mean ×1.196 (below the adopted ×1.488)
- *   - igemm64x128:wg16x8: conv2d-c96-512x512: ×1.011 < ×1.050
- *   - igemm64x128:wg16x8:dec: geometric mean ×1.169 (below the adopted ×1.488)
- *   - igemm64x128:wg16x8:tas-tb-un: conv2d-c96-512x512: ×0.990 < ×1.050
- *   - igemm64x128:wg16x8:tas-tb-un:dec: geometric mean ×1.231 (below the adopted ×1.488)
- *   - igemm64x128:wg16x8:tb-un: conv2d-c96-512x512: ×0.921 < ×1.050
- *   - igemm64x128:wg16x8:tb-un:dec: conv2d-c96-512x512: ×1.046 < ×1.050
- *   - igemm64x64:wg16x16: conv2d-c96-512x512: ×0.931 < ×1.050
- *   - igemm64x64:wg16x16:dec: conv2d-c96-512x512: ×1.046 < ×1.050
- *   - igemm64x64:wg16x16:tas-tb-un: geometric mean ×1.053 (below the adopted ×1.488)
- *   - igemm64x64:wg16x16:tas-tb-un:dec: geometric mean ×1.195 (below the adopted ×1.488)
- *   - igemm64x64:wg16x16:tb-un: conv2d-c96-512x512: ×1.013 < ×1.050
- *   - igemm64x64:wg16x16:tb-un:dec: geometric mean ×1.134 (below the adopted ×1.488)
- *   - igemm64x64:wg16x8: conv2d-c96-512x512: ×1.029 < ×1.050
- *   - igemm64x64:wg16x8:dec: geometric mean ×1.137 (below the adopted ×1.488)
- *   - igemm64x64:wg16x8:tas-tb-un: geometric mean ×1.131 (below the adopted ×1.488)
- *   - igemm64x64:wg16x8:tas-tb-un:dec: geometric mean ×1.267 (below the adopted ×1.488)
- *   - igemm64x64:wg16x8:tb-un: geometric mean ×1.067 (below the adopted ×1.488)
- *   - igemm64x64:wg16x8:tb-un:dec: geometric mean ×1.218 (below the adopted ×1.488)
- *   - igemm64x64:wg8x16: conv2d-c96-512x512: ×1.018 < ×1.050
- *   - igemm64x64:wg8x16:dec: geometric mean ×1.135 (below the adopted ×1.488)
- *   - igemm64x64:wg8x16:tas-tb-un: geometric mean ×1.103 (below the adopted ×1.488)
- *   - igemm64x64:wg8x16:tas-tb-un:dec: geometric mean ×1.234 (below the adopted ×1.488)
- *   - igemm64x64:wg8x16:tb-un: geometric mean ×1.128 (below the adopted ×1.488)
- *   - igemm64x64:wg8x16:tb-un:dec: geometric mean ×1.213 (below the adopted ×1.488)
- *   - igemm64x64:wg8x8: conv2d-c96-512x512: ×1.036 < ×1.050
- *   - igemm64x64:wg8x8:dec: geometric mean ×1.197 (below the adopted ×1.488)
- *   - igemm64x64:wg8x8:tas-tb-un: conv2d-c96-512x512: ×1.008 < ×1.050
- *   - igemm64x64:wg8x8:tas-tb-un:dec: geometric mean ×1.196 (below the adopted ×1.488)
- *   - igemm64x64:wg8x8:tb-un: conv2d-c96-512x512: ×0.873 < ×1.050
- *   - igemm64x64:wg8x8:tb-un:dec: conv2d-c96-512x512: ×0.969 < ×1.050
- *   - igemm8x64:wg8x4: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm8x64:wg8x4:dec: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm8x64:wg8x4:tas-tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm8x64:wg8x4:tas-tb-un:dec: conv2d-c96-512x512: ×0.840 < ×1.050
- *   - igemm8x64:wg8x4:tb-un: screened out by the quick look in conv2d-c96-512x512 (no timing to compare)
- *   - igemm8x64:wg8x4:tb-un:dec: conv2d-c96-512x512: ×0.845 < ×1.050
- * - i8a8.linear ≤ 256 (i8a8 linear row count ≤ 256, 3 cases): adopted tile16x64r4x4w16x4k32 ×2.188 (×1.060–×7.188)
- *   - tile128x128r16x8w16x8k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k16: i8a8-linear-m1-n18432-k3072: ×0.957 < ×1.050
- *   - tile128x128r8x8w16x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k32: i8a8-linear-m1-n18432-k3072: ×0.959 < ×1.050
- *   - tile128x128r8x8w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k64: i8a8-linear-m1-n18432-k3072: ×0.947 < ×1.050
- *   - tile128x128r8x8w16x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k16: i8a8-linear-m185-n1280-k1280: ×0.959 < ×1.050
- *   - tile128x32r16x4w8x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k32: i8a8-linear-m185-n1280-k1280: ×0.947 < ×1.050
- *   - tile128x32r16x4w8x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k64: i8a8-linear-m185-n1280-k1280: ×0.934 < ×1.050
- *   - tile128x32r16x4w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x32r8x4w8x16k16: geometric mean ×1.076 (below the adopted ×2.188)
- *   - tile128x32r8x4w8x16k16s: i8a8-linear-m1-n18432-k3072: ×1.039 < ×1.050
- *   - tile128x32r8x4w8x16k32: geometric mean ×1.073 (below the adopted ×2.188)
- *   - tile128x32r8x4w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x32r8x4w8x16k64: i8a8-linear-m1-n18432-k3072: ×1.020 < ×1.050
- *   - tile128x32r8x4w8x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k16: i8a8-linear-m1-n18432-k3072: ×0.990 < ×1.050
- *   - tile128x64r16x4w16x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k32: i8a8-linear-m185-n1280-k1280: ×0.992 < ×1.050
- *   - tile128x64r16x4w16x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k64: i8a8-linear-m185-n1280-k1280: ×0.975 < ×1.050
- *   - tile128x64r16x4w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.087 (below the adopted ×2.188)
- *   - tile128x64r8x4w16x16k16s: i8a8-linear-m1-n18432-k3072: ×1.009 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-linear-m1-n18432-k3072: ×1.041 < ×1.050
- *   - tile128x64r8x4w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r8x4w16x16k64: i8a8-linear-m1-n18432-k3072: ×1.006 < ×1.050
- *   - tile128x64r8x4w16x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k32: i8a8-linear-m256-n1280-k1280: ×0.991 < ×1.050
- *   - tile128x64r8x8w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k64: i8a8-linear-m1-n18432-k3072: ×0.987 < ×1.050
- *   - tile128x64r8x8w8x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile16x128r4x8w16x4k16: i8a8-linear-m256-n1280-k1280: ×1.015 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-linear-m256-n1280-k1280: ×1.002 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-linear-m256-n1280-k1280: ×1.043 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-linear-m256-n1280-k1280: ×1.041 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-linear-m256-n1280-k1280: ×1.044 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-linear-m256-n1280-k1280: ×1.028 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-linear-m256-n1280-k1280: ×1.005 < ×1.050
- *   - tile192x128r12x8w16x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k16: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile32x128r4x8w16x8k16: geometric mean ×1.752 (below the adopted ×2.188)
- *   - tile32x128r4x8w16x8k32: geometric mean ×1.754 (below the adopted ×2.188)
- *   - tile32x128r8x8w16x4k16: i8a8-linear-m256-n1280-k1280: ×0.968 < ×1.050
- *   - tile32x128r8x8w16x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x128r8x8w16x4k32: i8a8-linear-m256-n1280-k1280: ×0.965 < ×1.050
- *   - tile32x128r8x8w16x4k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x128r8x8w16x4k64: i8a8-linear-m256-n1280-k1280: ×0.951 < ×1.050
- *   - tile32x128r8x8w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile32x32r4x4w8x8k16: i8a8-linear-m256-n1280-k1280: ×1.047 < ×1.050
- *   - tile32x32r4x4w8x8k32: geometric mean ×1.784 (below the adopted ×2.188)
- *   - tile32x32r8x4w8x4k16: geometric mean ×1.812 (below the adopted ×2.188)
- *   - tile32x32r8x4w8x4k16s: geometric mean ×1.865 (below the adopted ×2.188)
- *   - tile32x32r8x4w8x4k32: geometric mean ×1.785 (below the adopted ×2.188)
- *   - tile32x32r8x4w8x4k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x32r8x4w8x4k64: i8a8-linear-m256-n1280-k1280: ×1.017 < ×1.050
- *   - tile32x32r8x4w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile32x64r4x4w16x8k16: geometric mean ×1.778 (below the adopted ×2.188)
- *   - tile32x64r4x4w16x8k32: geometric mean ×1.788 (below the adopted ×2.188)
- *   - tile32x64r4x8w8x8k16: geometric mean ×1.787 (below the adopted ×2.188)
- *   - tile32x64r4x8w8x8k32: i8a8-linear-m256-n1280-k1280: ×1.037 < ×1.050
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.804 (below the adopted ×2.188)
- *   - tile32x64r8x4w16x4k16s: geometric mean ×1.829 (below the adopted ×2.188)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.786 (below the adopted ×2.188)
- *   - tile32x64r8x4w16x4k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x64r8x4w16x4k64: i8a8-linear-m256-n1280-k1280: ×1.024 < ×1.050
- *   - tile32x64r8x4w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile32x64r8x8w8x4k16: i8a8-linear-m256-n1280-k1280: ×0.962 < ×1.050
- *   - tile32x64r8x8w8x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x64r8x8w8x4k32: i8a8-linear-m256-n1280-k1280: ×0.956 < ×1.050
- *   - tile32x64r8x8w8x4k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile32x64r8x8w8x4k64: i8a8-linear-m256-n1280-k1280: ×0.937 < ×1.050
- *   - tile32x64r8x8w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x128r12x8w16x4k16: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x128r12x8w16x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile48x128r12x8w16x4k32: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x128r12x8w16x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x128r12x8w16x4k64: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x128r12x8w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x32r12x4w8x4k16: i8a8-linear-m256-n1280-k1280: ×0.932 < ×1.050
- *   - tile48x32r12x4w8x4k16s: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x32r12x4w8x4k32: i8a8-linear-m256-n1280-k1280: ×0.917 < ×1.050
- *   - tile48x32r12x4w8x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x32r12x4w8x4k64: i8a8-linear-m256-n1280-k1280: ×0.890 < ×1.050
- *   - tile48x32r12x4w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x64r12x4w16x4k16: i8a8-linear-m256-n1280-k1280: ×0.946 < ×1.050
- *   - tile48x64r12x4w16x4k16s: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x64r12x4w16x4k32: i8a8-linear-m256-n1280-k1280: ×0.930 < ×1.050
- *   - tile48x64r12x4w16x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x64r12x4w16x4k64: i8a8-linear-m256-n1280-k1280: ×0.923 < ×1.050
- *   - tile48x64r12x4w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k16: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x64r12x8w8x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile48x64r12x8w8x4k32: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x64r12x8w8x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k64: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile48x64r12x8w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k16: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x128r16x8w16x4k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r4x8w16x16k16: geometric mean ×1.421 (below the adopted ×2.188)
- *   - tile64x128r4x8w16x16k32: geometric mean ×1.438 (below the adopted ×2.188)
- *   - tile64x128r8x8w16x8k16: i8a8-linear-m256-n1280-k1280: ×0.997 < ×1.050
- *   - tile64x128r8x8w16x8k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x128r8x8w16x8k32: i8a8-linear-m256-n1280-k1280: ×0.994 < ×1.050
- *   - tile64x128r8x8w16x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x128r8x8w16x8k64: i8a8-linear-m256-n1280-k1280: ×0.983 < ×1.050
- *   - tile64x128r8x8w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x32r16x4w8x4k16: i8a8-linear-m256-n1280-k1280: ×0.959 < ×1.050
- *   - tile64x32r16x4w8x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x32r16x4w8x4k32: i8a8-linear-m256-n1280-k1280: ×0.947 < ×1.050
- *   - tile64x32r16x4w8x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x32r16x4w8x4k64: i8a8-linear-m256-n1280-k1280: ×0.931 < ×1.050
- *   - tile64x32r16x4w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x32r4x4w8x16k16: geometric mean ×1.426 (below the adopted ×2.188)
- *   - tile64x32r4x4w8x16k32: geometric mean ×1.432 (below the adopted ×2.188)
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.452 (below the adopted ×2.188)
- *   - tile64x32r8x4w8x8k16s: geometric mean ×1.462 (below the adopted ×2.188)
- *   - tile64x32r8x4w8x8k32: geometric mean ×1.442 (below the adopted ×2.188)
- *   - tile64x32r8x4w8x8k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x32r8x4w8x8k64: i8a8-linear-m256-n1280-k1280: ×1.018 < ×1.050
- *   - tile64x32r8x4w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x4w16x4k16: i8a8-linear-m256-n1280-k1280: ×0.968 < ×1.050
- *   - tile64x64r16x4w16x4k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x64r16x4w16x4k32: i8a8-linear-m256-n1280-k1280: ×0.962 < ×1.050
- *   - tile64x64r16x4w16x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x4w16x4k64: i8a8-linear-m256-n1280-k1280: ×0.953 < ×1.050
- *   - tile64x64r16x4w16x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k16: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x64r16x8w8x4k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k32: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k64: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r4x4w16x16k16: geometric mean ×1.447 (below the adopted ×2.188)
- *   - tile64x64r4x4w16x16k32: geometric mean ×1.427 (below the adopted ×2.188)
- *   - tile64x64r4x8w8x16k16: geometric mean ×1.458 (below the adopted ×2.188)
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.456 (below the adopted ×2.188)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.478 (below the adopted ×2.188)
- *   - tile64x64r8x4w16x8k16s: geometric mean ×1.462 (below the adopted ×2.188)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.481 (below the adopted ×2.188)
- *   - tile64x64r8x4w16x8k32s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x64r8x4w16x8k64: geometric mean ×1.439 (below the adopted ×2.188)
- *   - tile64x64r8x4w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r8x8w8x8k16: i8a8-linear-m256-n1280-k1280: ×0.991 < ×1.050
- *   - tile64x64r8x8w8x8k16s: screened out by the quick look in i8a8-linear-m185-n1280-k1280 (no timing to compare)
- *   - tile64x64r8x8w8x8k32: i8a8-linear-m256-n1280-k1280: ×0.980 < ×1.050
- *   - tile64x64r8x8w8x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile64x64r8x8w8x8k64: i8a8-linear-m256-n1280-k1280: ×0.972 < ×1.050
- *   - tile64x64r8x8w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k16: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x128r12x8w16x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k32: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x128r12x8w16x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k64: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x128r12x8w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x32r12x4w8x8k16: i8a8-linear-m256-n1280-k1280: ×0.945 < ×1.050
- *   - tile96x32r12x4w8x8k16s: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x32r12x4w8x8k32: i8a8-linear-m256-n1280-k1280: ×0.922 < ×1.050
- *   - tile96x32r12x4w8x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x32r12x4w8x8k64: i8a8-linear-m256-n1280-k1280: ×0.901 < ×1.050
- *   - tile96x32r12x4w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x64r12x4w16x8k16: i8a8-linear-m256-n1280-k1280: ×0.990 < ×1.050
- *   - tile96x64r12x4w16x8k16s: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x64r12x4w16x8k32: i8a8-linear-m256-n1280-k1280: ×0.966 < ×1.050
- *   - tile96x64r12x4w16x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x64r12x4w16x8k64: i8a8-linear-m256-n1280-k1280: ×0.943 < ×1.050
- *   - tile96x64r12x4w16x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k16: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x64r12x8w8x8k16s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k32: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x64r12x8w8x8k32s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k64: screened out by the quick look in i8a8-linear-m256-n1280-k1280 (no timing to compare)
- *   - tile96x64r12x8w8x8k64s: screened out by the quick look in i8a8-linear-m1-n18432-k3072 (no timing to compare)
- * - i8a8.linear 257〜512 (i8a8 linear row count 257〜512, 1 cases): adopted tile32x64r8x4w16x4k16s ×1.073 (×1.073–×1.073)
- *   - tile128x128r16x8w16x8k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k64: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r16x8w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k16: i8a8-linear-m512-n3072-k3072: ×1.001 < ×1.050
- *   - tile128x128r8x8w16x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k32: i8a8-linear-m512-n3072-k3072: ×1.004 < ×1.050
- *   - tile128x128r8x8w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x128r8x8w16x16k64: i8a8-linear-m512-n3072-k3072: ×0.988 < ×1.050
- *   - tile128x128r8x8w16x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k16: i8a8-linear-m512-n3072-k3072: ×1.017 < ×1.050
- *   - tile128x32r16x4w8x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k32: i8a8-linear-m512-n3072-k3072: ×1.003 < ×1.050
- *   - tile128x32r16x4w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x32r16x4w8x8k64: i8a8-linear-m512-n3072-k3072: ×0.976 < ×1.050
- *   - tile128x32r16x4w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x32r8x4w8x16k16: geometric mean ×1.059 (below the adopted ×1.073)
- *   - tile128x32r8x4w8x16k16s: geometric mean ×1.065 (below the adopted ×1.073)
- *   - tile128x32r8x4w8x16k32: geometric mean ×1.063 (below the adopted ×1.073)
- *   - tile128x32r8x4w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x32r8x4w8x16k64: geometric mean ×1.051 (below the adopted ×1.073)
- *   - tile128x32r8x4w8x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k16: i8a8-linear-m512-n3072-k3072: ×0.998 < ×1.050
- *   - tile128x64r16x4w16x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k32: i8a8-linear-m512-n3072-k3072: ×0.993 < ×1.050
- *   - tile128x64r16x4w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x4w16x8k64: i8a8-linear-m512-n3072-k3072: ×0.983 < ×1.050
- *   - tile128x64r16x4w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k64: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r16x8w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.058 (below the adopted ×1.073)
- *   - tile128x64r8x4w16x16k16s: i8a8-linear-m512-n3072-k3072: ×1.012 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-linear-m512-n3072-k3072: ×1.048 < ×1.050
- *   - tile128x64r8x4w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r8x4w16x16k64: i8a8-linear-m512-n3072-k3072: ×1.031 < ×1.050
- *   - tile128x64r8x4w16x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k32: i8a8-linear-m512-n3072-k3072: ×0.992 < ×1.050
- *   - tile128x64r8x8w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile128x64r8x8w8x16k64: i8a8-linear-m512-n3072-k3072: ×0.987 < ×1.050
- *   - tile128x64r8x8w8x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile16x128r4x8w16x4k16: i8a8-linear-m512-n3072-k3072: ×1.005 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-linear-m512-n3072-k3072: ×0.997 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-linear-m512-n3072-k3072: ×1.020 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-linear-m512-n3072-k3072: ×1.005 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-linear-m512-n3072-k3072: ×0.996 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-linear-m512-n3072-k3072: ×1.006 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-linear-m512-n3072-k3072: ×1.015 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-linear-m512-n3072-k3072: ×0.995 < ×1.050
- *   - tile192x128r12x8w16x16k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x128r12x8w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k16: i8a8-linear-m512-n3072-k3072: ×0.972 < ×1.050
- *   - tile192x32r12x4w8x16k16s: i8a8-linear-m512-n3072-k3072: ×0.847 < ×1.050
- *   - tile192x32r12x4w8x16k32: i8a8-linear-m512-n3072-k3072: ×0.937 < ×1.050
- *   - tile192x32r12x4w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x32r12x4w8x16k64: i8a8-linear-m512-n3072-k3072: ×0.929 < ×1.050
- *   - tile192x32r12x4w8x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k16: i8a8-linear-m512-n3072-k3072: ×0.949 < ×1.050
- *   - tile192x64r12x4w16x16k16s: i8a8-linear-m512-n3072-k3072: ×0.798 < ×1.050
- *   - tile192x64r12x4w16x16k32: i8a8-linear-m512-n3072-k3072: ×0.937 < ×1.050
- *   - tile192x64r12x4w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x64r12x4w16x16k64: i8a8-linear-m512-n3072-k3072: ×0.906 < ×1.050
- *   - tile192x64r12x4w16x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k16: i8a8-linear-m512-n3072-k3072: ×0.772 < ×1.050
- *   - tile192x64r12x8w8x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k32: i8a8-linear-m512-n3072-k3072: ×0.788 < ×1.050
- *   - tile192x64r12x8w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile192x64r12x8w8x16k64: i8a8-linear-m512-n3072-k3072: ×0.776 < ×1.050
- *   - tile192x64r12x8w8x16k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x128r16x8w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k16: i8a8-linear-m512-n3072-k3072: ×0.979 < ×1.050
- *   - tile256x32r16x4w8x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x32r16x4w8x16k32: i8a8-linear-m512-n3072-k3072: ×0.969 < ×1.050
- *   - tile256x32r16x4w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k16: i8a8-linear-m512-n3072-k3072: ×0.965 < ×1.050
- *   - tile256x64r16x4w16x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x4w16x16k32: i8a8-linear-m512-n3072-k3072: ×0.969 < ×1.050
- *   - tile256x64r16x4w16x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile256x64r16x8w8x16k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x128r4x8w16x8k16: i8a8-linear-m512-n3072-k3072: ×1.029 < ×1.050
- *   - tile32x128r4x8w16x8k32: i8a8-linear-m512-n3072-k3072: ×1.031 < ×1.050
- *   - tile32x128r8x8w16x4k16: i8a8-linear-m512-n3072-k3072: ×1.014 < ×1.050
- *   - tile32x128r8x8w16x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x128r8x8w16x4k32: i8a8-linear-m512-n3072-k3072: ×1.007 < ×1.050
- *   - tile32x128r8x8w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x128r8x8w16x4k64: i8a8-linear-m512-n3072-k3072: ×0.942 < ×1.050
- *   - tile32x128r8x8w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x32r4x4w8x8k16: i8a8-linear-m512-n3072-k3072: ×1.026 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-linear-m512-n3072-k3072: ×1.031 < ×1.050
- *   - tile32x32r8x4w8x4k16: geometric mean ×1.069 (below the adopted ×1.073)
- *   - tile32x32r8x4w8x4k16s: i8a8-linear-m512-n3072-k3072: ×1.005 < ×1.050
- *   - tile32x32r8x4w8x4k32: geometric mean ×1.063 (below the adopted ×1.073)
- *   - tile32x32r8x4w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x32r8x4w8x4k64: i8a8-linear-m512-n3072-k3072: ×1.014 < ×1.050
- *   - tile32x32r8x4w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x64r4x4w16x8k16: i8a8-linear-m512-n3072-k3072: ×1.015 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-linear-m512-n3072-k3072: ×1.015 < ×1.050
- *   - tile32x64r4x8w8x8k16: geometric mean ×1.055 (below the adopted ×1.073)
- *   - tile32x64r4x8w8x8k32: i8a8-linear-m512-n3072-k3072: ×1.036 < ×1.050
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.065 (below the adopted ×1.073)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.054 (below the adopted ×1.073)
- *   - tile32x64r8x4w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x64r8x4w16x4k64: i8a8-linear-m512-n3072-k3072: ×1.040 < ×1.050
- *   - tile32x64r8x4w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x64r8x8w8x4k16: i8a8-linear-m512-n3072-k3072: ×1.001 < ×1.050
- *   - tile32x64r8x8w8x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x64r8x8w8x4k32: i8a8-linear-m512-n3072-k3072: ×0.987 < ×1.050
- *   - tile32x64r8x8w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile32x64r8x8w8x4k64: i8a8-linear-m512-n3072-k3072: ×0.915 < ×1.050
- *   - tile32x64r8x8w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x128r12x8w16x4k16: i8a8-linear-m512-n3072-k3072: ×0.893 < ×1.050
- *   - tile48x128r12x8w16x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x128r12x8w16x4k32: i8a8-linear-m512-n3072-k3072: ×0.853 < ×1.050
- *   - tile48x128r12x8w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x128r12x8w16x4k64: i8a8-linear-m512-n3072-k3072: ×0.825 < ×1.050
- *   - tile48x128r12x8w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x32r12x4w8x4k16: geometric mean ×1.055 (below the adopted ×1.073)
- *   - tile48x32r12x4w8x4k16s: i8a8-linear-m512-n3072-k3072: ×0.942 < ×1.050
- *   - tile48x32r12x4w8x4k32: i8a8-linear-m512-n3072-k3072: ×1.037 < ×1.050
- *   - tile48x32r12x4w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x32r12x4w8x4k64: i8a8-linear-m512-n3072-k3072: ×1.020 < ×1.050
- *   - tile48x32r12x4w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x4w16x4k16: i8a8-linear-m512-n3072-k3072: ×1.046 < ×1.050
- *   - tile48x64r12x4w16x4k16s: i8a8-linear-m512-n3072-k3072: ×0.949 < ×1.050
- *   - tile48x64r12x4w16x4k32: i8a8-linear-m512-n3072-k3072: ×1.016 < ×1.050
- *   - tile48x64r12x4w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x4w16x4k64: i8a8-linear-m512-n3072-k3072: ×1.034 < ×1.050
- *   - tile48x64r12x4w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k16: i8a8-linear-m512-n3072-k3072: ×0.858 < ×1.050
- *   - tile48x64r12x8w8x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k32: i8a8-linear-m512-n3072-k3072: ×0.825 < ×1.050
- *   - tile48x64r12x8w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k64: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile48x64r12x8w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k64: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r16x8w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r4x8w16x16k16: i8a8-linear-m512-n3072-k3072: ×1.027 < ×1.050
- *   - tile64x128r4x8w16x16k32: i8a8-linear-m512-n3072-k3072: ×1.034 < ×1.050
- *   - tile64x128r8x8w16x8k16: i8a8-linear-m512-n3072-k3072: ×1.000 < ×1.050
- *   - tile64x128r8x8w16x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r8x8w16x8k32: i8a8-linear-m512-n3072-k3072: ×0.998 < ×1.050
- *   - tile64x128r8x8w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x128r8x8w16x8k64: i8a8-linear-m512-n3072-k3072: ×0.980 < ×1.050
- *   - tile64x128r8x8w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x32r16x4w8x4k16: i8a8-linear-m512-n3072-k3072: ×0.994 < ×1.050
- *   - tile64x32r16x4w8x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x32r16x4w8x4k32: i8a8-linear-m512-n3072-k3072: ×0.971 < ×1.050
- *   - tile64x32r16x4w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x32r16x4w8x4k64: i8a8-linear-m512-n3072-k3072: ×0.931 < ×1.050
- *   - tile64x32r16x4w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x32r4x4w8x16k16: i8a8-linear-m512-n3072-k3072: ×1.025 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-linear-m512-n3072-k3072: ×1.026 < ×1.050
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.067 (below the adopted ×1.073)
- *   - tile64x32r8x4w8x8k16s: i8a8-linear-m512-n3072-k3072: ×1.04996 < ×1.05000
- *   - tile64x32r8x4w8x8k32: geometric mean ×1.062 (below the adopted ×1.073)
- *   - tile64x32r8x4w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x32r8x4w8x8k64: i8a8-linear-m512-n3072-k3072: ×1.035 < ×1.050
- *   - tile64x32r8x4w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x4w16x4k16: i8a8-linear-m512-n3072-k3072: ×1.021 < ×1.050
- *   - tile64x64r16x4w16x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x4w16x4k32: i8a8-linear-m512-n3072-k3072: ×1.011 < ×1.050
- *   - tile64x64r16x4w16x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x4w16x4k64: i8a8-linear-m512-n3072-k3072: ×1.000 < ×1.050
- *   - tile64x64r16x4w16x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k16: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k32: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k64: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r16x8w8x4k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r4x4w16x16k16: i8a8-linear-m512-n3072-k3072: ×1.023 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-linear-m512-n3072-k3072: ×1.012 < ×1.050
- *   - tile64x64r4x8w8x16k16: geometric mean ×1.060 (below the adopted ×1.073)
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.062 (below the adopted ×1.073)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.0727 (below the adopted ×1.0735)
- *   - tile64x64r8x4w16x8k16s: geometric mean ×1.052 (below the adopted ×1.073)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.072 (below the adopted ×1.073)
- *   - tile64x64r8x4w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r8x4w16x8k64: geometric mean ×1.060 (below the adopted ×1.073)
- *   - tile64x64r8x4w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r8x8w8x8k16: i8a8-linear-m512-n3072-k3072: ×1.032 < ×1.050
- *   - tile64x64r8x8w8x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r8x8w8x8k32: i8a8-linear-m512-n3072-k3072: ×1.020 < ×1.050
- *   - tile64x64r8x8w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile64x64r8x8w8x8k64: i8a8-linear-m512-n3072-k3072: ×0.996 < ×1.050
- *   - tile64x64r8x8w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k16: i8a8-linear-m512-n3072-k3072: ×0.802 < ×1.050
- *   - tile96x128r12x8w16x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k32: i8a8-linear-m512-n3072-k3072: ×0.799 < ×1.050
- *   - tile96x128r12x8w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x128r12x8w16x8k64: i8a8-linear-m512-n3072-k3072: ×0.763 < ×1.050
- *   - tile96x128r12x8w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x32r12x4w8x8k16: i8a8-linear-m512-n3072-k3072: ×0.977 < ×1.050
- *   - tile96x32r12x4w8x8k16s: i8a8-linear-m512-n3072-k3072: ×0.848 < ×1.050
- *   - tile96x32r12x4w8x8k32: i8a8-linear-m512-n3072-k3072: ×0.957 < ×1.050
- *   - tile96x32r12x4w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x32r12x4w8x8k64: i8a8-linear-m512-n3072-k3072: ×0.948 < ×1.050
- *   - tile96x32r12x4w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x64r12x4w16x8k16: i8a8-linear-m512-n3072-k3072: ×0.977 < ×1.050
- *   - tile96x64r12x4w16x8k16s: i8a8-linear-m512-n3072-k3072: ×0.864 < ×1.050
- *   - tile96x64r12x4w16x8k32: i8a8-linear-m512-n3072-k3072: ×0.952 < ×1.050
- *   - tile96x64r12x4w16x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x64r12x4w16x8k64: i8a8-linear-m512-n3072-k3072: ×0.949 < ×1.050
- *   - tile96x64r12x4w16x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k16: i8a8-linear-m512-n3072-k3072: ×0.800 < ×1.050
- *   - tile96x64r12x8w8x8k16s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k32: i8a8-linear-m512-n3072-k3072: ×0.792 < ×1.050
- *   - tile96x64r12x8w8x8k32s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- *   - tile96x64r12x8w8x8k64: i8a8-linear-m512-n3072-k3072: ×0.781 < ×1.050
- *   - tile96x64r12x8w8x8k64s: screened out by the quick look in i8a8-linear-m512-n3072-k3072 (no timing to compare)
- * - i8a8.linear > 512 (i8a8 linear row count > 512, 9 cases): keeps the default tile128x64r8x8w8x16k16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - tile128x128r16x8w16x8k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r16x8w16x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r16x8w16x8k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r16x8w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r16x8w16x8k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r16x8w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r8x8w16x16k16: i8a8-linear-m7920-n3072-k3072: ×0.951 < ×1.050
- *   - tile128x128r8x8w16x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r8x8w16x16k32: i8a8-linear-m7920-n3072-k14336: ×0.972 < ×1.050
- *   - tile128x128r8x8w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x128r8x8w16x16k64: i8a8-linear-m4096-n2048-k8192: ×0.963 < ×1.050
- *   - tile128x128r8x8w16x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x32r16x4w8x8k16: i8a8-linear-m7920-n3072-k14336: ×0.960 < ×1.050
- *   - tile128x32r16x4w8x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x32r16x4w8x8k32: i8a8-linear-m7920-n3072-k14336: ×0.951 < ×1.050
- *   - tile128x32r16x4w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x32r16x4w8x8k64: i8a8-linear-m7920-n3072-k14336: ×0.924 < ×1.050
- *   - tile128x32r16x4w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x32r8x4w8x16k16: i8a8-linear-m7920-n3072-k14336: ×0.990 < ×1.050
- *   - tile128x32r8x4w8x16k16s: i8a8-linear-m7920-n3072-k14336: ×0.984 < ×1.050
- *   - tile128x32r8x4w8x16k32: i8a8-linear-m7920-n3072-k14336: ×0.994 < ×1.050
- *   - tile128x32r8x4w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x32r8x4w8x16k64: i8a8-linear-m7920-n3072-k14336: ×0.971 < ×1.050
- *   - tile128x32r8x4w8x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x4w16x8k16: i8a8-linear-m7920-n3072-k14336: ×0.968 < ×1.050
- *   - tile128x64r16x4w16x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x4w16x8k32: i8a8-linear-m7920-n3072-k14336: ×0.962 < ×1.050
- *   - tile128x64r16x4w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x4w16x8k64: i8a8-linear-m7920-n3072-k14336: ×0.951 < ×1.050
- *   - tile128x64r16x4w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r16x8w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r8x4w16x16k16: i8a8-linear-m7920-n3072-k14336: ×0.997 < ×1.050
- *   - tile128x64r8x4w16x16k16s: i8a8-linear-m7920-n3072-k14336: ×0.960 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-linear-m1024-n2048-k8192: ×0.964 < ×1.050
- *   - tile128x64r8x4w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r8x4w16x16k64: i8a8-linear-m7920-n3072-k14336: ×0.967 < ×1.050
- *   - tile128x64r8x4w16x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r8x8w8x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r8x8w8x16k32: i8a8-linear-m7920-n3072-k14336: ×0.973 < ×1.050
- *   - tile128x64r8x8w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile128x64r8x8w8x16k64: i8a8-linear-m7920-n3072-k14336: ×0.967 < ×1.050
- *   - tile128x64r8x8w8x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile16x128r4x8w16x4k16: i8a8-linear-m7920-n3072-k14336: ×0.932 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-linear-m7920-n3072-k14336: ×0.890 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-linear-m7920-n3072-k14336: ×0.918 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-linear-m7920-n3072-k14336: ×0.893 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-linear-m7920-n3072-k14336: ×0.902 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-linear-m7920-n3072-k14336: ×0.909 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-linear-m7920-n3072-k14336: ×0.913 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-linear-m7920-n3072-k14336: ×0.876 < ×1.050
- *   - tile192x128r12x8w16x16k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x128r12x8w16x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x128r12x8w16x16k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x128r12x8w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x32r12x4w8x16k16: i8a8-linear-m1024-n2048-k8192: ×0.915 < ×1.050
- *   - tile192x32r12x4w8x16k16s: i8a8-linear-m1024-n2048-k2048: ×0.821 < ×1.050
- *   - tile192x32r12x4w8x16k32: i8a8-linear-m1024-n2048-k8192: ×0.887 < ×1.050
- *   - tile192x32r12x4w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x32r12x4w8x16k64: i8a8-linear-m1024-n8192-k2048: ×0.892 < ×1.050
- *   - tile192x32r12x4w8x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x4w16x16k16: i8a8-linear-m1024-n2048-k8192: ×0.920 < ×1.050
- *   - tile192x64r12x4w16x16k16s: i8a8-linear-m1024-n2048-k2048: ×0.781 < ×1.050
- *   - tile192x64r12x4w16x16k32: i8a8-linear-m1024-n2048-k2048: ×0.896 < ×1.050
- *   - tile192x64r12x4w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x4w16x16k64: i8a8-linear-m1024-n2048-k2048: ×0.876 < ×1.050
- *   - tile192x64r12x4w16x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x8w8x16k16: i8a8-linear-m1024-n2048-k2048: ×0.747 < ×1.050
- *   - tile192x64r12x8w8x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x8w8x16k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x8w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x8w8x16k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile192x64r12x8w8x16k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x128r16x8w16x16k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x128r16x8w16x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x128r16x8w16x16k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x128r16x8w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x32r16x4w8x16k16: i8a8-linear-m7920-n3072-k14336: ×0.949 < ×1.050
- *   - tile256x32r16x4w8x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x32r16x4w8x16k32: i8a8-linear-m7920-n3072-k14336: ×0.932 < ×1.050
- *   - tile256x32r16x4w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x4w16x16k16: i8a8-linear-m4096-n2048-k8192: ×0.935 < ×1.050
- *   - tile256x64r16x4w16x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x4w16x16k32: i8a8-linear-m4096-n2048-k8192: ×0.937 < ×1.050
- *   - tile256x64r16x4w16x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x8w8x16k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x8w8x16k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x8w8x16k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile256x64r16x8w8x16k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x128r4x8w16x8k16: i8a8-linear-m7920-n3072-k14336: ×0.950 < ×1.050
- *   - tile32x128r4x8w16x8k32: i8a8-linear-m7920-n3072-k14336: ×0.939 < ×1.050
- *   - tile32x128r8x8w16x4k16: i8a8-linear-m7920-n3072-k14336: ×0.949 < ×1.050
- *   - tile32x128r8x8w16x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x128r8x8w16x4k32: i8a8-linear-m7920-n3072-k14336: ×0.933 < ×1.050
- *   - tile32x128r8x8w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x128r8x8w16x4k64: i8a8-linear-m7920-n3072-k14336: ×0.869 < ×1.050
- *   - tile32x128r8x8w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x32r4x4w8x8k16: i8a8-linear-m7920-n3072-k14336: ×0.919 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-linear-m7920-n3072-k14336: ×0.923 < ×1.050
- *   - tile32x32r8x4w8x4k16: i8a8-linear-m7920-n3072-k14336: ×0.963 < ×1.050
- *   - tile32x32r8x4w8x4k16s: i8a8-linear-m1024-n8192-k2048: ×0.987 < ×1.050
- *   - tile32x32r8x4w8x4k32: i8a8-linear-m7920-n3072-k14336: ×0.966 < ×1.050
- *   - tile32x32r8x4w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x32r8x4w8x4k64: i8a8-linear-m7920-n3072-k14336: ×0.945 < ×1.050
- *   - tile32x32r8x4w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x64r4x4w16x8k16: i8a8-linear-m7920-n3072-k14336: ×0.908 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-linear-m7920-n3072-k14336: ×0.921 < ×1.050
- *   - tile32x64r4x8w8x8k16: i8a8-linear-m4096-n2048-k8192: ×0.983 < ×1.050
- *   - tile32x64r4x8w8x8k32: i8a8-linear-m7920-n3072-k14336: ×0.947 < ×1.050
- *   - tile32x64r8x4w16x4k16: i8a8-linear-m7920-n3072-k14336: ×0.978 < ×1.050
- *   - tile32x64r8x4w16x4k16s: i8a8-linear-m7920-n3072-k14336: ×0.966 < ×1.050
- *   - tile32x64r8x4w16x4k32: i8a8-linear-m4096-n2048-k8192: ×0.988 < ×1.050
- *   - tile32x64r8x4w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x64r8x4w16x4k64: i8a8-linear-m7920-n3072-k14336: ×0.938 < ×1.050
- *   - tile32x64r8x4w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x64r8x8w8x4k16: i8a8-linear-m7920-n3072-k14336: ×0.940 < ×1.050
- *   - tile32x64r8x8w8x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x64r8x8w8x4k32: i8a8-linear-m1024-n2048-k2048: ×0.923 < ×1.050
- *   - tile32x64r8x8w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile32x64r8x8w8x4k64: i8a8-linear-m1024-n2048-k8192: ×0.834 < ×1.050
- *   - tile32x64r8x8w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x128r12x8w16x4k16: i8a8-linear-m1024-n2048-k8192: ×0.851 < ×1.050
- *   - tile48x128r12x8w16x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x128r12x8w16x4k32: i8a8-linear-m1024-n8192-k2048: ×0.816 < ×1.050
- *   - tile48x128r12x8w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x128r12x8w16x4k64: i8a8-linear-m1024-n2048-k2048: ×0.762 < ×1.050
- *   - tile48x128r12x8w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x32r12x4w8x4k16: i8a8-linear-m1024-n2048-k8192: ×1.001 < ×1.050
- *   - tile48x32r12x4w8x4k16s: i8a8-linear-m7920-n14336-k3072: ×0.920 < ×1.050
- *   - tile48x32r12x4w8x4k32: i8a8-linear-m1024-n2048-k8192: ×0.977 < ×1.050
- *   - tile48x32r12x4w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x32r12x4w8x4k64: i8a8-linear-m7920-n3072-k14336: ×0.957 < ×1.050
- *   - tile48x32r12x4w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x4w16x4k16: i8a8-linear-m7920-n3072-k14336: ×1.008 < ×1.050
- *   - tile48x64r12x4w16x4k16s: i8a8-linear-m1024-n2048-k2048: ×0.912 < ×1.050
- *   - tile48x64r12x4w16x4k32: i8a8-linear-m1024-n8192-k2048: ×0.980 < ×1.050
- *   - tile48x64r12x4w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x4w16x4k64: i8a8-linear-m7920-n3072-k14336: ×0.992 < ×1.050
- *   - tile48x64r12x4w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x8w8x4k16: i8a8-linear-m1024-n2048-k8192: ×0.835 < ×1.050
- *   - tile48x64r12x8w8x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x8w8x4k32: i8a8-linear-m1024-n2048-k8192: ×0.793 < ×1.050
- *   - tile48x64r12x8w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x8w8x4k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile48x64r12x8w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r16x8w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r4x8w16x16k16: i8a8-linear-m7920-n3072-k14336: ×0.971 < ×1.050
- *   - tile64x128r4x8w16x16k32: i8a8-linear-m7920-n3072-k14336: ×0.979 < ×1.050
- *   - tile64x128r8x8w16x8k16: i8a8-linear-m7920-n3072-k14336: ×0.957 < ×1.050
- *   - tile64x128r8x8w16x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r8x8w16x8k32: i8a8-linear-m4096-n2048-k8192: ×0.969 < ×1.050
- *   - tile64x128r8x8w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x128r8x8w16x8k64: i8a8-linear-m7920-n3072-k14336: ×0.947 < ×1.050
- *   - tile64x128r8x8w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x32r16x4w8x4k16: i8a8-linear-m1024-n2048-k8192: ×0.946 < ×1.050
- *   - tile64x32r16x4w8x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x32r16x4w8x4k32: i8a8-linear-m7920-n3072-k14336: ×0.939 < ×1.050
- *   - tile64x32r16x4w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x32r16x4w8x4k64: i8a8-linear-m7920-n3072-k14336: ×0.876 < ×1.050
- *   - tile64x32r16x4w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x32r4x4w8x16k16: i8a8-linear-m7920-n3072-k14336: ×0.925 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-linear-m7920-n3072-k14336: ×0.927 < ×1.050
- *   - tile64x32r8x4w8x8k16: i8a8-linear-m7920-n3072-k14336: ×0.985 < ×1.050
- *   - tile64x32r8x4w8x8k16s: i8a8-linear-m7920-n3072-k14336: ×0.994 < ×1.050
- *   - tile64x32r8x4w8x8k32: i8a8-linear-m7920-n3072-k14336: ×0.983 < ×1.050
- *   - tile64x32r8x4w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x32r8x4w8x8k64: i8a8-linear-m7920-n3072-k14336: ×0.955 < ×1.050
- *   - tile64x32r8x4w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x4w16x4k16: i8a8-linear-m7920-n3072-k14336: ×0.943 < ×1.050
- *   - tile64x64r16x4w16x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x4w16x4k32: i8a8-linear-m7920-n3072-k14336: ×0.946 < ×1.050
- *   - tile64x64r16x4w16x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x4w16x4k64: i8a8-linear-m7920-n3072-k14336: ×0.935 < ×1.050
- *   - tile64x64r16x4w16x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k16: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k32: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k64: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r16x8w8x4k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r4x4w16x16k16: i8a8-linear-m7920-n3072-k14336: ×0.932 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-linear-m7920-n3072-k14336: ×0.924 < ×1.050
- *   - tile64x64r4x8w8x16k16: i8a8-linear-m7920-n3072-k14336: ×0.986 < ×1.050
- *   - tile64x64r4x8w8x16k32: i8a8-linear-m7920-n3072-k14336: ×0.966 < ×1.050
- *   - tile64x64r8x4w16x8k16: i8a8-linear-m7920-n3072-k14336: ×1.001 < ×1.050
- *   - tile64x64r8x4w16x8k16s: i8a8-linear-m7920-n3072-k14336: ×0.981 < ×1.050
- *   - tile64x64r8x4w16x8k32: i8a8-linear-m7920-n3072-k14336: ×1.003 < ×1.050
- *   - tile64x64r8x4w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r8x4w16x8k64: i8a8-linear-m7920-n3072-k14336: ×0.972 < ×1.050
- *   - tile64x64r8x4w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r8x8w8x8k16: i8a8-linear-m7920-n3072-k14336: ×0.973 < ×1.050
- *   - tile64x64r8x8w8x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r8x8w8x8k32: i8a8-linear-m7920-n3072-k14336: ×0.958 < ×1.050
- *   - tile64x64r8x8w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile64x64r8x8w8x8k64: i8a8-linear-m7920-n3072-k14336: ×0.951 < ×1.050
- *   - tile64x64r8x8w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x128r12x8w16x8k16: i8a8-linear-m1024-n2048-k8192: ×0.863 < ×1.050
- *   - tile96x128r12x8w16x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x128r12x8w16x8k32: i8a8-linear-m1024-n2048-k2048: ×0.828 < ×1.050
- *   - tile96x128r12x8w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x128r12x8w16x8k64: i8a8-linear-m1024-n2048-k2048: ×0.826 < ×1.050
- *   - tile96x128r12x8w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x32r12x4w8x8k16: i8a8-linear-m7920-n3072-k14336: ×0.989 < ×1.050
- *   - tile96x32r12x4w8x8k16s: i8a8-linear-m1024-n2048-k8192: ×0.895 < ×1.050
- *   - tile96x32r12x4w8x8k32: i8a8-linear-m1024-n2048-k8192: ×0.970 < ×1.050
- *   - tile96x32r12x4w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x32r12x4w8x8k64: i8a8-linear-m1024-n2048-k8192: ×0.955 < ×1.050
- *   - tile96x32r12x4w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x64r12x4w16x8k16: i8a8-linear-m1024-n2048-k2048: ×0.998 < ×1.050
- *   - tile96x64r12x4w16x8k16s: i8a8-linear-m1024-n2048-k8192: ×0.895 < ×1.050
- *   - tile96x64r12x4w16x8k32: i8a8-linear-m1024-n2048-k2048: ×1.000 < ×1.050
- *   - tile96x64r12x4w16x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x64r12x4w16x8k64: i8a8-linear-m1024-n8192-k2048: ×0.981 < ×1.050
- *   - tile96x64r12x4w16x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x64r12x8w8x8k16: i8a8-linear-m1024-n2048-k8192: ×0.835 < ×1.050
- *   - tile96x64r12x8w8x8k16s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x64r12x8w8x8k32: i8a8-linear-m1024-n2048-k8192: ×0.831 < ×1.050
- *   - tile96x64r12x8w8x8k32s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- *   - tile96x64r12x8w8x8k64: i8a8-linear-m7920-n3072-k3072: ×0.806 < ×1.050
- *   - tile96x64r12x8w8x8k64s: screened out by the quick look in i8a8-linear-m1024-n2048-k2048 (no timing to compare)
- * - i8a8.attentionQk (i8a8 attention ①QK, 4 cases): keeps the default tile128x64r8x8w8x16k16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - tile128x128r8x8w16x16k16: i8a8-attention-qk-cross-m1024-n512: ×0.934 < ×1.050
- *   - tile128x128r8x8w16x16k32: i8a8-attention-qk-cross-m1024-n512: ×0.946 < ×1.050
- *   - tile128x32r8x4w8x16k16: i8a8-attention-qk-self-m1024-n1024: ×1.011 < ×1.050
- *   - tile128x32r8x4w8x16k32: i8a8-attention-qk-self-m1024-n1024: ×1.000 < ×1.050
- *   - tile128x64r8x4w16x16k16: i8a8-attention-qk-self-m1024-n1024: ×0.999 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-attention-qk-cross-m4096-n512: ×1.003 < ×1.050
- *   - tile128x64r8x8w8x16k32: i8a8-attention-qk-cross-m4096-n512: ×0.961 < ×1.050
- *   - tile16x128r4x8w16x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.947 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.946 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.956 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.944 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.925 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.942 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.955 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.940 < ×1.050
- *   - tile32x128r4x8w16x8k16: i8a8-attention-qk-self-m1024-n1024: ×0.968 < ×1.050
- *   - tile32x128r4x8w16x8k32: i8a8-attention-qk-self-m1024-n1024: ×0.969 < ×1.050
- *   - tile32x128r8x8w16x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.969 < ×1.050
- *   - tile32x128r8x8w16x4k32: i8a8-attention-qk-cross-m4096-n512: ×0.968 < ×1.050
- *   - tile32x32r4x4w8x8k16: i8a8-attention-qk-self-m1024-n1024: ×0.969 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-attention-qk-self-m1024-n1024: ×0.966 < ×1.050
- *   - tile32x32r8x4w8x4k16: i8a8-attention-qk-self-m1024-n1024: ×1.001 < ×1.050
- *   - tile32x32r8x4w8x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.992 < ×1.050
- *   - tile32x64r4x4w16x8k16: i8a8-attention-qk-self-m1024-n1024: ×0.955 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-attention-qk-self-m1024-n1024: ×0.945 < ×1.050
- *   - tile32x64r4x8w8x8k16: i8a8-attention-qk-self-m1024-n1024: ×0.991 < ×1.050
- *   - tile32x64r4x8w8x8k32: i8a8-attention-qk-self-m1024-n1024: ×0.978 < ×1.050
- *   - tile32x64r8x4w16x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.996 < ×1.050
- *   - tile32x64r8x4w16x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.993 < ×1.050
- *   - tile32x64r8x8w8x4k16: i8a8-attention-qk-self-m1024-n1024: ×0.962 < ×1.050
- *   - tile32x64r8x8w8x4k32: i8a8-attention-qk-self-m1024-n1024: ×0.953 < ×1.050
- *   - tile64x128r4x8w16x16k16: i8a8-attention-qk-cross-m4096-n512: ×0.979 < ×1.050
- *   - tile64x128r4x8w16x16k32: i8a8-attention-qk-self-m1024-n1024: ×0.986 < ×1.050
- *   - tile64x128r8x8w16x8k16: i8a8-attention-qk-cross-m4096-n512: ×0.962 < ×1.050
- *   - tile64x128r8x8w16x8k32: i8a8-attention-qk-self-m1024-n1024: ×0.974 < ×1.050
- *   - tile64x32r4x4w8x16k16: i8a8-attention-qk-self-m1024-n1024: ×0.962 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-attention-qk-self-m1024-n1024: ×0.956 < ×1.050
- *   - tile64x32r8x4w8x8k16: i8a8-attention-qk-cross-m4096-n512: ×1.003 < ×1.050
- *   - tile64x32r8x4w8x8k32: i8a8-attention-qk-cross-m4096-n512: ×0.997 < ×1.050
- *   - tile64x64r4x4w16x16k16: i8a8-attention-qk-self-m1024-n1024: ×0.953 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-attention-qk-self-m1024-n1024: ×0.962 < ×1.050
- *   - tile64x64r4x8w8x16k16: i8a8-attention-qk-self-m1024-n1024: ×1.002 < ×1.050
- *   - tile64x64r4x8w8x16k32: i8a8-attention-qk-self-m1024-n1024: ×0.990 < ×1.050
- *   - tile64x64r8x4w16x8k16: i8a8-attention-qk-self-m1024-n1024: ×1.001 < ×1.050
- *   - tile64x64r8x4w16x8k32: i8a8-attention-qk-self-m1024-n1024: ×1.012 < ×1.050
- *   - tile64x64r8x8w8x8k16: i8a8-attention-qk-cross-m4096-n512: ×0.990 < ×1.050
- *   - tile64x64r8x8w8x8k32: i8a8-attention-qk-cross-m4096-n512: ×0.997 < ×1.050
- * - i8a8.attentionPv (i8a8 attention ③PV, 4 cases): keeps the default tile64x128r8x8w16x8k16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - tile128x128r8x8w16x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.959 < ×1.050
- *   - tile128x128r8x8w16x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.966 < ×1.050
- *   - tile128x32r8x4w8x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.963 < ×1.050
- *   - tile128x32r8x4w8x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.952 < ×1.050
- *   - tile128x64r8x4w16x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.999 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.984 < ×1.050
- *   - tile128x64r8x8w8x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.956 < ×1.050
- *   - tile128x64r8x8w8x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.957 < ×1.050
- *   - tile16x128r4x8w16x4k16: i8a8-attention-pv-self-m4096-n4096: ×0.975 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.955 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-attention-pv-self-m4096-n4096: ×0.952 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-attention-pv-cross-m4096-n512: ×0.944 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-attention-pv-cross-m4096-n512: ×0.949 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.944 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-attention-pv-self-m4096-n4096: ×0.962 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.948 < ×1.050
- *   - tile32x128r4x8w16x8k16: i8a8-attention-pv-self-m4096-n4096: ×1.009 < ×1.050
- *   - tile32x128r4x8w16x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.990 < ×1.050
- *   - tile32x128r8x8w16x4k16: i8a8-attention-pv-cross-m4096-n512: ×0.979 < ×1.050
- *   - tile32x128r8x8w16x4k32: i8a8-attention-pv-self-m1024-n1024: ×0.963 < ×1.050
- *   - tile32x32r4x4w8x8k16: i8a8-attention-pv-cross-m4096-n512: ×0.956 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.946 < ×1.050
- *   - tile32x32r8x4w8x4k16: i8a8-attention-pv-cross-m4096-n512: ×0.955 < ×1.050
- *   - tile32x32r8x4w8x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.949 < ×1.050
- *   - tile32x64r4x4w16x8k16: i8a8-attention-pv-self-m4096-n4096: ×0.954 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.953 < ×1.050
- *   - tile32x64r4x8w8x8k16: i8a8-attention-pv-cross-m4096-n512: ×0.980 < ×1.050
- *   - tile32x64r4x8w8x8k32: i8a8-attention-pv-self-m4096-n4096: ×0.960 < ×1.050
- *   - tile32x64r8x4w16x4k16: i8a8-attention-pv-self-m4096-n4096: ×1.010 < ×1.050
- *   - tile32x64r8x4w16x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.994 < ×1.050
- *   - tile32x64r8x8w8x4k16: i8a8-attention-pv-self-m4096-n4096: ×0.949 < ×1.050
- *   - tile32x64r8x8w8x4k32: i8a8-attention-pv-self-m4096-n4096: ×0.936 < ×1.050
- *   - tile64x128r4x8w16x16k16: i8a8-attention-pv-self-m4096-n4096: ×0.996 < ×1.050
- *   - tile64x128r4x8w16x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.988 < ×1.050
- *   - tile64x128r8x8w16x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.957 < ×1.050
- *   - tile64x32r4x4w8x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.933 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.926 < ×1.050
- *   - tile64x32r8x4w8x8k16: i8a8-attention-pv-self-m4096-n4096: ×0.965 < ×1.050
- *   - tile64x32r8x4w8x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.960 < ×1.050
- *   - tile64x64r4x4w16x16k16: i8a8-attention-pv-cross-m4096-n512: ×0.952 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.965 < ×1.050
- *   - tile64x64r4x8w8x16k16: i8a8-attention-pv-self-m4096-n4096: ×1.002 < ×1.050
- *   - tile64x64r4x8w8x16k32: i8a8-attention-pv-cross-m4096-n512: ×0.993 < ×1.050
- *   - tile64x64r8x4w16x8k16: i8a8-attention-pv-cross-m4096-n512: ×1.006 < ×1.050
- *   - tile64x64r8x4w16x8k32: i8a8-attention-pv-cross-m4096-n512: ×0.997 < ×1.050
- *   - tile64x64r8x8w8x8k16: i8a8-attention-pv-self-m4096-n4096: ×0.911 < ×1.050
- *   - tile64x64r8x8w8x8k32: i8a8-attention-pv-self-m4096-n4096: ×0.957 < ×1.050
- * - i8a8.conv3d (i8a8 conv3d (w8a8 implicit GEMM), 14 cases): keeps the default tile128x64r8x8w8x16k16 (no geometry matches the output in every case at ×1.050 or faster)
- *   - tile128x128r8x8w16x16k16: i8a8-conv3d-cin1024-cout1024-k333-in3x32x32: ×0.934 < ×1.050
- *   - tile128x128r8x8w16x16k32: i8a8-conv3d-cin1024-cout1024-k333-in3x32x32: ×0.926 < ×1.050
- *   - tile128x32r8x4w8x16k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.966 < ×1.050
- *   - tile128x32r8x4w8x16k32: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.969 < ×1.050
- *   - tile128x64r8x4w16x16k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.946 < ×1.050
- *   - tile128x64r8x4w16x16k32: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.938 < ×1.050
- *   - tile128x64r8x8w8x16k32: i8a8-conv3d-cin512-cout256-k333-in6x128x128: ×0.983 < ×1.050
- *   - tile16x128r4x8w16x4k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.912 < ×1.050
- *   - tile16x128r4x8w16x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.871 < ×1.050
- *   - tile16x32r4x4w8x4k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.879 < ×1.050
- *   - tile16x32r4x4w8x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.863 < ×1.050
- *   - tile16x64r4x4w16x4k16: i8a8-conv3d-cin512-cout256-k333-in6x256x256: ×0.863 < ×1.050
- *   - tile16x64r4x4w16x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.865 < ×1.050
- *   - tile16x64r4x8w8x4k16: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.919 < ×1.050
- *   - tile16x64r4x8w8x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.880 < ×1.050
- *   - tile32x128r4x8w16x8k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.951 < ×1.050
- *   - tile32x128r4x8w16x8k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.941 < ×1.050
- *   - tile32x128r8x8w16x4k16: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.943 < ×1.050
- *   - tile32x128r8x8w16x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.909 < ×1.050
- *   - tile32x32r4x4w8x8k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.909 < ×1.050
- *   - tile32x32r4x4w8x8k32: i8a8-conv3d-cin512-cout256-k333-in6x256x256: ×0.870 < ×1.050
- *   - tile32x32r8x4w8x4k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.982 < ×1.050
- *   - tile32x32r8x4w8x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.949 < ×1.050
- *   - tile32x64r4x4w16x8k16: i8a8-conv3d-cin512-cout256-k333-in6x256x256: ×0.900 < ×1.050
- *   - tile32x64r4x4w16x8k32: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.883 < ×1.050
- *   - tile32x64r4x8w8x8k16: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.963 < ×1.050
- *   - tile32x64r4x8w8x8k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.946 < ×1.050
- *   - tile32x64r8x4w16x4k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.973 < ×1.050
- *   - tile32x64r8x4w16x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.956 < ×1.050
- *   - tile32x64r8x8w8x4k16: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.934 < ×1.050
- *   - tile32x64r8x8w8x4k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.888 < ×1.050
- *   - tile64x128r4x8w16x16k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.955 < ×1.050
- *   - tile64x128r4x8w16x16k32: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.956 < ×1.050
- *   - tile64x128r8x8w16x8k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.978 < ×1.050
- *   - tile64x128r8x8w16x8k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.968 < ×1.050
- *   - tile64x32r4x4w8x16k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.912 < ×1.050
- *   - tile64x32r4x4w8x16k32: i8a8-conv3d-cin512-cout512-k333-in6x128x128: ×0.891 < ×1.050
- *   - tile64x32r8x4w8x8k16: i8a8-conv3d-cin512-cout512-k333-in6x64x64: ×0.967 < ×1.050
- *   - tile64x32r8x4w8x8k32: i8a8-conv3d-cin512-cout512-k333-in6x128x128: ×0.979 < ×1.050
- *   - tile64x64r4x4w16x16k16: i8a8-conv3d-cin512-cout256-k333-in6x128x128: ×0.902 < ×1.050
- *   - tile64x64r4x4w16x16k32: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.903 < ×1.050
- *   - tile64x64r4x8w8x16k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.982 < ×1.050
- *   - tile64x64r4x8w8x16k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.973 < ×1.050
- *   - tile64x64r8x4w16x8k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.986 < ×1.050
- *   - tile64x64r8x4w16x8k32: i8a8-conv3d-cin512-cout256-k333-in6x128x128: ×0.991 < ×1.050
- *   - tile64x64r8x8w8x8k16: i8a8-conv3d-cin1024-cout512-k333-in6x128x128: ×0.980 < ×1.050
- *   - tile64x64r8x8w8x8k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.965 < ×1.050
+ * GEMV choices: a candidate replaces the default profile's choice for a shape only when it is at
+ * least ×1.100 faster than that choice in every GEMV sweep record, with its words equal to
+ * the baseline's (identical class: the sequential variant's per-shape exceptions) or inside the
+ * band (reorder class: the parallel rows, measured at every row count of the parallel range and
+ * not slower at any) in every record; among those, the one whose smallest gain is largest. The
+ * choice's time is its fastest over the records, and only when a second record repeats it within
+ * ×1.100: a shape whose choice has no such time keeps the default, and so do the shared
+ * sequential keys whose cases disagree and the rows with packed activations.
+ *
+ * - linearGemv (the GEMV choices of linear), from 2 GEMV sweep records:
+ *   - [1] outputs/workbench/browser-apple-m5/gemv-sweep_2026-11-23T16-43-29.json (2026-11-23T16:43:28.766Z, set full): 345 groups — 345 current, 0 not current (their case is not the current one); of the current, 0 without a usable reference at exact and 0 at reorder; 0 rows of current groups not current
+ *   - [2] outputs/workbench/browser-apple-m5/gemv-sweep_2026-11-23T18-03-03.json (2026-11-23T18:03:02.056Z, set full): 345 groups — 345 current, 0 not current (their case is not the current one); of the current, 0 without a usable reference at exact and 0 at reorder; 0 rows of current groups not current
+ * - identical class (sequential.shapes, M = 1): 43 adopted, 56 kept
+ *   - i4 n8960 k1536 (case i4g32-n8960-k1536): c32u4 -> c32u2 (×1.244 [1], ×1.245 [2])
+ *   - i4 n2048 k1536 (cases i4g32-n2048-k1536, i4g512-n2048-k1536): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n2048-k1536 adopts c32u2; i4g512-n2048-k1536 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.995 < ×1.100 in [1])))
+ *   - i4 n256 k1536 (cases i4g32-n256-k1536, i4g512-n256-k1536): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n256-k1536 adopts c16u2; i4g512-n256-k1536 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.063 < ×1.100 in [1])))
+ *   - i4 n1536 k2048 (cases i4g32-n1536-k2048, i4g2048-n1536-k2048): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1536-k2048 adopts c64u2; i4g2048-n1536-k2048 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.992 < ×1.100 in [1])))
+ *   - i4 n6144 k1536 (cases i4g32-n6144-k1536, i4g512-n6144-k1536): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n6144-k1536 adopts c64u2; i4g512-n6144-k1536 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×1.002 < ×1.100 in [1])))
+ *   - i4 n1536 k6144 (cases i4g32-n1536-k6144, i4g2048-n1536-k6144): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1536-k6144 adopts c16u2; i4g2048-n1536-k6144 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.004 < ×1.100 in [1])))
+ *   - i4 n1536 k256 (case i4g32-n1536-k256): c32u4 -> c32u2 (×1.368 [1], ×1.367 [2])
+ *   - i4 n4096 k1536 (cases i4g32-n4096-k1536, i4g512-n4096-k1536): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n4096-k1536 adopts c32u2; i4g512-n4096-k1536 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×1.000 < ×1.100 in [1])))
+ *   - i4 n512 k1536 (cases i4g32-n512-k1536, i4g512-n512-k1536): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n512-k1536 adopts c16u2; i4g512-n512-k1536 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.066 < ×1.100 in [1])))
+ *   - i4 n1536 k4096 (cases i4g32-n1536-k4096, i4g4096-n1536-k4096): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1536-k4096 adopts c128u2; i4g4096-n1536-k4096 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×0.989 < ×1.100 in [1])))
+ *   - i4 n12288 k1536 (case i4g32-n12288-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c32u2: ×1.098 < ×1.100 in [1])); c32u2: ×1.098 [1], ×1.123 [2]
+ *   - i4 n1536 k12288 (case i4g32-n1536-k12288): c32u4 -> c64u2 (×1.622 [1], ×1.624 [2])
+ *   - i8 n262144 k1536 (case i8-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.999 < ×1.100 in [1])); c64u4: ×0.999 [1], ×0.974 [2]
+ *   - i4 n262144 k1536 (case i4g32-n262144-k1536): c32u4 -> c16u8 (×1.232 [1], ×1.219 [2])
+ *   - i4 n256 k3072 (case i4g32-n256-k3072): c32u4 -> c16u2 (×1.740 [1], ×1.750 [2])
+ *   - i4 n1024 k256 (case i4g32-n1024-k256): c32u4 -> c64u2 (×1.476 [1], ×1.454 [2])
+ *   - i4 n256 k1024 (case i4g32-n256-k1024): c32u4 -> c16u2 (×1.704 [1], ×1.690 [2])
+ *   - i4 n2048 k256 (case i4g32-n2048-k256): c32u4 -> c32u2 (×1.328 [1], ×1.331 [2])
+ *   - i4 n256 k2048 (case i4g32-n256-k2048): c32u4 -> c16u2 (×1.743 [1], ×1.736 [2])
+ *   - i4 n262144 k256 (case i4g32-n262144-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×1.052 < ×1.100 in [1])); c16u8: ×1.052 [1], ×1.053 [2]
+ *   - i8 n256 k3072 (case i8-n256-k3072): c32u4 -> c16u4 (×1.132 [1], ×1.111 [2])
+ *   - i8 n1024 k256 (case i8-n1024-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.041 < ×1.100 in [1])); c16u4: ×1.041 [1], ×1.011 [2]
+ *   - i8 n256 k1024 (case i8-n256-k1024): c32u4 -> c16u4 (×1.164 [1], ×1.137 [2])
+ *   - i8 n2048 k256 (case i8-n2048-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.974 < ×1.100 in [1])); c64u4: ×0.974 [1], ×0.966 [2]
+ *   - i8 n256 k2048 (case i8-n256-k2048): c32u4 -> c16u4 (×1.131 [1], ×1.130 [2])
+ *   - i8 n262144 k256 (case i8-n262144-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×1.002 < ×1.100 in [1])); c128u4: ×1.002 [1], ×1.001 [2]
+ *   - i8 n256 k1536 (case i8-n256-k1536): c32u4 -> c16u4 (×1.116 [1], ×1.101 [2])
+ *   - i8 n1536 k256 (case i8-n1536-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.008 < ×1.100 in [1])); c16u4: ×1.008 [1], ×1.007 [2]
+ *   - i2 n12288 k1536 (case i2-n12288-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.985 < ×1.100 in [1])); c64u4: ×0.985 [1], ×0.993 [2]
+ *   - i2 n1536 k12288 (case i2-n1536-k12288): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.998 < ×1.100 in [1])); c64u4: ×0.998 [1], ×0.997 [2]
+ *   - i2 n262144 k1536 (case i2-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×1.000 < ×1.100 in [1])); c64u4: ×1.000 [1], ×1.004 [2]
+ *   - i4 n10752 k2560 (case i4g32-n10752-k2560): c32u4 -> c16u2 (×1.179 [1], ×1.142 [2])
+ *   - i4 n2048 k2560 (cases i4g32-n2048-k2560, i4g512-n2048-k2560): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n2048-k2560 adopts c16u2; i4g512-n2048-k2560 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.998 < ×1.100 in [1])))
+ *   - i4 n512 k2560 (cases i4g32-n512-k2560, i4g512-n512-k2560): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n512-k2560 adopts c16u2; i4g512-n512-k2560 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.053 < ×1.100 in [1])))
+ *   - i4 n256 k2560 (case i4g32-n256-k2560): c32u4 -> c16u2 (×1.740 [1], ×1.742 [2])
+ *   - i4 n2560 k2048 (cases i4g32-n2560-k2048, i4g2048-n2560-k2048): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n2560-k2048 adopts c16u2; i4g2048-n2560-k2048 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.996 < ×1.100 in [1])))
+ *   - i4 n10240 k2560 (cases i4g32-n10240-k2560, i4g512-n10240-k2560): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n10240-k2560 adopts c32u8; i4g512-n10240-k2560 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u4: ×0.975 < ×1.100 in [1])))
+ *   - i4 n2560 k10240 (cases i4g32-n2560-k10240, i4g2048-n2560-k10240): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n2560-k10240 adopts c256u2; i4g2048-n2560-k10240 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×0.947 < ×1.100 in [1])))
+ *   - i4 n2560 k256 (case i4g32-n2560-k256): c32u4 -> c32u2 (×1.331 [1], ×1.359 [2])
+ *   - i4 n4096 k2560 (cases i4g32-n4096-k2560, i4g512-n4096-k2560): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n4096-k2560 adopts c64u2; i4g512-n4096-k2560 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×1.000 < ×1.100 in [1])))
+ *   - i4 n1024 k2560 (cases i4g32-n1024-k2560, i4g512-n1024-k2560): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n1024-k2560 adopts c32u2; i4g512-n1024-k2560 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.033 < ×1.100 in [1])))
+ *   - i4 n2560 k4096 (cases i4g32-n2560-k4096, i4g4096-n2560-k4096): keeps c32u4 (the cases that share the key disagree, so the default stays (i4g32-n2560-k4096 adopts c16u2; i4g4096-n2560-k4096 no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.995 < ×1.100 in [1])))
+ *   - i8 n262144 k2560 (case i8-n262144-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.994 < ×1.100 in [1])); c64u4: ×0.994 [1], ×0.989 [2]
+ *   - i4 n262144 k2560 (case i4g32-n262144-k2560): c32u4 -> c128u8 (×1.241 [1], ×1.238 [2])
+ *   - i4 n256 k5120 (case i4g32-n256-k5120): c32u4 -> c16u2 (×1.740 [1], ×1.736 [2])
+ *   - i8 n256 k2560 (case i8-n256-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.099 < ×1.100 in [1])); c16u4: ×1.099 [1], ×1.086 [2]
+ *   - i8 n2560 k256 (case i8-n2560-k256): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×0.992 < ×1.100 in [1])); c64u4: ×0.992 [1], ×1.011 [2]
+ *   - i2 n262144 k2560 (case i2-n262144-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u4: ×1.005 < ×1.100 in [1])); c64u4: ×1.005 [1], ×1.001 [2]
+ *   - i4 n15360 k3840 (case i4g32-n15360-k3840): c32u4 -> c64u2 (×1.175 [1], ×1.177 [2])
+ *   - i4 n8192 k3840 (case i4g32-n8192-k3840): c32u4 -> c32u2 (×1.204 [1], ×1.181 [2])
+ *   - i4 n4096 k3840 (case i4g32-n4096-k3840): c32u4 -> c256u2 (×1.352 [1], ×1.359 [2])
+ *   - i4 n2048 k3840 (case i4g32-n2048-k3840): c32u4 -> c16u2 (×1.656 [1], ×1.652 [2])
+ *   - i4 n512 k3840 (case i4g32-n512-k3840): c32u4 -> c16u2 (×1.736 [1], ×1.731 [2])
+ *   - i4 n3840 k4096 (case i4g32-n3840-k4096): c32u4 -> c32u2 (×1.406 [1], ×1.419 [2])
+ *   - i4 n3840 k8192 (case i4g32-n3840-k8192): c32u4 -> c256u2 (×1.308 [1], ×1.325 [2])
+ *   - i4 n3840 k15360 (case i4g32-n3840-k15360): c32u4 -> c256u2 (×1.284 [1], ×1.295 [2])
+ *   - i4 n262144 k3840 (case i4g32-n262144-k3840): c32u4 -> c16u2 (×1.257 [1], ×1.248 [2])
+ *   - i4 n1024 k7680 (case i4g32-n1024-k7680): c32u4 -> c32u2 (×1.772 [1], ×1.799 [2])
+ *   - i4 n4096 k1024 (case i4g32-n4096-k1024): c32u4 -> c32u2 (×1.257 [1], ×1.257 [2])
+ *   - i4 n1024 k4096 (case i4g32-n1024-k4096): c32u4 -> c32u2 (×1.763 [1], ×1.765 [2])
+ *   - i4 n8192 k1024 (case i4g32-n8192-k1024): c32u4 -> c32u2 (×1.232 [1], ×1.234 [2])
+ *   - i4 n1024 k8192 (case i4g32-n1024-k8192): c32u4 -> c32u2 (×1.743 [1], ×1.767 [2])
+ *   - i4 n3840 k1024 (case i4g32-n3840-k1024): c32u4 -> c32u2 (×1.303 [1], ×1.302 [2])
+ *   - i4 n262144 k1024 (case i4g32-n262144-k1024): c32u4 -> c16u8 (×1.230 [1], ×1.229 [2])
+ *   - i4 n8192 k2816 (case i4g32-n8192-k2816): c32u4 -> c32u8 (×1.130 [1], ×1.141 [2])
+ *   - i4 n4096 k2816 (case i4g32-n4096-k2816): c32u4 -> c32u2 (×1.346 [1], ×1.353 [2])
+ *   - i4 n2048 k2816 (case i4g32-n2048-k2816): c32u4 -> c16u2 (×1.619 [1], ×1.600 [2])
+ *   - i4 n2112 k2816 (case i4g32-n2112-k2816): c32u4 -> c256u2 (×1.626 [1], ×1.637 [2])
+ *   - i4 n1024 k2816 (case i4g32-n1024-k2816): c32u4 -> c32u2 (×1.688 [1], ×1.674 [2])
+ *   - i4 n128 k2816 (case i4g32-n128-k2816): c32u4 -> c16u2 (×1.730 [1], ×1.744 [2])
+ *   - i4 n2816 k4096 (case i4g32-n2816-k4096): c32u4 -> c64u2 (×1.439 [1], ×1.441 [2])
+ *   - i4 n2816 k8192 (case i4g32-n2816-k8192): c32u4 -> c32u2 (×1.338 [1], ×1.313 [2])
+ *   - i4 n2816 k2112 (case i4g32-n2816-k2112): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u1: its words differ from the baseline's in [1] at M=1))
+ *   - i4 n262144 k2816 (case i4g32-n262144-k2816): c32u4 -> c32u8 (×1.234 [1], ×1.183 [2])
+ *   - bf16 n8960 k1536 (case bf16-n8960-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.998 < ×1.100 in [1])); c16u16: ×0.998 [1], ×0.996 [2]
+ *   - bf16 n2048 k1536 (case bf16-n2048-k1536): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×1.008 < ×1.100 in [1])); c16u4: ×1.008 [1], ×1.000 [2]
+ *   - bf16 n256 k1536 (case bf16-n256-k1536): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×0.897 < ×1.100 in [1])); c16u8: ×0.897 [1], ×0.892 [2]
+ *   - bf16 n1536 k2048 (case bf16-n1536-k2048): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u4: ×0.999 < ×1.100 in [1])); c16u4: ×0.999 [1], ×1.001 [2]
+ *   - bf16 n6144 k1536 (case bf16-n6144-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.994 < ×1.100 in [1])); c16u16: ×0.994 [1], ×0.986 [2]
+ *   - bf16 n1536 k6144 (case bf16-n1536-k6144): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×1.037 < ×1.100 in [1])); c16u8: ×1.037 [1], ×1.019 [2]
+ *   - bf16 n1536 k256 (case bf16-n1536-k256): keeps c32u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.927 < ×1.100 in [1])); c16u16: ×0.927 [1], ×0.908 [2]
+ *   - bf16 n4096 k1536 (case bf16-n4096-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.994 < ×1.100 in [1])); c16u16: ×0.994 [1], ×0.960 [2]
+ *   - bf16 n512 k1536 (case bf16-n512-k1536): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c32u16: ×0.976 < ×1.100 in [1])); c32u16: ×0.976 [1], ×0.979 [2]
+ *   - bf16 n1536 k4096 (case bf16-n1536-k4096): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u16: ×0.990 < ×1.100 in [1])); c64u16: ×0.990 [1], ×1.016 [2]
+ *   - bf16 n12288 k1536 (case bf16-n12288-k1536): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×1.001 < ×1.100 in [1])); c16u16: ×1.001 [1], ×0.993 [2]
+ *   - bf16 n1536 k12288 (case bf16-n1536-k12288): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c32u8: ×1.026 < ×1.100 in [1])); c32u8: ×1.026 [1], ×1.022 [2]
+ *   - bf16 n262144 k1536 (case bf16-n262144-k1536): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×1.064 < ×1.100 in [1])); c16u8: ×1.064 [1], ×1.057 [2]
+ *   - bf16 n10752 k2560 (case bf16-n10752-k2560): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×1.003 < ×1.100 in [1])); c16u16: ×1.003 [1], ×0.997 [2]
+ *   - bf16 n2048 k2560 (case bf16-n2048-k2560): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c128u16: ×1.006 < ×1.100 in [1])); c128u16: ×1.006 [1], ×1.007 [2]
+ *   - bf16 n512 k2560 (case bf16-n512-k2560): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×1.015 < ×1.100 in [1])); c16u8: ×1.015 [1], ×1.012 [2]
+ *   - bf16 n256 k2560 (case bf16-n256-k2560): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u8: ×0.884 < ×1.100 in [1])); c16u8: ×0.884 [1], ×0.888 [2]
+ *   - bf16 n2560 k2048 (case bf16-n2560-k2048): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.984 < ×1.100 in [1])); c16u16: ×0.984 [1], ×1.015 [2]
+ *   - bf16 n10240 k2560 (case bf16-n10240-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×1.067 < ×1.100 in [1])); c16u16: ×1.067 [1], ×1.062 [2]
+ *   - bf16 n2560 k10240 (case bf16-n2560-k10240): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c256u8: ×1.010 < ×1.100 in [1])); c256u8: ×1.010 [1], ×1.012 [2]
+ *   - bf16 n2560 k256 (case bf16-n2560-k256): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c32u16: ×1.028 < ×1.100 in [1])); c32u16: ×1.028 [1], ×1.026 [2]
+ *   - bf16 n4096 k2560 (case bf16-n4096-k2560): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×0.988 < ×1.100 in [1])); c16u16: ×0.988 [1], ×0.998 [2]
+ *   - bf16 n1024 k2560 (case bf16-n1024-k2560): keeps c16u16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u16: ×0.998 < ×1.100 in [1])); c64u16: ×0.998 [1], ×1.003 [2]
+ *   - bf16 n2560 k4096 (case bf16-n2560-k4096): keeps c16u8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c64u8: ×0.996 < ×1.100 in [1])); c64u8: ×0.996 [1], ×1.004 [2]
+ *   - bf16 n262144 k2560 (case bf16-n262144-k2560): keeps c32u4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest c16u16: ×1.068 < ×1.100 in [1])); c16u16: ×1.068 [1], ×1.070 [2]
+ * - reorder class (parallelShapes, M = 1 to 8): 66 adopted, 49 kept
+ *   - i4 g32 n8960 k1536 (case i4g32-n8960-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×1.016 < ×1.100 in [1])); parallel-l16: ×1.016 [1], ×1.013 [2]
+ *   - i4 g32 n2048 k1536 (case i4g32-n2048-k1536): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.141 [1] M=4, ×1.125 [2] M=4, ×1.221 [1] M=8, ×1.213 [2] M=8
+ *   - i4 g32 n256 k1536 (case i4g32-n256-k1536): parallel-l32 with row blocks of 2 -> parallel-l16 with row blocks of 4 (×1.243 [1], ×1.181 [2]); at the other row counts: ×1.416 [1] M=4, ×1.395 [2] M=4, ×1.637 [1] M=8, ×1.632 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.435 [1], ×1.391 [2]): a Session option, not a row
+ *   - i4 g32 n1536 k2048 (case i4g32-n1536-k2048): staged-l32 -> parallel-l8 with row blocks of 4 (×1.510 [1], ×1.525 [2]); at the other row counts: ×2.449 [1] M=4, ×2.457 [2] M=4, ×2.621 [1] M=8, ×2.611 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.601 [1], ×1.602 [2]): a Session option, not a row
+ *   - i4 g32 n6144 k1536 (case i4g32-n6144-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×1.025 < ×1.100 in [1])); parallel-l16: ×1.025 [1], ×1.023 [2]
+ *   - i4 g32 n1536 k6144 (case i4g32-n1536-k6144): keeps staged-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.065 < ×1.100 in [1])); parallel-l4: ×1.065 [1], ×1.055 [2]
+ *   - i4 g32 n1536 k256 (case i4g32-n1536-k256): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.303 [1] M=4, ×1.302 [2] M=4, ×1.347 [1] M=8, ×1.348 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×1.109 [1], ×1.123 [2]): a Session option, not a row
+ *   - i4 g32 n4096 k1536 (case i4g32-n4096-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.010 < ×1.100 in [1])); parallel-l8: ×1.010 [1], ×1.014 [2]
+ *   - i4 g32 n512 k1536 (case i4g32-n512-k1536): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.241 [1], ×1.236 [2]); at the other row counts: ×1.901 [1] M=4, ×1.901 [2] M=4, ×2.115 [1] M=8, ×2.117 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.401 [1], ×1.367 [2]): a Session option, not a row
+ *   - i4 g32 n1536 k4096 (case i4g32-n1536-k4096): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.276 [1] M=4, ×1.274 [2] M=4, ×1.256 [1] M=8, ×1.254 [2] M=8
+ *   - i4 g32 n12288 k1536 (case i4g32-n12288-k1536): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l16: ×1.168 [1], ×1.193 [2]
+ *   - i4 g32 n1536 k12288 (case i4g32-n1536-k12288): keeps staged-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.052 < ×1.100 in [1])); parallel-l32: ×1.052 [1], ×1.038 [2]
+ *   - i8 n262144 k1536 (case i8-n262144-k1536): parallel-l16 -> parallel-l16 with row blocks of 4; at the other row counts: ×1.654 [1] M=4, ×1.646 [2] M=4, ×1.750 [1] M=8, ×1.719 [2] M=8
+ *   - i4 g32 n262144 k1536 (case i4g32-n262144-k1536): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l16: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); staged-l16: ×1.308 [1], ×1.295 [2]
+ *   - i4 g32 n256 k3072 (case i4g32-n256-k3072): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.108 [1], ×1.112 [2]); at the other row counts: ×1.385 [1] M=4, ×1.382 [2] M=4, ×1.499 [1] M=8, ×1.490 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.200 [1], ×1.223 [2]): a Session option, not a row
+ *   - i4 g32 n1024 k256 (case i4g32-n1024-k256): no row (c32u4) -> parallel-l4 with row blocks of 4 (×1.768 [1], ×1.802 [2]); at the other row counts: ×1.213 [1] M=4, ×1.222 [2] M=4, ×1.187 [1] M=8, ×1.193 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×2.047 [1], ×1.984 [2]): a Session option, not a row
+ *   - i4 g32 n256 k1024 (case i4g32-n256-k1024): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×1.098 < ×1.100 in [1])); parallel-l16: ×1.098 [1], ×1.142 [2]
+ *     - subgroup32-l16 meets the rule too (×1.380 [1], ×1.371 [2]): a Session option, not a row
+ *   - i4 g32 n2048 k256 (case i4g32-n2048-k256): no row (c32u4) -> staged-l4 with row blocks of 4 (×1.403 [1], ×1.405 [2]); at the other row counts: ×1.245 [1] M=4, ×1.235 [2] M=4, ×1.336 [1] M=8, ×1.336 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×1.530 [1], ×1.535 [2]): a Session option, not a row
+ *   - i4 g32 n256 k2048 (case i4g32-n256-k2048): no row (c32u4) -> parallel-l16 with row blocks of 4 (×7.269 [1], ×7.298 [2]); at the other row counts: ×2.173 [1] M=4, ×2.175 [2] M=4, ×1.550 [1] M=8, ×1.554 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×8.261 [1], ×8.046 [2]): a Session option, not a row
+ *   - i4 g32 n262144 k256 (case i4g32-n262144-k256): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l8: ×1.079 < ×1.100 in [1])); staged-l8: ×1.079 [1], ×1.080 [2]
+ *   - i8 n256 k3072 (case i8-n256-k3072): no row (c32u4) -> parallel-l16 with row blocks of 2 (×4.676 [1], ×4.675 [2]); at the other row counts: ×2.691 [1] M=4, ×2.728 [2] M=4, ×1.759 [1] M=8, ×1.768 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×5.488 [1], ×5.269 [2]): a Session option, not a row
+ *   - i8 n1024 k256 (case i8-n1024-k256): no row (c32u4) -> parallel-l4 with row blocks of 4 (×1.258 [1], ×1.273 [2]); at the other row counts: ×1.225 [1] M=4, ×1.229 [2] M=4, ×1.320 [1] M=8, ×1.320 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×1.439 [1], ×1.426 [2]): a Session option, not a row
+ *   - i8 n256 k1024 (case i8-n256-k1024): no row (c32u4) -> parallel-l16 with row blocks of 4 (×3.189 [1], ×3.021 [2]); at the other row counts: ×1.891 [1] M=4, ×1.911 [2] M=4, ×1.627 [1] M=8, ×1.626 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×3.693 [1], ×3.669 [2]): a Session option, not a row
+ *   - i8 n2048 k256 (case i8-n2048-k256): no row (c32u4) -> staged-l4 with row blocks of 4 (×1.119 [1], ×1.112 [2]); at the other row counts: ×1.388 [1] M=4, ×1.388 [2] M=4, ×1.395 [1] M=8, ×1.395 [2] M=8
+ *   - i8 n256 k2048 (case i8-n256-k2048): no row (c32u4) -> staged-l32 with row blocks of 4 (×4.058 [1], ×4.053 [2]); at the other row counts: ×2.146 [1] M=4, ×2.150 [2] M=4, ×1.553 [1] M=8, ×1.550 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×4.798 [1], ×4.587 [2]): a Session option, not a row
+ *   - i8 n262144 k256 (case i8-n262144-k256): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l8: ×1.306 [1], ×1.303 [2]
+ *   - i4 g512 n2048 k1536 (case i4g512-n2048-k1536): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.512 [1] M=4, ×1.512 [2] M=4, ×1.613 [1] M=8, ×1.614 [2] M=8
+ *   - i4 g512 n256 k1536 (case i4g512-n256-k1536): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.122 [1], ×1.109 [2]); at the other row counts: ×1.506 [1] M=4, ×1.499 [2] M=4, ×1.690 [1] M=8, ×1.697 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.358 [1], ×1.364 [2]): a Session option, not a row
+ *   - i4 g2048 n1536 k2048 (case i4g2048-n1536-k2048): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l8 meets the rule too (×1.334 [1], ×1.326 [2]): a Session option, not a row
+ *   - i4 g512 n6144 k1536 (case i4g512-n6144-k1536): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.573 [1] M=4, ×1.573 [2] M=4, ×1.640 [1] M=8, ×1.644 [2] M=8
+ *   - i4 g2048 n1536 k6144 (case i4g2048-n1536-k6144): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *   - i8 n256 k1536 (case i8-n256-k1536): parallel-l32 -> parallel-l32 with row blocks of 4; at the other row counts: ×1.208 [1] M=4, ×1.204 [2] M=4, ×1.257 [1] M=8, ×1.256 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×1.128 [1], ×1.134 [2]): a Session option, not a row
+ *   - i8 n1536 k256 (case i8-n1536-k256): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.418 [1] M=4, ×1.449 [2] M=4, ×1.421 [1] M=8, ×1.425 [2] M=8
+ *   - i4 g512 n4096 k1536 (case i4g512-n4096-k1536): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.562 [1] M=4, ×1.569 [2] M=4, ×1.629 [1] M=8, ×1.631 [2] M=8
+ *   - i4 g512 n512 k1536 (case i4g512-n512-k1536): parallel-l32 -> staged-l16 with row blocks of 4 (×1.234 [1], ×1.238 [2]); at the other row counts: ×1.722 [1] M=4, ×1.718 [2] M=4, ×1.928 [1] M=8, ×1.928 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.368 [1], ×1.393 [2]): a Session option, not a row
+ *   - i4 g4096 n1536 k4096 (case i4g4096-n1536-k4096): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *   - i2 n12288 k1536 (case i2-n12288-k1536): parallel-l2 -> parallel-l2 with row blocks of 4; at the other row counts: ×1.694 [1] M=4, ×1.696 [2] M=4, ×1.786 [1] M=8, ×1.788 [2] M=8
+ *   - i2 n1536 k12288 (case i2-n1536-k12288): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *   - i2 n262144 k1536 (case i2-n262144-k1536): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×0.985 < ×1.100 in [1])); parallel-l2: ×0.985 [1], ×1.008 [2]
+ *   - i4 g32 n10752 k2560 (case i4g32-n10752-k2560): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l32: ×1.380 [1], ×1.384 [2]
+ *   - i4 g32 n2048 k2560 (case i4g32-n2048-k2560): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.128 [1] M=4, ×1.128 [2] M=4, ×1.183 [1] M=8, ×1.184 [2] M=8
+ *   - i4 g32 n512 k2560 (case i4g32-n512-k2560): parallel-l32 -> staged-l16 with row blocks of 4 (×1.159 [1], ×1.152 [2]); at the other row counts: ×1.638 [1] M=4, ×1.633 [2] M=4, ×1.777 [1] M=8, ×1.778 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.304 [1], ×1.311 [2]): a Session option, not a row
+ *   - i4 g32 n256 k2560 (case i4g32-n256-k2560): parallel-l32 -> parallel-l16 with row blocks of 4 (×1.156 [1], ×1.138 [2]); at the other row counts: ×1.459 [1] M=4, ×1.460 [2] M=4, ×1.603 [1] M=8, ×1.603 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.314 [1], ×1.301 [2]): a Session option, not a row
+ *   - i4 g32 n2560 k2048 (case i4g32-n2560-k2048): staged-l32 -> parallel-l4 with row blocks of 4 (×1.132 [1], ×1.134 [2]); at the other row counts: ×2.705 [1] M=4, ×2.709 [2] M=4, ×2.924 [1] M=8, ×2.924 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.176 [1], ×1.173 [2]): a Session option, not a row
+ *   - i4 g32 n10240 k2560 (case i4g32-n10240-k2560): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l32: ×1.388 [1], ×1.387 [2]
+ *   - i4 g32 n2560 k10240 (case i4g32-n2560-k10240): keeps staged-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.016 < ×1.100 in [1])); parallel-l32: ×1.016 [1], ×1.012 [2]
+ *   - i4 g32 n2560 k256 (case i4g32-n2560-k256): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.131 [1] M=4, ×1.141 [2] M=4, ×1.196 [1] M=8, ×1.199 [2] M=8
+ *   - i4 g32 n4096 k2560 (case i4g32-n4096-k2560): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.072 [1] M=4, ×1.081 [2] M=4, ×1.200 [1] M=8, ×1.203 [2] M=8
+ *   - i4 g32 n1024 k2560 (case i4g32-n1024-k2560): parallel-l32 with row blocks of 2 -> parallel-l8 with row blocks of 4 (×1.310 [1], ×1.306 [2]); at the other row counts: ×1.853 [1] M=4, ×1.854 [2] M=4, ×2.049 [1] M=8, ×2.051 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.409 [1], ×1.409 [2]): a Session option, not a row
+ *   - i4 g32 n2560 k4096 (case i4g32-n2560-k4096): keeps staged-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.028 < ×1.100 in [1])); parallel-l32: ×1.028 [1], ×1.028 [2]
+ *   - i8 n262144 k2560 (case i8-n262144-k2560): parallel-l16 -> parallel-l16 with row blocks of 4; at the other row counts: ×1.614 [1] M=4, ×1.617 [2] M=4, ×1.730 [1] M=8, ×1.758 [2] M=8
+ *   - i4 g32 n262144 k2560 (case i4g32-n262144-k2560): no row (c32u4) -> parallel-l16 with row blocks of 4 (×1.419 [1], ×1.419 [2]); at the other row counts: ×1.416 [1] M=4, ×1.419 [2] M=4, ×1.214 [1] M=8, ×1.221 [2] M=8
+ *   - i4 g32 n256 k5120 (case i4g32-n256-k5120): no row (c32u4) -> parallel-l16 with row blocks of 4 (×10.209 [1], ×10.261 [2]); at the other row counts: ×2.813 [1] M=4, ×2.804 [2] M=4, ×1.803 [1] M=8, ×1.805 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×11.009 [1], ×11.299 [2]): a Session option, not a row
+ *   - i4 g512 n2048 k2560 (case i4g512-n2048-k2560): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.512 [1] M=4, ×1.515 [2] M=4, ×1.599 [1] M=8, ×1.599 [2] M=8
+ *   - i4 g512 n512 k2560 (case i4g512-n512-k2560): parallel-l32 -> staged-l16 with row blocks of 4 (×1.112 [1], ×1.116 [2]); at the other row counts: ×1.640 [1] M=4, ×1.639 [2] M=4, ×1.776 [1] M=8, ×1.777 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.233 [1], ×1.240 [2]): a Session option, not a row
+ *   - i4 g2048 n2560 k2048 (case i4g2048-n2560-k2048): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *     - subgroup32-l4 meets the rule too (×1.128 [1], ×1.128 [2]): a Session option, not a row
+ *   - i4 g512 n10240 k2560 (case i4g512-n10240-k2560): parallel-l4 -> staged-l16 with row blocks of 4 (×1.315 [1], ×1.323 [2]); at the other row counts: ×1.339 [1] M=4, ×1.363 [2] M=4, ×1.350 [1] M=8, ×1.360 [2] M=8
+ *   - i4 g2048 n2560 k10240 (case i4g2048-n2560-k10240): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *   - i8 n256 k2560 (case i8-n256-k2560): parallel-l32 -> parallel-l32 with row blocks of 4; at the other row counts: ×1.231 [1] M=4, ×1.237 [2] M=4, ×1.273 [1] M=8, ×1.273 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×1.125 [1], ×1.100 [2]): a Session option, not a row
+ *   - i8 n2560 k256 (case i8-n2560-k256): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.519 [1] M=4, ×1.521 [2] M=4, ×1.579 [1] M=8, ×1.579 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×1.122 [1], ×1.108 [2]): a Session option, not a row
+ *   - i4 g512 n4096 k2560 (case i4g512-n4096-k2560): parallel-l4 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.528 [1] M=4, ×1.526 [2] M=4, ×1.625 [1] M=8, ×1.625 [2] M=8
+ *   - i4 g512 n1024 k2560 (case i4g512-n1024-k2560): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.275 [1], ×1.276 [2]); at the other row counts: ×1.980 [1] M=4, ×1.975 [2] M=4, ×2.210 [1] M=8, ×2.210 [2] M=8
+ *     - subgroup32-l16 meets the rule too (×1.394 [1], ×1.391 [2]): a Session option, not a row
+ *   - i4 g4096 n2560 k4096 (case i4g4096-n2560-k4096): keeps packed-l32 (the default takes packed activations, whose kernels the sweep does not measure)
+ *   - i2 n262144 k2560 (case i2-n262144-k2560): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l2: ×1.003 < ×1.100 in [1])); parallel-l2: ×1.003 [1], ×0.999 [2]
+ *   - i4 g32 n15360 k3840 (case i4g32-n15360-k3840): parallel-l4 -> parallel-l16 with row blocks of 4 (×1.273 [1], ×1.274 [2]); at the other row counts: ×1.333 [1] M=4, ×1.323 [2] M=4, ×1.335 [1] M=8, ×1.321 [2] M=8
+ *   - i4 g32 n8192 k3840 (case i4g32-n8192-k3840): parallel-l4 -> parallel-l16 with row blocks of 4 (×1.282 [1], ×1.282 [2]); at the other row counts: ×1.306 [1] M=4, ×1.311 [2] M=4, ×1.302 [1] M=8, ×1.312 [2] M=8
+ *   - i4 g32 n4096 k3840 (case i4g32-n4096-k3840): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.037 [1] M=4, ×1.070 [2] M=4, ×1.172 [1] M=8, ×1.174 [2] M=8
+ *   - i4 g32 n2048 k3840 (case i4g32-n2048-k3840): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.152 [1] M=4, ×1.143 [2] M=4, ×1.188 [1] M=8, ×1.185 [2] M=8
+ *   - i4 g32 n512 k3840 (case i4g32-n512-k3840): keeps parallel-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.060 < ×1.100 in [1])); parallel-l8: ×1.060 [1], ×1.058 [2]
+ *     - subgroup32-l32 meets the rule too (×1.122 [1], ×1.126 [2]): a Session option, not a row
+ *   - i4 g32 n3840 k4096 (case i4g32-n3840-k4096): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.278 [1] M=4, ×1.280 [2] M=4, ×1.268 [1] M=8, ×1.271 [2] M=8
+ *   - i4 g32 n3840 k8192 (case i4g32-n3840-k8192): keeps staged-l32 with row blocks of 2 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.002 < ×1.100 in [1])); parallel-l32: ×1.002 [1], ×0.995 [2]
+ *   - i4 g32 n3840 k15360 (case i4g32-n3840-k15360): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.213 [1] M=4, ×1.213 [2] M=4, ×1.187 [1] M=8, ×1.196 [2] M=8
+ *   - i4 g32 n262144 k3840 (case i4g32-n262144-k3840): parallel-l16 -> parallel-l16 with row blocks of 4; at the other row counts: ×1.540 [1] M=4, ×1.539 [2] M=4, ×1.591 [1] M=8, ×1.592 [2] M=8
+ *   - i4 g32 n1024 k7680 (case i4g32-n1024-k7680): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.253 [1] M=4, ×1.255 [2] M=4, ×1.245 [1] M=8, ×1.245 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×1.118 [1], ×1.117 [2]): a Session option, not a row
+ *   - i4 g32 n4096 k1024 (case i4g32-n4096-k1024): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l16: ×1.406 [1], ×1.406 [2]
+ *   - i4 g32 n1024 k4096 (case i4g32-n1024-k4096): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.263 [1] M=4, ×1.263 [2] M=4, ×1.258 [1] M=8, ×1.259 [2] M=8
+ *     - subgroup32-l32 meets the rule too (×1.153 [1], ×1.149 [2]): a Session option, not a row
+ *   - i4 g32 n8192 k1024 (case i4g32-n8192-k1024): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l16: ×1.383 [1], ×1.383 [2]
+ *   - i4 g32 n1024 k8192 (case i4g32-n1024-k8192): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.237 [1] M=4, ×1.237 [2] M=4, ×1.232 [1] M=8, ×1.233 [2] M=8
+ *   - i4 g32 n3840 k1024 (case i4g32-n3840-k1024): no row (c32u4) -> parallel-l4 with row blocks of 2 (×1.440 [1], ×1.439 [2]); at the other row counts: ×1.308 [1] M=4, ×1.305 [2] M=4, ×1.320 [1] M=8, ×1.319 [2] M=8
+ *     - subgroup32-l4 meets the rule too (×1.492 [1], ×1.494 [2]): a Session option, not a row
+ *   - i4 g32 n262144 k1024 (case i4g32-n262144-k1024): keeps no row (c32u4) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l16: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); staged-l16: ×1.342 [1], ×1.341 [2]
+ *   - i4 g32 n8192 k2816 (case i4g32-n8192-k2816): keeps parallel-l4 with row blocks of 4 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: evidence at M=4 from fewer than 2 records (a parallel row serves M = 1 to 8: screened out by the quick look in [1] at M=4; screened out by the quick look in [2] at M=4))); parallel-l32: ×1.333 [1], ×1.348 [2]
+ *   - i4 g32 n4096 k2816 (case i4g32-n4096-k2816): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.092 [1] M=4, ×1.089 [2] M=4, ×1.209 [1] M=8, ×1.211 [2] M=8
+ *   - i4 g32 n2048 k2816 (case i4g32-n2048-k2816): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 4; at the other row counts: ×1.148 [1] M=4, ×1.149 [2] M=4, ×1.192 [1] M=8, ×1.189 [2] M=8
+ *   - i4 g32 n2112 k2816 (case i4g32-n2112-k2816): parallel-l4 with row blocks of 2 -> parallel-l4 with row blocks of 8; at the other row counts: ×1.203 [1] M=4, ×1.206 [2] M=4, ×1.235 [1] M=8, ×1.234 [2] M=8
+ *   - i4 g32 n1024 k2816 (case i4g32-n1024-k2816): parallel-l32 -> parallel-l8 with row blocks of 4 (×1.245 [1], ×1.245 [2]); at the other row counts: ×1.887 [1] M=4, ×1.885 [2] M=4, ×2.089 [1] M=8, ×2.086 [2] M=8
+ *     - subgroup32-l8 meets the rule too (×1.285 [1], ×1.276 [2]): a Session option, not a row
+ *   - i4 g32 n128 k2816 (case i4g32-n128-k2816): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×0.911 < ×1.100 in [2])); parallel-l16: ×0.911 [2]
+ *     - subgroup32-l32 meets the rule too (×1.184 [1], ×1.194 [2]): a Session option, not a row
+ *   - i4 g32 n2816 k4096 (case i4g32-n2816-k4096): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.283 [1] M=4, ×1.281 [2] M=4, ×1.264 [1] M=8, ×1.262 [2] M=8
+ *   - i4 g32 n2816 k8192 (case i4g32-n2816-k8192): staged-l32 -> staged-l32 with row blocks of 2; at the other row counts: ×1.249 [1] M=4, ×1.242 [2] M=4, ×1.236 [1] M=8, ×1.237 [2] M=8
+ *   - i4 g32 n2816 k2112 (case i4g32-n2816-k2112): staged-l32 with row blocks of 2 -> parallel-l2 with row blocks of 4 (×1.327 [1], ×1.329 [2]); at the other row counts: ×2.249 [1] M=4, ×2.253 [2] M=4, ×2.554 [1] M=8, ×2.554 [2] M=8
+ *     - subgroup32-l2 meets the rule too (×1.337 [1], ×1.337 [2]): a Session option, not a row
+ *   - i4 g32 n262144 k2816 (case i4g32-n262144-k2816): parallel-l4 -> parallel-l16 with row blocks of 4 (×1.294 [1], ×1.287 [2]); at the other row counts: ×1.273 [1] M=4, ×1.271 [2] M=4, ×1.291 [1] M=8, ×1.295 [2] M=8
+ *   - bf16 n8960 k1536 (case bf16-n8960-k1536): no row (c16u8) -> staged-l32 (×1.248 [1], ×1.243 [2]); at the other row counts: ×1.999 [1] M=4, ×1.999 [2] M=4, ×1.122 [1] M=8, ×1.126 [2] M=8
+ *   - bf16 n2048 k1536 (case bf16-n2048-k1536): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.041 < ×1.100 in [1])); parallel-l4: ×1.041 [1], ×1.035 [2]
+ *   - bf16 n256 k1536 (case bf16-n256-k1536): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×1.024 < ×1.100 in [1])); parallel-l16: ×1.024 [1], ×0.981 [2]
+ *   - bf16 n1536 k2048 (case bf16-n1536-k2048): keeps no row (c16u8) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×0.996 < ×1.100 in [1])); parallel-l4: ×0.996 [1], ×0.996 [2]
+ *   - bf16 n6144 k1536 (case bf16-n6144-k1536): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l32: ×1.030 < ×1.100 in [1])); staged-l32: ×1.030 [1], ×1.029 [2]
+ *   - bf16 n1536 k6144 (case bf16-n1536-k6144): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.007 < ×1.100 in [1])); parallel-l8: ×1.007 [1], ×1.006 [2]
+ *   - bf16 n1536 k256 (case bf16-n1536-k256): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.089 < ×1.100 in [1])); parallel-l4: ×1.089 [1], ×1.047 [2]
+ *   - bf16 n4096 k1536 (case bf16-n4096-k1536): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l32: ×0.997 < ×1.100 in [1])); staged-l32: ×0.997 [1], ×0.990 [2]
+ *   - bf16 n512 k1536 (case bf16-n512-k1536): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×0.927 < ×1.100 in [1])); parallel-l8: ×0.927 [1], ×0.921 [2]
+ *   - bf16 n1536 k4096 (case bf16-n1536-k4096): keeps staged-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l8: ×1.052 < ×1.100 in [1])); parallel-l8: ×1.052 [1], ×1.057 [2]
+ *   - bf16 n12288 k1536 (case bf16-n12288-k1536): no row (c16u8) -> staged-l32 (×1.251 [1], ×1.242 [2]); at the other row counts: ×2.004 [1] M=4, ×1.998 [2] M=4, ×1.098 [1] M=8, ×1.087 [2] M=8
+ *   - bf16 n1536 k12288 (case bf16-n1536-k12288): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.023 < ×1.100 in [1])); parallel-l32: ×1.023 [1], ×1.016 [2]
+ *   - bf16 n262144 k1536 (case bf16-n262144-k1536): no row (c32u4) -> staged-l16 (×1.317 [1], ×1.303 [2]); at the other row counts: ×2.183 [1] M=4, ×2.173 [2] M=4, ×1.283 [1] M=8, ×1.254 [2] M=8
+ *   - bf16 n10752 k2560 (case bf16-n10752-k2560): no row (c16u8) -> staged-l32 (×1.266 [1], ×1.255 [2]); at the other row counts: ×2.185 [1] M=4, ×2.174 [2] M=4, ×1.201 [1] M=8, ×1.187 [2] M=8
+ *   - bf16 n2048 k2560 (case bf16-n2048-k2560): keeps staged-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×1.022 < ×1.100 in [1])); parallel-l16: ×1.022 [1], ×1.020 [2]
+ *   - bf16 n512 k2560 (case bf16-n512-k2560): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.059 < ×1.100 in [1])); parallel-l4: ×1.059 [1], ×1.055 [2]
+ *   - bf16 n256 k2560 (case bf16-n256-k2560): keeps parallel-l32 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×0.931 < ×1.100 in [1])); parallel-l16: ×0.931 [1], ×0.921 [2]
+ *   - bf16 n2560 k2048 (case bf16-n2560-k2048): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l16: ×0.992 < ×1.100 in [1])); parallel-l16: ×0.992 [1], ×0.997 [2]
+ *   - bf16 n10240 k2560 (case bf16-n10240-k2560): no row (c32u4) -> staged-l32 (×1.328 [1], ×1.327 [2]); at the other row counts: ×2.199 [1] M=4, ×2.199 [2] M=4, ×1.214 [1] M=8, ×1.213 [2] M=8
+ *   - bf16 n2560 k10240 (case bf16-n2560-k10240): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l32: ×1.008 < ×1.100 in [1])); parallel-l32: ×1.008 [1], ×1.009 [2]
+ *   - bf16 n2560 k256 (case bf16-n2560-k256): keeps no row (c16u16) (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.073 < ×1.100 in [1])); parallel-l4: ×1.073 [1], ×1.066 [2]
+ *   - bf16 n4096 k2560 (case bf16-n4096-k2560): keeps parallel-l8 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l32: ×1.032 < ×1.100 in [1])); staged-l32: ×1.032 [1], ×1.032 [2]
+ *   - bf16 n1024 k2560 (case bf16-n1024-k2560): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest parallel-l4: ×1.032 < ×1.100 in [1])); parallel-l4: ×1.032 [1], ×1.035 [2]
+ *   - bf16 n2560 k4096 (case bf16-n2560-k4096): keeps parallel-l16 (no candidate is ×1.100 faster in the groups of 2 or more records that are evidence, with its check held (nearest staged-l32: ×0.997 < ×1.100 in [1])); staged-l32: ×0.997 [1], ×1.000 [2]
+ *   - bf16 n262144 k2560 (case bf16-n262144-k2560): no row (c32u4) -> parallel-l16 (×1.314 [1], ×1.311 [2]); at the other row counts: ×2.423 [1] M=4, ×2.427 [2] M=4, ×1.508 [1] M=8, ×1.489 [2] M=8
+ * - rowsThreadTarget: keeps 16384 (the full and row-blocks sets measure the row-block heights per case and row count, but the field is one thread target for every shape, and no rule turns the heights into it)
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -2377,6 +319,757 @@ export const APPLE_M5: GeometryProfile = {
     attentionQk: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
     attentionPv: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 16 },
     conv3d: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
+  },
+  linearGemv: {
+    sequential: {
+      variant: { cols: 32, unroll: 4 },
+      shapes: [
+        { storage: "bf16", n: 8960, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 2048, k: 1536, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 256, k: 1536, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 1536, k: 2048, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 6144, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 6144, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 1536, k: 256, variant: { cols: 32, unroll: 16 } },
+        { storage: "bf16", n: 4096, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 512, k: 1536, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 1536, k: 4096, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 12288, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 1536, k: 12288, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 10752, k: 2560, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 2048, k: 2560, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 512, k: 2560, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 256, k: 2560, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 2560, k: 2048, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 2560, k: 10240, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 2560, k: 256, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 4096, k: 2560, variant: { cols: 16, unroll: 8 } },
+        { storage: "bf16", n: 1024, k: 2560, variant: { cols: 16, unroll: 16 } },
+        { storage: "bf16", n: 2560, k: 4096, variant: { cols: 16, unroll: 8 } },
+        { storage: "i4", n: 8960, k: 1536, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 1536, k: 256, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 1536, k: 12288, variant: { cols: 64, unroll: 2 } },
+        { storage: "i4", n: 262144, k: 1536, variant: { cols: 16, unroll: 8 } },
+        { storage: "i4", n: 256, k: 3072, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 1024, k: 256, variant: { cols: 64, unroll: 2 } },
+        { storage: "i4", n: 256, k: 1024, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 2048, k: 256, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 256, k: 2048, variant: { cols: 16, unroll: 2 } },
+        { storage: "i8", n: 256, k: 3072, variant: { cols: 16, unroll: 4 } },
+        { storage: "i8", n: 256, k: 1024, variant: { cols: 16, unroll: 4 } },
+        { storage: "i8", n: 256, k: 2048, variant: { cols: 16, unroll: 4 } },
+        { storage: "i8", n: 256, k: 1536, variant: { cols: 16, unroll: 4 } },
+        { storage: "i4", n: 10752, k: 2560, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 256, k: 2560, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 2560, k: 256, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 262144, k: 2560, variant: { cols: 128, unroll: 8 } },
+        { storage: "i4", n: 256, k: 5120, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 15360, k: 3840, variant: { cols: 64, unroll: 2 } },
+        { storage: "i4", n: 8192, k: 3840, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 4096, k: 3840, variant: { cols: 256, unroll: 2 } },
+        { storage: "i4", n: 2048, k: 3840, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 512, k: 3840, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 3840, k: 4096, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 3840, k: 8192, variant: { cols: 256, unroll: 2 } },
+        { storage: "i4", n: 3840, k: 15360, variant: { cols: 256, unroll: 2 } },
+        { storage: "i4", n: 262144, k: 3840, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 1024, k: 7680, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 4096, k: 1024, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 1024, k: 4096, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 8192, k: 1024, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 1024, k: 8192, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 3840, k: 1024, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 262144, k: 1024, variant: { cols: 16, unroll: 8 } },
+        { storage: "i4", n: 8192, k: 2816, variant: { cols: 32, unroll: 8 } },
+        { storage: "i4", n: 4096, k: 2816, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 2048, k: 2816, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 2112, k: 2816, variant: { cols: 256, unroll: 2 } },
+        { storage: "i4", n: 1024, k: 2816, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 128, k: 2816, variant: { cols: 16, unroll: 2 } },
+        { storage: "i4", n: 2816, k: 4096, variant: { cols: 64, unroll: 2 } },
+        { storage: "i4", n: 2816, k: 8192, variant: { cols: 32, unroll: 2 } },
+        { storage: "i4", n: 262144, k: 2816, variant: { cols: 32, unroll: 8 } },
+      ],
+    },
+    rowsThreadTarget: 16384,
+    parallelShapes: [
+      {
+        storage: "i4",
+        n: 8960,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 1536,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 2048,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 6144,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 6144,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 1536,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 12288,
+        k: 1536,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1536,
+        k: 12288,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 1536,
+        group: 512,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 6144,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32, packedActivations: true },
+      { storage: "i8", n: 256, k: 1536, lanes: 32, packedActivations: false, rowBlock: 4 },
+      { storage: "i8", n: 1536, k: 256, lanes: 4, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 1536,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 1536,
+        group: 512,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+      { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false, rowBlock: 4 },
+      { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 10752,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 2560,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 2560,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 2048,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 10240,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 10240,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2560,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2560,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2560,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 2560,
+        group: 512,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 10240,
+        k: 2560,
+        group: 512,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
+      { storage: "i8", n: 256, k: 2560, lanes: 32, packedActivations: false, rowBlock: 4 },
+      { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2560,
+        group: 512,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2560,
+        group: 512,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+      {
+        storage: "i4",
+        n: 256,
+        k: 3072,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 256, k: 1024, group: 32, lanes: 32, packedActivations: false },
+      {
+        storage: "i4",
+        n: 15360,
+        k: 3840,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 8192,
+        k: 3840,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 3840,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 512,
+        k: 3840,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 8192,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 15360,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 262144,
+        k: 3840,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 7680,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 8192,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 8192,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 4096,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2112,
+        k: 2816,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 8,
+      },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 2816,
+        group: 32,
+        lanes: 8,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 4096,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 8192,
+        group: 32,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 2,
+      },
+      {
+        storage: "i4",
+        n: 2816,
+        k: 2112,
+        group: 32,
+        lanes: 2,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 262144,
+        k: 2816,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "bf16", n: 2048, k: 1536, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 256, k: 1536, lanes: 32, packedActivations: false },
+      { storage: "bf16", n: 6144, k: 1536, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 1536, k: 6144, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 1536, k: 256, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 4096, k: 1536, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 512, k: 1536, lanes: 16, packedActivations: false },
+      {
+        storage: "bf16",
+        n: 1536,
+        k: 4096,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "bf16", n: 1536, k: 12288, lanes: 16, packedActivations: false },
+      {
+        storage: "bf16",
+        n: 2048,
+        k: 2560,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "bf16", n: 512, k: 2560, lanes: 32, packedActivations: false },
+      { storage: "bf16", n: 256, k: 2560, lanes: 32, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 2048, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 10240, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 4096, k: 2560, lanes: 8, packedActivations: false },
+      { storage: "bf16", n: 1024, k: 2560, lanes: 16, packedActivations: false },
+      { storage: "bf16", n: 2560, k: 4096, lanes: 16, packedActivations: false },
+      {
+        storage: "i4",
+        n: 1024,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 2048,
+        k: 256,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 2048,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      { storage: "i8", n: 256, k: 3072, lanes: 16, packedActivations: false, rowBlock: 2 },
+      { storage: "i8", n: 1024, k: 256, lanes: 4, packedActivations: false, rowBlock: 4 },
+      { storage: "i8", n: 256, k: 1024, lanes: 16, packedActivations: false, rowBlock: 4 },
+      {
+        storage: "i8",
+        n: 2048,
+        k: 256,
+        lanes: 4,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      {
+        storage: "i8",
+        n: 256,
+        k: 2048,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 262144,
+        k: 2560,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 256,
+        k: 5120,
+        group: 32,
+        lanes: 16,
+        packedActivations: false,
+        rowBlock: 4,
+      },
+      {
+        storage: "i4",
+        n: 3840,
+        k: 1024,
+        group: 32,
+        lanes: 4,
+        packedActivations: false,
+        rowBlock: 2,
+      },
+      {
+        storage: "bf16",
+        n: 8960,
+        k: 1536,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      {
+        storage: "bf16",
+        n: 12288,
+        k: 1536,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      {
+        storage: "bf16",
+        n: 262144,
+        k: 1536,
+        lanes: 16,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      {
+        storage: "bf16",
+        n: 10752,
+        k: 2560,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      {
+        storage: "bf16",
+        n: 10240,
+        k: 2560,
+        lanes: 32,
+        packedActivations: false,
+        stagedActivations: true,
+      },
+      { storage: "bf16", n: 262144, k: 2560, lanes: 16, packedActivations: false },
+    ],
   },
   provenance: {
     adapter: {
