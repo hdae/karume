@@ -112,9 +112,6 @@ uv run python dist.py --pipeline irodori \
     --model v4.1-small --resolve-refs hf             # → models/karume-irodori-v4.1-small/ (references 26 roles in karume-irodori-v4-small)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv   # the pipeline declares the family-level repository name (karume-sbv2-jvnv) (2026-09-25)
-uv run python dist.py --pipeline sbv2-fn \
-    --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
-    --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
 uv run python dist.py --pipeline gemma4 \
     --model e2b --model e4b \
     --out ../../models/karume-gemma4                 # the regular line, E2B / E4B, bf16 only (about 23 GiB)
@@ -140,7 +137,7 @@ uv run python dist.py --pipeline depth-anything      # → models/karume-depth-a
   (siglip2 and depth-anything were first published with 0.9.0, birefnet / lucida on 2026-09-05 in the two-model form 1024² + 2048²).
   The two Wan repositories reference `karume-umt5-xxl` across repositories, so umT5 is published first (procedure: [release-runbook](release-runbook.md) "First publication of a family" — the runbook describes
   the 0.14.0 round of umT5 and Wan2.2).
-  `karume-sbv2-fn` is a separate case whose mirror is not kept permanently (the bullet below). The canonical source for repository names and the rules for sharing a repository is ADR
+  The canonical source for repository names and the rules for sharing a repository is ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) decisions 1 / 2 / 8 / 9.
 - Depending on the upstream license (siglip2 = Apache-2.0 / the birefnet line = MIT / depth-anything small =
   Apache-2.0), `LICENSE.md` / `NOTICE.md` are bundled at the repository root (decision 7 — a standing rule that applies
@@ -164,10 +161,6 @@ uv run python dist.py --pipeline depth-anything      # → models/karume-depth-a
   `repo_name` = the output directory name of the command above = the repo name in the card's Usage** (the latter two are
   derived from the former), so a rename takes one constant in the recipe. Where the published revision lives: the models table
   `gemma.SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).
-
-- The mirror of `karume-sbv2-fn` is **not kept permanently** (ruling of 2026-08-30 — the e2e checks take `karume-sbv2-jvnv`, whose license statement is
-  in order, as canonical). The command above is a record of how to regenerate it; whenever the series (exported from `inputs/sbv2/FN*`
-  → `outputs/series/`) are present, it can be rebuilt at any time.
 
 - The canonical spec is ADR [0041](decisions/0041-manifest-v2.md) (layout inside a repository = per-model
   subtrees + `shared/`; **placement is always an independent copy** — the reason hard links are forbidden is also in an addendum of that ADR) +

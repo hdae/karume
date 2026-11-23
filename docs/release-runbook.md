@@ -257,9 +257,7 @@ after changing to the repository root, so the pin applies to it too.
 - [ ] If there was a change that needs the distributions regenerated (manifest format, quant presets, card, default quant),
       regenerate the target repositories under `models/` with dist, and each family's check (WAV / PNG / verify_dist) is green.
       **The publication rebuild comes after the bump commit of §4** (the order of §0 — `generator` copies the package
-      version). The canonical source for the local e2e SBV2 check is the public mirror `karume-sbv2-jvnv` (switched on 2026-08-30 from
-      the private fn — the fn mirror is not kept around; when needed it is regenerated from
-      `inputs/sbv2/FN*` with the dist command of assets-layout)
+      version). The canonical source for the local e2e SBV2 check is the public mirror `karume-sbv2-jvnv`
 - [ ] License check: each family's provenance record
       (`tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`) and the
       attribution in the generated card of the distribution repository match the actual upstream (a per-revision human check — release gate. Canonical source =

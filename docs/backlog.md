@@ -1001,8 +1001,6 @@ maintainer's ruling of 2026-11-06).
   Irodori v4-Large's):
   rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
-  **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF** — its publication is held in
-  parked "HF publication of karume-sbv2-fn".
   The Code license of the code-dependency block is still Unverified in the deberta ledger
   (its Attribution too).
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
@@ -1048,13 +1046,6 @@ maintainer's ruling of 2026-11-06).
   The page-fault mechanism is **PoC'd in a spike outside the repository; practical viability uncertain** (on revival, transcribe the spike's measurements into
   research before entering a design spike — later section "MoE page-fault").
 
-- **HF publication of karume-sbv2-fn** (ruling to hold, 2026-08-20 — in wave K it briefly swung to "publish with source attribution",
-  but that was withdrawn). The upstream's written terms = only "commercial use OK, no credit needed, merging
-  free" on the Booth distribution page; **redistribution is not mentioned**, and the distributor's identity is unconfirmed. Revival = confirming with the distributor whether redistribution is allowed,
-  or a new maintainer ruling. The build method (separate pipeline `--pipeline sbv2-fn` — carrying the FN line's attribution) is kept.
-  The attribution is minimal (quoting the terms; no details of the distributor — ruling 2026-08-20, `a7ed68e0`). No permanent local mirror
-  (ruling 2026-08-30 — the e2e check was moved to jvnv, whose licence statement is positive; the fn mirror was deleted.
-  Regeneration = the dist command in assets-layout, from `inputs/sbv2/FN*`)
 - **Port of SBV2 `adjust_word2ph`** (ruling not to adopt, 2026-08-21 — ADR 0072 decision 8). The word2ph redistribution for accepting edits that change
   the phoneme count (replacing readings that do not align with word boundaries). The reference is the **upstream**
   Style-Bert-VITS2 semantics (LCS diff + 1..6 clamp, the residue raises), not the fork that AivisSpeech
