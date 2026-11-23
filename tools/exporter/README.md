@@ -476,6 +476,15 @@ key space is the FQN, so they never collide). On the fake-quant side, `fake_quan
 exactly once — rounding one weight through both would leave the scale ledger disagreeing with the
 actual values.
 
+A weight the model reads through the functional form of an op instead of through its module — a
+table looked up by `functional.embedding(index, self.table)` — is a bare parameter, and
+`fake_quant_int8` leaves bare parameters alone unless its `functional_weights` names one (parameter
+FQN → the module type whose op reads it, e.g. `{"table": nn.Embedding}`). A named weight is rounded
+on that type's axis and keyed by its own FQN, the tensor key the emitter looks its scale up by; the
+emitter holds the scale to the axis of the op that reads it in the traced graph, so a wrong type
+fails there. First used by the two position tables of EmbeddingGemma 2's vision tower
+(`../export-recipes/embeddinggemma2/export_vision.py`).
+
 Where the default `weight_dtype` **silently leaves ineligible weights as f32**, an explicit override
 **fails loudly whenever it cannot be honoured** — the caller wrote the intent one tensor at a time,
 so there is no room for silently choosing another storage. The 4 branches:

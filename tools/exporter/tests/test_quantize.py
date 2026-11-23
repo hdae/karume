@@ -1019,6 +1019,88 @@ class TestInt8FailsLoudly:
             fake_quant_int8(model)
 
 
+class LookedUp(nn.Module):
+    """A table read through `functional.embedding` (a bare parameter, not an `nn.Embedding`) beside
+    a module weight and a bare gain."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dense = nn.Linear(5, 3)
+        self.table = nn.Parameter(torch.randn(7, 5))
+        self.gain = nn.Parameter(torch.randn(3))
+
+    def forward(self, index: torch.Tensor) -> torch.Tensor:
+        return self.dense(nn.functional.embedding(index, self.table)) * self.gain
+
+
+class TestInt8FunctionalWeights:
+    """`functional_weights` — a weight read through the functional form of an op is rounded as
+    that op's module weight, keyed by its own FQN (the tensor key the converter gives it)."""
+
+    def test_a_table_read_by_functional_embedding_is_rounded_per_row(self):
+        model = LookedUp()
+
+        report = fake_quant_int8(model, functional_weights={"table": nn.Embedding})
+
+        assert sorted(report.scales) == ["dense.weight", "table"]
+        assert list(report.scales["table"].shape) == [7, 1]
+        restored = quantize_to_int8(model.table, report.scales["table"]).float()
+        assert torch.equal(restored * report.scales["table"], model.table)
+        assert report.modules == 2
+        assert report.elements == 3 * 5 + 7 * 5
+
+    def test_it_rounds_as_the_module_would(self):
+        """The same values and scale as an `nn.Embedding` holding the same table."""
+        model = LookedUp()
+        module = nn.Embedding(7, 5)
+        with torch.no_grad():
+            module.weight.copy_(model.table)
+
+        report = fake_quant_int8(model, functional_weights={"table": nn.Embedding})
+        reference = fake_quant_int8(module)
+
+        assert torch.equal(model.table, module.weight)
+        assert torch.equal(report.scales["table"], reference.scales["weight"])
+
+    def test_a_bare_parameter_that_is_not_named_is_left_alone(self):
+        model = LookedUp()
+        table = model.table.detach().clone()
+        gain = model.gain.detach().clone()
+
+        report = fake_quant_int8(model, functional_weights={"table": nn.Embedding})
+        untouched = LookedUp()
+        plain = fake_quant_int8(untouched)
+
+        assert "gain" not in report.scales
+        assert torch.equal(model.gain, gain)
+        assert sorted(plain.scales) == ["dense.weight"]
+        assert not torch.equal(model.table, table)
+
+    def test_a_module_weight_cannot_be_named_and_nothing_is_rounded(self):
+        model = LookedUp()
+        before = model.dense.weight.detach().clone()
+
+        with pytest.raises(QuantizeError, match="target as a module"):
+            fake_quant_int8(model, functional_weights={"dense.weight": nn.Linear})
+
+        assert torch.equal(model.dense.weight, before)
+
+    def test_a_name_that_is_not_a_parameter_fails_loudly(self):
+        with pytest.raises(QuantizeError, match="is not a parameter"):
+            fake_quant_int8(LookedUp(), functional_weights={"tabel": nn.Embedding})
+
+    def test_a_type_without_a_channel_axis_fails_loudly(self):
+        with pytest.raises(QuantizeError, match="no per-channel axis"):
+            fake_quant_int8(LookedUp(), functional_weights={"table": nn.LayerNorm})
+
+    def test_a_non_f32_table_fails_loudly(self):
+        model = LookedUp()
+        model.table = nn.Parameter(model.table.to(torch.float16))
+
+        with pytest.raises(QuantizeError, match="cannot be quantized"):
+            fake_quant_int8(model, functional_weights={"table": nn.Embedding})
+
+
 class TestIncludeFilter:
     """`include` (a predicate on module FQNs) — the hook that splits i8 / i4 targets exclusively in
     mixed storage."""

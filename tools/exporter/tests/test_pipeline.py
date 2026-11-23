@@ -20,6 +20,7 @@ from karume.container import ContainerFormatError, Provenance, container_parts
 from karume.ir import IrNode, IrValue
 from karume.ops import OpContractError
 from karume.pipeline import export_module, export_to_file, publish_model
+from karume.quantize import fake_quant_int8
 from karume.verify import ContainerError, verify_container
 
 PROVENANCE = Provenance(license="apache-2.0", writer="karume-test")
@@ -331,6 +332,50 @@ class TestTheGraphNameIsNamedByTheCaller:
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit\n")
 
         assert list(tmp_path.iterdir()) == []
+
+
+class LookedUp(nn.Module):
+    """A table read through `functional.embedding` (a bare parameter) and a linear."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.table = nn.Parameter(torch.randn(6, 4))
+        self.dense = nn.Linear(4, 3)
+
+    def forward(self, index: torch.Tensor) -> torch.Tensor:
+        return self.dense(nn.functional.embedding(index, self.table))
+
+
+class TestAFunctionalTableInInt8:
+    """A table rounded through `fake_quant_int8`'s `functional_weights` reaches the `embedding`
+    weight slot as i8 with the scale its rounding used, under its own FQN."""
+
+    def test_the_table_is_stored_as_i8_and_reads_back_bit_for_bit(self, tmp_path: Path) -> None:
+        module = LookedUp().eval()
+        report = fake_quant_int8(module, functional_weights={"table": nn.Embedding})
+        rounded = module.table.detach().clone()
+
+        graph = published(
+            module,
+            (torch.tensor([[0, 3, 5]]),),
+            tmp_path / "model.krm",
+            weight_dtype="i8",
+            weight_scales=report.scales,
+        )
+
+        storage = {init.tensor: init.storage for init in graph.initializers.values()}
+        assert storage["table"].dtype == "i8"
+        assert storage["dense.weight"].dtype == "i8"
+        verified = verify_container(container_parts(tmp_path / "model.krm"), blocks=True)
+        supply = verified.graphs["series"].supplies["table"]
+        payload = b"".join(
+            verified.read.block(block.id)[: block.payload_bytes] for block in supply.blocks
+        )
+        assert supply.scale is not None
+        scale_bytes = verified.read.block(supply.scale.id)[: supply.scale.payload_bytes]
+        values = torch.frombuffer(bytearray(payload), dtype=torch.int8).reshape(6, 4)
+        scale = torch.frombuffer(bytearray(scale_bytes), dtype=torch.float32).reshape(6, 1)
+        assert torch.equal(values.float() * scale, rounded)
 
 
 class TestTheGraphWideGate:

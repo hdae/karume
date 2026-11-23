@@ -230,14 +230,67 @@ def quantize_to_int8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return torch.round(weight / scale).clamp_(-INT8_MAX, INT8_MAX).to(torch.int8)
 
 
-def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = None) -> Int8Report:
+def _functional_targets(
+    model: nn.Module, functional_weights: Mapping[str, type[nn.Module]]
+) -> dict[str, tuple[torch.Tensor, int]]:
+    """Resolve {@link fake_quant_int8}'s `functional_weights` to `FQN → (parameter, axis)`, every
+    entry checked before anything is rounded."""
+    targets: dict[str, tuple[torch.Tensor, int]] = {}
+    for fqn, module_type in functional_weights.items():
+        axis = QUANT_CHANNEL_AXES.get(module_type)
+        if axis is None:
+            raise QuantizeError(
+                f"functional weight '{fqn}': {getattr(module_type, '__name__', module_type)} has"
+                f" no per-channel axis (types: {', '.join(c.__name__ for c in QUANT_CHANNEL_AXES)})"
+            )
+        owner_name, _, attribute = fqn.rpartition(".")
+        try:
+            owner = model.get_submodule(owner_name)
+            weight = model.get_parameter(fqn)
+        except AttributeError as cause:
+            message = f"functional weight '{fqn}' is not a parameter of the model"
+            raise QuantizeError(message) from cause
+        if attribute == "weight" and _channel_axis(owner) is not None:
+            # The module loop rounds it already: a second rounding would leave only the later
+            # scale in the values while the ledger holds one key.
+            raise QuantizeError(
+                f"functional weight '{fqn}' is the weight of a {type(owner).__name__}, which is a"
+                " target as a module"
+            )
+        if weight.dtype is not torch.float32:
+            raise QuantizeError(
+                f"'{fqn}': dtype {weight.dtype} cannot be quantized (f32 semantics only)"
+            )
+        if axis >= weight.dim():
+            raise QuantizeError(
+                f"'{fqn}': channel axis {axis} is not in a weight of rank {weight.dim()}"
+            )
+        targets[fqn] = (weight, axis)
+    return targets
+
+
+def fake_quant_int8(
+    model: nn.Module,
+    include: Callable[[str], bool] | None = None,
+    functional_weights: Mapping[str, type[nn.Module]] | None = None,
+) -> Int8Report:
     """Round the weights of modules with a weight slot to values representable in per-channel
     symmetric int8.
 
     The targets are only the `weight` of modules whose type is in {@link QUANT_CHANNEL_AXES} —
     neither biases nor norm-style weights are **touched** (bias always being f32 is the root fix
     of ADR 0006; the moment it became a quantization target, the prototype's demotion bug would
-    return).
+    return) — and the parameters named in `functional_weights`.
+
+    `functional_weights` names the weights a model reads through the functional form of an op
+    instead of through its module (parameter FQN → that module type): `functional.embedding(index,
+    self.table)` reads `table` exactly where an `nn.Embedding` reads its `weight`, and the traced
+    graph holds it in the same `embedding` weight slot. Each is rounded on that type's axis and
+    keyed by its own FQN, the tensor key the converter gives it. MUST: named explicitly — a bare
+    parameter is otherwise never a target (gains and scalars are bare parameters too). The emitter
+    holds every scale to the axis of the op that reads the weight in the traced graph
+    (`emit._plan_i8`), so a wrong type fails there. A module's own weight cannot be named (it is a
+    target as a module already), and `include` does not apply to these entries.
 
     `include` is a predicate on the **module FQN** (the name from `named_modules`; None = every
     target). It is the hook for splitting the targets in mixed storage (e.g. embedding in i8 and
@@ -257,29 +310,33 @@ def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = No
     it fails loudly — so that "`--dtype i8` was requested but it effectively wrote f32" is never
     silent (ADR 0006; the same when `include` dropped every target).
     """
+    targets: dict[str, tuple[torch.Tensor, int]] = {}
+    for name, module in model.named_modules():
+        # include is checked before _channel_axis — so that type ambiguity (several type matches)
+        # of a non-target module does not fail.
+        if include is not None and not include(name):
+            continue
+        axis = _channel_axis(module)
+        if axis is None:
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is None:
+            continue
+        fqn = f"{name}.weight" if name else "weight"
+        if weight.dtype is not torch.float32:
+            raise QuantizeError(
+                f"'{fqn}': dtype {weight.dtype} cannot be quantized (f32 semantics only)"
+            )
+        if axis >= weight.dim():
+            raise QuantizeError(
+                f"'{fqn}': channel axis {axis} is not in a weight of rank {weight.dim()}"
+            )
+        targets[fqn] = (weight, axis)
+    targets.update(_functional_targets(model, functional_weights or {}))
     scales: dict[str, torch.Tensor] = {}
     elements = 0
     with torch.no_grad():
-        for name, module in model.named_modules():
-            # include is checked before _channel_axis — so that type ambiguity (several type
-            # matches) of a non-target module does not fail.
-            if include is not None and not include(name):
-                continue
-            axis = _channel_axis(module)
-            if axis is None:
-                continue
-            weight = getattr(module, "weight", None)
-            if weight is None:
-                continue
-            fqn = f"{name}.weight" if name else "weight"
-            if weight.dtype is not torch.float32:
-                raise QuantizeError(
-                    f"'{fqn}': dtype {weight.dtype} cannot be quantized (f32 semantics only)"
-                )
-            if axis >= weight.dim():
-                raise QuantizeError(
-                    f"'{fqn}': channel axis {axis} is not in a weight of rank {weight.dim()}"
-                )
+        for fqn, (weight, axis) in targets.items():
             scale = channel_scale(weight, axis)
             weight.copy_(quantize_to_int8(weight, scale).to(torch.float32) * scale)
             scales[fqn] = scale
