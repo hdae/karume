@@ -61,6 +61,7 @@ import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/inde
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { NVIDIA_AMPERE } from "../src/kernels/geometry-profiles/nvidia-ampere.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
+import { APPLE_M5 } from "../src/kernels/geometry-profiles/apple-m5.ts";
 import {
   assertGemmGeometry,
   defaultGemmGeometry,
@@ -306,8 +307,13 @@ describe("the public list BUILTIN_GEOMETRY_PROFILES is a deeply frozen copy", ()
   it("the values equal the generated constants, and the constants themselves are not frozen (loading does not rewrite another module's values)", () => {
     // A copy missing a field (the frozen copy forgetting to copy a new field of the type) also
     // fails here
-    assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]);
-    for (const profile of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]) {
+    assertEquals(BUILTIN_GEOMETRY_PROFILES, [
+      APPLE_METAL_3,
+      NVIDIA_AMPERE,
+      NVIDIA_BLACKWELL,
+      APPLE_M5,
+    ]);
+    for (const profile of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL, APPLE_M5]) {
       assert(!Object.isFrozen(profile), `${profile.id}: the generated constant was frozen`);
       assert(
         !Object.isFrozen(profile.gemmRows[0].geometry),
