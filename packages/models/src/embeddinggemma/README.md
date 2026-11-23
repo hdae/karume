@@ -5,10 +5,12 @@ an audio or any mix of them into a sentence embedding — a unit vector, so the 
 results is their cosine similarity, an image's, an audio's and a text's alike. One family serves the EmbeddingGemma models; today it
 serves EmbeddingGemma 2 (`google/embeddinggemma-2`, Apache-2.0 — the distribution
 `karume-embeddinggemma-2`, model `text`, pipeline `embeddinggemma/1`, presets `bf16` — the default, the
-checkpoint's own weights — and `i8` — the text tower's weight slots as per-row int8; both compute in
-f32 and declare no knob, and `quant` picks one). Its vision tower is the weights role `vision`, the
-checkpoint's bf16 values in both presets, built only with `vision: true`; its audio tower likewise
-the weights role `audio`, built only with `audio: true`. The first EmbeddingGemma
+checkpoint's own weights — and `i8` — the weight slots stored as per-row int8; both compute in
+f32 and declare no knob, and `quant` picks one). Its vision tower is the weights role `vision`, built
+only with `vision: true`; its audio tower likewise the weights role `audio`, built only with
+`audio: true`. Each preset gives the towers the storage it gives the text tower: the checkpoint's
+bf16 values in `bf16`, per-row int8 in `i8` (the audio tower's two subsampling convolutions keep
+their bf16 values there). The first EmbeddingGemma
 joins the family later with its own manifest values.
 The public surface is [`embeddinggemma.ts`](../../embeddinggemma.ts) (also re-exported from the
 barrel as the namespace `embeddinggemma`); everything here is internal.
@@ -216,8 +218,8 @@ upstream's SentenceTransformer fixture (an image alone, a text then an image, an
 a `query`-prompted text with an image, two images): the token ids equal upstream's exactly, and on
 the RTX 3080 Ti the `bf16` vectors are within 5.44e-6 of upstream's (cosine at least
 0.999999999136; atol 2e-5 — the text graph fed upstream's own soft tokens is within 9.8e-7, checked
-at atol 3e-6, and the rest is the tower's GPU noise), the `i8` vectors at a cosine of 0.99976 to
-0.99991 (floor 0.999), each pinned by a sha256 row per preset.
+at atol 3e-6, and the rest is the tower's GPU noise), the `i8` vectors — both towers int8 — at a
+cosine of 0.99963 to 0.99988 (floor 0.999), each pinned by a sha256 row per preset.
 
 Audio: the host front end multiplies the samples by the window in f32, as upstream's f32 product
 does (one correctly rounded multiply — upstream's values exactly), and runs the FFT and the rest in
@@ -232,7 +234,7 @@ runs the four audio inputs of upstream's fixture (an audio alone, a text then an
 ids equal upstream's exactly, and on the RTX 3080 Ti the `bf16` vectors are within 2.44e-7 of
 upstream's (atol 7.5e-7 — the GPU's own f32 noise; with the windowed product in f64 they were
 2.45e-5 off), the text graph fed upstream's soft tokens within
-1.12e-7 (atol 3.5e-7), the `i8` vectors at a cosine of 0.99982 to 0.99991 (floor 0.999), a 30 s
+1.12e-7 (atol 3.5e-7), the `i8` vectors at a cosine of 0.99976 to 0.99991 (floor 0.999), a 30 s
 audio bit-identical on a device capped at the preset's limits, each pinned by a sha256 row per
 preset.
 

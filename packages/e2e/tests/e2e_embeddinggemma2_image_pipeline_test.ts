@@ -1,7 +1,8 @@
 // Image input of the EmbeddingGemma family over the local distribution of EmbeddingGemma 2 —
 // `embeddinggemma.Pipeline` built by `fromPretrained` from `models/karume-embeddinggemma-2/` with
 // `vision: true` (the recipe `tools/export-recipes/embeddinggemma2/distribution.py`; model `text`,
-// every preset of the mirror — `bf16`, the default, and `i8`, each with the same bf16 vision tower).
+// every preset of the mirror — `bf16`, the default, and `i8`, each with the vision tower in its own
+// storage: the checkpoint's bf16 weights, or every tensor of them rounded to per-row int8).
 //
 // The reference is the tracked fixture `packages/models/tests/fixtures/embeddinggemma2/
 // multimodal-reference.{json,safetensors}` (`multimodal_reference.py`): five whole inputs holding
@@ -15,13 +16,15 @@
 //    tokenized as one string each (the prompt's prefix glued to the first), each image as
 //    `<|image>` + n × `<|image|>` + `<image|>`, `<eos>` — equal upstream's exactly, and each image's
 //    soft rows start where upstream's do; the mirror declares `pipelineConfig.vision` as the
-//    recipe reads it and every preset maps the one bf16 tower.
-// 2. **The five inputs through each preset** (real GPU): `tokenize` gives the fixture's ids, the
-//    vector is a unit vector, it bit-for-bit equals this machine's sha256 row of that preset (row
-//    ID `embeddinggemma-2/<preset>/image/<case>`), and against upstream's vector: `bf16` within
-//    {@link IMAGE_TOLERANCE} (its derivation is there), `i8` at a cosine of at least
-//    {@link I8_COSINE_FLOOR} (its text tower is the int8 copy; no golden of the int8 model holds
-//    images). Each case records maxAbs, maxRel and the cosine.
+//    recipe reads it and each preset maps the tower of its own storage (the text tower's).
+// 2. **The five inputs through each preset** (real GPU): the pipeline fetched the text graph and
+//    the tower of the preset's storage and the tokenizer, nothing else; `tokenize` gives the
+//    fixture's ids, the vector is a unit vector, it bit-for-bit equals this machine's sha256 row of
+//    that preset (row ID `embeddinggemma-2/<preset>/image/<case>`), and against upstream's vector:
+//    `bf16` within {@link IMAGE_TOLERANCE} (its derivation is there), `i8` at a cosine of at least
+//    {@link I8_COSINE_FLOOR} (its text tower and its vision tower are the int8 copies; the tower's
+//    own goldens are the vision series e2e's, and no golden of the whole int8 model holds images).
+//    Each case records maxAbs, maxRel and the cosine.
 // 3. **A text call on the vision pipeline** is the text call of the pipeline without it: its vector
 //    has the sha256 row the text pipeline e2e pins (`embeddinggemma-2/<preset>/query-en`).
 // 4. **The text graph's soft-row path alone** (real GPU, `bf16`, `KARUME_SERIES=1` with the vision
@@ -141,10 +144,15 @@ const SOFT_ROW_TOLERANCE: Tolerance = { atol: 3e-6, rtol: 0 };
  * upstream's: the text pipeline e2e's floor between the `i8` and the `bf16` vector of a text
  * (`I8_COSINE_FLOOR` of `e2e_embeddinggemma2_pipeline_test.ts`, whose derivation is there).
  *
- * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22): 0.999759 (`image-then-text`) to
- * 0.999908 (`image-only`), maxAbs 1.74e-3 to 2.66e-3 — the text tower's int8 rounding (its tower
- * is the same bf16 one); within the 0.99940 to 0.99993 the ten golden texts measure against their
- * `bf16` vectors. No golden of the int8 model holds images, so no tighter band is drawn.
+ * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-23, both towers int8): 0.999627
+ * (`image-then-text`), 0.999812 (`query-text-image`), 0.999820 (`two-images`), 0.999834
+ * (`text-then-image`) and 0.999881 (`image-only`), maxAbs 1.93e-3 to 3.30e-3 — the rounding of the
+ * text tower and of the vision tower together. With the tower still bf16 (2026-11-22) it was
+ * 0.999759 to 0.999908, the text tower's rounding alone. That is the order the torch-CPU screening
+ * of the towers' int8 forms measured on 32 generated images (all-i8: lowest 0.999648, mean 0.999812
+ * at 768 values — docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md), and 0.999 leaves
+ * 1 − cos = 1e-3, 2.7 times the worst here (3.73e-4). No golden of the whole int8 model holds
+ * images, so no tighter band is drawn.
  */
 const I8_COSINE_FLOOR = 0.999;
 
@@ -394,7 +402,7 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: image input on the host (no G
     rules = embedTextRules(tokenizer, config, { images: true });
   });
 
-  it("declares pipelineConfig.vision as the recipe reads it, and every preset maps the one bf16 tower", async () => {
+  it("declares pipelineConfig.vision as the recipe reads it, and each preset maps the tower of its own storage", async () => {
     const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
     const entry = manifest.models["text"];
     assert(entry !== undefined, "the mirror has no model 'text'");
@@ -405,9 +413,12 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: image input on the host (no G
       endImageTokenId: FIXTURE.imageTokens.end,
       hiddenSize: 512,
     });
-    assertEquals(Object.keys(entry.weights["vision"] ?? {}), ["bf16"]);
+    assertEquals(
+      Object.keys(entry.weights["vision"] ?? {}),
+      PRESETS.map(({ quant }) => quant),
+    );
     for (const { quant } of PRESETS) {
-      assertEquals(entry.quants[quant]?.weights["vision"], "bf16", `${quant}: the tower`);
+      assertEquals(entry.quants[quant]?.weights["vision"], quant, `${quant}: the tower`);
     }
   });
 
@@ -456,12 +467,30 @@ const settle = async (
 /** The vector of the full-budget image on the uncapped device, per preset (check 4 compares with it). */
 const fullBudgetVectors = new Map<string, Float32Array<ArrayBuffer>>();
 
+/**
+ * The files a pipeline built with `roles` should fetch for a preset: every part of each role's
+ * container of the preset's own name (check 1 holds each preset to that storage) and the tokenizer.
+ */
+const presetFiles = async (quant: string, roles: readonly string[]): Promise<string[]> => {
+  const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
+  const entry = manifest.models["text"];
+  assert(entry !== undefined, "the mirror has no model 'text'");
+  const parts = roles.flatMap((role) => {
+    const container = entry.weights[role]?.[quant]?.container;
+    assert(container !== undefined, `the mirror has no ${quant} container of '${role}'`);
+    return container.parts.map(({ path }) => path);
+  });
+  return [...parts, ...Object.values(entry.assets).map(({ path }) => path)].sort();
+};
+
 for (const preset of PRESETS) {
   describe.skipIf(!RUNNABLE)(
     `EmbeddingGemma 2 image input over the mirror, preset ${preset.quant} (real GPU)`,
     () => {
       let gpu: GpuContext;
       let pipeline: embeddinggemma.Pipeline;
+      /** The paths whose fetch completed while the pipeline was built. */
+      const fetched = new Set<string>();
       beforeAll(async () => {
         gpu = verifyRunningGpu(await acquireTestGpu());
         const start = performance.now();
@@ -469,6 +498,9 @@ for (const preset of PRESETS) {
           gpu,
           quant: preset.quant,
           vision: true,
+          onProgress: ({ phase, path }) => {
+            if (phase === "complete") fetched.add(path);
+          },
         });
         console.log(
           `[embeddinggemma2-image] ${preset.quant}: fromPretrained with the tower ${milliseconds(start)} ms`,
@@ -481,6 +513,10 @@ for (const preset of PRESETS) {
         } finally {
           gpu.destroy();
         }
+      });
+
+      it(`fetched the ${preset.quant} text graph, the ${preset.quant} tower and the tokenizer, nothing else`, async () => {
+        assertEquals([...fetched].sort(), await presetFiles(preset.quant, ["model", "vision"]));
       });
 
       for (const entry of FIXTURE.cases) {

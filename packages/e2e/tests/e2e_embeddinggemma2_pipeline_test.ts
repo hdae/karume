@@ -421,14 +421,14 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: the manifest and the tokenize
     assertEquals(rules.placeholders.size, 3);
   });
 
-  it("gives each preset its own storage of the model, the one bf16 vision tower and audio tower, an empty session and the binding its narrowed device is capped at", async () => {
+  it("gives each preset its own storage of the model, of the vision tower and of the audio tower, an empty session and the binding its narrowed device is capped at", async () => {
     const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
     const entry = manifest.models["text"];
     for (const preset of PRESETS) {
       const quant = entry.quants[preset.quant];
       assertEquals(
         quant.weights,
-        { model: preset.quant, vision: "bf16", audio: "bf16" },
+        { model: preset.quant, vision: preset.quant, audio: preset.quant },
         `${preset.quant}: weights`,
       );
       assertEquals(quant.session, {}, `${preset.quant}: session`);

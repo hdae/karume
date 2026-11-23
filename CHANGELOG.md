@@ -56,8 +56,9 @@ measurements in `docs/research/`.
   Also exported: `EmbedOptions`, `TokenizeOptions`, `PipelineOptions`, `FromPretrainedOptions`, `Assets` and
   `ModelInputError`.
 - `@karume/models/embeddinggemma`: image input. `PipelineOptions.vision: true` (the option of `gemma.Pipeline`'s image
-  embedder) also fetches the distribution's vision tower (the weights role `vision`, the checkpoint's bf16 values in both
-  presets, about 320 MiB) and opens its Session; `embed` and `tokenize` then take image parts
+  embedder) also fetches the distribution's vision tower (the weights role `vision`, in the storage the preset gives
+  the text tower: the checkpoint's bf16 values in `bf16`, about 320 MiB, per-row int8 in `i8`, about 161 MiB) and
+  opens its Session; `embed` and `tokenize` then take image parts
   `{ type: "image", image }` beside text parts, `image` decoded RGB8 pixels (`Rgb8Image`, now exported by the subpath too).
   An input is upstream's sentence-transformers sequence — `<bos>`, each run of adjacent text (the prompt's prefix in front)
   tokenized as one string, each image as `<|image>`, its 139 to 280 soft tokens (from its size alone, at upstream's
@@ -67,7 +68,8 @@ measurements in `docs/research/`.
   `pipelineConfig` gains the optional `vision` (the shape of `gemma.Pipeline`'s); `onRunDiagnostics` still reports the
   text graph's runs only.
 - `@karume/models/embeddinggemma`: audio input. `PipelineOptions.audio: true` also fetches the distribution's audio
-  tower (the weights role `audio`, the checkpoint's bf16 values in both presets, about 560 MiB) and opens its Session;
+  tower (the weights role `audio`, likewise: bf16 in `bf16`, about 560 MiB, per-row int8 in `i8` with its two
+  subsampling convolutions kept bf16, about 282 MiB) and opens its Session;
   `embed` and `tokenize` then take audio parts `{ type: "audio", audio }` beside text and image parts, `audio` mono f32
   samples at 16,000 Hz (`MonoAudio` — `{ data, sampleRate }`, the shape of `decodeWav`'s result —, now exported by the
   subpath). The host computes the audio's log-mel frames itself (upstream's `Gemma4AudioFeatureExtractor` as the

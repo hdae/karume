@@ -2,7 +2,9 @@
 // `embeddinggemma.Pipeline` built by `fromPretrained` from `models/karume-embeddinggemma-2/` with
 // `audio: true` and `vision: true` (one fixture input holds an image too) (the recipe
 // `tools/export-recipes/embeddinggemma2/distribution.py`; model `text`, every preset of the mirror
-// — `bf16`, the default, and `i8`, each with the same bf16 towers).
+// — `bf16`, the default, and `i8`, each with the towers in its own storage: the checkpoint's bf16
+// weights, or those rounded to per-row int8 — the audio tower's two subsampling convolutions kept
+// bf16).
 //
 // The reference is the tracked fixture `packages/models/tests/fixtures/embeddinggemma2/
 // multimodal-reference.{json,safetensors}` (`multimodal_reference.py`): four whole inputs holding an
@@ -15,14 +17,15 @@
 // 1. **The token ids** (no GPU): the ids the pipeline runs for each input — `<bos>`, the text runs,
 //    each audio as `<|audio>` + n × `<|audio|>` + `<audio|>` (and the image as its block), `<eos>` —
 //    equal upstream's exactly, and each block's soft rows start where upstream's do; the mirror
-//    declares `pipelineConfig.audio` as the recipe reads it and every preset maps the one bf16
-//    audio tower.
-// 2. **The four inputs through each preset** (real GPU): `tokenize` gives the fixture's ids, the
-//    vector is a unit vector, it bit-for-bit equals this machine's sha256 row of that preset (row
-//    ID `embeddinggemma-2/<preset>/audio/<case>`), and against upstream's vector: `bf16` within
-//    {@link AUDIO_TOLERANCE} (its derivation is there), `i8` at a cosine of at least
-//    {@link I8_COSINE_FLOOR} (its text tower is the int8 copy). A 30 s audio (750 soft tokens) gives
-//    a unit vector and its own row (`…/audio/full-length`).
+//    declares `pipelineConfig.audio` as the recipe reads it and each preset maps the audio tower
+//    of its own storage (the text tower's).
+// 2. **The four inputs through each preset** (real GPU): the pipeline fetched the text graph and
+//    both towers of the preset's storage and the tokenizer, nothing else; `tokenize` gives the
+//    fixture's ids, the vector is a unit vector, it bit-for-bit equals this machine's sha256 row of
+//    that preset (row ID `embeddinggemma-2/<preset>/audio/<case>`), and against upstream's vector:
+//    `bf16` within {@link AUDIO_TOLERANCE} (its derivation is there), `i8` at a cosine of at least
+//    {@link I8_COSINE_FLOOR} (its text tower and its towers are the int8 copies). A 30 s audio (750
+//    soft tokens) gives a unit vector and its own row (`…/audio/full-length`).
 // 3. **A text call on the audio pipeline** is the text call of the pipeline without it: its vector
 //    has the sha256 row the text pipeline e2e pins (`embeddinggemma-2/<preset>/query-en`).
 // 4. **The text graph's soft-row path alone** (real GPU, `bf16`, `KARUME_SERIES=1` with the tower
@@ -142,12 +145,15 @@ const SOFT_ROW_TOLERANCE: Tolerance = { atol: 3.5e-7, rtol: 0 };
  * upstream's: the text pipeline e2e's floor between the `i8` and the `bf16` vector of a text
  * (`I8_COSINE_FLOOR` of `e2e_embeddinggemma2_pipeline_test.ts`, whose derivation is there).
  *
- * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-23): 0.999819 (`query-audio`), 0.999824
- * (`audio-only`), 0.999889 (`image-then-audio`) and 0.999909 (`text-then-audio`), maxAbs 1.64e-3 to
- * 2.19e-3 — unchanged to these digits from the front end with its product in f64 (2026-11-22:
- * 0.999819 to 0.999909): the text tower's int8 rounding (its towers are
- * the same bf16 ones); within the 0.99940 to 0.99993 the ten golden texts measure against their
- * `bf16` vectors. No golden of the int8 model holds audio, so no tighter band is drawn.
+ * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-23, both towers int8): 0.999762
+ * (`query-audio`), 0.999803 (`audio-only`), 0.999859 (`image-then-audio`) and 0.999907
+ * (`text-then-audio`), maxAbs 1.90e-3 to 2.63e-3 — the rounding of the text tower and of the
+ * towers together. With the towers still bf16 (the same day) it was 0.999819 to 0.999909, the text
+ * tower's rounding alone. That is the order the torch-CPU screening of the towers' int8 forms
+ * measured on 32 clips of synthetic speech (all-i8, the shipped form: lowest 0.999493, mean
+ * 0.999759 at 768 values — docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md), and
+ * 0.999 leaves 1 − cos = 1e-3, 4.2 times the worst here (2.38e-4). No golden of the whole int8
+ * model holds audio, so no tighter band is drawn.
  */
 const I8_COSINE_FLOOR = 0.999;
 
@@ -403,7 +409,7 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: audio input on the host (no G
     rules = embedTextRules(tokenizer, config, { images: true, audio: true });
   });
 
-  it("declares pipelineConfig.audio as the recipe reads it, and every preset maps the one bf16 tower", async () => {
+  it("declares pipelineConfig.audio as the recipe reads it, and each preset maps the tower of its own storage", async () => {
     const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
     const entry = manifest.models["text"];
     assert(entry !== undefined, "the mirror has no model 'text'");
@@ -415,9 +421,12 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: audio input on the host (no G
       maxSoftTokens: 750,
       sampleRate: 16000,
     });
-    assertEquals(Object.keys(entry.weights["audio"] ?? {}), ["bf16"]);
+    assertEquals(
+      Object.keys(entry.weights["audio"] ?? {}),
+      PRESETS.map(({ quant }) => quant),
+    );
     for (const { quant } of PRESETS) {
-      assertEquals(entry.quants[quant]?.weights["audio"], "bf16", `${quant}: the tower`);
+      assertEquals(entry.quants[quant]?.weights["audio"], quant, `${quant}: the tower`);
     }
   });
 
@@ -465,13 +474,40 @@ const settle = async (
 /** The 30 s audio's vector on the uncapped device, per preset (check 5 compares with it). */
 const fullLengthVectors = new Map<string, Float32Array<ArrayBuffer>>();
 
-const buildPipeline = async (gpu: GpuContext, quant: string): Promise<embeddinggemma.Pipeline> =>
+const buildPipeline = async (
+  gpu: GpuContext,
+  quant: string,
+  fetched?: Set<string>,
+): Promise<embeddinggemma.Pipeline> =>
   await embeddinggemma.Pipeline.fromPretrained(mirrorDirectory(MIRROR_ROOT), {
     gpu,
     quant,
     vision: true,
     audio: true,
+    ...(fetched === undefined
+      ? {}
+      : {
+          onProgress: ({ phase, path }) => {
+            if (phase === "complete") fetched.add(path);
+          },
+        }),
   });
+
+/**
+ * The files a pipeline built with `roles` should fetch for a preset: every part of each role's
+ * container of the preset's own name (check 1 holds each preset to that storage) and the tokenizer.
+ */
+const presetFiles = async (quant: string, roles: readonly string[]): Promise<string[]> => {
+  const manifest = parseManifest(await readTextFile(new URL("karume.json", MIRROR_ROOT)));
+  const entry = manifest.models["text"];
+  assert(entry !== undefined, "the mirror has no model 'text'");
+  const parts = roles.flatMap((role) => {
+    const container = entry.weights[role]?.[quant]?.container;
+    assert(container !== undefined, `the mirror has no ${quant} container of '${role}'`);
+    return container.parts.map(({ path }) => path);
+  });
+  return [...parts, ...Object.values(entry.assets).map(({ path }) => path)].sort();
+};
 
 for (const preset of PRESETS) {
   describe.skipIf(!RUNNABLE)(
@@ -479,10 +515,12 @@ for (const preset of PRESETS) {
     () => {
       let gpu: GpuContext;
       let pipeline: embeddinggemma.Pipeline;
+      /** The paths whose fetch completed while the pipeline was built. */
+      const fetched = new Set<string>();
       beforeAll(async () => {
         gpu = verifyRunningGpu(await acquireTestGpu());
         const start = performance.now();
-        pipeline = await buildPipeline(gpu, preset.quant);
+        pipeline = await buildPipeline(gpu, preset.quant, fetched);
         console.log(
           `[embeddinggemma2-audio] ${preset.quant}: fromPretrained with both towers ${milliseconds(start)} ms`,
         );
@@ -494,6 +532,13 @@ for (const preset of PRESETS) {
         } finally {
           gpu.destroy();
         }
+      });
+
+      it(`fetched the ${preset.quant} text graph, the ${preset.quant} towers and the tokenizer, nothing else`, async () => {
+        assertEquals(
+          [...fetched].sort(),
+          await presetFiles(preset.quant, ["model", "vision", "audio"]),
+        );
       });
 
       for (const entry of FIXTURE.audioCases) {

@@ -1051,12 +1051,13 @@ JSON.
 `embeddinggemma.Pipeline.embed` turns one text, image, audio or a mix into a sentence embedding: a
 **unit vector**, so the dot product of two results is their cosine similarity — an image or an audio
 row compares with a text row directly. Today the family serves EmbeddingGemma 2 (the local mirror
-`models/karume-embeddinggemma-2`, model `text`, presets `bf16` — the default — and `i8`, both with the
-bf16 vision and audio towers). On a model whose weights include the role `vision` (`hasVisionTower` in
-`config.ts` — the Gemma 4 page's rule for its image embedder), the page builds the pipeline with
-`vision: true`, so the tower's weights (about 320 MiB) are fetched with the text model's and every row
-offers an image; on one whose weights include the role `audio` (`hasAudioTower`), likewise with
-`audio: true` (about 560 MiB more), and every row offers an audio file.
+`models/karume-embeddinggemma-2`, model `text`, presets `bf16` — the default — and `i8`, each with
+the vision and audio towers in its own storage: bf16, or per-row int8). On a model whose weights
+include the role `vision` (`hasVisionTower` in `config.ts` — the Gemma 4 page's rule for its image
+embedder), the page builds the pipeline with `vision: true`, so the tower's weights (about 320 MiB
+with `bf16`, 161 MiB with `i8`) are fetched with the text model's and every row offers an image; on
+one whose weights include the role `audio` (`hasAudioTower`), likewise with `audio: true` (about
+560 MiB more with `bf16`, 282 MiB with `i8`), and every row offers an audio file.
 The distribution is not published, so the mount has no HF-compatible route: the page reads it
 **direct** (plain `fetch` from `/models/embeddinggemma-2/`), and Cached is disabled with the reason.
 

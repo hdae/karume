@@ -2006,8 +2006,8 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   (2026-11-22, with the bf16 tower in both presets). The tower's per-row intermediates stay under the
   WebGPU default binding size, so it adds no `requiredLimits`: an image of 280 soft tokens embeds to
   the same bits on a device whose binding and buffer limits are capped at 128 MiB or 256 MiB (measured
-  with the bf16 tower; the int8 tower of `i8`, built 2026-11-23, is not run on a GPU yet).
-  `onRunDiagnostics` reports the text graph's runs only.
+  with the bf16 tower, and on 2026-11-23 with the int8 tower of `i8` on the 128 MiB device; that
+  Session holds 161.1 MiB of weights). `onRunDiagnostics` reports the text graph's runs only.
 - **An audio is mono f32 samples at 16,000 Hz, at most 30 s.** An audio part holds `MonoAudio`
   (`{ data, sampleRate }`): the caller decodes and resamples (no WAV / MP3 / Opus decoder and no
   resampler in the pipeline — `decodeWav` of the barrel reads WAV but does not resample; the
@@ -2054,9 +2054,10 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   and a Session whose plan at 750 soft tokens is 126.0 MiB (4.2 MiB at 1 s), measured on the RTX
   3080 Ti under Node (2026-11-22, with the bf16 tower in both presets). It adds no `requiredLimits`:
   its largest intermediate is 46.9 MiB at 30 s, and a 30 s audio embeds to the same bits on a device
-  whose binding and buffer limits are capped at 128 MiB or 256 MiB (measured with the bf16 tower; the
-  int8 tower of `i8`, built 2026-11-23, is not run on a GPU yet). A 30 s audio's tower run takes
-  about 94 ms once its plan exists. Its runs are not in `onRunDiagnostics` either.
+  whose binding and buffer limits are capped at 128 MiB or 256 MiB (measured with the bf16 tower, and
+  on 2026-11-23 with the int8 tower of `i8` on the 128 MiB device, in the series e2e and through the
+  pipeline; that Session holds 281.6 MiB of weights). A 30 s audio's tower run takes about 94 ms once
+  its plan exists, in either storage. Its runs are not in `onRunDiagnostics` either.
 - **Each image is preprocessed synchronously when `embed` is called, and its rows are held while the
   call waits.** The resize and the patch rows run in JS on the caller's thread at issue (so a later
   write into the pixels does not reach the call), before the call takes its turn on the pipeline's
