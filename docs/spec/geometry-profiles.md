@@ -71,17 +71,18 @@ time.
   or a value the field does not have is refused, naming the row.
 - `quick+` lists a registered table's rule that carries a field by its tile; the cases then measure that tile with
   every field, the table's own geometry among them.
-- The two sets grow by these candidates: `quick+` from 821 to 1,517 rows over the sweep's 78 cases, `full` from 6,269
-  to 10,040. The case sets, the default kernels and their fingerprints do not change, so a registered table still
-  matches.
+- Over the sweep's 78 cases `quick+` forms 1,656 rows (896 with the tiles alone) and `full` 10,040 (6,269 with the
+  tiles alone), counted as the sweep forms them: per case the default's row and every candidate of the set by
+  another name. The fields change no case set, default kernel or fingerprint, so a registered table matches whether
+  or not its family was swept with them.
 - `nvidia-blackwell` carries them: a form in its four `gemmRows` rules above 64 rows, and a form with the decode in
   both `conv2d` fields. `apple-m5` carries a form in its five `gemmRows` rules from 17 to 512 rows and a form with the
   decode in both `conv2d` fields; `apple-metal-3-shared` a form in its rule of 33 to 64 rows and a form with the
   decode in both `conv2d` fields. `nvidia-ampere` and `apple-metal-3` carry none; a table takes one when its family is
   derived from a sweep that measured it.
-- `quick+` takes every registered table's geometries, so registering a table can grow it: with `apple-m5` and
-  `apple-metal-3-shared` registered the sweep's 78 cases measure 152 more rows in `quick+` and 27 more in the
-  evaluation set `k88` than without them (counted as the sweep forms its rows: 1,504 to 1,656 and 222 to 249).
+- `quick+` and the evaluation set `k88` take every registered table's geometries, so registering a table can grow
+  them: 152 of the 1,656 rows of `quick+` come from `apple-m5` and `apple-metal-3-shared` (1,504 without them), and
+  3 of the 213 rows `k88` forms over its own 19 cases (210 without them).
 
 ## A record
 
