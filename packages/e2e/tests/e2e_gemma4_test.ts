@@ -13,9 +13,10 @@
 //
 // True GQA (more than one k / v head) is not this file's: on real weights it is held by the greedy
 // parity of the E4B (8 q : 2 kv) and 12B (16 q : 8 kv on the sliding layers) decode graphs against
-// torch goldens — `e2e_gemma4_bf16_mirror_test.ts` ②, `e2e_gemma4_qat_mirror_test.ts` ④ and
-// `e2e_gemma4_12b_test.ts` ⑤, token identity with no `:gqa` key check — and, in one-shot
-// attention, by `e2e_qwen3_5_encoder_test.ts` (4 k / v heads, against Karume's CPU reference).
+// torch goldens (`e2e_gemma4_bf16_mirror_test.ts` ②, `e2e_gemma4_qat_mirror_test.ts` ④ and
+// `e2e_gemma4_12b_test.ts` ⑤ — token identity), by the census of `e2e_gemma4_bf16_mirror_test.ts`
+// ⑤ (the E4B decode's states-form QK / PV kernels all carry `:gqa`) and, in one-shot attention, by
+// `e2e_qwen3_5_encoder_test.ts` (4 k / v heads, against Karume's CPU reference).
 //
 // 4 checks:
 //
