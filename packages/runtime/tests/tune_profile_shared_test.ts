@@ -7,10 +7,11 @@
 // on every device, on that device's own cases against that device's own default, and among those
 // the largest geometric mean of the per-device geometric means (devices weigh equally, not cases);
 // a class one device has no case of keeps the default and names the device; (2) the verdict lines
-// show each device's ratio; (3) the provenance names every device; (4) the refusals (one adapter,
-// a description, attention-bench records) and that the measured derivation still refuses mixed
-// adapters; (5) a shared table as the base of a regeneration; (6) matching and the JSON reader of the
-// several-adapter form.
+// show each device's ratio; (3) the provenance names every device; (4) a device is told apart by
+// its description (a record without one, one description with two device ids and one description
+// alone are refused); (5) the refusals (a description, attention-bench records) and that the
+// measured derivation still refuses mixed adapters; (6) a shared table as the base of a
+// regeneration; (7) matching and the JSON reader of the several-adapter form.
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -200,28 +201,12 @@ describe("deriveGeometryProfile with shared: the rule", () => {
     assertEquals(profile.attentionOnline, undefined);
     assertEquals(profile.linearGemv, undefined);
   });
-
-  it("labels devices that share a description by their device id as well", () => {
-    const other = { ...M5, device: "0x1111" };
-    const { verdicts } = deriveGeometryProfile(
-      [
-        input("m5.json", caseRows(linearCase(1024), BIG, [[A, { speedup: 1.3 }]]), M5),
-        input("other.json", caseRows(linearCase(1024), BIG, [[A, { speedup: 1.3 }]]), other),
-      ],
-      SHARED,
-    );
-    assertStringIncludes(
-      linesOf(verdicts, "gemmRows > 512")[0],
-      'Apple M5 (device "0x0000") ×1.300 (×1.300–×1.300), Apple M5 (device "0x1111") ×1.300',
-    );
-  });
 });
 
-describe("deriveGeometryProfile with shared: the refusals", () => {
+describe("deriveGeometryProfile with shared: a device is told apart by its description", () => {
   const rows = caseRows(linearCase(1024), BIG, [[A, { speedup: 1.3 }]]);
-  const both = [input("m5.json", rows, M5), input("m2.json", rows, M2)];
 
-  it("refuses the records of one adapter only (two records that agree on the four fields)", () => {
+  it("refuses the records of one description only (two records of one device)", () => {
     assertThrows(
       () =>
         deriveGeometryProfile(
@@ -229,9 +214,47 @@ describe("deriveGeometryProfile with shared: the refusals", () => {
           SHARED,
         ),
       Error,
-      "A shared derivation needs the records of at least two adapters (distinct by vendor / architecture / device / description); every record given is of Apple M5",
+      "A shared derivation needs the records of at least two devices (told apart by their descriptions); every record given is of Apple M5 — derive a measured table of one adapter instead",
     );
   });
+
+  it("refuses a record whose adapter reports no description: one machine with and without Chrome's flag is not two devices", () => {
+    // Chrome reports the same M5 without its developer-features flag with an empty device and
+    // description: by the four fields it would be a second adapter
+    assertThrows(
+      () =>
+        deriveGeometryProfile(
+          [
+            input("m5.json", rows, M5),
+            input("m5-no-flag.json", rows, { ...M5, device: "", description: "" }),
+          ],
+          SHARED,
+        ),
+      Error,
+      "m5-no-flag.json: the adapter reports no description, so its records cannot be told apart from another device's (a shared derivation tells devices apart by their descriptions) — sweep where the adapter reports its description (in Chrome, with the WebGPU developer-features flag: chrome://flags/#enable-webgpu-developer-features)",
+    );
+  });
+
+  it("refuses records of one description with another device id: they are not of one adapter", () => {
+    assertThrows(
+      () =>
+        deriveGeometryProfile(
+          [
+            input("m5.json", rows, M5),
+            input("m2.json", rows, M2),
+            input("m5-other.json", rows, { ...M5, device: "0x1111" }),
+          ],
+          SHARED,
+        ),
+      Error,
+      'm5-other.json: adapter device "0x1111" differs from m5.json\'s "0x0000" under the same description "Apple M5" (a shared derivation tells devices apart by their descriptions, so the records of one description must be of one adapter)',
+    );
+  });
+});
+
+describe("deriveGeometryProfile with shared: the refusals", () => {
+  const rows = caseRows(linearCase(1024), BIG, [[A, { speedup: 1.3 }]]);
+  const both = [input("m5.json", rows, M5), input("m2.json", rows, M2)];
 
   it("refuses a description, a missing architecture, an injection-only target and records of another architecture", () => {
     assertThrows(

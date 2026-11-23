@@ -289,7 +289,7 @@ describe("a shared table (--shared)", () => {
     );
     assertEquals(code, 1);
     assertEquals(
-      stderr[0]?.startsWith("A shared derivation needs the records of at least two adapters"),
+      stderr[0]?.startsWith("A shared derivation needs the records of at least two devices"),
       true,
       stderr[0],
     );

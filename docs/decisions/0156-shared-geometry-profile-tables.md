@@ -35,20 +35,24 @@ slower, or screened out by the quick look, in some case of the other five.
    matched by vendor and architecture is a *predicted* table: the adapter runs geometries measured on other devices of its
    architecture. No table matches: the *default*. The selection order does not change.
 2. **A shared derivation, asked for explicitly** (`shared` of `deriveGeometryProfile`, `--shared` of the generator). It
-   needs a vendor and an architecture, takes no description, and needs the records of at least two adapters distinct by
-   the four fields. Anything else is refused.
-3. **Adopted device by device.** The records are grouped by adapter. Inside a group every rule of a measured table holds
-   as it does there. A geometry is eligible only when it passes that rule on every device, on the device's own cases
+   needs a vendor and an architecture, takes no description, and needs the records of at least two devices. Anything
+   else is refused.
+3. **A device is told apart by its description.** Every record must carry a non-empty description, and the records of
+   one description must agree on all four fields. Grouping by the four fields would count one GPU twice: Chrome
+   reports the same machine with its developer-features flag (a description and a device id) and without it (neither),
+   and the rule of two devices would then hold on one machine.
+4. **Adopted device by device.** The records are grouped by description. Inside a group every rule of a measured table
+   holds as it does there. A geometry is eligible only when it passes that rule on every device, on the device's own cases
    against the device's own default; among the eligible ones the table takes the one with the largest geometric mean of
    the per-device geometric means (devices weigh equally), ties by name. A field some device has no case of keeps the
    default.
-4. **Tile geometries only.** A shared table derives neither the online attention's key axis nor the GEMV choices of
+5. **Tile geometries only.** A shared table derives neither the online attention's key axis nor the GEMV choices of
    linear; the default profile's choices run on its adapters.
-5. **The provenance names every device**: `provenance.adapters` in place of `provenance.adapter`. Matching compares vendor
+6. **The provenance names every device**: `provenance.adapters` in place of `provenance.adapter`. Matching compares vendor
    and architecture for that form, every family's keys as before, and the four fields for a measured table as before.
-6. **The single-adapter guard stays** as the rule of a measured table, unchanged; the shared derivation is a second path
+7. **The single-adapter guard stays** as the rule of a measured table, unchanged; the shared derivation is a second path
    with its own checks, not a looser first one.
-7. **The Apple tables**: `apple-m5`, measured, matched by `Apple M5`, from the M5's full sweep; `apple-metal-3-shared`,
+8. **The Apple tables**: `apple-m5`, measured, matched by `Apple M5`, from the M5's full sweep; `apple-metal-3-shared`,
    predicted, matched by `apple` / `metal-3`, from that sweep and the M2's three records of 2026-11-23.
 
 ## Why

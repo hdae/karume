@@ -94,9 +94,10 @@ measurements in `docs/research/`.
   of their mask. The workbench's `kernel-check` entry runs a fourteenth check, `attention-band`.
 - `@karume/runtime/tune`: `deriveGeometryProfile` derives a **shared table** with `shared: true` — one table from the
   sweep records of two or more adapters of one vendor and architecture, matched by vendor and architecture without a
-  description. Each adapter's records are read as a measured table's; a geometry is adopted only when, on every adapter,
-  its output is identical and it is at least the threshold faster than that adapter's own default in every case of
-  the field, and among those the one with the largest geometric mean of the per-adapter geometric means is taken. No
+  description. The adapters are told apart by their descriptions: every record must carry one (a record without one,
+  or records of one description with two device ids, are refused). Each adapter's records are read as a measured
+  table's; a geometry is adopted only when, on every adapter, its output is identical and it is at least the
+  threshold faster than that adapter's own default in every case of the field, and among those the one with the largest geometric mean of the per-adapter geometric means is taken. No
   timing of one adapter is compared with another's. A shared table carries tile geometries only (no
   `attentionOnline`, no `linearGemv`), and its provenance names every adapter (`provenance.adapters`);
   `geometryProfileMismatch` compares a shared table's vendor and architecture with the adapter's.

@@ -1678,11 +1678,7 @@ const slotRowsOf = (
 /** One device of a shared derivation: its adapter and the label its verdicts name it by. */
 type SharedDevice = {
   readonly adapter: SweepAdapter;
-  /**
-   * The adapter's description, or, when that is empty or another device has the same one, the
-   * description with the device id (devices are distinct by the four fields, and vendor and
-   * architecture are the target's).
-   */
+  /** The adapter's description (a shared derivation tells devices apart by it). */
   readonly label: string;
 };
 
@@ -1733,29 +1729,52 @@ const adapterKey = (adapter: SweepAdapter): string =>
   JSON.stringify(ADAPTER_FIELDS.map((field) => adapter[field]));
 
 /**
- * The records grouped by adapter (the four fields), in the order each adapter's first record was
- * given, with the label each device's verdicts name it by.
+ * The records grouped by device, in the order each device's first record was given, each labelled
+ * by its description.
+ *
+ * MUST: a shared derivation tells devices apart by the adapter's description, so every record
+ * carries one and the records of one description agree on all four fields. Grouping by the four
+ * fields would let one GPU pass as two devices — Chrome reports the same machine with its
+ * developer-features flag (a description and a device id) and without it (both empty) — and the
+ * rule of at least two devices would then hold on one machine.
  */
 const sharedDevices = (
   sources: readonly SweepSource[],
 ): readonly (SharedDevice & { readonly sources: readonly SweepSource[] })[] => {
-  const groups = new Map<string, { adapter: SweepAdapter; sources: SweepSource[] }>();
+  const groups = new Map<
+    string,
+    { adapter: SweepAdapter; firstPath: string; sources: SweepSource[] }
+  >();
   for (const source of sources) {
-    const key = adapterKey(source.adapter);
-    const group = groups.get(key) ?? { adapter: source.adapter, sources: [] };
+    const { description } = source.adapter;
+    if (description === "") {
+      throw new Error(
+        `${source.path}: the adapter reports no description, so its records cannot be told apart from another device's (a shared derivation tells devices apart by their descriptions) — sweep where the adapter reports its description (in Chrome, with the WebGPU developer-features flag: chrome://flags/#enable-webgpu-developer-features)`,
+      );
+    }
+    const group = groups.get(description);
+    if (group === undefined) {
+      groups.set(description, {
+        adapter: source.adapter,
+        firstPath: source.path,
+        sources: [source],
+      });
+      continue;
+    }
+    for (const field of ADAPTER_FIELDS) {
+      if (source.adapter[field] !== group.adapter[field]) {
+        throw new Error(
+          `${source.path}: adapter ${field} ${JSON.stringify(source.adapter[field])} differs from ${group.firstPath}'s ${JSON.stringify(group.adapter[field])} under the same description ${JSON.stringify(description)} (a shared derivation tells devices apart by their descriptions, so the records of one description must be of one adapter)`,
+        );
+      }
+    }
     group.sources.push(source);
-    groups.set(key, group);
   }
-  const listed = [...groups.values()];
-  return listed.map(({ adapter, sources: grouped }) => {
-    const unique =
-      adapter.description !== "" &&
-      listed.filter((other) => other.adapter.description === adapter.description).length === 1;
-    const label = unique
-      ? adapter.description
-      : `${adapter.description === "" ? "no description" : adapter.description} (device ${JSON.stringify(adapter.device)})`;
-    return { adapter, label, sources: grouped };
-  });
+  return [...groups.values()].map(({ adapter, sources: grouped }) => ({
+    adapter,
+    label: adapter.description,
+    sources: grouped,
+  }));
 };
 
 /** One device's eligibility of a geometry in one class (its own cases, its own default). */
@@ -1905,7 +1924,8 @@ const judgeSharedSlot = (
  * adapters of one vendor and architecture (a pure function — SPEC:
  * docs/spec/geometry-profiles.md#shared-tables, DECIDED: ADR 0156).
  *
- * The records are grouped by adapter (the four fields). Inside one group every rule of
+ * The records are grouped by device, told apart by the adapter's description
+ * ({@link sharedDevices}). Inside one group every rule of
  * {@link deriveProfile} applies as it does to a measured table — the records of a group combine,
  * the material and rounding checks drop the same observations, a geometry must match the default's
  * output and reach `minSpeedup` on every case of the class the group holds. Timings are never
@@ -1916,7 +1936,8 @@ const judgeSharedSlot = (
  *
  * MUST: vendor and architecture are given and description is not (the table is matched by vendor
  * and architecture, below every table matched by description); every record is of that vendor and
- * architecture; the records hold at least two adapters. Anything else throws.
+ * architecture; every record carries a description, the records of one description are of one
+ * adapter, and the records hold at least two descriptions. Anything else throws.
  */
 export const deriveSharedProfile = (
   sources: readonly SweepSource[],
@@ -1944,7 +1965,7 @@ export const deriveSharedProfile = (
   const devices = sharedDevices(sources);
   if (devices.length < 2) {
     throw new Error(
-      `A shared derivation needs the records of at least two adapters (distinct by vendor / architecture / device / description); every record given is of ${devices[0].label} — derive a measured table of one adapter instead`,
+      `A shared derivation needs the records of at least two devices (told apart by their descriptions); every record given is of ${devices[0].label} — derive a measured table of one adapter instead`,
     );
   }
   const grouped = devices.map((device) => ({
@@ -2644,7 +2665,8 @@ const carryOver = (
       `${where} has no provenance (nothing to carry over — a base is a table derived from sweeps)`,
     );
   }
-  const devices = sharedDevices(sources);
+  // A measured derivation's records are one adapter's whatever their description (deriveProfile)
+  const devices = shared ? sharedDevices(sources) : [];
   if (provenance.adapters !== undefined) {
     if (!shared) {
       throw new Error(
@@ -2941,7 +2963,8 @@ export const buildGeometryProfile = (
     device,
     description,
   });
-  const adapters = sharedDevices(sources).map((device) => adapterOf(device.adapter));
+  const adapters =
+    spec.shared === true ? sharedDevices(sources).map((device) => adapterOf(device.adapter)) : [];
   if (spec.shared === true && adapters.length < 2) {
     throw new Error(
       `Generated table '${spec.id}': a shared table needs the records of two or more adapters (${adapters.length} given)`,
@@ -3143,7 +3166,8 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * Derive a **shared table** from the records of two or more adapters of one vendor and
    * architecture ({@link deriveSharedProfile} — SPEC: docs/spec/geometry-profiles.md#shared-tables):
    * it needs `vendor` and `architecture`, takes no `description`, no `optIn` and no
-   * `attentionBench`, and writes `provenance.adapters`. Omitted or false, the records must agree on
+   * `attentionBench`, tells the devices apart by their descriptions (every record carries one), and
+   * writes `provenance.adapters`. Omitted or false, the records must agree on
    * all four adapter fields (a measured table).
    */
   readonly shared?: boolean;

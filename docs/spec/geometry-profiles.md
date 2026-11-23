@@ -119,11 +119,17 @@ matched without a description: the predicted table of [the three levels](#the-th
 
 - **Asked for explicitly**: `deriveGeometryProfile` with `shared: true`, the generator with `--shared`. It needs a
   vendor and an architecture, takes no description and no injection-only target, and needs the records of at least
-  two adapters distinct by the four fields; every record must be of that vendor and architecture. Anything else is
-  refused, naming what. Without the option nothing of this applies: records whose four fields differ are refused
+  two devices; every record must be of that vendor and architecture. Anything else is refused, naming what. Without
+  the option nothing of this applies: records whose four fields differ are refused
   ([above](#where-a-table-comes-from)).
-- **Each device is read as one adapter.** The records are grouped by their adapter's four fields. Inside one group
-  every rule of a measured table applies as it does there: the group's records combine, the material and rounding
+- **A device is told apart by its description.** Every record must carry a non-empty description: a record without
+  one is refused, since it cannot be told apart from another device's (the same machine in Chrome reports its
+  description and device with the developer-features flag and neither without it, so by the four fields it would
+  be two adapters). The records are grouped by description, and the records of one description must agree on all
+  four fields: one that names another device id is refused, as not of one adapter. At least two descriptions are
+  needed.
+- **Each device is read as one adapter.** Inside one group every rule of a measured table applies as it does there:
+  the group's records combine, the material and rounding
   checks drop the same observations, a row the quick look screened out is no observation, the sweep's default row
   must be the current runtime's default. No timing of one device is compared with another's, and none is pooled:
   every ratio is a geometry against its own device's default on that device.
@@ -506,8 +512,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   not taken; among the geometries eligible on every device the largest geometric mean of the per-device geometric
   means is taken (devices weigh equally, not cases); one slow case on one device rules a geometry out; a field one
   device has no case of keeps the default and names the device; the provenance's adapters and the family entries;
-  the refusals (one adapter, a description, no architecture, an injection-only target, attention-bench records) and
-  the measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
+  the refusals (the records of one description only, a record without a description, records of one description
+  with two device ids, a description, no architecture, an injection-only target, attention-bench records) and the
+  measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
   and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table; the
   generator's `--shared` refusals and a shared table written, its header and the module it exports. The Apple tables
   of the built-in list are selected as [the three levels](#the-three-levels) say (`Apple M2`, `Apple M5`, an empty, absent or

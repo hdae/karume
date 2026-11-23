@@ -49,8 +49,11 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   are reported in the verdict lines, not refused, and so are the current groups without a usable reference. The field
   is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
-- `--shared` takes records of two or more adapters of the vendor and architecture (distinct by vendor, architecture,
-  device and description). The records are grouped by adapter and each group is read as one adapter's; a geometry is
+- `--shared` takes records of two or more devices of the vendor and architecture, told apart by their descriptions:
+  every record must carry a non-empty description (a browser record has one only when the browser reports it — in
+  Chrome, with the WebGPU developer-features flag, `chrome://flags/#enable-webgpu-developer-features`), the records
+  of one description must agree on the device id too, and at least two descriptions are needed. The records are
+  grouped by description and each group is read as one adapter's; a geometry is
   adopted only when, on every device, its output is identical and it is at least the threshold faster than that
   device's default on every case of the field the device's records hold, and among those the one with the largest
   geometric mean of the per-device geometric means is taken. A field some device has no case of keeps the default. A
