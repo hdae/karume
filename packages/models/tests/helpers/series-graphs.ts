@@ -61,8 +61,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     speaker: "speaker",
     "text-proj": "text_proj",
   },
-  "minicpm5-1b": { "": "model" },
-  "minicpm5-1b-decode": { "": "model" },
   // MOSS-Image's DiT (ADR 0138 decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
   // every weight of `dit`).
   "moss-image-sft-i8-dyn": { dit: "dit", dit_skip22: "dit_skip22", dit_text: "dit_text" },

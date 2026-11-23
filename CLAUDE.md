@@ -95,7 +95,7 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   `packages/e2e/tests/helpers/upstream-parity.ts`)
 - **Cases that use the real network** (the one `node_cache_storage_test.ts` that fetches small assets from
   huggingface.co) are also opt-in: `KARUME_NETWORK=1`. The default lanes SKIP them explicitly
-- **Families not run by default** (minicpm5 / siglip2 — maintained but not run every time; `LOW_PRIORITY_FAMILIES` in the
+- **Families not run by default** (siglip2 — maintained but not run every time; `LOW_PRIORITY_FAMILIES` in the
   lane table): `KARUME_ALL_FAMILIES=1 vp test --project models:siglip2`. Full verify and the release decision run the
   default set
 - One file: `vp test <path>`. Runs that use the GPU are serialised with other sessions through
