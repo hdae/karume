@@ -1,0 +1,22 @@
+{
+  "name": "@karume/embeddinggemma2-quality-set",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Generator of the EmbeddingGemma 2 quality set: captioned images and transcribed speech made by Karume's own pipelines.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.ts",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@hdae/yomi": "catalog:",
+    "@karume/hub": "workspace:*",
+    "@karume/local-distributions": "workspace:*",
+    "@karume/models": "workspace:*",
+    "@karume/test-support": "workspace:*"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}

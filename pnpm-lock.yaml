@@ -545,6 +545,28 @@ importers:
         specifier: 'catalog:'
         version: 1.2.0(@types/node@24.19.1)(@vitest/ui@5.0.4)(jiti@2.7.0)(typescript@7.0.2)
 
+  tools/embeddinggemma2-quality-set:
+    dependencies:
+      '@hdae/yomi':
+        specifier: 'catalog:'
+        version: '@jsr/hdae__yomi@0.4.2'
+      '@karume/hub':
+        specifier: workspace:*
+        version: link:../../packages/hub
+      '@karume/local-distributions':
+        specifier: workspace:*
+        version: link:../../packages/local-distributions
+      '@karume/models':
+        specifier: workspace:*
+        version: link:../../packages/models
+      '@karume/test-support':
+        specifier: workspace:*
+        version: link:../../packages/test-support
+    devDependencies:
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.2.0(@types/node@24.19.1)(@vitest/ui@5.0.4)(jiti@2.7.0)(typescript@7.0.2)
+
   tools/geometry-profiles:
     dependencies:
       '@karume/runtime':

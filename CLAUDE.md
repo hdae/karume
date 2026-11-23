@@ -74,7 +74,7 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `tools/exporter/` — PyPI `karume` = **the general-purpose core only** (src layout; the boundary is a machine gate —
   ADR 0065) / `tools/export-recipes/` — per-model recipes (outside the wheel; shared venv of the uv workspace;
   launched with `python -m <family>.<mod>`; dist is `export-recipes/dist.py`).
-  `tools/{lang,lint,published-smoke,verify-diff,release,geometry-profiles,test-assets}` are process tools (workspace
+  `tools/{lang,lint,published-smoke,verify-diff,release,geometry-profiles,test-assets,embeddinggemma2-quality-set}` are process tools (workspace
   packages); `tools/llm-baseline/` is the PyTorch quality baseline of Gemma 4 (Python, the exporter's venv) and
   `tools/diag/` holds the GPU-busy check scripts.
   The measurement tools and CLI examples (`tools/*` / `examples/*` of 0.14.0) have been removed and are rebuilt as

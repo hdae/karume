@@ -150,6 +150,11 @@ export const ALLOW_LIST: readonly Allowance[] = [
   },
   { path: "tools/lang/tests/", why: "inputs and expected values of the language tools' own tests" },
   // --- by nature: test and recipe material (ADR 0130 decision 3 (c)) ----------------------
+  {
+    path: "tools/embeddinggemma2-quality-set/set.ts",
+    why: "the Japanese sentences SBV2 speaks for the EmbeddingGemma 2 quality set (the transcripts of its clips)",
+    maxLines: 8,
+  },
   { path: "packages/e2e/tests/e2e_gemma4_chat_test.ts", why: MODEL_OUTPUT, maxLines: 2 },
   { path: "packages/e2e/tests/e2e_gemma4_pretrained_test.ts", why: MODEL_OUTPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_gemma4_test.ts", why: MODEL_OUTPUT, maxLines: 1 },
