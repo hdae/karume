@@ -21,6 +21,7 @@ original weights with its source).
 from __future__ import annotations
 
 import math
+import textwrap
 from collections.abc import Mapping
 from functools import partial
 from typing import Any
@@ -55,15 +56,38 @@ EMBEDDINGGEMMA2_VISION_TITLE = "EmbeddingGemma 2 Text and Image Embedding — Ka
 EMBEDDINGGEMMA2_AUDIO_TITLE = "EmbeddingGemma 2 Text and Audio Embedding — Karume"
 EMBEDDINGGEMMA2_VISION_AUDIO_TITLE = "EmbeddingGemma 2 Text, Image and Audio Embedding — Karume"
 
-#: The weights role of the vision tower and its one storage (the spellings
-#: `embeddinggemma2.distribution` writes). MUST: every preset maps the tower to this storage — the
-#: card states that no preset rounds it ({@link _tower_storage_lines}).
+#: The weights roles of the two towers (the spellings `embeddinggemma2.distribution` writes).
 EMBEDDINGGEMMA2_VISION_ROLE = "vision"
-EMBEDDINGGEMMA2_VISION_DTYPE = "bf16"
-
-#: The weights role of the audio tower and its one storage, under the same MUST.
 EMBEDDINGGEMMA2_AUDIO_ROLE = "audio"
-EMBEDDINGGEMMA2_AUDIO_DTYPE = "bf16"
+
+#: Weights role of a tower → dtype label → what that storage of the tower holds. MUST: every
+#: preset maps a tower to the storage it gives the text tower, among these — the card states it
+#: that way ({@link _tower}, {@link _tower_storage_lines}).
+EMBEDDINGGEMMA2_TOWER_STORAGES: Mapping[str, Mapping[str, str]] = {
+    EMBEDDINGGEMMA2_VISION_ROLE: {
+        "bf16": "the checkpoint's weights unchanged",
+        "i8": "every linear layer and the two learned position tables rounded to int8 with one"
+        " f32 scale per row",
+    },
+    EMBEDDINGGEMMA2_AUDIO_ROLE: {
+        "bf16": "the checkpoint's weights unchanged",
+        "i8": "every linear layer and depthwise convolution rounded to int8 with one f32 scale"
+        " per row",
+    },
+}
+
+#: What stays f32 in every storage of a tower.
+EMBEDDINGGEMMA2_TOWER_F32: Mapping[str, str] = {
+    EMBEDDINGGEMMA2_VISION_ROLE: "its norms and its folded rotary tables",
+    EMBEDDINGGEMMA2_AUDIO_ROLE: "its norms, biases and folded constants",
+}
+
+#: The audio tower's exception in `i8` (`export_audio.I8_KEPT_BF16_WEIGHTS` declares it, with the
+#: torch-CPU screening of 2026-11-23 as its reason) — one sentence, only beside an `i8` storage.
+EMBEDDINGGEMMA2_AUDIO_I8_EXCEPTION = (
+    "In `i8` its two subsampling convolutions keep their bf16 values: rounded, they alone moved"
+    " single soft tokens of real speech far from the original."
+)
 
 #: The audio one soft token stands for, in milliseconds (upstream's `processor_config.json`,
 #: `audio_ms_per_token`: four mel frames of a 10 ms hop) — a fact of the front end, not of the
@@ -109,10 +133,10 @@ EMBEDDINGGEMMA2_I8_SCREENING_SOURCE = "docs/research/2026-11-22-embeddinggemma2-
 #: MUST: stated as one measurement on that small set, never as a benchmark, and only for a manifest
 #: with an `i8` preset ({@link _i8_screening}).
 EMBEDDINGGEMMA2_I8_SCREENING: tuple[str, ...] = (
-    "One measurement, not a benchmark: a screening on torch (CPU, f32 arithmetic) with the weights",
-    "rounded exactly as the `i8` files store them, against the checkpoint's own weights, over 58",
-    "texts — the ten test texts of this conversion (12 to 8,192 tokens) and 48 short ones, 10 of",
-    "them in Japanese (2026-11-22). At the full 768 values:",
+    "One measurement, not a benchmark: a screening on torch (CPU, f32 arithmetic) with the text",
+    "tower's weights rounded exactly as the `i8` files store them, against the checkpoint's own",
+    "weights, over 58 texts — the ten test texts of this conversion (12 to 8,192 tokens) and 48",
+    "short ones, 10 of them in Japanese (2026-11-22). At the full 768 values:",
     "",
     "- the cosine of each text's embedding to the original weights' is 0.999396 at the lowest and",
     "  0.999842 on average;",
@@ -123,6 +147,31 @@ EMBEDDINGGEMMA2_I8_SCREENING: tuple[str, ...] = (
     "",
     f"Source: `{EMBEDDINGGEMMA2_I8_SCREENING_SOURCE}` in the Karume repository.",
 )
+
+#: Where the towers' int8 forms' measured distance comes from (a record of the Karume repository).
+EMBEDDINGGEMMA2_I8_TOWER_SCREENING_SOURCE = (
+    "docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md"
+)
+
+#: The towers' measured distance (the screening above, configuration `all-i8` on its quality set —
+#: every tower an input passes through rounded as the `i8` files store it; numbers copied from its
+#: re-run with the shipped form). One bullet per tower, drawn only for a tower the manifest ships
+#: with an `i8` storage ({@link _i8_screening}).
+EMBEDDINGGEMMA2_I8_TOWER_SCREENING_LEAD: tuple[str, ...] = (
+    "The towers' int8 weights were screened the same way (2026-11-23): each input embedded alone,",
+    "every tower it passes through rounded as the `i8` files store it, at the full 768 values:",
+    "",
+)
+EMBEDDINGGEMMA2_I8_TOWER_SCREENING: Mapping[str, tuple[str, ...]] = {
+    EMBEDDINGGEMMA2_VISION_ROLE: (
+        "- 32 generated images: the cosine to the original weights' embedding is 0.999648 at the",
+        "  lowest and 0.999812 on average.",
+    ),
+    EMBEDDINGGEMMA2_AUDIO_ROLE: (
+        "- 32 clips of Japanese synthetic speech (8 sentences): 0.999493 at the lowest and",
+        "  0.999759 on average.",
+    ),
+}
 
 #: The weights role of the text tower (the spelling `embeddinggemma2.distribution` imports — the
 #: card reads the storage of the main model from it).
@@ -203,13 +252,14 @@ def _input_length(max_tokens: int) -> list[str]:
     ]
 
 
-def _tower(manifest: Mapping[str, Any], role: str, dtype: str) -> Mapping[str, Any] | None:
+def _tower(manifest: Mapping[str, Any], role: str) -> Mapping[str, Any] | None:
     """The default model's `pipelineConfig.<role>` when the manifest ships the tower of that
     weights role (`vision` / `audio` — the declaration has the role's name), else `None`.
 
-    MUST: the tower's weights and the declaration come together, on every model, and every preset
-    maps the tower to its one `dtype` storage — the card states both (no preset rounds the tower),
-    so a manifest where that is not so is not drawn.
+    MUST: the tower's weights and the declaration come together, on every model; the tower is
+    stored in exactly the text tower's storages, each one the card describes, and every preset
+    maps it to the storage it gives the text tower — the card states it that way, so a manifest
+    where that is not so is not drawn.
     """
     shipped = {name: role in model["weights"] for name, model in manifest["models"].items()}
     for name, model in manifest["models"].items():
@@ -221,12 +271,24 @@ def _tower(manifest: Mapping[str, Any], role: str, dtype: str) -> Mapping[str, A
             )
         if not shipped[name]:
             continue
-        storages = list(model["weights"][role])
-        mapped = {quant["weights"][role] for quant in model["quants"].values()}
-        if storages != [dtype] or mapped != {dtype}:
+        storages = set(model["weights"][role])
+        text = set(model["weights"][EMBEDDINGGEMMA2_MODEL_ROLE])
+        mismatched = sorted(
+            quant_name
+            for quant_name, quant in model["quants"].items()
+            if quant["weights"][role] != quant["weights"][EMBEDDINGGEMMA2_MODEL_ROLE]
+        )
+        if storages != text or not storages <= set(EMBEDDINGGEMMA2_TOWER_STORAGES[role]):
             raise ValueError(
-                f"model '{name}': the {role} tower is stored as {storages} and mapped to"
-                f" {sorted(mapped)} — this card states that every preset ships its {dtype} values"
+                f"model '{name}': the {role} tower is stored as {sorted(storages)}, the text"
+                f" tower as {sorted(text)} — this card states that the tower ships in the"
+                " storage each preset gives the text tower"
+            )
+        if mismatched:
+            raise ValueError(
+                f"model '{name}': the quants {mismatched} map the {role} tower to another storage"
+                " than the text tower — this card states that the tower ships in the storage"
+                " each preset gives the text tower"
             )
     if len(set(shipped.values())) > 1:
         raise ValueError(f"the {role} tower ships with some models only ({shipped})")
@@ -235,12 +297,12 @@ def _tower(manifest: Mapping[str, Any], role: str, dtype: str) -> Mapping[str, A
 
 def _vision(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """The default model's `pipelineConfig.vision` when the manifest ships the vision tower."""
-    return _tower(manifest, EMBEDDINGGEMMA2_VISION_ROLE, EMBEDDINGGEMMA2_VISION_DTYPE)
+    return _tower(manifest, EMBEDDINGGEMMA2_VISION_ROLE)
 
 
 def _audio(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """The default model's `pipelineConfig.audio` when the manifest ships the audio tower."""
-    return _tower(manifest, EMBEDDINGGEMMA2_AUDIO_ROLE, EMBEDDINGGEMMA2_AUDIO_DTYPE)
+    return _tower(manifest, EMBEDDINGGEMMA2_AUDIO_ROLE)
 
 
 def _title(manifest: Mapping[str, Any]) -> str:
@@ -441,30 +503,39 @@ def _storage_lines(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _tower_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
-    """What each tower's one storage holds (a paragraph per tower after the storage list — none
-    for a manifest without towers). The storages are checked by {@link _tower}."""
+    """What each tower holds in each storage (a paragraph per tower after the storage list — none
+    for a manifest without towers). The storages are checked by {@link _tower}; they are the text
+    tower's ({@link _stored_dtypes})."""
+    dtypes = _stored_dtypes(manifest)
     lines: list[str] = []
-    if _vision(manifest) is not None:
-        lines += [
-            "",
-            f"The vision tower (`{EMBEDDINGGEMMA2_VISION_ROLE}`) ships in every preset as the",
-            f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_VISION_DTYPE}; its norms and its"
-            " folded",
-            "rotary tables in f32). No rounded form of the tower was measured, so no preset rounds"
-            " it.",
-            "A pipeline built without `vision: true` does not fetch it (the Download column below",
-            "counts it).",
-        ]
-    if _audio(manifest) is not None:
-        lines += [
-            "",
-            f"The audio tower (`{EMBEDDINGGEMMA2_AUDIO_ROLE}`) ships in every preset as the",
-            f"checkpoint's weights unchanged ({EMBEDDINGGEMMA2_AUDIO_DTYPE}; its norms, biases and"
-            " folded",
-            "constants in f32). No rounded form of the tower was measured, so no preset rounds it.",
-            "A pipeline built without `audio: true` does not fetch it (the Download column below",
-            "counts it).",
-        ]
+    for role, tower, option in (
+        (EMBEDDINGGEMMA2_VISION_ROLE, _vision(manifest), "vision"),
+        (EMBEDDINGGEMMA2_AUDIO_ROLE, _audio(manifest), "audio"),
+    ):
+        if tower is None:
+            continue
+        holds = EMBEDDINGGEMMA2_TOWER_STORAGES[role]
+        if len(dtypes) == 1:
+            stored = f"ships as {holds[dtypes[0]]} ({dtypes[0]})"
+        else:
+            stored = "ships in the storage each preset gives the text tower: " + ", ".join(
+                f"in `{dtype}` {holds[dtype]}" for dtype in dtypes
+            )
+        exception = (
+            [EMBEDDINGGEMMA2_AUDIO_I8_EXCEPTION]
+            if role == EMBEDDINGGEMMA2_AUDIO_ROLE and EMBEDDINGGEMMA2_I8_DTYPE in dtypes
+            else []
+        )
+        f32 = EMBEDDINGGEMMA2_TOWER_F32[role]
+        paragraph = " ".join(
+            [
+                f"The {role} tower (`{role}`) {stored}; {f32} stay f32.",
+                *exception,
+                f"A pipeline built without `{option}: true` does not fetch it (the Download column"
+                " below counts it).",
+            ]
+        )
+        lines += ["", *textwrap.wrap(paragraph, 96, break_long_words=False, break_on_hyphens=False)]
     return lines
 
 
@@ -517,25 +588,36 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         if EMBEDDINGGEMMA2_I8_DTYPE in _stored_dtypes(manifest)
         else ["  checkpoint's bf16 values unchanged."]
     )
-    vision_change = (
-        []
-        if _vision(manifest) is None
-        else [
-            "  The vision tower and its projection were re-expressed as a second graph that",
-            "  reads an image's real patches, the patches of one soft token side by side, with",
-            "  its two-dimensional rotary embedding folded into tables gathered by the patch",
-            "  positions; its weights keep the checkpoint's bf16 values unchanged in every preset.",
-        ]
+    tower_weights = (
+        "its weights ship in the storage each preset gives the text tower (the checkpoint's bf16"
+        " values unchanged in `bf16`, rounded to int8 in `i8`)."
+        if EMBEDDINGGEMMA2_I8_DTYPE in _stored_dtypes(manifest)
+        else "its weights keep the checkpoint's bf16 values unchanged in every preset."
     )
-    audio_change = (
+    changes = {
+        EMBEDDINGGEMMA2_VISION_ROLE: "The vision tower and its projection were re-expressed as a"
+        " second graph that reads an image's real patches, the patches of one soft token side by"
+        " side, with its two-dimensional rotary embedding folded into tables gathered by the patch"
+        " positions; ",
+        EMBEDDINGGEMMA2_AUDIO_ROLE: "The audio tower and its projection were re-expressed as a"
+        " graph of their own that reads an audio's log-mel frames (computed on the host) with"
+        " their frame mask, its local attention computed over each query's window of 12 keys; ",
+    }
+    vision_change, audio_change = (
         []
-        if _audio(manifest) is None
-        else [
-            "  The audio tower and its projection were re-expressed as a graph of their own that",
-            "  reads an audio's log-mel frames (computed on the host) with their frame mask, its",
-            "  local attention computed over each query's window of 12 keys; its weights keep the",
-            "  checkpoint's bf16 values unchanged in every preset.",
-        ]
+        if tower is None
+        else textwrap.wrap(
+            changes[role] + tower_weights,
+            92,
+            initial_indent="  ",
+            subsequent_indent="  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        for role, tower in (
+            (EMBEDDINGGEMMA2_VISION_ROLE, _vision(manifest)),
+            (EMBEDDINGGEMMA2_AUDIO_ROLE, _audio(manifest)),
+        )
     )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
@@ -738,16 +820,35 @@ def _prompts_and_limits(model: Mapping[str, Any]) -> list[str]:
 
 def _i8_screening(model: Mapping[str, Any]) -> list[str]:
     """The measured distance of the `i8` preset's weights from the original ones — only for a
-    model with a preset that stores the text tower as int8 (none, no section)."""
+    model with a preset that stores the text tower as int8 (none, no section), with a bullet for
+    each tower it stores as int8 too."""
     if not any(
         quant["weights"][EMBEDDINGGEMMA2_MODEL_ROLE] == EMBEDDINGGEMMA2_I8_DTYPE
         for quant in model["quants"].values()
     ):
         return []
+    towers = [
+        line
+        for role, lines in EMBEDDINGGEMMA2_I8_TOWER_SCREENING.items()
+        if EMBEDDINGGEMMA2_I8_DTYPE in model["weights"].get(role, {})
+        for line in lines
+    ]
+    tower_lines = (
+        [
+            "",
+            *EMBEDDINGGEMMA2_I8_TOWER_SCREENING_LEAD,
+            *towers,
+            "",
+            f"Source: `{EMBEDDINGGEMMA2_I8_TOWER_SCREENING_SOURCE}` in the Karume repository.",
+        ]
+        if towers
+        else []
+    )
     return [
         "### How far the int8 weights are from the original ones",
         "",
         *EMBEDDINGGEMMA2_I8_SCREENING,
+        *tower_lines,
     ]
 
 

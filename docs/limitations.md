@@ -1997,15 +1997,17 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   its two markers, all counted toward the 8,192-token limit — at most 29 images of 282 tokens fit one
   input. Upstream's other budgets (70 / 140 / 560 / 1120) are not offered; a larger one would also
   need longer position tables in the tower graph (840 positions cover the 280 budget's longest side).
-- **The vision tower is fetched and resident only with `vision: true`** — 320.3 MiB of bf16 weights
-  more in either preset (the `i8` preset rounds the text tower alone: no rounded form of the vision
-  tower was screened, so none is distributed), and a second Session whose plan at 280 soft tokens is
-  135.1 MiB with the family's 128 MiB row-block budget (329.1 MiB without it; its attention scores are
-  12 × 2,520² f32 = 290.7 MiB unsplit), measured on the RTX 3080 Ti under Node (2026-11-22). The
-  tower's per-row intermediates stay under the WebGPU default binding size, so it adds no
-  `requiredLimits`: an image of 280 soft tokens embeds to the same bits on a device whose binding and
-  buffer limits are capped at 128 MiB (`i8`) or 256 MiB (`bf16`). `onRunDiagnostics` reports the
-  text graph's runs only.
+- **The vision tower is fetched and resident only with `vision: true`**, in the storage of the
+  preset's text tower — 336,093,696 bytes more with `bf16` (its linears and learned position tables
+  as the checkpoint stores them) and 169,138,366 (161.3 MiB) with `i8` (the same tensors as per-row
+  int8; the norms and the folded rotary tables f32 in both) —, and a second Session whose plan at 280
+  soft tokens is 135.1 MiB with the family's 128 MiB row-block budget (329.1 MiB without it; its
+  attention scores are 12 × 2,520² f32 = 290.7 MiB unsplit), measured on the RTX 3080 Ti under Node
+  (2026-11-22, with the bf16 tower in both presets). The tower's per-row intermediates stay under the
+  WebGPU default binding size, so it adds no `requiredLimits`: an image of 280 soft tokens embeds to
+  the same bits on a device whose binding and buffer limits are capped at 128 MiB or 256 MiB (measured
+  with the bf16 tower; the int8 tower of `i8`, built 2026-11-23, is not run on a GPU yet).
+  `onRunDiagnostics` reports the text graph's runs only.
 - **An audio is mono f32 samples at 16,000 Hz, at most 30 s.** An audio part holds `MonoAudio`
   (`{ data, sampleRate }`): the caller decodes and resamples (no WAV / MP3 / Opus decoder and no
   resampler in the pipeline — `decodeWav` of the barrel reads WAV but does not resample; the
@@ -2043,14 +2045,18 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   (preemphasis, dither, per-bin normalisation, FFT overdrive) are not implemented; the dist recipe
   refuses a snapshot that turns one on. The frames of a 30 s audio take about 34 ms in V8 (Node, the
   development machine) and 1.5 MiB.
-- **The audio tower is fetched and resident only with `audio: true`** — 560.4 MiB of weights more in
-  either preset (587,590,521 bytes: its linears and convolutions bf16 as the checkpoint stores them,
-  the norms, biases and folded constants f32; the `i8` preset rounds the text tower alone), and a
-  Session whose plan at 750 soft tokens is 126.0 MiB (4.2 MiB at 1 s), measured on the RTX 3080 Ti
-  under Node (2026-11-22). It adds no `requiredLimits`: its largest intermediate is 46.9 MiB at
-  30 s, and a 30 s audio embeds to the same bits on a device whose binding and buffer limits are
-  capped at 128 MiB (`i8`) or 256 MiB (`bf16`). A 30 s audio's tower run takes about 94 ms once its
-  plan exists. Its runs are not in `onRunDiagnostics` either.
+- **The audio tower is fetched and resident only with `audio: true`**, in the storage of the
+  preset's text tower — 587,590,521 bytes (560.4 MiB) more with `bf16` (its linears and convolutions
+  bf16 as the checkpoint stores them, the norms, biases and folded constants f32) and 295,640,914
+  (281.9 MiB) with `i8` (its linears and depthwise convolutions as per-row int8; its two subsampling
+  convolutions and its window selector stay bf16, because rounding the two convolutions alone moved
+  single soft tokens of real speech far — [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md)) —,
+  and a Session whose plan at 750 soft tokens is 126.0 MiB (4.2 MiB at 1 s), measured on the RTX
+  3080 Ti under Node (2026-11-22, with the bf16 tower in both presets). It adds no `requiredLimits`:
+  its largest intermediate is 46.9 MiB at 30 s, and a 30 s audio embeds to the same bits on a device
+  whose binding and buffer limits are capped at 128 MiB or 256 MiB (measured with the bf16 tower; the
+  int8 tower of `i8`, built 2026-11-23, is not run on a GPU yet). A 30 s audio's tower run takes
+  about 94 ms once its plan exists. Its runs are not in `onRunDiagnostics` either.
 - **Each image is preprocessed synchronously when `embed` is called, and its rows are held while the
   call waits.** The resize and the patch rows run in JS on the caller's thread at issue (so a later
   write into the pixels does not reach the call), before the call takes its turn on the pipeline's
@@ -2061,10 +2067,14 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   (1.5 MiB for 30 s).
 - **Two presets, both with f32 compute and no execution knob**: `bf16`, the default (the
   checkpoint's own weights), and `i8` (the token table and every linear layer stored as per-row
-  int8 — a 323,958,272-byte container against 592,932,991). The int8 rounding moves each embedding
-  a little: on the ten golden texts its cosine to the `bf16` vector is 0.99940 to 0.99993 at 768
-  values (the pipeline e2e asserts at least 0.999 at every width), and the torch-CPU screening of
-  58 texts put its rank inversion rate at 0.74% ([research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md)) —
+  int8 — a 323,958,272-byte container against 592,932,991 —, and each tower's weights as per-row
+  int8 too, the audio tower's two subsampling convolutions kept bf16). The int8 rounding moves each
+  embedding a little: on the ten golden texts its cosine to the `bf16` vector is 0.99940 to 0.99993
+  at 768 values (the pipeline e2e asserts at least 0.999 at every width), and the torch-CPU screening
+  of 58 texts put its rank inversion rate at 0.74% ([research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md));
+  with the towers rounded too, the torch-CPU screening put the lowest cosine at 0.999648 over 32
+  generated images and 0.999493 over 32 clips of Japanese synthetic speech
+  ([research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md)) —
   measurements on those small sets, not a benchmark. There is no activation-int8 and no 4-bit
   preset. The output widths are the model's Matryoshka widths (768 / 512 / 256 / 128); there is no
   other width.

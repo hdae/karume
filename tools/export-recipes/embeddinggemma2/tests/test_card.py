@@ -4,11 +4,11 @@ The real `karume.json` is not used: the manifest here carries values **other** t
 (another token bound, other dimensions, other prompts and placeholder ids), so a hand-written
 number in the template shows as a mismatch. Besides the derivation from the manifest, it pins what
 the card must say plainly (text tower only — or, with the vision tower, text and images with its
-budget and its one bf16 storage, with the audio tower text and audio with its rate, its longest
-audio and its one bf16 storage, or all three —, the token limit against upstream's context, what
-each storage holds, the int8 form's measured distance with its source and only beside an `i8`
-preset, the prompts, the Matryoshka dimensions, upstream's precision statement, the licence) and
-the manifests it refuses to describe.
+budget, with the audio tower text and audio with its rate and its longest audio, or all three,
+each tower in the storage each preset gives the text tower and the audio tower's exception in
+`i8` —, the token limit against upstream's context, what each storage holds, the int8 forms'
+measured distance with its source and only beside an `i8` preset, the prompts, the Matryoshka
+dimensions, upstream's precision statement, the licence) and the manifests it refuses to describe.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from _shared.paths import REPO_ROOT
 from embeddinggemma2.card import (
     EMBEDDINGGEMMA2_I8_SCREENING,
     EMBEDDINGGEMMA2_I8_SCREENING_SOURCE,
+    EMBEDDINGGEMMA2_I8_TOWER_SCREENING,
+    EMBEDDINGGEMMA2_I8_TOWER_SCREENING_SOURCE,
     EMBEDDINGGEMMA2_SUPPORTED_PIPELINE,
     EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS,
     render_embeddinggemma2_model_card,
@@ -206,6 +208,24 @@ class TestWhatTheCardSays:
         assert "10 of the 48 in Japanese" in record
         assert "the 20 × 190 = 3,800 (query, document" in record
 
+    def test_the_towers_numbers_are_the_shipped_all_i8_rows_of_the_source(self) -> None:
+        """Each number of the towers' screening text is the quality set's min / mean of the
+        `all-i8` rows of the research record it cites — the images' table and the speech table's
+        re-run (the shipped form)."""
+        record = (REPO_ROOT / EMBEDDINGGEMMA2_I8_TOWER_SCREENING_SOURCE).read_text(encoding="utf-8")
+        images = re.search(
+            r"^## Results — images.*?^\| `all-i8` +\| ([^|]+)\|", record, re.M | re.S
+        )
+        speech = re.search(r"^\| re-run +\| `all-i8` +\| ([^|]+)\|", record, re.M)
+        assert images is not None and speech is not None
+        cells = {
+            "vision": images.group(1).strip().split(" / "),
+            "audio": speech.group(1).strip().split(" / "),
+        }
+        for role, lines in EMBEDDINGGEMMA2_I8_TOWER_SCREENING.items():
+            numbers = re.findall(r"0\.\d+", " ".join(lines))
+            assert numbers == cells[role], role
+
     def test_the_measured_distance_needs_an_i8_preset(self) -> None:
         assert "How far the int8 weights are" not in _render()
 
@@ -323,18 +343,28 @@ class TestWhatTheCardRefuses:
             _render(manifest)
 
 
-def _with_vision(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The manifest with the vision tower: its one bf16 container, mapped by every preset, and
-    `pipelineConfig.vision` (a budget and ids other than the real ones)."""
+def _with_tower(manifest: dict[str, Any] | None, role: str, size: int) -> dict[str, Any]:
+    """The manifest with a tower's containers: one per storage of the text tower, each preset
+    mapping the tower to the storage it gives the text tower."""
     manifest = copy.deepcopy(manifest or _manifest())
     model = manifest["models"]["text"]
-    container = copy.deepcopy(model["weights"]["model"]["bf16"])
-    for index, part in enumerate(container["container"]["parts"]):
-        part["path"] = part["path"].replace("text/model/", "text/vision/")
-        part["size"] = 17 + index
-    model["weights"]["vision"] = {"bf16": container}
+    model["weights"][role] = {}
+    for dtype, text in model["weights"]["model"].items():
+        container = copy.deepcopy(text)
+        for index, part in enumerate(container["container"]["parts"]):
+            part["path"] = part["path"].replace("text/model/", f"text/{role}/")
+            part["size"] = size + index
+        model["weights"][role][dtype] = container
     for quant in model["quants"].values():
-        quant["weights"]["vision"] = "bf16"
+        quant["weights"][role] = quant["weights"]["model"]
+    return manifest
+
+
+def _with_vision(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The manifest with the vision tower in the text tower's storages and `pipelineConfig.vision`
+    (a budget and ids other than the real ones)."""
+    manifest = _with_tower(manifest, "vision", 17)
+    model = manifest["models"]["text"]
     model["pipelineConfig"]["vision"] = {
         "softTokenBudget": 70,
         "imageTokenId": 71,
@@ -360,13 +390,41 @@ class TestTheVisionTower:
         assert "each image counts its soft tokens (at most 70) and its two markers" in card
         assert "at most 1,234 per input" in card
 
-    def test_it_states_that_every_preset_ships_the_towers_bf16_values(self) -> None:
-        for manifest in (_with_vision(), _with_vision(_with_i8())):
-            card = _render(manifest)
-            assert "The vision tower (`vision`) ships in every preset as the" in card
-            assert "No rounded form of the tower was measured, so no preset rounds it." in card
-            assert "built without `vision: true` does not fetch it" in card
-            assert "its weights keep the checkpoint's bf16 values unchanged in every preset" in card
+    def test_a_bf16_only_manifest_states_the_towers_bf16_values(self) -> None:
+        card = " ".join(_render(_with_vision()).split())
+        assert (
+            "The vision tower (`vision`) ships as the checkpoint's weights unchanged (bf16); its"
+            " norms and its folded rotary tables stay f32."
+        ) in card
+        assert "built without `vision: true` does not fetch it" in card
+        assert "its weights keep the checkpoint's bf16 values unchanged in every preset" in card
+
+    def test_it_states_that_the_tower_ships_in_each_presets_storage_beside_an_i8_preset(
+        self,
+    ) -> None:
+        card = " ".join(_render(_with_vision(_with_i8())).split())
+        assert (
+            "The vision tower (`vision`) ships in the storage each preset gives the text tower: in"
+            " `bf16` the checkpoint's weights unchanged, in `i8` every linear layer and the two"
+            " learned position tables rounded to int8 with one f32 scale per row; its norms and its"
+            " folded rotary tables stay f32."
+        ) in card
+        assert "built without `vision: true` does not fetch it" in card
+        assert (
+            "its weights ship in the storage each preset gives the text tower (the checkpoint's"
+            " bf16 values unchanged in `bf16`, rounded to int8 in `i8`)."
+        ) in card
+        assert "subsampling" not in card
+
+    def test_the_towers_measured_distance_is_stated_with_its_source(self) -> None:
+        card = _render(_with_vision(_with_i8()))
+        assert "- 32 generated images: the cosine to the original weights' embedding" in card
+        assert "Japanese synthetic speech" not in card
+        assert (
+            "Source: `docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md` in the"
+            " Karume repository."
+        ) in card
+        assert "towers' int8 weights" not in _render(_with_vision())
 
     def test_the_usage_shows_the_vision_option_and_an_image_part(self) -> None:
         card = _render(_with_vision())
@@ -385,12 +443,20 @@ class TestTheVisionTower:
         following = next(line for line in lines[last + 1 :] if line.strip())
         assert not following.startswith("- "), following
 
-    def test_a_rounded_tower_is_refused(self) -> None:
+    def test_a_preset_mapping_the_tower_to_another_storage_than_its_text_tower_is_refused(
+        self,
+    ) -> None:
+        manifest = _with_vision(_with_i8())
+        manifest["models"]["text"]["quants"]["i8"]["weights"]["vision"] = "bf16"
+        with pytest.raises(ValueError, match=r"the quants \['i8'\] map the vision tower"):
+            _render(manifest)
+
+    def test_a_tower_stored_otherwise_than_the_text_tower_is_refused(self) -> None:
         manifest = _with_vision(_with_i8())
         model = manifest["models"]["text"]
-        model["weights"]["vision"]["i8"] = copy.deepcopy(model["weights"]["vision"]["bf16"])
-        model["quants"]["i8"]["weights"]["vision"] = "i8"
-        with pytest.raises(ValueError, match="every preset ships its bf16 values"):
+        del model["weights"]["vision"]["i8"]
+        model["quants"]["i8"]["weights"]["vision"] = "bf16"
+        with pytest.raises(ValueError, match=r"the vision tower is stored as \['bf16'\]"):
             _render(manifest)
 
     def test_weights_without_the_declaration_and_the_other_way_round_are_refused(self) -> None:
@@ -407,17 +473,10 @@ class TestTheVisionTower:
 
 
 def _with_audio(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The manifest with the audio tower: its one bf16 container, mapped by every preset, and
-    `pipelineConfig.audio` (ids and a bound other than the real ones)."""
-    manifest = copy.deepcopy(manifest or _manifest())
+    """The manifest with the audio tower in the text tower's storages and `pipelineConfig.audio`
+    (ids and a bound other than the real ones)."""
+    manifest = _with_tower(manifest, "audio", 29)
     model = manifest["models"]["text"]
-    container = copy.deepcopy(model["weights"]["model"]["bf16"])
-    for index, part in enumerate(container["container"]["parts"]):
-        part["path"] = part["path"].replace("text/model/", "text/audio/")
-        part["size"] = 29 + index
-    model["weights"]["audio"] = {"bf16": container}
-    for quant in model["quants"].values():
-        quant["weights"]["audio"] = "bf16"
     model["pipelineConfig"]["audio"] = {
         "audioTokenId": 72,
         "beginAudioTokenId": 76,
@@ -446,13 +505,30 @@ class TestTheAudioTower:
         assert "each audio counts its soft tokens (at most 375) and its two markers" in card
         assert "at most 1,234 per input" in card
 
-    def test_it_states_that_every_preset_ships_the_towers_bf16_values(self) -> None:
-        for manifest in (_with_audio(), _with_audio(_with_i8())):
-            card = _render(manifest)
-            assert "The audio tower (`audio`) ships in every preset as the" in card
-            assert "built without `audio: true` does not fetch it" in card
-            assert "The audio tower and its projection were re-expressed as a graph" in card
-            assert "checkpoint's bf16 values unchanged in every preset." in card
+    def test_a_bf16_only_manifest_states_the_towers_bf16_values(self) -> None:
+        card = " ".join(_render(_with_audio()).split())
+        assert (
+            "The audio tower (`audio`) ships as the checkpoint's weights unchanged (bf16); its"
+            " norms, biases and folded constants stay f32."
+        ) in card
+        assert "built without `audio: true` does not fetch it" in card
+        assert "The audio tower and its projection were re-expressed as a graph" in card
+        assert "checkpoint's bf16 values unchanged in every preset." in card
+        assert "subsampling" not in card
+
+    def test_beside_an_i8_preset_it_states_each_storage_and_the_exception_in_one_sentence(
+        self,
+    ) -> None:
+        card = " ".join(_render(_with_audio(_with_i8())).split())
+        assert (
+            "The audio tower (`audio`) ships in the storage each preset gives the text tower: in"
+            " `bf16` the checkpoint's weights unchanged, in `i8` every linear layer and depthwise"
+            " convolution rounded to int8 with one f32 scale per row; its norms, biases and folded"
+            " constants stay f32. In `i8` its two subsampling convolutions keep their bf16 values:"
+            " rounded, they alone moved single soft tokens of real speech far from the original."
+        ) in card
+        assert card.count("subsampling convolutions") == 1
+        assert "- 32 clips of Japanese synthetic speech (8 sentences): 0.999493 at" in card
 
     def test_the_usage_shows_the_audio_option_and_an_audio_part(self) -> None:
         card = _render(_with_audio())
@@ -475,8 +551,8 @@ class TestTheAudioTower:
         assert "  40 ms, up to 375 (15 s) — a longer audio or another sample rate" in card
         assert "Video cannot be embedded." in card
         assert "at most 70 for an image, 375 for an audio" in card
-        assert "The vision tower (`vision`) ships in every preset" in card
-        assert "The audio tower (`audio`) ships in every preset" in card
+        assert "The vision tower (`vision`) ships in the storage each preset gives" in card
+        assert "The audio tower (`audio`) ships in the storage each preset gives" in card
         assert "  // vision: true, // also fetches the vision tower, for image parts" in card
         assert "  // audio: true, // also fetches the audio tower, for audio parts" in card
         assert "an image\npart on a pipeline built without `vision: true` or an audio part" in card
@@ -489,12 +565,20 @@ class TestTheAudioTower:
             following = next(line for line in lines[last + 1 :] if line.strip())
             assert not following.startswith("- "), following
 
-    def test_a_rounded_tower_is_refused(self) -> None:
+    def test_a_preset_mapping_the_tower_to_another_storage_than_its_text_tower_is_refused(
+        self,
+    ) -> None:
+        manifest = _with_audio(_with_i8())
+        manifest["models"]["text"]["quants"]["bf16"]["weights"]["audio"] = "i8"
+        with pytest.raises(ValueError, match=r"the quants \['bf16'\] map the audio tower"):
+            _render(manifest)
+
+    def test_a_tower_in_a_storage_the_card_does_not_describe_is_refused(self) -> None:
         manifest = _with_audio(_with_i8())
         model = manifest["models"]["text"]
-        model["weights"]["audio"]["i8"] = copy.deepcopy(model["weights"]["audio"]["bf16"])
-        model["quants"]["i8"]["weights"]["audio"] = "i8"
-        with pytest.raises(ValueError, match="the audio tower is stored as"):
+        for role in ("model", "audio"):
+            model["weights"][role]["i4"] = copy.deepcopy(model["weights"][role]["i8"])
+        with pytest.raises(ValueError, match="stored as"):
             _render(manifest)
 
     def test_weights_without_the_declaration_and_the_other_way_round_are_refused(self) -> None:

@@ -7,7 +7,8 @@ published). The **text tower** of `google/embeddinggemma-2` is the distribution'
 the **vision tower** is exported as series of its own (`export_vision.py`) and ships in the same
 model as the weights role `vision` (since 2026-11-22), and the **audio tower** is exported as series
 of its own (`export_audio.py`) and ships in the same model as the weights role `audio` (since
-2026-11-22).
+2026-11-22). Each tower ships in the storage of each preset's text tower: bf16 in `bf16`, int8 in `i8`
+(since 2026-11-23).
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstring of `export.py`; this file is the entry point only. Every file a
@@ -396,13 +397,14 @@ does not (max abs 9.25e-5 on one such text; 0 once the pad id is substituted).
 `dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (local only — no
 upload, no published pin): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
 family `embeddinggemma`) with the graph as the weights `model` in two storages — `bf16` from the bf16 series and `i8`
-from the i8 series, each container checked to carry the bf16 one's graph —, the vision tower as the weights `vision` in
-one storage, `bf16`, from the series `embeddinggemma-2-vision-bf16` (so both presets map it — no rounded tower was
-screened, and the card says so; the pipeline fetches it only with `vision: true`), the audio tower as the weights
-`audio` in one storage, `bf16`, from the series `embeddinggemma-2-audio-bf16` (likewise mapped by both presets, fetched
-only with `audio: true`), and the compiled tokenizer as the asset `tokenizer`, two presets with an empty session
-(`bf16`, the original weights and the default; `i8`, the int8 storage of the text tower), `LICENSE.md` (the Apache-2.0
-text) and `NOTICE.md` (the modification notice, which states the int8 copy and the two tower graphs). The card's title
+from the i8 series, each container checked to carry the bf16 one's graph —, the vision tower as the weights `vision` and
+the audio tower as the weights `audio` in the same two storages (`bf16` from the series `embeddinggemma-2-vision-bf16`
+/ `embeddinggemma-2-audio-bf16`, `i8` from `embeddinggemma-2-vision-i8` / `embeddinggemma-2-audio-i8`, each tower's
+i8 container checked to carry its bf16 one's graph; the pipeline fetches a tower only with `vision: true` /
+`audio: true`), and the compiled tokenizer as the asset `tokenizer`, two presets with an empty session, each mapping
+every graph to its own storage (`bf16`, the original weights and the default; `i8`, the int8 storage of the three
+graphs), `LICENSE.md` (the Apache-2.0 text) and `NOTICE.md` (the modification notice, which states the int8 copies,
+the audio tower's kept convolutions and the two tower graphs). The card's title
 and text follow the towers the manifest ships. Its `pipelineConfig` carries the model's own values, each read from its source and
 checked against the others when the plan is built:
 
@@ -416,13 +418,15 @@ checked against the others when the plan is built:
 | `audio`             | `{audioTokenId: 258881, beginAudioTokenId: 256000, endAudioTokenId: 258883, hiddenSize: 512, maxSoftTokens: 750, sampleRate: 16000}` | `config.json`'s `audio_token_id` / `boa_token_id` / `eoa_token_index` (each a special token of the asset, distinct); `text_config.hidden_size`, held to the tower's output; the audio graph's bound of `n` (its folded window bias), held to the soft tokens of the feature extractor's longest audio (480,000 samples, `export_audio.MAX_SAMPLES` mirrored) and to the audio series' record; `preprocessor_config.json`'s `sampling_rate` |
 
 The plan also checks each storage (`model_bf16` must hold bf16 and none of the other compressed layouts, `model_i8`
-the same for i8 — so the f32 series, or the two series swapped, are refused; `vision_bf16` bf16 and no rounded layout),
+the same for i8 — so the f32 series, or the two series swapped, are refused; `vision_bf16` / `audio_bf16` the same as
+`model_bf16`, `vision_i8` the same as `model_i8`, `audio_i8` i8 and bf16 beside it — its bf16 tensors exactly the two
+subsampling convolutions and one window selector, the export's declared exceptions),
 that the i8 container carries the bf16 container's graph, the graph's inputs and output, the tokenizer asset against the
 pinned `tokenizer.json` and the graph's vocabulary, each container's licence and upstream revision against the pin, the
 processor's image settings against what the host implements (`Gemma4ImageProcessor`, bicubic, the 1/255 rescale, no
 normalisation), the tower graph (`pixels` f32 `[1, 9n, 768]`, `position_x` / `position_y` i32 `[1, 9n]`, one f32
 `[1, n, 512]`, position tables covering `3 · budget` patches) and the vision series' record (its series, its budget
-and the pin); for the audio tower, `audio_bf16` bf16 and no rounded layout, the feature extractor's settings in both
+and the pin); for the audio tower, the feature extractor's settings in both
 `preprocessor_config.json` and `processor_config.json`'s `feature_extractor` block against what the host front end
 implements (`Gemma4AudioFeatureExtractor`, 16 kHz, 128 mel filters 0–8,000 Hz, frames of 320 by 160, an FFT of 512, a
 mel floor of 0.001, and no preemphasis, dither, input scale, per-bin normalisation or FFT overdrive — a `False` is not
@@ -437,7 +441,12 @@ to 750 soft tokens for 30 s (a 30 s clip is 754 ids in sentence-transformers and
 holds it to the recorded 280 (`EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH`), so a snapshot that changes it fails the build and
 the difference (`docs/limitations.md`) is looked at again.
 
-Assembled again on 2026-11-22 with the audio tower, the mirror holds 1,850,169,018 bytes in all (the audio
+Assembled again on 2026-11-23 with the towers' i8 storages, the mirror holds 2,314,952,320 bytes in all (the vision
+i8 container 169,138,366 more, the audio i8 container 295,640,914): every file of the `bf16` preset (its fourteen
+container parts and the tokenizer) and the text tower's i8 container are byte-identical to the assembly before it,
+and in `karume.json` every entry of the `bf16` preset is unchanged; the `i8` preset now maps both towers to their i8
+containers and downloads 798,296,220 bytes with both towers (333,516,940 without them). Assembled on 2026-11-22 with
+the audio tower, the mirror held 1,850,169,018 bytes in all (the audio
 container 587,590,521 more); the text and vision containers and the tokenizer are byte-identical to the assembly
 before it, and each preset downloads 587,590,521 bytes more for the tower with `audio: true`. Assembled before with
 the vision tower, it held 1,262,574,677 bytes (the containers 592,932,991 + 323,958,272 + 336,093,696 and the
@@ -446,7 +455,8 @@ the vision tower, it held 1,262,574,677 bytes (the containers 592,932,991 + 323,
 926,477,217 bytes. The dist driver
 derives `requiredLimits` `{ maxStorageBufferBindingSize: 268435456 }` for `bf16` (its bf16 token table, 256 MiB) and
 none for `i8` (its int8 table is 134,217,728 bytes, exactly the WebGPU default, which the bake leaves out; the vision
-tower's largest table, 15 MiB of bf16, and the audio tower's, 8 MiB of bf16, add none). Against the
+tower's largest table, 15 MiB of bf16 or 7.5 MiB of i8, and the audio tower's, 8 MiB of bf16 or 4 MiB of i8, add
+none). Against the
 mirror before the soft inputs, only the first part of each container and the graph descriptor's length and digest
 in `karume.json` changed.
 
@@ -455,8 +465,11 @@ of [research 2026-11-22](../../../docs/research/2026-11-22-embeddinggemma2-quant
 the rounding the i8 series stores) put the cosine to the original weights' embeddings at 0.999396 at the lowest and
 0.999842 on average over 58 texts at 768 values, with 0.74% of the 3,800 ranking triples inverted; on the GPU the
 cosine of each golden text's shipped `i8` vector to its `bf16` vector equals the screening's value for that text to
-the seventh digit (the per-text values are in the screening's untracked `report.json`). The card prints the
-screening's numbers with that source.
+the seventh digit (the per-text values are in the screening's untracked `report.json`). The towers' int8 forms were
+screened the same way on 32 generated images and 32 clips of Japanese synthetic speech
+([research 2026-11-23](../../../docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md), configuration
+`all-i8`, the shipped form): lowest cosine 0.999648 and mean 0.999812 over the images, 0.999493 and 0.999759 over the
+clips, at 768 values. The card prints both screenings' numbers with their sources.
 
 ## Running
 

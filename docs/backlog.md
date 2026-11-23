@@ -725,6 +725,27 @@ maintainer's ruling of 2026-11-06).
        sha256 rows per preset, and the GPU check that each golden text's `i8` vector keeps a cosine of at least 0.999 to
        its `bf16` one at every width (measured 0.99940 to 0.99993 at 768, the screening's values to the seventh digit).
        The card states the screening's numbers with their source.
+     - Built 2026-11-23, stage 1 of 2 (the maintainer's decision that day: the preset `i8` takes int8 towers, `bf16`
+       does not change in any byte, no new preset name): the series `embeddinggemma-2-vision-i8`
+       (`export_vision.py --dtype i8`: the 114 linears and the two learned position tables as per-row int8, the RoPE
+       tables f32; 169,138,366 bytes against 336,093,696) and `embeddinggemma-2-audio-i8` (`export_audio.py --dtype
+       i8`: the 123 linears and the 12 depthwise convolutions as per-row int8, the two subsampling convolutions and the
+       window selector kept bf16 — rounded, the two convolutions alone moved single soft tokens of real speech to a
+       cosine of 0.20; 295,640,914 bytes against 587,590,521), each rounded before its reference and goldens with the
+       other series' graph and cases. The exporter's `fake_quant_int8` takes `functional_weights` (a table read by
+       `functional.embedding` rounded as an `embedding` weight), and the tower wrappers share every weight with
+       upstream's modules, so the goldens are upstream's forward on the rounded weights; the bf16 series exported again
+       byte-identical. The distribution maps each preset's towers to its own storage; the mirror carries both forms of
+       each tower with every file of the `bf16` preset byte-identical (the `i8` preset downloads 798,296,220 bytes with
+       both towers), and the card states the audio exception. The torch-CPU screening was run again on the shipped form
+       ([research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md): `all-i8` lowest cosine
+       0.999648 over 32 generated images, 0.999493 over 32 clips), writing its clips at 16 kHz to
+       `inputs/embeddinggemma2/quality-set-16k/`.
+     - Left, stage 2 of the same decision: the TypeScript and GPU side over the new mirror — the series e2e of the two
+       i8 tower series against their own goldens with sha256 rows per series, the pipeline e2e of the `i8` preset with
+       the int8 towers (its sha256 rows recorded again; the tests that pin the mirror's manifest follow it), the quality
+       set's 16 kHz clips and images through the real pipeline against the screening, and the docs of the built
+       pipeline.
      - Left unbuilt, by the same choice: the activation-int8 preset `i8-a8` (the screening: lowest cosine 0.99563 and
        2.39% of the ranking triples inverted at 768, against 0.99940 and 0.74% for `i8`), and every 4-bit preset (lowest
        0.960 to 0.966, 8.2 to 8.5% inverted).
@@ -777,7 +798,7 @@ maintainer's ruling of 2026-11-06).
        inputs byte for byte on its four images. One tower run per image, read back into `soft_embeds` with the mask set,
        then the text graph once; the tower's Session takes the family's row-block budget (plan 135.1 MiB against
        329.1 MiB at 280 soft tokens on the RTX 3080 Ti). The budget is upstream's default 280, fixed.
-     - The distribution carries the tower as the weights role `vision`, bf16 in both presets (series
+     - The distribution carries the tower as the weights role `vision`, bf16 in both presets until 2026-11-23 (step 3) (series
        `embeddinggemma-2-vision-bf16`; no rounded tower was screened — the card says so), and `pipelineConfig.vision`
        (`softTokenBudget`, the three image ids, `hiddenSize`; the TS reader is the Gemma 4 family's); the recipe checks
        the processor settings against what the host implements, the tower graph and its position tables against the
@@ -796,8 +817,8 @@ maintainer's ruling of 2026-11-06).
      on the host without the mirror, and the distribution's checks that both position axes are gathered and the
      folded RoPE tables are stored f32.
      Left: video (frames through the same tower); unordered and not chosen: the tower's runs in
-     `onRunDiagnostics` (reported for the text graph only), other soft-token budgets (they would need longer position
-     tables), and a rounded tower (unscreened). Open couplings, not built: (a) a manifest whose
+     `onRunDiagnostics` (reported for the text graph only) and other soft-token budgets (they would need longer position
+     tables). The int8 tower is step 3's (built 2026-11-23). Open couplings, not built: (a) a manifest whose
      `pipelineConfig.vision.softTokenBudget` is below the traced range is admitted — the reader takes 70 or 140,
      the tower was traced and checked for n in 139 to 280 only (the IR records no symbol range to check against), so
      such a hand-made manifest runs the tower at counts no golden covers (560 and 1120 are refused by the position
@@ -834,7 +855,7 @@ maintainer's ruling of 2026-11-06).
        the rest in f64; its frames are within one ulp (4.77e-7) of upstream's f32 frames, and their bits equal
        upstream's arithmetic with an f64 FFT (the recipe's `audio-front-end.json`). Refused, never adjusted:
        another rate, over 30 s (upstream truncates silently), at most 160 samples, a non-finite sample.
-     - The distribution carries the tower as the weights role `audio`, bf16 in both presets (series
+     - The distribution carries the tower as the weights role `audio`, bf16 in both presets until 2026-11-23 (step 3) (series
        `embeddinggemma-2-audio-bf16`), and `pipelineConfig.audio` (the three audio ids, `hiddenSize`, `maxSoftTokens`
        750, `sampleRate` 16000); the recipe holds the feature extractor's settings in `preprocessor_config.json` and
        `processor_config.json` to the host's, the tower graph and its bound, and the audio series' record. The mirror
@@ -847,8 +868,9 @@ maintainer's ruling of 2026-11-06).
        to 16 kHz and mixed to mono by the browser), its soft tokens in the row's count, the library's refusal of the
        row shown under it, the record `karume-playground-embeddinggemma/3`. Not checked in a browser yet.
      Left, unordered and not chosen: a resampler or decoder in the library (the caller resamples today), audio longer
-     than 30 s (upstream truncates; splitting is the caller's), the tower's runs in `onRunDiagnostics`, an
-     upstream-bit front end (numpy's complex64 FFT is not copied — one ulp), and a rounded audio tower (unscreened).
+     than 30 s (upstream truncates; splitting is the caller's), the tower's runs in `onRunDiagnostics` and an
+     upstream-bit front end (numpy's complex64 FFT is not copied — one ulp). The int8 audio tower is step 3's (built
+     2026-11-23).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

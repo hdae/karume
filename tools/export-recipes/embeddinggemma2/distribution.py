@@ -21,26 +21,32 @@ The model ships three graphs and one asset:
     linear) rounded to per-row symmetric int8, each with its F32 scale; the rest as in bf16.
 
   Both containers carry the same graph ({@link assert_same_graph}) — only the storage differs.
-- `vision` — the vision tower with its projection (`embeddinggemma2/export_vision.py --dtype
-  bf16`, series {@link EMBEDDINGGEMMA2_VISION_SERIES}): an image's patch rows and positions in, its
-  soft tokens `[1, n, 512]` out — the text graph's soft rows. One dtype label, `bf16` (the
-  checkpoint's own values; the norms and the folded rotary tables f32), so every preset maps it
-  ({@link complete_quant_weights}): no rounded form of the tower was screened, and the int8
-  preset rounds the text tower alone. The pipeline fetches it only when asked for image input.
-- `audio` — the audio tower with its projection (`embeddinggemma2/export_audio.py --dtype bf16`,
-  series {@link EMBEDDINGGEMMA2_AUDIO_SERIES}): an audio's log-mel frames and their frame mask in,
-  its soft tokens `[1, n, 512]` out — the text graph's soft rows. One dtype label, `bf16` (the
-  checkpoint's own values; the norms, the biases and the folded constants f32), mapped by every
-  preset for the vision tower's reason. The pipeline fetches it only when asked for audio input;
-  the host computes the frames itself, with the feature extractor's settings held here to the
-  pinned `preprocessor_config.json` ({@link EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR}).
+- `vision` — the vision tower with its projection (`embeddinggemma2/export_vision.py`, series
+  {@link EMBEDDINGGEMMA2_VISION_SERIES}): an image's patch rows and positions in, its soft tokens
+  `[1, n, 512]` out — the text graph's soft rows. The text graph's two dtype labels: `bf16`
+  (`--dtype bf16` — the checkpoint's own values; the norms and the folded rotary tables f32) and
+  `i8` (`--dtype i8` — the same weight slots, the linears and the two learned position tables,
+  rounded to per-row int8). Both carry the same graph. The pipeline fetches it only when asked for
+  image input.
+- `audio` — the audio tower with its projection (`embeddinggemma2/export_audio.py`, series
+  {@link EMBEDDINGGEMMA2_AUDIO_SERIES}): an audio's log-mel frames and their frame mask in, its
+  soft tokens `[1, n, 512]` out — the text graph's soft rows. The same two labels: `bf16` (the
+  checkpoint's own values; the norms, the biases and the folded constants f32) and `i8` (the
+  linears and the depthwise convolutions rounded to per-row int8; the two subsampling convolutions
+  and the window selector stay bf16 — the export's declared exceptions, held here by
+  {@link assert_embeddinggemma2_audio_i8_kept}). Both carry the same graph. The pipeline fetches it
+  only when asked for audio input; the host computes the frames itself, with the feature
+  extractor's settings held here to the pinned `preprocessor_config.json`
+  ({@link EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR}).
 - `tokenizer` — the compiled tokenizer asset (`embeddinggemma2/tokenizer.py`), held to the pinned
   `tokenizer.json` it was compiled from.
 
-Two quant presets, both with an empty `session` (f32 compute on the reference path): `bf16` (the
-original weights, the default — ADR 0128 decision 4) and `i8` (the int8 storage of the text tower;
-the maintainer's choice of 2026-11-22, after the torch-CPU screening of
-`docs/research/2026-11-22-embeddinggemma2-quant-screen.md`).
+Two quant presets, both with an empty `session` (f32 compute on the reference path), each mapping
+every graph to its own storage: `bf16` (the original weights, the default — ADR 0128 decision 4)
+and `i8` (the int8 storage of the three graphs; the maintainer's choices of 2026-11-22 for the text
+tower, after the torch-CPU screening of `docs/research/2026-11-22-embeddinggemma2-quant-screen.md`,
+and of 2026-11-23 for the towers, after the screening of
+`docs/research/2026-11-23-embeddinggemma2-tower-quant-screen.md`).
 
 `pipelineConfig` carries **the model's own values**, read from their sources at build time and
 checked against each other ({@link embeddinggemma2_pipeline_config}):
@@ -134,30 +140,46 @@ EMBEDDINGGEMMA2_SERIES: Mapping[str, str] = {
     EMBEDDINGGEMMA2_I8_DTYPE: "embeddinggemma-2-text-i8",
 }
 
-#: The weights role of the vision tower (= the tower graph's name, `export_vision.GRAPH_NAME`), its
-#: one storage, and the series it is read from (`export_vision.DEFAULT_OUT_DIRS["bf16"]` — that
-#: module imports torch; the tests hold the mirrors equal).
+#: The weights role of the vision tower (= the tower graph's name, `export_vision.GRAPH_NAME`) and,
+#: per dtype label, the series its container is read from (`export_vision.DEFAULT_OUT_DIRS` — that
+#: module imports torch; the tests hold the mirrors equal). The labels are the text graph's: each
+#: preset maps the tower to the storage it gives the text graph.
 EMBEDDINGGEMMA2_VISION_ROLE = "vision"
-EMBEDDINGGEMMA2_VISION_DTYPE = "bf16"
-EMBEDDINGGEMMA2_VISION_SERIES = "embeddinggemma-2-vision-bf16"
+EMBEDDINGGEMMA2_VISION_SERIES: Mapping[str, str] = {
+    EMBEDDINGGEMMA2_DTYPE: "embeddinggemma-2-vision-bf16",
+    EMBEDDINGGEMMA2_I8_DTYPE: "embeddinggemma-2-vision-i8",
+}
 
-
-def embeddinggemma2_role(dtype: str) -> str:
-    """The artifact role of the graph in one storage (`model_bf16` — the one word the placements,
-    the output paths and the storage checks share)."""
-    return f"{EMBEDDINGGEMMA2_ROLE}_{dtype}"
-
-
-#: The artifact role of the vision tower's container (the form of {@link embeddinggemma2_role}).
-EMBEDDINGGEMMA2_VISION_ARTIFACT = f"{EMBEDDINGGEMMA2_VISION_ROLE}_{EMBEDDINGGEMMA2_VISION_DTYPE}"
-
-#: The weights role of the audio tower (= the tower graph's name, `export_audio.GRAPH_NAME`), its
-#: one storage, the series it is read from (`export_audio.DEFAULT_OUT_DIRS["bf16"]` — that module
-#: imports torch; the tests hold the mirrors equal) and its artifact role.
+#: The weights role of the audio tower (= the tower graph's name, `export_audio.GRAPH_NAME`) and,
+#: per dtype label, the series its container is read from (`export_audio.DEFAULT_OUT_DIRS`,
+#: mirrored likewise).
 EMBEDDINGGEMMA2_AUDIO_ROLE = "audio"
-EMBEDDINGGEMMA2_AUDIO_DTYPE = "bf16"
-EMBEDDINGGEMMA2_AUDIO_SERIES = "embeddinggemma-2-audio-bf16"
-EMBEDDINGGEMMA2_AUDIO_ARTIFACT = f"{EMBEDDINGGEMMA2_AUDIO_ROLE}_{EMBEDDINGGEMMA2_AUDIO_DTYPE}"
+EMBEDDINGGEMMA2_AUDIO_SERIES: Mapping[str, str] = {
+    EMBEDDINGGEMMA2_DTYPE: "embeddinggemma-2-audio-bf16",
+    EMBEDDINGGEMMA2_I8_DTYPE: "embeddinggemma-2-audio-i8",
+}
+
+#: Weights role → dtype label → series, for the three graphs (one storage label set, the text
+#: graph's first).
+EMBEDDINGGEMMA2_GRAPH_SERIES: Mapping[str, Mapping[str, str]] = {
+    EMBEDDINGGEMMA2_ROLE: EMBEDDINGGEMMA2_SERIES,
+    EMBEDDINGGEMMA2_VISION_ROLE: EMBEDDINGGEMMA2_VISION_SERIES,
+    EMBEDDINGGEMMA2_AUDIO_ROLE: EMBEDDINGGEMMA2_AUDIO_SERIES,
+}
+
+#: What the audio tower's i8 container keeps bf16 — the mirror of
+#: `export_audio.I8_KEPT_BF16_WEIGHTS` (its two subsampling convolutions; the reason is declared
+#: there, the tests hold the two equal) — and the suffix of the one more tensor it keeps bf16, the
+#: window selector (a weight slot of no weight, one buffer shared by every layer:
+#: `export_audio.WINDOW_SELECTOR`).
+EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16: tuple[str, ...] = ("layer0.conv.weight", "layer1.conv.weight")
+EMBEDDINGGEMMA2_AUDIO_SELECTOR_SUFFIX = ".self_attn.window_selector"
+
+
+def embeddinggemma2_role(dtype: str, role: str = EMBEDDINGGEMMA2_ROLE) -> str:
+    """The artifact role of a graph (the text graph unless named) in one storage (`model_bf16`,
+    `vision_i8` — the one word the placements, the output paths and the storage checks share)."""
+    return f"{role}_{dtype}"
 
 
 #: The representative container path inside a series and the asset file inside the tokenizer
@@ -170,15 +192,10 @@ EMBEDDINGGEMMA2_TOKENIZER_FILE = "tokenizer.json"
 #: in the other families, so the two containers side by side cannot be mistaken.
 EMBEDDINGGEMMA2_OUTPUT_PATHS: Mapping[str, str] = {
     **{
-        embeddinggemma2_role(dtype): f"{EMBEDDINGGEMMA2_ROLE}/model.{dtype}.krm"
-        for dtype in EMBEDDINGGEMMA2_SERIES
+        embeddinggemma2_role(dtype, role): f"{role}/model.{dtype}.krm"
+        for role, series in EMBEDDINGGEMMA2_GRAPH_SERIES.items()
+        for dtype in series
     },
-    EMBEDDINGGEMMA2_VISION_ARTIFACT: (
-        f"{EMBEDDINGGEMMA2_VISION_ROLE}/model.{EMBEDDINGGEMMA2_VISION_DTYPE}.krm"
-    ),
-    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: (
-        f"{EMBEDDINGGEMMA2_AUDIO_ROLE}/model.{EMBEDDINGGEMMA2_AUDIO_DTYPE}.krm"
-    ),
     EMBEDDINGGEMMA2_TOKENIZER_ROLE: (
         f"{EMBEDDINGGEMMA2_TOKENIZER_ROLE}/{EMBEDDINGGEMMA2_TOKENIZER_FILE}"
     ),
@@ -187,37 +204,46 @@ EMBEDDINGGEMMA2_OUTPUT_PATHS: Mapping[str, str] = {
 #: The storage each graph's binding table **must** hold ({@link assert_storage}) — the f32 series
 #: holds none and fails here.
 EMBEDDINGGEMMA2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    **{embeddinggemma2_role(dtype): dtype for dtype in EMBEDDINGGEMMA2_SERIES},
-    EMBEDDINGGEMMA2_VISION_ARTIFACT: EMBEDDINGGEMMA2_VISION_DTYPE,
-    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: EMBEDDINGGEMMA2_AUDIO_DTYPE,
+    embeddinggemma2_role(dtype, role): dtype
+    for role, series in EMBEDDINGGEMMA2_GRAPH_SERIES.items()
+    for dtype in series
 }
 
 #: The storage each graph's binding table **must not** hold ({@link assert_storage_absent}). MUST:
 #: every layout of the codec ledger but f32 / i32 and the role's own — a series in another
 #: compressed storage also holds f32 parts (the norms, the folded constants, the int8 scales), so
 #: the requirement alone lets it through, and only this table tells the series apart (a mixed-up
-#: series root cannot be told apart by the numeric gates — ADR 0027 / 0029). The bf16 role
-#: forbidding i8 and the i8 role forbidding bf16 is what keeps the two presets from swapping; the
-#: towers' roles forbid every rounded layout (no rounded tower was screened).
+#: series root cannot be told apart by the numeric gates — ADR 0027 / 0029). Each bf16 role
+#: forbidding i8 and each i8 role requiring it (and forbidding bf16) is what keeps the two presets
+#: from swapping. The audio tower's i8 role alone holds bf16 beside i8 — its declared exceptions —
+#: so it cannot forbid it; {@link assert_embeddinggemma2_audio_i8_kept} holds its bf16 tensors to
+#: exactly those.
 EMBEDDINGGEMMA2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE): ("f16", "i8", "i4", "i4f16", "i2"),
+    **{
+        embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE, role): ("f16", "i8", "i4", "i4f16", "i2")
+        for role in EMBEDDINGGEMMA2_GRAPH_SERIES
+    },
     embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE): ("f16", "bf16", "i4", "i4f16", "i2"),
-    EMBEDDINGGEMMA2_VISION_ARTIFACT: ("f16", "i8", "i4", "i4f16", "i2"),
-    EMBEDDINGGEMMA2_AUDIO_ARTIFACT: ("f16", "i8", "i4", "i4f16", "i2"),
+    embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE, EMBEDDINGGEMMA2_VISION_ROLE): (
+        "f16",
+        "bf16",
+        "i4",
+        "i4f16",
+        "i2",
+    ),
+    embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE, EMBEDDINGGEMMA2_AUDIO_ROLE): (
+        "f16",
+        "i4",
+        "i4f16",
+        "i2",
+    ),
 }
 
-#: The weights declaration (dtype label → role). The text graph has two labels, so every preset
-#: names its own; each tower has one, which {@link complete_quant_weights} gives every preset.
+#: The weights declaration (weights role → dtype label → artifact role). Every graph has the two
+#: labels, so every preset names its own for each ({@link EMBEDDINGGEMMA2_QUANTS}).
 EMBEDDINGGEMMA2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    EMBEDDINGGEMMA2_ROLE: {
-        dtype: WeightFiles(embeddinggemma2_role(dtype)) for dtype in EMBEDDINGGEMMA2_SERIES
-    },
-    EMBEDDINGGEMMA2_VISION_ROLE: {
-        EMBEDDINGGEMMA2_VISION_DTYPE: WeightFiles(EMBEDDINGGEMMA2_VISION_ARTIFACT)
-    },
-    EMBEDDINGGEMMA2_AUDIO_ROLE: {
-        EMBEDDINGGEMMA2_AUDIO_DTYPE: WeightFiles(EMBEDDINGGEMMA2_AUDIO_ARTIFACT)
-    },
+    role: {dtype: WeightFiles(embeddinggemma2_role(dtype, role)) for dtype in series}
+    for role, series in EMBEDDINGGEMMA2_GRAPH_SERIES.items()
 }
 
 #: The assets declaration (asset name → role).
@@ -229,9 +255,12 @@ EMBEDDINGGEMMA2_ASSETS: Mapping[str, str] = {
 #: path (`session` empty — ADR 0104), so neither needs a self A/B check (ADR 0147 decision 2).
 #:
 #: - `bf16` — the original weights (ADR 0128 decision 4), the checkpoint's own bf16 values in the
-#:   reference summation order. The label is the original-weights label of ADR 0131 / 0154.
-#: - `i8` — the same weight slots stored as per-row int8 (the maintainer's choice of 2026-11-22:
-#:   one int8 preset, no activation quantization, no 4-bit preset).
+#:   reference summation order, for every graph. The label is the original-weights label of ADR
+#:   0131 / 0154.
+#: - `i8` — the same weight slots stored as per-row int8, in every graph (the maintainer's choices
+#:   of 2026-11-22 for the text graph — one int8 preset, no activation quantization, no 4-bit
+#:   preset — and of 2026-11-23 for the towers, the audio tower keeping its declared exceptions
+#:   bf16).
 #:
 #: `label` / `description` are the selection UI's fields (ADR 0075 decision 1 — 64 / 200
 #: characters; ADR 0128 C3 needs both once a model has two presets). They state the storage and
@@ -239,13 +268,13 @@ EMBEDDINGGEMMA2_ASSETS: Mapping[str, str] = {
 #: not which preset is the default (`defaultQuant` says it — ADR 0075 decision 3).
 EMBEDDINGGEMMA2_QUANTS: Mapping[str, Any] = {
     EMBEDDINGGEMMA2_DTYPE: {
-        "weights": {EMBEDDINGGEMMA2_ROLE: EMBEDDINGGEMMA2_DTYPE},
+        "weights": {role: EMBEDDINGGEMMA2_DTYPE for role in EMBEDDINGGEMMA2_GRAPH_SERIES},
         "session": {},
         "label": "Original weights (bf16)",
         "description": "The checkpoint's own bf16 weights with f32 compute.",
     },
     EMBEDDINGGEMMA2_I8_DTYPE: {
-        "weights": {EMBEDDINGGEMMA2_ROLE: EMBEDDINGGEMMA2_I8_DTYPE},
+        "weights": {role: EMBEDDINGGEMMA2_I8_DTYPE for role in EMBEDDINGGEMMA2_GRAPH_SERIES},
         "session": {},
         "label": "Half size (int8)",
         "description": "The token table and every linear layer stored as int8 (one scale per row)"
@@ -403,25 +432,37 @@ def embeddinggemma2_repo_name(_model: str) -> str:
 
 @dataclass(frozen=True)
 class EmbeddingGemma2Sources:
-    """The assembly inputs: the series of each storage of the text graph (dtype label →
-    directory), the vision tower's series, the audio tower's series, the tokenizer series and the
-    pinned upstream snapshot (`inputs/` — not a generated artifact; only its small configuration
-    files and `tokenizer.json` are read)."""
+    """The assembly inputs: the series of each storage (dtype label → directory) of the text
+    graph, of the vision tower and of the audio tower, the tokenizer series and the pinned upstream
+    snapshot (`inputs/` — not a generated artifact; only its small configuration files and
+    `tokenizer.json` are read)."""
 
     series: Mapping[str, Path]
-    vision: Path
-    audio: Path
+    vision: Mapping[str, Path]
+    audio: Mapping[str, Path]
     tokenizer: Path
     snapshot: Path
+
+    def of(self, role: str) -> Mapping[str, Path]:
+        """The series of the graph of a weights role."""
+        return {
+            EMBEDDINGGEMMA2_ROLE: self.series,
+            EMBEDDINGGEMMA2_VISION_ROLE: self.vision,
+            EMBEDDINGGEMMA2_AUDIO_ROLE: self.audio,
+        }[role]
 
 
 def embeddinggemma2_sources(series_dir: Path) -> EmbeddingGemma2Sources:
     """Resolve the inputs from the series parent directory (`outputs/series/`) and the snapshot's
     place (`embeddinggemma2.sources.SNAPSHOT_DIR`)."""
+    resolved = {
+        role: {dtype: series_dir / name for dtype, name in series.items()}
+        for role, series in EMBEDDINGGEMMA2_GRAPH_SERIES.items()
+    }
     return EmbeddingGemma2Sources(
-        series={dtype: series_dir / name for dtype, name in EMBEDDINGGEMMA2_SERIES.items()},
-        vision=series_dir / EMBEDDINGGEMMA2_VISION_SERIES,
-        audio=series_dir / EMBEDDINGGEMMA2_AUDIO_SERIES,
+        series=resolved[EMBEDDINGGEMMA2_ROLE],
+        vision=resolved[EMBEDDINGGEMMA2_VISION_ROLE],
+        audio=resolved[EMBEDDINGGEMMA2_AUDIO_ROLE],
         tokenizer=series_dir / TOKENIZER_SERIES,
         snapshot=upstream_sources.SNAPSHOT_DIR,
     )
@@ -431,23 +472,24 @@ def embeddinggemma2_placements(sources: EmbeddingGemma2Sources) -> dict[str, Pat
     """Role → source file. Anything not here stays out (the series' `io.*.safetensors` and the
     towers' series records).
 
-    MUST: exactly the storages of {@link EMBEDDINGGEMMA2_SERIES} — a missing one would leave a
-    preset pointing at no file, an extra one would ship a container no preset reads.
+    MUST: exactly the storages of {@link EMBEDDINGGEMMA2_GRAPH_SERIES} for each graph — a missing
+    one would leave a preset pointing at no file, an extra one would ship a container no preset
+    reads.
     """
-    if set(sources.series) != set(EMBEDDINGGEMMA2_SERIES):
-        raise DistError(
-            f"the series are given for {sorted(sources.series)}, not for the storages"
-            f" {sorted(EMBEDDINGGEMMA2_SERIES)}"
-        )
-    return {
-        **{
-            embeddinggemma2_role(dtype): sources.series[dtype] / EMBEDDINGGEMMA2_MODEL_FILE
-            for dtype in EMBEDDINGGEMMA2_SERIES
-        },
-        EMBEDDINGGEMMA2_VISION_ARTIFACT: sources.vision / EMBEDDINGGEMMA2_MODEL_FILE,
-        EMBEDDINGGEMMA2_AUDIO_ARTIFACT: sources.audio / EMBEDDINGGEMMA2_MODEL_FILE,
-        EMBEDDINGGEMMA2_TOKENIZER_ROLE: sources.tokenizer / EMBEDDINGGEMMA2_TOKENIZER_FILE,
-    }
+    placements: dict[str, Path] = {}
+    for role, series in EMBEDDINGGEMMA2_GRAPH_SERIES.items():
+        given = sources.of(role)
+        if set(given) != set(series):
+            raise DistError(
+                f"the {role} series are given for {sorted(given)}, not for the storages"
+                f" {sorted(series)}"
+            )
+        for dtype in series:
+            placements[embeddinggemma2_role(dtype, role)] = (
+                given[dtype] / EMBEDDINGGEMMA2_MODEL_FILE
+            )
+    placements[EMBEDDINGGEMMA2_TOKENIZER_ROLE] = sources.tokenizer / EMBEDDINGGEMMA2_TOKENIZER_FILE
+    return placements
 
 
 def _read_json(path: Path, what: str) -> Any:
@@ -822,22 +864,42 @@ def assert_embeddinggemma2_vision_graph(
         )
 
 
+def assert_embeddinggemma2_audio_i8_kept(path: Path) -> None:
+    """The audio tower's i8 container keeps exactly its declared exceptions bf16: the weights of
+    {@link EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16} and one window selector
+    ({@link EMBEDDINGGEMMA2_AUDIO_SELECTOR_SUFFIX}).
+
+    MUST: its role cannot forbid bf16 (it holds these), so this is what tells the shipped form from
+    an audio series rounded otherwise — one with a linear left bf16, or with a kept convolution
+    rounded, which the card's statement of the exception would not describe.
+    """
+    bf16 = {key for key, layout in read_layouts(path).items() if layout == "bf16"}
+    selectors = {key for key in bf16 if key.endswith(EMBEDDINGGEMMA2_AUDIO_SELECTOR_SUFFIX)}
+    expected = set(EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16)
+    if len(selectors) != 1 or bf16 - selectors != expected:
+        raise DistError(
+            f"{path}: the audio tower's i8 container keeps {sorted(bf16)} bf16, not its two"
+            f" subsampling convolutions {sorted(expected)} and one window selector"
+        )
+
+
 def assert_embeddinggemma2_vision_series(
-    series: Path, budget: int, pin: upstream_sources.SourcePin
+    series: Path, name: str, budget: int, pin: upstream_sources.SourcePin
 ) -> None:
-    """The vision series is a full one, taken at the budget this distribution declares, from the
+    """A vision series is a full one, taken at the budget this distribution declares, from the
     pinned checkpoint.
 
-    MUST: its record ({@link EMBEDDINGGEMMA2_VISION_REFERENCE_FILE}) names this series, the budget
-    `pipelineConfig.vision` declares and the pin — goldens taken at another budget hold the host to
-    rows it never builds, and a series of another revision would ship under this pin.
+    MUST: its record ({@link EMBEDDINGGEMMA2_VISION_REFERENCE_FILE}) names the series `name` (the
+    one of its storage), the budget `pipelineConfig.vision` declares and the pin — goldens taken at
+    another budget hold the host to rows it never builds, and a series of another revision would
+    ship under this pin.
     """
     record_path = series / EMBEDDINGGEMMA2_VISION_REFERENCE_FILE
     record = _read_json(record_path, "the vision series' record")
     if not isinstance(record, dict):
         raise DistError(f"{record_path}: the top level is not an object")
     for key, expected in (
-        ("series", EMBEDDINGGEMMA2_VISION_SERIES),
+        ("series", name),
         ("softTokenBudget", budget),
         ("upstream", pin.label),
     ):
@@ -994,21 +1056,27 @@ def assert_embeddinggemma2_audio_graph(
 
 
 def assert_embeddinggemma2_audio_series(
-    series: Path, *, sample_rate: int, max_soft_tokens: int, pin: upstream_sources.SourcePin
+    series: Path,
+    name: str,
+    *,
+    sample_rate: int,
+    max_soft_tokens: int,
+    pin: upstream_sources.SourcePin,
 ) -> None:
-    """The audio series is a full one, taken at the sample rate and the bound this distribution
+    """An audio series is a full one, taken at the sample rate and the bound this distribution
     declares, from the pinned checkpoint.
 
-    MUST: its record ({@link EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE}) names this series, the pin,
-    the sample rate and the bound — goldens taken at another rate or bound hold the host to frames
-    it never builds, and a series of another revision would ship under this pin.
+    MUST: its record ({@link EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE}) names the series `name` (the
+    one of its storage), the pin, the sample rate and the bound — goldens taken at another rate or
+    bound hold the host to frames it never builds, and a series of another revision would ship
+    under this pin.
     """
     record_path = series / EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE
     record = _read_json(record_path, "the audio series' record")
     if not isinstance(record, dict):
         raise DistError(f"{record_path}: the top level is not an object")
     for key, expected in (
-        ("series", EMBEDDINGGEMMA2_AUDIO_SERIES),
+        ("series", name),
         ("upstream", pin.label),
         ("sampleRate", sample_rate),
         ("softTokensMax", max_soft_tokens),
@@ -1159,28 +1227,49 @@ def embeddinggemma2_plan(
             f"{container}: soft_embeds is {soft_width} wide, upstream's text_config.hidden_size"
             f" {hidden}"
         )
-    vision_container = placements[EMBEDDINGGEMMA2_VISION_ARTIFACT]
+    # Each tower's contract is read from its original weights' container; its other storage must
+    # carry the same graph (as the text graph's).
+    vision_container = placements[
+        embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE, EMBEDDINGGEMMA2_VISION_ROLE)
+    ]
+    vision_graph = ir_graph(vision_container)
     assert_embeddinggemma2_vision_graph(
-        ir_graph(vision_container), vision_container, hidden=hidden, processor=processor
+        vision_graph, vision_container, hidden=hidden, processor=processor
     )
-    assert_embeddinggemma2_vision_series(sources.vision, processor.budget, pin)
-    audio_container = placements[EMBEDDINGGEMMA2_AUDIO_ARTIFACT]
+    audio_container = placements[
+        embeddinggemma2_role(EMBEDDINGGEMMA2_DTYPE, EMBEDDINGGEMMA2_AUDIO_ROLE)
+    ]
+    audio_graph = ir_graph(audio_container)
     max_soft_tokens = assert_embeddinggemma2_audio_graph(
-        ir_graph(audio_container),
+        audio_graph,
         audio_container,
         hidden=hidden,
         mel_bins=EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR["feature_size"],
     )
-    assert_embeddinggemma2_audio_series(
-        sources.audio, sample_rate=sample_rate, max_soft_tokens=max_soft_tokens, pin=pin
+    for dtype, name in EMBEDDINGGEMMA2_VISION_SERIES.items():
+        if dtype != EMBEDDINGGEMMA2_DTYPE:
+            other = placements[embeddinggemma2_role(dtype, EMBEDDINGGEMMA2_VISION_ROLE)]
+            assert_same_graph(ir_graph(other), other, vision_graph, vision_container)
+        assert_embeddinggemma2_vision_series(sources.vision[dtype], name, processor.budget, pin)
+    for dtype, name in EMBEDDINGGEMMA2_AUDIO_SERIES.items():
+        if dtype != EMBEDDINGGEMMA2_DTYPE:
+            other = placements[embeddinggemma2_role(dtype, EMBEDDINGGEMMA2_AUDIO_ROLE)]
+            assert_same_graph(ir_graph(other), other, audio_graph, audio_container)
+        assert_embeddinggemma2_audio_series(
+            sources.audio[dtype],
+            name,
+            sample_rate=sample_rate,
+            max_soft_tokens=max_soft_tokens,
+            pin=pin,
+        )
+    assert_embeddinggemma2_audio_i8_kept(
+        placements[embeddinggemma2_role(EMBEDDINGGEMMA2_I8_DTYPE, EMBEDDINGGEMMA2_AUDIO_ROLE)]
     )
     # Every container names the license and the commit it was exported from (the export bakes
     # them).
-    for role in (
-        *(embeddinggemma2_role(dtype) for dtype in EMBEDDINGGEMMA2_SERIES),
-        EMBEDDINGGEMMA2_VISION_ARTIFACT,
-        EMBEDDINGGEMMA2_AUDIO_ARTIFACT,
-    ):
+    for role in placements:
+        if role == EMBEDDINGGEMMA2_TOKENIZER_ROLE:
+            continue
         assert_upstream_provenance(
             placements[role], license=EMBEDDINGGEMMA2_LICENSE, revision=pin.revision
         )
@@ -1237,9 +1326,8 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-#: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_SERIES},
-#: {@link EMBEDDINGGEMMA2_VISION_DTYPE}, {@link EMBEDDINGGEMMA2_AUDIO_DTYPE}), this text changes
-#: with it.
+#: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_GRAPH_SERIES}), this
+#: text changes with it.
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
@@ -1262,14 +1350,19 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - The vision tower and its projection were re-expressed as a second graph: it reads an image's
   real patches only, ordered so that the patches pooled into one soft token are adjacent, and its
   two-dimensional rotary embedding is folded into tables of the graph gathered by the patch
-  positions. Its weights keep the checkpoint's BF16 values unchanged in both forms (its norms and
-  the folded tables are stored in float32); none of them was rounded.
+  positions. Its weights ship in the same two forms: the `bf16` form keeps the checkpoint's BF16
+  values unchanged, and in the `i8` form every linear layer and the two learned position tables
+  were rounded to symmetric int8 with one float32 scale per row (its norms and the folded tables
+  are stored in float32 in both).
 - The audio tower and its projection were re-expressed as a third graph: it reads an audio's
   log-mel frames (computed from the samples outside the graph) with their frame mask, its
   chunked local attention is computed over each query's window of 12 keys with the relative
   position term folded into constants, and the bounds of its clipped linear layers are constants
-  of the graph. Its weights keep the checkpoint's BF16 values unchanged in both forms (its norms,
-  biases and folded constants are stored in float32); none of them was rounded.
+  of the graph. Its weights ship in the same two forms: the `bf16` form keeps the checkpoint's
+  BF16 values unchanged, and in the `i8` form every linear layer and depthwise convolution was
+  rounded to symmetric int8 with one float32 scale per row, while its two subsampling
+  convolutions keep their BF16 values (its norms, biases and folded constants are stored in
+  float32 in both).
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt
   prefixes of its `config_sentence_transformers.json` are carried in `karume.json`.
 

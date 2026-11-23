@@ -6,7 +6,8 @@ of the graph's contract (`input_ids` i32 / `pool_mask` f32 `[1, T]`, `soft_embed
 `[1, T, 4]` / `soft_mask` bool `[1, T, 1]` in, one f32 `[1, 768]` out, a token table, a projection
 and a constant sliced by `T` at the bound), written through the core's own writer
 ({@link _write_container} — the i8 one rounded first, as the export does), and so do the two
-towers' series ({@link _write_vision_container}, {@link _write_audio_container}); the tokenizer
+towers' series in both storages ({@link _write_vision_container}, {@link _write_audio_container} —
+the audio tower's i8 one keeping its declared exceptions bf16); the tokenizer
 asset and the upstream snapshot are synthetic JSON, held to a synthetic pin. Every check of the
 plan is exercised by shifting one input from that passing form. The card is covered by
 `test_card.py`; the cases that read the real pinned snapshot skip explicitly without it.
@@ -242,11 +243,17 @@ def _write_vision_container(
 #: longest audio (750 — the recipe requires exactly this one).
 AUDIO_BOUND = 750
 
+#: What the audio tower's i8 series keeps bf16: its two subsampling convolutions and its window
+#: selector (the real tower's keys — each a weight slot here too).
+AUDIO_SELECTOR = f"layers.11{eg2.EMBEDDINGGEMMA2_AUDIO_SELECTOR_SUFFIX}"
+AUDIO_KEPT = (*eg2.EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16, AUDIO_SELECTOR)
+
 
 def _write_audio_container(
     path: Path,
     *,
     weight_dtype: str = "bf16",
+    kept: tuple[str, ...] = AUDIO_KEPT,
     width: int = HIDDEN,
     mel_bins: int = 128,
     frames: str = "4n",
@@ -255,21 +262,23 @@ def _write_audio_container(
     license: str = eg2.EMBEDDINGGEMMA2_LICENSE,
 ) -> None:
     """Write the smallest container of the audio tower graph's contract (`features` f32
-    `[1, 4n, 128]`, `frame_mask` f32 `[1, 4n]` in, one f32 `[1, n, width]` out, a projection and a
+    `[1, 4n, 128]`, `frame_mask` f32 `[1, 4n]` in, one f32 `[1, n, width]` out, a projection, the
+    three tensors the i8 series keeps bf16 ({@link AUDIO_KEPT}, each read by a linear) and a
     window constant of `bound` rows sliced by `n`, kept f32 as the export keeps its folded
-    constants) as a series component."""
+    constants) as a series component. Under i8 every weight but `kept` is rounded to per-row int8
+    first and `kept` stays bf16 (the export's form)."""
     symbol = eg2.EMBEDDINGGEMMA2_AUDIO_SYMBOL
     graph = IrGraph(symbols=[symbol])
     graph.inputs += [
         IrInput(name="features", dtype="f32", shape=[1, frames, mel_bins]),
         IrInput(name="frame_mask", dtype="f32", shape=[1, frames]),
     ]
+    # Multiples of 1/8 below 2, so the bf16 write stores them unchanged.
+    weight = (torch.arange(width * mel_bins, dtype=torch.float32) % 16).reshape(width, mel_bins) / 8
+    # Two weights the i8 series rounds (one may be kept bf16 for a fault), then the kept ones.
+    weights = ("projection", "output", *AUDIO_KEPT)
     tensors = {
-        # Multiples of 1/8 below 2, so the bf16 write stores them unchanged.
-        "projection": (torch.arange(width * mel_bins, dtype=torch.float32) % 16).reshape(
-            width, mel_bins
-        )
-        / 8,
+        **{name: weight.clone() for name in weights},
         "bias": torch.zeros(width, dtype=torch.float32),
         "const.window": torch.full((bound, 12), 1 / 3, dtype=torch.float32),
         "seed": torch.ones(1, 1, dtype=torch.float32),
@@ -277,11 +286,16 @@ def _write_audio_container(
     for name, tensor in tensors.items():
         graph.initializers[name] = IrInitializer(tensor=name, storage=IrStorage("f32"))
         graph.values[name] = IrValue("f32", list(tensor.shape))
-    graph.values["projected"] = IrValue("f32", [1, frames, width])
     graph.values["window.n"] = IrValue("f32", [symbol, 12])
     graph.values["soft"] = IrValue("f32", [1, symbol, width])
+    for index, name in enumerate(weights):
+        graph.values[f"projected{index}"] = IrValue("f32", [1, frames, width])
+        graph.nodes.append(
+            IrNode(
+                op="linear", ins=["features", name, "bias"], outs=[f"projected{index}"], attrs={}
+            )
+        )
     graph.nodes += [
-        IrNode(op="linear", ins=["features", "projection", "bias"], outs=["projected"], attrs={}),
         IrNode(
             op="sym_prefix_slice",
             ins=["const.window"],
@@ -291,17 +305,21 @@ def _write_audio_container(
         IrNode(op="expand", ins=["seed"], outs=["soft"], attrs={}),
     ]
     graph.outputs.append("soft")
-    scales: dict[str, torch.Tensor] = {}
+    overrides = {"const.window": "f32"}
     if weight_dtype == "i8":
-        scales["projection"] = channel_scale(tensors["projection"], 0)
-        rounded = quantize_to_int8(tensors["projection"], scales["projection"])
-        tensors["projection"] = rounded.to(torch.float32) * scales["projection"]
+        overrides |= {name: "bf16" for name in kept}
+    scales: dict[str, torch.Tensor] = {}
+    for name in weights:
+        if overrides.get(name, weight_dtype) == "i8":
+            scales[name] = channel_scale(tensors[name], 0)
+            rounded = quantize_to_int8(tensors[name], scales[name])
+            tensors[name] = rounded.to(torch.float32) * scales[name]
     stored = stored_model(
         graph,
         tensors,
         weight_dtype=weight_dtype,
         weight_scales=scales,
-        weight_dtype_overrides={"const.window": "f32"},
+        weight_dtype_overrides=overrides,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     publish_container(
@@ -389,18 +407,29 @@ class Fixture:
 
     def __init__(self, root: Path) -> None:
         self.series_root = root / "outputs" / "series"
+        series = {
+            role: {dtype: self.series_root / name for dtype, name in names.items()}
+            for role, names in eg2.EMBEDDINGGEMMA2_GRAPH_SERIES.items()
+        }
         self.sources = eg2.EmbeddingGemma2Sources(
-            series={
-                dtype: self.series_root / name for dtype, name in eg2.EMBEDDINGGEMMA2_SERIES.items()
-            },
-            vision=self.series_root / eg2.EMBEDDINGGEMMA2_VISION_SERIES,
-            audio=self.series_root / eg2.EMBEDDINGGEMMA2_AUDIO_SERIES,
+            series=series[eg2.EMBEDDINGGEMMA2_ROLE],
+            vision=series[eg2.EMBEDDINGGEMMA2_VISION_ROLE],
+            audio=series[eg2.EMBEDDINGGEMMA2_AUDIO_ROLE],
             tokenizer=self.series_root / tokenizer.TOKENIZER_SERIES,
             snapshot=root / "inputs" / "embeddinggemma2" / "embeddinggemma-2",
         )
-        #: The towers' containers.
-        self.vision_container = self.sources.vision / eg2.EMBEDDINGGEMMA2_MODEL_FILE
-        self.audio_container = self.sources.audio / eg2.EMBEDDINGGEMMA2_MODEL_FILE
+        #: Dtype label → each tower's container; the original weights' one by itself (the one
+        #: the tower's contract is read from).
+        self.vision_containers = {
+            dtype: path / eg2.EMBEDDINGGEMMA2_MODEL_FILE
+            for dtype, path in self.sources.vision.items()
+        }
+        self.audio_containers = {
+            dtype: path / eg2.EMBEDDINGGEMMA2_MODEL_FILE
+            for dtype, path in self.sources.audio.items()
+        }
+        self.vision_container = self.vision_containers[eg2.EMBEDDINGGEMMA2_DTYPE]
+        self.audio_container = self.audio_containers[eg2.EMBEDDINGGEMMA2_DTYPE]
         #: Dtype label → the series' container.
         self.containers = {
             dtype: series / eg2.EMBEDDINGGEMMA2_MODEL_FILE
@@ -412,42 +441,52 @@ class Fixture:
             _write_container(container, weight_dtype=dtype)
             # A series also holds the goldens, which must not be distributed.
             (container.parent / "io.query-en.safetensors").write_bytes(b"io-fixture")
-        _write_vision_container(self.vision_container)
-        (self.sources.vision / "io.gradient-square.safetensors").write_bytes(b"io-fixture")
-        _write_audio_container(self.audio_container)
-        (self.sources.audio / "io.sweep.safetensors").write_bytes(b"io-fixture")
+        for dtype in eg2.EMBEDDINGGEMMA2_SERIES:
+            _write_vision_container(self.vision_containers[dtype], weight_dtype=dtype)
+            (self.sources.vision[dtype] / "io.gradient-square.safetensors").write_bytes(
+                b"io-fixture"
+            )
+            _write_audio_container(self.audio_containers[dtype], weight_dtype=dtype)
+            (self.sources.audio[dtype] / "io.sweep.safetensors").write_bytes(b"io-fixture")
+            self.write_vision_record({}, dtype)
+            self.write_audio_record({}, dtype)
         _write_json(self.sources.snapshot / "config.json", UPSTREAM_CONFIG)
         _write_json(self.sources.snapshot / "config_sentence_transformers.json", PROMPTS_CONFIG)
         _write_json(self.sources.snapshot / "processor_config.json", PROCESSOR_CONFIG)
         _write_json(self.sources.snapshot / "preprocessor_config.json", PREPROCESSOR_CONFIG)
         (self.sources.snapshot / "tokenizer.json").write_text('{"fixture": true}', encoding="utf-8")
         self.write_tokenizer(_tokenizer_asset(self.snapshot_sha("tokenizer.json")))
-        self.write_vision_record({})
-        self.write_audio_record({})
 
-    def write_vision_record(self, patch: Mapping[str, Any]) -> None:
-        """The vision series' record (`export_vision.py` writes it), with fields replaced."""
+    def write_vision_record(
+        self, patch: Mapping[str, Any], dtype: str = eg2.EMBEDDINGGEMMA2_DTYPE
+    ) -> None:
+        """A vision series' record (`export_vision.py` writes it), with fields replaced."""
         record = {
-            "series": eg2.EMBEDDINGGEMMA2_VISION_SERIES,
+            "series": eg2.EMBEDDINGGEMMA2_VISION_SERIES[dtype],
             "upstream": f"{upstream_sources.PIN.repo}@{FIXTURE_REVISION}",
             "softTokenBudget": BUDGET,
             "ropePositions": POSITIONS,
             "images": [],
         }
         _write_json(
-            self.sources.vision / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE, {**record, **patch}
+            self.sources.vision[dtype] / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE,
+            {**record, **patch},
         )
 
-    def rewrite_vision(self, **container: Any) -> None:
-        """Replace the vision series' container with one written with other arguments."""
-        for stale in sequence_siblings(self.vision_container):
+    def rewrite_vision(self, dtype: str = eg2.EMBEDDINGGEMMA2_DTYPE, **container: Any) -> None:
+        """Replace a vision series' container with one written with other arguments (in its own
+        storage unless they say otherwise)."""
+        path = self.vision_containers[dtype]
+        for stale in sequence_siblings(path):
             stale.unlink()
-        _write_vision_container(self.vision_container, **container)
+        _write_vision_container(path, **{"weight_dtype": dtype, **container})
 
-    def write_audio_record(self, patch: Mapping[str, Any]) -> None:
-        """The audio series' record (`export_audio.py` writes it), with fields replaced."""
+    def write_audio_record(
+        self, patch: Mapping[str, Any], dtype: str = eg2.EMBEDDINGGEMMA2_DTYPE
+    ) -> None:
+        """An audio series' record (`export_audio.py` writes it), with fields replaced."""
         record = {
-            "series": eg2.EMBEDDINGGEMMA2_AUDIO_SERIES,
+            "series": eg2.EMBEDDINGGEMMA2_AUDIO_SERIES[dtype],
             "upstream": f"{upstream_sources.PIN.repo}@{FIXTURE_REVISION}",
             "sampleRate": 16_000,
             "pcmScale": 32_768,
@@ -456,14 +495,17 @@ class Fixture:
             "audios": [],
         }
         _write_json(
-            self.sources.audio / eg2.EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE, {**record, **patch}
+            self.sources.audio[dtype] / eg2.EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE,
+            {**record, **patch},
         )
 
-    def rewrite_audio(self, **container: Any) -> None:
-        """Replace the audio series' container with one written with other arguments."""
-        for stale in sequence_siblings(self.audio_container):
+    def rewrite_audio(self, dtype: str = eg2.EMBEDDINGGEMMA2_DTYPE, **container: Any) -> None:
+        """Replace an audio series' container with one written with other arguments (in its own
+        storage unless they say otherwise)."""
+        path = self.audio_containers[dtype]
+        for stale in sequence_siblings(path):
             stale.unlink()
-        _write_audio_container(self.audio_container, **container)
+        _write_audio_container(path, **{"weight_dtype": dtype, **container})
 
     def snapshot_sha(self, name: str) -> str:
         return upstream_sources.file_sha256(self.sources.snapshot / name)
@@ -554,8 +596,8 @@ class TestLayout:
         assert model["pipeline"] == "embeddinggemma/1"
         assert list(model["weights"]) == ["model", "vision", "audio"]
         assert list(model["weights"]["model"]) == ["bf16", "i8"]
-        assert list(model["weights"]["vision"]) == ["bf16"]
-        assert list(model["weights"]["audio"]) == ["bf16"]
+        assert list(model["weights"]["vision"]) == ["bf16", "i8"]
+        assert list(model["weights"]["audio"]) == ["bf16", "i8"]
         assert list(model["assets"]) == ["tokenizer"]
         assert list(model["quants"]) == ["bf16", "i8"]
         assert model["defaultQuant"] == "bf16"
@@ -568,8 +610,8 @@ class TestLayout:
         assert model["quants"]["bf16"]["label"] == "Original weights (bf16)"
         assert model["quants"]["i8"]["weights"] == {
             "model": "i8",
-            "vision": "bf16",
-            "audio": "bf16",
+            "vision": "i8",
+            "audio": "i8",
         }
         assert model["quants"]["i8"]["session"] == {}
         assert model["quants"]["i8"]["label"] == "Half size (int8)"
@@ -672,7 +714,9 @@ class TestStorage:
             "model_bf16": "bf16",
             "model_i8": "i8",
             "vision_bf16": "bf16",
+            "vision_i8": "i8",
             "audio_bf16": "bf16",
+            "audio_i8": "i8",
         }
 
     def test_a_missing_storage_is_refused(self, fixture: Fixture) -> None:
@@ -1005,7 +1049,9 @@ class TestLegalText:
         # The i8 form is the one quantized copy, and the notice says what was rounded.
         assert "**The `i8` form is an\n  int8-quantized copy**" in notice
         assert "every linear layer of the text tower were" in notice
-        assert "BF16 values unchanged in both forms" in notice
+        assert "every linear layer and the two learned position tables" in notice
+        assert "every linear layer and depthwise convolution was" in notice
+        assert "while its two subsampling\n  convolutions keep their BF16 values" in notice
         assert "rounded to symmetric int8 with one float32 scale per row" in notice
         assert notice.count("quantiz") == 1
 
@@ -1017,26 +1063,30 @@ class TestLegalText:
 
         named = set(re.findall(r"`([a-z0-9]+)` form", notice))
         assert named == set(_model(manifest)["weights"]["model"])
+        for role in ("vision", "audio"):
+            assert set(_model(manifest)["weights"][role]) == named
 
 
 class TestVisionTower:
-    """The tower: one bf16 storage every preset maps, held to the processor, its series' record
-    and both graphs, and `pipelineConfig.vision` read from its sources."""
+    """The tower: the text graph's two storages, each preset mapping its own, held to the
+    processor, its series' records and both graphs, and `pipelineConfig.vision` read from its
+    sources."""
 
-    def test_every_preset_maps_the_one_bf16_tower_its_series_ships(
+    def test_each_preset_maps_the_tower_of_its_own_storage(
         self, assembled, fixture: Fixture
     ) -> None:
         out_dir, manifest = assembled
         model = _model(manifest)
-        parts = model["weights"]["vision"]["bf16"]["container"]["parts"]
 
-        assert parts[0]["path"].startswith("text/vision/model.bf16-")
-        assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
-            source.read_bytes() for source in sorted(sequence_siblings(fixture.vision_container))
-        ]
+        for dtype, container in fixture.vision_containers.items():
+            parts = model["weights"]["vision"][dtype]["container"]["parts"]
+            assert parts[0]["path"].startswith(f"text/vision/model.{dtype}-")
+            assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
+                source.read_bytes() for source in sorted(sequence_siblings(container))
+            ]
         assert {name: quant["weights"]["vision"] for name, quant in model["quants"].items()} == {
             "bf16": "bf16",
-            "i8": "bf16",
+            "i8": "i8",
         }
 
     def test_the_vision_series_record_stays_out(self, assembled) -> None:
@@ -1063,11 +1113,36 @@ class TestVisionTower:
         with pytest.raises(DistError, match=r"vision_bf16: storage of .* has no bf16"):
             fixture.plan()
 
-    def test_the_towers_forbidden_table_names_every_rounded_layout(self) -> None:
-        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", "bf16"}
+    @pytest.mark.parametrize("dtype", ["bf16", "f32"])
+    def test_another_storage_in_the_int8_place_is_refused(
+        self, fixture: Fixture, dtype: str
+    ) -> None:
+        fixture.rewrite_vision("i8", weight_dtype=dtype)
+
+        with pytest.raises(DistError, match=r"vision_i8: storage of .* has no i8"):
+            fixture.plan()
+
+    def test_a_bf16_table_in_the_int8_tower_is_refused(self, fixture: Fixture) -> None:
+        """i8 is there — the forbidden table keeps a bf16 tensor out of the int8 tower."""
+        fixture.rewrite_vision("i8", rope_storage="bf16")
+
+        with pytest.raises(DistError, match=r"vision_i8: .* has bf16 \(actual"):
+            fixture.plan()
+
+    def test_an_int8_tower_of_another_graph_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_vision("i8", positions=POSITIONS + 3)
+
+        with pytest.raises(DistError, match="its graph is not the graph of"):
+            fixture.plan()
+
+    @pytest.mark.parametrize("dtype", sorted(eg2.EMBEDDINGGEMMA2_VISION_SERIES))
+    def test_the_towers_forbidden_table_names_every_other_compressed_layout(
+        self, dtype: str
+    ) -> None:
+        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", dtype}
 
         assert (
-            set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.EMBEDDINGGEMMA2_VISION_ARTIFACT])
+            set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.embeddinggemma2_role(dtype, "vision")])
             == compressed
         )
 
@@ -1158,8 +1233,15 @@ class TestVisionTower:
         with pytest.raises(DistError, match=message):
             fixture.plan()
 
-    def test_a_series_without_its_record_is_refused(self, fixture: Fixture) -> None:
-        (fixture.sources.vision / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE).unlink()
+    def test_the_int8_series_record_names_its_own_series(self, fixture: Fixture) -> None:
+        fixture.write_vision_record({"series": "embeddinggemma-2-vision-bf16"}, "i8")
+
+        with pytest.raises(DistError, match="series is 'embeddinggemma-2-vision-bf16', not"):
+            fixture.plan()
+
+    @pytest.mark.parametrize("dtype", sorted(eg2.EMBEDDINGGEMMA2_VISION_SERIES))
+    def test_a_series_without_its_record_is_refused(self, fixture: Fixture, dtype: str) -> None:
+        (fixture.sources.vision[dtype] / eg2.EMBEDDINGGEMMA2_VISION_REFERENCE_FILE).unlink()
 
         with pytest.raises(DistError, match="missing assembly input"):
             fixture.plan()
@@ -1190,24 +1272,64 @@ class TestVisionTower:
 
 
 class TestAudioTower:
-    """The audio tower: one bf16 storage every preset maps, held to the feature extractor, its
-    series' record and both graphs, and `pipelineConfig.audio` read from its sources."""
+    """The audio tower: the text graph's two storages, each preset mapping its own (the int8 one
+    keeping exactly its declared exceptions bf16), held to the feature extractor, its series'
+    records and both graphs, and `pipelineConfig.audio` read from its sources."""
 
-    def test_every_preset_maps_the_one_bf16_tower_its_series_ships(
+    def test_each_preset_maps_the_tower_of_its_own_storage(
         self, assembled, fixture: Fixture
     ) -> None:
         out_dir, manifest = assembled
         model = _model(manifest)
-        parts = model["weights"]["audio"]["bf16"]["container"]["parts"]
 
-        assert parts[0]["path"].startswith("text/audio/model.bf16-")
-        assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
-            source.read_bytes() for source in sorted(sequence_siblings(fixture.audio_container))
-        ]
+        for dtype, container in fixture.audio_containers.items():
+            parts = model["weights"]["audio"][dtype]["container"]["parts"]
+            assert parts[0]["path"].startswith(f"text/audio/model.{dtype}-")
+            assert [(out_dir / part["path"]).read_bytes() for part in parts] == [
+                source.read_bytes() for source in sorted(sequence_siblings(container))
+            ]
         assert {name: quant["weights"]["audio"] for name, quant in model["quants"].items()} == {
             "bf16": "bf16",
-            "i8": "bf16",
+            "i8": "i8",
         }
+
+    def test_the_int8_tower_keeps_its_exceptions_bf16_and_rounds_the_rest(
+        self, fixture: Fixture
+    ) -> None:
+        assert storage_dtypes(fixture.audio_containers["i8"]) == {"bf16", "f32", "i8"}
+        eg2.assert_embeddinggemma2_audio_i8_kept(fixture.audio_containers["i8"])
+
+    @pytest.mark.parametrize(
+        "kept",
+        [
+            (eg2.EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16[1], AUDIO_SELECTOR),
+            (*eg2.EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16,),
+            (*AUDIO_KEPT, "projection"),
+        ],
+        ids=["a-kept-convolution-rounded", "the-selector-rounded", "another-weight-kept"],
+    )
+    def test_an_int8_tower_keeping_another_set_bf16_is_refused(
+        self, fixture: Fixture, kept: tuple[str, ...]
+    ) -> None:
+        fixture.rewrite_audio("i8", kept=kept)
+
+        with pytest.raises(DistError, match="bf16, not its two subsampling convolutions"):
+            fixture.plan()
+
+    @pytest.mark.parametrize("dtype", ["bf16", "f32"])
+    def test_another_storage_in_the_int8_place_is_refused(
+        self, fixture: Fixture, dtype: str
+    ) -> None:
+        fixture.rewrite_audio("i8", weight_dtype=dtype)
+
+        with pytest.raises(DistError, match=r"audio_i8: storage of .* has no i8"):
+            fixture.plan()
+
+    def test_an_int8_tower_of_another_graph_is_refused(self, fixture: Fixture) -> None:
+        fixture.rewrite_audio("i8", mel_bins=80)
+
+        with pytest.raises(DistError, match="its graph is not the graph of"):
+            fixture.plan()
 
     def test_the_audio_series_record_and_goldens_stay_out(self, assembled) -> None:
         out_dir, _ = assembled
@@ -1232,18 +1354,22 @@ class TestAudioTower:
 
     @pytest.mark.parametrize("dtype", ["i8", "f32"])
     def test_a_tower_in_another_storage_is_refused(self, fixture: Fixture, dtype: str) -> None:
+        """The int8 series holds its kept tensors bf16, so the requirement passes and the forbidden
+        table refuses it; the f32 series fails the requirement."""
         fixture.rewrite_audio(weight_dtype=dtype)
 
-        with pytest.raises(DistError, match=r"audio_bf16: storage of .* has no bf16"):
+        message = {"i8": r"audio_bf16: .* has i8 \(actual", "f32": r"audio_bf16: .* has no bf16"}
+        with pytest.raises(DistError, match=message[dtype]):
             fixture.plan()
 
-    def test_the_towers_forbidden_table_names_every_rounded_layout(self) -> None:
-        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32", "bf16"}
+    def test_the_towers_forbidden_tables_name_every_other_compressed_layout(self) -> None:
+        """The int8 role allows bf16 beside i8 — its declared exceptions, held exactly by
+        `assert_embeddinggemma2_audio_i8_kept` — and nothing else."""
+        layouts = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
+        forbidden = eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN
 
-        assert (
-            set(eg2.EMBEDDINGGEMMA2_STORAGE_FORBIDDEN[eg2.EMBEDDINGGEMMA2_AUDIO_ARTIFACT])
-            == compressed
-        )
+        assert set(forbidden["audio_bf16"]) == layouts - {"bf16"}
+        assert set(forbidden["audio_i8"]) == layouts - {"bf16", "i8"}
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -1360,8 +1486,15 @@ class TestAudioTower:
         with pytest.raises(DistError, match=message):
             fixture.plan()
 
-    def test_a_series_without_its_record_is_refused(self, fixture: Fixture) -> None:
-        (fixture.sources.audio / eg2.EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE).unlink()
+    def test_the_int8_series_record_names_its_own_series(self, fixture: Fixture) -> None:
+        fixture.write_audio_record({"series": "embeddinggemma-2-audio-bf16"}, "i8")
+
+        with pytest.raises(DistError, match="series is 'embeddinggemma-2-audio-bf16', not"):
+            fixture.plan()
+
+    @pytest.mark.parametrize("dtype", sorted(eg2.EMBEDDINGGEMMA2_AUDIO_SERIES))
+    def test_a_series_without_its_record_is_refused(self, fixture: Fixture, dtype: str) -> None:
+        (fixture.sources.audio[dtype] / eg2.EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE).unlink()
 
         with pytest.raises(DistError, match="missing assembly input"):
             fixture.plan()
@@ -1449,7 +1582,9 @@ class TestMirroredConstants:
     def test_the_vision_constants_are_the_tower_exports(self) -> None:
         from embeddinggemma2 import export_vision
 
-        assert export_vision.DEFAULT_OUT_DIRS["bf16"].name == eg2.EMBEDDINGGEMMA2_VISION_SERIES
+        assert list(eg2.EMBEDDINGGEMMA2_VISION_SERIES) == ["bf16", "i8"]
+        for dtype, series in eg2.EMBEDDINGGEMMA2_VISION_SERIES.items():
+            assert export_vision.DEFAULT_OUT_DIRS[dtype].name == series
         assert export_vision.GRAPH_NAME == eg2.EMBEDDINGGEMMA2_VISION_ROLE
         assert (
             tuple(name for name, _ in eg2.EMBEDDINGGEMMA2_VISION_INPUTS)
@@ -1461,7 +1596,14 @@ class TestMirroredConstants:
     def test_the_audio_constants_are_the_tower_exports(self) -> None:
         from embeddinggemma2 import export_audio
 
-        assert export_audio.DEFAULT_OUT_DIRS["bf16"].name == eg2.EMBEDDINGGEMMA2_AUDIO_SERIES
+        assert list(eg2.EMBEDDINGGEMMA2_AUDIO_SERIES) == ["bf16", "i8"]
+        for dtype, series in eg2.EMBEDDINGGEMMA2_AUDIO_SERIES.items():
+            assert export_audio.DEFAULT_OUT_DIRS[dtype].name == series
+        assert eg2.EMBEDDINGGEMMA2_AUDIO_I8_KEPT_BF16 == export_audio.I8_KEPT_BF16_WEIGHTS
+        assert (
+            f".self_attn.{export_audio.WINDOW_SELECTOR}"
+            == eg2.EMBEDDINGGEMMA2_AUDIO_SELECTOR_SUFFIX
+        )
         assert export_audio.GRAPH_NAME == eg2.EMBEDDINGGEMMA2_AUDIO_ROLE
         assert (
             tuple(name for name, _ in eg2.EMBEDDINGGEMMA2_AUDIO_INPUTS) == export_audio.GRAPH_INPUTS
