@@ -39,3 +39,25 @@ flock /tmp/karume-gpu.lock node tools/embeddinggemma2-quality-set/generate.ts [<
 - An earlier `manifest.json` is removed first and the new one is written last, so a run that fails leaves none.
 - SBV2's reading dictionary is fetched by `@hdae/yomi` at the revision its version pins (on every run: Node has no
   Cache Storage).
+
+## Comparing the presets on the set
+
+`compare-presets.ts` runs the set through the real `embeddinggemma.Pipeline` of the local mirror
+(`models/karume-embeddinggemma-2`) in the presets `bf16` and `i8`, both built with `vision: true` and `audio: true`:
+
+```sh
+flock /tmp/karume-gpu.lock node tools/embeddinggemma2-quality-set/compare-presets.ts [<record directory>]
+```
+
+- It embeds every image of `inputs/embeddinggemma2/quality-set/` and every clip of
+  `inputs/embeddinggemma2/quality-set-16k/`, each alone and without a prompt, and the distinct captions and
+  transcripts with the `query` prompt. The pipeline takes 16 kHz only, so the clips are the 16 kHz, 16-bit WAVs the
+  tower screening writes (`measure_quant_towers.py --write-clips` in `tools/export-recipes/embeddinggemma2/`); a clip
+  at another rate fails before the GPU is touched.
+- Every input runs twice per preset: a warm-up pass that gives the vectors, then a timed pass that must give the same
+  bits, the presets alternating which runs first. A time is the whole `embed` call.
+- It prints, per modality, the cosine of each item's `i8` vector to its `bf16` vector (min / mean / worst item) and
+  the same for its texts at 768 and 128 values, the cross-modal top-1 of each preset (item → text, text → item — a
+  hit is any item of the text) with how many choices the presets share, and the mean and median time per item.
+- The record goes to `<record directory>/record.json`, by default
+  `outputs/bench/embeddinggemma-2/<date>_tower-i8-gpu/` (outside git).

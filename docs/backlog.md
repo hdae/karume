@@ -741,11 +741,18 @@ maintainer's ruling of 2026-11-06).
        ([research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md): `all-i8` lowest cosine
        0.999648 over 32 generated images, 0.999493 over 32 clips), writing its clips at 16 kHz to
        `inputs/embeddinggemma2/quality-set-16k/`.
-     - Left, stage 2 of the same decision: the TypeScript and GPU side over the new mirror — the series e2e of the two
-       i8 tower series against their own goldens with sha256 rows per series, the pipeline e2e of the `i8` preset with
-       the int8 towers (its sha256 rows recorded again; the tests that pin the mirror's manifest follow it), the quality
-       set's 16 kHz clips and images through the real pipeline against the screening, and the docs of the built
-       pipeline.
+     - Built 2026-11-23, stage 2 of 2: the TypeScript and GPU side over the new mirror, with no change to the
+       pipeline's code (each preset's mapping already picks each tower's storage). The series e2e of the two i8 tower
+       series against their own goldens, each image and waveform held at about three times its measured error (vision
+       5.15e-5 to 3.56e-4, audio 1.03e-5 to 2.49e-4 max abs — the f32 series' order) with new sha256 rows per series;
+       the pipeline e2e checks that each preset fetches its own storage of every role, and the `i8` preset's image and
+       audio rows were recorded again (the 11 rows of the maintainer's approval of that day; every other row
+       unchanged), its cosine to upstream's vectors now 0.999627 to 0.999881 (images) and 0.999762 to 0.999907 (audio)
+       against the unchanged floor 0.999; the int8 towers need no `requiredLimits` (the 128 MiB device). The quality
+       set through the real pipeline (`tools/embeddinggemma2-quality-set/compare-presets.ts`,
+       [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-i8-gpu.md)): every item's cosine of `i8` to
+       `bf16` equals the screening's to within 4.4e-8 (lowest 0.999648 over the images and 0.999493 over the clips at
+       768), the same top-1 hits as `bf16` in both directions, and the same median time per item.
      - Left unbuilt, by the same choice: the activation-int8 preset `i8-a8` (the screening: lowest cosine 0.99563 and
        2.39% of the ranking triples inverted at 768, against 0.99940 and 0.74% for `i8`), and every 4-bit preset (lowest
        0.960 to 0.966, 8.2 to 8.5% inverted).

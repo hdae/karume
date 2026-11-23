@@ -2,7 +2,7 @@
   "name": "@karume/embeddinggemma2-quality-set",
   "version": "0.0.0",
   "private": true,
-  "description": "Generator of the EmbeddingGemma 2 quality set: captioned images and transcribed speech made by Karume's own pipelines.",
+  "description": "Generator of the EmbeddingGemma 2 quality set (captioned images and transcribed speech made by Karume's own pipelines) and the GPU comparison of its presets on it.",
   "license": "MIT",
   "type": "module",
   "scripts": {
