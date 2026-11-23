@@ -107,7 +107,6 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("birefnet/export.py", "export_series"),
     ("depth_anything/export.py", "export_series"),
     ("irodori/dacvae/export.py", "export_series"),
-    ("wan/export_dit.py", "emit"),
     ("wan/export_vae.py", "emit_targets"),
     ("wan/export_vae.py", "emit_shared_targets"),
     ("wan/export_vae_encoder.py", "emit_series"),

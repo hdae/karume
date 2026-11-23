@@ -1387,14 +1387,14 @@ class TestTheWritersSpellTheSameNames:
         assert export_vae.shared_target(WAN_VAE_NEXT_ROLE, 32) == WAN_VAE_NEXT_32_ROLE
 
     def test_the_rope_base_asset_and_the_context_input(self) -> None:
-        from wan import export_dit
+        from wan import dit_common, ti2v_export_dit
 
-        assert (export_dit.ROPE_BASE_ASSET, export_dit.ROPE_BASE_ROLE) == (
+        assert (dit_common.ROPE_BASE_ASSET, dit_common.ROPE_BASE_ROLE) == (
             WAN_ROPE_BASE_ASSET,
             WAN_ROPE_BASE_ROLE,
         )
-        assert export_dit.MODEL_FILE == WAN_MODEL_FILE
-        assert WAN_DIT_CONTEXT_INPUT in export_dit.INPUT_NAMES
+        assert ti2v_export_dit.MODEL_FILE == WAN_MODEL_FILE
+        assert WAN_DIT_CONTEXT_INPUT in ti2v_export_dit.INPUT_NAMES
 
     def test_the_wan22_series_names(self) -> None:
         """The i8 series of the Wan2.2 DiT and the f16 series of the VAE (writers

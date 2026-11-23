@@ -1,4 +1,4 @@
-"""The patch layer that turns the Wan2.1 DiT (diffusers `WanTransformer3DModel`) into S-shaped IR
+"""The patch layer that turns the Wan DiT (diffusers `WanTransformer3DModel`) into S-shaped IR
 (ADR 0118).
 
 The graph is **S-shaped** like Anima's (ADR 0034): the entry is after the patchify, the exit before
@@ -31,8 +31,8 @@ has them** (the table of ADR 0118 decision 3).
 MUST: the patched path is **eager-equivalent** to upstream. The RoPE rewrite is bit-identical (`a −
 b = a + (−b)` and commutativity of addition — {@link real_pair_rotary}). The Linear form of the
 patch embedding can differ from conv3d in reduction order, so the difference is recorded (measured
-2026-10-02: 0 in all 8 cases on torch 2.13 CPU — `wan/tests/test_dit_patch.py` compares it with the
-bound of the reduction-order difference on the real weights).
+2026-10-02: 0 in all 8 cases on torch 2.13 CPU) and checked against the bound of the reduction-order
+difference (`wan.dit_common.patch_embedding_error_bound`).
 
 MUST: do not change the plain upstream path. attn1's processor is replaced, but the replacement
 takes the real-valued form only when called with {@link RealPairRope}; when the upstream forward
@@ -45,13 +45,13 @@ MUST: import diffusers inside functions (the `wan` group is not in the default s
 
 ## Wan2.2 TI2V (ADR 0121 decisions 3 / 4)
 
-The 5B of the same class is written out with {@link WanDitTokensTi2v} (a single I2V-capable graph —
-2 time inputs, a condition mask, a `where` on the modulation). The forward of 2.1's
-{@link WanDitTokens} is not changed (the 1.3B containers and goldens stay byte-identical — decision
-10). There are 2 upstream counterparts to compare with, one per time representation: T2V is the
-upstream forward with a 1-D timestep ({@link reference_dit}); I2V is a reference wrapper that runs
-the time MLP per value with M = 1 and hands per-token tables to the upstream blocks (the
-`condition` of {@link reference_dit} — {@link _TokenwiseTimeEmbedder}).
+The 5B is written out with {@link WanDitTokensTi2v} (a single I2V-capable graph — 2 time inputs, a
+condition mask, a `where` on the modulation). {@link WanDitTokens} stays the 5-input form with one
+time input (the RAM probe `wan.dit_probe` traces it). There are 2 upstream counterparts to compare
+with, one per time representation: T2V is the upstream forward with a 1-D timestep
+({@link reference_dit}); I2V is a reference wrapper that runs the time MLP per value with M = 1 and
+hands per-token tables to the upstream blocks (the `condition` of {@link reference_dit} —
+{@link _TokenwiseTimeEmbedder}).
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def _real_pair_call(
     if encoder_hidden_states is not None or attn.add_k_proj is not None:
         raise NotImplementedError(
             "real-valued RoPE is for self-attention only (without the image condition's add_k_proj)"
-            " — attn1 of Wan2.1 T2V"
+            " — the attn1 of the Wan DiT"
         )
     from diffusers.models.attention_dispatch import dispatch_attention_fn
     from diffusers.models.transformers.transformer_wan import _get_qkv_projections
@@ -272,11 +272,13 @@ def patch_embedding_linear(conv: nn.Conv3d) -> nn.Linear:
 
 
 def _assert_supported_config(model: nn.Module) -> None:
-    """Check the configuration the S-shaped wrapper assumes (Wan2.1 T2V). Fail loudly otherwise."""
+    """Check the configuration the S-shaped wrapper assumes (no image embedding). Fail loudly
+    otherwise."""
     config = model.config
     if config.image_dim is not None or config.added_kv_proj_dim is not None:
         raise NotImplementedError(
-            "image-conditioned (I2V) configurations are not supported — Wan2.1 T2V only"
+            "configurations with an image embedding (image_dim / added_kv_proj_dim) are not"
+            " supported"
         )
     if config.pos_embed_seq_len is not None:
         raise NotImplementedError("configurations with pos_embed_seq_len are not supported")
@@ -385,10 +387,7 @@ class WanDitTokens(nn.Module):
         showing that every rewrite other than the patch embedding is bit-identical —
         `wan/tests/test_dit_patch.py`).
         """
-        output, _ = self._trunk(
-            hidden_states, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin, collect=False
-        )
-        return output
+        return self._trunk(hidden_states, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin)
 
     def _trunk(
         self,
@@ -397,13 +396,8 @@ class WanDitTokens(nn.Module):
         encoder_hidden_states: torch.Tensor,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
-        *,
-        collect: bool,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """The body (condition embedding → block list → output norm / projection).
-
-        With `collect`, it also returns the output of each block.
-        """
+    ) -> torch.Tensor:
+        """The body (condition embedding → block list → output norm / projection)."""
         embedder = self.condition_embedder
         # Upstream `WanTimeTextImageEmbedding.forward` (only the sinusoidal step moved to the host).
         time_embedder_dtype = next(iter(embedder.time_embedder.parameters())).dtype
@@ -417,47 +411,15 @@ class WanDitTokens(nn.Module):
         timestep_proj = timestep_proj.unflatten(1, (6, -1))
 
         rotary_emb = RealPairRope(rope_cos, rope_sin)
-        collected: list[torch.Tensor] = []
         for block in self.blocks:
             hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
-            if collect:
-                collected.append(hidden_states)
 
         # batch_size, inner_dim
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
         hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(
             hidden_states
         )
-        return self.proj_out(hidden_states), collected
-
-
-class WanDitTokensLayers(WanDitTokens):
-    """A measurement form of {@link WanDitTokens} **with a per-layer exit added** (the growth of the
-    error with the number of layers — decision 8).
-
-    The outputs are the output of each block `[1,S,dim]` (in block order) and, last, the same final
-    output `[1,S,pt·ph·pw·C]` as {@link WanDitTokens}. It is not a product graph (not shipped) — the
-    inputs and weights are the same, so it runs on the same golden inputs and is compared layer by
-    layer with the output of each upstream block (values taken with a forward hook).
-    """
-
-    def forward(  # type: ignore[override]
-        self,
-        tokens: torch.Tensor,
-        timesteps_proj: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
-        rope_cos: torch.Tensor,
-        rope_sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        output, collected = self._trunk(
-            self.patch_embedding(tokens),
-            timesteps_proj,
-            encoder_hidden_states,
-            rope_cos,
-            rope_sin,
-            collect=True,
-        )
-        return (*collected, output)
+        return self.proj_out(hidden_states)
 
 
 def _time_embedding(
@@ -468,9 +430,8 @@ def _time_embedding(
 
     The time step of upstream `WanTimeTextImageEmbedding.forward`, verbatim (the sinusoidal is on
     the host). It is the same formula as the same 5 lines of {@link WanDitTokens._trunk}; that one
-    does not go through this function so that 2.1's wrapper graph does not move by a single byte
-    (ADR 0121 decision 10 — a change to the recipe shared with 2.1 is confirmed by the 1.3B
-    containers staying byte-identical).
+    keeps its own copy so that the graph of the 5-input wrapper stays as it was traced (ADR 0121
+    decision 10).
     """
     time_embedder_dtype = next(iter(embedder.time_embedder.parameters())).dtype
     if timesteps_proj.dtype != time_embedder_dtype and time_embedder_dtype != torch.int8:
@@ -488,8 +449,9 @@ def _two_time_embeddings(
 
     MUST: do not concatenate the 2 rows into one run with M = 2. torch CPU's linear differs in the
     last bit between M = 1 and M ≥ 2 (difference investigation §6.1) — combined, the generated-side
-    row of T2V would no longer be computed in the same form as 2.1. In the IR this adds 3 linear
-    nodes with the same weights (`wan.ti2v_export_dit.inspect_structure` pins the count).
+    row of T2V would no longer be computed in the same form as {@link WanDitTokens}. In the IR this
+    adds 3 linear nodes with the same weights (`wan.ti2v_export_dit.inspect_structure` pins the
+    count).
     """
     return (
         _time_embedding(embedder, generation, like),
@@ -587,7 +549,7 @@ class WanDitTokensTi2v(WanDitTokens):
     graph).
 
     It adds 2 inputs after the 5 inputs of {@link WanDitTokens} (the positions of the first 5 are
-    the same as 2.1's):
+    the same as there):
 
     - `timesteps_proj_condition [1,freq_dim]`: the time sinusoidal of the conditioned side (t = 0
       for I2V, the same value as the generated side for T2V — host {@link dit_timesteps_proj})
@@ -598,10 +560,10 @@ class WanDitTokensTi2v(WanDitTokens):
     The time MLP is run **twice with M = 1** (3 more linear nodes with the same weights — the 310
     dispatches of decision 2). It is not one run with M = 2 because torch CPU's linear differs in
     the last bit between M = 1 and M ≥ 2 (keeping the generated-side row of T2V computed in the same
-    form as 2.1 — the "why" of decision 3). The per-block modulation is selected by
+    form as {@link WanDitTokens} — the "why" of decision 3). The per-block modulation is selected by
     {@link _ti2v_block}, the output modulation here, each with a `where` right before its use.
 
-    MUST: do not use `WanDitTokens.forward` (2.1's 5 inputs) — this wrapper has 7 inputs.
+    MUST: do not use `WanDitTokens.forward` (the 5 inputs) — this wrapper has 7 inputs.
     """
 
     def forward(  # type: ignore[override]
@@ -975,7 +937,7 @@ def reference_dit(
     With `condition`, a 2-D timestep `[1,S]` is passed to the upstream forward, and
     `condition_embedder` is replaced by {@link _TokenwiseTimeEmbedder} for the duration of the call
     (the I2V reference wrapper of ADR 0121 decision 4 — the time MLP with M = 1 per value). Without
-    it, the upstream forward itself (with a 1-D timestep the same path as 2.1; with a 2-D one
+    it, the upstream forward itself (with a 1-D timestep the T2V path; with a 2-D one
     diffusers' path with M = S).
     """
     with flash_attention_only():

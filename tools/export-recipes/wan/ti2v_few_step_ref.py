@@ -3,10 +3,9 @@
 It runs diffusers' `WanPipeline` unmodified on the CPU in f32 for two steps (with CFG, guidance 5.0,
 shift 5.0) at 1280×704 with 17 frames (latent `[48,5,44,80]`, S = 4,400) and produces the latents
 (before the VAE) and the RGB frames from tiled decode → unpatchify → clamp of them. The GPU end to
-end (`wan.Ti2vPipeline`) is compared with these values within a band. It is the 2.2 version of
-2.1's `wan/few_step_ref.py`; the 2.1 script and `pipeline_ref.py` do not change
-(`pipeline_ref.video_size` hard-codes 16 ch and scale 8) — only `pipeline_ref.pad_text_embeds` and
-`few_step_ref.denormalize_latents` are used.
+end (`wan.Ti2vPipeline`) is compared with these values within a band. The text context goes in
+through `pipeline_ref.pad_text_embeds`, and the de-normalization before the decode is upstream's
+({@link denormalize_latents}).
 
 ## Inputs
 
@@ -28,12 +27,12 @@ end (`wan.Ti2vPipeline`) is compared with these values within a band. It is the 
 1. Phase 1 (DiT): run every case for two steps with `WanPipeline(expand_timesteps=False)`. Time
    takes the one-dimensional timestep path (the time MLP with M = 1, modulation `[B,6,C]`), the same
    as decision 4's T2V form. The DiT outputs are recorded with a forward hook, and the cond / uncond
-   split is decided by the value of the text context the hook received (the same as
-   `few_step_ref` — independent of the call order).
+   split is decided by the value of the text context the hook received (independent of the call
+   order).
 2. Observation (not a gate): the two decision cases also run two steps with `expand_timesteps=True`
    (the upstream default, the M = S path where the timestep is `[1,S]`), and the latents of each
    step are written to `observed_m_s.latents.<i>`. The hook is a different one (it checks that the
-   timestep is `[1,S]` with a single value — `int()` of `few_step_ref` does not take `[S]`).
+   timestep is `[1,S]` with a single value — the phase-1 hook's `int()` does not take `[S]`).
 3. Phase 2 (VAE): release the DiT (fail loudly if a reference remains), and make the frames through
    step 5's 2.2 path (`vae_tiling` — blend in patchify space → upstream unpatchify → clamp).
 
@@ -130,7 +129,7 @@ LATENT_SHAPE = (48, 5, 44, 80)
 #: and checked).
 FLOW_SHIFT = 5.0
 
-#: The CFG strength (the same value as the 2.1 reference).
+#: The CFG strength (the shared reference setting).
 GUIDANCE_SCALE = pipeline_ref.GUIDANCE_SCALE
 
 #: The series root (the i8 DiT characterizes the reference preset, so it goes in the i8 DiT
@@ -178,8 +177,8 @@ class FixtureCase:
         return self.role == "band"
 
 
-#: 2 decision cases (they decide the band) + 1 acceptance case. The seeds differ from both the 2.1
-#: reference (20261030–33) and the DiT golden (the low part of the 20262000s).
+#: 2 decision cases (they decide the band) + 1 acceptance case. The seeds differ from the DiT golden
+#: (the low part of the 20262000s).
 #: MUST: do not change the decision cases or the band after seeing the result of `accept`.
 FIXTURE_CASES = (
     FixtureCase("band-boxing-cats", role="band", seed=20262101, prompt="boxing-cats"),
@@ -442,8 +441,8 @@ def denoise_case(
     handle = pipeline.transformer.register_forward_hook(record_forward, with_kwargs=True)
     started = time.perf_counter()
     try:
-        # attention is pinned to the CPU flash path, as in `export_dit`'s reference (leaving no
-        # path that silently falls back to MATH — the same as `few_step_ref`).
+        # attention is pinned to the CPU flash path, as in the DiT goldens' reference (leaving no
+        # path that silently falls back to MATH).
         with torch.no_grad(), dit_patch.flash_attention_only():
             final = _call(pipeline, embeds, names, latents_init, _step_recorder(steps))
     finally:

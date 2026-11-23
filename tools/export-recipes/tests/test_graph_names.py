@@ -84,7 +84,6 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("siglip2/export.py", "export_series", "SIGLIP2_ROLE", "SIGLIP2_ROLE"),
     ("birefnet/export.py", "export_series", "BIREFNET_ROLE", "BIREFNET_ROLE"),
     ("depth_anything/export.py", "export_series", "DEPTH_ANYTHING_ROLE", "DEPTH_ANYTHING_ROLE"),
-    ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
     ("wan/export_vae.py", "emit_shared_targets", "name", "SHARED_TARGETS"),
     ("wan/export_vae_encoder.py", "emit_series", "target", "TARGETS"),

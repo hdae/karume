@@ -42,7 +42,7 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-from wan import dit_common, dit_patch, dit_probe, dit_reference, export_dit, ti2v_export_dit
+from wan import dit_common, dit_patch, dit_probe, dit_reference, ti2v_export_dit
 from wan.tests.test_dit_patch import EXPECTED_OPS, TINY_DIT
 
 #: The synthetic layer count (num_layers of TINY_DIT).
@@ -145,7 +145,6 @@ class TestTheCases:
         assert {case.tokens(self.PATCH) for case in cases} == {192}
         assert len({case.name(self.PATCH) for case in cases}) == len(cases)
         assert len({case.seed for case in cases}) == len(cases)
-        assert not {case.seed for case in cases} & {spec.seed for spec in export_dit.CASES}
 
     def test_every_context_is_a_fixed_prompt_and_every_prompt_is_used(self) -> None:
         """The contexts are the 4 fixed prompts of the embedding assets (synthetic random values
@@ -586,7 +585,6 @@ class TestTheFullCases:
 
         assert len({case.name(self.PATCH) for case in every}) == len(every)
         assert len({case.seed for case in every}) == len(every)
-        assert not {case.seed for case in full} & {spec.seed for spec in export_dit.CASES}
         assert all(case.name(self.PATCH).startswith(case.role) for case in full)
 
     def test_every_fixed_prompt_is_a_context_in_both_roles(self) -> None:
@@ -804,19 +802,13 @@ class TestTheFullGoldenWriter:
 
 
 class TestTheQuantObservation:
-    def test_the_cases_are_the_decision_cases_of_each_model(self) -> None:
-        five_b = ti2v_export_dit._observe_cases("ti2v-5b", (1, 2, 2))
-        one_three = ti2v_export_dit._observe_cases("t2v-1.3b", (1, 2, 2))
+    def test_the_cases_are_the_decision_cases(self) -> None:
+        five_b = ti2v_export_dit._observe_cases((1, 2, 2))
 
         assert [form for _, _, form, _ in five_b] == ["t2v"] * 3 + ["i2v"] * 3
-        assert len(one_three) == 6
-        assert {form for _, _, form, _ in one_three} == {"t2v"}
-        assert all(name.startswith("band-") for name, *_ in five_b + one_three)
-        # The contexts are built the same way for the two models (the same prompts in the same
-        # order).
-        assert [text for *_, text in five_b] == [text for *_, text in one_three]
+        assert all(name.startswith("band-") for name, *_ in five_b)
 
-    def test_it_measures_both_models_and_compares_their_worst_case(
+    def test_it_measures_every_decision_case(
         self, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
         _tiny_text(monkeypatch, tmp_path)
@@ -824,10 +816,7 @@ class TestTheQuantObservation:
 
         summary = ti2v_export_dit.observe_quant()
 
-        for model in ti2v_export_dit.OBSERVE_MODELS:
-            rows = summary["models"][model]["cases"]
-            assert len(rows) == 6
-            assert all(0 < row["ratio"] < 1 for row in rows)
-        factor = summary["models"]["ti2v-5b"]["worst"] / summary["models"]["t2v-1.3b"]["worst"]
-        assert summary["worst_factor_5b_over_1_3b"] == factor
-        assert summary["escalate"] is (factor > ti2v_export_dit.ESCALATE_FACTOR)
+        rows = summary["models"]["ti2v-5b"]["cases"]
+        assert len(rows) == 6
+        assert all(0 < row["ratio"] < 1 for row in rows)
+        assert summary["models"]["ti2v-5b"]["worst"] == max(row["ratio"] for row in rows)

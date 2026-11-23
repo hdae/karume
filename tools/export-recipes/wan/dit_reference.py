@@ -1,19 +1,14 @@
-"""The layer-by-layer CPU reference of the Wan DiT (f64 / f32 — ADR 0121 decision 7, step 0) and
-its bit-exact comparison with the existing 1.3B goldens.
-
-    uv run --group wan --inexact python -m wan.dit_reference compare --dtype i8 --max-tokens 192
-    uv run --group wan --inexact python -m wan.dit_reference compare --dtype f16
-    uv run --group wan --inexact python -m wan.dit_reference compare --dtype i8 --source module
+"""The layer-by-layer CPU reference of the Wan DiT (f64 / f32 — ADR 0121 decision 7, step 0).
 
 ## Why layer by layer
 
-The Wan2.1 f64 reference loaded the f32 model and made all of it f64 with `model.double()` (about
-10.4 GB for 1.3B). For 5B the full f64 size is 37.25 GiB, which does not fit a 31 GiB machine (the
-capacity table of ADR 0121). So the DiT is made f64 / f32 and run **one block at a time**
-({@link LayerwiseDit}). What is held at once is only the part outside the blocks (patch embedding,
-condition embedding, output projection — 0.67 GiB in f64 for 5B) and one block (1.22 GiB likewise).
-The loop variable of upstream's block loop keeps the previous block while asking for the next, so
-the previous block's weights are released before the next is loaded ({@link LayerwiseDit._opener}).
+Making the whole f32 model f64 with `model.double()` needs 37.25 GiB for 5B, which does not fit a
+31 GiB machine (the capacity table of ADR 0121). So the DiT is made f64 / f32 and run **one block at
+a time** ({@link LayerwiseDit}). What is held at once is only the part outside the blocks (patch
+embedding, condition embedding, output projection — 0.67 GiB in f64 for 5B) and one block (1.22 GiB
+likewise). The loop variable of upstream's block loop keeps the previous block while asking for the
+next, so the previous block's weights are released before the next is loaded
+({@link LayerwiseDit._opener}).
 
 ## Running upstream's forward without rewriting it
 
@@ -46,8 +41,8 @@ them fails loudly — {@link LayerwiseDit.run}).
   packed values times the per-row scale multiplied **in f32** (the same values as the export's
   fake-quant — dequantizing in f64 would split bitwise from the existing goldens, which are f32
   fake-quant values widened to f64 — ADR 0121 decision 7). f16 is f16 → f32.
-- {@link ModuleWeights}: an upstream model that is already loaded and rounded (the 1.3B of
-  `wan.export_dit` — a machine that holds the full f32 model).
+- {@link ModuleWeights}: an upstream model that is already loaded and rounded (`wan.dit_probe`
+  `eager` — a machine that holds the full f32 model).
 - {@link CheckpointDitWeights}: reads one tensor at a time from the upstream checkpoint (F32) and
   applies the series rounding (f16 / i8 fake-quant) to each (a preview of 5B, which has no container
   yet — `wan.dit_probe`). The rounding is closed within one tensor (f16 per element, i8 with a
@@ -59,9 +54,9 @@ The f64 reference widens the f32 values to f64 whichever the source (`.to(float6
 
 On this machine the f32 GEMM (MKL) of torch CPU changes the last bits depending on **the offset of
 the weight's start address from a 64-byte boundary**. Weights with the same values, shape and stride
-moved the output by up to 4.6e-6 at S = 128 on 1.3B when only the offset changed (i8 series
-`accept-s00128-t0030` of `compare`). The f64 reference was bit-identical on the same case (the f64
-weights are fresh allocations on both paths — 64-byte aligned).
+moved the output by up to 4.6e-6 at S = 128 on the 1.3B DiT when only the offset changed. The f64
+reference was bit-identical on the same case (the f64 weights are fresh allocations on both paths —
+64-byte aligned).
 
 The f32 weights of upstream's eager (a model loaded with `from_pretrained`) sit at addresses that
 mmap the checkpoint's safetensors. The offset is `(8 + header length + data_offsets[0]) mod 64`
@@ -82,80 +77,34 @@ created (the only exception is the shape of the timestep sinusoid — `dit_patch
 Weight loading (including dequantization in f32), however, is outside the f64 path, and the watch
 is paused only during it ({@link _PausableWatch}).
 
-## Comparison with the existing 1.3B goldens (`compare` — the pass condition of step 0)
-
-Re-takes the case table of `wan.export_dit` ({@link wan.export_dit.series_cases}) layer by layer.
-It writes `reference.<case>.safetensors` to **a separate location** (default {@link DEFAULT_OUT})
-and then compares each tensor bitwise with the series' existing `reference.<case>` (whether the
-files' sha256 match is also recorded). It never writes to the existing goldens or containers (read
-only). Finished cases are skipped by looking at the result rows (`results.jsonl`), so after a stop
-the same `--out` continues where it left off ({@link _done} — a row carries the run mode (full / f64
-only) and the comparison version ({@link COMPARE_VERSION}), and rows that do not match are not
-counted as done). At the end a summary goes to `summary.json` (it passes when `differ` is empty).
-Rows and the summary also carry the execution environment the f32 bit-exactness depends on (torch
-thread count, CPU instruction set, MKL / OpenMP environment variables —
-{@link numeric_environment}).
-
 MUST: import diffusers inside functions (the `wan` group is not in the default sync —
 `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
 
-import argparse
 import copy
 import hashlib
 import json
 import math
 import os
 import struct
-import sys
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 from torch import nn
 
-from _shared.paths import BENCH_ROOT
 from karume.container import codec_entry
 from karume.quantize import QUANT_MODULE_TYPES, channel_scale, iter_quant_targets, quantize_to_int8
 from wan import dit_patch
 from wan.pipeline_ref import assert_no_mps
 from wan.umt5_export import Checkpoint
 from wan.umt5_reference import ContainerWeights
-
-#: The default output location of the comparison
-#: (`outputs/bench/<distribution name>/<date>_<purpose>/` — `docs/assets-layout.md`; separate from
-#: the existing series and goldens — running jobs read the series). The date is the day of the
-#: start, so to continue across a date change pass the earlier location with `--out`.
-DEFAULT_OUT = BENCH_ROOT / "karume-wan2.1" / f"{date.today().isoformat()}_dit-layerwise"
-
-#: The comparison's result rows (one JSON line per case — the resume markers) and the summary
-#: written at the end.
-RESULTS_FILE = "results.jsonl"
-SUMMARY_FILE = "summary.json"
-
-#: The comparison version. Bump it when what is compared (keys, case inputs, how the written goldens
-#: are assembled) or the row fields change — rows of another version are not counted as "done" on
-#: resume ({@link _done}).
-COMPARE_VERSION = 2
-
-#: The run mode (full = f32 output, blocks and f64 / f64 only = `--f64-only`).
-CompareMode = Literal["full", "f64-only"]
-
-#: Run mode → the row modes counted as "done" (a full row also covers an f64-only run — not the
-#: other way round).
-_COVERING_MODES: dict[str, frozenset[str]] = {
-    "full": frozenset({"full"}),
-    "f64-only": frozenset({"full", "f64-only"}),
-}
 
 #: Prefixes of the recorded environment variables (MKL's CNR (`MKL_CBWR`), thread counts, OpenMP
 #: affinity).
@@ -721,46 +670,8 @@ class LayerwiseDit:
 
 
 # ---------------------------------------------------------------------------
-# Comparison with the existing 1.3B goldens
+# Records
 # ---------------------------------------------------------------------------
-
-
-def _tensor_bits(tensor: torch.Tensor) -> torch.Tensor:
-    """For comparing as bit strings (-0.0 vs 0.0 and NaN are not left to numeric equality)."""
-    return tensor.detach().contiguous().flatten().view(torch.uint8)
-
-
-def compare_tensors(
-    actual: Mapping[str, torch.Tensor], expected_path: Path, keys: Sequence[str] | None = None
-) -> dict[str, Any]:
-    """Compares the written golden (`actual`) with the existing `reference.<case>` bitwise, tensor
-    by tensor.
-
-    With `keys` only those keys are compared (`--f64-only`). Names the keys that are missing from
-    the existing file, differ in shape / dtype, or differ in bits.
-    """
-    compared = sorted(actual) if keys is None else sorted(keys)
-    mismatched: dict[str, str] = {}
-    with safe_open(str(expected_path), framework="pt") as handle:
-        present = set(handle.keys())
-        wanted = set(compared) if keys is not None else set(compared) | present
-        for key in sorted(wanted):
-            if key not in actual:
-                mismatched[key] = "missing from the written side"
-                continue
-            if key not in present:
-                mismatched[key] = "missing from the existing file"
-                continue
-            mine, theirs = actual[key], handle.get_tensor(key)
-            if mine.dtype != theirs.dtype or list(mine.shape) != list(theirs.shape):
-                mismatched[key] = (
-                    f"{mine.dtype} {list(mine.shape)} / existing {theirs.dtype}"
-                    f" {list(theirs.shape)}"
-                )
-            elif not torch.equal(_tensor_bits(mine), _tensor_bits(theirs)):
-                difference = (mine.double() - theirs.double()).abs().max()
-                mismatched[key] = f"bits differ (max absolute difference {float(difference):.3e})"
-    return {"keys": sorted(wanted), "mismatched": mismatched}
 
 
 def file_sha256(path: Path) -> str:
@@ -784,148 +695,6 @@ def numeric_environment() -> dict[str, Any]:
     }
 
 
-def _done(results: Path, mode: CompareMode) -> dict[str, dict[str, Any]]:
-    """The result rows (resume markers) — case name → row for the cases this run counts as "done".
-
-    Only rows whose version equals {@link COMPARE_VERSION} and whose mode covers this run
-    ({@link _COVERING_MODES}) are counted. A half-written last row from a crash (no trailing line
-    break — a row is written up to its line break in one write) is dropped and also cut from the
-    file, and that case is run again. A row that is not the last one and cannot be read is not a
-    half-written row, so it fails loudly.
-    """
-    if not results.is_file():
-        return {}
-    lines = results.read_text(encoding="utf-8").split("\n")
-    partial = lines.pop()
-    if partial:
-        print(
-            f"[compare] {results}: dropping the half-written last row ({len(partial)} characters)"
-            " — that case runs again",
-            flush=True,
-        )
-        results.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
-    done: dict[str, dict[str, Any]] = {}
-    stale = 0
-    for number, line in enumerate(lines, start=1):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise DitReferenceError(
-                f"{results}:{number}: unreadable row (not the last one)"
-            ) from error
-        if (
-            row.get("compare_version") == COMPARE_VERSION
-            and row.get("mode") in (_COVERING_MODES[mode])
-        ):
-            done[row["case"]] = row
-        else:
-            stale += 1
-    if stale:
-        print(
-            f"[compare] {results}: rows whose comparison version ({COMPARE_VERSION}) or run mode"
-            f" ({mode}) does not match are not counted as done ({stale} rows)",
-            flush=True,
-        )
-    return done
-
-
-def _append_row(results: Path, row: Mapping[str, Any]) -> None:
-    """Writes a result row up to its line break in one write and flushes it to disk (after a crash
-    only the last row can be partial)."""
-    with results.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
-def compare_series(
-    dtype: str,
-    *,
-    source_kind: Literal["container", "module"] = "container",
-    names: Sequence[str] = (),
-    max_tokens: int | None = None,
-    f64_only: bool = False,
-    out: Path = DEFAULT_OUT,
-) -> dict[str, Any]:
-    """Re-takes the existing goldens of a 1.3B series (`dtype` = f16 / i8) layer by layer and
-    compares them bitwise.
-
-    It writes only under `out/<series name>-<source_kind>/` (the existing series is only read).
-    Cases come in the order of `wan.export_dit.series_cases(dtype)` and can be narrowed with
-    `names` / `max_tokens`.
-    """
-    from wan import export_dit
-    from wan.sources import DEFAULT_MODEL, local_snapshot
-
-    existing = export_dit.series_dir(dtype) / export_dit.TARGET
-    target = out / f"{existing.parent.name}-{source_kind}"
-    target.mkdir(parents=True, exist_ok=True)
-    results = target / RESULTS_FILE
-    mode: CompareMode = "f64-only" if f64_only else "full"
-    done = _done(results, mode)
-    environment = numeric_environment()
-    upstream = local_snapshot(DEFAULT_MODEL) / TRANSFORMER_SUBFOLDER
-    # The container's weights are not at upstream's mmap addresses — run the f32 reference with the
-    # same offsets as upstream's eager (module doc). The module source is the upstream model's own
-    # addresses, so it is not re-placed.
-    alignment = upstream_alignment(upstream) if source_kind == "container" else None
-    writer = LayerwiseDit(load_config(upstream), alignment=alignment)
-    known = {spec.name(writer.patch_size) for spec in export_dit.series_cases(dtype)}
-    if set(names) - known:
-        raise DitReferenceError(f"unknown case names: {sorted(set(names) - known)}")
-    specs = [
-        spec
-        for spec in export_dit.series_cases(dtype)
-        if (not names or spec.name(writer.patch_size) in names)
-        and (max_tokens is None or _tokens(spec, writer.patch_size) <= max_tokens)
-        # `--f64-only` covers only cases with an f64 reference (the small-S cases of the f16
-        # series have only the f32 reference).
-        and (not f64_only or export_dit.wants_float64(dtype, spec))
-    ]
-    source = _source(source_kind, dtype, existing)
-    finished = sum(spec.name(writer.patch_size) in done for spec in specs)
-    print(
-        f"[compare] {existing}: {len(specs)} cases ({finished} done)"
-        f" → {target} (source {source_kind}, mode {mode}, environment {json.dumps(environment)})",
-        flush=True,
-    )
-    for position, spec in enumerate(specs, start=1):
-        name = spec.name(writer.patch_size)
-        if name in done:
-            print(f"[{position}/{len(specs)}] {name}: done ({done[name]['status']})", flush=True)
-            continue
-        row = {
-            **_compare_case(writer, source, dtype, spec, existing, target, f64_only=f64_only),
-            "mode": mode,
-            "compare_version": COMPARE_VERSION,
-            "environment": environment,
-        }
-        _append_row(results, row)
-        done[name] = row
-        print(f"[{position}/{len(specs)}] {json.dumps(row, ensure_ascii=False)}", flush=True)
-    chosen = [done[spec.name(writer.patch_size)] for spec in specs]
-    environments = []
-    for row in chosen:
-        if row["environment"] not in environments:
-            environments.append(row["environment"])
-    summary = {
-        "series": str(existing),
-        "out": str(target),
-        "mode": mode,
-        "compare_version": COMPARE_VERSION,
-        "cases": len(chosen),
-        "equal": sum(row["status"] == "equal" for row in chosen),
-        "differ": [row["case"] for row in chosen if row["status"] != "equal"],
-        # The environments the rows were taken in (more than one across resumes — f32 bits depend
-        # on the environment).
-        "environments": environments,
-    }
-    (target / SUMMARY_FILE).write_text(
-        json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
-    return summary
-
-
 #: The minimum S that prints per-block progress rows (full-size cases — one forward takes minutes).
 PROGRESS_TOKENS = 4096
 
@@ -935,123 +704,3 @@ def _block_progress(name: str, label: str, layers: int) -> Callable[[int, float]
         print(f"[block] {name} {label} {index + 1}/{layers} {seconds:.1f} s", flush=True)
 
     return report
-
-
-def _tokens(spec: Any, patch_size: tuple[int, int, int]) -> int:
-    frames, height, width = spec.latent_shape
-    return (frames // patch_size[0]) * (height // patch_size[1]) * (width // patch_size[2])
-
-
-def _source(kind: str, dtype: str, existing: Path) -> WeightSource:
-    """The comparison's weight source (container = the same path as 5B, module = the 1.3B path of
-    `export_dit`)."""
-    from wan import dit_common, export_dit
-
-    if kind == "container":
-        return ContainerDitWeights(existing / export_dit.MODEL_FILE)
-    model = dit_common.load_transformer(export_dit.DEFAULT_MODEL)
-    dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
-    return ModuleWeights(model)
-
-
-def _compare_case(
-    writer: LayerwiseDit,
-    source: WeightSource,
-    dtype: str,
-    spec: Any,
-    existing: Path,
-    target: Path,
-    *,
-    f64_only: bool,
-) -> dict[str, Any]:
-    """Re-takes and writes one case, and returns the result row of the comparison with the
-    existing golden."""
-    from wan import dit_common, export_dit
-
-    name = spec.name(writer.patch_size)
-    latents, timestep, encoder_hidden_states = dit_common.case_inputs(writer, spec)
-    long_case = _tokens(spec, writer.patch_size) >= PROGRESS_TOKENS
-    seconds: dict[str, float] = {}
-    reference32 = None
-    if not f64_only:
-        reference32 = writer.forward(
-            source,
-            torch.float32,
-            latents,
-            timestep,
-            encoder_hidden_states,
-            collect_blocks=spec.blocks,
-            on_block=_block_progress(name, "f32", writer.layers) if long_case else None,
-        )
-        seconds["f32"] = round(reference32.seconds, 1)
-    reference64 = None
-    if export_dit.wants_float64(dtype, spec):
-        reference64 = writer.forward(
-            source,
-            torch.float64,
-            latents,
-            timestep,
-            encoder_hidden_states,
-            on_block=_block_progress(name, "f64", writer.layers) if long_case else None,
-        )
-        seconds["f64"] = round(reference64.seconds, 1)
-    if reference32 is None and reference64 is None:
-        raise DitReferenceError(f"{name}: --f64-only on a case without an f64 reference")
-    tensors = dit_common.reference_tensors(
-        name,
-        latents=latents,
-        timestep=timestep,
-        output=None if reference32 is None else reference32.output,
-        blocks=[] if reference32 is None else reference32.blocks,
-        output_f64=None if reference64 is None else reference64.output,
-    )
-    filename = f"{dit_common.REFERENCE_PREFIX}{name}{dit_common.CASE_SUFFIX}"
-    save_file(tensors, str(target / filename))
-    keys = [dit_common.REFERENCE_F64_KEY] if f64_only else None
-    comparison = compare_tensors(tensors, existing / filename, keys)
-    return {
-        "case": name,
-        "status": "differ" if comparison["mismatched"] else "equal",
-        "compared": len(comparison["keys"]),
-        "mismatched": comparison["mismatched"],
-        "file_sha256_equal": file_sha256(target / filename) == file_sha256(existing / filename),
-        "seconds": seconds,
-    }
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("command", choices=("compare",))
-    parser.add_argument("--dtype", required=True, choices=("f16", "i8"), help="the 1.3B series")
-    parser.add_argument(
-        "--source",
-        default="container",
-        choices=("container", "module"),
-        help="the weight source (container = the series container, module = the f32 model +"
-        " fake-quant)",
-    )
-    parser.add_argument(
-        "--case", action="append", default=[], help="narrow by case name (repeatable)"
-    )
-    parser.add_argument("--max-tokens", type=int, help="only cases with S up to this")
-    parser.add_argument(
-        "--f64-only",
-        action="store_true",
-        help="take and compare only the f64 reference (output.f64)",
-    )
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    args = parser.parse_args(argv)
-    summary = compare_series(
-        args.dtype,
-        source_kind=args.source,
-        names=args.case,
-        max_tokens=args.max_tokens,
-        f64_only=args.f64_only,
-        out=args.out,
-    )
-    print(json.dumps(summary, ensure_ascii=False, indent=1))
-    return 0 if not summary["differ"] else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

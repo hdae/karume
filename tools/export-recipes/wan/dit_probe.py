@@ -14,7 +14,7 @@ of `/proc` every second and VmHWM per stage) as JSON, and writes the same to `<c
 Nothing is written to the series (`outputs/series/`). `reference` compares with the `eager` result
 in the same place, so pass the same `--out` to both when they run on different days.
 
-The DiT patch of `prepare` / `eager` stays in step 0's form, the same as Wan2.1 (one time input —
+The DiT patch of `prepare` / `eager` stays in step 0's form (one time input —
 `dit_patch.WanDitTokens`), and the 5B configuration passes the check of that premise (`image_dim` /
 `added_kv_proj_dim` are None). The product's I2V-capable graph (2 time inputs, a condition mask —
 ADR 0121 decision 3) is written by step 1's `wan.ti2v_export_dit`, which passes its own trace
@@ -43,7 +43,7 @@ activations")
 
 Read the full upstream in f32 with `from_pretrained`, apply the i8 fake-quant through the S-shaped
 wrapper, run the plain upstream forward (the reference) and the patched eager on one S = 192 case,
-and apply the `dit_common.eager_failures` check (the same function as `wan.export_dit`). In
+and apply the `dit_common.eager_failures` check (the same check as `wan.ti2v_export_dit`). In
 addition, confirm that the f32 of the layer-by-layer reference (`wan.dit_reference` — the same
 in-memory weights) is bit-identical to the upstream f32, and take the layer-by-layer f64 too.
 
@@ -120,7 +120,7 @@ from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
 from karume.verify import assert_op_contracts, assert_runtime_support
 from wan import dit_common, dit_patch, dit_reference
 from wan.pipeline_ref import pad_text_embeds
-from wan.sources import SOURCES, local_snapshot
+from wan.sources import local_snapshot
 from wan.umt5_export import CHUNK_ROWS, Checkpoint, MemoryMonitor, quantize_rows
 
 #: The default model (Wan2.2 TI2V-5B — ADR 0121).
@@ -128,7 +128,7 @@ DEFAULT_MODEL = "ti2v-5b"
 
 #: Model → the distribution name of the default output location (`outputs/bench/<distribution
 #: name>/` — `docs/assets-layout.md`).
-BENCH_NAMES: dict[str, str] = {"t2v-1.3b": "karume-wan2.1", "ti2v-5b": "karume-wan2.2"}
+BENCH_NAMES: dict[str, str] = {"ti2v-5b": "karume-wan2.2"}
 
 #: The base amount added to the estimate of the eager peak (the process base, activations, the
 #: fake-quant temporaries — from the 1.3B measurement, the 0.59 GiB left after subtracting the full
@@ -140,12 +140,12 @@ EAGER_BASE_BYTES = int(0.6 * 2**30)
 MEMORY_HEADROOM_BYTES = 1 * 2**30
 
 #: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — ADR 0121 decision 3) and the lower bound
-#: (the same as Wan2.1).
+#: (`dit_common.DIT_SYM_MIN`).
 SYM_MAX = 27_280
 SYM_MIN = dit_common.DIT_SYM_MIN
 
-#: The case to measure (S = 192, t = 999 — the values of the first band case of the 1.3B DiT
-#: goldens, kept so the probe outputs keep their names and values).
+#: The case to measure (S = 192, t = 999; the seed and the valid text length are fixed so the
+#: probe outputs keep their names and values from run to run).
 PROBE_CASE = dit_common.CaseSpec("band", (3, 16, 16), 999, 24, 20261002)
 
 #: The spelling of the eager / reference output files (`<command>.<case>.safetensors`).
@@ -243,8 +243,8 @@ def meta_inputs(config: Mapping[str, Any], spec: dit_common.CaseSpec) -> tuple[t
 
 
 def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
-    """The same form as `export_dit.dynamic_shapes`, with only the upper bound raised to 5B's
-    accepted maximum."""
+    """The symbolic dimensions per input (the RoPE tables share `S` with the tokens), with the upper
+    bound at 5B's accepted maximum."""
     tokens = Dim("S", min=SYM_MIN, max=sym_max)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens})
 
@@ -315,7 +315,7 @@ def prepare(
     """trace → plain → quantize (up to trace with `trace_only`). Returns the material and the
     summary fields.
 
-    `tracer` replaces the trace (the default is the 2.1-form {@link trace}; the I2V-capable graph
+    `tracer` replaces the trace (the default is the 5-input {@link trace}; the I2V-capable graph
     uses `wan.ti2v_export_dit.trace` — the rest of the material building (plain / quantize) goes
     through the same single path).
     """
@@ -690,7 +690,7 @@ def _probe_run(text: str) -> ProbeRun:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("command", choices=("prepare", "eager", "reference"))
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(BENCH_NAMES))
     parser.add_argument(
         "--out",
         type=Path,

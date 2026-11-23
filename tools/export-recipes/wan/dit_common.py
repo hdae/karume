@@ -73,7 +73,7 @@ from karume.quantize import (
 )
 from wan import dit_patch
 from wan.pipeline_ref import TEXT_DIM, assert_no_mps, pad_text_embeds
-from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
+from wan.sources import SOURCES, local_snapshot
 
 #: The storage dtypes that can be written (= `weight_dtype` of `export_to_file`).
 DTYPES = ("f16", "i8")
@@ -92,8 +92,7 @@ IO_PREFIX = "io."
 REFERENCE_PREFIX = "reference."
 
 
-#: The key of the f64 reference in `reference.<case>` of full-size cases (`REFERENCE_F64_KEY` on the
-#: TS side).
+#: The key of the f64 reference in `reference.<case>` (`REFERENCE_F64_KEY` on the TS side).
 REFERENCE_F64_KEY = "output.f64"
 
 
@@ -106,12 +105,12 @@ INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
 
-#: The graph input names (the argument names of the wrapper's forward become the IR input names as
-#: is).
+#: The graph input names (the argument names of `dit_patch.WanDitTokens.forward` become the IR input
+#: names as is — `wan.ti2v_export_dit` appends its two condition inputs).
 INPUT_NAMES = ("tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin")
 
 
-#: The lower bound likewise (the line that avoids 0 / 1 specialization — the same as Anima's
+#: The lower bound of `Dim("S")` (the line that avoids 0 / 1 specialization — the same as Anima's
 #: `DIT_SYM_MIN`).
 DIT_SYM_MIN = 2
 
@@ -126,24 +125,13 @@ class CaseSpec:
     timestep: int
     text_length: int
     seed: int
-    #: A suffix that tells apart cases with the same role, S and timestep (the second full-size
-    #: t = 999 case).
-    variant: str = ""
-    #: Whether the golden holds each block's output (`block.NN`) (the counterpart of the per-layer
-    #: record — only 2 at full size).
+    #: Whether the reference also takes each block's output (`dit_patch.reference_dit_layers`).
     blocks: bool = True
 
     def name(self, patch_size: tuple[int, int, int]) -> str:
         frames, height, width = self.latent_shape
         tokens = (frames // patch_size[0]) * (height // patch_size[1]) * (width // patch_size[2])
-        suffix = f"-{self.variant}" if self.variant else ""
-        return f"{self.role}-s{tokens:05d}-t{self.timestep:04d}{suffix}"
-
-    @property
-    def full_size(self) -> bool:
-        """A full-size case (33 frames of ADR 0118 step 3, 81 frames of step 8) — takes an f64
-        reference in addition to f32."""
-        return self.role.startswith("full-")
+        return f"{self.role}-s{tokens:05d}-t{self.timestep:04d}"
 
 
 @dataclass(frozen=True)
@@ -158,8 +146,7 @@ class Case:
     reference: torch.Tensor
     #: Each block's output (empty for cases without `spec.blocks`).
     reference_blocks: list[torch.Tensor]
-    #: The time taken by upstream's plain forward (the reference) (seconds, CPU f32 — recorded for
-    #: the full-size cases).
+    #: The time taken by upstream's plain forward (the reference) (seconds, CPU f32).
     reference_seconds: float
 
 
@@ -167,7 +154,7 @@ def _generator(seed: int) -> torch.Generator:
     return torch.Generator().manual_seed(seed)
 
 
-def load_transformer(model_name: str = DEFAULT_MODEL) -> nn.Module:
+def load_transformer(model_name: str) -> nn.Module:
     """Loads the DiT of the pinned revision on CPU f32 (stops on a machine where MPS is visible —
     decision 3)."""
     assert_no_mps()
@@ -188,8 +175,7 @@ def unrounded_weights(dtype: str, model: nn.Module) -> list[str]:
     - `i8`: upstream's weight slots (linear and patch embedding) are per-channel i8-representable
       values (bit-unchanged by rounding once more — the note on `karume.quantize.INT8_MAX`)
 
-    The rounding writers ({@link round_to_f16} / {@link fake_quant_i8}) and the side that receives
-    the rounded model ({@link float64_references}) go through the same check.
+    The rounding helpers ({@link round_to_f16} / {@link fake_quant_i8}) go through this check.
     """
     with torch.no_grad():
         if dtype == "f16":
@@ -270,7 +256,7 @@ def fake_quant(
     """Rounds the weights to the representable values of the series storage dtype (MUST come before
     taking the reference — ADR 0006).
 
-    Returns a one-line summary and the i8 scale ledger (passed to emit as is — None for f16).
+    Returns a one-line summary and the i8 scale ledger (passed to the writer as is — None for f16).
     """
     if dtype == "i8":
         report = fake_quant_i8(model, wrapper)
@@ -283,7 +269,7 @@ def fake_quant(
 def case_inputs(
     model: nn.Module, spec: CaseSpec
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The upstream inputs of one case (latent `[1,16,F,H,W]`, timestep, text context
+    """The upstream inputs of one case (latent `[1,C,F,H,W]`, timestep, text context
     `[1,512,4096]`).
 
     The random numbers are drawn in this one place so that the f32 and f64 references receive the
@@ -371,8 +357,8 @@ def patch_embedding_error_bound(tokens: torch.Tensor, linear: nn.Linear) -> torc
     return 2 * (terms * unit / (1 - terms * unit)) * magnitude
 
 
-#: The numeric summary fields that must be finite (`reference_f32_vs_f64_ratio` exists only for the
-#: full-size cases — {@link eager_failures} below).
+#: The numeric summary fields that must be finite (`reference_f32_vs_f64_ratio` exists only for a
+#: case with an f64 reference — {@link eager_failures} below).
 _FINITE_FIELDS = (
     "reference_max_abs",
     "trunk_max_abs_diff",
@@ -384,9 +370,9 @@ _FINITE_FIELDS = (
 def eager_failures(report: Mapping[str, Any]) -> list[str]:
     """The points where one eager summary departs from the claims of ADR 0118 (empty means pass).
 
-    MUST: if there is even one, emit does not publish ({@link emit}) and `--verify` exits non-zero.
-    It checks that the trunk is bit-exact (the patch's eager equivalence MUST), that the
-    patch-embedding difference is within the reduction-order bound
+    MUST: if there is even one, the writer does not publish (`wan.ti2v_export_dit` stops inside its
+    working directory). It checks that the trunk is bit-exact (the patch's eager equivalence MUST),
+    that the patch-embedding difference is within the reduction-order bound
     ({@link patch_embedding_error_bound}), and that the patched output and the numeric fields are
     finite.
     """
@@ -428,11 +414,11 @@ def eager_report(
 
     If the patch embedding's output is bit-identical to upstream's conv3d, trunk does the same
     computation on the same input as full (`forward` is `forward_hidden(patch_embedding(tokens),
-    …)`), so it is not run again (`trunk_from_full`). At full size (S = 14,040) one forward takes
-    minutes on CPU, so the forwards per case are cut down to this one.
+    …)`), so it is not run again (`trunk_from_full`). At real size one forward takes minutes on
+    CPU, so the forwards per case are cut down to this one.
 
     Attention runs under {@link dit_patch.flash_attention_only} as for the reference (falling back
-    to MATH at S = 32,760 OOMs).
+    to MATH at a large S runs out of memory).
     """
     patch_size = wrapper.patch_size
     with torch.no_grad(), dit_patch.flash_attention_only():
@@ -490,10 +476,8 @@ def reference_tensors(
     """The contents of `reference.<case>` (`latents` / `timestep` (i32) / `output` / `block.NN` /
     `output.f64`).
 
-    The writer ({@link _write_case_files}) and the comparison against the layer-by-layer reference
-    (`wan.dit_reference compare` — `--f64-only`, which does not take `output`, passes
-    `output=None`) go through the same assembly — spelling it in two places would let the comparison
-    call a shape that differs from the writer's "identical".
+    The golden writer (`wan.ti2v_export_dit.golden_case`) assembles the file through this one
+    place (`output=None` leaves the f32 output out).
     """
     reference = {
         "latents": latents.contiguous(),
@@ -508,10 +492,8 @@ def reference_tensors(
         # Stored as values rounded to f32 (the TS safetensors reader does not read F64). The
         # rounding difference is at most 2⁻²⁴·|x| per element, at most 6e-8 as a ratio. How much it
         # moves the normalization's denominator (the CPU f32 reference's ratio against f64) is set
-        # by the smallest denominator: for the band cases (`full-band`) alone, under 2% with the
-        # S = 14,040 minimum of 3.72e-6 and about 2.9% with the S = 32,760 minimum of 2.07e-6;
-        # including acceptance, about 3.3% with the minimum 1.83e-6 (`full-accept-s14040-t0600`).
-        # It does not affect the band verdict (worst × 5).
+        # by the smallest denominator (a few percent at a denominator around 2e-6). It does not
+        # affect the band verdict (worst × 5).
         reference[REFERENCE_F64_KEY] = output_f64.to(torch.float32).contiguous()
     return reference
 
@@ -519,7 +501,7 @@ def reference_tensors(
 def case_file_names(name: str) -> tuple[str, str]:
     """The golden file names of one case (`io.<case>` and `reference.<case>`).
 
-    The writer ({@link _write_case_files}) and the comparison's exclusion ({@link check_absent}) go
-    through the same spelling.
+    The writer and the readers of the installed goldens (`wan.ti2v_export_dit` — the resume check of
+    `write-full` and `eager-full`) go through the same spelling.
     """
     return f"{IO_PREFIX}{name}{CASE_SUFFIX}", f"{REFERENCE_PREFIX}{name}{CASE_SUFFIX}"

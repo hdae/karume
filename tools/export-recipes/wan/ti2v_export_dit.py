@@ -13,11 +13,11 @@ non-zero when its `passed` field is false.
 
 ## The graph (decision 3)
 
-`wan.dit_patch.WanDitTokensTi2v`: 7 inputs — 2.1's 5 inputs (tokens, `timesteps_proj`, context,
-the two RoPE tables) followed by `timesteps_proj_condition [1,256]` and `condition_mask [1,S,1]`
-(bool). The time MLP runs twice with M = 1, and each modulation component is selected by a `where`
-right before it is consumed. The upper bound of `Dim("S")` is 27,280 (1280×704×121 — the TS side
-narrows the accepted set).
+`wan.dit_patch.WanDitTokensTi2v`: 7 inputs — the 5 inputs of the one-time form (tokens,
+`timesteps_proj`, context, the two RoPE tables) followed by `timesteps_proj_condition [1,256]` and
+`condition_mask [1,S,1]` (bool). The time MLP runs twice with M = 1, and each modulation component
+is selected by a `where` right before it is consumed. The upper bound of `Dim("S")` is 27,280
+(1280×704×121 — the TS side narrows the accepted set).
 
 ## The export form (decision 7 — the form of ADR 0119 step 10b, no change to the exporter core)
 
@@ -25,7 +25,7 @@ The trace runs on the upstream on meta without weights ({@link trace}), and the 
 patch embedding's Linear included) are turned into i8 per block of rows from the checkpoint and
 passed as `fixed_weights`. bias, norm and `scale_shift_table` stay the checkpoint's f32 (the
 material preparation of `wan.dit_probe.prepare` runs through {@link trace} — measured peak at step 0
-5.84 GiB). The container holds the asset `rope_base` (the same slot as in 2.1).
+5.84 GiB). The container holds the asset `rope_base` (`dit_common.ROPE_BASE_ASSET`).
 
 ## The IR check ({@link inspect_graph} — the acceptance of step 1)
 
@@ -106,7 +106,7 @@ sides and can slip through the check. `eager-full` ({@link eager_full}) closes t
 the form decision 4 describes:
 
 - the upstream is loaded whole as one f32 model with `from_pretrained`, and i8 fake-quant is applied
-  through the patched wrapper (the same as 2.1's `export_dit` — neither the container nor the
+  through the patched wrapper (`dit_common.fake_quant_i8` — neither the container nor the
   layer-by-layer path is involved)
 - for each case, the eager of the patched graph ({@link dit_patch.WanDitTokensTi2v} — the T2V /
   I2V form) is compared with the upstream (T2V with the forward of the one-dimensional timestep,
@@ -127,11 +127,9 @@ stops before loading.
 ## Observing quantization (decision 5 — `observe-quant`)
 
 The difference (max abs ÷ max ref) of the CPU f32 reference with i8 weights only against the
-unquantized CPU f32 reference is taken on the S = 192 decision cases for both the 5B and the 1.3B,
-with the same assignment of prompts (the reader is the checkpoint's F32 and the values with i8
-fake-quant applied one at a time — `dit_reference.CheckpointDitWeights`). When the 5B's worst
-exceeds twice the 1.3B's worst (a rule of thumb), `escalate` becomes true (raised for a ruling
-before step 2).
+unquantized CPU f32 reference is taken on the S = 192 decision cases of the 5B (the reader is the
+checkpoint's F32 and the values with i8 fake-quant applied one at a time —
+`dit_reference.CheckpointDitWeights`). The summary lists each case and the worst and the median.
 
 MUST: diffusers is imported inside functions (the `wan` group is not part of the default sync —
 `tests/test_optional_group_imports.py`).
@@ -170,7 +168,7 @@ from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_module, publish_model
 from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
-from wan import dit_common, dit_patch, dit_probe, dit_reference, export_dit
+from wan import dit_common, dit_patch, dit_probe, dit_reference
 from wan.sources import local_snapshot
 from wan.umt5_export import MemoryMonitor
 
@@ -182,18 +180,18 @@ SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn"
 SERIES = SERIES_ROOT / SERIES_NAME
 
 #: The container's graph name = the distribution's component name = the key in weights
-#: (container-v1 §2.1 — the same slot as 2.1's DiT; the match is checked by
+#: (container-v1 §2.1; the match is checked by
 #: `tests/test_graph_names.py`). The location inside the series uses the same spelling (a
 #: convention, not a derivation).
 TARGET = "transformer"
 MODEL_FILE = "model.krm"
 
 #: The graph input names (the arguments of the wrapper's forward become the IR input names as is —
-#: the first 5 are the same as in 2.1).
+#: the first 5 are `dit_common.INPUT_NAMES`).
 INPUT_NAMES = (*dit_common.INPUT_NAMES, "timesteps_proj_condition", "condition_mask")
 
-#: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — decision 3) and the lower bound (the same
-#: as in 2.1).
+#: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — decision 3) and the lower bound
+#: (`dit_common.DIT_SYM_MIN`).
 SYM_MAX = 27_280
 SYM_MIN = dit_common.DIT_SYM_MIN
 
@@ -211,8 +209,7 @@ WHERE_HEAD = 2
 EXPECTED_5B = {"i8_weights": 307, "linear_nodes": 310}
 
 #: The base of the golden's random seeds (for the decision cases; the acceptance cases hold seeds
-#: from a separate line directly — a value that overlaps neither the 1.3B's `export_dit.SEED` +
-#: 0–25 nor the acceptance 777001 and up).
+#: from a separate line directly).
 SEED = 20262000
 
 #: The distribution name of the location (`outputs/bench/<distribution name>/` —
@@ -236,13 +233,13 @@ class Ti2vCase:
     asset ADR 0121 decision 9 carries over to 2.2 as is) (`dit_probe.probe_inputs` — zero-padded to
     512 rows after the valid length). The latents are random from the seed.
 
-    Why the synthetic random context (how 2.1's goldens are made) is not used (step 1's isolation —
-    results in `outputs/bench/karume-wan2.2/2026-10-04_dit-f32-f64-diagnosis/`): N(0,1) random
-    values are outside the distribution, about 12 times the size of the real umT5 output (std about
-    0.08), and on the 5B that alone amplifies the difference between CPU f32 and f64 layer after
-    layer. The output ratio at S = 1,170, t = 999 is 1.38e-2 synthetic / 1.24e-6 with a real
-    prompt, and even at S = 192 the synthetic one is 5.3e-4 (the same construction on the 1.3B gives
-    2e-6 to 1.6e-4). When the denominator of the r check (the ratio of CPU f32 against f64)
+    Why the synthetic random context (what `dit_common.case_inputs` draws) is not used (step 1's
+    isolation — results in `outputs/bench/karume-wan2.2/2026-10-04_dit-f32-f64-diagnosis/`): N(0,1)
+    random values are outside the distribution, about 12 times the size of the real umT5 output (std
+    about 0.08), and on the 5B that alone amplifies the difference between CPU f32 and f64 layer
+    after layer. The output ratio at S = 1,170, t = 999 is 1.38e-2 synthetic / 1.24e-6 with a real
+    prompt, and even at S = 192 the synthetic one is 5.3e-4 (the same construction on the 1.3B DiT
+    gave 2e-6 to 1.6e-4). When the denominator of the r check (the ratio of CPU f32 against f64)
     saturates from this amplification, subtle fault injections get lost in the band.
     """
 
@@ -275,8 +272,7 @@ class Ti2vCase:
 #: is the condition — with F' = 1 every token would be the condition). The fixed 4 prompts (3
 #: positive + the negative — the context of CFG's second pass) are spread over the forms and roles.
 #: MUST: do not add or remove `band` (decision) cases after seeing the results of `accept`
-#: (acceptance) (deciding the band and accepting are independent — the same discipline as 2.1's
-#: `export_dit.CASES`).
+#: (acceptance) (deciding the band and accepting are independent).
 CASES: tuple[Ti2vCase, ...] = (
     Ti2vCase("band", "t2v", (3, 16, 16), 999, "boxing-cats", SEED + 0),
     Ti2vCase("band", "t2v", (2, 16, 24), 500, "ferret", SEED + 1),
@@ -381,7 +377,7 @@ def meta_inputs(config: Mapping[str, Any], latent_shape: tuple[int, int, int]) -
 def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
     """The symbolic dimensions per input. The RoPE tables and the condition mask share the same
     `S` (a separate symbol would accept shapes of mismatched length and give silently wrong
-    values — the same judgment as in 2.1)."""
+    values)."""
     tokens = Dim("S", min=SYM_MIN, max=sym_max)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens}, None, {1: tokens})
 
@@ -539,8 +535,8 @@ def expected_counts(model: str, inspection: Mapping[str, Any]) -> list[str]:
 
 
 def rope_base_asset(writer: dit_reference.LayerwiseDit) -> dict[str, AssetInput]:
-    """The asset `rope_base` (per-axis base tables cut from the upstream RoPE tables — the same
-    slot and format as in 2.1)."""
+    """The asset `rope_base` (per-axis base tables cut from the upstream RoPE tables — the slot
+    and format of `dit_common.ROPE_BASE_ASSET`)."""
     payload = save(dit_patch.dit_rope_base_tables(writer.rope))
     return {
         dit_common.ROPE_BASE_ASSET: AssetInput(dit_common.ROPE_BASE_ROLE, len(payload), payload)
@@ -1222,83 +1218,53 @@ def inspect_only(model: str = DEFAULT_MODEL) -> dict[str, Any]:
 # Observing quantization (decision 5)
 # ---------------------------------------------------------------------------
 
-#: The observed models → each model's decision cases (S = 192). For the 1.3B, the 6 decision cases
-#: of the i8 series (T2V only).
-OBSERVE_MODELS = ("t2v-1.3b", DEFAULT_MODEL)
-
-#: How many times the 1.3B's observed value the 5B's must exceed to be raised for a ruling (the
-#: rule of thumb of decision 5).
-ESCALATE_FACTOR = 2.0
-
 
 def _observe_cases(
-    model: str, patch: tuple[int, int, int]
+    patch: tuple[int, int, int],
 ) -> list[tuple[str, dit_common.CaseSpec, Form, str]]:
-    """The observation cases (name, latent shape, T2V / I2V form, context prompt).
-
-    For the 5B, the 6 decision cases of {@link CASES}. For the 1.3B, the 6 decision cases of the i8
-    series (T2V only), with the prompts assigned in the same order as the 5B's decision cases (the
-    context is built the same way on both models — a synthetic random context amplifies only the
-    5B, {@link Ti2vCase}).
-    """
+    """The observation cases (name, latent shape, T2V / I2V form, context prompt) — the 6 decision
+    cases of {@link CASES}."""
     band = [case for case in CASES if case.role == "band"]
-    if model == DEFAULT_MODEL:
-        return [(case.name(patch), case.spec(), case.form, case.text) for case in band]
-    specs = [spec for spec in export_dit.series_cases("i8", full=False) if spec.role == "band"]
-    return [
-        (spec.name(patch), spec, "t2v", case.text) for spec, case in zip(specs, band, strict=True)
-    ]
+    return [(case.name(patch), case.spec(), case.form, case.text) for case in band]
 
 
-def observe_quant(models: Sequence[str] = OBSERVE_MODELS) -> dict[str, Any]:
+def observe_quant() -> dict[str, Any]:
     """The difference of the f32 reference with i8 weights only against the unquantized f32
-    reference (the module doc's "Observing quantization").
-
-    Taken on the decision cases of the 5B and the 1.3B, it lists how many times the 1.3B's worst the
-    5B's worst is.
-    """
-    results: dict[str, Any] = {}
-    for model in models:
-        directory = transformer_dir(model)
-        config = dit_reference.load_config(directory)
-        writer = dit_reference.LayerwiseDit(
-            config, alignment=dit_reference.upstream_alignment(directory)
+    reference on the decision cases of the 5B (the module doc's "Observing quantization")."""
+    directory = transformer_dir(DEFAULT_MODEL)
+    config = dit_reference.load_config(directory)
+    writer = dit_reference.LayerwiseDit(
+        config, alignment=dit_reference.upstream_alignment(directory)
+    )
+    unquantized = dit_reference.CheckpointDitWeights(directory, "none")
+    quantized = dit_reference.CheckpointDitWeights(
+        directory, "i8", dit_reference.quant_keys(config)
+    )
+    rows = []
+    for name, spec, form, prompt in _observe_cases(writer.patch_size):
+        latents, timestep, text = dit_probe.probe_inputs(writer, spec, prompt)
+        condition = None
+        if form == "i2v":
+            mask = dit_patch.dit_condition_mask(
+                spec.latent_shape, writer.patch_size, conditioned=True
+            )[..., 0]
+            condition = dit_patch.TimestepCondition(torch.zeros_like(timestep), mask)
+        plain = writer.forward(
+            unquantized, torch.float32, latents, timestep, text, condition=condition
         )
-        unquantized = dit_reference.CheckpointDitWeights(directory, "none")
-        quantized = dit_reference.CheckpointDitWeights(
-            directory, "i8", dit_reference.quant_keys(config)
+        rounded = writer.forward(
+            quantized, torch.float32, latents, timestep, text, condition=condition
         )
-        rows = []
-        for name, spec, form, prompt in _observe_cases(model, writer.patch_size):
-            latents, timestep, text = dit_probe.probe_inputs(writer, spec, prompt)
-            condition = None
-            if form == "i2v":
-                mask = dit_patch.dit_condition_mask(
-                    spec.latent_shape, writer.patch_size, conditioned=True
-                )[..., 0]
-                condition = dit_patch.TimestepCondition(torch.zeros_like(timestep), mask)
-            plain = writer.forward(
-                unquantized, torch.float32, latents, timestep, text, condition=condition
-            )
-            rounded = writer.forward(
-                quantized, torch.float32, latents, timestep, text, condition=condition
-            )
-            ratio = dit_common._ratio(rounded.output, plain.output)
-            rows.append({"case": name, "form": form, "text": prompt, "ratio": ratio})
-            print(f"[observe] {model} {name}: {ratio:.3e}", flush=True)
-        ratios = [row["ratio"] for row in rows]
-        results[model] = {
-            "cases": rows,
-            "worst": max(ratios),
-            "median": statistics.median(ratios),
-        }
-    summary: dict[str, Any] = {"models": results}
-    if set(OBSERVE_MODELS) <= set(results):
-        factor = results[DEFAULT_MODEL]["worst"] / results["t2v-1.3b"]["worst"]
-        summary["worst_factor_5b_over_1_3b"] = factor
-        summary["escalate"] = factor > ESCALATE_FACTOR
-    summary["passed"] = True
-    return summary
+        ratio = dit_common._ratio(rounded.output, plain.output)
+        rows.append({"case": name, "form": form, "text": prompt, "ratio": ratio})
+        print(f"[observe] {DEFAULT_MODEL} {name}: {ratio:.3e}", flush=True)
+    ratios = [row["ratio"] for row in rows]
+    result = {
+        "cases": rows,
+        "worst": max(ratios),
+        "median": statistics.median(ratios),
+    }
+    return {"models": {DEFAULT_MODEL: result}, "passed": True}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

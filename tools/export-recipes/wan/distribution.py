@@ -37,8 +37,8 @@ The public surface is the pipeline {@link TI2V_PIPELINE} (`--pipeline wan-ti2v`)
 repository's dist driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 
 MUST: this module does not import torch (`import dist` does not load torch —
-`TestImportingTheDriver` in `tests/test_dist_driver.py`). The writers (`wan.export_dit` /
-`wan.ti2v_export_dit` / `wan.export_vae` / `wan.text_embeds`) load torch, so the spellings (series
+`TestImportingTheDriver` in `tests/test_dist_driver.py`). The writers (`wan.ti2v_export_dit` /
+`wan.export_vae` / `wan.text_embeds`) load torch, so the spellings (series
 names, asset names, metadata keys, graph input names) live here, and the checks in
 `wan/tests/test_distribution.py` confirm that they match the writers' spellings.
 """
@@ -260,7 +260,7 @@ WAN_TOKENIZER_SUBFOLDER = "tokenizer"
 WAN_TOKENIZER_VERSIONS: tuple[str, ...] = ("ftfy", "transformers")
 
 #: The asset name and role of the RoPE base table the `transformer` container declares (the writer
-#: is `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE` of `wan.export_dit`, the reader `ROPE_BASE` in the TS
+#: is `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE` of `wan.dit_common`, the reader `ROPE_BASE` in the TS
 #: side's `dit-loop.ts`).
 WAN_ROPE_BASE_ASSET = "rope_base"
 WAN_ROPE_BASE_ROLE = "rope-base"
@@ -272,7 +272,7 @@ WAN_VAE_LATENT_INPUT = "latent"
 
 #: The DiT's context input (`[1, rows, width]` — the row width and the upper bound on the valid
 #: length of the embedding asset are taken from it). The writer's spelling is
-#: `wan.export_dit.INPUT_NAMES`.
+#: `wan.dit_common.INPUT_NAMES`.
 WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 
 #: The relative output paths (**inside the model subtree**) — the one place the placement table and

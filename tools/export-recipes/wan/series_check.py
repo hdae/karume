@@ -46,10 +46,6 @@ and their reasons). The exit code is 0 only when there is no mismatch, 1 when th
 containing NUL, a duplicate, a name nested inside another `--require`, a root that is not a
 directory), and 3 for an unreadable file (permissions and so on — OSError; standard output stays
 empty and the reason goes to standard error).
-
-This is a separate entry point from the `--check` of export_dit (`series_mismatches` — only the
-bytes directly under a component directory) (the design of ADR 0121 step 4 — export_dit itself is
-not changed).
 """
 
 from __future__ import annotations

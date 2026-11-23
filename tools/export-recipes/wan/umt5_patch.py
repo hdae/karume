@@ -330,7 +330,7 @@ def valid_output(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
 
 def max_ratio(actual: torch.Tensor, expected: torch.Tensor) -> float:
     """Max absolute difference ÷ max absolute value of the reference (in f64 — the same form as the
-    band metric of `wan.export_dit`)."""
+    band metric of `wan.dit_common._ratio`)."""
     expected = expected.double()
     return float((actual.double() - expected).abs().max() / expected.abs().max())
 

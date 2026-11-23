@@ -181,25 +181,23 @@ class TestTheModelKeyedCheck:
             sources.allow_patterns("unknown")
 
 
-#: The scripts fixed to Wan2.1 (series location, case table and text step are Wan2.1 — `--model`
-#: accepts `WAN21_MODELS`) and the rest of their arguments (the required positional arguments).
+#: The scripts pinned to the Wan2.1 checkpoint (the text assets the Wan2.2 distribution ships and
+#: the TS host fixtures — `--model` accepts `WAN21_MODELS`) and the rest of their arguments (the
+#: required positional arguments).
 WAN21_SCRIPTS = (
-    ("wan.export_dit", ["--verify"]),
     ("wan.dit_host_fixture", []),
     ("wan.scheduler_ref", []),
-    ("wan.few_step_ref", []),
     ("wan.text_embeds", []),
     ("wan.umt5_export", ["prepare"]),
     ("wan.umt5_tokenizer", []),
     ("wan.umt5_host_fixture", []),
-    ("wan.pipeline_ref", ["--smoke"]),
 )
 
 
 @pytest.mark.parametrize(("module", "rest"), WAN21_SCRIPTS, ids=[m for m, _ in WAN21_SCRIPTS])
 def test_the_wan21_scripts_refuse_the_ti2v_5b_model(module: str, rest: list[str], capsys):
-    """Even with `ti2v-5b` in the table, the scripts that write into the Wan2.1 series do not
-    accept the 5B (they stop at argument parsing)."""
+    """Even with `ti2v-5b` in the table, the scripts pinned to the Wan2.1 checkpoint do not accept
+    the 5B (they stop at argument parsing)."""
     pytest.importorskip("diffusers")
     import importlib
 
