@@ -395,7 +395,7 @@
 | `wan.sources.UMT5_SOURCES` (umT5 upstream table) | umT5 の上流の表 | umT5 の書き手が読む本家の上流の表（recipe 側） | — | `tools/export-recipes/wan/sources.py` |
 | two axes (`--upstream` / `--model`) | 軸の 2 本 | umT5 の台本の 2 つの選択（重みの出所 / Wan の text 側の snapshot） | — | ADR 0122 決定 3 |
 | `axes` in the golden metadata | golden の axes | golden の各ケースのメタに残す、2 本の軸の上流と pin の記録 | — | ADR 0122 決定 3 |
-| `export_dit --check` | `export_dit --check` | Wan2.1 の DiT の中間成果物を一時ディレクトリへ書き直し、sha256 で突き合わせるだけの口 | — | ADR 0121 追記 |
+| `export_dit --check` | `export_dit --check` | Wan2.1 の DiT の中間成果物を一時ディレクトリへ書き直し、sha256 で突き合わせるだけの口（Wan2.1 とともに削除） | — | ADR 0121 追記 |
 | `ti2v_export_dit eager-full` | eager-full | Wan2.2 5B の上流を f32 の全量で読み、パッチ後のグラフの eager と比べる口 | — | ADR 0121 決定 4 |
 | `dit_condition_mask` (host function for the condition mask) | 条件マスクのホスト関数 | 潜在の形と patch から条件マスクを作るホストの関数 | — | ADR 0121 決定 3 |
 | f32 address dependence (MKL) | f32 の番地依存 | 重みの番地の 64 バイト境界からのずれで f32 の最終ビットが変わる現象 | — | ADR 0121 追記 |

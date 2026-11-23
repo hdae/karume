@@ -1,11 +1,13 @@
 """The Wan export recipe — Wan2.2 TI2V 5B, text and image to video (ADR 0118 / ADR 0121 / ADR 0065
-decision 2 — outside the wheel, repository only). The Wan2.1 T2V 1.3B scripts that remain are the
-source of the text assets the Wan2.2 distribution ships and of helpers the `ti2v_*` scripts import.
+decision 2 — outside the wheel, repository only). The text assets the Wan2.2 distribution ships and
+the TS host fixtures of the scheduler and the DiT host steps are made from the Wan2.1 T2V 1.3B
+checkpoint.
 
 Only **what cannot live in the general-purpose exporter core** goes here: the pins of the upstream
-sources ({@link wan.sources}), the diffusers reference pipeline ({@link wan.pipeline_ref}), the
-patches and export scripts of the DiT and the video VAE, the tiling reference, the text-embedding
-generation and the distribution recipe. Dependencies point **one way only, recipe → core**
+sources ({@link wan.sources}), the diffusers reference runs ({@link wan.ti2v_few_step_ref}, with
+the shared settings of {@link wan.pipeline_ref}), the patches and export scripts of the DiT and the
+video VAE, the tiling reference, the text-embedding generation and the distribution recipe.
+Dependencies point **one way only, recipe → core**
 (`tools/exporter/tests/test_architecture_boundary.py` enforces it mechanically).
 
 MUST: **do not re-export** (no shape where `from wan import X` drags the family's contents in with
