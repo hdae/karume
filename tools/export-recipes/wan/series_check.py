@@ -1,7 +1,7 @@
 """CLI that compares rewritten Wan outputs with an existing series (ADR 0121 step 4 — checking
-that the 2.1 series is unchanged).
+that a series is unchanged).
 
-After a recipe change, the 2.1 outputs (the VAE chunk graphs, fixtures and so on) are rewritten
+After a recipe change, the outputs (the VAE chunk graphs, fixtures and so on) are rewritten
 into a scratch directory and compared with the existing series, only for the items named with
 `--require`. Because this is a check, what the design avoids is saying "match" when the two differ
 (a false match):

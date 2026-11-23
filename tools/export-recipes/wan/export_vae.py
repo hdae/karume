@@ -1,13 +1,11 @@
-"""The script that writes the 2 chunk graphs of the Wan video VAE decoder out to IR v2 (step 4 of
-ADR 0118 / 0121).
+"""The script that writes the 2 chunk graphs of the Wan2.2 video VAE decoder out to IR v2 (step 4
+of ADR 0118 / 0121).
 
-The series, latent tile and fixture cases of each model (`--model` — default `t2v-1.3b`) are set
-all at once by the {@link VAE_SERIES} table (forgetting to pass something only writes the 2.1 series
-with 2.1 values; there is no path that silently breaks another model's series):
+The series, latent tile and fixture cases of each model (`--model` — default `ti2v-5b`) are set
+all at once by the {@link VAE_SERIES} table:
 
 | Model | Series (`outputs/series/` — decision 7) | Tile t | Latent z | Frame C |
 |---|---|---|---|---|
-| `t2v-1.3b` (Wan2.1) | `wan2.1-t2v-1.3b-f16-dyn` (ADR 0118) | 32 | 16 | 3 (pixels) |
 | `ti2v-5b` (Wan2.2) | `wan2.2-ti2v-5b-f16-dyn` (ADR 0121) | 16 | 48 | 12 (patchify space) |
 
 What it writes:
@@ -18,31 +16,29 @@ What it writes:
   frames `[C,4,8t,8t]` + the 32 updated caches.
 - `vae_chunks.<case>.safetensors` (at the series root) — the fixtures for checking the chunk
   sequence. A fixed-seed random latent (de-normalized, `z·std + mean`) and the output of the chunk
-  loop of upstream's non-tiled `_decode` **before the clamp** (for 2.2 also before unpatchify)
+  loop of upstream's non-tiled `_decode` **before unpatchify and the clamp**
   ({@link wan.vae_patch.reference_decode_unclamped}). The GPU check of the chunk sequence (the
   acceptance of step 4) reads them. There are 3 cases (ADR 0118 addendum 2026-10-02 — band cases
   and acceptance cases are separate): `band`, which sets the band (9 chunks = 33 frames), and
   `accept` (5 chunks = 17 frames) and `long` (21 chunks = 81 frames — ADR 0118 step 8, long enough
   to carry the caches over 20 times), which judge acceptance with another latent and other chunk
-  boundaries. The seeds differ per model.
+  boundaries.
 
-The tile side `t` (latent) can be overridden by an argument (the default comes from the table — 2.1
-is diffusers' `tile_sample_min` 256 px ÷ 8, 2.2 is 256 px ÷ the spatial compression 16). The host
-does not hold the tile side as a literal; it derives it from the input shapes of the opened asset
-(decision 2).
+The tile side `t` (latent) can be overridden by an argument (the default comes from the table —
+256 px ÷ the spatial compression 16). The host does not hold the tile side as a literal; it
+derives it from the input shapes of the opened asset (decision 2).
 
 Storage defaults to the f16 preset (decision 7): the weights are rounded to f16-representable
 values (fake-quant — ADR 0006) before the export and the fixtures' reference are taken. Taking the
 reference before rounding would make the checked difference a mix of quantization error and
 implementation error, and the band would lose its meaning.
 
-`--dtype i8` (ADR 0133 decision 7 — only for models with an i8 series, currently Wan2.2) applies
-`fake_quant_int8` after the f16 rounding (the default targets — the decoder's conv3d and conv2d and
-the mid 1×1 convs get i8 with one scale per output channel) and writes the same 2 graphs to **the
-model's i8 series root** (for Wan2.2 the same `wan2.2-ti2v-5b-i8-dyn` as the DiT's i8 container —
-the component directories `vae_decoder_first/` / `vae_decoder_next/` do not overlap with
-`transformer/`). An i8 run writes no fixtures (the fixtures are the e2e f16 reference — the i8
-series is compared with the f16 decode on the GPU side).
+`--dtype i8` (ADR 0133 decision 7) applies `fake_quant_int8` after the f16 rounding (the default
+targets — the decoder's conv3d and conv2d and the mid 1×1 convs get i8 with one scale per output
+channel) and writes the same 2 graphs to **the model's i8 series root** (for Wan2.2 the same
+`wan2.2-ti2v-5b-i8-dyn` as the DiT's i8 container — the component directories `vae_decoder_first/` /
+`vae_decoder_next/` do not overlap with `transformer/`). An i8 run writes no fixtures (the fixtures
+are the e2e f16 reference — the i8 series is compared with the f16 decode on the GPU side).
 
 `--shared` (ADR 0134 decision 1 — `--tile` is required) traces the same module again at the
 `--tile` side and writes, to the same series root, a pair that holds no weight bytes at all,
@@ -57,7 +53,6 @@ written (the reference of the chunk sequence is the default-tile pair's fixtures
 
     uv run --group wan --inexact python -m wan.export_vae              # 2 graphs + fixtures
     uv run --group wan --inexact python -m wan.export_vae --verify     # eager equivalence (real)
-    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b [--verify]   # Wan2.2
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8   # i8 series
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --tile 32 --shared
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 \\
@@ -96,14 +91,13 @@ from karume.pipeline import export_module, export_to_file, publish_model
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 from karume.verify import ir_graph_from_container, verify_container
 from wan import vae_patch
-from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
+from wan.sources import SOURCES, local_snapshot
 
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
 
-#: The series name (decision 7 — the `-dyn` suffix is the ADR 0077 convention, matching the DiT's
-#: S shape. The 2 VAE graphs are in the same series).
-SERIES_NAME = "wan2.1-t2v-1.3b-f16-dyn"
+#: The default model (Wan2.2 TI2V-5B — a key of {@link VAE_SERIES}).
+DEFAULT_MODEL = "ti2v-5b"
 
 #: Target name = component name = the container's graph name (decision 7).
 TARGET_FIRST = "vae_decoder_first"
@@ -112,13 +106,9 @@ TARGETS = (TARGET_FIRST, TARGET_NEXT)
 
 MODEL_FILE = "model.krm"
 
-#: The default latent tile side (decision 2 — diffusers' `tile_sample_min` 256 px ÷ 8).
-DEFAULT_TILE = 32
-
 #: The spatial ratio between the chunk graph's inputs and outputs (the frame side per latent 1 —
-#: pixels of the patchify space for 2.2). Upstream config's `scale_factor_spatial` is this ×
-#: `patch_size` (8 × 1 for 2.1, 8 × 2 = 16 for 2.2 — checked by {@link assert_series_config},
-#: ADR 0121 decision 6).
+#: pixels of the patchify space). Upstream config's `scale_factor_spatial` is this × `patch_size`
+#: (8 × 2 = 16 — checked by {@link assert_series_config}, ADR 0121 decision 6).
 SPATIAL_SCALE = 8
 
 #: The number of frames a next chunk produces (2 temporal upsample stages = 4×). first produces 1.
@@ -129,10 +119,8 @@ NEXT_FRAMES = 4
 FIXTURE_PREFIX = "vae_chunks."
 FIXTURE_SUFFIX = ".safetensors"
 
-#: The fixtures' metadata `reference` (the reference's provenance). One for the generation without
-#: patchify (2.1) and one for the generation whose chunk-loop output is in the patchify space
-#: before unpatchify (2.2).
-FIXTURE_REFERENCE = "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)"
+#: The fixtures' metadata `reference` (the reference's provenance — the chunk-loop output is in the
+#: patchify space before unpatchify).
 FIXTURE_REFERENCE_BEFORE_UNPATCHIFY = (
     "diffusers AutoencoderKLWan._decode chunk loop before unpatchify and clamp (CPU f32)"
 )
@@ -180,15 +168,6 @@ class FixtureCase:
     role: str
 
 
-#: Band and acceptance cases differ in both the latent (seed) and the chunk boundaries (chunk
-#: count). `long` is the 81-frame acceptance (ADR 0118 step 8), and the band stays that of `band`
-#: (the band is not re-derived from the 21-chunk result).
-FIXTURE_CASES = (
-    FixtureCase("band", seed=20261002, chunks=9, role="band"),
-    FixtureCase("accept", seed=20261003, chunks=5, role="accept"),
-    FixtureCase("long", seed=20261004, chunks=21, role="accept"),
-)
-
 #: The VAE series of Wan2.2 TI2V-5B (ADR 0121 decision 7 — a VAE-only series, no DiT).
 TI2V_SERIES_NAME = "wan2.2-ti2v-5b-f16-dyn"
 
@@ -203,8 +182,9 @@ WEIGHT_DTYPES = ("f16", "i8")
 #: The latent tile side of Wan2.2 (ADR 0121 decision 6 — output 256 px ÷ spatial compression 16).
 TI2V_TILE = 16
 
-#: The Wan2.2 cases (the same construction as 2.1, only the seeds differ — 1 band case + 2
-#: acceptance cases).
+#: The Wan2.2 cases (1 band case + 2 acceptance cases). Band and acceptance cases differ in both the
+#: latent (seed) and the chunk boundaries (chunk count). `long` is the 81-frame acceptance, and the
+#: band stays that of `band` (the band is not re-derived from the 21-chunk result).
 TI2V_FIXTURE_CASES = (
     FixtureCase("band", seed=20261041, chunks=9, role="band"),
     FixtureCase("accept", seed=20261042, chunks=5, role="accept"),
@@ -220,15 +200,14 @@ class VaeSeries:
     tile: int
     #: The expected `patch_size` of the upstream config (fail loudly otherwise —
     #: {@link assert_series_config}).
-    patch_size: int | None
+    patch_size: int
     cases: tuple[FixtureCase, ...]
-    #: The series `--dtype i8` writes to (ADR 0133 decision 7 — a model with None cannot write i8).
-    i8_series: str | None = None
+    #: The series `--dtype i8` writes to (ADR 0133 decision 7).
+    i8_series: str
 
 
 #: Model name (a key of `wan.sources.SOURCES`) → series.
 VAE_SERIES: dict[str, VaeSeries] = {
-    "t2v-1.3b": VaeSeries(SERIES_NAME, DEFAULT_TILE, None, FIXTURE_CASES, None),
     "ti2v-5b": VaeSeries(TI2V_SERIES_NAME, TI2V_TILE, 2, TI2V_FIXTURE_CASES, TI2V_I8_SERIES_NAME),
 }
 
@@ -303,7 +282,7 @@ def assert_series_config(vae: AutoencoderKLWan, series: VaeSeries) -> None:
             f"upstream patch_size {config.patch_size} differs from what series {series.series}"
             f" expects ({series.patch_size})"
         )
-    expected = SPATIAL_SCALE * (series.patch_size or 1)
+    expected = SPATIAL_SCALE * series.patch_size
     if config.scale_factor_spatial != expected:
         raise ChunkGraphError(
             f"upstream scale_factor_spatial {config.scale_factor_spatial} is not"
@@ -469,7 +448,6 @@ def emit_targets(
     source: Provenance,
     *,
     cases: Sequence[FixtureCase],
-    patch_size: int | None,
     weight_dtype: str = "f16",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
@@ -479,10 +457,6 @@ def emit_targets(
     `weight_dtype` is the weight storage ({@link WEIGHT_DTYPES}); i8 comes with `weight_scales` (the
     ledger of {@link fake_quant_i8}). i8 writes no fixtures (the metadata `weights` claims only the
     f16-rounded reference — a reference made with i8 weights is not published under that name).
-
-    `patch_size` is the value of the series table ({@link VaeSeries}) and decides only the wording
-    of the fixtures' metadata `reference` (2.1 has no unpatchify, so the wording stays that of the
-    existing 2.1 fixtures).
 
     MUST: publish as one set. Publishing per graph or per file would let a run that failed midway
     leave a mixed old/new set in the series (only first at the new tile side, next and the fixtures
@@ -506,7 +480,6 @@ def emit_targets(
         raise ChunkGraphError(
             f"a {weight_dtype} run writes no fixtures (only the f16 reference does)"
         )
-    reference = FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_BEFORE_UNPATCHIFY
     out_root.mkdir(parents=True, exist_ok=True)
     finals = [out_root / target for target in targets]
     finals += [fixture_path(out_root, case) for case in cases]
@@ -544,7 +517,7 @@ def emit_targets(
                     "tile": str(tile),
                     "role": case.role,
                     "weights": "f16-rounded",
-                    "reference": reference,
+                    "reference": FIXTURE_REFERENCE_BEFORE_UNPATCHIFY,
                 },
             )
             written.append(
@@ -736,7 +709,7 @@ def emit_shared_targets(
 
 def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torch.Tensor:
     """A fixed-seed random latent, de-normalized, `[1, z, F, t, t]` (the value right before decode
-    in upstream `WanPipeline`; z is upstream config's `z_dim` — 16 for 2.1, 48 for 2.2).
+    in upstream `WanPipeline`; z is upstream config's `z_dim` — 48 for Wan2.2).
 
     `WanPipeline` de-normalizes with `latents / (1/std) + mean` before passing to `vae.decode`. The
     graph input is the value after that, so the fixtures are built in the same value range as real
@@ -755,8 +728,7 @@ def verify(model: str, tile: int, chunks: int, seed: int) -> dict[str, Any]:
     """Measures the patch's eager equivalence on the real weights (f32, no rounding).
 
     - `clamp(unpatchify(upstream's chunk loop before clamp)) == upstream _decode` (the reference's
-      provenance — bit-exact. unpatchify applies only to the generation with patchify (2.2), using
-      diffusers' function itself)
+      provenance — bit-exact. unpatchify is diffusers' function itself)
     - the form with only the cache normalization applied (upstream's code as is) == upstream
       (bit-exact — the measurement behind the derivation of decision 2)
     - the difference between the final rewritten form ({@link wan.vae_patch.chunk_decode}) and
@@ -776,7 +748,7 @@ def verify(model: str, tile: int, chunks: int, seed: int) -> dict[str, Any]:
         first = vae_patch.WanVaeChunkDecoder(vae, first=True).eval()
         following = vae_patch.WanVaeChunkDecoder(vae, first=False).eval()
         final = vae_patch.chunk_decode(first, following, latents[0])
-    restored = reference if series.patch_size is None else unpatchify(reference, series.patch_size)
+    restored = unpatchify(reference, series.patch_size)
     difference = (final - reference[0]).abs()
     reference_max = float(reference.abs().max())
     per_frame = [float(difference[:, index].max()) for index in range(difference.shape[1])]
@@ -810,15 +782,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--tile",
         type=int,
         default=None,
-        help="latent tile side (default from the table — 32 for 2.1, 16 for 2.2)",
+        help="latent tile side (default from the table — 16)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f16",
-        help="weight storage (default f16. i8 only for models with an i8 series — ADR 0133"
-        " decision 7. i8 writes no fixtures: the fixtures are the e2e f16 reference, and the i8"
-        " series is compared with the f16 decode on the GPU side)",
+        help="weight storage (default f16; i8 — ADR 0133 decision 7 — writes no fixtures: the"
+        " fixtures are the e2e f16 reference, and the i8 series is compared with the f16 decode on"
+        " the GPU side)",
     )
     parser.add_argument(
         "--out", type=Path, default=None, help="series root (default: the model's series — table)"
@@ -853,13 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if tile <= 0:
         parser.error(f"--tile must be a positive integer (got {tile})")
     i8 = args.dtype == "i8"
-    series_name = series.series
-    if i8:
-        if series.i8_series is None:
-            parser.error(
-                f"--dtype i8: model {args.model} has no VAE i8 series (ADR 0133 decision 7)"
-            )
-        series_name = series.i8_series
+    series_name = series.i8_series if i8 else series.series
     if args.shared and args.tile is None:
         parser.error(
             "--shared requires --tile (a side other than the lender's default tile"
@@ -901,7 +867,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.out or SERIES_ROOT / series_name,
         source,
         cases=() if i8 or args.no_fixtures else series.cases,
-        patch_size=series.patch_size,
         weight_dtype=args.dtype,
         weight_scales=scales,
     )

@@ -29,9 +29,10 @@ from wan import vae_patch, vae_tiling
 #: The real-size tile edge (latent — the default input shape of the chunk graph).
 TILE = 32
 
-#: Wan2.1's lower bound of the overlap (latent) — the value derived by the formula from the 64 px
-#: output ({@link TestMinOverlapLatent}).
-OVERLAP = vae_tiling.WAN21_MIN_OVERLAP_LATENT
+#: The lower bound of the overlap (latent) for a spatial compression of 8 without unpatchify — the
+#: value derived by the formula from the 64 px output ({@link TestMinOverlapLatent}); the geometry
+#: the TS host test mirrors.
+OVERLAP = vae_tiling.min_overlap_latent(8, 1)
 
 #: Start positions at tile edge 32 and overlap lower bound 8 (the latent's full length → the
 #: sequence of start positions). Frozen with **the same values** as the TS side (`AXIS_STARTS` of
@@ -40,8 +41,8 @@ OVERLAP = vae_tiling.WAN21_MIN_OVERLAP_LATENT
 #: mirror drift on a machine without a GPU too.
 #:
 #: - 32: degenerate (one tile — the shape of the degenerate check)
-#: - 60 / 104: the two edges of the accepted set (832×480 / 480×832 — ADR 0118 decision 7). Exactly
-#:   the ADR's values (rows 0 / 14 / 28, columns 0 / 24 / 48 / 72)
+#: - 60 / 104: the two edges of 832×480 / 480×832 at a compression of 8 (ADR 0118 decision 7).
+#:   Exactly the ADR's values (rows 0 / 14 / 28, columns 0 / 24 / 48 / 72)
 #: - 57: the edge where `i·span/(count−1)` is exactly a half (span 25 / 3 tiles → 12.5). If the
 #:   integer formula regresses to the built-in `round` (round half to even) it becomes (0, 12, 25) —
 #:   the other edges have no halves, so this one row alone catches that regression (the same role as
@@ -58,9 +59,9 @@ class TestMinOverlapLatent:
     """The lower bound of the overlap is the 64 px output ÷ the spatial compression (the graph's
     ratio × the unpatchify factor — ADR 0121 decision 6).
 
-    With only the 2.1 value (8), the formula would not turn red even if it ignored the unpatchify
-    factor, so a row with factor 2 is also there to pin the formula at two points (a check of the
-    formula, not of the 2.2 plan table).
+    With only the value without unpatchify (8), the formula would not turn red even if it ignored
+    the unpatchify factor, so a row with factor 2 is also there to pin the formula at two points (a
+    check of the formula, not of the 2.2 plan table).
     """
 
     @pytest.mark.parametrize(("scale", "patch_size", "expected"), [(8, 1, 8), (8, 2, 4)])
@@ -68,11 +69,6 @@ class TestMinOverlapLatent:
         self, scale: int, patch_size: int, expected: int
     ):
         assert vae_tiling.min_overlap_latent(scale, patch_size) == expected
-
-    def test_wan21_overlap_is_eight_latents(self):
-        """The same as the value the 2.1 plan table ({@link MIRRORED_STARTS}) was built from."""
-        assert vae_tiling.WAN21_MIN_OVERLAP_LATENT == 8
-        assert type(vae_tiling.WAN21_MIN_OVERLAP_LATENT) is int
 
     def test_a_compression_that_does_not_divide_64_px_is_rejected(self):
         """No rounding — rounding would silently move the overlap away from 64 px."""
@@ -99,7 +95,7 @@ class TestMinOverlapLatent:
             vae_tiling.min_overlap_latent(scale, patch_size)
 
     def test_the_tile_planners_require_the_overlap(self):
-        """Forgetting to pass it is a TypeError — no silent planning with the 2.1 value."""
+        """Forgetting to pass it is a TypeError — no silent planning with a default value."""
         with pytest.raises(TypeError):
             vae_tiling.plan_tile_axis(60, TILE)  # type: ignore[call-arg]
         with pytest.raises(TypeError):
@@ -320,21 +316,6 @@ class TestAssembleTiles:
 
         with pytest.raises(ValueError, match="differ from the plan's"):
             vae_tiling.assemble_tiles([[torch.zeros(1, 1, 1, 8, 8)]], plan)
-
-
-class TestFixtureCases:
-    def test_acceptance_differs_from_the_band_in_every_axis(self):
-        """The acceptance case differs from the band's decision case in the latent (seed), the
-        chunk boundaries and the tile positions (vertical and horizontal) (ADR 0118 addendum
-        2026-10-02). A portrait shape brings a row / column mix-up out in the values."""
-        cases = {case.role: case for case in vae_tiling.FIXTURE_CASES}
-        band, accept = cases["band"], cases["accept"]
-
-        assert (band.height, band.width, band.chunks) == (60, 104, 9)
-        assert band.full and not accept.full
-        assert accept.seed != band.seed
-        assert accept.chunks != band.chunks
-        assert (accept.height, accept.width) == (band.width, band.height)
 
 
 @pytest.fixture(scope="module")
