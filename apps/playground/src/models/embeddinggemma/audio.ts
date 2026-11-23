@@ -1,10 +1,13 @@
 /**
  * The audio of a row: a chosen file → mono f32 samples at the model's rate (`pipelineConfig.audio.
  * sampleRate`, 16 kHz), the `MonoAudio` an audio part holds. The pipeline has no resampler (another
- * rate is a `ModelInputError`), so the page decodes and resamples with the browser: an
- * `AudioContext` at the model's rate makes `decodeAudioData` resample to it, and the channels are
- * mixed to mono. The browser's resampler is not specified — the same file can give other samples in
- * another browser — so the record keeps the sha256 of the samples that went in. This is page code,
+ * rate is a `ModelInputError`), so the page decodes and resamples with the browser:
+ * `decodeAudioData` resamples to the rate of the context it is called on, and the channels are
+ * mixed to mono. The context is an `OfflineAudioContext` at the model's rate: `decodeAudioData` is
+ * `BaseAudioContext`'s, the same decode and resample on either kind of context (Web Audio API), and
+ * an offline one opens no output device and needs no closing. The browser's resampler is not
+ * specified — the same file can give other samples in another browser — so the record keeps the
+ * sha256 of the samples that went in. This is page code,
  * not library code: the library takes samples only.
  *
  * Nothing is cut here: an audio over 30 s is kept as it is and refused by the pipeline (its message
@@ -54,19 +57,17 @@ export const audioSummary = (loaded: LoadedAudio): string =>
 /** Decodes an audio file in the browser, resampled to `sampleRate` and mixed to mono. */
 export const decodeAudioFile = async (file: File, sampleRate: number): Promise<LoadedAudio> => {
   const bytes = await file.arrayBuffer();
-  const context = new AudioContext({ sampleRate });
-  try {
-    // decodeAudioData detaches the buffer it gets; `bytes` is not used after this.
-    const decoded = await context.decodeAudioData(bytes);
-    const channels = Array.from({ length: decoded.numberOfChannels }, (_, channel) =>
-      decoded.getChannelData(channel),
-    );
-    return {
-      name: file.name,
-      audio: { data: mixToMono(channels), sampleRate },
-      channels: decoded.numberOfChannels,
-    };
-  } finally {
-    await context.close();
-  }
+  // Never rendered: one channel of one frame is the smallest context; the decoded buffer keeps the
+  // file's own channels.
+  const context = new OfflineAudioContext({ numberOfChannels: 1, length: 1, sampleRate });
+  // decodeAudioData detaches the buffer it gets; `bytes` is not used after this.
+  const decoded = await context.decodeAudioData(bytes);
+  const channels = Array.from({ length: decoded.numberOfChannels }, (_, channel) =>
+    decoded.getChannelData(channel),
+  );
+  return {
+    name: file.name,
+    audio: { data: mixToMono(channels), sampleRate },
+    channels: decoded.numberOfChannels,
+  };
 };

@@ -3,7 +3,10 @@
  * names with their prefixes (the prompt select of each row), the output dimensions (the dimension
  * select), the token limit (a hint) and, on a model that declares `audio`, the sample rate an audio
  * is resampled to and its soft-token bound (a hint). The distribution owns these values — the page
- * derives every list from here and hard-codes none. `embeddinggemma.Pipeline` validates the whole block again
+ * derives every list from here and hard-codes none of them. The row hint's "one soft token per
+ * 40 ms" and "over 30 s is refused" are not among them: they are the library's audio front end (a
+ * hop of 160 samples, four frames a token, at most 480,000 samples), which neither `pipelineConfig`
+ * nor the subpath's surface states, so the page writes them as text. `embeddinggemma.Pipeline` validates the whole block again
  * when it is built; this reader only refuses a block it cannot show (fail loudly, never guess) and
  * leaves the fields it does not show (`placeholderTokens`) to the pipeline.
  */

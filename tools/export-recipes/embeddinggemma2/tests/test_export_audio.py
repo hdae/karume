@@ -12,6 +12,10 @@ broken:
   forward on the extractor-like frames and on the graph's frames for every residue of the frame
   count mod 4; without the mask it is bit-identical except at `L ≡ 2 (mod 4)`, where it moves far;
   upstream's modules are left as they are
+- across upstream's 12-query chunks (1 to 40 soft tokens and a partial fifth chunk): every
+  layer's attention gives nonzero weight to exactly the keys upstream's does (the query and the 11
+  before it), and in f64 (upstream's f32 casts lifted) the wrapper's soft tokens equal upstream's to
+  f64 noise
 - the traced form: two inputs on `4n`, one output `[1, n, 512]`, no fused attention and no
   `where`, the softmaxes on the window, one selector shared by every window copy, one bias prefix —
   and each broken form is refused
@@ -262,6 +266,146 @@ class TestTinyTower:
 
         with pytest.raises(export_audio.AudioExportError, match="non-finite bounds"):
             _wrapper(tiny_tower)
+
+
+#: Upstream's attention chunk: 12 queries per block over a 24-key context (the block's 12 and the
+#: 12 before it).
+CHUNK = 12
+
+#: The soft-token counts across the chunks: 1 to 40 (every position of the first three chunks and
+#: into the fourth, so the first, second and third boundaries) and 53 (a partial fifth chunk of 5).
+CHUNK_TOKENS = [*range(1, 41), 53]
+
+#: The bound of the wrapper against upstream in f64 (max abs of the tiny tower's soft tokens, which
+#: reach about 4.7). Measured on 2026-11-23 over {@link CHUNK_TOKENS}: at most 3.6e-15 — the two
+#: compute the same values in another order. Far below any wrong key: a window off by one key for
+#: the queries past the first chunk moves the soft tokens by more than 1e-2.
+F64_TOLERANCE = 1e-13
+
+
+def _chunk_frames(tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extractor-like frames of an audio of `tokens` soft tokens, the residue of `L` mod 4 cycling
+    with `tokens`, then five padding frames."""
+    return _extracted(4 * tokens - tokens % 4, padding=5, seed=tokens)
+
+
+def _upstream_pattern(weights: torch.Tensor, tokens: int) -> torch.Tensor:
+    """`[H, n, n]` from upstream's returned weights `[1, H, blocks, 12, 24]`: block `b`'s query `i`
+    is token `12b + i`, its context column `c` key `12b − 12 + c`. MUST: a key outside `[0, n)` or
+    a query past `n` has weight 0 (the tokens upstream pads and masks)."""
+    _, heads, blocks, chunk, context = weights.shape
+    assert (chunk, context) == (CHUNK, 2 * CHUNK)
+    dense = torch.zeros(heads, tokens, tokens, dtype=weights.dtype)
+    for block in range(blocks):
+        for row in range(chunk):
+            query = CHUNK * block + row
+            for column in range(context):
+                key = CHUNK * block - CHUNK + column
+                value = weights[0, :, block, row, column]
+                if query < tokens and 0 <= key < tokens:
+                    dense[:, query, key] = value
+                elif query < tokens:
+                    assert not bool(value.any()), (query, key)
+    return dense
+
+
+def _wrapper_pattern(weights: torch.Tensor) -> torch.Tensor:
+    """`[H, n, n]` from the wrapper's softmax `[H, n, 12]`: query `t`'s column `j` is key
+    `t − 11 + j`. MUST: a column before the first token has weight 0."""
+    heads, tokens, window = weights.shape
+    dense = torch.zeros(heads, tokens, tokens, dtype=weights.dtype)
+    for query in range(tokens):
+        for column in range(window):
+            key = query - (window - 1) + column
+            if key >= 0:
+                dense[:, query, key] = weights[:, query, column]
+            else:
+                assert not bool(weights[:, query, column].any()), (query, key)
+    return dense
+
+
+def _band(tokens: int) -> torch.Tensor:
+    """`[n, n]`: True where key `k` is query `t` or one of the 11 before it."""
+    query = torch.arange(tokens).unsqueeze(1)
+    key = torch.arange(tokens).unsqueeze(0)
+    return (key <= query) & (key > query - export_audio.WINDOW)
+
+
+class TestChunkBoundaries:
+    """The wrapper across upstream's 12-query chunks on the tiny tower (transformers at the pinned
+    release)."""
+
+    @pytest.mark.parametrize("tokens", CHUNK_TOKENS)
+    def test_every_layer_weighs_exactly_upstream_s_keys(
+        self, tiny_tower, tokens: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        features, mask = _chunk_frames(tokens)
+        frames = export_audio.host_frames(features, mask)
+        with torch.no_grad():
+            upstream = tiny_tower.tower(features, mask, return_dict=True, output_attentions=True)
+        softmax = functional.softmax
+        captured: list[torch.Tensor] = []
+
+        def recording(*args, **kwargs) -> torch.Tensor:
+            result = softmax(*args, **kwargs)
+            captured.append(result.detach().clone())
+            return result
+
+        # The wrapper's only softmaxes are its attentions' (the traced form holds one per layer).
+        monkeypatch.setattr(functional, "softmax", recording)
+        with torch.no_grad():
+            _wrapper(tiny_tower)(frames.features, frames.frame_mask)
+        monkeypatch.undo()
+
+        assert frames.soft_tokens == tokens
+        assert len(captured) == len(upstream.attentions) == TINY_LAYERS
+        band = _band(tokens)
+        for layer, (ours, theirs) in enumerate(zip(captured, upstream.attentions, strict=True)):
+            ours_dense = _wrapper_pattern(ours)
+            theirs_dense = _upstream_pattern(theirs, tokens)
+            assert torch.equal(ours_dense != 0, theirs_dense != 0), f"layer {layer}"
+            assert torch.equal(theirs_dense != 0, band.expand_as(theirs_dense)), f"layer {layer}"
+
+    @pytest.mark.parametrize("tokens", CHUNK_TOKENS)
+    def test_in_f64_it_equals_upstream_s_forward(
+        self, tiny_tower, tokens: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        features, mask = _chunk_frames(tokens)
+        frames = export_audio.host_frames(features, mask)
+        tower = export_audio.Tower(
+            tower=copy.deepcopy(tiny_tower.tower).double(),
+            embedder=copy.deepcopy(tiny_tower.embedder).double(),
+            config=tiny_tower.config,
+        )
+        # Lift upstream's f32 casts (`.float()` and the softmax's `dtype=torch.float32`) for f64
+        # tensors, so both sides run in f64 end to end.
+        to_float, softmax = torch.Tensor.float, functional.softmax
+        monkeypatch.setattr(
+            torch.Tensor,
+            "float",
+            lambda self, *args, **kwargs: (
+                self if self.dtype == torch.float64 else to_float(self, *args, **kwargs)
+            ),
+        )
+        monkeypatch.setattr(
+            functional,
+            "softmax",
+            lambda tensor, dim=None, _stacklevel=3, dtype=None: softmax(
+                tensor, dim=dim, dtype=None if tensor.dtype == torch.float64 else dtype
+            ),
+        )
+
+        golden = export_audio.upstream_soft_tokens(tower, features.double(), mask)
+        with torch.no_grad():
+            ours = (
+                export_audio.AudioTowerWrapper(tower)
+                .double()
+                .eval()(frames.features.double(), frames.frame_mask.double())
+            )
+
+        assert golden.dtype == ours.dtype == torch.float64
+        assert list(ours.shape) == [1, tokens, 512]
+        torch.testing.assert_close(ours[0], golden, atol=F64_TOLERANCE, rtol=0)
 
 
 @pytest.fixture

@@ -339,10 +339,11 @@ PREPROCESSOR_CONFIG = {
     "preemphasis_htk_flavor": True,
     "return_attention_mask": True,
 }
-#: The processor's image settings (what the host implements, at the synthetic budget) and its
+#: The processor's image settings (what the host implements, at the synthetic budget), its
 #: feature extractor block — the same settings, with the integer spellings upstream writes there
-#: (`0` for `0.0`).
+#: (`0` for `0.0`) — and the `audio_seq_length` the recipe recorded.
 PROCESSOR_CONFIG = {
+    "audio_seq_length": eg2.EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH,
     "feature_extractor": {
         **PREPROCESSOR_CONFIG,
         "dither": 0,
@@ -1302,6 +1303,21 @@ class TestAudioTower:
         with pytest.raises(DistError, match="dither is False"):
             fixture.plan()
 
+    @pytest.mark.parametrize("value", [750, 281, True, None])
+    def test_an_audio_seq_length_other_than_the_recorded_one_is_refused(
+        self, fixture: Fixture, value: Any
+    ) -> None:
+        processor = {**PROCESSOR_CONFIG, "audio_seq_length": value}
+        if value is None:
+            del processor["audio_seq_length"]
+        fixture.rewrite_snapshot("processor_config.json", processor)
+
+        expected = "'missing'" if value is None else repr(value)
+        with pytest.raises(
+            DistError, match=f"audio_seq_length is {expected}, not the recorded 280"
+        ):
+            fixture.plan()
+
     def test_a_tower_of_another_output_width_is_refused(self, fixture: Fixture) -> None:
         fixture.rewrite_audio(width=8)
 
@@ -1538,6 +1554,17 @@ class TestThePinnedSnapshot:
             )
             == 16_000
         )
+
+    def test_its_audio_seq_length_is_the_recorded_280(self) -> None:
+        directory = _real_snapshot()
+        upstream_sources.assert_pinned(directory, ("processor_config.json",))
+        path = directory / "processor_config.json"
+
+        found = eg2.embeddinggemma2_audio_seq_length(
+            json.loads(path.read_text(encoding="utf-8")), str(path)
+        )
+
+        assert found == eg2.EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH == 280
 
     def test_its_audio_ids_are_special_tokens_of_the_compiled_asset(self) -> None:
         directory = _real_snapshot()

@@ -828,9 +828,11 @@ maintainer's ruling of 2026-11-06).
      Stage 2 built 2026-11-22:
      - `embeddinggemma.Pipeline` takes audio parts `{ type: "audio", audio }` (`MonoAudio`, 16 kHz mono f32) with
        `audio: true` (the weights role `audio`, fetched only then; `vision` and `audio` may be on together). The host
-       front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames in f64 with the FFT moved to
-       `src/audio/fft.ts` (the vowel detector's, its second user); its frames equal upstream's code run in f64 and
-       rounded to f32, value for value, and are up to 5.12e-4 from upstream's f32 frames. Refused, never adjusted:
+       front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames with the FFT moved to `src/audio/fft.ts`
+       (the vowel detector's, its second user): the windowed product in f32 as upstream's (since 2026-11-23 — the
+       review found that the 5.12e-4 gap of the first build was upstream's f32 product, not its f32 FFT), the FFT and
+       the rest in f64; its frames are within one ulp (4.77e-7) of upstream's f32 frames, and their bits equal
+       upstream's arithmetic with an f64 FFT (the recipe's `audio-front-end.json`). Refused, never adjusted:
        another rate, over 30 s (upstream truncates silently), at most 160 samples, a non-finite sample.
      - The distribution carries the tower as the weights role `audio`, bf16 in both presets (series
        `embeddinggemma-2-audio-bf16`), and `pipelineConfig.audio` (the three audio ids, `hiddenSize`, `maxSoftTokens`
@@ -838,15 +840,15 @@ maintainer's ruling of 2026-11-06).
        `processor_config.json` to the host's, the tower graph and its bound, and the audio series' record. The mirror
        was assembled again (the text and vision containers byte-identical).
      - The pipeline e2e over the mirror on the RTX 3080 Ti: upstream's ids for the four audio cases, `bf16` within
-       2.45e-5 of upstream's vectors (atol 7.5e-5 — the front end's difference carried through the tower; with
-       upstream's frames 3.3e-7), the text graph fed upstream's soft tokens within 1.12e-7 (atol 3.5e-7), `i8` at a
-       cosine of 0.99982 to 0.99991 (floor 0.999), a 30 s audio bit-identical on capped devices, ten new sha256 rows.
+       2.44e-7 of upstream's vectors (atol 7.5e-7; 2.45e-5 and atol 7.5e-5 with the product in f64), the text graph
+       fed upstream's soft tokens within 1.12e-7 (atol 3.5e-7), `i8` at a cosine of 0.99982 to 0.99991 (floor 0.999),
+       a 30 s audio bit-identical on capped devices, ten sha256 rows (re-recorded on 2026-11-23 for the f32 product).
      - The Playground page `/embeddinggemma`: an optional audio per row on a model with the tower (decoded, resampled
        to 16 kHz and mixed to mono by the browser), its soft tokens in the row's count, the library's refusal of the
        row shown under it, the record `karume-playground-embeddinggemma/3`. Not checked in a browser yet.
      Left, unordered and not chosen: a resampler or decoder in the library (the caller resamples today), audio longer
      than 30 s (upstream truncates; splitting is the caller's), the tower's runs in `onRunDiagnostics`, an
-     upstream-bit front end (numpy's f32 FFT rounding is not copied), and a rounded audio tower (unscreened).
+     upstream-bit front end (numpy's complex64 FFT is not copied — one ulp), and a rounded audio tower (unscreened).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and

@@ -8,8 +8,10 @@
  * ② The front end (`AudioFrontEnd`): the frame and soft-token counts of the fixture's waveforms and
  *    of the edge lengths (every residue of the frame count mod 4, the one-frame floor, the 30 s
  *    maximum); the frames of the fixture's three waveforms against upstream's feature extractor's
- *    (within a bound per waveform; their sha256 pinned); the padding frames and the mask; the
- *    settings against the snapshot's `preprocessor_config.json` (when present); and, with
+ *    (within a bound per waveform; their bits equal to upstream's arithmetic with an f64 FFT, the
+ *    digests of the recipe's `audio-front-end.json`); the padding frames and the mask; the
+ *    settings and the longest audio against that fixture, and against the snapshot's
+ *    `preprocessor_config.json` (when present); and, with
  *    `KARUME_SERIES=1`, the layout against the audio series' io inputs.
  * ③ The sequence of an input holding an audio (`planEmbedRequest` / `tokenizeEmbedInput`): the
  *    audio block, beside text and an image, the prompt before it, the limit counting its soft
@@ -46,6 +48,7 @@ import type { Rgb8Image } from "../src/image/preprocess.ts";
 import { parseEmbeddingGemmaPipelineConfig } from "../src/embeddinggemma/config.ts";
 import {
   AUDIO_FEATURE_EXTRACTOR,
+  AUDIO_MAX_SAMPLES,
   AudioFrontEnd,
   audioSoftTokens,
   audioValidFrames,
@@ -344,30 +347,51 @@ describe("pipelineConfig.audio", () => {
  * The bound of the host frames against upstream's feature extractor's, per fixture waveform (max
  * abs over the valid frames; log-mel values of −6.9 to about 5).
  *
- * Measured on 2026-11-22: sweep 5.12e-4, click 4.77e-7, edge 2.57e-4. The host frames are every
- * one of them `fround` of upstream's own code run in f64 (its window times f64 samples, a complex128
- * rfft — measured against all 38,528 values of the three waveforms), so these differences are
- * upstream's f32 rounding (numpy's complex64 rfft): on `click` (mostly silence) it is 1 to 2 ulp of
- * the values, on the tonal `sweep` and `edge` it reaches 5e-4 in the near-silent mel bins of a
- * frame, where `ln(mel + 0.001)` turns an energy error of about 6e-7 into that much. Each bound is
- * three times its waveform's measure. The breakages it guards against are far above: a hop of 128
- * or a power spectrum instead of the magnitude moves the frames by more than 1 (the fault
- * injections of the commit that added this file).
+ * Measured on 2026-11-23: 4.77e-7 on each of sweep, click and edge (one ulp of a value in [4, 8),
+ * on 768, 47 and 721 of their 12,672 / 12,800 / 13,056 values; the others equal). The host
+ * multiplies the samples by the window in f32 as upstream does, so the frames enter the FFT as
+ * upstream's own; what is left is upstream's complex64 rfft against the host's f64 one, at most an
+ * ulp after the logarithm. (Before the product was rounded to f32 the gap was 5.12e-4 / 4.77e-7 /
+ * 2.57e-4 — upstream's f32 product, not its FFT, in the near-silent mel bins where `ln(mel +
+ * 0.001)` magnifies an energy error.) Each bound is about three times its waveform's measure. The
+ * breakages it guards against are far above: a hop of 128 or a power spectrum instead of the
+ * magnitude moves the frames by more than 1, and the product left in f64 moves them by 5.12e-4.
  */
 const FRAME_TOLERANCE: Readonly<Record<string, number>> = {
-  sweep: 1.5e-3,
+  sweep: 1.5e-6,
   click: 1.5e-6,
-  edge: 8e-4,
+  edge: 1.5e-6,
 };
 
-/**
- * The sha256 of the host frames `[4n, 128]` f32 (padding frames included) of the fixture's
- * waveforms, taken on 2026-11-22 — the f32 rounding of upstream's code run in f64 (above).
- */
-const FRAME_DIGESTS: Readonly<Record<string, string>> = {
-  sweep: "8d736e70473039940b9359b1a6154b2a3e69d381efcbbfcc0067daf1a461ae96",
-  click: "5ecf614a27c9256f54bd2284078fc94b737698dfdf5fe3b1911bbc59dc428392",
-  edge: "ca56b9d058abf7332322890b8445bde0b58192e05c102681125245bf80936b4f",
+/** The front end's fixture (`tools/export-recipes/embeddinggemma2/audio_front_end.py`). */
+type FrontEndFixture = {
+  /** The settings of the pinned `preprocessor_config.json` that change a frame, as stated there. */
+  readonly featureExtractor: Readonly<Record<string, unknown>>;
+  /** The extractor's `max_length` call default. */
+  readonly maxSamples: number;
+  /**
+   * Per fixture waveform, the sha256 of the `[4n, 128]` f32 tower input by upstream's arithmetic
+   * with an f64 FFT: the f32 product of the samples and the f32 window, numpy's rfft in f64, the
+   * magnitude, the f64 mel product, `ln(mel + 0.001)`, rounded to f32 (the `L` frames, then zero
+   * frames). The recipe checks that the same steps with an f32 FFT are the extractor's run bit for
+   * bit.
+   */
+  readonly frameDigests: Readonly<Record<string, string>>;
+};
+
+const FRONT_END_FIXTURE = JSON.parse(
+  await readTextFile(new URL("fixtures/embeddinggemma2/audio-front-end.json", import.meta.url)),
+) as FrontEndFixture;
+
+/** The settings of upstream's extractor the front end does not implement, and the value each must hold. */
+const OFF_SETTINGS: Readonly<Record<string, unknown>> = {
+  preemphasis: 0,
+  dither: 0,
+  input_scale_factor: 1,
+  per_bin_mean: null,
+  per_bin_stddev: null,
+  fft_overdrive: false,
+  feature_extractor_type: "Gemma4AudioFeatureExtractor",
 };
 
 const FRONT_END = new AudioFrontEnd();
@@ -461,7 +485,7 @@ describe("AudioFrontEnd: the fixture's waveforms as the tower reads them", () =>
       );
     });
 
-    it(`${entry.name}: the frames padded to 4n with zeros, the mask 1 on the L valid ones, their sha256 pinned`, async () => {
+    it(`${entry.name}: the frames padded to 4n with zeros, the mask 1 on the L valid ones, their bits upstream's arithmetic with an f64 FFT`, async () => {
       const input = FRONT_END.towerInput(fixtureAudio(entry.name).data);
       const frames = 4 * entry.softTokens;
       assertEquals([input.validFrames, input.softTokens], [entry.validFrames, entry.softTokens]);
@@ -471,7 +495,10 @@ describe("AudioFrontEnd: the fixture's waveforms as the tower reads them", () =>
         [...input.frameMask],
         Array.from({ length: frames }, (_, frame) => (frame < entry.validFrames ? 1 : 0)),
       );
-      assertEquals(await sha256Hex(bytesOf(input.features)), FRAME_DIGESTS[entry.name]);
+      assertEquals(
+        await sha256Hex(bytesOf(input.features)),
+        FRONT_END_FIXTURE.frameDigests[entry.name],
+      );
     });
 
     const io = seriesIo(entry.name);
@@ -526,12 +553,35 @@ describe("AudioFrontEnd: the fixture's waveforms as the tower reads them", () =>
     );
   });
 
-  it("builds one audio's frames independently of the one before (the scratch is cleared per frame)", () => {
+  it("builds one audio's frames to the same bits after another audio as on a fresh front end", () => {
     const fresh = new AudioFrontEnd().towerInput(fixtureAudio("edge").data);
     FRONT_END.towerInput(fixtureAudio("sweep").data);
     assertEquals(
       bytesOf(FRONT_END.towerInput(fixtureAudio("edge").data).features),
       bytesOf(fresh.features),
+    );
+  });
+
+  it("implements the settings the recipe's fixture records from the pinned preprocessor_config.json", () => {
+    const settings = FRONT_END_FIXTURE.featureExtractor;
+    for (const [key, value] of Object.entries(AUDIO_FEATURE_EXTRACTOR)) {
+      assertEquals(settings[key], value, key);
+    }
+    for (const [key, value] of Object.entries(OFF_SETTINGS)) {
+      assertEquals(settings[key], value, key);
+    }
+    // Every setting the fixture records is one of the two sets: a new one fails until it is placed.
+    assertEquals(
+      Object.keys(settings).sort(),
+      [...Object.keys(AUDIO_FEATURE_EXTRACTOR), ...Object.keys(OFF_SETTINGS)].sort(),
+    );
+  });
+
+  it("refuses past the extractor's longest audio, and the fixture's digests cover its waveforms", () => {
+    assertEquals(AUDIO_MAX_SAMPLES, FRONT_END_FIXTURE.maxSamples);
+    assertEquals(
+      Object.keys(FRONT_END_FIXTURE.frameDigests),
+      MULTIMODAL.audios.map(({ name }) => name),
     );
   });
 

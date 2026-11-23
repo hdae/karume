@@ -71,7 +71,8 @@ measurements in `docs/research/`.
   `embed` and `tokenize` then take audio parts `{ type: "audio", audio }` beside text and image parts, `audio` mono f32
   samples at 16,000 Hz (`MonoAudio` — `{ data, sampleRate }`, the shape of `decodeWav`'s result —, now exported by the
   subpath). The host computes the audio's log-mel frames itself (upstream's `Gemma4AudioFeatureExtractor` as the
-  checkpoint configures it, every step in f64), and the audio is `<|audio>`, one soft token per 40 ms
+  checkpoint configures it: the samples times the window in f32 as upstream's own product, the FFT and the rest in
+  f64, so the frames are within one ulp of upstream's), and the audio is `<|audio>`, one soft token per 40 ms
   (`ceil(L / 4)` of its `L = ceil(samples / 160) − 1` frames — 750 for 30 s) and `<audio|>` in the sequence, counted
   toward the token limits; one tower run per audio, in the order of the parts, image runs included. A
   `ModelInputError` refuses, before the GPU, an audio at another rate (nothing is resampled), one over 480,000

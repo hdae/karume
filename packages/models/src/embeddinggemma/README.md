@@ -219,17 +219,19 @@ the RTX 3080 Ti the `bf16` vectors are within 5.44e-6 of upstream's (cosine at l
 at atol 3e-6, and the rest is the tower's GPU noise), the `i8` vectors at a cosine of 0.99976 to
 0.99991 (floor 0.999), each pinned by a sha256 row per preset.
 
-Audio: the host frames of the fixture's three waveforms
-(`packages/models/tests/embeddinggemma2_audio_input_test.ts`) are `fround` of upstream's own code run
-in f64, value for value, and so differ from upstream's frames by numpy's f32 FFT rounding — up to 5.12e-4 (`sweep`), 2.57e-4
-(`edge`) and 4.77e-7 (`click`), in the near-silent mel bins where `ln(mel + 0.001)` magnifies an
-energy error; the frame and soft-token counts are checked on every residue of the frame count mod 4
-and at the 30 s maximum. The pipeline e2e (`packages/e2e/tests/e2e_embeddinggemma2_audio_pipeline_test.ts`)
+Audio: the host front end multiplies the samples by the window in f32, as upstream's f32 product
+does (one correctly rounded multiply — upstream's values exactly), and runs the FFT and the rest in
+f64. The frames of the fixture's three waveforms
+(`packages/models/tests/embeddinggemma2_audio_input_test.ts`) are within 4.77e-7 of upstream's (one
+ulp — upstream's complex64 FFT against the host's f64 one), and their bits equal upstream's
+arithmetic with an f64 FFT (the digests of `fixtures/embeddinggemma2/audio-front-end.json`, which
+the recipe writes and checks against upstream's extractor); the frame and soft-token counts are
+checked on every residue of the frame count mod 4 and at the 30 s maximum. The pipeline e2e (`packages/e2e/tests/e2e_embeddinggemma2_audio_pipeline_test.ts`)
 runs the four audio inputs of upstream's fixture (an audio alone, a text then an audio, a
 `query`-prompted audio of 102 frames — the frame mask's case —, an image then an audio): the token
-ids equal upstream's exactly, and on the RTX 3080 Ti the `bf16` vectors are within 2.45e-5 of
-upstream's (atol 7.5e-5; with upstream's frames the GPU is within 3.3e-7, so the rest is the front
-end's difference carried through the tower), the text graph fed upstream's soft tokens within
+ids equal upstream's exactly, and on the RTX 3080 Ti the `bf16` vectors are within 2.44e-7 of
+upstream's (atol 7.5e-7 — the GPU's own f32 noise; with the windowed product in f64 they were
+2.45e-5 off), the text graph fed upstream's soft tokens within
 1.12e-7 (atol 3.5e-7), the `i8` vectors at a cosine of 0.99982 to 0.99991 (floor 0.999), a 30 s
 audio bit-identical on a device capped at the preset's limits, each pinned by a sha256 row per
 preset.

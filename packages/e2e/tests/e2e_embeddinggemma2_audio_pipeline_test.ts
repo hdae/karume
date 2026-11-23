@@ -98,31 +98,31 @@ import {
 /**
  * The tolerance of the `bf16` preset's vectors against upstream's SentenceTransformer vectors.
  *
- * Measured through the pipeline on node-nvidia-geforce-rtx-3080-ti (2026-11-22, four inputs,
+ * Measured through the pipeline on node-nvidia-geforce-rtx-3080-ti (2026-11-23, four inputs,
  * `[768]` unit vectors; cosine in f64). The columns on the right place the error: the GPU tower fed
  * upstream's own frames (the audio series' io inputs) instead of the host's, the text graph on the
  * GPU fed upstream's own soft tokens (check 4), and the two graphs composed in torch f32 (the
- * fixture's `composition`):
+ * fixture's `composition`) — those three measured on 2026-11-22:
  *
  * | Case             | T   | waveform (L mod 4) | maxAbs  | cosine         | tower on upstream's frames | text graph + upstream's soft tokens | torch composition |
  * | ---------------- | --- | ------------------ | ------- | -------------- | -------------------------- | ----------------------------------- | ----------------- |
- * | audio-only       | 29  | sweep (3)          | 2.08e-6 | 0.999999999859 | 1.64e-7                    | 9.87e-8                             | 6.98e-8           |
- * | text-then-audio  | 34  | click (0)          | 1.16e-7 | 1.000000000000 | 1.53e-7                    | 9.69e-8                             | 5.96e-8           |
- * | query-audio      | 38  | edge (2)           | 2.45e-5 | 0.999999980781 | 3.04e-7                    | 1.12e-7                             | 1.19e-7           |
- * | image-then-audio | 287 | sweep (3)          | 8.25e-7 | 0.999999999977 | 3.28e-7                    | 4.94e-8                             | 5.03e-8           |
+ * | audio-only       | 29  | sweep (3)          | 1.46e-7 | 0.999999999999 | 1.64e-7                    | 9.87e-8                             | 6.98e-8           |
+ * | text-then-audio  | 34  | click (0)          | 1.49e-7 | 0.999999999999 | 1.53e-7                    | 9.69e-8                             | 5.96e-8           |
+ * | query-audio      | 38  | edge (2)           | 1.80e-7 | 0.999999999999 | 3.04e-7                    | 1.12e-7                             | 1.19e-7           |
+ * | image-then-audio | 287 | sweep (3)          | 2.44e-7 | 0.999999999998 | 3.28e-7                    | 4.94e-8                             | 5.03e-8           |
  *
- * Almost all of the error is the host front end's: its frames are upstream's code in f64 rounded to
- * f32 once, upstream's own frames carry numpy's f32 FFT rounding (up to 5.1e-4 on `sweep` and
- * 2.6e-4 on `edge`, in the near-silent mel bins — `embeddinggemma2_audio_input_test.ts`), and the
- * tower carries that difference into its soft tokens (9.8e-4 on `sweep`, 2.6e-3 on `edge`; 5.5e-6
- * on the mostly silent `click`). With upstream's frames the GPU tower and text graph are within
- * 3.3e-7 of upstream's vectors. atol 7.5e-5 is three times the worst (`query-audio`); rtol 0 — a
- * unit vector's values thin out to near 0, so atol alone decides. The breakages this guards against
- * are far above it (the fault injections of the commit that added this file): soft rows shifted by
- * one row, the frame mask left all ones on `edge` (its last soft token moves by 4.2), a hop of 128
- * or the power spectrum in place of the magnitude.
+ * The host's frames are upstream's to one ulp (the f32 product of the samples and the window is
+ * upstream's own; only the FFT runs in f64 — `embeddinggemma2_audio_input_test.ts`), so the vectors
+ * sit where the GPU tower fed upstream's frames does: the GPU's own f32 noise, the order of the
+ * torch composition's. (With the product left in f64, the frames were up to 5.12e-4 off in
+ * near-silent mel bins, the soft tokens up to 2.6e-3, and the vectors up to 2.45e-5 —
+ * `query-audio`; the bound was 7.5e-5.) atol 7.5e-7 is three times the worst (`image-then-audio`);
+ * rtol 0 — a unit vector's values thin out to near 0, so atol alone decides. The breakages this
+ * guards against are far above it: soft rows shifted by one row, the frame mask left all ones on
+ * `edge` (its last soft token moves by 4.2), a hop of 128 or the power spectrum in place of the
+ * magnitude, and the windowed product left in f64 (2.45e-5).
  */
-const AUDIO_TOLERANCE: Tolerance = { atol: 7.5e-5, rtol: 0 };
+const AUDIO_TOLERANCE: Tolerance = { atol: 7.5e-7, rtol: 0 };
 
 /**
  * The tolerance of check 4: the `bf16` text graph on the GPU fed upstream's own soft tokens,
@@ -131,9 +131,9 @@ const AUDIO_TOLERANCE: Tolerance = { atol: 7.5e-5, rtol: 0 };
  * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22, the four inputs): maxAbs 9.87e-8
  * (`audio-only`), 9.69e-8 (`text-then-audio`), 1.12e-7 (`query-audio`) and 4.94e-8
  * (`image-then-audio`) — the order of the torch composition's own error (the table above). atol
- * 3.5e-7 is three times the worst; rtol 0, as for {@link AUDIO_TOLERANCE}. It is two hundred times
- * tighter than that one, whose budget the front end's difference takes: a soft row that enters the
- * text graph off by about 1e-6 passes {@link AUDIO_TOLERANCE} and fails here.
+ * 3.5e-7 is three times the worst; rtol 0, as for {@link AUDIO_TOLERANCE}. It is about half that
+ * one, whose budget the audio tower's GPU noise shares: this check holds the text graph's soft-row
+ * path alone, out of reach of that noise.
  */
 const SOFT_ROW_TOLERANCE: Tolerance = { atol: 3.5e-7, rtol: 0 };
 
@@ -142,8 +142,10 @@ const SOFT_ROW_TOLERANCE: Tolerance = { atol: 3.5e-7, rtol: 0 };
  * upstream's: the text pipeline e2e's floor between the `i8` and the `bf16` vector of a text
  * (`I8_COSINE_FLOOR` of `e2e_embeddinggemma2_pipeline_test.ts`, whose derivation is there).
  *
- * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22): 0.999819 (`query-audio`) to 0.999909
- * (`text-then-audio`), maxAbs 1.64e-3 to 2.19e-3 — the text tower's int8 rounding (its towers are
+ * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-23): 0.999819 (`query-audio`), 0.999824
+ * (`audio-only`), 0.999889 (`image-then-audio`) and 0.999909 (`text-then-audio`), maxAbs 1.64e-3 to
+ * 2.19e-3 — unchanged to these digits from the front end with its product in f64 (2026-11-22:
+ * 0.999819 to 0.999909): the text tower's int8 rounding (its towers are
  * the same bf16 ones); within the 0.99940 to 0.99993 the ten golden texts measure against their
  * `bf16` vectors. No golden of the int8 model holds audio, so no tighter band is drawn.
  */

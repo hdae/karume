@@ -221,8 +221,10 @@ frame counts `4s + 2` and one output token more than the audio's for half the re
 keeps the output at `n`. An audio of at most 160 samples has no valid frame and no soft token.
 
 The frames (upstream's `Gemma4AudioFeatureExtractor`, f32 out — the host front end,
-`packages/models/src/embeddinggemma/audio.ts`, computes the same steps in f64 and rounds once, and
-refuses an audio over 30 s or at another rate instead of truncating or misreading it):
+`packages/models/src/embeddinggemma/audio.ts`, computes the same steps with the windowed product in
+f32 as upstream's and the FFT and the rest in f64, rounding once, so its frames are within one ulp
+of upstream's; and it refuses an audio over 30 s or at another rate instead of truncating or
+misreading it):
 
 - 16 kHz mono f32 samples, **not resampled** (an array is read as 16 kHz whatever its rate),
   **truncated at 480,000 samples (30 s)** without a word; zero-padded on the right to a multiple of
@@ -232,8 +234,10 @@ refuses an audio over 30 s or at another rate instead of truncating or misreadin
   zero-padded), its **magnitude**; an HTK mel bank of 128 triangles from 0 to 8,000 Hz
   (`2595 · log10(1 + f / 700)`, centres `linspace` over 130 mel points, FFT bins `linspace(0, 8000,
   257)`, no area normalisation, f64, filter 0 all zero); `log(mel + 1e-3)` (natural log; silence is
-  −6.9077554); no per-bin normalisation. numpy computes the window and the FFT in f32 (complex64)
-  for f32 samples and the mel product and the log in f64, then casts to f32;
+  −6.9077554); no per-bin normalisation. numpy multiplies the f32 samples by the f32 window in f32
+  (each product rounded to f32) and runs the FFT in f32 (complex64), the mel product and the log in
+  f64, then casts to f32. Of the two f32 steps only the product moves the frames visibly: left in
+  f64 it shifts near-silent mel bins by up to 5.12e-4, while the f32 FFT adds one ulp;
 - frame `i` is valid iff sample `160 · i + 160` exists, so `s` samples have
   `L = max(0, ceil(s / 160) − 1)` valid frames (1 s → 99 → 25 soft tokens, 30 s → 2,999 → 750); an
   invalid frame is zeros. The 128-sample padding can add one invalid frame, which the host drops.
@@ -258,12 +262,19 @@ Measured on 2026-11-22 (CPU, f32; soft tokens reach 5.5 to 6.1):
 
 The rewrite is exact in arithmetic: in f64 (upstream's f32 casts lifted) the wrapper equals upstream
 to 1.3e-12, while upstream's own f32 run is up to 3.0e-4 from that f64 run and the wrapper's up to
-3.4e-4 — the differences above are f32 summation order. The real-GPU check is
-`packages/e2e/tests/e2e_embeddinggemma2_audio_test.ts` (lane `models:embeddinggemma2`,
-`KARUME_SERIES=1`): both series against the goldens within atol 2e-3 (measured on the RTX 3080 Ti at
-1.41e-5 to 5.82e-4; the GPU is up to 5.0e-4 from f64 — its comment has the table), the two series
-bit-identical to each other, with sha256 rows per series, and the 30 s golden on a device capped at
-128 MiB (the WebGPU default binding and buffer limits) bit-identical to the uncapped run.
+3.4e-4 — the differences above are f32 summation order. The unit tests pin the window across
+upstream's 12-query chunks on a tiny random tower (`tests/test_export_audio.py`, 1 to 40 soft
+tokens and a partial fifth chunk): every layer gives nonzero weight to exactly the keys upstream's
+returned attention weights do, and in f64 the wrapper's soft tokens equal upstream's within 1e-13
+(measured 3.6e-15; a window one key off past the first chunk moves them by 2.2e-2 or more). The
+real-GPU check is `packages/e2e/tests/e2e_embeddinggemma2_audio_test.ts` (lane
+`models:embeddinggemma2`, `KARUME_SERIES=1`): both series against the goldens, each waveform at
+about three times its own measured error, as an atol (4.2e-5 for `sweep` to 1.75e-3 for `noise`;
+measured on the RTX 3080 Ti at 1.41e-5 to 5.82e-4, the GPU up to 5.0e-4 from f64) and as a floor on
+every soft token's cosine (measured `1 − 3.7e-12` to `1 − 7.0e-9`) — its comment has the table —,
+the two series bit-identical to each other, with sha256 rows per series, and the 30 s golden on a
+device capped at 128 MiB (the WebGPU default binding and buffer limits) bit-identical to the
+uncapped run.
 
 On the RTX 3080 Ti under Node (2026-11-22, five warm runs after the first, the median):
 
@@ -317,6 +328,19 @@ The script also composes Karume's graphs in torch (the tower wrappers' soft toke
 placeholder rows of the text wrapper, over the ids upstream ran) and holds them to upstream's
 vectors within 1e-5. Measured on 2026-11-22: max abs 5.9e-8 to 1.8e-6 for the image cases and
 5.0e-8 to 1.2e-7 for the audio cases, cosine at least 0.99999999991 (`composition` of each case).
+
+## What `audio_front_end.py` writes (the host front end's fixture)
+
+`packages/models/tests/fixtures/embeddinggemma2/audio-front-end.json` (tracked in git) ties the TypeScript front end to
+upstream without the snapshot: the settings of the pinned `preprocessor_config.json` that change a frame, as the file
+states them; the extractor's `max_length` call default (480,000 samples); and per waveform of the multimodal fixture
+(`sweep`, `click`, `edge`) the SHA-256 of the `[4n, 128]` f32 tower input by upstream's arithmetic with the FFT in
+f64 — the f32 product of the samples and the f32 window, numpy's `rfft` in f64, the magnitude, the f64 mel product,
+`log(mel + 0.001)`, cast to f32. Before writing, the script checks that the same steps with the FFT in f32 are
+upstream's extractor's run bit for bit. `tests/test_audio_front_end.py` holds `export_audio`'s settings and
+`MAX_SAMPLES` and the distribution's mirror to the file (no snapshot or transformers needed) and, with transformers at
+the pinned release, recomputes the digests; `packages/models/tests/embeddinggemma2_audio_input_test.ts` holds
+`AUDIO_FEATURE_EXTRACTOR` and `AUDIO_MAX_SAMPLES` to it and its frames' SHA-256 to the digests.
 
 ## What `tokenizer.py` emits
 
@@ -379,6 +403,14 @@ mel floor of 0.001, and no preemphasis, dither, input scale, per-bin normalisati
 taken for a `0`), the tower graph (`features` f32 `[1, 4n, 128]`, `frame_mask` f32 `[1, 4n]`, one f32 `[1, n, 512]`,
 the bound of `n` 750) and the audio series' record (its series, the pin, the sample rate and `softTokensMax`).
 
+`processor_config.json` also sets `audio_seq_length` to 280 (its processor's default is 750). Upstream reads it only in
+its serving helper (`_compute_audio_num_tokens`, the count `_get_num_multimodal_tokens` reports to a vLLM-style
+server), which caps an audio's soft tokens there — about 11.2 s at 40 ms a token. The processor path that
+sentence-transformers runs (`replace_audio_token`, the count from the frame mask) has no cap, and Karume follows it: up
+to 750 soft tokens for 30 s (a 30 s clip is 754 ids in sentence-transformers and here). The plan reads the value and
+holds it to the recorded 280 (`EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH`), so a snapshot that changes it fails the build and
+the difference (`docs/limitations.md`) is looked at again.
+
 Assembled again on 2026-11-22 with the audio tower, the mirror holds 1,850,169,018 bytes in all (the audio
 container 587,590,521 more); the text and vision containers and the tokenizer are byte-identical to the assembly
 before it, and each preset downloads 587,590,521 bytes more for the tower with `audio: true`. Assembled before with
@@ -412,6 +444,7 @@ uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision --dtype bf16
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio
 uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export_audio --dtype bf16
+uv run --with 'transformers==5.23.0' python -m embeddinggemma2.audio_front_end
 uv run python dist.py --pipeline embeddinggemma-2
 uv run --with 'transformers==5.23.0' --with 'sentence-transformers==6.1.0' \
     python -m embeddinggemma2.parity

@@ -2018,16 +2018,28 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
   token); a non-finite sample is refused. One soft token stands for 40 ms (`ceil(L / 4)` of the
   `L = ceil(samples / 160) − 1` valid frames — 25 for 1 s, 750 for 30 s), plus two markers, counted
   toward the 8,192-token limit.
-- **The audio front end is computed on the host, in f64, so its frames are not upstream's bits.**
-  The log-mel frames are upstream's `Gemma4AudioFeatureExtractor` as the checkpoint configures it
-  (160 zeros prepended, frames of 320 by a hop of 160, a periodic Hann window, an rfft of 512, the
-  magnitude, 128 HTK mel filters 0–8,000 Hz, `ln(mel + 0.001)`), every step in f64 and rounded to
-  f32 once; upstream (numpy 2) runs the window and the FFT in f32. Measured on the fixture's three
-  waveforms (2026-11-22): the host frames equal upstream's code run in f64 then rounded to f32, value
-  for value, and differ from upstream's own frames by up to 5.12e-4 (log-mel values of −6.9 to about
-  5; the near-silent bins, where the logarithm magnifies numpy's f32 rounding) — through the tower
-  that is up to 2.6e-3 on the soft tokens and 2.45e-5 on the `bf16` vector (cosine 0.99999998; with
-  upstream's own frames the vector is within 3.3e-7). The other settings of the feature extractor
+- **An audio's soft tokens follow upstream's processor path, up to 750, not the snapshot's
+  `audio_seq_length` of 280.** The checkpoint's `processor_config.json` sets `audio_seq_length` to
+  280 (its processor's default is 750). Upstream reads it in one place: the token count its serving
+  helper reports (`_compute_audio_num_tokens`, behind `_get_num_multimodal_tokens` — what a
+  vLLM-style server asks) is capped there, at 280 soft tokens or about 11.2 s. The processor itself
+  (`replace_audio_token`, the path sentence-transformers runs) counts the tokens from the frame mask
+  without that cap, and the tower returns that many — 750 for 30 s (754 ids with the markers,
+  checked against sentence-transformers). Karume follows the processor path, so an audio of 11.2 to
+  30 s has more soft tokens here than such a helper would report. The dist recipe records the 280 it
+  reads and refuses a snapshot that states another value, so a change upstream is noticed.
+- **The audio front end is computed on the host, with the FFT in f64, so its frames are within one
+  ulp of upstream's, not its bits.** The log-mel frames are upstream's `Gemma4AudioFeatureExtractor`
+  as the checkpoint configures it (160 zeros prepended, frames of 320 by a hop of 160, a periodic
+  Hann window, an rfft of 512, the magnitude, 128 HTK mel filters 0–8,000 Hz, `ln(mel + 0.001)`).
+  The samples times the window are rounded to f32 as upstream's f32 product is (one correctly
+  rounded multiply, so these are upstream's values exactly); the FFT and the rest run in f64 and
+  round to f32 once, where upstream (numpy 2) runs the FFT in f32 (complex64). Measured on the
+  fixture's three waveforms (2026-11-23): the host frames are within 4.77e-7 of upstream's own (one
+  ulp of log-mel values of −6.9 to about 5), and the `bf16` vectors within 2.44e-7 of upstream's
+  (cosine 0.999999999998 or more — the GPU's own f32 noise). With the product in f64, as first built,
+  the frames were up to 5.12e-4 off in near-silent mel bins and the vectors up to 2.45e-5. The other
+  settings of the feature extractor
   (preemphasis, dither, per-bin normalisation, FFT overdrive) are not implemented; the dist recipe
   refuses a snapshot that turns one on. The frames of a 30 s audio take about 34 ms in V8 (Node, the
   development machine) and 1.5 MiB.

@@ -347,6 +347,12 @@ EMBEDDINGGEMMA2_AUDIO_REFERENCE_FILE = "reference.json"
 #: `packages/models/src/embeddinggemma/audio.ts`). Its soft tokens bound the audio graph's symbol.
 EMBEDDINGGEMMA2_AUDIO_MAX_SAMPLES = 480_000
 
+#: The `audio_seq_length` of the pinned `processor_config.json`, as recorded on 2026-11-23 (its
+#: processor's default is 750). Upstream's serving helper caps an audio's soft tokens there (280 ×
+#: 40 ms = 11.2 s); its processor path, which sentence-transformers and the host follow, does not —
+#: up to 750 for 30 s ({@link embeddinggemma2_audio_seq_length}; `docs/limitations.md`).
+EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH = 280
+
 #: What the host's audio front end implements (`AUDIO_FEATURE_EXTRACTOR` of
 #: `packages/models/src/embeddinggemma/audio.ts`): the feature extractor's class and every setting
 #: that changes its frames. MUST: the pinned `preprocessor_config.json` — and the same block of
@@ -902,6 +908,28 @@ def embeddinggemma2_audio_feature_extractor(
     return EMBEDDINGGEMMA2_AUDIO_FEATURE_EXTRACTOR["sampling_rate"]
 
 
+def embeddinggemma2_audio_seq_length(processor: Mapping[str, Any], where: str) -> int:
+    """Read `processor_config.json`'s `audio_seq_length` and hold it to the value this recipe
+    recorded ({@link EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH}); return it.
+
+    Nothing Karume builds reads it: upstream's processor path (`replace_audio_token`, the one
+    sentence-transformers runs) counts an audio's soft tokens from the frame mask without a cap, and
+    the host follows that path, up to the graph's bound. Only upstream's serving helper
+    (`_compute_audio_num_tokens`) caps its count there. MUST: a snapshot that states another value
+    fails, so the change is seen and the documented difference (`docs/limitations.md`) is checked
+    again rather than going stale.
+    """
+    found = processor.get("audio_seq_length", _MISSING)
+    if isinstance(found, bool) or found != EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH:
+        raise DistError(
+            f"{where}: audio_seq_length is {found!r}, not the recorded"
+            f" {EMBEDDINGGEMMA2_AUDIO_SEQ_LENGTH} — upstream's serving helper caps an audio's soft"
+            " tokens there while its processor path (which Karume follows) does not; check the"
+            " documented difference again before recording the new value"
+        )
+    return found
+
+
 def embeddinggemma2_audio_soft_tokens(samples: int) -> int:
     """The soft tokens of an audio of `samples` samples (`waveforms.valid_frames` and
     `soft_tokens`, mirrored torch-free: `ceil(max(0, ceil(samples / 160) − 1) / 4)`)."""
@@ -1120,6 +1148,7 @@ def embeddinggemma2_plan(
     sample_rate = embeddinggemma2_audio_feature_extractor(
         preprocessor_config, processor_config, str(sources.snapshot)
     )
+    embeddinggemma2_audio_seq_length(processor_config, str(processor_path))
     # The soft rows' width is the token table's (a soft row replaces a scaled lookup) and the
     # upstream text config's hidden size; the tower's output must be that width too.
     hidden = _positive_int(

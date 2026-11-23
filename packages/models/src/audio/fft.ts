@@ -8,7 +8,7 @@
  * resident scratch). It has two users, so it sits in the shared layer: the vowel detector's feature
  * extraction (`src/vowel-detector/features.ts`, the power spectrum and the autocorrelation) and the
  * log-mel front end of the EmbeddingGemma family's audio tower (`src/embeddinggemma/audio.ts`, the
- * power spectrum of an f64 frame).
+ * power spectrum of a windowed frame of f32 values, transformed in f64).
  *
  * ## MUST: run the transform in f64 (the upstream TS implementation uses f32)
  *
@@ -16,8 +16,10 @@
  * through `np.fft` = **always f64** (numpy's FFT promotes even f32 input to double precision). The
  * upstream TS implementation runs its butterflies in Float32Array and is that much further from the
  * canonical spec; its max abs diff against the Python reference is **5.42e-6** (measured). The
- * EmbeddingGemma front end's upstream runs its FFT in f32 instead, and there too the f64 transform
- * is the one nearer the exact values (`src/embeddinggemma/audio.ts`). Making this f64
+ * EmbeddingGemma front end's upstream runs its FFT in f32 (complex64) instead; there the f64
+ * transform of the same frames is at most one ulp of a log-mel value from upstream's
+ * (`src/embeddinggemma/audio.ts` — the frames themselves are upstream's f32 product, reproduced
+ * exactly, since that product is upstream's arithmetic and not an implementation detail). Making this f64
  * aligns the dtype flow with Python step by step and shrinks it to **4.77e-7 = 2 ULP from storing
  * the reference in f32** (= numerically at the floor. The derivation is at the top of
  * `tests/vowel_detector_host_test.ts`).

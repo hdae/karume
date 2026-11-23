@@ -23,12 +23,18 @@
  *    ({@link audioValidFrames}). Upstream zeroes the others (its right padding to a multiple of 128
  *    samples only adds such frames); here they are not computed.
  *
- * **Precision.** Upstream (numpy 2) windows and transforms in f32 (`complex64`) and takes the mel
- * product and the logarithm in f64; this front end does every step in f64 and rounds to f32 once,
- * at the end — the f32 window values times f32 samples are exact in f64. Its frames therefore sit
- * nearer the exact values than upstream's own; the difference to upstream's frames is measured in
- * `embeddinggemma2_audio_input_test.ts` (not copied: copying numpy's f32 rounding would fake a match —
- * the rule of `src/audio/fft.ts`).
+ * **Precision.** Upstream (numpy 2) multiplies f32 samples by its f32 window — an f32 array times
+ * an f32 array, so each product is rounded to f32 — transforms that in f32 (`complex64`) and takes
+ * the mel product and the logarithm in f64. The product is part of upstream's defined arithmetic,
+ * and this front end reproduces it exactly: `Math.fround(sample · window)` is the one correctly
+ * rounded f32 product (the f64 product of two f32 values is exact, and rounding it once to f32 is
+ * IEEE's f32 multiply), so the frames enter the FFT as upstream's own. The FFT, the magnitude, the
+ * mel product and the logarithm run in f64 and the result is rounded to f32 once. That step is not
+ * copied (numpy's complex64 butterflies are its implementation, not a definition — the rule of
+ * `src/audio/fft.ts`), and it is all that is left between the two: at most one ulp of a frame
+ * value on the fixture's waveforms (`embeddinggemma2_audio_input_test.ts`). Left in f64, the
+ * product alone moved the frames by up to 5.12e-4 in near-silent mel bins, where `ln(mel + 0.001)`
+ * magnifies an energy error.
  *
  * ## The tower's input (the io contract of the recipe, `export_audio.py`)
  *
@@ -259,7 +265,9 @@ export class AudioFrontEnd {
           `${OWNER}: internal inconsistency: frame ${frame} reads sample ${at} of ${samples.length}`,
         );
       }
-      this.#frame[offset] = sample * this.#window[offset];
+      // MUST: rounded to f32 — upstream's product is an f32 array times an f32 array (precision,
+      // module doc).
+      this.#frame[offset] = Math.fround(sample * this.#window[offset]);
     }
     this.#fft.powerSpectrum(this.#frame, this.#power);
     for (let bin = 0; bin < FFT_BINS; bin += 1) this.#magnitude[bin] = Math.sqrt(this.#power[bin]);

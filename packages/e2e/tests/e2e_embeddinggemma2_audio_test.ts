@@ -51,36 +51,58 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 
+/** How one golden waveform is held to upstream's soft tokens (both series — module doc). */
+type AudioCheck = {
+  /** Its soft-token count n. */
+  readonly tokens: number;
+  /** The allclose of the whole `[1, n, 512]` output against the golden. */
+  readonly tolerance: Tolerance;
+  /** The floor of the cosine of every soft token (one `[512]` row) to the golden's. */
+  readonly minTokenCosine: number;
+};
+
 /**
- * The tolerance of the tower's soft tokens against upstream's (both series — their weights hold
- * the same values, so they have the same goldens; on this machine the two series' outputs are
- * bit-identical).
+ * The checks of each golden waveform (both series — their weights hold the same values, so they
+ * have the same goldens; on this machine the two series' outputs are bit-identical).
  *
  * Measured on node-nvidia-geforce-rtx-3080-ti (2026-11-22, plain comparison, `[1, n, 512]` soft
- * tokens whose values reach 5.5 to 6.1). The torch columns place the GPU's error: the same graph in
- * torch f64 on the same frames (upstream's f32 casts lifted; it equals upstream's tower in f64 to
- * 1.3e-12) is the reference the f32 runs scatter around.
+ * tokens whose values reach 5.5 to 6.1; the min token cosine 2026-11-23). The torch columns place
+ * the GPU's error: the same graph in torch f64 on the same frames (upstream's f32 casts lifted; it
+ * equals upstream's tower in f64 to 1.3e-12) is the reference the f32 runs scatter around. "Min
+ * token cosine" is the lowest cosine of one soft token to the golden's, `1 − cosine` shown:
  *
- * | Waveform | n   | GPU vs golden | GPU vs torch f64 | torch f32 vs f64 | golden vs f64 |
- * | -------- | --- | ------------- | ---------------- | ---------------- | ------------- |
- * | sweep    | 25  | 1.41e-5       | 7.14e-6          | 5.89e-6          | 2.12e-5       |
- * | noise    | 63  | 5.82e-4       | 3.54e-4          | 1.76e-4          | 2.27e-4       |
- * | click    | 25  | 1.55e-5       | 1.35e-5          | 5.35e-6          | 5.92e-6       |
- * | edge     | 26  | 8.12e-5       | 1.32e-4          | 3.04e-5          | 5.04e-5       |
- * | tones    | 250 | 1.33e-4       | 2.35e-4          | 3.36e-4          | 2.35e-4       |
- * | long     | 750 | 2.00e-4       | 4.98e-4          | 2.56e-4          | 3.01e-4       |
+ * | Waveform | n   | GPU vs golden | GPU vs torch f64 | torch f32 vs f64 | golden vs f64 | Min token cosine, GPU vs golden |
+ * | -------- | --- | ------------- | ---------------- | ---------------- | ------------- | ------------------------------- |
+ * | sweep    | 25  | 1.41e-5       | 7.14e-6          | 5.89e-6          | 2.12e-5       | 1 − 3.66e-12                    |
+ * | noise    | 63  | 5.82e-4       | 3.54e-4          | 1.76e-4          | 2.27e-4       | 1 − 6.96e-9                     |
+ * | click    | 25  | 1.55e-5       | 1.35e-5          | 5.35e-6          | 5.92e-6       | 1 − 5.28e-12                    |
+ * | edge     | 26  | 8.12e-5       | 1.32e-4          | 3.04e-5          | 5.04e-5       | 1 − 1.49e-10                    |
+ * | tones    | 250 | 1.33e-4       | 2.35e-4          | 3.36e-4          | 2.35e-4       | 1 − 3.14e-10                    |
+ * | long     | 750 | 2.00e-4       | 4.98e-4          | 2.56e-4          | 3.01e-4       | 1 − 6.37e-10                    |
  *
  * The tower is sensitive in f32 (12 conformer layers whose activations reach about 50 before the
  * projector): torch's own f32 run is up to 3.4e-4 from f64, and upstream's golden up to 3.0e-4. The
  * GPU is up to 5.0e-4 from f64 — the same order, another summation order; against the golden it is
- * furthest on `noise` (5.8e-4), where the two scatter to opposite sides. atol 2e-3 is 3.4 times the
- * worst measured; the cosine of every output to its golden is above 0.99999999984. The breakages
- * this guards against are far above it: the frame mask dropped moves `edge`'s last token by 4.2 (L
- * ≡ 2 mod 4 — the recipe checks it), a window of 13 keys instead of 12 moves the soft tokens by
- * about 0.4 (random frames in torch, measured before the recipe was written). rtol 0: the values
- * are of one scale, atol alone decides.
+ * furthest on `noise` (5.8e-4), where the two scatter to opposite sides. Each waveform is held at
+ * about three times its own measured error, both for the whole output (atol) and for its worst
+ * soft token (`1 − cosine`), so a regression that keeps every value under the worst waveform's
+ * error still fails on the others; one bound sized to `noise` would leave `sweep` and `click` about
+ * 40 times headroom. The breakages this guards against are far above it: the frame mask dropped
+ * moves `edge`'s last token by 4.2 (L ≡ 2 mod 4 — the recipe checks it), a window of 13 keys
+ * instead of 12 moves the soft tokens by about 0.4 (random frames in torch, measured before the
+ * recipe was written), and even one extra key unmasked at the first token of the first layer
+ * alone moves `sweep` by 3.6e-4 and `tones` by 5.6e-3 (8 and 14 times their bounds; one atol of
+ * 2e-3 for all six let it pass — the recipe's tiny tower pins the window's keys across chunk
+ * boundaries). rtol 0: the values are of one scale, atol alone decides.
  */
-const AUDIO_TOLERANCE: Tolerance = { atol: 2e-3, rtol: 0 };
+const AUDIO_CHECKS: Readonly<Record<string, AudioCheck>> = {
+  click: { tokens: 25, tolerance: { atol: 4.6e-5, rtol: 0 }, minTokenCosine: 1 - 1.6e-11 },
+  edge: { tokens: 26, tolerance: { atol: 2.4e-4, rtol: 0 }, minTokenCosine: 1 - 4.5e-10 },
+  long: { tokens: 750, tolerance: { atol: 6e-4, rtol: 0 }, minTokenCosine: 1 - 1.9e-9 },
+  noise: { tokens: 63, tolerance: { atol: 1.75e-3, rtol: 0 }, minTokenCosine: 1 - 2.1e-8 },
+  sweep: { tokens: 25, tolerance: { atol: 4.2e-5, rtol: 0 }, minTokenCosine: 1 - 1.1e-11 },
+  tones: { tokens: 250, tolerance: { atol: 4e-4, rtol: 0 }, minTokenCosine: 1 - 9.4e-10 },
+};
 
 /** The generate command a SKIP prints (the same spelling as tools/export-recipes/embeddinggemma2/README.md). */
 const GENERATE_COMMAND =
@@ -90,7 +112,6 @@ const GENERATE_COMMAND =
 type SeriesSpec = {
   /** The directory under `outputs/series/` (also the prefix of its sha256 row IDs). */
   readonly name: string;
-  readonly tolerance: Tolerance;
   /** The command that writes it. */
   readonly generate: string;
   /** What the series holds, for the SKIP message. */
@@ -100,13 +121,11 @@ type SeriesSpec = {
 const SERIES: readonly SeriesSpec[] = [
   {
     name: "embeddinggemma-2-audio",
-    tolerance: AUDIO_TOLERANCE,
     generate: GENERATE_COMMAND,
     weights: "f32 weights of about 1.1 GiB",
   },
   {
     name: "embeddinggemma-2-audio-bf16",
-    tolerance: AUDIO_TOLERANCE,
     generate: `${GENERATE_COMMAND} --dtype bf16`,
     weights: "bf16 weights of about 560 MiB",
   },
@@ -121,20 +140,13 @@ const SYMBOL = "n";
 const FRAMES_PER_TOKEN = 4;
 
 /**
- * The cases that should have been generated, with their soft-token count n. Pinned here rather than
- * taken from the listing, so a partial generation fails instead of losing tests silently; the source
- * of truth is `WAVEFORMS` of `tools/export-recipes/embeddinggemma2/waveforms.py`. 750 is the most
- * upstream's front end gives (its 30 s truncation).
+ * The cases that should have been generated are the keys of {@link AUDIO_CHECKS}, each with its
+ * soft-token count n. Pinned here rather than taken from the listing, so a partial generation fails
+ * instead of losing tests silently; the source of truth is `WAVEFORMS` of
+ * `tools/export-recipes/embeddinggemma2/waveforms.py`. 750 is the most upstream's front end gives
+ * (its 30 s truncation).
  */
-const EXPECTED_TOKENS: Readonly<Record<string, number>> = {
-  click: 25,
-  edge: 26,
-  long: 750,
-  noise: 63,
-  sweep: 25,
-  tones: 250,
-};
-const EXPECTED_CASES = Object.keys(EXPECTED_TOKENS).sort();
+const EXPECTED_CASES = Object.keys(AUDIO_CHECKS).sort();
 
 /** The golden the capped-device case runs (the largest soft-token count). */
 const CAPPED_CASE = "long";
@@ -143,6 +155,28 @@ const CAPPED_BYTES = 128 * 2 ** 20;
 
 /** The runs after the first one each case times (warm: the plan and the pipelines exist). */
 const WARM_RUNS = 5;
+
+/** The lowest cosine of one soft token to the golden's (`[n, 512]` rows, in f64). */
+const minTokenCosine = (
+  output: Float32Array<ArrayBuffer>,
+  golden: Float32Array<ArrayBuffer>,
+  width: number,
+): number => {
+  assertEquals(output.length, golden.length, "token cosine of outputs of two sizes");
+  let lowest = 1;
+  for (let at = 0; at < output.length; at += width) {
+    let dot = 0;
+    let left = 0;
+    let right = 0;
+    for (let index = at; index < at + width; index += 1) {
+      dot += output[index] * golden[index];
+      left += output[index] * output[index];
+      right += golden[index] * golden[index];
+    }
+    lowest = Math.min(lowest, dot / Math.sqrt(left * right));
+  }
+  return lowest;
+};
 
 /**
  * Lists the asset directory. It falls back to empty only when the directory does not exist.
@@ -217,7 +251,7 @@ const openCase = async (root: URL, graphName: string, caseName: string): Promise
   ]);
   const parsed = prepareContainer(opened, graphName);
   const io = parseSafetensors(ioBytes);
-  const tokens = EXPECTED_TOKENS[caseName];
+  const { tokens } = AUDIO_CHECKS[caseName];
 
   // Every tensor of io matches the graph's inputs and outputs exactly.
   const expectedKeys = [
@@ -273,7 +307,8 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
         let settlement: ReferenceSettlement | undefined;
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const { parsed, io, inputs } = await openCase(root, graphName, caseName);
-          const tokens = EXPECTED_TOKENS[caseName];
+          const check = AUDIO_CHECKS[caseName];
+          const { tokens } = check;
           const gpu = await acquireGpu();
           try {
             assertAdapterMatchesEnvironment(gpu);
@@ -316,16 +351,26 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
               assertEquals(output.shape, [1, tokens, 512], `${where}: shape`);
               assertEquals(output.shape, view.shape, `${where}: the golden's shape`);
               assertEquals(output.dtype, declared, `${where}: dtype`);
-              const report = compareTensors(output, ioTensor(io, view, declared), spec.tolerance);
+              const golden = ioTensor(io, view, declared);
+              const report = compareTensors(output, golden, check.tolerance);
               measurements.push({
                 output: name,
                 maxAbs: report.maxAbsError,
                 maxRel: report.maxRelError,
-                tolerance: spec.tolerance,
+                tolerance: check.tolerance,
                 stage: "karume",
               });
+              assert(output.dtype === "f32" && golden.dtype === "f32", `${where}: not f32`);
+              const tokenCosine = minTokenCosine(output.data, golden.data, 512);
+              console.log(
+                `[embeddinggemma2-audio] ${spec.name} ${caseName} maxAbs ${report.maxAbsError.toExponential(3)},` +
+                  ` min token cosine 1 - ${(1 - tokenCosine).toExponential(3)}`,
+              );
               assert(report.pass, `${where}: ${formatAllclose(report)}`);
-              assert(output.dtype === "f32", `${where}: the artifact's dtype is ${output.dtype}`);
+              assert(
+                tokenCosine >= check.minTokenCosine,
+                `${where}: a soft token's cosine to the golden's is ${tokenCosine}, under ${check.minTokenCosine}`,
+              );
               if (caseName === CAPPED_CASE) {
                 uncappedOutputs.set(spec.name, output.data);
               }

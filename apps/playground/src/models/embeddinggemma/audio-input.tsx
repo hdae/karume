@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ErrorAlert } from "@/components/error-alert";
 import { Field } from "@/components/field";
@@ -9,7 +9,11 @@ import { audioSummary, decodeAudioFile, type LoadedAudio } from "./audio";
 /**
  * An audio file field of a row: the browser decodes the file, resamples it to `sampleRate` and mixes
  * it to mono (`./audio.ts`); `onAudio` gets the result, which the page keeps (`audio`) so the summary
- * survives a re-render.
+ * survives a re-render, or `undefined` when the file does not decode (the row then holds no audio
+ * rather than the one before, which the error would otherwise sit beside). The file input is emptied
+ * whenever the row comes to hold no audio and after a failed decode, so the same file can be chosen
+ * again after "Remove audio" or a failure (choosing the file an input already holds fires no
+ * change).
  */
 export const AudioInput = ({
   id,
@@ -23,11 +27,18 @@ export const AudioInput = ({
   label?: string;
   sampleRate: number;
   audio: LoadedAudio | undefined;
-  onAudio: (audio: LoadedAudio) => void;
+  onAudio: (audio: LoadedAudio | undefined) => void;
   disabled?: boolean;
 }) => {
   const [error, setError] = useState<unknown>(undefined);
   const [decoding, setDecoding] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const emptyInput = (): void => {
+    if (input.current !== null) input.current.value = "";
+  };
+  useEffect(() => {
+    if (audio === undefined && input.current !== null) input.current.value = "";
+  }, [audio]);
   return (
     <div className="flex flex-col gap-3">
       <Field
@@ -42,6 +53,7 @@ export const AudioInput = ({
         }
       >
         <Input
+          ref={input}
           id={id}
           type="file"
           accept="audio/*,.wav"
@@ -59,6 +71,9 @@ export const AudioInput = ({
               (failure: unknown) => {
                 setDecoding(false);
                 setError(failure);
+                // The row may hold no audio already, so the effect above would not run again.
+                emptyInput();
+                onAudio(undefined);
               },
             );
           }}
