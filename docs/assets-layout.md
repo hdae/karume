@@ -199,10 +199,10 @@ An explicit `--source` takes top priority, and the actual source is printed at s
 Gemma 4 defaults to local as before; fetching from the public repository is requested with `--repo`.
 SBV2 names the distribution to use explicitly with `--source`.
 
-The experimental CLIs for additional LLMs are MiniCPM5 (`examples/minicpm5/README.md` (removed in 0.15)) /
-Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public distribution exists yet, so they read the converted
-series under `outputs/series/` and the official `tokenizer.json` under `inputs/` directly. They look for existing series in the order GPTQ i4 → i8 → RTN i4 → f16 → f32,
-and when there are several experiments of the same kind they ask for `--source`. They do no new fetching and no re-conversion.
+The experimental CLI for an additional LLM is Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public
+distribution exists yet, so it reads the converted series under `outputs/series/` and the official `tokenizer.json`
+under `inputs/` directly. It looks for existing series in the order GPTQ i4 → i8 → RTN i4 → f16 → f32, and when there
+are several experiments of the same kind it asks for `--source`. It does no new fetching and no re-conversion.
 
 ## Publishing (upload to HF)
 

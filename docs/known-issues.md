@@ -185,7 +185,7 @@ an unroll that is not 4, 238 of them 16-column variants, which never differ on t
 - **Impact**: what does not hold on Metal is the statement "this rewrite changed no word", not the output. The
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
   (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
-  seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
+  seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 lines.
   The grouped form of `expert_linear` (a run of 2 to 768 tokens over weight rows of 64 words or more) takes the
   words that its 4-word unrolled loop leaves with one loop per row for this reason: with every row's word in one
   loop body, the M2 rounded the rows after the first of a walk unlike the one-row form (55 of 72 cases at each of

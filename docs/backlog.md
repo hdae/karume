@@ -128,7 +128,7 @@ maintainer's ruling of 2026-11-06).
       `extend` gains 6 ranges and widens 2, `prepend` loses U+11A3A); `packages/models/tests/fixtures/anima-text/parity.json` and
       the distributed T5 table would change when regenerated. No check is red.
     - Not re-checked on 5.23.0 (assets absent here): the umT5, Wan and Qwen3.5 tokenizer fixtures, the MOSS stage-0
-      records, the real-weight exports of siglip2, birefnet, depth-anything, deberta, minicpm5, embeddinggemma and
+      records, the real-weight exports of siglip2, birefnet, depth-anything, deberta, embeddinggemma and
       sbv2, and the batch>1 EmbeddingGemma entry of known-issues (written for the 5.14 line).
     - Comments in `packages/models/src` still name transformers 5.14.1 as the source of truth (the T5 / umT5 /
       Qwen2 / Qwen3.5 tokenizers, the image preprocessing, the umT5 relative positions, Gemma 4 vision).
@@ -306,7 +306,7 @@ maintainer's ruling of 2026-11-06).
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
-  - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice),
+  - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, SBV2's front and voice),
     and whether the `:wbf16` GEMM kernels (M > 1) have their geometry per adapter: the geometry sweep's linear cases
     measure f16 storage only (`CaseWeight` in `packages/runtime/src/tune/cases.ts`); the GEMV side has bf16 rows.
 
@@ -349,7 +349,7 @@ maintainer's ruling of 2026-11-06).
        (decision 2).
     4. The checks of decision 4 (A, P, F, B, G, E): before a `KARUME_UPSTREAM_PARITY` file is retired it is mapped to its
        replacement (a file without one keeps its opt-in lane); patch fidelity for the recipes without a `--verify` mode
-       (deberta, embeddinggemma, gemma4, gemma4_qat, irodori, minicpm5, moss, qwen3_5 on 2026-11-09); deviation records per
+       (deberta, embeddinggemma, gemma4, gemma4_qat, irodori, moss, qwen3_5 on 2026-11-09); deviation records per
        family, starting from BiRefNet's post-processing (ADR 0125) and Gemma 4's vision masks (ADR 0144 decision 1).
   - **Records**: Wan2.2's untiled VAE distance (torch tiled against untiled on the same latents — an ADR 0121 addendum and
     ADR 0147 decision 10); the inventory of published presets with no recorded verification (the self A/B check, the
@@ -418,7 +418,7 @@ maintainer's ruling of 2026-11-06).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
   The acceptance of Qwen3 / MiniCPM5 / E4B / gemma4-qat and the adoption records of K-25 to K-44 are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Remaining = the cost study of sharing the gate/up input (perf-ledger K-50, whose step 0 measurement has not run); isolating the cause of the GPU Instance loss in Chrome;
-  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B and MiniCPM5; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
+  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
 - **Continued verification of the 9/11 review** (investigation 2026-09-10, [follow-up record](research/2026-09-10-codex-mtp-optimization.md)):
   Decide whether `artifacts.staged_publication` allows several writers to the same final, and if needed design locking and recovery from interruption.
   The follow-up tests of the GPU edge-channel protection on M2 / browsers and whole-model performance measurement remain.
@@ -463,7 +463,7 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
     0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
     [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
-    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `qwen3`
     and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
     `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
     `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
@@ -972,10 +972,6 @@ maintainer's ruling of 2026-11-06).
   internal but shared by every test tolerance, the e2e ones included — option A's per-op table is implemented.
   [research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §8.2).
 
-- **minicpm5's `export_decode` still bakes the RoPE table** (an asymmetry: only gemma4 moved to host supply, with ADR
-  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)).
-  Whether to align it with host supply is a separate ruling.
-
 - **Adjacent filings of the memory management wave** (source of truth = ADR [0089](decisions/0089-memory-limits-preflight.md)
   Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)):
   allocation in `GpuContext.createResident` still relies on errorScope (run-time transients fail before allocation in the planning-time
@@ -1009,7 +1005,7 @@ maintainer's ruling of 2026-11-06).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF** — its publication is held in
   parked "HF publication of karume-sbv2-fn".
-  The Code license of the code-dependency block is still Unverified in the deberta, minicpm5 and embeddinggemma ledgers
+  The Code license of the code-dependency block is still Unverified in the deberta and embeddinggemma ledgers
   (deberta's Attribution too).
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
   ([container-v1](container-v1.md) §2.3). The recipes of anima and irodori (main and dacvae), and

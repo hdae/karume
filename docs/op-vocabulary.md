@@ -98,7 +98,7 @@ either). It will be resolved from M1-P2 on, when the per-op assignment is fixed 
   **per-target opt-in** through `curated_decompositions(preserved=…)`
   (`PRESERVED_OP_PREFIXES_WITH_ATTENTION` — first Anima's transformer / vae_decoder and
   EmbeddingGemma; the current users are the recipes under `tools/export-recipes/` that pass it, the
-  Gemma 4, MiniCPM5 and Wan recipes among them).
+  Gemma 4 and Wan recipes among them).
   The exporter stops the decomposition — the judgement is that one fused kernel is faster than the
   several dispatches after decomposition, and this asymmetry is the correct state. The prototype's
   attention / rms_norm / silu being absent from Core ATen 160 has the same root. The
