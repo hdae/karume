@@ -1,8 +1,8 @@
 /**
- * The command: what it refuses on the command line (exit 2), that a dry run writes nothing, and a
- * new adapter's first table written from hand-built sweep records. Each case runs on a temporary
- * repository holding copies of the two registration files and the records, so no test writes into
- * packages/runtime/src. The formatter is the real one. No GPU.
+ * The command: what it refuses on the command line (exit 2), that a dry run writes nothing, a new
+ * adapter's first table written from hand-built sweep records, and a shared table of two adapters.
+ * Each case runs on a temporary repository holding copies of the two registration files and the
+ * records, so no test writes into packages/runtime/src. The formatter is the real one. No GPU.
  */
 
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,6 +24,7 @@ import {
   CONV2D_FIELDS_GEOMETRY,
   fieldsSweepRecord,
   FORM_GEOMETRY,
+  OTHER_ADAPTER,
   sweepRecord,
   workbenchRecord,
 } from "./helpers/records.ts";
@@ -236,5 +237,118 @@ describe("a table that adopts a skeleton form and conv2d's counter decode (perf-
     );
     // … and the written table stands for the kernels it runs on its adapter
     assertEquals(geometryProfileMismatch(expected, ADAPTER), undefined);
+  });
+});
+
+describe("a shared table (--shared)", () => {
+  const RECORD_OTHER = "outputs/workbench/browser-other-gpu/geometry-sweep_c.json";
+
+  beforeEach(() => {
+    write(
+      RECORD_OTHER,
+      bytesOf(
+        workbenchRecord("geometry-sweep", sweepRecord("2026-11-16T03:00:00Z", 1.4, OTHER_ADAPTER)),
+      ),
+    );
+  });
+
+  it("refuses --shared beside a description, attention-bench or GEMV records and --gemv-plan, and without records", async () => {
+    for (const extra of [
+      [...MATCH, "--description=Test GPU"],
+      [...MATCH, `--attention-bench=${RECORD_B}`],
+      [...MATCH, `--gemv-records=${RECORD_B}`],
+      ["--gemv-plan"],
+    ]) {
+      stderr = [];
+      const code = await main(
+        ["test-shared", "--shared", `--records=${RECORD_A},${RECORD_OTHER}`, ...extra],
+        environment(),
+      );
+      assertEquals(code, 2, extra.join(" "));
+      assertEquals(
+        stderr[0]?.startsWith("--shared derives the tile geometry of a table matched by vendor"),
+        true,
+        stderr[0],
+      );
+    }
+    stderr = [];
+    assertEquals(await main(["test-shared", "--shared", ...MATCH], environment()), 2);
+    assertEquals(
+      await main(
+        ["test-shared", "--shared", `--records=${RECORD_A}`, `--vendor=${ADAPTER.vendor}`],
+        environment(),
+      ),
+      2,
+    );
+  });
+
+  it("exits 1 with the derivation's message for the records of one adapter", async () => {
+    const code = await main(
+      ["test-shared", "--shared", `--records=${RECORD_A},${RECORD_B}`, ...MATCH],
+      environment(),
+    );
+    assertEquals(code, 1);
+    assertEquals(
+      stderr[0]?.startsWith("A shared derivation needs the records of at least two adapters"),
+      true,
+      stderr[0],
+    );
+  });
+
+  it("is written from the records of two adapters: the header names the devices, says the table is matched without a description and lists the records per device, and the module exports the derived table", async () => {
+    const code = await main(
+      ["test-shared", "--shared", `--records=${RECORD_A},${RECORD_OTHER}`, ...MATCH],
+      environment(),
+    );
+    assertEquals(code, 0, stderr.join("\n"));
+    const path = `${PROFILES_DIRECTORY}/test-shared.ts`;
+    const text = readFileSync(join(root, path), "utf8");
+    const lines = text.split("\n");
+    for (const expected of [
+      " * A static table of tile geometries for the adapter match: vendor testvendor, architecture testarch.",
+      " * A shared table: derived from the sweep records of 2 devices of that vendor and architecture,",
+      " * Test GPU (device 0x1234) and Other GPU (device 0x1234).",
+      " * It is matched without a description, so it predicts the geometries for every adapter of that",
+      " * table with `node tools/geometry-profiles/generate.ts test-shared --shared --records=<path>,<path>[,…]`.",
+      " * Records of Test GPU (device 0x1234):",
+      ` * - ${RECORD_A} (sha256 ${loadRecord(readFileSync(join(root, RECORD_A)), RECORD_A, "records").sha256}, 2026-11-16T01:00:00Z)`,
+      " * Records of Other GPU (device 0x1234):",
+      " * Adoption (shared): a geometry replaces the default of a field only when, on every device, on",
+    ]) {
+      assertEquals(lines.includes(expected), true, `${expected}\n${text.slice(0, 3000)}`);
+    }
+    assertEquals(
+      lines.some((line) =>
+        line.startsWith(
+          " * - gemmRows > 512 (linear / matmul / bmm row count > 512; Test GPU 1 cases, Other GPU 1 cases): adopted reg64x32r4x4w8 ×1.296 over the devices (Test GPU ×1.200 (×1.200–×1.200), Other GPU ×1.400 (×1.400–×1.400))",
+        ),
+      ),
+      true,
+      text,
+    );
+    const records = [RECORD_A, RECORD_OTHER].map((record) =>
+      loadRecord(readFileSync(join(root, record)), record, "records"),
+    );
+    const expected = deriveGeometryProfile(records, {
+      id: "test-shared",
+      vendor: ADAPTER.vendor,
+      architecture: ADAPTER.architecture,
+      minSpeedup: 1.05,
+      shared: true,
+    }).profile;
+    const module: unknown = await import(pathToFileURL(join(root, path)).href);
+    assert(typeof module === "object" && module !== null && "TEST_SHARED" in module);
+    assertEquals(module.TEST_SHARED, expected);
+    assertEquals(expected.match, { vendor: ADAPTER.vendor, architecture: ADAPTER.architecture });
+    assertEquals(expected.provenance?.adapters, [ADAPTER, OTHER_ADAPTER]);
+    assertEquals(
+      text.slice(text.indexOf("import type {")),
+      formatTypeScript(profileModule(expected), path),
+    );
+    // A shared table predicts for an adapter of its vendor and architecture it was not measured on
+    assertEquals(
+      geometryProfileMismatch(expected, { ...ADAPTER, device: "", description: "" }),
+      undefined,
+    );
   });
 });

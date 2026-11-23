@@ -2,8 +2,10 @@
  * The header comment of a generated table: what the table is, which op families (and whether the
  * GEMV choices of linear) this generation derived and from which records (and how each record was
  * made), which it carried over from the registered table and from which commit, and the adoption
- * rules with the derivations' verdict lines. Pure over the derivation's inputs and outputs: no
- * date, machine name or absolute path enters it, so the same inputs give the same bytes.
+ * rules with the derivations' verdict lines. A shared table's header also says which devices it
+ * predicts from and that it is matched without a description, and lists the records per device.
+ * Pure over the derivation's inputs and outputs: no date, machine name or absolute path enters it,
+ * so the same inputs give the same bytes.
  */
 
 import type { GeometryProfile } from "@karume/runtime";
@@ -113,6 +115,23 @@ const madeOf = (record: LoadedRecord): string => {
   return `workbench; ${where}; ${backend}; ${timing}; ${checkout}`;
 };
 
+/** An adapter as a shared table's header names it: its description and its device id. */
+const deviceOf = (adapter: unknown): string => {
+  const description = field(adapter, "description");
+  const device = field(adapter, "device");
+  return `${typeof description === "string" && description !== "" ? description : "no description"} (device ${typeof device === "string" && device !== "" ? device : "not reported"})`;
+};
+
+/** `a`, `a and b`, `a, b and c`. */
+const listOf = (items: readonly string[]): string =>
+  items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+
+/** The four fields of an adapter, for telling a record's adapter apart. */
+const adapterKey = (adapter: unknown): string =>
+  JSON.stringify(
+    ["vendor", "architecture", "device", "description"].map((name) => field(adapter, name)),
+  );
+
 const recordLines = (record: LoadedRecord): string[] => {
   const date = field(record.report, "date");
   return [
@@ -131,6 +150,22 @@ const matchOf = (match: GeometryProfile["match"]): string =>
       ].join(", ");
 
 const ratio = (value: number): string => `×${value.toFixed(3)}`;
+
+/**
+ * The sweep records of a shared table grouped by device, in the order of the table's adapters
+ * (`provenance.adapters`): a heading per device, then its records.
+ */
+const sharedRecordLines = (
+  adapters: readonly unknown[],
+  records: readonly LoadedRecord[],
+): string[] =>
+  adapters.flatMap((adapter, index) => [
+    ...(index === 0 ? [] : [""]),
+    `Records of ${deviceOf(adapter)}:`,
+    ...records
+      .filter((record) => adapterKey(field(record.report, "adapter")) === adapterKey(adapter))
+      .flatMap(recordLines),
+  ]);
 
 /**
  * The op families this generation derived: a derived family's provenance entry cites the records
@@ -159,6 +194,7 @@ const GEMV = "the GEMV choices of linear (GEMV sweep records)";
 export const profileHeader = (input: HeaderInput): string => {
   const { profile, records, attentionBench, base, minSpeedup, gemv } = input;
   const { derived, carried } = derivedFamilies(profile, records);
+  const adapters = profile.provenance?.adapters;
   const benchGiven = attentionBench.length > 0;
   const benchCarried = !benchGiven && profile.provenance?.attentionBench !== undefined;
   const gemvCarried = gemv === undefined && profile.linearGemv !== undefined;
@@ -176,9 +212,20 @@ export const profileHeader = (input: HeaderInput): string => {
     `Geometry profile \`${profile.id}\` (**generated — do not edit by hand**).`,
     "",
     `A static table of tile geometries for the adapter match: ${matchOf(profile.match)}.`,
+    ...(adapters === undefined
+      ? []
+      : [
+          `A shared table: derived from the sweep records of ${adapters.length} devices of that vendor and architecture,`,
+          `${listOf(adapters.map(deviceOf))}.`,
+          "It is matched without a description, so it predicts the geometries for every adapter of that",
+          "vendor and architecture no table names by its description (Chrome without its",
+          "developer-features flag reports none).",
+        ]),
     "The runtime only selects the table by the adapter's match; nothing is measured at run time.",
     "To change a value, take a sweep with the workbench's `geometry-sweep` entry and regenerate the",
-    `table with \`node tools/geometry-profiles/generate.ts ${profile.id} --records=<path>[,<path>…]\`.`,
+    adapters === undefined
+      ? `table with \`node tools/geometry-profiles/generate.ts ${profile.id} --records=<path>[,<path>…]\`.`
+      : `table with \`node tools/geometry-profiles/generate.ts ${profile.id} --shared --records=<path>,<path>[,…]\`.`,
     ...(gemv === undefined && profile.linearGemv === undefined
       ? []
       : [
@@ -188,7 +235,9 @@ export const profileHeader = (input: HeaderInput): string => {
     "",
     `Derived in this generation: ${derivedNames.length === 0 ? "none" : derivedNames.join(", ")}.`,
     "",
-    ...[...records, ...attentionBench, ...(gemv?.records ?? [])].flatMap(recordLines),
+    ...(adapters === undefined
+      ? [...records, ...attentionBench, ...(gemv?.records ?? [])].flatMap(recordLines)
+      : sharedRecordLines(adapters, records)),
     ...(base === undefined
       ? []
       : [
@@ -198,7 +247,22 @@ export const profileHeader = (input: HeaderInput): string => {
           }.`,
           `Their adoption lines are in \`git show ${base.commit}:${base.path}\`.`,
         ]),
-    ...(records.length === 0
+    ...(records.length === 0 || adapters === undefined
+      ? []
+      : [
+          "",
+          "Adoption (shared): a geometry replaces the default of a field only when, on every device, on",
+          "every case of the field that device's records hold, its output is identical to the default",
+          `geometry's and it is at least ${ratio(minSpeedup)} faster than the default on that device; among those,`,
+          "the one with the largest geometric mean over the devices of each device's geometric mean is",
+          "taken, else the default stays. A field some device has no case of keeps the default. No timing",
+          "of one device is compared with another's.",
+          "Within one device, a case whose default re-measurement ratio lies outside 0.9–1.1 (or whose",
+          "re-measurement failed or is missing) is dropped from that record's ratios, as is an observation",
+          "whose timestamp rounding could move its ratio by more than 1%; output mismatches and failures",
+          "still count.",
+        ]),
+    ...(records.length === 0 || adapters !== undefined
       ? []
       : [
           "",

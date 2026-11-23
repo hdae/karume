@@ -66,6 +66,7 @@ const recordOf = (
   date: string,
   rows: readonly GeometrySweepRow[],
   families: readonly ("gemm" | "conv2d")[],
+  adapter: Readonly<Record<string, string>> = ADAPTER,
 ): Record<string, unknown> => {
   const keys = (ids: ReturnType<typeof sweepCaseSetIds>): Record<string, string> =>
     Object.fromEntries(
@@ -85,7 +86,7 @@ const recordOf = (
     defaultKernels: keys(sweepDefaultKernelsIds()),
     candidateKernels: sweepCandidateKernelsId(rows, true),
     userAgent: CHROME,
-    adapter: ADAPTER,
+    adapter,
     gpuTiming: { feature: true, unit: "ns", quantized: false },
     dp4a: true,
     settings: {
@@ -105,8 +106,15 @@ const recordOf = (
   };
 };
 
-/** One sweep record; `date` tells two records apart (their bytes, and so their sha256, differ). */
-export const sweepRecord = (date: string, speedup = 1.2): Record<string, unknown> =>
+/**
+ * One sweep record; `date` tells two records apart (their bytes, and so their sha256, differ), and
+ * `adapter` is the adapter it names (default {@link ADAPTER}).
+ */
+export const sweepRecord = (
+  date: string,
+  speedup = 1.2,
+  adapter: Readonly<Record<string, string>> = ADAPTER,
+): Record<string, unknown> =>
   recordOf(
     date,
     [
@@ -114,7 +122,11 @@ export const sweepRecord = (date: string, speedup = 1.2): Record<string, unknown
       row("reg64x32r4x4w8", FAST_GEOMETRY, false, speedup),
     ],
     ["gemm"],
+    adapter,
   );
+
+/** A second adapter of {@link ADAPTER}'s vendor and architecture (another model). */
+export const OTHER_ADAPTER = { ...ADAPTER, description: "Other GPU" } as const;
 
 /** The geometries the record of {@link fieldsSweepRecord} makes faster. */
 export const FORM_GEOMETRY = { ...DEFAULT_GEOMETRY, form: "tb-un" } as const;

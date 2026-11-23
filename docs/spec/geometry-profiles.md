@@ -36,6 +36,9 @@ time.
   base, a covered family is derived from every case of its current case set, so a sweep of only some of a family's
   ops is refused.
 - A new adapter's first table has no base and needs its adapter match on the command line.
+- A shared table is derived only when the command asks for one (`--shared`, [below](#shared-tables)). Without it the
+  records must agree on all four adapter fields (vendor, architecture, device, description): records of two devices
+  are refused, whatever the match.
 - The GEMV choices of linear come from GEMV sweep records ([below](#deriving-the-gemv-choices)), given next to the
   sweep records or alone for a registered table. Without them, a base table's `linearGemv` is carried as it is,
   also through a regeneration that derives only the tile geometry.
@@ -94,6 +97,9 @@ time.
   they are among the things derived, their records are listed with the others, their rule follows the tile
   geometry's (which is left out when no sweep record was given) and their decisions follow the verdict lines; when
   they were carried, they are among the things carried over.
+- A shared table's header also says from which devices it predicts (each by its description and device id) and that it
+  is matched without a description, lists the records under the device each is of, states the shared rule, and its
+  verdict lines give each device's ratios ([below](#shared-tables)).
 - Every registered table's header is the generator's. The tile geometry of `apple-metal-3` was written by a tool
   that no longer exists; its header names the commit whose file holds that tool's adoption lines.
 
@@ -102,7 +108,8 @@ time.
 A shared table is one table derived from the sweep records of two or more devices of one vendor and architecture and
 matched without a description: the predicted table of [the three levels](#the-three-levels).
 
-- **Asked for explicitly**: `deriveGeometryProfile` with `shared: true`. It needs a vendor and an architecture, takes no description and no injection-only target, and needs the records of at least
+- **Asked for explicitly**: `deriveGeometryProfile` with `shared: true`, the generator with `--shared`. It needs a
+  vendor and an architecture, takes no description and no injection-only target, and needs the records of at least
   two adapters distinct by the four fields; every record must be of that vendor and architecture. Anything else is
   refused, naming what. Without the option nothing of this applies: records whose four fields differ are refused
   ([above](#where-a-table-comes-from)).
@@ -119,9 +126,9 @@ matched without a description: the predicted table of [the three levels](#the-th
   none eligible the field keeps the default. A field some device has no case of keeps the default, and the verdict
   names that device.
 - **Tile geometries only.** A shared table carries no `attentionOnline` and no `linearGemv`: attention-bench
-  records are refused beside it (`deriveLinearGemvChoices` and `planGemvMeasurements` refuse a shared table),
-  so a Session on its adapters runs the default profile's GEMV choices and the key-axis form the attention's `N`
-  gives.
+  records, GEMV sweep records and `--gemv-plan` are refused beside it (`deriveLinearGemvChoices` and
+  `planGemvMeasurements` refuse a shared table), so a Session on its adapters runs the default profile's GEMV
+  choices and the key-axis form the attention's `N` gives.
 - **Provenance**: `provenance.adapters`, each device's four fields in the order its first record was given, in place
   of `provenance.adapter`. A family's entry cites every record with a row of it, of every device.
   `geometryProfileMismatch` compares the vendor and the architecture of each of the table's adapters with the
@@ -438,6 +445,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
 [--gemv-records=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>]
 [--dry-run]`
 
+`node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
+[--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]`
+
 `node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-records=<path>[,…]] [--dry-run]`
 
 - A registered id uses its table as base and its table's match; giving a match is an error. An id that is not
@@ -445,6 +455,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
 - At least one of `--records` and `--gemv-records` is given. With `--gemv-records` alone, a registered table keeps its
   tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`. `--min-speedup` is the tile
   geometry's threshold only.
+- `--shared` derives a shared table ([above](#shared-tables)): a first one needs `--vendor` and `--architecture`, a
+  registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records` and
+  `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.
 - `--gemv-plan` derives nothing: it prints what the GEMV records lack ([above](#planning-the-gemv-measurements)) and
   writes its batch (with `--dry-run`, prints it); `--records`, `--attention-bench`, a match and `--min-speedup` beside
   it are usage errors. A registered id's table checks the records' adapter as the derivation does.
@@ -472,7 +485,8 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   device has no case of keeps the default and names the device; the provenance's adapters and the family entries;
   the refusals (one adapter, a description, no architecture, an injection-only target, attention-bench records) and
   the measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
-  and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table.
+  and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table; the
+  generator's `--shared` refusals and a shared table written, its header and the module it exports.
 - The skeleton form and the counter decode as candidates (core lane): what each case measures in each set, that no
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter

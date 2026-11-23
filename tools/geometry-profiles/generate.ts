@@ -5,6 +5,8 @@
  *   node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]]
  *     [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]]
  *     [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
+ *   node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
+ *     [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
  *   node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-records=<path>[,…]]
  *     [--dry-run]
  *
@@ -16,6 +18,11 @@
  * format. GEMV sweep records (`--gemv-records`) derive the table's GEMV choices of linear
  * (`linearGemv`, with `deriveLinearGemvChoices`) onto the table; without them a base's field is
  * carried. A registered table can take GEMV sweep records alone; a first table needs `--records`.
+ *
+ * `--shared` derives a shared table: from the sweep records of two or more adapters of one vendor
+ * and architecture, matched without a description (`deriveGeometryProfile`'s `shared`). It carries
+ * tile geometries only, so attention-bench and GEMV records and `--gemv-plan` are usage errors
+ * beside it, and so is `--description`.
  *
  * `--gemv-plan` derives nothing: it writes the workbench batch `inputs/workbench/batches/
  * gemv-plan-<profile id>.json` that measures, twice, what the GEMV sweep records at hand lack for the
@@ -69,6 +76,8 @@ const USAGE =
   "usage: node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] " +
   "[--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] " +
   "[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]\n" +
+  "       node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] " +
+  "[--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]\n" +
   "       node tools/geometry-profiles/generate.ts <profile id> --gemv-plan " +
   "[--gemv-records=<path>[,<path>…]] [--dry-run]";
 
@@ -91,6 +100,8 @@ export type Request = {
   readonly dryRun: boolean;
   /** Write the batch of what the GEMV records lack instead of deriving (`--gemv-plan`). */
   readonly gemvPlan: boolean;
+  /** Derive a shared table from the records of several adapters (`--shared`). */
+  readonly shared: boolean;
 };
 
 const VALUE_OPTIONS = [
@@ -116,9 +127,14 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
   const positional: string[] = [];
   let dryRun = false;
   let gemvPlan = false;
+  let shared = false;
   for (const argument of argv) {
     if (argument === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (argument === "--shared") {
+      shared = true;
       continue;
     }
     if (argument === "--gemv-plan") {
@@ -146,6 +162,24 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
   }
   const records = pathList(values.get("records"));
   const gemvRecords = pathList(values.get("gemv-records"));
+  if (shared) {
+    // A shared table carries tile geometries only and is matched without a description
+    const refused = [
+      ...(gemvPlan ? ["--gemv-plan"] : []),
+      ...(["attention-bench", "gemv-records", "description"] as const)
+        .filter((option) => values.has(option))
+        .map((option) => `--${option}`),
+    ];
+    if (refused.length > 0) {
+      throw new UsageError(
+        `--shared derives the tile geometry of a table matched by vendor and architecture only (drop ${refused.join(", ")})`,
+      );
+    }
+    if (records.length === 0) throw new UsageError("--shared needs --records");
+    if (values.has("vendor") && !values.has("architecture")) {
+      throw new UsageError("--shared needs --architecture with --vendor");
+    }
+  }
   if (gemvPlan) {
     const derivationOnly = VALUE_OPTIONS.filter(
       (option) => option !== "gemv-records" && values.has(option),
@@ -186,6 +220,7 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
     minSpeedup,
     dryRun,
     gemvPlan,
+    shared,
   };
 };
 
@@ -214,6 +249,8 @@ export const deriveTable = (input: {
   readonly records: readonly LoadedRecord[];
   readonly attentionBench: readonly LoadedRecord[];
   readonly base?: GeometryProfile;
+  /** A shared table of several adapters (`--shared`). */
+  readonly shared?: boolean;
 }): GeometryProfileDerivation =>
   deriveGeometryProfile(
     input.records.map(({ report, path, sha256 }) => ({ report, path, sha256 })),
@@ -231,6 +268,7 @@ export const deriveTable = (input: {
             })),
           }),
       ...(input.base === undefined ? {} : { base: input.base }),
+      ...(input.shared === true ? { shared: true } : {}),
     },
   );
 
@@ -396,6 +434,7 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
           records,
           attentionBench,
           ...(base === undefined ? {} : { base }),
+          ...(request.shared ? { shared: true } : {}),
         });
   const tiled = geometry?.profile ?? base;
   if (tiled === undefined) throw new Error("No table to derive the GEMV choices for");
