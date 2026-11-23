@@ -27,8 +27,11 @@ import {
   type GeometryProfile,
   type GeometryProfileAdapter,
 } from "../src/kernels/geometry-profile.ts";
+import { caseShape, SWEEP_CASES } from "../src/tune/cases.ts";
 import { infinityJson } from "../src/tune/derive.ts";
-import { gemmCandidate } from "../src/tune/geometries.ts";
+import { familyEntries } from "../src/tune/families.ts";
+import { gemmCandidate, quickConv2dCandidates } from "../src/tune/geometries.ts";
+import { casePlan } from "../src/tune/harness.ts";
 import {
   A,
   B,
@@ -37,6 +40,7 @@ import {
   familyDefaultRows,
   linearCase,
   report,
+  row,
 } from "./helpers/sweep-records.ts";
 import { benchRecord } from "./helpers/attention-bench-records.ts";
 
@@ -353,6 +357,42 @@ describe("deriveGeometryProfile with shared and a base", () => {
         ),
       Error,
       "The records of Apple M2 cover family conv2d only in part",
+    );
+  });
+
+  it("derives a family one device has no row of where the base holds the default for it, and refuses it where the base holds another geometry", () => {
+    // Every case of conv2d with the default and the first other quick candidate at ×1.2 (identical)
+    const fasterConv2d = familyEntries(SWEEP_CASES, "conv2d").flatMap((sweepCase) => {
+      const ref = { caseId: sweepCase.id, op: sweepCase.op, shape: caseShape(sweepCase) };
+      const { defaultCandidate } = casePlan(sweepCase, 65535, false);
+      const faster = quickConv2dCandidates().find(({ name }) => name !== defaultCandidate.name);
+      assert(faster !== undefined);
+      return [
+        row(ref, defaultCandidate, true),
+        row(ref, faster, false, { speedup: 1.2, identical: true }),
+      ];
+    });
+    const m2Gemm = input("m2-gemm-again.json", familyDefaultRows("gemm"), M2);
+    // The base's conv2d is the default: the M2's records without conv2d keep it so
+    const plain = deriveGeometryProfile([conv2d[0], m2Gemm], { ...SHARED, base: base() });
+    assertEquals(plain.profile.conv2d, base().conv2d);
+    assertStringIncludes(
+      linesOf(plain.verdicts, "conv2d.rows64")[0],
+      "no case of this class in the records of Apple M2",
+    );
+    // A base whose conv2d is adopted on both devices would silently lose it
+    const adopted = deriveGeometryProfile(
+      [
+        input("m5-conv2d-fast.json", fasterConv2d, M5),
+        input("m2-conv2d-fast.json", fasterConv2d, M2),
+      ],
+      SHARED,
+    ).profile;
+    assert(JSON.stringify(adopted.conv2d) !== JSON.stringify(base().conv2d));
+    assertThrows(
+      () => deriveGeometryProfile([conv2d[0], m2Gemm], { ...SHARED, base: adopted }),
+      Error,
+      "The records of Apple M2 have no row of family conv2d, and the base table 'apple-shared' holds other than the default there",
     );
   });
 });

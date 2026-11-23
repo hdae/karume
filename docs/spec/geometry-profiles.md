@@ -146,8 +146,10 @@ matched without a description: the predicted table of [the three levels](#the-th
   mismatch, and `parseGeometryProfileJson` and the injection check refuse it together with a provenance that has
   both forms.
 - **Regenerating**: a registered shared table is the base of a shared derivation only, onto records of the same
-  adapters (as a set); each device's records cover a family they have a row of completely. A measured table is not
-  the base of a shared derivation, nor a shared one of a measured derivation.
+  adapters (as a set); each device's records cover a family they have a row of completely. A family the records cover
+  but one device has no row of keeps the default, so it is derived only where the base holds the default for it too,
+  and refused where the base holds another geometry (it would silently go back to the default). A measured table is
+  not the base of a shared derivation, nor a shared one of a measured derivation.
 - **The verdict lines** give, per field, each device's number of cases; for an adopted geometry its geometric mean
   over the devices and each device's geometric mean, smallest and largest ratio; for every geometry not taken each
   device's ratios or the reason it is not eligible there.
@@ -497,6 +499,9 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   records the case is skipped and says which files are missing.
 - `apple-metal-3` has no such case: every record its tile geometry's provenance cites has a format the derivation no
   longer accepts.
+- On a machine that has the records: for `apple-m5` and `apple-metal-3-shared`, every record any of their families
+  cites, with the registered table as base (a shared derivation for the shared one), derives an object equal to the
+  registered table, provenance included.
 - The shared derivation on hand-built records (core lane): a geometry faster on one device and slower on another is
   not taken; among the geometries eligible on every device the largest geometric mean of the per-device geometric
   means is taken (devices weigh equally, not cases); one slow case on one device rules a geometry out; a field one

@@ -2627,8 +2627,9 @@ const withBaseFields = (
  *   again); a `base` carrying `attentionOnline` without the block or without its `kernels`, and a
  *   block with `kernels` on a `base` without `attentionOnline`, are refused.
  * - A shared derivation (`shared`) takes only a shared table whose adapters are the records'
- *   adapters (as a set), and needs every covered family complete in the records of every adapter;
- *   a measured derivation takes only a measured table.
+ *   adapters (as a set); each adapter's records cover a family they have a row of completely, and a
+ *   covered family one adapter has no row of (which keeps the default) is refused unless the base
+ *   holds the default for it. A measured derivation takes only a measured table.
  */
 const carryOver = (
   base: GeometryProfile,
@@ -2684,17 +2685,30 @@ const carryOver = (
   }
   const rows = sources.flatMap((source) => source.rows);
   const covered = familiesOf(rows);
-  // A shared table's class keeps the default where one device has no case of it, so each device's
-  // records must cover a covered family as completely as one adapter's must
+  // Each device's records cover a family they have a row of as completely as one adapter's must. A
+  // shared table's family that one device has no row of keeps the default (deriveSharedProfile), so
+  // it is derived only where the base holds the default for it too: elsewhere it would silently go
+  // back to the default
   const groups = shared
     ? devices.map((device) => ({
+        label: device.label,
         of: ` of ${device.label}`,
         rows: device.sources.flatMap((source) => source.rows),
       }))
-    : [{ of: "", rows }];
+    : [{ label: "", of: "", rows }];
   for (const group of groups) {
     const swept = new Set(group.rows.map((row) => row.caseId));
+    const own = familiesOf(group.rows);
     for (const family of covered) {
+      if (shared && !own.includes(family)) {
+        if (familyKernelsId(base, family) !== familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family)) {
+          throw new Error(
+            `The records of ${group.label} have no row of family ${family}, and the base table '${base.id}' holds other than the default there: a shared field takes a geometry only where every device measured it, ` +
+              "so the family would silently go back to the default — sweep it on that device too",
+          );
+        }
+        continue;
+      }
       const missing = familyEntries(SWEEP_CASES, family).filter(({ id }) => !swept.has(id));
       if (missing.length > 0) {
         throw new Error(
