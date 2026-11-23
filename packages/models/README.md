@@ -92,7 +92,7 @@ minified) until the package declares `"sideEffects": false`
 | `@karume/models/siglip2`           | image to embedding                                        |
 | `@karume/models/embeddinggemma`    | text, images and audio to sentence embedding (EmbeddingGemma 2) |
 | `@karume/models/umt5`              | text to encoder hidden states (umT5-XXL)                  |
-| `@karume/models/wan`               | text to video (Wan2.1 / Wan2.2), image to video (Wan2.2)  |
+| `@karume/models/wan`               | text to video and image to video (Wan2.2)                 |
 
 ## Requirements
 

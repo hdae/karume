@@ -594,7 +594,7 @@ The chunk graphs and their input shapes are the same at every length (one latent
 should not depend on the clip's length. In the 5-frame runs the executor reports a largest window mean of about 1.3 s for
 `vae_decoder_first` and 1.2–1.5 s for `vae_decoder_next`, with 660 and 720 windows over budget; at 9 frames it reports
 105 ms and 48 ms with 54 and 0 over budget. The int8 decoder on int8 activations (`i8-a8-attn8-online-conv8`) is not
-affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked: other sizes, Wan2.1, Chrome, other GPUs.
+affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked: other sizes, Chrome, other GPUs.
 
 - Impact: a 5-frame clip (the shortest the descriptor accepts) decodes in about 2.6 times the time of a 17-frame clip.
   The outputs are finite and deterministic (the same sha256 in two runs). The default lane's short seed cases run 9 frames

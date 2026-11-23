@@ -43,8 +43,7 @@ instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly with
 | `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), first published in 0.21.0) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
 | `karume-irodori-v4-large` (ADR [0151](decisions/0151-irodori-v4-large.md), first published in 0.22.0) | `karume-irodori-v4-small` (model `v4-small`) | the codec pair `codec_encoder` / `codec_decoder` in f16 and i8 (`IRODORI_PUBLISHED`); the tokenizer asset is its own |
 
-`karume-wan2.1` has the same reference as Wan2.2 but is not published on HF (the maintainer's ruling 2026-10-15). The Wan procedure
-is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
+The Wan procedure is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
 
 1. **Upload `karume-anima` first** (with the fragmentation countermeasures of §2; the 5 official variants (`anima-turbo-v1.1` (default) /
    `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`) — ADR 0087)
@@ -421,12 +420,6 @@ makes that check fail, or goes green while the table is not on the public surfac
 umT5 (TS entry `Umt5Encoder` — `@karume/models/umt5`) got `UMT5_SOURCES`, and Wan got `WAN_SOURCES` (0.15.0 spells
 them `umt5.Encoder`, `umt5.SOURCES` and `wan.SOURCES` — ADR 0136).
 
-Wan2.1 (`karume-wan2.1`) is not published on HF (the maintainer's ruling 2026-10-15 — ADR
-[0118](decisions/0118-wan21-video-generation.md) addendum (2026-10-15)). The code stays, and the distribution is assembled locally
-with `dist.py --pipeline wan` (the same umT5 reference as Wan2.2 below — before umT5 is published, `--allow-placeholder-ref` (the
-placeholder of §0); after it is published, `--resolve-refs hf`. `--out` is the default `models/karume-wan2.1`). Do not add `"wan2.1"`
-to `wan.SOURCES`, and do not upload `karume-wan2.1`.
-
 - [ ] **Check before publication (Wan2.2)**: the 50-step run (`KARUME_WAN_TI2V_FULL_PIPELINE=1 vp test
       packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts -t "50 ステップ"` —
       the precomputed path, 1280×704, 33 frames, one each with the reference preset and the practical preset. About 35 minutes on an RTX 3080 Ti) is green, and
@@ -466,14 +459,11 @@ to `wan.SOURCES`, and do not upload `karume-wan2.1`.
       (the check that requires the same set of repositories as the TS tables — it reads the `repo: "hdae/…",` lines of `packages/models/src/*/config.ts`)
 - [ ] Pass the hint for an omitted ref (the third argument of `toManifestSource`): `SOURCES["umt5-xxl"] (@karume/models/umt5)` to
       `umt5.Encoder.fromPretrained` (`packages/models/src/umt5/encoder.ts`), and `SOURCES["wan2.2"] (@karume/models/wan)` to
-      `wan.Ti2vPipeline.fromPretrained`. Wan's call shares the single `loadWanFromPretrained` of
-      `packages/models/src/wan/family.ts` with `wan.Pipeline` (2.1), so
-      shape it so that 2.1 gets no hint (the table has no 2.1 key)
+      `wan.Ti2vPipeline.fromPretrained`
 - [ ] Fix the docs that say "there is no table yet" or "unpublished, no pin constant either" (pick them up with `rg -n 'SOURCES|未公開|not
-      published' packages/models`). Keep the statements that Wan2.1 is unpublished
+      published' packages/models`)
 - [ ] In the note of `DISTRIBUTIONS` in `packages/runtime/tests/distribution_gate_test.ts`, move `karume-umt5-xxl` and
-      `karume-wan2.2` to "published" (the mirrors themselves were on the all-skip guard before publication. `karume-wan2.1`
-      stays unpublished and the e2e tests use it as their root, so it stays on the list)
+      `karume-wan2.2` to "published" (the mirrors themselves were on the all-skip guard before publication)
 - [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is one `SOURCES` line in each of `./umt5` and `./wan`
       (the barrel's `.` entry lists the namespaces only, so it does not change)
 

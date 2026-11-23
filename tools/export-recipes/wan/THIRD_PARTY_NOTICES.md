@@ -16,8 +16,8 @@ completed on that date.
 ## Upstream sources
 
 - **Weights** — [Wan-AI/Wan2.1-T2V-1.3B-Diffusers](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers),
-  pinned in `sources.py` (`SOURCES`). `transformer` and `vae` (with the `scheduler` config) are
-  converted into `karume-wan2.1`, which is built locally and not published. The umT5-XXL
+  pinned in `sources.py` (`SOURCES`). No distribution ships its `transformer` or `vae` (the scripts
+  that read them write series and test fixtures only). The umT5-XXL
   `text_encoder` is run locally to produce the precomputed text embeddings (`text_embeds.py`). The
   `tokenizer` is converted into one JSON table together with the prompt-cleaning tables
   (`umt5_tokenizer.py`). `karume-wan2.2` redistributes both the converted tokenizer and the
@@ -41,7 +41,7 @@ completed on that date.
 - **Prompt normalization** — `ftfy` (pinned `ftfy==6.3.1`), imported through diffusers'
   `prompt_clean`. `prompt_clean.py` evaluates ftfy's character tables and translates its
   `BADNESS_RE` pattern into JavaScript; the results are part of the tokenizer asset that
-  `karume-wan2.1` ships.
+  `karume-wan2.2` ships.
 - **Fixed prompts** — `prompts.py` quotes four prompt texts verbatim from the official Wan2.1
   repository (the t2v-1.3B example in `README.md` and `sample_neg_prompt` in
   `wan/configs/shared_config.py`) and from the Diffusers documentation and source (the Wan
@@ -64,7 +64,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Weights license          | `apache-2.0` — `sources.py` records it from the model card front matter (HF API, 2026-10-02), and `export_vae.py` reads it from the downloaded snapshot's `README.md`; the repository has no LICENSE file. Reviewed by a human against the revision used on 2026-10-15.                                                                                                                                                                        |
 | Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the text encoder referenced from `karume-umt5-xxl`, the precomputed text embeddings, the converted tokenizer).                                                                       |
-| Published in             | `karume-wan2.1` is not published. `karume-wan2.2` redistributes two assets made from this checkpoint: the converted tokenizer (its files are identical to the `tokenizer` folder of Wan2.2 TI2V 5B — next block) with the prompt-cleaning tables, and the precomputed text embeddings computed with this checkpoint's umT5-XXL in bfloat16. Its `NOTICE.md` lists both.                                                                        |
+| Published in             | `karume-wan2.2` redistributes two assets made from this checkpoint: the converted tokenizer (its files are identical to the `tokenizer` folder of Wan2.2 TI2V 5B — next block) with the prompt-cleaning tables, and the precomputed text embeddings computed with this checkpoint's umT5-XXL in bfloat16. Its `NOTICE.md` lists both.                                                                        |
 
 ### Wan-AI/Wan2.2-TI2V-5B-Diffusers
 

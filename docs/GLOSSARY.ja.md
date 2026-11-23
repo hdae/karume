@@ -347,7 +347,7 @@
 | valid length (L_valid) | 有効長 | トークナイザのマスクが 1 の長さ | — | ADR 0118 決定 3 / 4 |
 | normalized ratio (r) | 正規化比 | GPU の誤差を CPU f32 参照自身の誤差で割った、実寸の DiT 照合の指標 | — | ADR 0118 追記 |
 | `submitGpuTime` (GPU time per submit) | 1 submit の GPU 時間 | 1 submit ごとの GPU 実行の幅の観測（制御には使わない） | — | ADR 0118 決定 6 |
-| umT5 (umT5-XXL) | umT5 | Wan2.1 / 2.2 のテキストエンコーダ（多言語 T5 の encoder） | — | ADR 0118 / 0119 |
+| umT5 (umT5-XXL) | umT5 | Wan のテキストエンコーダ（多言語 T5 の encoder。Wan2.2 は Wan2.1 の重みを使う） | — | ADR 0118 / 0119 |
 | `prompt_clean` | プロンプトの前処理 | 上流 Wan のプロンプト前処理 | — | ADR 0119 決定 2 |
 | layer-sequential reference | 層逐次の参照 | 重みを層ごとに読んで回す CPU 参照 | — | ADR 0119 決定 8 |
 | `BADNESS_RE` (mojibake detection) | mojibake 判定 | ftfy の文字化け判定の正規表現（当たる入力は拒む） | — | ADR 0119 決定 2 |
@@ -371,12 +371,12 @@
 | DupUp3D / AvgDown3D | DupUp3D / AvgDown3D | VAE 2.2 の残差の外側のショートカット | — | ADR 0121 決定 6 |
 | meta trace (export) | meta trace | 重みを持たない meta の上流で trace する export の形 | — | ADR 0121 決定 7 |
 | `karume-wan2.2` / `ti2v-5b` / `wan-ti2v/1` | Wan2.2 の配布リポ | Wan2.2 TI2V-5B の配布リポ・モデル名・pipeline 名 | — | ADR 0121 決定 9 / 10 |
-| generation descriptor (Wan) | 世代の記述子 | Wan2.1 と 2.2 で違い、グラフ宣言から導けない値を集めた TS の定数の束 | — | ADR 0121 決定 10 |
+| generation descriptor (Wan) | 世代の記述子 | 世代ごとの、グラフ宣言から導けない値を集めた TS の定数の束 | — | ADR 0121 決定 10 |
 | accepted without a development-machine sha row | 開発機の sha 行を持たない受理 | 受理集合に入れるが、開発機で sha 行もチェックも持てない寸法・フレーム数 | — | ADR 0121 決定 8 |
 | 10 GB class / 12 GiB class (machine VRAM class) | 10 GB 級 / 12 GiB 級 | 動作を確かめた長さを機の VRAM の容量で分ける呼び名 | — | limitations |
 | i8 weight count / linear dispatch count | i8 の重みの本数 / dispatch の本数 | 容器が i8 で持つ linear の重みの本数と、1 パスで走る linear の dispatch の本数 | — | ADR 0121 決定 2 |
 | spatial compression (Wan VAE tiles) | 空間の圧縮 | グラフの入出力の空間比 × ホストの unpatchify の倍率 | — | ADR 0121 決定 6 |
-| shared modules (Wan) | 共有モジュール | Wan2.1 / 2.2 の class が共有する text / DiT / VAE の処理の関数 | — | ADR 0121 決定 10 |
+| shared modules (Wan) | 共有モジュール | ファミリー本体 `family.ts` が動かす text / DiT / VAE の段の関数 | — | ADR 0121 決定 10 |
 | `wan.series_check` (series comparison) | 中間成果物の照合 | recipe の生成物を空のディレクトリへ書き直し、既存の中間成果物と名指した項目だけ突き合わせる CLI | 系列の照合 | ADR 0121 追記 |
 | original (google/umt5-xxl) | 本家 | umT5-XXL を公開した Google の HF リポ（karume-umt5-xxl の上流） | — | ADR 0122 決定 1・2 |
 | compatible text encoder | 互換の text encoder | 本家と構成が同じで重みだけが違う umT5 | — | ADR 0122 決定 5・7 |
@@ -388,7 +388,6 @@
 | relative-position bucket configuration (umT5) | バケットの構成 | umT5 の相対位置バイアスのバケット数・最大距離と有効長の上限 | — | ADR 0122 決定 5・7 |
 | `--swap-text-encoder` (Wan example) | 差し替えのフラグ | umT5 を互換の部品へ差し替えた `examples/wan` の CLI のフラグ（0.15 で削除） | — | ADR 0122 決定 7 |
 | `--generation` (Wan example) | 世代のフラグ | 世代を選んだ `examples/wan` の CLI のフラグ（0.15 で削除） | — | ADR 0121 |
-| `KARUME_WAN_SWAP_TEXT_ENCODER` | 差し替えの e2e の opt-in | 差し替えの e2e に差し替え先の手元の配布形を渡す環境変数 | — | ADR 0122 追記 |
 | baseline (moving umT5 provenance) | 基準線 | 出所を切り替える前に今の出所のまま作る比較の起点 | — | ADR 0122 決定 9 |
 | tied alias | tied な別名 | 同じ重みを 2 つの名前で指す形 | — | ADR 0122 決定 2 |
 | RNE (round to nearest even) | RNE | f32 → bf16 の標準の丸め（最近接偶数丸め） | — | ADR 0122 |
@@ -406,7 +405,7 @@
 | generation script (the first Wan2.2 video) | 生成スクリプト | 製品の class ができる前に Wan2.2 の動画を出した git 追跡外の台本（以後は使わない） | — | ADR 0121 追記 |
 | frozen copy (GPU check) | 凍結コピー | 対象コミットを `git archive` で取り出し、資産へリンクを張ったディレクトリ | — | ADR 0121 追記 |
 | relay step (test VRAM) | 中継の step | `t.step` へ中継の関数だけを渡し、GPU を掴む本体を step の終了時に手放す形 | — | ADR 0121 追記 |
-| generation table (Wan distribution recipe) | 世代の表 | Wan2.1 / 2.2 で違う配布の事実を集めた frozen dataclass | — | `tools/export-recipes/wan/distribution.py` |
+| generation table (Wan distribution recipe) | 世代の表 | 世代の配布の事実を集めた frozen dataclass | — | `tools/export-recipes/wan/distribution.py` |
 | seams (of the DiT pass) | 切れ目 | Wan の DiT の 1 step の中で GPU が DiT の計算をしていない部分 | — | research 2026-10-15・perf-ledger H-37 |
 
 ## 画像生成（MOSS-Image）

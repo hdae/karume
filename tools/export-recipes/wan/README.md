@@ -67,7 +67,8 @@ forward bit for bit, the linear form of the patch embedding must stay within the
 bound `2·γ_{K+1}·(|x|·|W|ᵀ + |b|)` of the conv3d, and the patched output must be finite. A failing
 case stops the export before the series is touched.
 
-The real-GPU comparison is `packages/models/tests/e2e_wan_dit_test.ts`: the band is about 5× the
+The real-GPU comparison of this series left the tree with Wan2.1's TypeScript pipeline; the
+Wan2.2 DiT keeps the same gate (`packages/e2e/tests/e2e_wan_ti2v_dit_test.ts`): the band is about 5× the
 worst of six decision cases spread over the sampling schedule, and three separate acceptance cases
 and four fault injections (RoPE h/w swap, unpatchify order, flipped timestep halves, timestep off by
 one) check it.
@@ -197,8 +198,9 @@ Measured on 2026-10-02 (tile 32):
 | GPU (B570, Deno) chunk loop vs upstream, `band`       | max abs 4.65e-6 (ratio 3.58e-6)                |
 | GPU chunk loop vs upstream, `accept`                  | max abs 3.55e-6 (ratio 2.77e-6)                |
 
-The GPU check is `packages/models/tests/e2e_wan_vae_tiles_test.ts` (one tile = one batch, only the
-frames are read back; fault injections must leave the tolerance).
+The GPU check of these tiles left the tree with Wan2.1's TypeScript pipeline; the Wan2.2 VAE keeps
+the same check (`packages/e2e/tests/e2e_wan_ti2v_vae_tiles_test.ts` — one tile = one batch, only
+the frames are read back; fault injections must leave the tolerance).
 
 ### Tiled decode (stage 5)
 
@@ -563,8 +565,9 @@ model and runs the whole script on a small synthetic Wan2.2 model. The GPU side 
 
 ### The pipeline these feed (`@karume/models/wan`)
 
-`wan.Pipeline` (`packages/models/src/wan/`) loads the three containers and the embedding asset from
-the distribution (stage 7 below) and runs `generate` in three stages: the asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
+Wan2.1's `wan.Pipeline` (removed with Wan2.1; `wan.Ti2vPipeline` runs the same stages on Wan2.2)
+loaded the three containers and the embedding asset from its distribution and ran `generate` in
+three stages: the asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
 CFG as two batch-1 passes and the host UniPC, then the tiled VAE decode and the clamp. Measured on
 the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
 
@@ -579,8 +582,8 @@ the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
   `drm-total-vram0`) peaks at 5.7 GiB in the DiT stage and 2.9 GiB in the VAE stage, and is back
   to 0.4 GiB right after the DiT session is disposed, so the two stages never overlap and no extra
   wait for released memory is needed between them.
-- The 50-step run with the default settings is opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it runs the 33-frame
-  and the 81-frame clip and writes every frame and a 4×8 contact sheet as PNG under
+- The 50-step run with the default settings was opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it ran the 33-frame
+  and the 81-frame clip and wrote every frame and a 4×8 contact sheet as PNG under
   `outputs/verify/<environment>/<date>_wan-pipeline-full/`. The 81-frame clip (2026-10-03) took
   7,173 s: 68.6 s per DiT pass (100 passes) and 315 s for the VAE decode, with VRAM peaks of
   7.31 GiB in the DiT stage and 3.78 GiB in the VAE stage.
@@ -748,78 +751,62 @@ node ../release/container_license.ts ../../outputs/misc/local-dist/<name>
 
 ## Distribution (stage 7)
 
-`wan/distribution.py` assembles the series into the distribution `models/karume-wan2.1/` (ADR 0118
-decision 7 — one repository per family generation; not published on Hugging Face yet). `karume dist`
-does the copying, hashing and verification; the recipe only says what goes where. The text encoder
-is a cross-repository reference to `karume-umt5-xxl` (ADR 0119 stage 10d, decision A) that the
-recipe declares (`wan_references` — model `xxl`, role `text_encoder`; ADR 0038 §7 addendum
+`wan/distribution.py` assembles the series into the distribution `models/karume-wan2.2/` (ADR 0121
+stage 8 — model `ti2v-5b`, pipeline `wan-ti2v/1`; one repository per family generation, ADR 0092).
+`karume dist` does the copying, hashing and verification; the recipe only says what goes where. The
+text encoder is a cross-repository reference to `karume-umt5-xxl` (ADR 0119 stage 10d, decision A)
+that the recipe declares (`wan_references` — model `xxl`, role `text_encoder`; ADR 0038 §7 addendum
 2026-10-28), so build that repository first and give the build the commit it is pinned at (the
 revision sources are in [`../README.md`](../README.md#dist-driver)):
 
 ```bash
 uv run python dist.py --pipeline umt5
-uv run python dist.py --pipeline wan --allow-placeholder-ref   # Wan2.1: development mirror only
-uv run python dist.py --pipeline wan-ti2v --resolve-refs hf    # Wan2.2: the publication build
+uv run python dist.py --pipeline wan-ti2v --resolve-refs hf    # the publication build
 ```
 
-`--pipeline wan-ti2v` with the same reference assembles Wan2.2 TI2V 5B into
-`models/karume-wan2.2/` (ADR 0121 stage 8 — model `ti2v-5b`, pipeline `wan-ti2v/1`). The recipe is
-the same plan function with the Wan2.2 table: only the int8 transformer (`wan2.2-ti2v-5b-i8-dyn`),
-the VAE graphs of `wan2.2-ti2v-5b-f16-dyn`, the quants `f16+dit8` and
-`f16+dit8-a8-attn8-s16` (the default since 2026-10-06), `scheduler.shift` 5.0, and the two Wan2.1 text assets copied byte for byte —
+The distribution carries the int8 transformer (`wan2.2-ti2v-5b-i8-dyn`), the VAE graphs of
+`wan2.2-ti2v-5b-f16-dyn`, and the two text assets of the Wan2.1 text series copied byte for byte —
 their provenance is checked against the Wan2.1 pin, while the transformer and VAE containers are
 checked against the Wan2.2 pin. The VAE graphs include the three encoder parts for image to video
 (`vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post`, f16, 107,887,956 B in all — ADR 0121
-stage 9b), and only the Wan2.2 distribution carries them; export them with
-`python -m wan.export_vae_encoder` (see the VAE section) before assembling, as the plan needs all
-three. The decoder graphs also come in int8 from `wan2.2-ti2v-5b-i8-dyn` (`model.i8.krm`, written by
-`python -m wan.export_vae --model ti2v-5b --dtype i8`), selected by two more quants (ADR 0133
-decision 6): `i8` (the int8 transformer and VAE decoder with no session knobs — the reference) and
-`i8-a8-attn8-online-conv8` (the online preset's knobs plus `convCompute` `a8`, which runs the
-decoder's 3-D convolutions on int8 activations). Every other quant selects the f16 decoder, and the
-default does not change.
+stage 9b); export them with `python -m wan.export_vae_encoder` (see the VAE section) before
+assembling, as the plan needs all three. The decoder graphs also come in int8 from
+`wan2.2-ti2v-5b-i8-dyn` (`model.i8.krm`, written by `python -m wan.export_vae --model ti2v-5b --dtype
+i8`), and a 32-latent tile pair of each (ADR 0134) borrows the weights of the 16-latent pair.
 
-Until `karume-umt5-xxl` is published there is no commit SHA. The development mirror uses the
-placeholder `0000000000000000000000000000000000000000`, which only `--allow-placeholder-ref`
-produces; a build without a revision source fails before writing anything, so a publishing build
-has to pass the real SHA or `--resolve-refs hf` (`docs/release-runbook.md` §0). A local reader
-resolves the reference through `crossRepo` and does not look at the revision.
+A local reader resolves the text encoder reference through `crossRepo` and does not look at the
+revision. A build without a revision source fails before writing anything, so a publishing build
+has to pass the real SHA or `--resolve-refs hf` (`docs/release-runbook.md` §0); the placeholder
+`0000000000000000000000000000000000000000` that only `--allow-placeholder-ref` produces is for a
+development mirror.
 
-| Manifest entry (`karume/6`) | Value                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `weights`                   | `text_encoder` with one `i8` container referenced from `karume-umt5-xxl` (`xxl/text_encoder/model.i8-*.krm`, every part pinned by repo, commit, size and SHA-256); `transformer` with an `f16` and an `i8` container (`model.f16.krm` / `model.i8.krm`); `vae_decoder_first` / `vae_decoder_next` with one `f16` container each — the key is the container's graph name (container-v1 §2.1)                                                        |
-| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`) and `umt5_tokenizer` (`umt5_tokenizer/tokenizer.json` — format `karume-wan-umt5-tokenizer/1`), model-level and quant-independent. `rope_base` stays a container asset of `transformer` (ADR 0109)                                                                                                                                                                                            |
-| `quants`                    | `f16` (no session knobs — the seat closest to the original weights, chosen explicitly); `f16+dit8` (int8 transformer, no session knobs — the reference seat); `f16+dit8-a8-attn8-s16` (default; int8 transformer with `linearCompute` / `attentionCompute` `a8` and `attentionScoreStorage` `f16`) — ADR 0120. Every seat selects the `i8` text encoder, so every seat declares the vocabulary embedding's 1,050,148,864 bytes as `requiredLimits` |
-| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                                                                                                                                                                                                                                                                                                            |
+| Manifest entry (`karume/6`) | Value |
+| --------------------------- | ----- |
+| model                       | `ti2v-5b` (the only one; pipeline `wan-ti2v/1`) |
+| `weights`                   | `text_encoder` with one `i8` container referenced from `karume-umt5-xxl` (`xxl/text_encoder/model.i8-*.krm`, every part pinned by repo, commit, size and SHA-256); `transformer` with one `i8` container; `vae_decoder_first` / `vae_decoder_next` and their 32-latent pair with an `f16` and an `i8` container each; `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` with one `f16` container each — the key is the container's graph name (container-v1 §2.1) |
+| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`) and `umt5_tokenizer` (`umt5_tokenizer/tokenizer.json` — format `karume-wan-umt5-tokenizer/1`), model-level and quant-independent. `rope_base` stays a container asset of `transformer` (ADR 0109) |
+| `quants`                    | `f16+dit8` (the reference seat), `f16+dit8-a8-attn8-s16`, `f16+dit8-a8-attn8-online`, `i8` (the reference seat of the int8 VAE decoder) and `i8-a8-attn8-online-conv8` (default) — ADR 0121 decision 2, ADR 0132, ADR 0133. Every seat selects the `i8` text encoder, so every seat declares the vocabulary embedding's 1,050,148,864 bytes as `requiredLimits` |
+| `pipelineConfig`            | `scheduler.shift` 5.0, `defaults.steps` 50, `defaults.guidance` 5.0 |
 
 Before anything is placed, the plan checks that each container stores the format of its seat and
-no other compressed format (int8 for the text encoder, f16 for the f16 transformer and the VAE
-graphs, int8 for the int8 transformer), names the pinned upstream revision and license in its
-provenance (`wan/sources.py`), that the text encoder passes the same gates as in its own repository
-and that its output width is the transformers' context width, that the two VAE graphs belong to one
-set (the same latent shape, and the caches of `first` appear in `next` with the same names, shapes
-and order — the rule the TypeScript loader applies), that both transformers declare the same
-`rope_base` asset byte for byte, that the embedding asset was made from the pinned revision with the
-bfloat16 encoder and the pinned diffusers / ftfy, carries exactly the prompts of `wan/prompts.py`
-with a normalized text for each that no other row claims, and fits both transformers'
-`encoder_hidden_states [1, 512, 4096]` input, and that the tokenizer asset has the format the
-TypeScript reader knows, the pinned source and transformers / ftfy versions, and a `maxLength` that
-fits the context rows. The golden files of the series (`io.*`, `reference.*`, `vae_*`,
-`pipeline_steps.*`) are never copied, and with the reference the text encoder is not copied either
-(`karume dist` checks that the referenced parts are byte-identical to the series container).
+no other compressed format, names the pinned upstream revision and license in its provenance
+(`wan/sources.py`), that the text encoder passes the same gates as in its own repository and that
+its output width is the transformer's context width, that each VAE decoder pair belongs to one set
+(the same latent shape, and the caches of `first` appear in `next` with the same names, shapes and
+order — the rule the TypeScript loader applies), that each 32-latent container borrows every weight
+from its lender, that the transformer declares the `rope_base` asset, that the embedding asset was
+made from the pinned revision with the bfloat16 encoder and the pinned diffusers / ftfy, carries
+exactly the prompts of `wan/prompts.py` with a normalized text for each that no other row claims,
+and fits the transformer's `encoder_hidden_states [1, 512, 4096]` input, and that the tokenizer
+asset has the format the TypeScript reader knows, the pinned source and transformers / ftfy
+versions, and a `maxLength` that fits the context rows. The golden files of the series (`io.*`,
+`reference.*`, `vae_*`, `pipeline_steps.*`) are never copied, and with the reference the text
+encoder is not copied either (`karume dist` checks that the referenced parts are byte-identical to
+the series container).
 
-The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes: container
-format, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the text encoder
-referenced from `karume-umt5-xxl`, the precomputed text embeddings kept for use without it, the
-tokenizer converted together with the prompt-cleaning tables), and `README.md` is the model card
-rendered from the manifest by `wan/card.py`: the pinned upstream, where the text encoder comes from,
-the `textEncoder` choice (`"gpu"` by default, `"precomputed"` for the fixed prompts only), the
-prompt rules, the fixed prompts with their sources, the accepted inputs, how the outputs are
-verified, the quant table (with the `dit` abbreviation spelled out), the defaults, the measured
-resources (each stage with the `f16` quant and the precomputed embeddings, the text encoder stage
-from a 2-step run, and the transformer of each quant, with the cells not measured marked as such)
-and the declared limits. Re-running the command writes the same bytes.
+The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes made to
+the upstream weights), and `README.md` is the model card rendered from the manifest by `wan/card.py`.
+Re-running the command writes the same bytes.
 
 ## Tests
 
@@ -844,20 +831,10 @@ normalized text equal to `prompt_clean`), the scheduler columns (first timestep 
 decreasing, the 1e-6 correction), the scheduler fixture being current, and the few-step reference
 (shapes, schedule and tile plan in the metadata, the embeddings' sha256, the seeded noise).
 
-The `models:wan` lane runs the host-function tests (including the UniPC / CFG fixture and the pipeline's input
-gates) and the real-GPU parity gates for the DiT, the VAE chunk graphs, the tiled decode and the
-two-step pipeline run (with its sha256 row in `packages/models/tests/fixtures/references/wan.json`,
-written with `KARUME_REFERENCE=write`). The DiT and VAE gates read the series under `outputs/series/`
-written by `wan.export_dit`, `wan.export_vae` and `wan.vae_tiling`; the pipeline run loads the
-distribution `models/karume-wan2.1/` through `fromPretrained` and compares it with the references
-written by `wan.few_step_ref` — its sha256 rows were first written from the series, so the
-distribution path has to reproduce them bit for bit. The gates skip explicitly (with the generating
-command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the
-50-step runs: the 33-frame and the 81-frame clip, each with the `f16` quant and with
-`f16+dit8-a8-attn8-s16` (four runs). On the B570, the `f16` quant takes about half an hour for the
-33-frame clip and about two hours for the 81-frame clip; `f16+dit8-a8-attn8-s16` takes about 16
-minutes for the 33-frame clip and about 62 minutes for the 81-frame clip (3,703 s, of which the
-transformer stage is 3,383 s).
+The `models:wan` lane runs the family's host-function tests (including the UniPC / CFG fixture, the
+DiT host fixture and the pipeline's input gates on a test generation) and the umT5 port check
+(`e2e_wan_umt5_test.ts`). The real-GPU parity gates of Wan2.2 run in `models:wan-ti2v`; they skip
+explicitly (with the generating command) when their assets or a GPU adapter are missing.
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache. The Wan2.2 TI2V-5B tests take `wan22_snapshot` the

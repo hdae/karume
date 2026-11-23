@@ -51,8 +51,8 @@ anima = [
   "torchvision>=0.28",
   "transformers==5.14.1",
 ]
-# For the real-weight export and references of Wan2.1 T2V (`uv sync --group wan`). Not in the
-# default sync.
+# For the real-weight export and references of Wan (Wan2.2 TI2V, and the text assets it ships from
+# the Wan2.1 T2V checkpoint) (`uv sync --group wan`). Not in the default sync.
 # What each entry is for (ADR 0118 decisions 4 / 7):
 #   diffusers — `WanTransformer3DModel` / `AutoencoderKLWan` / `WanPipeline` /
 #     `UniPCMultistepScheduler` (the source of truth of the reference pipeline).

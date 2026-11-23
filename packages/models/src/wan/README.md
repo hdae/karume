@@ -1,14 +1,14 @@
-# Wan2.1 / Wan2.2 (host side)
+# Wan2.2 (host side)
 
 The `./wan` subpath of `@karume/models` (ADR
-[0118](../../../../docs/decisions/0118-wan21-video-generation.md) decision 7): `wan.Pipeline` turns a
-prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]` together with its frame rate (`fps` on
-`GeneratedVideo` — 16 for Wan2.1, a fact of the upstream model rather than a knob or a manifest
-field). `wan.Ti2vPipeline` does the same for Wan2.2 TI2V 5B (ADR
-[0121](../../../../docs/decisions/0121-wan22-ti2v-5b.md)): the same stages, the same shared family
-body (`family.ts`) and the same public types, with pipeline `wan-ti2v/1`, 48 latent channels, a VAE
-patch size of 2 and 24 fps. It also runs image-to-video: a request with an `image` (decoded RGB8)
-and an optional `fit` gets the image as its first frame (ADR 0121 decision 11). The public surface is
+[0118](../../../../docs/decisions/0118-wan21-video-generation.md) decision 7, ADR
+[0121](../../../../docs/decisions/0121-wan22-ti2v-5b.md)): `wan.Ti2vPipeline` (Wan2.2 TI2V 5B,
+pipeline `wan-ti2v/1`) turns a prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]` together
+with its frame rate (`fps` on `GeneratedVideo` — 24, a fact of the upstream model rather than a knob
+or a manifest field), with 48 latent channels and a VAE patch size of 2. The class is a thin shell
+over the family body (`family.ts`), which takes the generation's values from a `WanFamilySpec`. It
+also runs image-to-video: a request with an `image` (decoded RGB8) and an optional `fit` gets the
+image as its first frame (ADR 0121 decision 11). The public surface is
 [`wan.ts`](../../wan.ts) (also re-exported from the barrel); everything here is internal.
 
 The pipeline runs three stages (four with an image), one session set at a time: the VAE encoder
@@ -20,8 +20,8 @@ stage the pipeline waits for its released GPU memory (an empty submit, then `onS
 before the next stage opens, because the transformer stage has little headroom; between the other
 stages there is no such wait. Intel / wgpu can release `destroy()` late, but on the B570
 (2026-10-02, fdinfo `drm-total-vram0`) the transformer stage's peak drops as soon as its session is
-disposed and does not overlap the VAE stage's peak (the NOTE at the top of `pipeline.ts` has the
-numbers). After the text stage, on the B570 under Deno at 33 frames, 0.08 GiB stays allocated
+disposed and does not overlap the VAE stage's peak (measured on Wan2.1 T2V 1.3B; the NOTE at the top
+of `ti2v-pipeline.ts` has the numbers). After the text stage, on the B570 under Deno at 33 frames, 0.08 GiB stays allocated
 (the text stage's peak 6.30 GiB drops to 0.708 GiB, against 0.633 GiB before the stage — ADR 0119,
 the addendum on the stage 10c GPU gates and the stage 10d-4 results); Chrome has not been measured:
 
@@ -50,13 +50,12 @@ the addendum on the stage 10c GPU gates and the stage 10d-4 results); Chrome has
 3. **vae_decoder** — the two chunk graphs with the resident causal cache, always tiled, then the clamp
    to `[-1, 1]`.
 
-The distributions are `karume-wan2.1` (ADR 0118 stage 7) and `karume-wan2.2` (ADR 0121 stage 8).
-Only `karume-wan2.2` is published on Hugging Face, so the `wan.SOURCES` table (`config.ts`) has the
-single key `"wan2.2"` and no Wan2.1 entry (ADR 0118, addendum of 2026-10-15).
-`wan.Pipeline.fromPretrained` and `wan.Ti2vPipeline.fromPretrained` load them through `@karume/hub`
-(a local mirror is passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest
-and the bytes. Both go through the same admission. The Wan2.2 distribution reuses the Wan2.1 text
-assets byte for byte (the same umT5 embeddings and tokenizer, ADR 0121 decision 9). The
+The distribution is `karume-wan2.2` (ADR 0121 stage 8), published on Hugging Face as the
+`"wan2.2"` key of the `wan.SOURCES` table (`config.ts`). `wan.Ti2vPipeline.fromPretrained` loads it
+through `@karume/hub` (a local mirror is passed as a `denoDirectory` source handle), and
+`fromAssets` takes the manifest and the bytes. Both go through the same admission. The
+distribution's text assets are the ones built from the Wan2.1 T2V 1.3B checkpoint (the umT5
+embeddings and tokenizer, ADR 0121 decision 9). The
 `text_encoder` component is a cross-repository reference to the umT5 distribution
 (`karume-umt5-xxl`); a local mirror of it is passed through the source handle's `crossRepo`
 mapping. The `"precomputed"` route never opens that component. The defaults for steps,
@@ -76,7 +75,7 @@ abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 | `text-embeds.ts`                | stage 6       | reading and checking the text-embedding asset, prompt lookup, zero padding to 512 rows                                                                                                                                                                                                                   |
 | `latents.ts`                    | stage 6       | the VAE's per-channel latent mean / std, the normalization of the encoded image and the de-normalization before decoding                                                                                                                                                                                 |
 | `random.ts`                     | stage 6       | the seeded initial noise (splitmix64 + Box–Muller — not torch's `randn`)                                                                                                                                                                                                                                 |
-| `descriptor.ts`                 | 0121 stage 3  | the generation descriptors `WAN21_GENERATION` and `WAN22_TI2V_GENERATION`: the per-generation values a graph declaration cannot give (accepted sizes, frame range, defaults, `fps`, the VAE patch size, the latent statistics, the DiT input form `ditInputForm` — `"t2v"` five inputs / `"ti2v"` seven) |
+| `descriptor.ts`                 | 0121 stage 3  | the generation descriptor `WAN22_TI2V_GENERATION`: the per-generation values a graph declaration cannot give (accepted sizes, frame range, defaults, `fps`, the VAE patch size, the latent statistics, the DiT input form `ditInputForm` — `"ti2v"`, seven inputs)                                       |
 | `graph-io.ts`                   | 0121 stage 3  | small readers for graph declarations and outputs (value lookup, shape check, output dtype, non-finite scan)                                                                                                                                                                                              |
 | `plan.ts`                       | 0121 stage 3  | the request gate that turns a request into a plan (sizes, frames, knobs, seed or latents, the image and `fit`; the latent shape and the tile plan)                                                                                                                                                       |
 | `text-stage.ts`                 | 0121 stage 3  | the text stage: route admission, the umT5 graph contract, loading, the prompt gates, encoding or looking up the contexts                                                                                                                                                                                 |
@@ -84,24 +83,22 @@ abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 | `tile-decode.ts`                | 0121 stage 3  | the VAE stage: the tiled decode, and the admission checks of the VAE declaration against the descriptor                                                                                                                                                                                                  |
 | `i2v-preprocess.ts`             | 0121 stage 9a | the image preprocessing for image-to-video: the size choice, the `fit` (Lanczos resize from `../image/lanczos.ts`, center crop or stretch), `[-1, 1]` and the patchify                                                                                                                                   |
 | `vae-encoder.ts`                | 0121 stage 9b | the encoder stage: the three encoder graph contracts, one batched run with tensors handed over on the GPU, the read-back of the latent mean, and the wait for released memory                                                                                                                            |
-| `pipeline.ts`                   | stage 6       | `wan.Pipeline` (the Wan2.1 class): the public types, and a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN21_FAMILY` to `family.ts`                                                                                                                              |
 | `family.ts`                     | 0121 stage 6  | the shared family body: admission, construction, stage order, session lifetimes, the generate gates and the session policy; per-family values come in a `WanFamilySpec`                                                                                                                                  |
-| `ti2v-pipeline.ts`              | 0121 stage 6  | `wan.Ti2vPipeline` (the Wan2.2 TI2V class): the same thin shell as `wan.Pipeline`, passing `WAN22_TI2V_FAMILY` to `family.ts`                                                                                                                                                                              |
-| `config.ts`                     | stage 7       | `pipelineConfig` schema (pipelines `wan/1` and `wan-ti2v/1` share it): default steps, guidance and shift                                                                                                                                                                                                 |
+| `ti2v-pipeline.ts`              | 0121 stage 6  | `wan.Ti2vPipeline`: a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN22_TI2V_FAMILY` to `family.ts`; its module doc holds the stage order and session lifetimes                                                                                                   |
+| `types.ts`                      | 0121 stage 6  | the public types of the class (request, events, result, construction options, the already-fetched input)                                                                                                                                                                                                   |
+| `config.ts`                     | stage 7       | `pipelineConfig` schema of pipeline `wan-ti2v/1`: default steps, guidance and shift                                                                                                                                                                                                                      |
 | `frames.ts`                     | stage 6       | one frame to 8-bit RGBA (`wan.frameToRgba` — the rule the reference hashes use)                                                                                                                                                                                                                           |
 | `text/*.ts`                     | 10a           | the `prompt_clean` mirror and the prompt encoder (cleaning, then the shared umT5 tokenizer with its reject rules from `../umt5/tokenizer.ts`)                                                                                                                                                            |
 | `../umt5/*.ts`                  | 10c           | not in this folder: the umT5 host code shared with `@karume/models/umt5` (the tokenizer, the relative-position bucket table, the session inputs / output reading and padding, the graph contract)                                                                                                        |
 
 ## Accepted requests
 
-The sizes and frames depend on the class: `wan.Pipeline` (Wan2.1) accepts 832×480 or 480×832 with
-4n+1 frames from 5 to 81 (default 832×480, 33 frames); `wan.Ti2vPipeline` (Wan2.2) accepts 1280×704
-or 704×1280 with 4n+1 frames from 5 to 121 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
+`wan.Ti2vPipeline` accepts 1280×704 or 704×1280 with 4n+1 frames from 5 to 121 (default 1280×704,
+33 frames). It takes `steps` ≥ 1,
 `guidance` ≥ 1 and finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair
 whose σ column is strictly decreasing, and either a `seed` (default 0) or the initial noise as
 `latents`. The sizes, the frame range and the defaults come from the generation descriptor
-(`descriptor.ts`). For Wan2.1, only 832×480 with 33 and 81 frames have been checked end to end on
-the GPU; for Wan2.2, 1280×704 and 704×1280 with 17 frames (two steps) and 1280×704 with 33 frames
+(`descriptor.ts`). 1280×704 and 704×1280 with 17 frames (two steps) and 1280×704 with 33 frames
 (50 steps, both quants) have been checked end to end on the GPU (ADR 0121 stage 6), and 1280×704
 with 121 frames (50 steps, the practical quant) completed on an RTX 3080 Ti (12 GiB, Deno). On the
 Arc B570 (about 9.4 GiB allocatable from Deno), clips up to 57 frames have been checked (49 with both
@@ -112,9 +109,9 @@ The transformer stage is closed before the VAE stage opens, so the two are never
 non-finite umT5 output, a non-finite latent after any step, or a non-finite VAE output before the
 clamp fails the generation instead of being returned.
 
-Only `wan.Ti2vPipeline` takes `image` (RGB8 `{ data, width, height }`, any size) and `fit`
-(`"crop"`, the default, or `"stretch"`); `wan.Pipeline` rejects both with a `ModelInputError`, as
-does `fit` without `image`, while a misspelled `fit` is a plain `Error`. Without `width` / `height`,
+`wan.Ti2vPipeline` takes `image` (RGB8 `{ data, width, height }`, any size) and `fit` (`"crop"`, the
+default, or `"stretch"`); `fit` without `image` is a `ModelInputError`, while a misspelled `fit` is a
+plain `Error`. Without `width` / `height`,
 the accepted size closest to the image's aspect ratio is used (1280×704 for an image at least as
 wide as it is tall, 704×1280 otherwise); given ones must be an accepted size. Image-to-video has been
 checked end to end on the GPU at 1280×704 with 9 frames (two steps) and 33 frames (50 steps, both

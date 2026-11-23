@@ -136,8 +136,6 @@ maintainer's ruling of 2026-11-06).
   order on 2026-11-15)**. Each item is its own commit with its behaviour tests. Item 1 has landed; what has landed of
   items 2 to 7 is described by the specs it cites. Left:
   2. **Records of a run** (the WGSL a test dispatches, `outputs/references/`, the verification cache's records):
-     - Wan2.1's pipeline file (`e2e_wan_pipeline_test.ts`) is not shortened: its case IDs carry no frame count and its
-       cases run the default 33 frames.
      - A mismatch reports the differing bytes of the two artifacts; a distance per artifact type (pixels, samples,
        tensor values) is not built.
   3. **Kernel selection as one table per op and dispatch programs**
@@ -461,8 +459,8 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
     0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
     [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
-    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `qwen3`
-    and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the example
+    `qwen3`. `fusion-hints`' search itself is back as the fusion candidate search of
     `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
     `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
@@ -628,20 +626,18 @@ maintainer's ruling of 2026-11-06).
   **Adjacent small items of stage 9 (filed 2026-10-10, review)**:
   (a) the distribution assembly (`tools/export-recipes/wan/distribution.py`) does not check the input/output contract of the VAE encoder's 3 containers (input names, symbols, the shape chain pre → attn → post) (the decoder's 2 containers have the pair check `assert_vae_chunk_pair` — a series with only one of them rebuilt passes assembly and is first rejected at admission in the user's `fromPretrained`; filed 2026-10-10, review G4-01, a candidate for the fix wave)
   **Adjacent small items of stages 5 / 6 (filed 2026-10-05)**:
-  (a) the tile reference reader and helper functions are duplicated across the Wan VAE e2e tests (`readTileFixture` in `e2e_wan_ti2v_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tile32_test.ts`; `planMeta` in those two and `e2e_wan_vae_tiles_test.ts`; `compare` and `absMax` in `e2e_wan_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tiles_test.ts`; `poisonFrames` in those two plus `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_a8_test.ts`; `roundUpTwoDigits` — see (d)) → into a shared test helper
+  (a) the tile reference reader and helper functions are duplicated across the Wan VAE e2e tests (`readTileFixture` and `planMeta` in `e2e_wan_ti2v_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tile32_test.ts`; `poisonFrames` in those two and `e2e_wan_ti2v_vae_a8_test.ts`; `roundUpTwoDigits` — see (d)) → into a shared test helper
   (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in `tools/export-recipes/wan/` (`text_embeds.py`, `vae_tiling.py`, `few_step_ref.py`, `ti2v_few_step_ref.py`, `export_vae.py`, `export_vae_encoder.py`) → into `_shared`
   (c) the existing 5 DiT inputs have no dtype check (only the 2 inputs added for 2.2 check the dtype)
-  (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts` and `e2e_wan_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
-  (e) the messages of the `pipelineConfig` reader have no owner prefix (the message cannot tell whether the 2.1 or the 2.2 class failed)
-  (f) the 2.1, 2.2 T2V and 2.2 I2V end-to-end e2e tests (`e2e_wan_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`), and the 2.1 test keeps its own verbatim copy of the contact sheet that the two 2.2 tests import from `packages/models/tests/helpers/wan-video-artifacts.ts`
+  (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
+  (f) the 2.2 T2V and I2V end-to-end e2e tests (`e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`)
   (g) there is no host test combining the admission of the gpu path (`admitWanText`) with the 48 ch, 7-input DiT (stage 6 results)
   (h) `video_size` in `tools/export-recipes/wan/pipeline_ref.py` hard-codes 16 ch and compression 8 (unusable for 2.2 — stage 6 results)
   (i) `planWanRequest` checks only the element count of the injected `latents`, not the shape (stage 6 results)
   **Adjacent small items of stage 4 (filed 2026-10-05, deferred in review)**:
   (a) move `filePresent` into a neutral test helper (today the VAE helper `packages/models/tests/helpers/wan-ti2v-vae.ts` imports it from the DiT helper `wan-ti2v-dit.ts` in the same directory — the VAE tests depend on importing the DiT helper)
-  (b) make the drop-cache fault injection of the shared helper `packages/models/tests/helpers/wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run both the 2.1 and the 2.2 lane)
+  (b) make the drop-cache fault injection of the shared helper `packages/models/tests/helpers/wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run the 2.2 lane)
   (c) a closed form of DupUp3D (put up0 / up1 on the fused upsample2x) — perf-ledger K-77
-  (d) in the step "the fault-injection loop matches the product path at Uint32 when there is no fault" of the 2.1 VAE chunk e2e (`e2e_wan_vae_tiles_test.ts`), refill the frames with poison values before `decodeWithFault(none)` as well and assert 0 non-finite (the 2.2 e2e was fixed in stage 4 — after the fix, run the 2.1 VAE chunk e2e for real)
   **Adjacent small items of stage 3 (filed 2026-10-04, proposals)**:
   (b) add a paragraph "how to swap it into Wan" to the model card of the experimental mirror (the fine-tuned umT5)
   (c) add a check that compares the model card of the local distribution mirror with the card the recipe draws today (to find missed rebuilds)
@@ -903,7 +899,7 @@ maintainer's ruling of 2026-11-06).
   [0033](decisions/0033-vae-fixed-tile-decode.md) addendum.
 - **RAM-saving sequential tile assembly for Wan's VAE (filed 2026-10-11, Codex deep review R6A-016)**: the Wan version of the anima
   candidate above. `decodeWanVaeTiles` (`packages/models/src/wan/vae-tiles.ts`) accumulates all tiles in an array, then allocates the final video and
-  composites, so for Wan2.1's 832×480, 81 frames the 12 tiles' 764,411,904 B and the output's 388,177,920 B are alive at the same time
+  composites, so (computed when filed, on Wan2.1's 832×480 × 81 frames) the 12 tiles' 764,411,904 B and the output's 388,177,920 B are alive at the same time
   (computed from the shapes; RSS not measured). Candidate: decode row by row, paste into the output, and keep only the row above and the tile to the left. Conditions: keep the blend
   order (vertical → horizontal), and decide adoption after confirming bit identity with today's output by a Uint32 comparison. To measure: RSS for 33 / 81
   frames, readback wait, GPU time (for Wan2.2, measure the same quantities at 1280×704 and at the exit of patchify space).
