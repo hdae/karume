@@ -51,7 +51,6 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("birefnet", both("birefnet")),
   family("depth-anything", both("depth_anything")),
   family("siglip2", both("siglip2")),
-  family("vowel-detector", both("vowel_detector")),
   family("minicpm5", both("minicpm5")),
   family(
     "embeddinggemma",

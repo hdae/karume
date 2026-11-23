@@ -95,10 +95,6 @@
         "kind": "namespace"
       },
       {
-        "name": "vowelDetector",
-        "kind": "namespace"
-      },
-      {
         "name": "wan",
         "kind": "namespace"
       }
@@ -1059,36 +1055,6 @@
       {
         "name": "SOURCES",
         "kind": "variable"
-      }
-    ],
-    "./vowel-detector": [
-      {
-        "name": "Assets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "FromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "LabSegment",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "ModelInputError",
-        "kind": "class"
-      },
-      {
-        "name": "Pipeline",
-        "kind": "class"
-      },
-      {
-        "name": "PipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Result",
-        "kind": "typeAlias"
       }
     ],
     "./wan": [

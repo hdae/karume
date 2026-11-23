@@ -169,7 +169,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "packages/e2e/tests/e2e_sbv2_ab_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_sbv2_style_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_sbv2_wav_test.ts", why: TTS_INPUT, maxLines: 1 },
-  { path: "packages/e2e/tests/e2e_vowel_detector_chain_test.ts", why: TTS_INPUT, maxLines: 3 },
   {
     path: "packages/hub/tests/fetch_test.ts",
     why: "the Japanese error text of the dependency @hdae/fetch-cache, which the test matches",

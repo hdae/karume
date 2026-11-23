@@ -22,8 +22,8 @@
 //   decode form)
 //
 // The host-side generation loop (`src/generation/greedy.ts`) is a models implementation, so this
-// check sits on the models side (the same split as `e2e_vowel_detector_chain_test.ts` — no
-// backwards dependency of a runtime test importing the models implementation by a relative path).
+// check sits on the models side (no backwards dependency of a runtime test importing the models
+// implementation by a relative path).
 // The runtime side, in turn, holds the acceptance conditions of the states-form kernels on
 // synthetic graphs (`tests/gpu_state_acceptance_test.ts`), which need no real weights.
 //

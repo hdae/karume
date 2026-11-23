@@ -31,6 +31,10 @@ measurements in `docs/research/`.
   staleRows }` (was `{ current, unsteady, stale, staleRows }`), and `LinearGemvStaleGroup` has no `cause` (only a
   group whose case is not current is stale). The plan lists, at a case and row count where a reference's fastest
   time is not repeated, every candidate read against it, and no candidate whose reference the sweep does not measure.
+- `@karume/models`: the vowel detector is removed — the subpath `@karume/models/vowel-detector` (`Pipeline`,
+  `Assets`, `FromPretrainedOptions`, `PipelineOptions`, `Result`, `LabSegment` and its re-export of `ModelInputError`)
+  and the barrel namespace `vowelDetector`. Its distribution was never published. `ModelInputError` and `decodeWav`
+  stay in the barrel; the `gru_scan` / `gru_scan_reverse` ops stay in `@karume/runtime`.
 
 ### Added
 

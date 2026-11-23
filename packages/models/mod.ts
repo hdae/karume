@@ -1,7 +1,7 @@
 /**
  * `@karume/models` — the barrel of the pipelines. Offered alongside the per-family subpaths
  * (`./anima` / `./birefnet` / `./depth-anything` / `./gemma` / `./gemma4-qat-mobile` / `./irodori` /
- * `./sbv2` / `./siglip2` / `./umt5` / `./vowel-detector` / `./wan` / `./moss` / `./embeddinggemma`)
+ * `./sbv2` / `./siglip2` / `./umt5` / `./wan` / `./moss` / `./embeddinggemma`)
  * (ADR 0037).
  *
  * Two kinds of export:
@@ -10,7 +10,7 @@
  *   every `fromPretrained`, {@link ModelInputError}, {@link KARUME_SOURCES} and the PNG / WAV /
  *   image helpers.
  * - **One namespace per family** (`anima`, `birefnet`, `depthAnything`, `gemma`, `gemma4QatMobile`,
- *   `irodori`, `sbv2`, `siglip2`, `umt5`, `vowelDetector`, `wan`, `moss`, `embeddinggemma` — the
+ *   `irodori`, `sbv2`, `siglip2`, `umt5`, `wan`, `moss`, `embeddinggemma` — the
  *   subpath key in camelCase).
  *   Each namespace **is** that subpath's module (`export * as`), so the barrel and the subpaths
  *   cannot drift apart, and the members are documented once, on the subpath's own page (JSR lists a
@@ -143,13 +143,6 @@ export * as siglip2 from "./siglip2.ts";
  * https://jsr.io/@karume/models/doc/umt5
  */
 export * as umt5 from "./umt5.ts";
-
-/**
- * Vowel detection — Japanese speech → a `.lab` for lip sync. This namespace is the module of the
- * subpath `@karume/models/vowel-detector`; its members and their docs are on that page:
- * https://jsr.io/@karume/models/doc/vowel-detector
- */
-export * as vowelDetector from "./vowel-detector.ts";
 
 /**
  * Wan2.1 / 2.2 — text (+ a conditioning image) → video. This namespace is the module of the subpath

@@ -27,7 +27,6 @@ import {
 } from "../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
 import { UMT5_ENCODER_SESSION_POLICY } from "../src/umt5/encoder.ts";
-import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
 test("toSessionOptions: maps the declared keys one by one (an unspecified key creates no field at all)", () => {
@@ -469,7 +468,7 @@ describe("assertSessionOverrides", () => {
 });
 
 describe("the families' policy tables", () => {
-  it("the tables of all 11 families have every key of SessionSpec (the run-time counterpart of the type's exhaustiveness)", () => {
+  it("the tables of all 10 families have every key of SessionSpec (the run-time counterpart of the type's exhaustiveness)", () => {
     // The tables' type is the exhaustive `Required<SessionSpec>`, so a new key fails the type
     // check. This is the counterpart for a change that loosens the type (making it `Partial`, for
     // example) and so passes the type check.
@@ -483,7 +482,6 @@ describe("the families' policy tables", () => {
       sbv2: SBV2_SESSION_POLICY,
       siglip2: SIGLIP2_SESSION_POLICY,
       "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
-      "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
       wan: WAN_SESSION_POLICY,
     };
     for (const [family, policy] of Object.entries(policies)) {

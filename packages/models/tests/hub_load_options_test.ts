@@ -1,4 +1,4 @@
-// The check for the options that the `fromPretrained` of 9 families pass through to the hub
+// The check for the options that the `fromPretrained` of 8 families pass through to the hub
 // (`src/hub/load-options.ts`). **Needs neither a GPU nor the real network.**
 //
 // When the 0.11.0 hub added `onRetry` (the retry notification for 429 / 503), the
@@ -11,11 +11,11 @@
 //     overriding the default `globalThis.fetch`, and so on).
 //  ③ `onProgress` is not copied (the family side puts progress into `loadContainerComponents`
 //     separately).
-//  ④ The type check — **every one** of the 9 families accepts `onRetry` (`vp check` goes red
+//  ④ The type check — **every one** of the 8 families accepts `onRetry` (`vp check` goes red
 //     if one is missing).
 // Finally, as the counterpart seen from the public surface, a mock fetch's 429 checks that "anima's
 // `fromPretrained` carries `onRetry` down to `loadManifest`" (one family is enough — the carrying
-// path is the same one for all 9 families).
+// path is the same one for all 8 families).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -29,7 +29,6 @@ import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
 import * as siglip2 from "../siglip2.ts";
 import * as umt5 from "../umt5.ts";
-import * as vowelDetector from "../vowel-detector.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 const noopRetry = (diagnostic: RetryDiagnostic): void => void diagnostic;
@@ -85,7 +84,7 @@ test("hubLoadOptions: onProgress is not copied (the family side adds progress se
   assertEquals(Object.keys(hubOptions), ["onRetry"]);
 });
 
-test("type check: the fromPretrained options of 9 families accept onRetry", () => {
+test("type check: the fromPretrained options of 8 families accept onRetry", () => {
   // `satisfies` is the substance (the type check of `vp check` is the check). Goes red if even one family
   // drifts from the shared type.
   const perFamily = [
@@ -97,10 +96,9 @@ test("type check: the fromPretrained options of 9 families accept onRetry", () =
     { onRetry: noopRetry } satisfies sbv2.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies siglip2.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies umt5.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies vowelDetector.FromPretrainedOptions,
   ];
-  assertEquals(perFamily.length, 9, "the families listed are not 9");
-  // The same list also checks that the copy's entry (`hubLoadOptions`) accepts the 9 families'
+  assertEquals(perFamily.length, 8, "the families listed are not 8");
+  // The same list also checks that the copy's entry (`hubLoadOptions`) accepts the 8 families'
   // types **as they are**.
   for (const options of perFamily) assertStrictEquals(hubLoadOptions(options).onRetry, noopRetry);
 });

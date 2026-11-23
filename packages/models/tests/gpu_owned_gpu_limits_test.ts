@@ -11,7 +11,7 @@
  * check never happens at all.
  *
  * Here a **declaration no real machine can satisfy** (`Number.MAX_SAFE_INTEGER` — the largest value
- * the manifest accepts) is set, 4 families are built from declaration-only containers (no weights),
+ * the manifest accepts) is set, 3 families are built from declaration-only containers (no weights),
  * and they are expected to fail with the limits message. Every family check (graph declarations,
  * pipelineConfig) is made to pass, so the limits are the only reason to fail.
  *
@@ -25,16 +25,12 @@ import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as siglip2 from "../siglip2.ts";
-import * as vowelDetector from "../vowel-detector.ts";
-import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
-import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import {
   declaredContainer,
   partAssets,
   tensorlessContainer,
   type TensorlessGraphSpec,
 } from "./helpers/container-fixture.ts";
-import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** The baked resolution (square 2×2). */
@@ -47,12 +43,7 @@ const UNSATISFIABLE = { maxBufferSize: Number.MAX_SAFE_INTEGER };
 const LIMITS_MESSAGE = "this GPU does not meet the required device limits";
 
 /** The skeleton of a distribution form (one component, one quant, unsatisfiable limits). */
-const manifestOf = (
-  pipeline: string,
-  key: string,
-  config: Record<string, unknown>,
-  assets: Record<string, unknown> = {},
-): Manifest =>
+const manifestOf = (pipeline: string, key: string, config: Record<string, unknown>): Manifest =>
   parseManifest(
     JSON.stringify({
       format: "karume/6",
@@ -62,7 +53,7 @@ const manifestOf = (
         test: {
           pipeline,
           weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
-          assets,
+          assets: {},
           quants: {
             f32: { weights: { [key]: "f32" }, session: {}, requiredLimits: UNSATISFIABLE },
           },
@@ -130,50 +121,6 @@ const families: readonly Family[] = [
           interpolation: "bicubic",
         }),
         assets: await containerOf("depth", imageGraph("predicted_depth", [1, SIZE, SIZE])),
-      }),
-  },
-  {
-    name: "vowelDetector.Pipeline",
-    build: async () =>
-      await vowelDetector.Pipeline.fromAssets({
-        manifest: manifestOf(
-          "vowel-detector/1",
-          "crnn",
-          {
-            sampleRate: SAMPLE_RATE,
-            featureDim: FEATURE_DIM,
-            classes: [...LIPSYNC_CLASSES],
-            minFrames: 4,
-            maxFrames: 60_000,
-          },
-          {
-            mel_basis: {
-              path: "crnn/features/mel-basis.safetensors",
-              size: 16,
-              sha256: "a".repeat(64),
-            },
-          },
-        ),
-        assets: {
-          ...(await containerOf("crnn", {
-            symbols: ["T"],
-            inputs: [{ name: "features", shape: [1, "2T", FEATURE_DIM] }],
-            output: { name: "logits", shape: [1, "T", LIPSYNC_CLASSES.length] },
-          })),
-          mel_basis: writeSafetensors(
-            new Map([
-              [
-                "mel_basis",
-                {
-                  dtype: "F32" as const,
-                  shape: [N_MELS, MEL_BINS],
-                  data: new Float32Array(N_MELS * MEL_BINS),
-                },
-              ],
-            ]),
-            {},
-          ),
-        },
       }),
   },
 ];

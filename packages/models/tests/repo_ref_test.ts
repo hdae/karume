@@ -63,7 +63,7 @@ test("toRepoRef: a family without a public distribution repository is not pointe
   // Pointing at an identifier that does not exist sends the reader looking for something they
   // cannot import.
   const error = assertThrows(
-    () => toRepoRef(undefined, "vowelDetector.Pipeline.fromPretrained"),
+    () => toRepoRef(undefined, "embeddinggemma.Pipeline.fromPretrained"),
     Error,
     "repo is required",
   );
