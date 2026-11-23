@@ -102,7 +102,7 @@ export const wanSpatialCompression = (
  * (`wanVaeMinTileOverlap` — fails loudly if it does not divide evenly).
  *
  * NOTE: `export` is so that the plan check, the admission check and the GPU comparison
- * (`e2e_wan_vae_tiles_test.ts`) go through the production derivation (not on the `mod.ts` / subpath
+ * (`e2e_wan_ti2v_vae_tiles_test.ts`) go through the production derivation (not on the `mod.ts` / subpath
  * surface — ADR 0008).
  */
 export const planWanGenerationTiles = (

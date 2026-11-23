@@ -19,7 +19,7 @@
  *    are **bit-identical** to the golden's inputs. The GPU checks run on these TS inputs (the product path). It also
  *    checks that the golden was taken from the current container (the part 0 sha256).
  * 2. **The band of the normalized ratio r** (decision 8 ①): r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 − f64| ÷
- *    max|f64|) (the same metric as the DiT's full-size check — `DIT_FULL_NORMALIZED_BAND` of `e2e_wan_dit_test.ts`).
+ *    max|f64|) (the same metric as the Wan DiT e2e — `normalizedRatio` of `e2e_wan_ti2v_dit_test.ts`).
  *    The band is the worst r of the 6 band-setting cases × 5, rounded up to 2 significant digits; the 4 acceptance
  *    cases are judged separately ({@link UMT5_NORMALIZED_BAND}).
  * 3. **Fault injection** (on the 4 acceptance cases; each must leave the band): shifting the relative-position table by

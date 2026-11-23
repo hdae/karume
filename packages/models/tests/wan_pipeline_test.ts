@@ -3,7 +3,7 @@
 // umT5), the construction entry (the path spelling, the umT5 declaration, abort), where the default
 // negative comes from, the text-embedding asset checks, latent denormalisation, RGBA conversion of
 // frames, the RNG, and `generate` run on mock Sessions (the order and teardown of the text stage, the
-// cleanup and non-finite checks, abort). The real-GPU run is e2e_wan_pipeline_test.ts.
+// cleanup and non-finite checks, abort). The real-GPU run is e2e_wan_ti2v_pipeline_test.ts.
 
 import { readTextFile } from "@karume/test-support/fs";
 import {
@@ -48,13 +48,10 @@ import {
   writeContainer,
 } from "./helpers/container-fixture.ts";
 import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
-import { readTextIfPresent } from "./helpers/read-if-present.ts";
-import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
 import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
-import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import {
   findWanTextEmbedding,
   padWanTextEmbedding,
@@ -1701,10 +1698,10 @@ describe("the default negative (the official sample_neg_prompt)", () => {
 });
 
 /**
- * The text-embedding asset the Wan2.1 distribution ships (ADR 0139 decision 1 — the local mirror
- * built by `dist.py`; a machine without it SKIPs only the case below).
+ * The text-embedding asset the published Wan2.2 distribution ships (ADR 0139 decision 1; a machine
+ * without the mirror SKIPs only the case below).
  */
-const WAN_MIRROR = mirrorRoot("karume-wan2.1");
+const WAN_MIRROR = mirrorRoot("karume-wan2.2");
 const textEmbedsMirror = mirrorPresent(WAN_MIRROR)
   ? await readMirrorAsset(WAN_MIRROR, "text_embeds")
   : undefined;
@@ -1712,7 +1709,7 @@ if (textEmbedsMirror === undefined) {
   console.warn(
     `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/6, or a sibling it references is ` +
       "absent), so the check of the default negative against the asset's row is SKIPPED (the check against the " +
-      `recipe's text runs on the fixture). Assemble the mirror: ${WAN_ASSEMBLE_COMMAND}`,
+      "recipe's text runs on the fixture). Fetch the karume-wan2.2 and karume-umt5-xxl distributions into models/",
   );
 }
 
@@ -2057,39 +2054,6 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
     assertStrictEquals(error, reason);
   });
 });
-
-/** The manifest of the distribution mirror (written by `dist.py --pipeline wan` — a machine without it SKIPs only the case below). */
-const DIST_MANIFEST = new URL("../../../models/karume-wan2.1/karume.json", import.meta.url);
-const distManifestText = await readTextIfPresent(DIST_MANIFEST);
-if (distManifestText === undefined) {
-  console.warn(
-    `[karume] ${DIST_MANIFEST.pathname} is absent, so the check that a build without quant resolves to the practical preset is SKIPPED. ` +
-      `Assemble it: ${WAN_ASSEMBLE_COMMAND}`,
-  );
-}
-
-/** The default preset (ruling 4 of ADR 0120 on 2026-10-04 — the most practical preset today. The source of truth is the recipe's `WAN_DEFAULT_QUANT`). */
-const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
-
-test.skipIf(distManifestText === undefined)(
-  "the distribution's default preset: a build without quant resolves to the practical preset (reading only the manifest karume.json)",
-  async () => {
-    assert(distManifestText !== undefined);
-    // The preset is resolved in the family admission (before the weights are read). Passing a shared
-    // GPU whose limits are all 0 makes every preset fail on the requiredLimits it declares (the umT5
-    // vocabulary embedding), and that message names the resolved preset — observing the preset without
-    // using weights or a GPU.
-    await assertRejects(
-      () =>
-        Pipeline.fromAssets(
-          { manifest: parseManifest(distManifestText), assets: SHELL_COMPONENTS },
-          { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
-        ),
-      Error,
-      `wan.Pipeline: quant '${PRACTICAL_QUANT}': this GPU does not meet the required device limits`,
-    );
-  },
-);
 
 describe("Pipeline.generate (mock Sessions, the text stage of the GPU path)", () => {
   it("the text stage runs positive → negative and tears down, then sets up the DiT stage (the Session's run options are {})", async () => {

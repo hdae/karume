@@ -1,13 +1,11 @@
 /**
- * What the e2e of the Wan video VAE's chunk sequence (2.1's `e2e_wan_vae_tiles_test.ts`, 2.2's
- * `e2e_wan_ti2v_vae_tiles_test.ts`) share: the fixture reader, a chunk loop with a fault-injection
- * entry, the VRAM breakdown and bit equality.
+ * What the e2e of the Wan video VAE's chunk sequence (`e2e_wan_ti2v_vae_tiles_test.ts` and its
+ * siblings) share: the fixture reader, a chunk loop with a fault-injection entry, the VRAM breakdown
+ * and bit equality.
  *
  * The product path is `decodeWanVaeTile` of `src/wan/vae-chunks.ts`. The loop here is built from
  * the same parts, and each e2e checks that without a fault it matches the product path bit for bit
- * as Uint32 (the guarantee that the injected results represent the product path). Both generations
- * use the same loop so that the injection's shape is not grown per generation with one side
- * silently drifting.
+ * as Uint32 (the guarantee that the injected results represent the product path).
  */
 
 import { readFile } from "@karume/test-support/fs";

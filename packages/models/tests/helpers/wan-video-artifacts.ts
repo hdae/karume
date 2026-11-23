@@ -1,10 +1,6 @@
 /**
  * Writes the artifacts of a generated Wan video (every frame as PNG plus a contact sheet) to the
  * results directory (the material for the maintainer's visual check — ADR 0121 step 6).
- *
- * NOTE: the contents are a verbatim copy of the contact-sheet and PNG writing of the 2.1 e2e
- * (`e2e_wan_pipeline_test.ts`). The copy on the 2.1 e2e side is not touched (the 2.1 lane is frozen
- * — ruling of ADR 0121 step 6), so removing the duplication is out of scope and handled separately.
  */
 
 import { writeFile } from "@karume/test-support/fs";

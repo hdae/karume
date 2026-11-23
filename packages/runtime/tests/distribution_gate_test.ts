@@ -16,8 +16,8 @@
 // 2026-09-25). Mirrors that no e2e reads yet (siglip2 and others) are listed too — matching the
 // guard's reach to "what the e2e reads today" would bring the silent SKIP back the day an e2e is
 // added and the guard update is forgotten. The unpublished vowel-detector is not listed (it is
-// listed once its distribution exists). A mirror that the e2e (and the fusion hit-count check)
-// roots on is listed even when unpublished (wan2.1).
+// listed once its distribution exists). A mirror that the e2e roots on is listed even when
+// unpublished (embeddinggemma-2).
 //
 // It checks **more than presence** (ADR 0108 stage 3, acceptance item ②). A `karume.json` that is
 // present but still of an old major, or that declares a part that is missing or whose length
@@ -102,7 +102,7 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * 17 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
  * 0.14.0, `karume-moss-image`, first published in 0.15.1, `karume-gemma4-qat-mobile`, published
  * under this name in 0.16.0, `karume-irodori-v4.1-small-mf`, first published in 0.21.0, and
- * `karume-irodori-v4-large`, first published in 0.22.0) + the unpublished `karume-wan2.1` and
+ * `karume-irodori-v4-large`, first published in 0.22.0) + the unpublished
  * `karume-embeddinggemma-2`.
  *
  * The two published ones were on the guard's roster before publication: `karume-umt5-xxl` is the
@@ -117,10 +117,6 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * mobile QAT public-entry e2e and the fusion hit-count check root on it. `karume-gemma4-qat` now
  * holds the q4_0 QAT line (E2B / E4B / 12B with their drafters, published in 0.16.0), which the
  * q4_0 QAT mirror e2e, its sha256 rows and the 12B e2e root on.
- *
- * `karume-wan2.1` is unpublished (not published to HF — ADR 0118 addendum (2026-10-15)), but Wan's
- * end-to-end e2e (`e2e_wan_pipeline_test.ts`) and the fusion hit-count check root on it (ADR 0118
- * stage 7).
  *
  * `karume-moss-image` was on the roster before its publication as well (ADR 0138 addendum of
  * 2026-11-01): the pipeline e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so
@@ -154,7 +150,6 @@ const DISTRIBUTIONS = [
   "karume-moss-image",
   "karume-sbv2-jvnv",
   "karume-siglip2",
-  "karume-wan2.1",
   "karume-wan2.2",
   "karume-umt5-xxl",
 ] as const;

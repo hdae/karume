@@ -1,7 +1,7 @@
 // The host side of the tiled decode of the Wan2.1 video VAE (ADR 0118 decision 2, stage 5 — pure
 // functions that need neither a GPU nor assets).
 //
-// The reference comparison and the degenerate check on a real GPU are in `e2e_wan_vae_tiles_test.ts`.
+// The reference comparison on a real GPU is in `e2e_wan_ti2v_vae_tiles_test.ts`.
 // This file pins the **frozen geometry table** (the same values as the Python side — frozen twice, ADR
 // 0033 addendum 9a), the layout invariants and the analytic solutions of the stitching.
 

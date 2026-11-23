@@ -3,8 +3,7 @@
 // latent into chunks, concatenating the frames, and the cache residents with their tile-head zeroing
 // (`ResidentTensor.clear` on mock residents, and across two tiles on stub chunk graphs on a real GPU).
 //
-// The chunk sequence on a real GPU with real assets is checked by `e2e_wan_vae_tiles_test.ts` and
-// `e2e_wan_ti2v_vae_tiles_test.ts`. The e2e tests only pass well-formed assets, so the declaration's
+// The chunk sequence on a real GPU with real assets is checked by `e2e_wan_ti2v_vae_tiles_test.ts`. The e2e tests only pass well-formed assets, so the declaration's
 // failure shapes (the branches that reject an asset off the contract by name) are checked only here.
 // Declarations follow `helpers/stub-model.ts`: write one correct form, then break one point.
 

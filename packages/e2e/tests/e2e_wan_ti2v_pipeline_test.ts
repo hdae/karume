@@ -235,8 +235,7 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
  *
  * The derivation rule: per observation point, the worst of the two deciding cases × 5 (rounded up to 2 significant
  * digits). The candidate the first real run printed is written here together with the table of measurements (the two
- * deciding cases, the band, the acceptance case) (the same form as the doc of the constant of the same name in 2.1's
- * `e2e_wan_pipeline_test.ts`).
+ * deciding cases, the band, the acceptance case).
  *
  * Derivation (2026-10-05, B570, reference preset):
  *

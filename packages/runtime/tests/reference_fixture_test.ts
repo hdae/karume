@@ -269,7 +269,7 @@ test("reference check: red for a case with both a held row and a current-environ
 test("reference check: an opt-in case is not counted in a run that leaves it out of the registration", () => {
   // `opt-in` is a case enabled by an environment variable (its row exists only on another
   // machine). In a run where it is disabled the caller does not register it (the conditional
-  // registration of CASE_IDS in e2e_wan_pipeline_test.ts) — the check counts only the registered
+  // registration of CASE_IDS in e2e_wan_ti2v_pipeline_test.ts) — the check counts only the registered
   // set, not the whole fixture.
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "opt-in": { [OTHER]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {

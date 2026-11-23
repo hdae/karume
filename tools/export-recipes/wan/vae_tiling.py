@@ -8,8 +8,7 @@ The host cuts the full frame (832×480 = 60×104 latents) into tiles, decodes th
 overlaps and stitches them together (always tiled — ADR 0118 decision 2, the video version of
 ADR 0033 / 0038 §4). This module is the **Python-side source of truth of the geometry and the
 blending**, and the script for the reference fixtures read by the GPU comparison
-(`packages/models/tests/e2e_wan_vae_tiles_test.ts` for 2.1,
-`packages/models/tests/e2e_wan_ti2v_vae_tiles_test.ts` for 2.2).
+(`packages/e2e/tests/e2e_wan_ti2v_vae_tiles_test.ts`).
 The TS side is `packages/models/src/wan/vae-tiles.ts`.
 
 ## Geometry = rounded evenly spaced snapped placement (a deliberate deviation from upstream)

@@ -1,10 +1,9 @@
 /**
- * One case of Wan's **self A/B check** (ADR 0110 decision 5 / ADR 0120 decision 4) — shared by 2.1 (`e2e_wan_ab_test.ts`)
- * and 2.2 (`e2e_wan_ti2v_ab_test.ts`). The differences between the two generations (the pipeline class, the census table's
- * series, the model, the preset, where the distribution lives, the fixed request values, the log prefix) come in through
- * {@link WanAbSubject}; the procedure, the order of the verdicts, the shape of the fault injections and the recording into the
- * results are one implementation (so the check's claim does not diverge between generations). The verdict of "what turns red"
- * itself is the pure functions of `ab-gate.ts`.
+ * One case of Wan's **self A/B check** (ADR 0110 decision 5 / ADR 0120 decision 4) — run by `e2e_wan_ti2v_ab_test.ts`.
+ * The generation's values (the pipeline class, the census table's series, the model, the preset, where the distribution
+ * lives, the fixed request values, the log prefix) come in through {@link WanAbSubject}; the procedure, the order of the
+ * verdicts, the shape of the fault injections and the recording into the results live here. The verdict of "what turns
+ * red" itself is the pure functions of `ab-gate.ts`.
  *
  * The procedure of one case (= one frame count) ({@link registerWanAbCase}):
  *
