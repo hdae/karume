@@ -4,7 +4,7 @@
  *
  * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
  * limit). **This module is therefore the source of truth for the shape**, and the recipe-side test
- * matches its field names against the writer (`WAN_PIPELINE_CONFIG` in the recipe
+ * matches its field names against the writer (`WAN22_PIPELINE_CONFIG` in the recipe
  * `tools/export-recipes/wan/distribution.py`).
  *
  * Only the generation defaults are declared (ADR 0118 decision 5 — the product defaults start in the

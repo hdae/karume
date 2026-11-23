@@ -19,7 +19,7 @@ from real_assets import mirror_asset, require_test_asset
 
 from _shared.paths import GOLDENS_ROOT
 from wan import export_vae, few_step_ref, pipeline_ref, prompts, text_embeds, vae_tiling
-from wan.distribution import WAN21, WAN_TEXT_EMBEDS_ROLE
+from wan.distribution import WAN22, WAN_TEXT_EMBEDS_ROLE
 
 #: The goldens of the Wan2.1 f16 series (the references `wan.few_step_ref` writes there).
 GOLDENS = GOLDENS_ROOT / export_vae.SERIES_NAME
@@ -119,8 +119,8 @@ class TestWrittenReference:
 
     def test_it_was_made_from_the_current_text_embeds(self, written):
         """New text embeddings mean new references (bound by sha256) — checked against the text
-        embeddings the Wan2.1 distribution ships."""
-        embeds = mirror_asset(WAN21.repo_name, WAN21.default_model, WAN_TEXT_EMBEDS_ROLE)
+        embeddings the Wan2.2 distribution ships (the asset built from the Wan2.1 checkpoint)."""
+        embeds = mirror_asset(WAN22.repo_name, WAN22.default_model, WAN_TEXT_EMBEDS_ROLE)
         _, _, metadata = written
 
         assert metadata["text_embeds_sha256"] == hashlib.sha256(embeds.read_bytes()).hexdigest()

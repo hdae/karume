@@ -77,9 +77,7 @@ uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1
 uv run python dist.py --pipeline irodori                # v4-small
 uv run python dist.py --pipeline irodori --model v4.1-small \
     --resolve-refs hf                                   # references karume-irodori-v4-small
-uv run python dist.py --pipeline umt5                   # umT5-XXL encoder referenced by Wan2.1 and Wan2.2
-uv run python dist.py --pipeline wan \
-    --allow-placeholder-ref                             # Wan2.1 T2V 1.3B (not published)
+uv run python dist.py --pipeline umt5                   # umT5-XXL encoder referenced by Wan2.2
 uv run python dist.py --pipeline wan-ti2v \
     --resolve-refs hf                                   # Wan2.2 TI2V 5B (references karume-umt5-xxl)
 uv run python dist.py --pipeline moss-image             # MOSS-Image-SFT
@@ -89,7 +87,7 @@ uv run python dist.py --pipeline sbv2 \
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `irodori` / `irodori-large` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md). The house non-endorsement sentence every card

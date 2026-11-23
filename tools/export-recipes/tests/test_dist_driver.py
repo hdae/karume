@@ -53,7 +53,6 @@ from karume.modelcard import HF_OWNER, UNOFFICIAL_CONVERSION_NOTICE
 from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
-from wan.distribution import PIPELINE as WAN_PIPELINE
 from wan.distribution import TI2V_PIPELINE as WAN_TI2V_PIPELINE
 from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
 
@@ -73,7 +72,6 @@ RECIPE_PIPELINES = {
     "gemma4": GEMMA4_PIPELINE,
     "gemma4-qat": GEMMA4_QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": GEMMA4_QAT_PIPELINE,
-    "wan": WAN_PIPELINE,
     "wan-ti2v": WAN_TI2V_PIPELINE,
     "umt5": UMT5_PIPELINE,
     "moss-image": MOSS_PIPELINE,
@@ -173,7 +171,6 @@ class TestRegistry:
             "birefnet",
             "lucida",
             "depth-anything",
-            "wan",
             "wan-ti2v",
             "umt5",
             "moss-image",
@@ -250,8 +247,6 @@ RELEASE_REPOSITORIES = [
     ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
     ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
     ("umt5", ["xxl"], None, "karume-umt5-xxl"),
-    # Wan2.1 (`--pipeline wan` → karume-wan2.1) is not published on HF, so it is not listed
-    # (ADR 0118 addendum 2026-10-15).
     ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
     ("moss-image", ["sft"], None, "karume-moss-image"),
 ]

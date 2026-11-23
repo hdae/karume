@@ -23,8 +23,6 @@ is the source of truth of the accepted set.
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # a BiRefNet_HR derivative (own repo)
     uv run python dist.py --pipeline umt5                  # umT5-XXL encoder (referenced by Wan)
-    uv run python dist.py --pipeline wan --allow-placeholder-ref
-                                                           # Wan2.1 T2V 1.3B (not published)
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
     uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT
@@ -148,9 +146,8 @@ PIPELINES: Mapping[str, Pipeline] = {
     # `gemma4-qat/1`).
     "gemma4-qat": gemma4_distribution.QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": gemma4_qat_distribution.PIPELINE,
-    "wan": wan_distribution.PIPELINE,
-    # Wan's generations are separate repositories (ADR 0092 decision 2 — `karume-wan2.2`), so the
-    # Pipeline is a separate entry too.
+    # Wan2.2 TI2V 5B (`karume-wan2.2` — Wan's generations are separate repositories, ADR 0092
+    # decision 2).
     "wan-ti2v": wan_distribution.TI2V_PIPELINE,
     # What Wan's text_encoder references (ADR 0119 addendum D — a components-only repository; no
     # TS family reads it).

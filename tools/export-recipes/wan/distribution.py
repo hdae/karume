@@ -1,26 +1,24 @@
-"""The Wan distribution recipe (Wan2.1 / Wan2.2) — series layout, output path table, quant table
-and the choice of card (ADR 0118 decision 7, ADR 0121 decisions 2 / 9 / 10).
+"""The Wan distribution recipe (Wan2.2 TI2V 5B — `karume-wan2.2`) — series layout, output path
+table, quant table and the choice of card (ADR 0118 decision 7, ADR 0121 decisions 2 / 9 / 10).
 
 The general-purpose assembly engine (placement, folding of shared entries, sha256, manifest,
 staging/swap, verification) lives in `karume.dist`. This module owns only **the facts specific to
 Wan**: what to pick up from which series directory, at which distribution path and under which
 dtype label to lay it out, and which quant is the default.
 
-The facts that differ per generation (distribution repository name, pipeline contract, shipped
-models, the DiT and VAE series, the transformer's storage labels, the pin of the text assets'
-provenance, the quant table and default preset, `pipelineConfig`, NOTICE, card) are collected in
-the generation table {@link WanGeneration} ({@link WAN21} / {@link WAN22}), and a single plan
-function ({@link wan_plan}) builds both. The placement table, the storage requirement / prohibition
-tables and the weights declaration are derived from the transformer storage labels the generation
-holds (Wan2.2 has only i8 and no f16 DiT — ADR 0121 decision 2). The paragraphs below describe the
-Wan2.1 distribution; the differences of Wan2.2 are summarized in the doc of {@link WAN22}.
+The facts of the generation (distribution repository name, pipeline contract, shipped models, the
+DiT and VAE series, the storage labels, the pin of the text assets' provenance, the quant table and
+default preset, `pipelineConfig`, NOTICE, card) are collected in the generation table
+{@link WanGeneration} ({@link WAN22}), which the plan function ({@link wan_plan}) reads. The
+placement table, the storage requirement / prohibition tables and the weights declaration are
+derived from the storage labels the generation holds; the doc of {@link WAN22} lists what it ships.
 
-The distribution ships 3 graphs (the DiT's S-shaped `transformer` and the VAE's chunk graphs
-`vae_decoder_first` / `vae_decoder_next` — series `wan2.1-t2v-1.3b-f16-dyn`) and 2 per-model assets
-(the step-1 text embeddings `text_embeds` — decision 4; the umT5 tokenizer and preprocessing tables
-`umt5_tokenizer` — ADR 0119 addendum "Design of step 10d" C; both quant-independent, ADR 0109
-decision 4). Only `transformer` has 2 containers, one per storage label (f16, and the i8 of series
-`wan2.1-t2v-1.3b-i8-dyn` — ADR 0120 decision 1). The per-axis RoPE base table `rope_base` is a
+The graphs are the DiT's S-shaped `transformer` (i8 only — ADR 0121 decision 2), the VAE decoder's
+chunk graphs (`vae_decoder_first` / `vae_decoder_next` and their 32-latent pair, f16 and i8) and
+the three graphs of the I2V VAE encoder; the 2 per-model assets are the step-1 text embeddings
+`text_embeds` (decision 4) and the umT5 tokenizer and preprocessing tables `umt5_tokenizer` (ADR
+0119 addendum "Design of step 10d" C), both quant-independent (ADR 0109 decision 4) and built from
+the Wan2.1 T2V 1.3B checkpoint (ADR 0121 decision 9). The per-axis RoPE base table `rope_base` is a
 **container asset** of `transformer` (role `rope-base`), so it is not in the manifest's `assets`
 (ADR 0109 decision 4 — the same placement as Anima).
 
@@ -32,17 +30,11 @@ dist's 5 `--ref-*` options, the referenced side being the distribution built by
 through the same single function as umT5's distribution recipe
 (`wan.umt5_distribution.assert_umt5_encoder`).
 
-**One repository per family, a separate repository per generation** (`karume-wan2.1` — ADR 0092
-decisions 1 / 2). A model is an axis within a generation; today there is only `t2v-1.3b`. There are
-3 quant presets ({@link WAN_QUANTS}): `f16` (DiT and VAE weights stored as f16, f32 activations —
-ADR 0118 decision 7; the preset closest to the original weights, used when asked for explicitly),
-and with the DiT weights in i8, the reference preset `f16+dit8` and the practical preset
-`f16+dit8-a8-attn8-s16` (ADR 0120 decision 1). The default is the practical preset (ADR 0120 ruling
-2026-10-04 item 4 — {@link WAN_DEFAULT_QUANT}).
+**One repository per family, a separate repository per generation** (`karume-wan2.2` — ADR 0092
+decisions 1 / 2). A model is an axis within a generation; today there is only `ti2v-5b`.
 
-The public surface is the 2 pipelines {@link PIPELINE} (`--pipeline wan` — Wan2.1) and
-{@link TI2V_PIPELINE} (`--pipeline wan-ti2v` — Wan2.2) — the repository's dist driver
-(`tools/export-recipes/dist.py`) merges them into the core's PIPELINES.
+The public surface is the pipeline {@link TI2V_PIPELINE} (`--pipeline wan-ti2v`) — the
+repository's dist driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 
 MUST: this module does not import torch (`import dist` does not load torch —
 `TestImportingTheDriver` in `tests/test_dist_driver.py`). The writers (`wan.export_dit` /
@@ -87,9 +79,9 @@ from karume.dist import (
     ir_graph,
 )
 from wan import umt5_tokenizer
-from wan.card import WAN21_CARD, WAN22_CARD, WanCard, render_wan_model_card
+from wan.card import WAN22_CARD, WanCard, render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import DEFAULT_MODEL, SOURCES, WAN22_TEXT_MODEL
+from wan.sources import SOURCES, WAN22_TEXT_MODEL
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
@@ -98,22 +90,6 @@ from wan.umt5_distribution import (
     assert_umt5_encoder,
     umt5_container,
 )
-
-#: The pipeline contract (ADR 0041 §2 — per model). The TS side's accepted set is
-#: `WAN_PIPELINE_NAME` / `WAN_PIPELINE_MAJOR` (`packages/models/src/wan/config.ts`).
-WAN_PIPELINE = "wan/1"
-
-#: The distribution repository name (ADR 0092 decisions 1 / 2 — one repository per family, a
-#: separate one per generation; Wan2.2 is `karume-wan2.2`).
-WAN_REPO_NAME = "karume-wan2.1"
-
-#: The DiT and VAE series (decision 7 — the `-dyn` suffix is ADR 0077's convention). The writers'
-#: spellings are `wan.export_dit.SERIES` / `wan.export_vae.SERIES_NAME`.
-WAN_SERIES = "wan2.1-t2v-1.3b-f16-dyn"
-
-#: The DiT's i8 series (ADR 0120 decision 2 — transformer only). The writer's spelling is
-#: `wan.export_dit.I8_SERIES`.
-WAN_I8_SERIES = "wan2.1-t2v-1.3b-i8-dyn"
 
 #: The text-embeddings series (the place of a compile product without a graph —
 #: docs/assets-layout.md), its asset's file name and the only metadata key. The writer's spellings
@@ -189,24 +165,19 @@ WAN_GRAPH_ROLES: tuple[str, ...] = (
 )
 
 #: The placement roles of the `transformer` containers (one per storage label — ADR 0120 decision 1;
-#: the same spelling as anima's `transformer_f16` / `transformer_i8`). They key the placement table
-#: and the storage requirement / prohibition tables; the manifest's weights key stays the
-#: container's graph name {@link WAN_TRANSFORMER_ROLE}.
-WAN_TRANSFORMER_F16_ROLE = "transformer_f16"
+#: the same spelling as anima's `transformer_i8`). They key the placement table and the storage
+#: requirement / prohibition tables; the manifest's weights key stays the container's graph name
+#: {@link WAN_TRANSFORMER_ROLE}.
 WAN_TRANSFORMER_I8_ROLE = "transformer_i8"
-WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
+WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_I8_ROLE,)
 
 #: Transformer storage label → placement role (the roles of a generation are looked up from the
 #: `transformer_labels` of the generation table {@link WanGeneration}).
-WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {
-    "f16": WAN_TRANSFORMER_F16_ROLE,
-    "i8": WAN_TRANSFORMER_I8_ROLE,
-}
+WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {"i8": WAN_TRANSFORMER_I8_ROLE}
 
-#: The placement roles of the VAE decoder's i8 containers (ADR 0133 decision 7 — Wan2.2 only). The
-#: f16 roles stay the container graph names {@link WAN_VAE_FIRST_ROLE} / {@link WAN_VAE_NEXT_ROLE}
-#: (renaming them would change the Wan2.1 distribution). The manifest's weights keys are the graph
-#: names in both cases.
+#: The placement roles of the VAE decoder's i8 containers (ADR 0133 decision 7). The f16 roles are
+#: the container graph names {@link WAN_VAE_FIRST_ROLE} / {@link WAN_VAE_NEXT_ROLE}. The manifest's
+#: weights keys are the graph names in both cases.
 WAN_VAE_FIRST_I8_ROLE = "vae_decoder_first_i8"
 WAN_VAE_NEXT_I8_ROLE = "vae_decoder_next_i8"
 
@@ -249,12 +220,10 @@ WAN_VAE_LENDER_ROLES: Mapping[str, str] = {
 }
 
 #: The placement roles that have a container (text_encoder has one, in i8; the transformer and the
-#: VAE decoder one per storage label; the VAE encoder one each, in f16). The union of the roles of
-#: all generations. Each generation uses the roles of its own storage labels, and only a generation
-#: with the encoder uses the encoder roles ({@link WanGeneration.container_roles} — Wan2.1 does not
-#: have the 3 encoder graphs). The storage requirement / prohibition tables, the output paths and
-#: the weights declaration below are likewise tables over all generations, from which each
-#: generation looks up its own roles.
+#: VAE decoder one per storage label; the VAE encoder one each, in f16). The generation uses the
+#: roles of its own storage labels ({@link WanGeneration.container_roles}); the storage requirement
+#: / prohibition tables, the output paths and the weights declaration below are tables over these
+#: roles, from which the generation looks up its own.
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
     *WAN_VAE_ENCODER_ROLES,
     WAN_TEXT_ENCODER_ROLE,
@@ -318,7 +287,6 @@ WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 WAN_OUTPUT_PATHS: Mapping[str, str] = {
     **{role: f"{role}/model.f16.krm" for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: UMT5_OUTPUT_PATHS[UMT5_ROLE],
-    WAN_TRANSFORMER_F16_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
     WAN_TRANSFORMER_I8_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.i8.krm",
     WAN_VAE_FIRST_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.f16.krm",
     WAN_VAE_FIRST_I8_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.i8.krm",
@@ -348,7 +316,6 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
     WAN_TEXT_ENCODER_ROLE: "i8",
-    WAN_TRANSFORMER_F16_ROLE: "f16",
     WAN_TRANSFORMER_I8_ROLE: "i8",
     WAN_VAE_FIRST_ROLE: "f16",
     WAN_VAE_FIRST_I8_ROLE: "i8",
@@ -388,10 +355,7 @@ WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
 WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     **{role: {"f16": WeightFiles(role)} for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: {"i8": WeightFiles(WAN_TEXT_ENCODER_ROLE)},
-    WAN_TRANSFORMER_ROLE: {
-        "f16": WeightFiles(WAN_TRANSFORMER_F16_ROLE),
-        "i8": WeightFiles(WAN_TRANSFORMER_I8_ROLE),
-    },
+    WAN_TRANSFORMER_ROLE: {"i8": WeightFiles(WAN_TRANSFORMER_I8_ROLE)},
     WAN_VAE_FIRST_ROLE: {
         "f16": WeightFiles(WAN_VAE_FIRST_ROLE),
         "i8": WeightFiles(WAN_VAE_FIRST_I8_ROLE),
@@ -424,131 +388,6 @@ WAN_ASSETS: Mapping[str, str] = {
 #: 1).
 WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
 
-#: The quant table (ADR 0118 decision 7, ADR 0120 decision 1). The VAE has one storage label, so it
-#: is not written in weights ({@link complete_quant_weights} fills it into a complete mapping). The
-#: transformer has two, f16 / i8, so it is written per preset. The 3 `session` keys are the fields
-#: the TS side's acceptance table (`WAN_SESSION_POLICY`) takes, and the practical preset's
-#: declaration is the same as anima's preset of the same name.
-#:
-#: - `f16+dit8` is the reference preset (`session` is empty — the same i8 weights as the practical
-#:   preset, the counterpart of the on-machine A/B check; ADR 0110 decision 5 ②).
-#: - No intermediate presets (`f16+dit8-a8` / `f16+dit8-a8-attn8`) are made (decision 1 — isolating
-#:   one knob at a time is covered by manifest overrides in the tests).
-#:
-#: The knob tokens of preset names (ADR 0074 §3 / ADR 0133 decision 6): `a8` = `linearCompute:
-#: "a8"`, `attn8` = `attentionCompute: "a8"`, `s16` = `attentionScoreStorage: "f16"`, `online` =
-#: `attentionScoreStorage: "none"` (Wan2.2 — ADR 0132), `conv8` = `convCompute: "a8"` (the conv3d of
-#: Wan2.2's VAE decoder — ADR 0133).
-#:
-#: `label` / `description` are display fields for a selection UI (ADR 0075 decision 1 — English, 64
-#: / 200 characters at most). They say nothing about speed or quality — the only speed measurement
-#: of the a8 presets is on the B570 (−50% per forward — ADR 0120 step 4), and on Metal a8 is not
-#: faster (investigation §3.1), so it cannot go into GPU-independent display fields. The quality (no
-#: clear degradation compared with `f16` in step 6's visual check — ADR 0120 ruling 2026-10-04 item
-#: 1) and the per-preset cost are written by the card (`wan/card.py`), which names the preset. Being
-#: the default is not written either (`defaultQuant` points to it — ADR 0075 decision 3).
-WAN_QUANTS: Mapping[str, Any] = {
-    "f16": {
-        "weights": {WAN_TRANSFORMER_ROLE: "f16"},
-        "session": {},
-        "label": "Full quality (f16)",
-        "description": "Transformer and VAE weights in f16 storage with f32 compute — the"
-        " largest download.",
-    },
-    "f16+dit8": {
-        "weights": {WAN_TRANSFORMER_ROLE: "i8"},
-        "session": {},
-        "label": "Half-size transformer (int8)",
-        "description": "Transformer weights stored as int8 (one scale per output channel) and"
-        " computed in f32; the VAE stays f16. About half the transformer download.",
-    },
-    "f16+dit8-a8-attn8-s16": {
-        "weights": {WAN_TRANSFORMER_ROLE: "i8"},
-        "session": {
-            "linearCompute": "a8",
-            "attentionCompute": "a8",
-            "attentionScoreStorage": "f16",
-        },
-        "label": "int8 transformer, int8 activations",
-        "description": "The int8 transformer with per-token int8 activations in its linear layers"
-        " and attention (integer dot products), and attention scores held in f16.",
-    },
-}
-#: The default preset is the practical preset (ADR 0120 ruling 2026-10-04 item 4 — the default is
-#: the most practical preset today: light, with little quality loss; step 6's visual check showed no
-#: clear degradation compared with `f16`). The `f16` preset is the reference-side preset used when
-#: asked for explicitly.
-WAN_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
-
-#: Pipeline-owned settings (the hub passes them through — ADR 0041 §2; the TS side's schema is
-#: `packages/models/src/wan/config.ts`). The values are the settings that produce the reference
-#: outputs (decision 5):
-#:
-#: - `scheduler.shift` 3.0 — the `flow_shift` of `scheduler/scheduler_config.json` in the upstream
-#:   Diffusers version (docstring "3.0 for 480P"). The product default starts from this value, and
-#:   the visual A/B decides whether to change it (decision 5, ruling 2).
-#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — the defaults of the upstream
-#:   `WanPipeline.__call__` (decision 5).
-#:
-#: The UniPC structure (solver order, bh2, `num_train_timesteps`) is not declared — the TS port
-#: implements just that one branch (`WAN_UNIPC_CONFIG` in `scheduler.ts`), and making it declarable
-#: would let the distribution side choose combinations that were never verified.
-WAN_PIPELINE_CONFIG: Mapping[str, Any] = {
-    "scheduler": {"shift": 3.0},
-    "defaults": {"steps": 50, "guidance": 5.0},
-}
-
-
-#: The notice of modifications (Apache 2.0 §4(b)). Lists **the changes this repository made to the
-#: upstream weights**.
-#:
-#: MUST: the text matches the contents of the distribution — as values it is plausible prose, so
-#: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
-#: shipping.
-WAN_NOTICE_MARKDOWN = """# NOTICE
-
-This repository redistributes a modified form of the Wan2.1 T2V 1.3B checkpoint listed in
-`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
-following changes were made:
-
-- The weights were converted into the Karume container format (a `.krm` part sequence whose first
-  part carries the graph and model descriptors).
-- **f16 storage**: every parameter of the float16 transformer and of the VAE decoder was rounded
-  from the source float32 value to the nearest float16 value. Weight matrices and convolution
-  kernels are stored as float16; the other parameters (biases, normalization weights) keep the
-  rounded values in float32 storage. Computation runs in float32.
-- **int8 transformer**: a second copy of the transformer stores the weight matrices of all its
-  linear layers (the patch-embedding projection included) as int8, quantized from the source
-  float32 values to the nearest step with one float32 scale per output channel (symmetric). Its
-  other parameters (biases, normalization weights, modulation tables) keep the source float32
-  values. The int8 weights are computed in float32, or, in the quants that declare it, multiplied
-  with activations that are quantized to int8 per token at run time.
-- The transformer graph takes patchified latent tokens and returns tokens: the patchify, the
-  unpatchify and the sinusoidal timestep projection run on the host, and the patch-embedding
-  convolution is applied as the equivalent linear layer. The rotary embedding keeps the upstream
-  real-valued cos / sin tables, but the host builds them from per-axis base tables stored in the
-  container, and the graph applies them in a pair-swap form (swap each adjacent pair, then multiply
-  elementwise by the cos / sin tables).
-- The VAE decoder was re-expressed as two graphs that decode one latent frame each (the first
-  frame, and every later frame), with the causal convolution cache passed in and out of the graph
-  instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
-  differs slightly from the upstream untiled decode.
-- **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
-  encoder of `google/umt5-xxl` (bit-identical in float32 to the `text_encoder` folder of this
-  checkpoint), converted to int8, from the separate repository `karume-umt5-xxl` at a pinned commit
-  (with the size and the SHA-256 of every part); the changes made to it are listed in that
-  repository's own `NOTICE.md`.
-- The umT5-XXL outputs of a fixed set of prompts (computed with the upstream encoder in bfloat16
-  and stored as float32) are included as a precomputed asset, for use without the text encoder.
-- The tokenizer of the checkpoint was converted into one JSON table (vocabulary, scores, added
-  tokens and the whitespace set), together with lookup tables for the upstream prompt cleaning
-  (evaluated from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database,
-  including a translation of ftfy's mojibake-detection pattern) that the host uses to reproduce
-  the cleaning or to reject a prompt.
-
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
-"""
-
 #: Wan2.2's distribution repository name and pipeline contract (ADR 0121 decision 10 — the TS side's
 #: accepted set is `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`
 #: (`packages/models/src/wan/config.ts`)).
@@ -567,14 +406,25 @@ WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
 #: transformer has the single storage label i8, so weights does not name it
 #: ({@link complete_quant_weights} fills it into a complete mapping — writing it would duplicate
 #: derivable state). The VAE decoder has two, f16 / i8, so it is written per preset
-#: ({@link _WAN22_VAE_F16} / {@link _WAN22_VAE_I8}). The practical preset's `session` / `label` /
-#: `description` take the same single entry as 2.1's preset of the same name (ADR 0121 decision 2
-#: "the same name and bundle as 2.1's practical preset"). The reference preset's display fields have
-#: their own 2.2 text, since 2.1's ("about half the f16 preset") does not hold for 2.2. The base
+#: ({@link _WAN22_VAE_F16} / {@link _WAN22_VAE_I8}). The practical preset `f16+dit8-a8-attn8-s16`
+#: keeps the name, bundle and display fields of Wan2.1's preset of the same name (ADR 0121 decision
+#: 2 "the same name and bundle as 2.1's practical preset"). The base
 #: storage is set by the VAE decoder's storage (ADR 0074 §1 — the storage common to all roles:
 #: presets with an f16 decoder are `f16+dit8…`, those with an i8 decoder `i8…`). The 32-latent tile
 #: pair (ADR 0134 decision 5) names the same label as the decoder — a borrowing pair runs on the
-#: lender's weights of the same label, so the labels within a preset do not diverge.
+#: lender's weights of the same label, so the labels within a preset do not diverge. The 3
+#: attention and linear `session` keys are the fields the TS side's acceptance table
+#: (`WAN_SESSION_POLICY`) takes.
+#:
+#: The knob tokens of preset names (ADR 0074 §3 / ADR 0133 decision 6): `a8` = `linearCompute:
+#: "a8"`, `attn8` = `attentionCompute: "a8"`, `s16` = `attentionScoreStorage: "f16"`, `online` =
+#: `attentionScoreStorage: "none"` (ADR 0132), `conv8` = `convCompute: "a8"` (the conv3d of the VAE
+#: decoder — ADR 0133).
+#:
+#: `label` / `description` are display fields for a selection UI (ADR 0075 decision 1 — English, 64
+#: / 200 characters at most). They say nothing about speed or quality, which the card writes per
+#: named preset (`wan/card.py`). Being the default is not written either (`defaultQuant` points to
+#: it — ADR 0075 decision 3).
 _WAN22_VAE_F16: Mapping[str, str] = dict.fromkeys(
     (WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE, WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE), "f16"
 )
@@ -589,14 +439,23 @@ WAN22_QUANTS: Mapping[str, Any] = {
         "description": "Transformer weights stored as int8 (one scale per output channel) and"
         " computed in f32; the VAE stays f16.",
     },
-    "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": _WAN22_VAE_F16},
+    "f16+dit8-a8-attn8-s16": {
+        "weights": _WAN22_VAE_F16,
+        "session": {
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
+            "attentionScoreStorage": "f16",
+        },
+        "label": "int8 transformer, int8 activations",
+        "description": "The int8 transformer with per-token int8 activations in its linear layers"
+        " and attention (integer dot products), and attention scores held in f16.",
+    },
     # The online-attention preset (ADR 0132 decision 6): the same int8 weights as the s16 preset
     # (no new download — `weights` names the same f16 VAE decoder) with attention computed by
     # the online kernel, which never stores the scores (`attentionScoreStorage: "none"` — ADR 0132
-    # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). Wan2.2 only:
-    # Wan2.1's table is not changed. The default on 2026-10-23 (ADR 0132 decision 6) until the conv8
-    # preset below took over the same day (`WAN22_DEFAULT_QUANT`); the s16 preset above stays as its
-    # sibling.
+    # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). The default on
+    # 2026-10-23 (ADR 0132 decision 6) until the conv8 preset below took over the same day
+    # (`WAN22_DEFAULT_QUANT`); the s16 preset above stays as its sibling.
     "f16+dit8-a8-attn8-online": {
         "weights": _WAN22_VAE_F16,
         "session": {
@@ -652,8 +511,7 @@ WAN22_QUANTS: Mapping[str, Any] = {
 #: as siblings. The default can change with a quality ruling, so it is held in this one place only.
 WAN22_DEFAULT_QUANT = "i8-a8-attn8-online-conv8"
 
-#: Wan2.2's `pipelineConfig` (the schema is the same as 2.1's —
-#: `packages/models/src/wan/config.ts`):
+#: Wan2.2's `pipelineConfig` (the schema is `packages/models/src/wan/config.ts`):
 #:
 #: - `scheduler.shift` 5.0 — the `flow_shift` of the pinned scheduler (the official 720P value — the
 #:   decision of ADR 0121 addendum "Accepted sizes to the 2 official sizes").
@@ -672,9 +530,9 @@ WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: the 2 checkpoints was confirmed by matching sha256 of the 4 files in `tokenizer/` at the 2 pinned
 #: revisions (2026-10-06).
 #:
-#: MUST: the text matches the contents of the distribution (the same reason as
-#: {@link WAN_NOTICE_MARKDOWN}). No place copied from 2.1's text where the facts differ (the f16
-#: transformer, the f16 preset, a single VAE exit) may remain.
+#: MUST: the text matches the contents of the distribution — as values it is plausible prose, so
+#: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
+#: shipping.
 WAN22_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in
@@ -781,15 +639,12 @@ class WanGeneration:
     #: the {@link i8_series} series (ADR 0133 decision 7).
     vae_labels: tuple[str, ...]
     #: The latent tiles of the VAE decoder pairs. The first is the default-tile pair that holds the
-    #: weights (its roles have no suffix — 32 for Wan2.1, 16 for Wan2.2 — the tiles of the writer's
+    #: weights (its roles have no suffix — 16 for Wan2.2 — the tiles of the writer's
     #: `wan.export_vae.VAE_SERIES`); the rest are pairs that borrow weights from it
     #: ({@link WAN_VAE_SHARED_LABEL_ROLES} — ADR 0134, one pair per storage label).
     vae_tiles: tuple[int, ...]
     #: Whether the VAE encoder of the I2V conditioning image (the 3 graphs of
-    #: {@link WAN_VAE_ENCODER_ROLES} — f16 series) is shipped. Wan2.2 only (ADR 0121 decision 11).
-    #: The all-generation table {@link WAN_WEIGHTS} also reaches the Wan2.1 plan, so without
-    #: narrowing it here encoder entries would leak into the Wan2.1 manifest (2.1 is a T2V-only
-    #: checkpoint, and the 2.1 distribution is kept byte-identical).
+    #: {@link WAN_VAE_ENCODER_ROLES} — f16 series) is shipped (ADR 0121 decision 11).
     vae_encoder: bool
     #: The model name (a key of `SOURCES`) whose pin gives the provenance of the 2 text assets
     #: (embeddings, tokenizer). The provenance of the DiT / VAE containers is checked against the
@@ -885,32 +740,11 @@ class WanGeneration:
         return {name: labels for name, labels in declared.items() if labels}
 
 
-#: Wan2.1 T2V 1.3B (`--pipeline wan` → `karume-wan2.1`). The transformer has 2 containers, f16 / i8.
-WAN21 = WanGeneration(
-    repo_name=WAN_REPO_NAME,
-    pipeline=WAN_PIPELINE,
-    default_model=DEFAULT_MODEL,
-    series=WAN_SERIES,
-    i8_series=WAN_I8_SERIES,
-    transformer_labels=("f16", "i8"),
-    vae_labels=("f16",),
-    vae_tiles=(32,),
-    vae_encoder=False,
-    text_model=DEFAULT_MODEL,
-    quants=WAN_QUANTS,
-    default_quant=WAN_DEFAULT_QUANT,
-    pipeline_config=WAN_PIPELINE_CONFIG,
-    notice=WAN_NOTICE_MARKDOWN,
-    dit_writer="python -m wan.export_dit",
-    vae_writer="python -m wan.export_vae",
-    card=WAN21_CARD,
-)
-
-#: Wan2.2 TI2V 5B (`--pipeline wan-ti2v` → `karume-wan2.2`, model `ti2v-5b`). Differences from 2.1:
+#: Wan2.2 TI2V 5B (`--pipeline wan-ti2v` → `karume-wan2.2`, model `ti2v-5b`):
 #:
 #: - The transformer is **i8 only** (no f16 DiT — ADR 0121 decision 2). The DiT is a single
 #:   I2V-capable graph (decision 3 — 7 inputs; assembly looks only at the context input and the RoPE
-#:   base table, the same checks as 2.1).
+#:   base table).
 #: - The VAE is the 2 chunk graphs of Wan2.2-VAE (decision 6 — 48 latent channels, the exit in
 #:   patchified space). The decoder has 2 of each, f16 / i8 (i8 from the same i8 series as the DiT
 #:   — ADR 0133 decision 7). In addition, a 32-latent tile pair (ADR 0134) is shipped per storage
@@ -920,10 +754,11 @@ WAN21 = WanGeneration(
 #:   9a — the same f16 series as the decoder). Every preset takes the single f16 one (even for
 #:   T2V-only use — the ruling of the addendum "Ruling on the plan of step 9 and the results of step
 #:   9a").
-#: - The 2 text assets are **the very files of the 2.1 series**, and their provenance is the Wan2.1
-#:   pin (decision 9 — {@link WanGeneration.text_model}). The provenance of the DiT / VAE containers
-#:   is checked against the Wan2.2 pin.
-#: - umT5 is the same cross-repository reference to `karume-umt5-xxl` as in 2.1.
+#: - The 2 text assets are **the files of the Wan2.1 text series** (`wan2.1-t2v-1.3b-text-embeds`,
+#:   `wan2.1-umt5-tokenizer`), and their provenance is the Wan2.1 pin (decision 9 —
+#:   {@link WanGeneration.text_model}). The provenance of the DiT / VAE containers is checked
+#:   against the Wan2.2 pin.
+#: - umT5 is a cross-repository reference to `karume-umt5-xxl`.
 WAN22 = WanGeneration(
     repo_name=WAN22_REPO_NAME,
     pipeline=WAN22_PIPELINE,
@@ -947,10 +782,10 @@ WAN22 = WanGeneration(
 
 @dataclass(frozen=True)
 class WanSources:
-    """The assembly inputs = 3 series directories (the f16 series (VAE decoder; in 2.2 also the
-    VAE encoder; in 2.1 the f16 DiT), the DiT's i8 series, the text-embeddings series), the umT5
-    container (i8 series) and the tokenizer asset. For every generation the text embeddings and the
-    tokenizer asset point at the Wan2.1 series (ADR 0121 decision 9)."""
+    """The assembly inputs = 3 series directories (the f16 series (VAE decoder and encoder), the
+    DiT's i8 series, the text-embeddings series), the umT5 container (i8 series) and the tokenizer
+    asset. The text embeddings and the tokenizer asset point at the Wan2.1 text series (ADR 0121
+    decision 9)."""
 
     series: Path
     i8_series: Path
@@ -962,7 +797,7 @@ class WanSources:
     tokenizer: Path
 
 
-def wan_sources(series_dir: Path, generation: WanGeneration = WAN21) -> WanSources:
+def wan_sources(series_dir: Path, generation: WanGeneration = WAN22) -> WanSources:
     """Look up the generation's inputs from the parent directory of the series
     (`outputs/series/`)."""
     return WanSources(
@@ -974,7 +809,7 @@ def wan_sources(series_dir: Path, generation: WanGeneration = WAN21) -> WanSourc
     )
 
 
-def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> dict[str, Path]:
+def wan_placements(sources: WanSources, generation: WanGeneration = WAN22) -> dict[str, Path]:
     """Placement role → source file. The output paths live in {@link WAN_OUTPUT_PATHS}.
 
     Anything not in this table does not reach the output (the goldens `io.*` / `reference.*` /
@@ -984,7 +819,6 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
     encoder only for a generation that ships it (f16 series).
     """
     transformers = {
-        WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
     }
     decoders = {
@@ -1008,7 +842,7 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
     }
 
 
-def wan_repo_name(_model: str, generation: WanGeneration = WAN21) -> str:
+def wan_repo_name(_model: str, generation: WanGeneration = WAN22) -> str:
     """The distribution repository name (one repository per family and a separate one per
     generation, so it is the same for every model of the generation — ADR 0092 decisions 1 / 2)."""
     return generation.repo_name
@@ -1386,7 +1220,7 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
 
 
 def wan_plan(
-    sources: WanSources, model: str | None = None, generation: WanGeneration = WAN21
+    sources: WanSources, model: str | None = None, generation: WanGeneration = WAN22
 ) -> ModelPlan:
     """Build the plan for one model of the generation (every check and read happens here — nothing
     is written).
@@ -1495,7 +1329,7 @@ def wan_plan(
     )
 
 
-def wan_dist_plan(series_dir: Path, model: str, generation: WanGeneration = WAN21) -> ModelPlan:
+def wan_dist_plan(series_dir: Path, model: str, generation: WanGeneration = WAN22) -> ModelPlan:
     """Build the plan for one model of the generation from the parent of `--series` (the CLI's
     dispatch target)."""
     return wan_plan(wan_sources(series_dir, generation), model, generation)
@@ -1510,39 +1344,18 @@ WAN_TEXT_ENCODER_REFERENCE = CrossRepoReference(
 
 
 def wan_references(_model: str) -> tuple[CrossRepoReference, ...]:
-    """`Pipeline.references` of both generations: the text encoder lives in the umT5 repository."""
+    """`Pipeline.references`: the text encoder lives in the umT5 repository."""
     return (WAN_TEXT_ENCODER_REFERENCE,)
 
 
-#: The original text of the upstream license (Apache 2.0). The redistribution terms of §4 apply per
-#: distribution repository, and both the Wan2.1 and the Wan2.2 distribution repositories carry the
-#: same text, so it is read once here whatever the number of assemblies or generations (ADR 0092
-#: decision 7).
+#: The original text of the upstream license (Apache 2.0 — ADR 0092 decision 7).
 _APACHE_LICENSE = apache_license_2_0()
 
-#: The `--pipeline wan` entry (the driver merges it into the core's PIPELINES).
-PIPELINE = Pipeline(
-    default_model=DEFAULT_MODEL,
-    repo_name=wan_repo_name,
-    plan=wan_dist_plan,
-    # Attribution (upstream repository, license) is determined uniquely by the model name
-    # (`wan.sources.SOURCES`), so it is not an axis to choose. The abbreviation table is a fact not
-    # in the manifest, so it is passed from here (the same form as anima).
-    card_profiles={
-        "wan": partial(
-            render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS, card=WAN21.card
-        )
-    },
-    root_files={
-        "LICENSE.md": _APACHE_LICENSE,
-        "NOTICE.md": WAN21.notice,
-    },
-    references=wan_references,
-)
-
-#: The `--pipeline wan-ti2v` entry (Wan2.2 TI2V 5B → `karume-wan2.2`). The same form as
-#: {@link PIPELINE}, bundling the generation table {@link WAN22}. The upstream license is the same
-#: Apache 2.0, and the NOTICE is 2.2's modifications.
+#: The `--pipeline wan-ti2v` entry (Wan2.2 TI2V 5B → `karume-wan2.2`; the driver merges it into the
+#: core's PIPELINES), bundling the generation table {@link WAN22}. Attribution (upstream
+#: repository, license) is determined uniquely by the model name (`wan.sources.SOURCES`), so it is
+#: not an axis to choose. The abbreviation table is a fact not in the manifest, so it is passed from
+#: here (the same form as anima).
 TI2V_PIPELINE = Pipeline(
     default_model=WAN22.default_model,
     repo_name=partial(wan_repo_name, generation=WAN22),

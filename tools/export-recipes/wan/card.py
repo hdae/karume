@@ -1,13 +1,13 @@
 """The model card (`README.md`) of the Wan distribution — pure functions derived mechanically from
-the manifest (Wan2.1 / Wan2.2).
+the manifest (Wan2.2 TI2V 5B).
 
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
 live in `karume.modelcard`. This module owns only **the facts of each Wan generation**: attribution
 (provenance, pinned revision, license) and what this pipeline's card says (the fixed prompts of
 step 1, the accepted inputs, the numeric checks, the measured resources).
 
-The facts that differ per generation are collected in the generation table {@link WanCard}
-({@link WAN21_CARD} / {@link WAN22_CARD}); the card's skeleton (section order, attribution lines,
+The facts of the generation are collected in the generation table {@link WanCard}
+({@link WAN22_CARD}); the card's skeleton (section order, attribution lines,
 Usage, prompts, the frame of the accepted inputs, defaults, declared limits) is drawn by the single
 {@link render_wan_model_card}. A generation table holds the facts that can be passed as values
 (pipeline contract, model set, accepted sets, public class name) and the renderers of the sections
@@ -22,10 +22,10 @@ and pins (`wan.sources.SOURCES` is the source of truth), the table of fixed prom
 (`wan.prompts.FIXED_PROMPTS` is the source of truth — the assembly check
 `wan.distribution.assert_text_embeds` matches it against the asset's metadata, so the text drawn
 here cannot drift from the shipped assets), the accepted sets of the TS side (`acceptedSizes` /
-`minFrames` / `maxFrames` of `WAN21_GENERATION` in `packages/models/src/wan/descriptor.ts`, the
-choice of text path `textEncoder` — ADR 0119 addendum B, the prompt acceptance rules — ADR 0119
-decisions 1 / 2 / 4 and addendum 10a; Wan2.2 uses `WAN22_TI2V_GENERATION`) and the measured
-resources (`_wan21_resources` / `_wan22_resources` — ADR 0089 decision 3).
+`minFrames` / `maxFrames` of `WAN22_TI2V_GENERATION` in `packages/models/src/wan/descriptor.ts`,
+the choice of text path `textEncoder` — ADR 0119 addendum B, the prompt acceptance rules — ADR
+0119 decisions 1 / 2 / 4 and addendum 10a) and the measured resources (`_wan22_resources` — ADR
+0089 decision 3).
 
 MUST: do not import torch (`import dist` does not load torch —
 `TestImportingTheDriver` in `tests/test_dist_driver.py`).
@@ -54,11 +54,8 @@ from karume.modelcard import (
     require_pipeline,
 )
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES, UMT5_SOURCES, WAN21_MODELS, WAN22_MODELS, WAN22_TEXT_MODEL
+from wan.sources import SOURCES, UMT5_SOURCES, WAN22_MODELS, WAN22_TEXT_MODEL
 from wan.umt5_distribution import UMT5_DEFAULT_MODEL, UMT5_ROLE
-
-#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
-WAN_SUPPORTED_PIPELINE = "wan/1"
 
 #: The HF pipeline tag (the same as upstream).
 WAN_PIPELINE_TAG = "text-to-video"
@@ -70,21 +67,9 @@ WAN_PAPER = "arxiv.org/abs/2503.20314"
 #: root — Apache 2.0 §4(a)).
 WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: The sizes and frame counts the TS side accepts (a copy of the accepted set in
-#: `packages/models/src/wan/descriptor.ts` — a fact not in the manifest).
-#: MUST: the same values as the TS side (the tests on both sides compare through
-#: `packages/models/tests/fixtures/wan-card-limits.json` — changing one side only turns them red).
-WAN_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((832, 480), (480, 832))
-WAN_FRAMES = (5, 81)
-
-#: The TS side's generation defaults (a copy of `WAN21_GENERATION.defaults` — drawn by the Usage
-#: comment).
-WAN_DEFAULT_SIZE = (832, 480)
-WAN_DEFAULT_FRAMES = 33
-
 #: The construction option that chooses the text path (the second argument of the TS side's
-#: `wan.Pipeline.fromPretrained` — ADR 0119 addendum B; a fact not in the manifest). The default is
-#: the GPU path (decision 7).
+#: `wan.Ti2vPipeline.fromPretrained` — ADR 0119 addendum B; a fact not in the manifest). The
+#: default is the GPU path (decision 7).
 WAN_TEXT_ENCODER_OPTION = "textEncoder"
 WAN_TEXT_ENCODER_PATHS = ("gpu", "precomputed")
 
@@ -100,44 +85,6 @@ WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 #: in f32 to this checkpoint's `text_encoder`, but the provenance names the original — so that it
 #: does not disagree with the card of the umT5 distribution).
 WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
-
-#: The quant preset whose end-to-end resources (the per-stage table of ``_wan_resources``) were
-#: measured. MUST: the card states the numbers **as numbers of this preset** — a distribution
-#: without this preset does not draw them (no numbers for a preset that was not measured — the same
-#: as the BiRefNet card).
-WAN_RESOURCE_QUANT = "f16"
-
-#: The measured transformer per preset (ADR 0120 addenda "Results of steps 3 / 4 / 5" (DiT alone,
-#: normal mode, B570), "Material for step 6" (the practical preset's 50-step 33-frame end-to-end
-#: run, the precomputed path) and "The two sha rows of the 50-step practical preset" (the
-#: practical preset's 81-frame end-to-end run: wall 3,703 s = DiT stage 3,383 s + VAE stage 319 s)).
-#: A row is `(frames, 1 forward, DiT-alone allocation, 50-step end-to-end run)`. The `f16` rows are
-#: the baseline, and their end-to-end column is the same run as the per-stage table above (ADR 0118
-#: steps 6 / 8). The reference preset `f16+dit8` takes the same time per forward as `f16` in the
-#: r check measurement (S = 14,040) — its allocation and 81 frames were not measured.
-#: MUST: an unmeasured cell says "not measured" / "not run" and is never filled with an estimate. A
-#: preset missing from the table is stated as "not measured" (the preset order stays the
-#: manifest's).
-WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
-    "f16": (
-        (33, "17.1 s", "5.15 GiB", "~30 minutes"),
-        (81, "68.5 s", "6.17 GiB", "~2 hours"),
-    ),
-    "f16+dit8": (
-        (33, "same as `f16`", "not measured", "not run"),
-        (81, "not measured", "not measured", "not run"),
-    ),
-    "f16+dit8-a8-attn8-s16": (
-        (33, "8.5 s", "4.02 GiB", "952 s (~16 minutes)"),
-        (81, "34.0 s", "5.46 GiB", "3,703 s (~62 minutes)"),
-    ),
-}
-
-#: The step-1 latent relative RMS error of the practical preset (against the reference preset
-#: `f16+dit8` — measured by the on-machine A/B check of ADR 0120 step 4). `(preset, reference
-#: preset, 33 frames, 81 frames)`. The visual result the card states next to it is ADR 0120 ruling
-#: 2026-10-04 item 1 (the 12 pairs of step 6 — `f16` and the practical preset, 50 steps, 33 frames).
-WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.210")
 
 #: The pipeline contract the Wan2.2 TI2V 5B card can describe (`WAN_TI2V_PIPELINE_NAME` /
 #: `WAN_TI2V_PIPELINE_MAJOR` in the TS side's `packages/models/src/wan/config.ts`).
@@ -196,8 +143,7 @@ WAN22_DEFAULT_FRAMES = 33
 #:   it has no 33 / 49-frame rows (not measured).
 #:
 #: MUST: an unmeasured cell says "not measured" and is never filled with an estimate. A preset
-#: missing from the table is stated as "not measured" (the preset order stays the manifest's — the
-#: same treatment as 2.1's {@link WAN_QUANT_TRANSFORMER}).
+#: missing from the table is stated as "not measured" (the preset order stays the manifest's).
 WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] = {
     "f16+dit8": (
         (33, "21.8 s", "7.86 GiB", "2,143 s", "439 s", "43 min 3 s"),
@@ -248,7 +194,7 @@ class WanCard:
     inputs, defaults, declared limits) is drawn by the single {@link render_wan_model_card}.
     """
 
-    #: The generation's name (attribution lines and check messages — `Wan2.1` / `Wan2.2`).
+    #: The generation's name (attribution lines and check messages — `Wan2.2`).
     generation: str
     #: The checkpoint name shown in the card's heading.
     title: str
@@ -284,10 +230,9 @@ class WanCard:
     attribution_notes: Callable[[Mapping[str, Any]], list[str]]
     #: The "Resources" section (the measured table and its notes — ADR 0089 decision 3).
     resources: Callable[[Mapping[str, Any]], list[str]]
-    #: The lines below exist only for the generation that takes I2V (Wan2.2). They default to empty
-    #: — the Wan2.1 card stays byte-identical (2.1's `wan.Pipeline` rejects `image` with
-    #: `ModelInputError` — ADR 0121 step 9b). Tags added to the frontmatter after the pipeline tag
-    #: (HF has one pipeline tag, so it stays text-to-video — I2V is stated by a tag).
+    #: The lines below are for a generation that takes I2V (ADR 0121 step 9b; empty by default).
+    #: Tags added to the frontmatter after the pipeline tag (HF has one pipeline tag, so it stays
+    #: text-to-video — I2V is stated by a tag).
     extra_tags: tuple[str, ...] = ()
     #: Lines added at the end of the Usage section (the I2V example and the note on image decoding).
     usage_extra: tuple[str, ...] = ()
@@ -380,36 +325,6 @@ def _reader_lines(manifest: Mapping[str, Any], pipeline: str) -> list[str]:
         f" reader is a pipeline that implements `{pipeline}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
         f" is `karume.json` (`{manifest['format']}`).",
-    ]
-
-
-def _wan21_overview(manifest: Mapping[str, Any]) -> list[str]:
-    where = _encoder_whereabouts(manifest)
-    return [
-        "## What is this",
-        "",
-        "A **text-to-video** distribution of Wan2.1 T2V 1.3B, converted into the WebGPU",
-        "inference runtime **Karume**'s container format (a `.krm` part sequence whose first part",
-        "carries the graph and model descriptors).",
-        "",
-        f"- Four graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
-        f" {where}),",
-        "  `transformer` (the diffusion transformer, on patchified latent tokens) and",
-        "  `vae_decoder_first` / `vae_decoder_next` (the video VAE decoder, one latent frame per",
-        "  call, with the causal cache passed in and out).",
-        "- The rest runs on the host in TypeScript: the prompt cleaning and the tokenizer (or,",
-        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"`, the lookup of the',
-        "  precomputed embeddings), the relative-position buckets, the patchify and RoPE tables,",
-        "  classifier-free guidance as two batch-1 passes, the flow-matching UniPC scheduler, and",
-        "  the tiled VAE decode. The output is `[3, frames, height, width]` float32 in `[-1, 1]`.",
-        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6): with the text encoder on the",
-        "  GPU in 2-step runs (a fixed prompt and a free prompt, 832 × 480, 33 frames, each pinned",
-        "  by the SHA-256 of its frames), and with the precomputed embeddings in full 50-step",
-        "  runs. A 50-step run through the text encoder has not been done yet.",
-        "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
-        "  `f16` quant with the precomputed embeddings, 832 × 480, 81 frames) in 46.1 minutes.",
-        "  The text encoder on the GPU and the int8 quants have not been run in a browser yet.",
-        *_reader_lines(manifest, WAN_SUPPORTED_PIPELINE),
     ]
 
 
@@ -508,47 +423,6 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
             f" ([technical report](https://{card.paper}))."
         )
     return lines + card.attribution_notes(manifest)
-
-
-def _wan21_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
-    """Wan2.1's summary of modifications, where the text encoder lives, and the precomputed
-    embeddings."""
-    lines = [
-        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
-        "  conversion into the Karume container format; every parameter of the float16",
-        "  transformer and the VAE rounded to the nearest float16 value (weight matrices and",
-        "  kernels stored as float16, computation in float32); a second, int8 copy of the",
-        "  transformer whose linear weights are quantized per output channel (biases and",
-        "  normalization weights kept in float32 at the source values);",
-        "  the transformer graph re-expressed on patchified tokens, with the RoPE tables built on",
-        "  the host from per-axis base tables and applied in a pair-swap form;",
-        "  the VAE decoder re-expressed as two one-frame graphs with an explicit causal cache,",
-        "  always decoded in overlapping tiles; the tokenizer converted into one table together",
-        "  with lookup tables for the upstream prompt cleaning. No retraining and no fine-tuning.",
-    ]
-    _, borrowed = _text_encoder(manifest)
-    if borrowed is None:
-        lines.append(
-            f"- **The text encoder** (the encoder of `{WAN_TEXT_ENCODER_UPSTREAM}`, bit-identical"
-            " in float32 to this checkpoint's `text_encoder`, in int8) is stored in this"
-            " repository."
-        )
-    else:
-        repo, revision = borrowed
-        lines += [
-            "- **The text encoder is not stored here.** `karume.json` references the encoder of",
-            f"  `{WAN_TEXT_ENCODER_UPSTREAM}` (bit-identical in float32 to this checkpoint's",
-            "  `text_encoder`), converted to int8, at commit"
-            f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
-            "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
-            "  the changes made to it.",
-        ]
-    lines += [
-        "- **Precomputed embeddings**: the repository also ships the encoder's outputs for a",
-        "  fixed set of prompts (see below), computed with the upstream encoder in bfloat16 and",
-        "  stored as float32, for use without the text encoder.",
-    ]
-    return lines
 
 
 def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
@@ -717,27 +591,6 @@ def _wan_prompts() -> list[str]:
         lines += ["", f"`{prompt.name}`:", "", "```text", prompt.text.strip("\n"), "```"]
     return lines
 
-
-#: The range of Wan2.1's accepted frame counts that was checked end to end on the GPU (ADR 0118
-#: steps 6 / 8, ADR 0119 step 10c).
-_WAN21_FRAMES_CHECKED = (
-    "Only 832 × 480 has been checked end to end on",
-    "  the GPU: 33 and 81 frames with the precomputed embeddings, and 33 frames with the",
-    "  text encoder.",
-)
-
-#: Wan2.1's comparison with upstream (the 2-step end-to-end run of the `f16` preset, and one
-#: full-size transformer forward against an f64 reference — ADR 0118) and the note on tiled decode.
-_WAN21_VERIFICATION = (
-    "- **Against the upstream reference** (the `f16` quant, with the precomputed",
-    "  embeddings): a 2-step run with injected noise is compared with diffusers on CPU in",
-    "  float32 (the same f16-rounded weights, the same tiled decode), and one transformer",
-    "  forward at each full size (33 and 81 frames) against a float64 reference. Differences",
-    "  stay within tolerances measured on separate decision cases; the remaining gap is",
-    "  float32 rounding in the GPU matrix products, not a porting difference.",
-    "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
-    "  slightly from the upstream untiled decode.",
-)
 
 #: The range of Wan2.2's accepted frame counts that was checked end to end on the GPU (the 2-step
 #: 17-frame sha rows and the 50-step end-to-end runs of the product class (33 frames) of ADR 0121
@@ -1004,117 +857,6 @@ def _wan_inputs(card: WanCard) -> list[str]:
     ]
 
 
-def _wan21_resources(manifest: Mapping[str, Any]) -> list[str]:
-    """Guidance on execution resources (ADR 0089 decision 3 — the allocations of intermediate
-    tensors and the binding sizes are not counted by the manifest's `requiredLimits`: **facts
-    that are not in the manifest**. The same treatment as the BiRefNet card).
-
-    The numbers are measured 50-step end-to-end runs on the B570 in Deno — 33 frames on 2026-10-02
-    (the acceptance of ADR 0118 step 6), 81 frames on 2026-10-03 (step 8): VRAM is the per-stage
-    peak of fdinfo's `drm-total-vram0`; the times are one transformer pass (batch 1) and the whole
-    tiled VAE decode.
-    1 pass × 100 + VAE agrees with the end-to-end run (33 frames: 16.8 × 100 + 129 ≈ 1,809 s /
-    1,811 s; 81 frames: 68.6 × 100 + 315 ≈ 7,175 s / 7,173 s). The intermediate tensor sizes are
-    computed from the shapes (the FFN's `[S, 8960]` f32 is 503,193,600 B at S = 14,040 and
-    1,174,118,400 B at S = 32,760; one row block of the self-attention scores is 2,146,435,200 B at
-    81 frames — inside the B570's binding limit of 2,147,483,644 B).
-
-    The text stage numbers (GPU path) are measured in ADR 0119 addendum "The GPU check of step 10c
-    and the results of step 10d-4" (one 2-step 33-frame end-to-end run, and one forward of umT5
-    alone). The per-preset transformer numbers are as the provenance of `WAN_QUANT_TRANSFORMER`
-    says.
-
-    MUST: no numbers for conditions that were not measured — no estimates for the other sizes and
-    frame counts of the accepted set or for other GPUs. The browser was checked only with one
-    81-frame end-to-end run of the `f16` preset on the asset path in Chrome on the RTX 5070 Ti (ADR
-    0118 addendum "Results of step 9"), so everything else is stated as unchecked.
-    """
-    for name, model in manifest["models"].items():
-        if WAN_RESOURCE_QUANT not in model["quants"]:
-            raise ValueError(
-                f"quant '{WAN_RESOURCE_QUANT}', whose execution resources were measured, is not a"
-                f" preset of model '{name}' (presets: {sorted(model['quants'])}) — no numbers are"
-                " stated for a preset that was not measured"
-            )
-    # The preset order stays the manifest's. A preset missing from the table gets no estimate and is
-    # stated as not measured.
-    seats = dict.fromkeys(
-        quant for model in manifest["models"].values() for quant in model["quants"]
-    )
-    measured = [quant for quant in seats if quant in WAN_QUANT_TRANSFORMER]
-    unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN_QUANT_TRANSFORMER]
-    practical, reference, error_33, error_81 = WAN_PRACTICAL_QUANT_ERROR
-    return [
-        "## Resources",
-        "",
-        "Measured on an Intel Arc B570 in Deno 2.9.6, with the"
-        f" `{WAN_RESOURCE_QUANT}` quant at 832 × 480,",
-        "50 steps and guidance 5 (classifier-free guidance runs two transformer passes per step,",
-        "so 100 passes); 33 frames on 2026-10-02 and 81 frames on 2026-10-03:",
-        "",
-        "| Frames | Transformer peak | VAE peak | Pass   | VAE decode | Clip        |",
-        "| ------ | ---------------- | -------- | ------ | ---------- | ----------- |",
-        "| 33     | 6.19 GiB         | 3.32 GiB | 16.8 s | 129 s      | ~30 minutes |",
-        "| 81     | 7.31 GiB         | 3.78 GiB | 68.6 s | 315 s      | ~2 hours    |",
-        "",
-        "Pass is one transformer pass (batch 1); VAE decode is the tiled decode of the whole clip.",
-        "These runs used the precomputed embeddings.",
-        "",
-        f'With the text encoder (`{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[0]}"`),'
-        " measured on 2026-10-03 in a 2-step run at",
-        "832 × 480 and 33 frames: the text encoder stage (the umT5-XXL encoder run for the",
-        "positive and the negative prompt, including building its session) took 10.4 s and",
-        "peaked at 6.30 GiB; after it was disposed, 0.08 GiB more than before the stage remained",
-        "allocated. In the same run the transformer stage peaked at 5.94 GiB and the VAE stage at",
-        "3.32 GiB. One forward of the text encoder alone takes 0.14 s (8 tokens) to 1.73 s",
-        "(488 tokens). A 50-step run through the text encoder has not been done yet.",
-        "",
-        "Per quant, at 832 × 480 (the 50-step clips with the precomputed embeddings and",
-        "guidance 5):",
-        "",
-        "| Quant | Frames | Pass | Transformer allocation | 50-step clip |",
-        "| ----- | ------ | ---- | ---------------------- | ------------ |",
-        *(
-            f"| `{quant}` | {frames} | {forward} | {allocation} | {clip} |"
-            for quant in measured
-            for frames, forward, allocation, clip in WAN_QUANT_TRANSFORMER[quant]
-        ),
-        "",
-        "Pass and allocation here are of the transformer run alone (one pass, batch 1); the",
-        "allocation is the runtime's own count of what it allocated, not the driver's total.",
-        "",
-        *(
-            [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet.", ""]
-            if unmeasured
-            else []
-        ),
-        *(
-            [
-                f"- **Quality of `{practical}`**: after the first step its latent differs from",
-                f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative",
-                f"  RMS error of {error_33} at 33 frames and {error_81} at 81 frames, mostly",
-                "  from the int8 attention. Side by side with `f16` on twelve 50-step clips at",
-                "  33 frames (seeds 42 to 45 with the three fixed prompts), no clear degradation",
-                "  was seen.",
-            ]
-            if practical in seats and reference in seats
-            else []
-        ),
-        *_download_and_memory(manifest),
-        "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
-        "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
-        "  feed-forward activation `[S, 8960]` in float32 alone is about 480 MiB at 33 frames",
-        "  (S = 14,040) and about 1.09 GiB at 81 frames (S = 32,760), and one row block of the",
-        "  self-attention scores at 81 frames is 2.00 GiB, just under the 2 GiB binding limit the",
-        "  adapter reports.",
-        "  The runtime requests the adapter's own limits, which Deno grants on the B570; in a",
-        "  browser the environment has to grant the adapter's limits as well. Chrome on the",
-        "  RTX 5070 Ti granted them (2 GiB buffers) and ran the 81-frame clip above; other",
-        "  browsers and GPUs have not been checked.",
-        *_undeclared(manifest),
-    ]
-
-
 def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     """Guidance on Wan2.2's execution resources (ADR 0089 decision 3 — the same treatment as 2.1's
     {@link _wan21_resources}).
@@ -1317,13 +1059,13 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
 
 def _download_and_memory(
     manifest: Mapping[str, Any],
-    peaks: str = "the peaks are of the total allocation (the driver's fdinfo)",
+    peaks: str,
 ) -> list[str]:
     """The 2 items of the resources note on the text_encoder download size (from the manifest) and
     on how to read the VRAM peaks.
 
-    `peaks` is the sentence on how the peaks were measured. 2.1 keeps the default (all fdinfo).
-    2.2's table mixes in an nvidia-smi row (121 frames), so it passes the method per row.
+    `peaks` is the sentence on how the peaks were measured (2.2's table mixes in an nvidia-smi row
+    — 121 frames — so the method is named per row).
     """
     encoder_bytes, borrowed = _text_encoder(manifest)
     source = "" if borrowed is None else f" from `{borrowed[0]}`"
@@ -1386,25 +1128,6 @@ def _wan_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-#: The generation table of the card of Wan2.1 T2V 1.3B (`karume-wan2.1`).
-WAN21_CARD = WanCard(
-    generation="Wan2.1",
-    title="Wan2.1 T2V 1.3B",
-    supported_pipeline=WAN_SUPPORTED_PIPELINE,
-    models=WAN21_MODELS,
-    pipeline_class="Pipeline",
-    paper=WAN_PAPER,
-    accepted_sizes=WAN_ACCEPTED_SIZES,
-    frames=WAN_FRAMES,
-    default_size=WAN_DEFAULT_SIZE,
-    default_frames=WAN_DEFAULT_FRAMES,
-    frames_checked=_WAN21_FRAMES_CHECKED,
-    verification=_WAN21_VERIFICATION,
-    overview=_wan21_overview,
-    attribution_notes=_wan21_attribution_notes,
-    resources=_wan21_resources,
-)
-
 #: The generation table of the card of Wan2.2 TI2V 5B (`karume-wan2.2`). The technical report is the
 #: one the upstream `README.md` at the pinned revision cites (the same arXiv 2503.20314 as Wan2.1 —
 #: confirmed on 2026-10-06 in the README of the pin in the HF cache).
@@ -1435,7 +1158,8 @@ def render_wan_model_card(
     repo: str,
     abbreviations: Mapping[str, str],
     host_assets: Mapping[FileRefKey, int] = {},
-    card: WanCard = WAN21_CARD,
+    *,
+    card: WanCard,
 ) -> str:
     """Assemble the body of the Wan distribution's `README.md` (pure function, with a trailing
     newline).
@@ -1443,8 +1167,7 @@ def render_wan_model_card(
     `abbreviations` maps the component-override tokens of preset names (the source of truth is
     `WAN_QUANT_ABBREVIATIONS` in `wan.distribution` — ADR 0074 decision 4). It is a fact not in the
     manifest, so it is taken as an argument rather than copied as a constant (the same form as the
-    anima card). `card` is the generation table (the distribution recipe's Pipeline bundles it per
-    generation — the default is Wan2.1).
+    anima card). `card` is the generation table (the distribution recipe's Pipeline bundles it).
     """
     require_pipeline(manifest, card.supported_pipeline)
     metadata = _wan_metadata(manifest, card)

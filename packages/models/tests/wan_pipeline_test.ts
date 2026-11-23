@@ -186,9 +186,9 @@ const buildAsset = (
 };
 
 const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
-/** The geometry of the distributed VAE chunk graph (latent tile 32, scale 8 — `8t / t`, output RGB 3). */
+/** The VAE chunk graph geometry of the test generation (latent tile 32, scale 8 — `8t / t`, output RGB 3). */
 const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 3 };
-/** The distribution's `pipelineConfig` (`WAN_PIPELINE_CONFIG` of the recipe `wan/distribution.py` — the reference setting). */
+/** A `pipelineConfig` of the test generation (the reference setting — 50 steps, guide 5.0, shift 3.0). */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<GenerateRequest>) =>
   planWanGeneration(
