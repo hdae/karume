@@ -102,10 +102,14 @@ const BASE_INPUTS = [
 
 const base = (): GeometryProfile => derive(BASE_INPUTS, { id: "base-gpu" }).profile;
 
-/** `profile`'s provenance (fails when absent). */
-const provenanceOf = (profile: GeometryProfile): NonNullable<GeometryProfile["provenance"]> => {
-  assert(profile.provenance !== undefined, `${profile.id} has no provenance`);
-  return profile.provenance;
+/** `profile`'s provenance (fails when absent or when it is a shared table's). */
+const provenanceOf = (
+  profile: GeometryProfile,
+): Extract<NonNullable<GeometryProfile["provenance"]>, { readonly adapters?: undefined }> => {
+  const { provenance } = profile;
+  assert(provenance !== undefined, `${profile.id} has no provenance`);
+  assert(provenance.adapters === undefined, `${profile.id} is a shared table`);
+  return provenance;
 };
 
 describe("deriveGeometryProfile with a base table", () => {

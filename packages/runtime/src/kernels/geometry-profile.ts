@@ -152,6 +152,29 @@ export type GeometryProfileFamilyProvenance = {
 };
 
 /**
+ * One swept adapter as its records name it: the 4 fields of `GPUAdapterInfo` (an empty string stays
+ * a value).
+ */
+export type GeometryProfileAdapter = {
+  readonly vendor: string;
+  readonly architecture: string;
+  readonly device: string;
+  readonly description: string;
+};
+
+/**
+ * The adapters a generated table was derived from, in one of two forms. A measured table holds
+ * `adapter`: the one adapter every record agrees with on all four fields. A shared table holds
+ * `adapters`: two or more adapters of one vendor and architecture, distinct by the four fields, in
+ * the order their records were given — it is matched by vendor and architecture and predicts for
+ * the adapters of that vendor and architecture that no table names by description.
+ * SPEC: docs/spec/geometry-profiles.md#shared-tables
+ */
+export type GeometryProfileAdapters =
+  | { readonly adapter: GeometryProfileAdapter; readonly adapters?: undefined }
+  | { readonly adapters: readonly GeometryProfileAdapter[]; readonly adapter?: undefined };
+
+/**
  * A GEMM geometry profile = a static table of tile geometries per op × bucket (DECIDED: ADR 0115).
  * The embedded tables (`./geometry-profiles/`) are chosen by the adapter's (vendor, architecture,
  * description), and users can inject, with `acquireGpu({ geometryProfile })`, a table made from
@@ -241,17 +264,7 @@ export type GeometryProfile = {
    * `./tune` does the matching. The runtime (`assertGeometryProfile`, the injection entry point of
    * `acquireGpu`) checks only the shape (the field types) and does not use it for matching.
    */
-  readonly provenance?: {
-    /**
-     * The swept adapter (the 4 fields of `GPUAdapterInfo` — an empty string stays a value;
-     * identical across all records).
-     */
-    readonly adapter: {
-      readonly vendor: string;
-      readonly architecture: string;
-      readonly device: string;
-      readonly description: string;
-    };
+  readonly provenance?: GeometryProfileAdapters & {
     /**
      * Per op family ({@link GeometryProfileFamily}), the records and matching keys of that family.
      * A family that no record has a case of has no entry: its fields are the default (matching
@@ -1002,9 +1015,28 @@ const rulesOf = <Geometry>(
  */
 const assertProvenanceShape = (value: unknown, where: string): void => {
   const provenance = recordOf(value, where, "provenance");
-  const adapter = recordOf(provenance.adapter, where, "provenance.adapter");
-  for (const key of ["vendor", "architecture", "device", "description"] as const) {
-    stringOf(adapter[key], where, `provenance.adapter.${key}`);
+  const adapterShape = (entry: unknown, path: string): void => {
+    const adapter = recordOf(entry, where, path);
+    for (const key of ["vendor", "architecture", "device", "description"] as const) {
+      stringOf(adapter[key], where, `${path}.${key}`);
+    }
+  };
+  // The two forms of GeometryProfileAdapters: a measured table's one adapter, or a shared table's
+  // list — never both and never neither
+  if (provenance.adapters === undefined) {
+    adapterShape(provenance.adapter, "provenance.adapter");
+  } else {
+    if (provenance.adapter !== undefined) {
+      throw new CodegenError(
+        `${where}: provenance has both adapter and adapters (a table is measured on one adapter or shared by several, not both)`,
+      );
+    }
+    if (!Array.isArray(provenance.adapters)) {
+      throw new CodegenError(`${where}: provenance.adapters is not an array`);
+    }
+    denseEntriesOf(provenance.adapters, where, "provenance.adapters").forEach((entry, index) =>
+      adapterShape(entry, `provenance.adapters[${index}]`),
+    );
   }
   const families = recordOf(provenance.families, where, "provenance.families");
   for (const family of GEOMETRY_PROFILE_FAMILIES) {

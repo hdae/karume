@@ -21,6 +21,7 @@ import {
   DEFAULT_GEOMETRY_PROFILE,
   GEOMETRY_PROFILE_FAMILIES,
   type GeometryProfile,
+  type GeometryProfileAdapter,
   type GeometryProfileFamily,
   type GeometryProfileFamilyProvenance,
 } from "../src/kernels/geometry-profile.ts";
@@ -29,7 +30,7 @@ import { infinityJson } from "../src/tune/derive.ts";
 import { familyKernelsId } from "../src/tune/fingerprint.ts";
 
 type Provenance = NonNullable<GeometryProfile["provenance"]>;
-type Adapter = Provenance["adapter"];
+type Adapter = GeometryProfileAdapter;
 
 const ADAPTER: Adapter = {
   vendor: "apple",
@@ -295,10 +296,17 @@ describe("geometryProfileMismatch", () => {
 
 describe("geometryProfileMismatch on the built-in tables", () => {
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-    it(`${profile.id} matches its own adapter on the current runtime`, () => {
+    const shared = profile.provenance?.adapters !== undefined;
+    it(`${profile.id} matches ${shared ? "each adapter it was derived from and one of their vendor and architecture it was not measured on" : "its own adapter"} on the current runtime`, () => {
       const { provenance } = profile;
       assert(provenance !== undefined, `${profile.id} has no provenance`);
-      assertEquals(geometryProfileMismatch(profile, provenance.adapter), undefined);
+      const adapters =
+        provenance.adapters === undefined
+          ? [provenance.adapter]
+          : [...provenance.adapters, { ...provenance.adapters[0], device: "", description: "" }];
+      for (const adapter of adapters) {
+        assertEquals(geometryProfileMismatch(profile, adapter), undefined, adapter.description);
+      }
     });
   }
 });

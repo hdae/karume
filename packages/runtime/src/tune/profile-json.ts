@@ -16,6 +16,8 @@ import {
   GEOMETRY_PROFILE_FAMILIES,
   type GemmRowsRule,
   type GeometryProfile,
+  type GeometryProfileAdapter,
+  type GeometryProfileAdapters,
   type GeometryProfileFamily,
   type GeometryProfileFamilyProvenance,
   type I8a8RowsRule,
@@ -330,22 +332,50 @@ const readLinearGemv = (value: unknown, path: string): LinearGemvChoices => {
   };
 };
 
-const readProvenance = (value: unknown, path: string): Provenance => {
-  const fields = readRecord(value, path, ["adapter", "families"], ["attentionBench"]);
-  const adapterPath = child(path, "adapter");
-  const adapter = readRecord(fields.adapter, adapterPath, [
-    "vendor",
-    "architecture",
-    "device",
-    "description",
-  ]);
+/** One adapter of `provenance` (four strings). */
+const readAdapter = (value: unknown, path: string): GeometryProfileAdapter => {
+  const adapter = readRecord(value, path, ["vendor", "architecture", "device", "description"]);
   return {
-    adapter: {
-      vendor: readString(adapter.vendor, child(adapterPath, "vendor")),
-      architecture: readString(adapter.architecture, child(adapterPath, "architecture")),
-      device: readString(adapter.device, child(adapterPath, "device")),
-      description: readString(adapter.description, child(adapterPath, "description")),
-    },
+    vendor: readString(adapter.vendor, child(path, "vendor")),
+    architecture: readString(adapter.architecture, child(path, "architecture")),
+    device: readString(adapter.device, child(path, "device")),
+    description: readString(adapter.description, child(path, "description")),
+  };
+};
+
+/**
+ * The adapters of `provenance`: a measured table's `adapter`, or a shared table's `adapters` — two
+ * or more (the derivation never writes fewer), never both.
+ * SPEC: docs/spec/geometry-profiles.md#shared-tables
+ */
+const readAdapters = (fields: Record<string, unknown>, path: string): GeometryProfileAdapters => {
+  if (fields.adapters === undefined) {
+    if (fields.adapter === undefined) return fail(path, "is missing fields adapter");
+    return { adapter: readAdapter(fields.adapter, child(path, "adapter")) };
+  }
+  if (fields.adapter !== undefined) {
+    return fail(
+      path,
+      "has both adapter and adapters (a measured table has one, a shared one the list)",
+    );
+  }
+  const adaptersPath = child(path, "adapters");
+  const adapters = readArray(fields.adapters, adaptersPath);
+  if (adapters.length < 2) {
+    return fail(
+      adaptersPath,
+      `names ${adapters.length} adapter${adapters.length === 1 ? "" : "s"} (a shared table is derived from two or more)`,
+    );
+  }
+  return {
+    adapters: adapters.map((adapter, index) => readAdapter(adapter, `${adaptersPath}[${index}]`)),
+  };
+};
+
+const readProvenance = (value: unknown, path: string): Provenance => {
+  const fields = readRecord(value, path, ["families"], ["adapter", "adapters", "attentionBench"]);
+  return {
+    ...readAdapters(fields, path),
     families: readFamilies(fields.families, child(path, "families")),
     ...(fields.attentionBench === undefined
       ? {}

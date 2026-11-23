@@ -1,8 +1,27 @@
 # Geometry profile tables
 
 How the per-adapter geometry profile tables under `packages/runtime/src/kernels/geometry-profiles/` are made now. A
-table is a static answer for one adapter: which tile geometry each op family uses. The runtime selects a table by the
-adapter's match and measures nothing at run time.
+table is a static answer for one adapter, or, for a shared table, for the adapters of one vendor and architecture:
+which tile geometry each op family uses. The runtime selects a table by the adapter's match and measures nothing at run
+time.
+
+## The three levels
+
+- The runtime selects one table per adapter (`selectGeometryProfile`) by exact string equality with the adapter's
+  vendor, architecture and description, in this order: (1) a table whose match names all three; (2) a table whose
+  match names the vendor and the architecture and no description; (3) a table whose match names the vendor only; (4)
+  the default profile. An empty description is no description, so it never reaches (1). Chrome without its
+  developer-features flag reports an empty description (and device): a browser user reaches (2) to (4) only.
+- The levels are named **measured**, **predicted** and **default**. A measured table is matched by the adapter's
+  description and derived from that device's own records. A predicted table is matched by vendor and architecture,
+  so the adapter runs geometries measured on other devices of its architecture: a shared table's
+  ([below](#shared-tables)), or one device's table matched without its description — `nvidia-ampere` and
+  `nvidia-blackwell` are each derived from one device's records and matched so (under Node on Dawn the description
+  is the driver's version, and Chrome without its flag reports none). No table is matched by vendor alone. The
+  default is the default profile: no table matches.
+- Nothing is matched by similarity: a description no table names gets the predicted table of its vendor and
+  architecture, never the table of the nearest measured device. The sha256 reference rows are kept per environment
+  key, and each must say which table that machine ran with.
 
 ## Where a table comes from
 
@@ -78,6 +97,45 @@ adapter's match and measures nothing at run time.
 - Every registered table's header is the generator's. The tile geometry of `apple-metal-3` was written by a tool
   that no longer exists; its header names the commit whose file holds that tool's adoption lines.
 
+## Shared tables
+
+A shared table is one table derived from the sweep records of two or more devices of one vendor and architecture and
+matched without a description: the predicted table of [the three levels](#the-three-levels).
+
+- **Asked for explicitly**: `deriveGeometryProfile` with `shared: true`. It needs a vendor and an architecture, takes no description and no injection-only target, and needs the records of at least
+  two adapters distinct by the four fields; every record must be of that vendor and architecture. Anything else is
+  refused, naming what. Without the option nothing of this applies: records whose four fields differ are refused
+  ([above](#where-a-table-comes-from)).
+- **Each device is read as one adapter.** The records are grouped by their adapter's four fields. Inside one group
+  every rule of a measured table applies as it does there: the group's records combine, the material and rounding
+  checks drop the same observations, a row the quick look screened out is no observation, the sweep's default row
+  must be the current runtime's default. No timing of one device is compared with another's, and none is pooled:
+  every ratio is a geometry against its own device's default on that device.
+- **The rule**, per field (a row-count bucket of `gemmRows` and of `i8a8.linear`, each other field): a geometry is
+  eligible only when, on every device, it passes the measured table's rule on that device's cases of the field —
+  identical output and at least the threshold (×1.05 by default) on every one of them. A geometry a device did not
+  measure is not measured there. Among the eligible ones the table takes the one with the largest geometric mean of
+  the per-device geometric means — devices weigh equally, whatever number of cases each measured —, ties by name. With
+  none eligible the field keeps the default. A field some device has no case of keeps the default, and the verdict
+  names that device.
+- **Tile geometries only.** A shared table carries no `attentionOnline` and no `linearGemv`: attention-bench
+  records are refused beside it (`deriveLinearGemvChoices` and `planGemvMeasurements` refuse a shared table),
+  so a Session on its adapters runs the default profile's GEMV choices and the key-axis form the attention's `N`
+  gives.
+- **Provenance**: `provenance.adapters`, each device's four fields in the order its first record was given, in place
+  of `provenance.adapter`. A family's entry cites every record with a row of it, of every device.
+  `geometryProfileMismatch` compares the vendor and the architecture of each of the table's adapters with the
+  adapter's — not the device or the description, which the table predicts for —, then every family's keys as for a
+  measured table; a measured table is compared on all four fields as before. A list of fewer than two adapters is a
+  mismatch, and `parseGeometryProfileJson` and the injection check refuse it together with a provenance that has
+  both forms.
+- **Regenerating**: a registered shared table is the base of a shared derivation only, onto records of the same
+  adapters (as a set); each device's records cover a family they have a row of completely. A measured table is not
+  the base of a shared derivation, nor a shared one of a measured derivation.
+- **The verdict lines** give, per field, each device's number of cases; for an adopted geometry its geometric mean
+  over the devices and each device's geometric mean, smallest and largest ratio; for every geometry not taken each
+  device's ratios or the reason it is not eligible there.
+
 ## The GEMV choices of linear
 
 - A profile can also hold the GEMV choices of linear (`linearGemv`): the variant of the sequential kernel and its
@@ -107,9 +165,9 @@ adapter's match and measures nothing at run time.
   profile where none matches, an injected table when the device was acquired with one) and writes the profile's id in
   the record (`geometryProfile`). Every other kernel of the sweep reads nothing of the profile.
 - Every registered table carries them: `nvidia-ampere`, `nvidia-blackwell` and `apple-metal-3`. A table without them
-  (an injected one, or a first table derived without GEMV records) runs with the default profile's, and so does an
-  adapter no table matches: the Session fills them in once, where it selects its profile, so the linear selection,
-  the fusion pass and the recipe builder all read the same choices.
+  (an injected one, a first table derived without GEMV records, a shared table) runs with the default profile's, and
+  so does an adapter no table matches: the Session fills them in once, where it selects its profile, so the linear
+  selection, the fusion pass and the recipe builder all read the same choices.
 - The memory estimate has no adapter and reads the default profile's. Of the choices, the fusion pass reads which
   shapes have a parallel row (the linear → `static_quantize` fusion) and a row's packed-activation flag (the packed
   pairing); no size reads the sequential variants, a row's lanes, its staged flag or its row block. No registered
@@ -408,6 +466,13 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   records the case is skipped and says which files are missing.
 - `apple-metal-3` has no such case: every record its tile geometry's provenance cites has a format the derivation no
   longer accepts.
+- The shared derivation on hand-built records (core lane): a geometry faster on one device and slower on another is
+  not taken; among the geometries eligible on every device the largest geometric mean of the per-device geometric
+  means is taken (devices weigh equally, not cases); one slow case on one device rules a geometry out; a field one
+  device has no case of keeps the default and names the device; the provenance's adapters and the family entries;
+  the refusals (one adapter, a description, no architecture, an injection-only target, attention-bench records) and
+  the measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
+  and the injection check of the several-adapter form; `deriveLinearGemvChoices` refusing a shared table.
 - The skeleton form and the counter decode as candidates (core lane): what each case measures in each set, that no
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter

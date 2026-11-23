@@ -947,6 +947,14 @@ const assertOneAdapter = (
     }
   }
   if (provenance !== undefined) {
+    // MUST: no GEMV choices for a shared table — its tile geometry is derived from several devices
+    // under a rule of its own, and no such rule exists for the GEMV choices yet
+    // (SPEC: docs/spec/geometry-profiles.md#shared-tables)
+    if (provenance.adapters !== undefined) {
+      throw new Error(
+        `Table '${table.id}' is a shared table (derived from ${provenance.adapters.length} adapters): it carries tile geometries only, and its GEMV choices are the default profile's`,
+      );
+    }
     for (const field of PROVENANCE_ADAPTER_FIELDS) {
       if (provenance.adapter[field] !== first.adapter[field]) {
         throw new Error(
