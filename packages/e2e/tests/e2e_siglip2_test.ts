@@ -1,8 +1,8 @@
 // Real-GPU golden E2E of the real-weight SigLIP2 **vision tower** (stage 3 of ADR 0005).
 //
 // The tiny golden (tests/e2e_golden_test.ts) covers "the coverage of the op contracts", the
-// real-weight SBV2 / Irodori cover "real weights on the audio-chain side", and EmbeddingGemma
-// (tests/e2e_embeddinggemma_test.ts) covers "text models with a single-vector output"; this one
+// real-weight SBV2 / Irodori cover "real weights on the audio-chain side", and EmbeddingGemma 2
+// (tests/e2e_embeddinggemma2_test.ts) covers "text models with a single-vector output"; this one
 // covers **image models with a single-vector output**.
 //
 // The container comes from the distribution mirror `models/karume-siglip2/` (model `base` /

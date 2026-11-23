@@ -34,7 +34,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   deberta: { "full-24layer": "text_encoder" },
   "deberta-i8": { "full-24layer": "text_encoder", "sbv2-22layer": "text_encoder" },
   "depth-anything-v2-small-hf": { "": "depth" },
-  "embeddinggemma-300m": { "": "model" },
   "embeddinggemma-2-text": { "": "model" },
   "embeddinggemma-2-text-i8": { "": "model" },
   "embeddinggemma-2-vision": { "": "vision" },
