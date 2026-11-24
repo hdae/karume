@@ -99,8 +99,7 @@ const entry: Entry = {
     },
     { kind: "integer", name: "width", label: "Width", min: 64, max: 4096, default: 1024 },
     { kind: "integer", name: "height", label: "Height", min: 64, max: 4096, default: 1024 },
-    // `direct` by default: the default mount (anima-2.9b) is served on no HF-compatible route.
-    { ...sourceParameter("How a browser reads the distribution"), default: "direct" },
+    sourceParameter("How a browser reads the distribution"),
   ],
   run: async ({ parameters, gpuOptions, signal, progress, openDistribution }) => {
     const mount = choiceValue(parameters, "mount", TIMING_MOUNTS);
