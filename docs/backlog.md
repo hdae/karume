@@ -53,25 +53,10 @@ maintainer's ruling of 2026-11-06).
 ## later
 
 - **After the 0.23.0 release (filed together on 2026-11-19; the order among them is not ruled)**:
-  - Put after the release by the maintainer's rulings of 2026-11-19: the GEMV derivation's evidence rules
-    (perf-ledger K-113; built 2026-11-20; the registered tables derived again under them 2026-11-21), and the bf16 shapes
-    that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
+  - Put after the release by the maintainer's rulings of 2026-11-19: the bf16 shapes
+    that could take a parallel row of the default profile — in item 6 of "The move to maintained specs (ADR 0152)" below; the first
     publication of Anima-2.9B ("Anima-2.9B" below);
     and EmbeddingGemma 2 ("EmbeddingGemma 2" below).
-  - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
-    Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
-    parallel rows are faster than the default's but its sequential choices are not, and part of them were not compared
-    word for word there ([research 2026-11-19](research/2026-11-19-gemv-tables-across-devices.md) §7). Built
-    2026-11-23 in another form (ADR [0156](decisions/0156-shared-geometry-profile-tables.md)): the M5 has a measured
-    table, `apple-m5`, matched by its description, from its full geometry sweep; an Apple `metal-3` adapter that
-    reports no description gets the shared table `apple-metal-3-shared`, derived from the M5's sweep and three M2
-    records of the M5's geometries ([spec](spec/geometry-profiles.md#shared-tables)). `apple-m5` carries the M5's
-    own GEMV choices, derived from its two GEMV sweep records of 2026-11-23 (43 sequential exceptions, 66 parallel rows
-    changed or added — [spec](spec/geometry-profiles.md#the-gemv-choices-of-linear)); `apple-metal-3-shared` runs the
-    default profile's (a shared table carries tile geometries only). Left, in item 6 of "The move to maintained specs
-    (ADR 0152)": a rule for a shared table's GEMV choices; an M2 full
-    geometry sweep, which re-derives `apple-metal-3`'s tile families and lets the shared table compare every candidate
-    on both devices; the M1, M3 and M4 are not measured.
   - Here without a ruling on their timing: the two items below.
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
     workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
@@ -96,10 +81,6 @@ maintainer's ruling of 2026-11-06).
       machine that runs it; such a link resolves nowhere else (CI went red on one, 2026-11-19). Proposed: reject
       absolute targets.
   - **Found while adding EmbeddingGemma 2 (filed 2026-11-21; none approved yet)**:
-    - Two cases of `tools/export-recipes/irodori/tests/test_tokenizer_ref.py` (`TestTableReproducesSplitter`) end
-      as errors, not as explicit skips, in an environment without `tokenizers` that holds the assets: the fixture
-      helper `_unigram_tokenizer` imports `tokenizers` without `importorskip`. `uv run --locked --isolated pytest`
-      exits 1 on the development machine because of them; CI skips them (it has no assets).
     - The Families table of `tools/export-recipes/README.md` and `docs/assets-layout.md` have no row for the
       `embeddinggemma2` recipe and its upstream snapshot under `inputs/embeddinggemma2/`.
     - The attention hook of the Gemma 4 recipe refuses `attention_mask=None`, so the EmbeddingGemma 2 recipe carries
@@ -206,13 +187,7 @@ maintainer's ruling of 2026-11-06).
          say what removes a row of the default from a device's table: the derivation judges a candidate against the
          default's choice for the shape, so a device drops an inherited exception only when its records show the
          general variant ×1.10 faster in every group, and a device on which the row is slower by less keeps it;
-       - the derivation's evidence rules are built (perf-ledger K-113, 2026-11-20): a record stands wherever it timed
-         the kernels the current default runs, so a row added to the default no longer discards the other devices'
-         records of the shape. The three registered tables are derived again under them (2026-11-21, on the
-         maintainer's review of their diffs; `nvidia-ampere` from 24 records of the card's turbo mode and its driver of
-         2026-11-20 — the records before that are of another driver and are not mixed with them). Left: the
-         development machine's sha256 rows that follow its new choices, re-recorded on the maintainer's approval of
-         their list, and the bf16 shapes that could take a parallel row of the default (`2560 × 256` and
+       - the bf16 shapes that could take a parallel row of the default (`2560 × 256` and
          `1536 × 2048`; `8960 × 1536` is slower than the GEMM at 8 rows on the RTX 3080 Ti);
        - where a table's choice at `reorder` is slower than its choice at `exact` (the three devices' GEMV sweep records
          since 2026-11-17, per dispatch, read 2026-11-19; rows with packed activations are not measured; perf-ledger
@@ -317,17 +292,28 @@ maintainer's ruling of 2026-11-06).
   CFG 3.5–5). The RTX 3080 Ti has a sha256 row for its default preset (512², CFG 4, 20 steps passed explicitly, the base's
   check knobs — `e2e_anima_test.ts`), and its fusion counts at 40 blocks are pinned (`e2e_anima_fusion_counts_test.ts`).
   The maintainer's visual A/B of `bf16` and the default `bf16+dit8-a8-attn8-s16` (ADR 0147 decision 3 (2); seeds 42–45 ×
-  three prompts at 1024², 20 steps) found no problem (2026-11-24). Left, in order:
-  - The licence interview and the review of the notice and the card: the open rows of the ledger block
-    (`tools/export-recipes/anima/THIRD_PARTY_NOTICES.md`, "Gazingstars123/Anima-2.9B") — which CircleStone text to attach
-    (the file beside the upstream weights is the v1.2 text before upstream's fix of two section references; the recipe
-    bundles the fixed text, as for the other two repositories) and whether the author asks for more than the CircleStone
-    terms.
-  - `bf16-c16` has not run on the 2.9B (no Anima e2e case runs it); the A/B band is the base's only.
+  three prompts at 1024², 20 steps) found no problem (2026-11-24). A second row runs the distribution's own defaults
+  (`anima-2.9b-preview-v1-defaults`, 512²). The licence rows of its ledger block are closed (the maintainer's ruling of
+  2026-11-24: CircleStone's current text is bundled, the author is not asked), and its card quotes the upstream card's
+  description of how the model was made. Left, in order:
+  - `bf16-c16` has not run on the 2.9B (the e2e case `base-cfg-bf16-c16` runs it on the base); the A/B band is the
+    base's only.
   - A browser check in the Playground (RTX 5070 Ti, M2): the default preset downloads 4.02 GiB, its DiT weights are
     2,666 MiB.
   - Publication with the maintainer's explicit OK and the pin: the checklist "First publication of `karume-anima-2.9b`" in
     [the release runbook](release-runbook.md) §3.
+  - `tools/export-recipes/anima/eval_dist.py` (the evaluation distribution of the rejected i4 experiment — perf-ledger
+    Q-9) no longer runs: it reads every role from series under `outputs/series/`, and the base text stack, the
+    tokenizers and the published models' series are no longer kept there (distribution builds read the published
+    mirrors). Its tests pass because they build their own series. **Filed only** (2026-11-24): make it read the
+    borrowed roles from the mirrors, or retire it with the experiment.
+
+- **The model cards and notices across repositories (filed 2026-11-24, the maintainer's request; after the 0.24.0
+  release)**: check that every distribution's README.md and NOTICE.md are written the same way (section order, how an
+  upstream is named and pinned, what is quoted and what is stated in the recipe's own words, where the reader is sent
+  for the upstream's own description) and write the rules down where the recipes can point at them. The 2.9B card set
+  one precedent: an upstream's statement that the recipe cannot measure is quoted verbatim, and the notice refers to the
+  upstream card for it.
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
@@ -348,9 +334,8 @@ maintainer's ruling of 2026-11-06).
 
 - **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
   accepted; the order among them and against the other items is the maintainer's)**. Code items 1 and 2 (the three
-  fusion keys out of `SessionOptions` and out of the manifest vocabulary) landed on 2026-11-15; their re-upload, source
-  pins and published smoke are part of the 0.23.0 release (`now`). Code item 3, the Session canary, is not built (ADR
-  [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) decision 3). The remaining items keep
+  fusion keys out of `SessionOptions` and out of the manifest vocabulary) landed on 2026-11-15. Code item 3, the Session
+  canary, is not built (ADR [0152](decisions/0152-maintained-specs-and-declared-numeric-requirements.md) decision 3). The remaining items keep
   their numbers. Each code item is its own commit with its behaviour tests and states its blast radius:
   - **Code** (the decisions name what each changes):
     4. The derived applicability check at admission replaces the twelve `FamilySessionPolicy` tables: one pure runtime
