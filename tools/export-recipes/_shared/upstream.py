@@ -151,11 +151,10 @@ def card_license_identifier(metadata: CardMetadata, where: str) -> str:
     """Take the license identifier to write into the container from the card's front matter
     (values confirmed upstream by hand).
 
-    For families with no local upstream README (anima, read directly from the HF cache; the sbv2
-    FN models from Booth). `other` is not written for the same reason as in
-    {@link snapshot_license} — `other` is HF's spelling for "a custom license without an
-    identifier", and the license cannot be identified from a container taken away
-    (repository-wide review W-RC3-6 of 2026-09-24).
+    For families with no local upstream README (anima, read directly from the HF cache). `other`
+    is not written for the same reason as in {@link snapshot_license} — `other` is HF's spelling
+    for "a custom license without an identifier", and the license cannot be identified from a
+    container taken away (repository-wide review W-RC3-6 of 2026-09-24).
     """
     return _license_identifier(metadata.license, metadata.license_name, where)
 
@@ -229,7 +228,6 @@ UPSTREAM_AUTHORS: Mapping[str, str] = {
     # sbv2 — the voices' and the text encoder's publishers.
     "litagin": "litagin",
     "ku-nlp": "ku-nlp",
-    "rufflet17": "rufflet17",
     # wan — the card's attribution section ("released by Wan-AI").
     "Wan-AI": "Wan-AI",
 }

@@ -101,8 +101,6 @@ uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anim
     --out ../../models/karume-anima-extra --resolve-refs hf
                                                      # → models/karume-anima-extra/ (fine-tunes; the text stack is referenced in karume-anima)
 uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/ (umT5-XXL encoder; i8 — ADR 0119)
-uv run python dist.py --pipeline wan --allow-placeholder-ref
-                                                     # → models/karume-wan2.1/ (text_encoder is referenced in karume-umt5-xxl; not published)
 uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                      # → models/karume-wan2.2/ (Wan2.2 TI2V 5B; text_encoder is referenced in karume-umt5-xxl — ADR 0121)
 uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
@@ -112,9 +110,6 @@ uv run python dist.py --pipeline irodori \
     --model v4.1-small --resolve-refs hf             # → models/karume-irodori-v4.1-small/ (references 26 roles in karume-irodori-v4-small)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv   # the pipeline declares the family-level repository name (karume-sbv2-jvnv) (2026-09-25)
-uv run python dist.py --pipeline sbv2-fn \
-    --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
-    --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
 uv run python dist.py --pipeline gemma4 \
     --model e2b --model e4b \
     --out ../../models/karume-gemma4                 # the regular line, E2B / E4B, bf16 only (about 23 GiB)
@@ -134,14 +129,13 @@ uv run python dist.py --pipeline lucida \
     --model 1024 --model 2048 \
     --out ../../models/karume-lucida                 # a derivative = a separate repository; the same two models
 uv run python dist.py --pipeline depth-anything      # → models/karume-depth-anything-v2/
-uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- **Not yet published for the first time: `vowel-detector`.** Of the three Wan repositories, `karume-umt5-xxl` and `karume-wan2.2` were first published with 0.14.0, and `karume-wan2.1` is not published (ADR [0118](decisions/0118-wan21-video-generation.md) addendum 2026-10-15)
+- The two Wan repositories, `karume-umt5-xxl` and `karume-wan2.2`, were first published with 0.14.0
   (siglip2 and depth-anything were first published with 0.9.0, birefnet / lucida on 2026-09-05 in the two-model form 1024² + 2048²).
   The two Wan repositories reference `karume-umt5-xxl` across repositories, so umT5 is published first (procedure: [release-runbook](release-runbook.md) "First publication of a family" — the runbook describes
   the 0.14.0 round of umT5 and Wan2.2).
-  `karume-sbv2-fn` is a separate case whose mirror is not kept permanently (the bullet below). The canonical source for repository names and the rules for sharing a repository is ADR
+  The canonical source for repository names and the rules for sharing a repository is ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) decisions 1 / 2 / 8 / 9.
 - Depending on the upstream license (siglip2 = Apache-2.0 / the birefnet line = MIT / depth-anything small =
   Apache-2.0), `LICENSE.md` / `NOTICE.md` are bundled at the repository root (decision 7 — a standing rule that applies
@@ -165,10 +159,6 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   `repo_name` = the output directory name of the command above = the repo name in the card's Usage** (the latter two are
   derived from the former), so a rename takes one constant in the recipe. Where the published revision lives: the models table
   `gemma.SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).
-
-- The mirror of `karume-sbv2-fn` is **not kept permanently** (ruling of 2026-08-30 — the e2e checks take `karume-sbv2-jvnv`, whose license statement is
-  in order, as canonical). The command above is a record of how to regenerate it; whenever the series (exported from `inputs/sbv2/FN*`
-  → `outputs/series/`) are present, it can be rebuilt at any time.
 
 - The canonical spec is ADR [0041](decisions/0041-manifest-v2.md) (layout inside a repository = per-model
   subtrees + `shared/`; **placement is always an independent copy** — the reason hard links are forbidden is also in an addendum of that ADR) +
@@ -198,12 +188,12 @@ Only when the mirror itself is missing do they fetch the verified published revi
 If an existing directory has no `karume.json`, it is an error, as an incomplete distribution.
 An explicit `--source` takes top priority, and the actual source is printed at startup.
 Gemma 4 defaults to local as before; fetching from the public repository is requested with `--repo`.
-SBV2 and vowel-detector name the distribution to use explicitly with `--source`.
+SBV2 names the distribution to use explicitly with `--source`.
 
-The experimental CLIs for additional LLMs are MiniCPM5 (`examples/minicpm5/README.md` (removed in 0.15)) /
-Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public distribution exists yet, so they read the converted
-series under `outputs/series/` and the official `tokenizer.json` under `inputs/` directly. They look for existing series in the order GPTQ i4 → i8 → RTN i4 → f16 → f32,
-and when there are several experiments of the same kind they ask for `--source`. They do no new fetching and no re-conversion.
+The experimental CLI for an additional LLM is Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public
+distribution exists yet, so it reads the converted series under `outputs/series/` and the official `tokenizer.json`
+under `inputs/` directly. It looks for existing series in the order GPTQ i4 → i8 → RTN i4 → f16 → f32, and when there
+are several experiments of the same kind it asks for `--source`. It does no new fetching and no re-conversion.
 
 ## Publishing (upload to HF)
 

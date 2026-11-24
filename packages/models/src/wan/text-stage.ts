@@ -5,12 +5,12 @@
  * rows in {@link precomputedContexts}).
  *
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
- * time) are defined by the doc at the top of `./pipeline.ts`; this module holds only the text stage's
- * parts. Shared by the Wan2.1 / 2.2 classes (umT5 is the same as 2.1 — ADR 0121 decisions 9 and 10).
- * `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1, `"wan.Ti2vPipeline"` for Wan2.2).
+ * time) are defined by the doc at the top of `./ti2v-pipeline.ts`; this module holds only the text
+ * stage's parts (umT5 and its text assets are Wan2.1's, which Wan2.2 uses unchanged — ADR 0121
+ * decisions 9 and 10). `owner` is the message prefix (`"wan.Ti2vPipeline"`).
  *
  * NOTE: the public types (`PipelineOptions` / `GenerateEvent` / `RunComponent` / `Assets`)
- * are taken from `./pipeline.ts` with `import type` (type-only references are erased, so there is no
+ * are taken from `./types.ts` with `import type` (type-only references are erased, so there is no
  * import cycle).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
@@ -28,7 +28,7 @@ import type { ComponentOpener, GraphOwner, ModelComponent } from "../hub/compone
 import { umt5GraphContract } from "../umt5/graph-contract.ts";
 import { buildUmt5RelativePositionBuckets, UMT5_MAX_LENGTH } from "../umt5/relative-position.ts";
 import { padUmt5Context, umt5SessionInputs } from "../umt5/session-io.ts";
-import type { Assets, GenerateEvent, PipelineOptions, RunComponent } from "./pipeline.ts";
+import type { Assets, GenerateEvent, PipelineOptions, RunComponent } from "./types.ts";
 import type { PromptGate, WanGenerationPlan } from "./plan.ts";
 import { DIT_CONTEXT, type DitContract, type WanContexts } from "./dit-loop.ts";
 import { firstNonFinite } from "./graph-io.ts";
@@ -102,7 +102,7 @@ export const assertTextEncoderDeclared = (
 /**
  * The key of the text embedding asset (the per-model `assets` of the step 7 manifest — decision 4).
  * Read on both paths — the accepted set of `"precomputed"`, and on `"gpu"` the source of
- * `Pipeline.prompts` (the list of examples).
+ * `Ti2vPipeline.prompts` (the list of examples).
  */
 const TEXT_EMBEDS = "text_embeds";
 

@@ -98,7 +98,8 @@ the second.
 
 - {@link compare_with_upstream} — on every golden waveform, the wrapper's soft tokens against
   upstream's forward on the extractor's frames with its mask (the golden) and on the graph's own
-  frames, within {@link UPSTREAM_TOLERANCE}; and the wrapper with an all-ones mask, bit-identical
+  frames, within the series' bound ({@link UPSTREAM_TOLERANCES} — the i8 series, whose rounded
+  weights move the f32 noise, has its own); and the wrapper with an all-ones mask, bit-identical
   unless `L ≡ 2 (mod 4)` and far off there. The goldens cover every residue and the largest count.
 - {@link assert_ir_form} — the two inputs on `4n` and the one output `[1, n, 512]`, one symbol, no
   state, no fused `attention` and no `where`, 12 softmaxes on `[8, n, 12]`, 24 window copies over
@@ -170,10 +171,14 @@ from torch.export import Dim
 from torch.nn import functional
 
 from _shared.paths import SERIES_ROOT
-from embeddinggemma.export import INPUT_PREFIX, IO_PREFIX, IO_SUFFIX, MODEL_FILE, OUTPUT_PREFIX
 from embeddinggemma2 import sources
 from embeddinggemma2.export import (
+    INPUT_PREFIX,
+    IO_PREFIX,
+    IO_SUFFIX,
     LICENSE,
+    MODEL_FILE,
+    OUTPUT_PREFIX,
     WHERE_OP,
     EmbeddingGemma2ExportError,
     assert_transformers_version,
@@ -280,8 +285,26 @@ UPSTREAM_ATTENTION = "eager"
 #: times the worst wrapper-to-upstream difference, the size of upstream's own f32 error. The
 #: breakages it guards against are far above it: the frame mask dropped moves an `L ≡ 2 (mod 4)`
 #: audio's last token by 4.2 (`edge`), a window of 13 keys by about 0.4 (random frames, torch —
-#: the investigation before this script).
+#: the investigation before this script). It holds the f32 and bf16 series (the checkpoint's
+#: weights); the i8 series has its own ({@link UPSTREAM_TOLERANCE_I8}).
 UPSTREAM_TOLERANCE = 3e-4
+
+#: The same bound for the i8 series, derived the same way from its own weights (the rounded ones
+#: — the f32 noise moves with the weights). Measured on 2026-11-23 over the six golden waveforms:
+#: the wrapper against upstream 3.10e-6 (`click`) to 2.82e-4 (`long`); in f64 (upstream's f32
+#: casts lifted, the rounded weights upcast exactly) the wrapper equals upstream to 6.3e-13, while
+#: upstream's f32 run is up to 4.0e-4 from that f64 run (`long`) and the wrapper's up to 1.8e-4
+#: (`noise`) — the difference is f32 summation order, not a change of the rewrite. The bound is
+#: three times the worst wrapper-to-upstream difference (8.4e-4), to one digit; the breakages
+#: above stay far beyond it.
+UPSTREAM_TOLERANCE_I8 = 8e-4
+
+#: The bound each storage's series is held to (the record states the one used).
+UPSTREAM_TOLERANCES: Mapping[str, float] = {
+    "f32": UPSTREAM_TOLERANCE,
+    "bf16": UPSTREAM_TOLERANCE,
+    "i8": UPSTREAM_TOLERANCE_I8,
+}
 
 #: The trace's example soft-token count (inside the symbol's range, far from 0 / 1).
 EXAMPLE_TOKENS = 100
@@ -699,14 +722,15 @@ def _difference(left: torch.Tensor, right: torch.Tensor) -> dict[str, float]:
 
 
 def compare_with_upstream(
-    wrapper: AudioTowerWrapper, tower: Tower, audio: ProcessedAudio
+    wrapper: AudioTowerWrapper, tower: Tower, audio: ProcessedAudio, tolerance: float
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Upstream's soft tokens of the extractor's frames (the golden) and the measured differences:
     the wrapper against them and against upstream on the graph's own frames, upstream's two
     forwards against each other, and the wrapper with an all-ones mask (what the mask input
     guards).
 
-    MUST: each of the first three within {@link UPSTREAM_TOLERANCE}. MUST: without the mask the
+    MUST: each of the first three within `tolerance` (the series' bound, {@link
+    UPSTREAM_TOLERANCES}). MUST: without the mask the
     wrapper is bit-identical unless `L ≡ 2 (mod 4)`, and then moves the last token far — the rule
     the io contract states.
     """
@@ -728,15 +752,15 @@ def compare_with_upstream(
         "upstream_same_frames_vs_extractor_frames": _difference(same_frames, golden),
     }
     worst = max(entry["max_abs"] for entry in measured.values())
-    if worst > UPSTREAM_TOLERANCE:
+    if worst > tolerance:
         raise AssertionError(
             f"{audio.waveform.name}: the wrapper differs from upstream's tower by {measured}"
-            f" (> {UPSTREAM_TOLERANCE})"
+            f" (> {tolerance})"
         )
     measured["wrapper_without_mask"] = _difference(unmasked, ours)
     moved = measured["wrapper_without_mask"]["max_abs"]
     if frames.valid % FRAMES_PER_TOKEN == 2:
-        if moved <= 100 * UPSTREAM_TOLERANCE:
+        if moved <= 100 * tolerance:
             raise AssertionError(
                 f"{audio.waveform.name}: L = {frames.valid} ≡ 2 (mod 4), yet the mask moves the"
                 f" soft tokens by only {moved:.3e}"
@@ -1009,8 +1033,10 @@ def export_series(
         raise AudioExportError(f"the goldens cover the frame residues {sorted(residues)} only")
     if max(audio.soft_tokens for audio in processed) != SOFT_TOKENS_MAX:
         raise AudioExportError(f"no golden runs at the largest count {SOFT_TOKENS_MAX}")
+    tolerance = UPSTREAM_TOLERANCES[dtype]
     goldens = {
-        audio.waveform.name: compare_with_upstream(wrapper, tower, audio) for audio in processed
+        audio.waveform.name: compare_with_upstream(wrapper, tower, audio, tolerance)
+        for audio in processed
     }
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     graph, tensors = trace(wrapper)
@@ -1041,7 +1067,7 @@ def export_series(
             "pcmScale": PCM_SCALE,
             "softTokensMax": SOFT_TOKENS_MAX,
             "window": WINDOW,
-            "upstreamTolerance": UPSTREAM_TOLERANCE,
+            "upstreamTolerance": tolerance,
             "audios": [audio_record(audio, goldens[audio.waveform.name][1]) for audio in processed],
         }
         (staged / REFERENCE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")

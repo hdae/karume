@@ -219,8 +219,7 @@ class FixtureCase(ti2v_few_step_ref.FixtureCase):
 
 
 #: 2 deciding cases (they decide the band) + 1 acceptance case. The prompt is the fixed prompt with
-#: the same name as the image. The seeds differ from both the T2V reference (20262101 to 03) and
-#: the 2.1 reference.
+#: the same name as the image. The seeds differ from the T2V reference (20262101 to 03).
 #: MUST: the `accept` results never change the deciding cases or the band.
 FIXTURE_CASES = (
     FixtureCase(

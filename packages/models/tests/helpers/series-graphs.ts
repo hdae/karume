@@ -34,7 +34,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   deberta: { "full-24layer": "text_encoder" },
   "deberta-i8": { "full-24layer": "text_encoder", "sbv2-22layer": "text_encoder" },
   "depth-anything-v2-small-hf": { "": "depth" },
-  "embeddinggemma-300m": { "": "model" },
   "embeddinggemma-2-text": { "": "model" },
   "embeddinggemma-2-text-i8": { "": "model" },
   "embeddinggemma-2-vision": { "": "vision" },
@@ -61,8 +60,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     speaker: "speaker",
     "text-proj": "text_proj",
   },
-  "minicpm5-1b": { "": "model" },
-  "minicpm5-1b-decode": { "": "model" },
   // MOSS-Image's DiT (ADR 0138 decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
   // every weight of `dit`).
   "moss-image-sft-i8-dyn": { dit: "dit", dit_skip22: "dit_skip22", dit_text: "dit_text" },
@@ -79,14 +76,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "siglip2-base-patch16-224": { "": "vision" },
   "siglip2-so400m-patch14-384": { "": "vision" },
   "umt5-xxl-i8-dyn": { text_encoder: "text_encoder" },
-  "vowel-detector-crnn-epoch3": { "": "crnn" },
-  "wan2.1-t2v-1.3b-f16-dyn": {
-    transformer: "transformer",
-    vae_decoder_first: "vae_decoder_first",
-    vae_decoder_next: "vae_decoder_next",
-  },
-  "wan2.1-t2v-1.3b-f16-dyn-probe": { transformer: "transformer" },
-  "wan2.1-t2v-1.3b-i8-dyn": { transformer: "transformer" },
   "wan2.2-ti2v-5b-f16-dyn": {
     vae_decoder_first: "vae_decoder_first",
     vae_decoder_next: "vae_decoder_next",

@@ -116,7 +116,7 @@ outputs/series/gemma4-e2b/model-NNNNN-of-NNNNN.krm  the container: graph + weigh
 outputs/series/gemma4-e2b/io.<case>.safetensors      input tensors and expected outputs from torch CPU
 ```
 
-The io tensor key convention is the same as the tiny goldens, DeBERTa, EmbeddingGemma and MiniCPM5
+The io tensor key convention is the same as the tiny goldens, DeBERTa and EmbeddingGemma
 (`input.<graph input name>` / `output.<position>`). The token length `T` is symbolic with an upper
 bound of 768.
 
@@ -593,8 +593,8 @@ The same run also writes the git-tracked parity fixture
 calling upstream `tokenizers.Tokenizer` **independently**, so no preprocessing is shared with the
 TypeScript port (decision 7); the vocabulary and merges it carries are the subset the cases need.
 
-EmbeddingGemma runs through the same machinery (`embeddinggemma/tokenizer.py`): the implementation
-is shared, the assets are not.
+EmbeddingGemma 2 runs through the same machinery (`embeddinggemma2/tokenizer.py`): the
+implementation is shared, the assets are not.
 
 ## What `chat.py` emits
 
@@ -696,7 +696,7 @@ The PLE scripts (`export.py`, `export_decode.py`, `export_token.py`, `export_pro
 Both fixture writers print the `vp fmt` command to run afterwards — the committed shape of a
 fixture is whatever the repository formatter produces (the format check of `vp check` checks it).
 
-`transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a
+`transformers` is pinned to 5.14.1 for the same reason as DeBERTa and EmbeddingGemma (a
 change in the modeling code changes the graph shape); it is brought in temporarily with `--with`
 rather than declared as a dependency group.
 

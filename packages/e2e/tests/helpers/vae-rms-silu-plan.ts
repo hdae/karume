@@ -1,7 +1,7 @@
 /**
  * The rule `models/vae_rms_silu` (`@karume/models/wan` and `/anima`, the VAE's channel RMS norm and
  * the SiLU after it in one dispatch) planned on a distribution graph, for the family fusion-count
- * tests that pin its hits (Wan2.1, Wan2.2, anima): the plan with a rule list — by default the VAE
+ * tests that pin its hits (Wan2.2, anima): the plan with a rule list — by default the VAE
  * decoder's (`vaeDecoderFusionRules`, the list the Wan and anima pipelines give their VAE decoder
  * Sessions) — and the plan with the same options and the rule disabled by name (the test-only
  * `DISABLED_FUSION_RULES`, the plain side), both through {@link planDistributionFusions} (the

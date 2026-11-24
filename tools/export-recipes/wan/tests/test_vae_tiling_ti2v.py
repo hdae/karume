@@ -18,12 +18,6 @@ quietly**:
   two things added to the metadata are `patch_size` and `reference`
 - the CLI pair of `--model` and `--case` (a pair not in the table fails before the VAE is read), the
   per-model defaults, and the check of the loaded VAE against the series' premises
-- the whole metadata of 2.1's `write_fixture` and the set of tensor names (decode is swapped out —
-  the values are R0's job)
-
-The 2.1 path (`test_vae_tiling.py`) does not change — that 2.1's fixture is unchanged is confirmed
-by rewriting `vae_tiles.{band,accept}` and comparing them with the existing ones through
-`wan.series_check` (it is long on the CPU, so it is not in pytest).
 """
 
 from __future__ import annotations
@@ -159,7 +153,6 @@ class TestUnpatchifyOrder:
 class TestFixtureCasesTi2v:
     def test_the_tables_cover_the_series_of_export_vae(self):
         assert set(vae_tiling.FIXTURE_CASES_BY_MODEL) == set(export_vae.VAE_SERIES)
-        assert vae_tiling.FIXTURE_CASES_BY_MODEL["t2v-1.3b"] is vae_tiling.FIXTURE_CASES
         assert vae_tiling.FIXTURE_CASES_BY_MODEL["ti2v-5b"] is vae_tiling.TI2V_FIXTURE_CASES
 
     def test_the_cases_are_the_three_sizes_of_the_design(self):
@@ -186,24 +179,15 @@ class TestFixtureCasesTi2v:
             assert (case.height, case.width) != (band.height, band.width), name
 
     def test_seeds_are_distinct_from_every_other_fixture(self):
-        """No latent is shared with the 2.1 tile reference or with step 4's chunk sequences (2.1 /
-        2.2)."""
+        """No latent is shared with step 4's chunk sequences."""
         seeds = [case.seed for case in vae_tiling.TI2V_FIXTURE_CASES]
-        others = {
-            case.seed
-            for case in (
-                *vae_tiling.FIXTURE_CASES,
-                *export_vae.FIXTURE_CASES,
-                *export_vae.TI2V_FIXTURE_CASES,
-            )
-        }
+        others = {case.seed for case in export_vae.TI2V_FIXTURE_CASES}
 
         assert len(set(seeds)) == len(seeds)
         assert not set(seeds) & others
 
     def test_only_accept_of_ti2v_carries_rgb_and_the_untiled_reference(self):
-        """RGB is only in accept of the generation that patchifies (ruling F-11); the 2.1 table has
-        no RGB."""
+        """RGB is only in accept (ruling F-11)."""
         flags = {
             (model, case.name): (case.full, case.rgb)
             for model, cases in vae_tiling.FIXTURE_CASES_BY_MODEL.items()
@@ -214,13 +198,6 @@ class TestFixtureCasesTi2v:
         assert flags[("ti2v-5b", "accept")] == (True, True)
         assert flags[("ti2v-5b", "band")] == (False, False)
         assert flags[("ti2v-5b", "wide")] == (False, False)
-
-    def test_the_wan21_reference_string_is_unchanged(self):
-        """The 2.1 metadata `reference` is the same string as before the 2.2 path was added (the
-        premise of R0's metadata match)."""
-        assert vae_tiling.FIXTURE_REFERENCE == (
-            "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
-        )
 
 
 def _seeded(seed: int, height: int, width: int, chunks: int = 3) -> torch.Tensor:
@@ -355,99 +332,10 @@ class TestWriteFixtureTi2v:
             )
         assert not any(tmp_path.iterdir())
 
-    def test_rgb_is_refused_for_a_generation_without_patchify(self, tmp_path: Path):
-        vae = SimpleNamespace(config=SimpleNamespace(patch_size=None))
-
-        with pytest.raises(ValueError, match="only for a generation that patchifies"):
-            vae_tiling.write_fixture(
-                vae, SYNTHETIC_CASE, 8, tmp_path, min_overlap=OVERLAP, patch_size=None
-            )
-
     def test_the_overlap_and_the_patch_size_are_required(self, ti2v_synthetic_vae, tmp_path: Path):
-        """Forgetting to pass it is a TypeError — no silent writing with the 2.1 value."""
+        """Forgetting to pass it is a TypeError — no silent writing with a default value."""
         with pytest.raises(TypeError):
             vae_tiling.write_fixture(ti2v_synthetic_vae, SYNTHETIC_CASE, 8, tmp_path)  # type: ignore[call-arg]
-
-
-#: The metadata of the 2.1 fixture (values copied from the output written before the 2.2 path was
-#: added, `wan2.1-t2v-1.3b-f16-dyn/vae_tiles.{band,accept}.safetensors` under `outputs/series/`).
-WAN21_REFERENCE = "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
-WAN21_METADATA = {
-    "band": {
-        "seed": "20261012",
-        "chunks": "9",
-        "role": "band",
-        "weights": "f16-rounded",
-        "reference": WAN21_REFERENCE,
-        "tile": "32",
-        "scale": "8",
-        "rows_starts": "0,14,28",
-        "cols_starts": "0,24,48,72",
-        "rows_blend": "144,144",
-        "cols_blend": "64,64,64",
-        "frames_full": "upstream non-tiled _decode chunk loop before clamp (CPU f32)",
-    },
-    "accept": {
-        "seed": "20261013",
-        "chunks": "3",
-        "role": "accept",
-        "weights": "f16-rounded",
-        "reference": WAN21_REFERENCE,
-        "tile": "32",
-        "scale": "8",
-        "rows_starts": "0,24,48,72",
-        "cols_starts": "0,14,28",
-        "rows_blend": "64,64,64",
-        "cols_blend": "144,144",
-    },
-}
-WAN21_TENSORS = {
-    "band": {"latents", "frames", "frames_full"},
-    "accept": {"latents", "frames"},
-}
-
-
-class TestWriteFixtureWan21:
-    """Freeze the whole metadata and the set of tensor names of the 2.1 path (`patch_size` is
-    None).
-
-    decode is swapped out (that the values are unchanged is R0's job — comparing the rewritten real
-    outputs with the existing ones through `wan.series_check`). What this catches is only a
-    metadata regression caused by adding the 2.2 path.
-    """
-
-    @pytest.fixture
-    def decode_stubbed(self, monkeypatch):
-        def seeded_latents(_vae, case):
-            return torch.zeros(1, 16, case.chunks, case.height, case.width)
-
-        def decoded(_vae, latents, *_plan):
-            _, _, chunks, height, width = latents.shape
-            return torch.full((1, 3, 1 + 4 * (chunks - 1), height * 8, width * 8), 0.5)
-
-        monkeypatch.setattr(vae_tiling, "seeded_latents", seeded_latents)
-        monkeypatch.setattr(vae_tiling, "tiled_decode_unclamped", decoded)
-        monkeypatch.setattr(vae_tiling.vae_patch, "reference_decode_unclamped", decoded)
-
-    @pytest.mark.parametrize("case", vae_tiling.FIXTURE_CASES, ids=lambda case: case.name)
-    def test_the_metadata_and_the_tensor_names_are_those_before_ti2v(
-        self, decode_stubbed, case, tmp_path: Path
-    ):
-        from safetensors import safe_open
-
-        vae = SimpleNamespace(config=SimpleNamespace(patch_size=None))
-        summary = vae_tiling.write_fixture(
-            vae,
-            case,
-            export_vae.DEFAULT_TILE,
-            tmp_path,
-            min_overlap=vae_tiling.WAN21_MIN_OVERLAP_LATENT,
-            patch_size=None,
-        )
-
-        with safe_open(summary["path"], framework="pt") as handle:
-            assert set(handle.keys()) == WAN21_TENSORS[case.name]
-            assert handle.metadata() == WAN21_METADATA[case.name]
 
 
 class _LoadedError(Exception):
@@ -488,19 +376,9 @@ class TestCli:
         assert vae is loaded
         assert series is export_vae.VAE_SERIES[model]
 
-    def test_the_default_model_keeps_the_wan21_values(self, recorded):
-        assert vae_tiling.main([]) == 0
-
-        out = SERIES_ROOT / export_vae.SERIES_NAME
-        assert recorded["load"] == [("t2v-1.3b", True)]
-        self._assert_the_series_config_is_checked(recorded, "t2v-1.3b")
-        assert recorded["write"] == [
-            ("band", 32, out, 8, None),
-            ("accept", 32, out, 8, None),
-        ]
-
-    def test_ti2v_takes_its_series_tile_overlap_and_cases(self, recorded):
-        assert vae_tiling.main(["--model", "ti2v-5b"]) == 0
+    @pytest.mark.parametrize("argv", [[], ["--model", "ti2v-5b"]], ids=["default", "ti2v-5b"])
+    def test_ti2v_takes_its_series_tile_overlap_and_cases(self, recorded, argv: list[str]):
+        assert vae_tiling.main(argv) == 0
 
         out = SERIES_ROOT / export_vae.TI2V_SERIES_NAME
         assert recorded["load"] == [("ti2v-5b", True)]
@@ -511,7 +389,7 @@ class TestCli:
             ("wide", 16, out, 4, 2),
         ]
 
-    @pytest.mark.parametrize(("model", "tile"), [("t2v-1.3b", 8), ("ti2v-5b", 4)])
+    @pytest.mark.parametrize(("model", "tile"), [("ti2v-5b", 4)])
     def test_a_tile_not_above_the_overlap_is_rejected_before_loading(
         self, recorded, capsys, model: str, tile: int
     ):
@@ -528,19 +406,28 @@ class TestCli:
         assert recorded["load"] == []
 
     def test_a_case_of_another_model_is_rejected_before_loading(self, monkeypatch, capsys):
+        """A second model whose table has no `wide` (a stand-in row — the table holds one model)."""
+
         def load_vae(*_args, **_kwargs):
             raise _LoadedError
 
         monkeypatch.setattr(vae_tiling.export_vae, "load_vae", load_vae)
+        monkeypatch.setitem(
+            vae_tiling.export_vae.VAE_SERIES, "other", vae_tiling.export_vae.VAE_SERIES["ti2v-5b"]
+        )
+        monkeypatch.setitem(
+            vae_tiling.FIXTURE_CASES_BY_MODEL, "other", vae_tiling.TI2V_FIXTURE_CASES[:1]
+        )
 
         with pytest.raises(SystemExit) as exited:
-            vae_tiling.main(["--model", "t2v-1.3b", "--case", "wide"])
+            vae_tiling.main(["--model", "other", "--case", "wide"])
 
         assert exited.value.code == 2
-        assert "--case ['wide'] is not in the table of --model t2v-1.3b" in capsys.readouterr().err
+        assert "--case ['wide'] is not in the table of --model other" in capsys.readouterr().err
 
     def test_case_choices_are_the_union_of_the_models(self, recorded):
-        """`wide` is only in the 2.2 table, but it is accepted as a `--case` choice."""
+        """`--case` takes the names of the models' tables (`wide` included); any other name is a
+        parse error."""
         assert vae_tiling.main(["--model", "ti2v-5b", "--case", "wide"]) == 0
         assert [call[0] for call in recorded["write"]] == ["wide"]
 

@@ -169,7 +169,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "packages/e2e/tests/e2e_sbv2_ab_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_sbv2_style_test.ts", why: TTS_INPUT, maxLines: 1 },
   { path: "packages/e2e/tests/e2e_sbv2_wav_test.ts", why: TTS_INPUT, maxLines: 1 },
-  { path: "packages/e2e/tests/e2e_vowel_detector_chain_test.ts", why: TTS_INPUT, maxLines: 3 },
   {
     path: "packages/hub/tests/fetch_test.ts",
     why: "the Japanese error text of the dependency @hdae/fetch-cache, which the test matches",
@@ -215,12 +214,10 @@ export const ALLOW_LIST: readonly Allowance[] = [
   },
   { path: "tools/export-recipes/deberta/tests/test_calib.py", why: TOKENIZER_CASES, maxLines: 1 },
   {
-    path: "tools/export-recipes/embeddinggemma/calib_texts.py",
+    path: "tools/export-recipes/embeddinggemma2/calib_texts.py",
     why: CALIBRATION_TEXT,
     maxLines: 14,
   },
-  { path: "tools/export-recipes/embeddinggemma/export.py", why: TOKENIZER_CASES, maxLines: 1 },
-  { path: "tools/export-recipes/embeddinggemma/tokenizer.py", why: TOKENIZER_CASES, maxLines: 1 },
   { path: "tools/export-recipes/embeddinggemma2/export.py", why: TOKENIZER_CASES, maxLines: 1 },
   {
     path: "tools/export-recipes/embeddinggemma2/multimodal_reference.py",
@@ -257,14 +254,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
     maxLines: 39,
   },
   { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 98 },
-  { path: "tools/export-recipes/minicpm5/calib_texts.py", why: CALIBRATION_TEXT, maxLines: 16 },
-  { path: "tools/export-recipes/minicpm5/export.py", why: MODEL_OUTPUT, maxLines: 11 },
-  { path: "tools/export-recipes/minicpm5/README.md", why: MODEL_OUTPUT, maxLines: 1 },
-  {
-    path: "tools/export-recipes/minicpm5/tests/test_calib_texts.py",
-    why: "the kana / kanji class bounds that detect Japanese text",
-    maxLines: 1,
-  },
   {
     path: "tools/export-recipes/sbv2/card.py",
     why: "the Japanese TTS demo sentence of the generated card",
@@ -278,11 +267,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
     path: "tools/export-recipes/tests/test_graph_names.py",
     why: "the old Japanese pointer spellings and words the scan looks for",
     maxLines: 4,
-  },
-  {
-    path: "tools/export-recipes/vowel_detector/card.py",
-    why: "upstream's voice-model names, copied verbatim from its NOTICE into the card attribution",
-    maxLines: 1,
   },
   {
     path: "tools/export-recipes/wan/prompts.py",

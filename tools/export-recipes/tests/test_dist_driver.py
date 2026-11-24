@@ -51,11 +51,8 @@ from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.migrate import card_format_statement
 from karume.modelcard import HF_OWNER, UNOFFICIAL_CONVERSION_NOTICE
 from moss.distribution import PIPELINE as MOSS_PIPELINE
-from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
-from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
-from wan.distribution import PIPELINE as WAN_PIPELINE
 from wan.distribution import TI2V_PIPELINE as WAN_TI2V_PIPELINE
 from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
 
@@ -66,18 +63,15 @@ RECIPE_PIPELINES = {
     "anima": ANIMA_OFFICIAL_PIPELINE,
     "anima-extra": ANIMA_EXTRA_PIPELINE,
     "sbv2": SBV2_PIPELINE,
-    "sbv2-fn": SBV2_FN_PIPELINE,
     "irodori": IRODORI_PIPELINE,
     "irodori-large": IRODORI_LARGE_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
     "birefnet": BIREFNET_PIPELINE,
     "lucida": LUCIDA_PIPELINE,
     "depth-anything": DEPTH_ANYTHING_PIPELINE,
-    "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
     "gemma4-qat": GEMMA4_QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": GEMMA4_QAT_PIPELINE,
-    "wan": WAN_PIPELINE,
     "wan-ti2v": WAN_TI2V_PIPELINE,
     "umt5": UMT5_PIPELINE,
     "moss-image": MOSS_PIPELINE,
@@ -157,36 +151,12 @@ class TestRegistry:
         assert base.root_files["LICENSE.md"] != derived.root_files["LICENSE.md"]
         assert base.root_files["NOTICE.md"] != derived.root_files["NOTICE.md"]
 
-    def test_the_two_sbv2_voice_families_stay_separate_pipelines(self) -> None:
-        """SBV2's JVNV line (`sbv2`) and FN line (`sbv2-fn`) are **separate entries** too.
-
-        The license differs per family (JVNV = CC BY-SA 4.0; FN = Booth's distribution terms, with
-        no license text that can be bundled), so folding them into one would make the FN repository
-        claim the CC BY-SA text and the JVNV attribution.
-        """
-        jvnv = dist.PIPELINES["sbv2"]
-        fn = dist.PIPELINES["sbv2-fn"]
-
-        assert jvnv is not fn
-        assert sorted(jvnv.card_profiles) == ["jvnv"]
-        assert sorted(fn.card_profiles) == ["fn"]
-        assert "Attribution-ShareAlike 4.0" in jvnv.root_files["LICENSE.md"]
-        assert fn.root_files == {}
-
     def test_every_distribution_pipeline_ships_its_legal_text(self) -> None:
         """The entries that put **both** `LICENSE.md` and `NOTICE.md` at the root of the
         distribution repository (ADR 0092 decision 7).
 
         They are named one by one so that a new family appearing silently without the bundled texts
         shows up as "missing from the table".
-
-        vowel-detector is not among them: MIT requires only "the full text + the copyright lines",
-        and a modification notice (`NOTICE.md`) has nobody to address (the upstream and the
-        copyright holder are the same). The permission notice itself is checked by
-        `test_the_mit_only_pipeline_still_ships_its_permission_notice` below. `sbv2-fn` is not
-        among them either: its HF publication is on hold, and the upstream's written terms (the
-        Booth distribution page) have no license text that can be bundled
-        ({@link sbv2.distribution.FN_PIPELINE}).
         """
         expected = {
             "anima",
@@ -201,7 +171,6 @@ class TestRegistry:
             "birefnet",
             "lucida",
             "depth-anything",
-            "wan",
             "wan-ti2v",
             "umt5",
             "moss-image",
@@ -213,20 +182,6 @@ class TestRegistry:
             if set(spec.root_files) == {"LICENSE.md", "NOTICE.md"}
         }
         assert carried == expected
-
-    def test_the_mit_only_pipeline_still_ships_its_permission_notice(self) -> None:
-        """MUST: an MIT entry does not drop the permission notice either (a separate matter from
-        having no `NOTICE.md`).
-
-        `karume.dist.LEGAL_PATHS` is an accepted set and **does not require presence**, so if
-        `root_files` were built empty, neither `verify_dist` nor the manifest check would say
-        anything.
-        """
-        root_files = dist.PIPELINES["vowel-detector"].root_files
-
-        assert set(root_files) == {"LICENSE.md"}
-        assert "MIT License" in root_files["LICENSE.md"]
-        assert "Copyright (c) " in root_files["LICENSE.md"]
 
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
         """A card is a per-pipeline template — its renderer refuses another pipeline's
@@ -292,8 +247,6 @@ RELEASE_REPOSITORIES = [
     ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
     ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
     ("umt5", ["xxl"], None, "karume-umt5-xxl"),
-    # Wan2.1 (`--pipeline wan` → karume-wan2.1) is not published on HF, so it is not listed
-    # (ADR 0118 addendum 2026-10-15).
     ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
     ("moss-image", ["sft"], None, "karume-moss-image"),
 ]
@@ -376,10 +329,6 @@ HOUSE_SENTENCE = re.compile(
     .replace(re.escape("{author}"), "(?P<author>.+)")
 )
 
-#: The pipelines whose card carries no house sentence: their upstream is our own release
-#: (`vowel_detector.card`), and the sentence would disclaim ourselves.
-FIRST_PARTY_PIPELINES = frozenset({"vowel-detector"})
-
 
 def _mirrors_built_by(name: str) -> list[Path]:
     """The local distribution mirrors `--pipeline name` builds: those whose models the pipeline
@@ -411,9 +360,6 @@ class TestTheHouseSentenceOnEveryCard:
             for render_card in dist.PIPELINES[name].card_profiles.values():
                 lines = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}").split("\n")
                 sentences = [line for line in lines if HOUSE_SENTENCE.fullmatch(line)]
-                if name in FIRST_PARTY_PIPELINES:
-                    assert sentences == [], manifest_path
-                    continue
                 title = next(index for index, line in enumerate(lines) if line.startswith("# "))
                 assert sentences == [lines[title + 2]], manifest_path
 

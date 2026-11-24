@@ -8,11 +8,10 @@ named state slots) /
 (attention with state references and `state_append`) /
 [0068](../../../docs/decisions/0068-decode-exit-multi-output.md) decision 4 (the decode exit) /
 [0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed w4) on a real model that has
-**sliding + KV sharing + mixed quantization** at once. The same frame without KV sharing is
-`minicpm5/export_decode.py`. The model-independent checks (how greedy is taken, the margin check,
-the capacity check) have their source of truth in {@link _shared.decode_series}, and the one-shot
-helpers are in {@link gemma4.export}; both are imported and reused (one rule is not written in two
-places).
+**sliding + KV sharing + mixed quantization** at once. The model-independent checks (how greedy is
+taken, the margin check, the capacity check) have their source of truth in {@link
+_shared.decode_series}, and the one-shot helpers are in {@link gemma4.export}; both are imported
+and reused (one rule is not written in two places).
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode              # E2B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b  # E4B
@@ -250,7 +249,7 @@ MARGIN_FLOOR = 2.5e-2
 #: The cases greedy goldens are taken for (a subset of {@link gemma4.export.GOLDEN_CASES}).
 #: io goldens are taken for all three cases (they cover one step, so they need no margin check).
 #:
-#: NOTE: currently **a provisional all-cases selection** (minicpm5 has a set fixed after
+#: NOTE: currently **a provisional all-cases selection** (not yet a set fixed after
 #: measurement). Cases {@link assert_greedy_margins} rejects in a real run with w4 are removed
 #: from here and the run repeated — the check applies once after every case is measured, so one
 #: real run collects every case to remove.

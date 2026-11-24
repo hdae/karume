@@ -30,7 +30,9 @@
 // ⑤ the census of `bf16-fast` (real GPU): the kernels a greedy chat turn plans in each phase — decode,
 //    and for E2B verify and draft — equal the census table's `karume-gemma4` row exactly (the
 //    linears with a bf16 row on the parallel GEMV, the rest on the sequential path; RMS→add). The
-//    plan of the same rows without a GPU is `e2e_gemma4_bf16_parallel_gemv_plan_test.ts`
+//    plan of the same rows without a GPU is `e2e_gemma4_bf16_parallel_gemv_plan_test.ts`. Every
+//    decode run's states-form QK / PV kernels also carry `:gqa` (E2B 8 q : 1 kv, E4B 8 q : 2 kv —
+//    for E4B the default lanes' one real-weight check that more than one k / v head runs grouped)
 //
 // The parity cases ② and ④ run `bf16` alone: `bf16-fast` sums in another order, so its tokens can
 // differ from the torch goldens.
@@ -57,6 +59,7 @@ import { type Manifest, MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { parseSafetensors, type SafetensorsFile, type SessionDiagnostics } from "@karume/runtime";
 import { type ChatMessage, type GenerationSequence, Pipeline } from "../../models/gemma.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
+import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 import { mirrorDirectory, mirrorHasModel, mirrorRoot } from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -548,6 +551,48 @@ for (const model of MODELS) {
 // ⑤ the census of bf16-fast (real GPU)
 // ---------------------------------------------------------------------------
 
+/**
+ * The states-form attention of every decode run took the grouped-query (`:gqa`) kernels — both
+ * models group their query heads (E2B 8 q : 1 kv, E4B 8 q : 2 kv): the QK and PV steps (the fused
+ * row statistics + PV included) carry the bit; the row statistics and `state_append`, which have no
+ * head axis to group, do not. The census table counts these kernels by their reduction form only,
+ * so a layer that ran with k / v expanded to the query heads would still match its row.
+ */
+const assertGqaStateKeys = (
+  runs: readonly SessionDiagnostics["lastRunPipelines"][],
+  where: string,
+): void => {
+  assert(runs.length > 0, `${where}: no decode run`);
+  const grouped = new Set<string>();
+  runs.forEach((rows, run) => {
+    const entries = requireCensus(rows, `${where} decode run ${run}`);
+    const shown = entries.map((entry) => `${entry.key}×${entry.dispatchCount}`).join(" / ");
+    const family = (prefix: string) => entries.filter((entry) => entry.key.startsWith(prefix));
+    const qk = family("attention_state_qk");
+    const pv = [...family("attention_state_pv"), ...family("attention_state_stats_pv")];
+    const stats = family("attention_state_stats:");
+    const append = family("state_append");
+    assert(
+      qk.length > 0 && pv.length > 0,
+      `${where} decode run ${run}: no states-form QK / PV kernel ran (ran: ${shown})`,
+    );
+    assertEquals(
+      [...qk, ...pv].filter((entry) => !entry.key.includes(":gqa")).map((entry) => entry.key),
+      [],
+      `${where} decode run ${run}: non-GQA QK / PV kernels ran although the model groups its ` +
+        `query heads (ran: ${shown})`,
+    );
+    assertEquals(
+      [...stats, ...append].filter((entry) => entry.key.includes(":gqa")).map((entry) => entry.key),
+      [],
+      `${where} decode run ${run}: GQA variants of the row statistics / state_append ran ` +
+        `(ran: ${shown})`,
+    );
+    for (const entry of [...qk, ...pv]) grouped.add(entry.key);
+  });
+  console.log(`[e2e] gemma4 ${where} decode (${runs.length} runs): ${[...grouped].join(" / ")}`);
+};
+
 for (const model of MODELS) {
   test.skipIf(!PRESENT[model] || !GPU_AVAILABLE)(
     `gemma4 ${model} ${FAST}: the planned kernels of each phase equal the census table's row (real GPU)`,
@@ -589,6 +634,7 @@ for (const model of MODELS) {
       for (const phase of HAS_DRAFTER[model] ? ["decode", "verify", "draft"] : ["decode"]) {
         assert(byPhase.has(phase), `${model} ${FAST}: no ${phase} run`);
       }
+      assertGqaStateKeys(byPhase.get("decode") ?? [], `${model} ${FAST}`);
       assert(
         assertRowCensus(row, byPhase, gemmaComponentOf, `${model} ${FAST}`) > 0,
         "nothing was compared",

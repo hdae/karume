@@ -1,5 +1,5 @@
 /**
- * The host side of Wan2.1's DiT **S-shaped graph** (one symbol for the token length) — patchify /
+ * The host side of Wan's DiT **S-shaped graph** (one symbol for the token length) — patchify /
  * unpatchify (ADR 0118 decision 3).
  *
  * The graph's entry is after patchify and its exit before unpatchify, so the conversion between

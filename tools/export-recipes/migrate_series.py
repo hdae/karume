@@ -10,8 +10,8 @@ The series mode is **not added** to core's `karume migrate` because only a famil
 the families). The series layout differs per family, and **a directory name is not a component
 name**:
 
-- one component directly under the series (siglip2 / birefnet / depth-anything / vowel-detector /
-  gemma4 / gemma4-qat / minicpm5 / embeddinggemma) — the directory name is the series name.
+- one component directly under the series (siglip2 / birefnet / depth-anything / gemma4 /
+  gemma4-qat) — the directory name is the series name.
 - components side by side in subdirectories (anima / sbv2 / irodori / dacvae / deberta) — some
   spellings do not match (`caption-proj` → `caption_proj`, `decoder` → `codec_decoder`, deberta's
   `full-24layer` → the `text_encoder` role SBV2 consumes).
@@ -58,7 +58,6 @@ from birefnet.distribution import BIREFNET_ROLE
 from deberta import export as deberta_export
 from depth_anything import export as depth_anything_export
 from depth_anything.distribution import DEPTH_ANYTHING_ROLE
-from embeddinggemma import export as embeddinggemma_export
 from gemma4 import export as gemma4_export
 from gemma4.distribution import GEMMA4_DRAFTER_ROLE, GEMMA4_DRAFTER_SUFFIX, GEMMA4_ROLE
 from gemma4_qat import export as gemma4_qat_export
@@ -76,13 +75,10 @@ from karume.migrate import (
     read_ple_index,
 )
 from karume.ple import PLE_INDEX_ASSET
-from minicpm5 import export as minicpm5_export
 from sbv2 import export as sbv2_export
 from sbv2.distribution import SBV2_FRONT_ROLE, SBV2_SERIES_PREFIX, SBV2_VOICE_ROLE
 from siglip2 import export as siglip2_export
 from siglip2.distribution import SIGLIP2_ROLE
-from vowel_detector import export as vowel_detector_export
-from vowel_detector.distribution import VOWEL_DETECTOR_GRAPH_ROLE
 
 #: The representative name of an old shard list (`model` in every family — the stem of the
 #: writer's `MODEL_FILE`).
@@ -201,7 +197,7 @@ def input_checkpoint(root: Path, series: str) -> Path:
     """Series name → where the real weights that produced the series live (the reverse lookup of the
     default output path of the scripts with one component directly under the series).
 
-    The siglip2 / birefnet / depth-anything / minicpm5 scripts build the default output path from
+    The siglip2 / birefnet / depth-anything scripts build the default output path from
     the directory name of `--model-dir` (lowercased, `_` → `-`, possibly followed by a suffix such
     as `-<resolution>`). The container's provenance (license and revision) is derived from that
     checkpoint itself (each script's `upstream_provenance`), so the migration looks up the same
@@ -294,12 +290,6 @@ FAMILIES: tuple[Family, ...] = (
         flat_role=lambda _: SIGLIP2_ROLE,
     ),
     Family(
-        "vowel-detector",
-        lambda name: name.startswith("vowel-detector-"),
-        lambda _: vowel_detector_export.PROVENANCE,
-        flat_role=lambda _: VOWEL_DETECTOR_GRAPH_ROLE,
-    ),
-    Family(
         "deberta",
         # `deberta{,-i8,-i4}` (the spellings of `deberta.export.DEFAULT_OUT_ROOTS`).
         lambda name: name == "deberta" or name.startswith("deberta-"),
@@ -343,25 +333,6 @@ FAMILIES: tuple[Family, ...] = (
         flat_role=lambda name: (
             GEMMA4_DRAFTER_ROLE if name.endswith(f"-{GEMMA4_DRAFTER_SUFFIX}") else GEMMA4_ROLE
         ),
-    ),
-    Family(
-        "minicpm5",
-        lambda name: name.startswith("minicpm5-"),
-        lambda name: minicpm5_export.upstream_provenance(
-            input_checkpoint(minicpm5_export.DEFAULT_MODEL_DIR.parent, name)
-        ),
-        flat_role=lambda _: minicpm5_export.GRAPH_NAME,
-    ),
-    Family(
-        "embeddinggemma",
-        lambda name: name.startswith("embeddinggemma-"),
-        # The series name does not name the checkpoint (the script's default output path is a fixed
-        # spelling that does not follow `--model-dir`), so derive it from the default checkpoint
-        # that produces that default output.
-        lambda _: embeddinggemma_export.upstream_provenance(
-            embeddinggemma_export.DEFAULT_MODEL_DIR
-        ),
-        flat_role=lambda _: embeddinggemma_export.GRAPH_NAME,
     ),
 )
 

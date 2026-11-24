@@ -2,15 +2,21 @@
 // storage (embedding i8 × linear i4) and the two layer types of attention take effect on the real
 // model**.
 //
-// `e2e_minicpm5_greedy_test.ts` is the mirror original that owns "true GQA gives correct numbers
-// as a 24-layer language model"; what this one adds are the 3 points specific to Gemma 4:
+// It checks the 3 points specific to Gemma 4:
 //
-// - **MQA 8:1** (one k / v head — a stronger degeneration than minicpm5's 16:2)
+// - **MQA 8:1** (one k / v head — the degenerate end of GQA)
 // - **Per-layer-type D** (sliding layers have head_dim 256 / full layers 512. `hidden_size / heads`
 //   = 192 differs from both, so checking every layer with one of the values leaves the rest
 //   entirely unchecked)
 // - **Mixed quantization** (ADR 0069 decision 5 — a vocabulary of 262144 × 35 PLE tables is the
 //   shape "the embeddings are most of the weights", so neither i4 alone nor i8 alone works)
+//
+// True GQA (more than one k / v head) is not this file's: on real weights it is held by the greedy
+// parity of the E4B (8 q : 2 kv) and 12B (16 q : 8 kv on the sliding layers) decode graphs against
+// torch goldens (`e2e_gemma4_bf16_mirror_test.ts` ②, `e2e_gemma4_qat_mirror_test.ts` ④ and
+// `e2e_gemma4_12b_test.ts` ⑤ — token identity), by the census of `e2e_gemma4_bf16_mirror_test.ts`
+// ⑤ (the E4B decode's states-form QK / PV kernels all carry `:gqa`) and, in one-shot attention, by
+// `e2e_qwen3_5_encoder_test.ts` (4 k / v heads, against Karume's CPU reference).
 //
 // 4 checks:
 //
@@ -105,7 +111,7 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
  * times atol 1e-2 — the decision does not waver.
  *
  * **rtol is 0** (the decision rests on atol alone) — the same shape as the other real-weight checks
- * (DeBERTa / EmbeddingGemma / MiniCPM5). When a reference element is exactly 0.0, allclose clips
+ * (DeBERTa / EmbeddingGemma). When a reference element is exactly 0.0, allclose clips
  * the denominator from below at 1e-12, so maxRel jumps, but that element's absolute error is far
  * below atol. Once the measurement table is filled in, this paragraph too is restated from the
  * measurement as "was it that shape".

@@ -9,20 +9,14 @@
  * exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 
-import {
-  WAN22_LATENTS_MEAN,
-  WAN22_LATENTS_STD,
-  WAN_LATENTS_MEAN,
-  WAN_LATENTS_STD,
-  type WanLatentStats,
-} from "./latents.ts";
+import { WAN22_LATENTS_MEAN, WAN22_LATENTS_STD, type WanLatentStats } from "./latents.ts";
 
 /**
- * The DiT's graph input form (ADR 0121 decision 3). `"t2v"` = Wan2.1's 5 inputs (`tokens`,
- * `timesteps_proj`, `encoder_hidden_states`, `rope_cos`, `rope_sin`), `"ti2v"` = Wan2.2 TI2V's 7
- * inputs (the 5 + `timesteps_proj_condition`, `condition_mask`).
+ * The DiT's graph input form (ADR 0121 decision 3). `"ti2v"` = Wan2.2 TI2V's 7 inputs (`tokens`,
+ * `timesteps_proj`, `encoder_hidden_states`, `rope_cos`, `rope_sin`, `timesteps_proj_condition`,
+ * `condition_mask`) — the only form the host builds.
  */
-export type WanDitInputForm = "t2v" | "ti2v";
+export type WanDitInputForm = "ti2v";
 
 export type WanGenerationDescriptor = {
   /**
@@ -63,41 +57,6 @@ export type WanGenerationDescriptor = {
    * admission (`ditContract` in `dit-loop.ts`).
    */
   readonly ditInputForm: WanDitInputForm;
-};
-
-/**
- * The descriptor of Wan2.1 (T2V 1.3B).
- *
- * Accepted set (ADR 0118 decision 7 — 832×480 / 480×832 × 4n+1 frames, 5–81). Acceptance-tested:
- * 33 frames at 832×480 (steps 3 / 5 / 6), 81 frames (step 8), and the VAE at 480×832 (step 5).
- *
- * Whether 81 frames fit is decided by the VRAM of the DiT stage alone — as measured in the NOTE at
- * the top of `pipeline.ts`, the allocation comes back right after the DiT Session is folded, and the
- * DiT and VAE stages do not overlap (peak at the switch = peak of the DiT stage). Step 8's
- * measurement (B570, a full 81-frame 50-step run, fdinfo) gave a DiT stage peak of 7.31 GiB and a VAE
- * stage peak of 3.78 GiB (ADR 0118 "Step 8 results"). MUST: the rejection message states only the
- * limit (81) (step numbers mean nothing to users).
- *
- * The default is the first target, 832×480 with 33 frames (a fact of the accepted set). fps 16 and no
- * `patch_size` (1) are upstream Wan2.1's values.
- *
- * MUST: when changing the accepted set, change the model card (`WAN_ACCEPTED_SIZES` / `WAN_FRAMES` in
- * `tools/export-recipes/wan/card.py`) and `tests/fixtures/wan-card-limits.json` to the same values —
- * the card keeps a copy of this fact, which is not in the manifest, so the tests on both sides of the
- * fixture (wan_pipeline_test.ts and the recipe's test_distribution.py) turn a one-sided update red.
- */
-export const WAN21_GENERATION: WanGenerationDescriptor = {
-  latents: { mean: WAN_LATENTS_MEAN, std: WAN_LATENTS_STD },
-  acceptedSizes: [
-    { width: 832, height: 480 },
-    { width: 480, height: 832 },
-  ],
-  minFrames: 5,
-  maxFrames: 81,
-  defaults: { frames: 33, width: 832, height: 480 },
-  fps: 16,
-  vaePatchSize: 1,
-  ditInputForm: "t2v",
 };
 
 /**

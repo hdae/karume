@@ -1,10 +1,9 @@
 """The Wan distribution recipe (`wan.distribution`) and card (`wan.card`) — unit tests of one
 assembly round.
 
-Covers both Wan2.1 (`--pipeline wan`) and Wan2.2 (`--pipeline wan-ti2v` — the same plan function
-built with the generation table `WAN22`). In the Wan2.2 set, the DiT / VAE containers claim the
-Wan2.2 pin and the two text assets claim the Wan2.1 pin (ADR 0121 decision 9 — the split of the
-provenance check).
+Covers Wan2.2 (`--pipeline wan-ti2v` — the plan function built with the generation table `WAN22`).
+The DiT / VAE containers claim the Wan2.2 pin and the two text assets claim the Wan2.1 pin (ADR
+0121 decision 9 — the split of the provenance check).
 
 The inputs that reach the assembly are made of **valid minimal containers** of a few KB
 (`ir_fixtures`, and `umt5_fixture` for umT5) and synthetic assets in the same form as the writers
@@ -65,25 +64,17 @@ from karume.modelcard import FileRefKey
 from karume.pipeline import publish_model
 from wan import umt5_tokenizer
 from wan.card import (
-    WAN21_CARD,
     WAN22_ACCEPTED_SIZES,
     WAN22_CARD,
     WAN22_FRAMES,
     WAN22_RESOURCES,
     WAN22_SUPPORTED_PIPELINE,
-    WAN_ACCEPTED_SIZES,
-    WAN_FRAMES,
-    WAN_QUANT_TRANSFORMER,
-    WAN_RESOURCE_QUANT,
-    WAN_SUPPORTED_PIPELINE,
     WAN_TEXT_ENCODER_OPTION,
     WAN_TEXT_ENCODER_PATHS,
     render_wan_model_card,
 )
 from wan.distribution import (
-    PIPELINE,
     TI2V_PIPELINE,
-    WAN21,
     WAN22,
     WAN22_I8_SERIES,
     WAN22_PIPELINE,
@@ -92,16 +83,11 @@ from wan.distribution import (
     WAN_CONTAINER_ROLES,
     WAN_DIT_CONTEXT_INPUT,
     WAN_GRAPH_ROLES,
-    WAN_I8_SERIES,
     WAN_MODEL_FILE,
     WAN_OUTPUT_PATHS,
-    WAN_PIPELINE,
-    WAN_PIPELINE_CONFIG,
     WAN_QUANT_ABBREVIATIONS,
-    WAN_REPO_NAME,
     WAN_ROPE_BASE_ASSET,
     WAN_ROPE_BASE_ROLE,
-    WAN_SERIES,
     WAN_STORAGE_FORBIDDEN,
     WAN_STORAGE_REQUIREMENTS,
     WAN_TEXT_EMBEDS_FILE,
@@ -114,7 +100,6 @@ from wan.distribution import (
     WAN_TOKENIZER_ROLE,
     WAN_TOKENIZER_SUBFOLDER,
     WAN_TOKENIZER_VERSIONS,
-    WAN_TRANSFORMER_F16_ROLE,
     WAN_TRANSFORMER_I8_ROLE,
     WAN_TRANSFORMER_ROLE,
     WAN_VAE_ENCODER_ATTN_ROLE,
@@ -131,10 +116,10 @@ from wan.distribution import (
     WAN_VAE_NEXT_32_ROLE,
     WAN_VAE_NEXT_I8_ROLE,
     WAN_VAE_NEXT_ROLE,
-    WAN_WEIGHTS,
     WanGeneration,
     WanSources,
     assert_shared_decoder,
+    assert_shared_rope_base,
     wan_placements,
     wan_plan,
     wan_references,
@@ -161,12 +146,6 @@ _WIDTH = 8
 #: between the transformer containers).
 _ROPE_BASE = b"rope-base-table!"
 
-#: The valid provenance the writers (`wan.export_dit` / `wan.export_vae`) bake.
-_PINNED = Provenance(
-    license=SOURCES[DEFAULT_MODEL].license,
-    notice=NOTICE_FILENAME,
-    upstream_revision=SOURCES[DEFAULT_MODEL].revision,
-)
 
 #: The valid provenance the umT5 writer (`wan.umt5_export`) bakes — the umT5 upstream is the pin of
 #: the original `google/umt5-xxl`, a different row from the Wan pin of the DiT / VAE (ADR 0122
@@ -183,11 +162,6 @@ _UMT5_PINNED = Provenance(
 #: exactly.
 _CONFIG_KEYS = {"scheduler": ("shift",), "defaults": ("steps", "guidance")}
 
-#: A copy of the TS side's accepted set (`packages/models/tests/wan_pipeline_test.ts` checks that it
-#: equals the values of `descriptor.ts`). The card's table is compared with this fixture, so
-#: updating only one of the card and the TS side turns red.
-_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-card-limits.json"
-
 #: The target of the cross-repository reference (the umT5 distribution repository) and its
 #: synthetic commit SHA.
 _UMT5_REPO = f"hdae/{UMT5_REPO_NAME}"
@@ -196,8 +170,8 @@ _UMT5_REVISION = FIXTURE_REVISION
 
 @pytest.fixture(autouse=True)
 def _pinned_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the fixture containers claim the provenance "baked by the scripts from the pinned
-    revision"."""
+    """Make the fixture containers claim the provenance "baked by the writers from the pinned
+    Wan2.2 revision" ({@link _PINNED})."""
     stamp_fixture_provenance(monkeypatch, _PINNED)
 
 
@@ -317,8 +291,6 @@ def _default_container(role: str) -> list[bytes]:
     the original's pin the umT5 writer bakes for the text_encoder (`_UMT5_PINNED`)."""
     if role == WAN_TEXT_ENCODER_ROLE:
         return umt5_container(provenance=_UMT5_PINNED, width=_WIDTH)
-    if role == WAN_TRANSFORMER_F16_ROLE:
-        return _graph_container(WAN_TRANSFORMER_ROLE)
     if role == WAN_TRANSFORMER_I8_ROLE:
         return _graph_container(WAN_TRANSFORMER_ROLE, storage="i8")
     if role in _VAE_I8_GRAPHS:
@@ -384,13 +356,12 @@ def _build_sources(
     containers: Mapping[str, list[bytes]] = {},
     embeds: bytes | None = None,
     tokenizer: bytes | None = None,
-    generation: WanGeneration = WAN21,
+    generation: WanGeneration = WAN22,
 ) -> WanSources:
     """Reproduce the 5 series with fake assets (including goldens that must not be distributed).
-    The keys of `containers` are placement roles (`text_encoder` / `transformer_f16` /
-    `transformer_i8` / the 2 of the VAE — Wan2.2 has no `transformer_f16`). The provenance of the
-    containers is whatever `ir_fixtures` bakes at that moment (for the Wan2.2 set, call this after
-    switching to the Wan2.2 pin with {@link wan22_provenance})."""
+    The keys of `containers` are placement roles (`text_encoder` / `transformer_i8` / the VAE
+    roles). The provenance of the containers is whatever `ir_fixtures` bakes at that moment (the
+    Wan2.2 pin, stamped by the autouse {@link _pinned_provenance})."""
     sources = wan_sources(root / "outputs" / "series", generation)
     placements = wan_placements(sources, generation)
     for role in generation.container_roles:
@@ -398,12 +369,10 @@ def _build_sources(
     # Goldens that must not enter the distribution (the series really holds these).
     for role in generation.transformer_roles:
         (placements[role].parent / "io.band-s00192-t0999.safetensors").write_bytes(b"io")
-    # pipeline_steps sit at the root of the main DiT series (for real: the f16 series for 2.1, the
-    # i8 series for 2.2).
+    # pipeline_steps sit at the root of the main DiT series (for real: the i8 series).
     steps_series = placements[generation.transformer_roles[0]].parent.parent
     (steps_series / "pipeline_steps.band-boxing-cats.safetensors").write_bytes(b"steps")
-    # The goldens of the encoder GPU check sit at the root of the f16 series (for real: only the
-    # 2.2 series).
+    # The goldens of the encoder GPU check sit at the root of the f16 series.
     if generation.vae_encoder:
         (sources.series / "vae_encoder.boxing-cats-1280x704.safetensors").write_bytes(b"golden")
     (sources.text_encoder.parent / "reference.band-l0008.safetensors").write_bytes(b"golden")
@@ -428,7 +397,7 @@ def _assemble_umt5(root: Path, sources: WanSources) -> Path:
 def _reference(umt5_dir: Path, revision: str = _UMT5_REVISION) -> ExternalComponents:
     """The reference the recipe declares ({@link wan_references} — the text encoder in the umT5
     repository), resolved against a local umT5 distribution."""
-    (declared,) = wan_references(DEFAULT_MODEL)
+    (declared,) = wan_references(_TI2V)
     return ExternalComponents(
         repo=declared.repo,
         revision=revision,
@@ -438,37 +407,8 @@ def _reference(umt5_dir: Path, revision: str = _UMT5_REVISION) -> ExternalCompon
     )
 
 
-def _render(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
-    return PIPELINE.card_profiles["wan"](
-        manifest, repo=f"hdae/{WAN_REPO_NAME}", host_assets=host_assets
-    )
-
-
-@pytest.fixture
-def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
-    """A distribution in the published form (text_encoder is a cross-repository reference to the
-    umT5 repository)."""
-    sources = _build_sources(tmp_path)
-    out_dir = tmp_path / "models" / WAN_REPO_NAME
-    manifest = assemble_family(
-        [wan_plan(sources)],
-        out_dir,
-        DEFAULT_MODEL,
-        render_card=_render,
-        root_files=PIPELINE.root_files,
-        external=(_reference(_assemble_umt5(tmp_path, sources)),),
-    )
-    return out_dir, manifest
-
-
-def _card(manifest: Mapping[str, Any], repo: str = "hdae/x") -> str:
-    """Rebuild only the card (the abbreviation table passed is the source of truth of the
-    distribution recipe)."""
-    return render_wan_model_card(manifest, repo, WAN_QUANT_ABBREVIATIONS)
-
-
 def _model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
-    return manifest["models"][DEFAULT_MODEL]
+    return manifest["models"][_TI2V]
 
 
 def _present(out_dir: Path) -> list[str]:
@@ -489,10 +429,18 @@ def _overview_names_every_graph(out_dir: Path, manifest: Mapping[str, Any]) -> N
 #: The Wan2.2 model name, and the valid provenance its writers (`wan.ti2v_export_dit` /
 #: `wan.export_vae --model ti2v-5b`) bake (the Wan2.2 pin).
 _TI2V = "ti2v-5b"
-_PINNED22 = Provenance(
+_PINNED = Provenance(
     license=SOURCES[_TI2V].license,
     notice=NOTICE_FILENAME,
     upstream_revision=SOURCES[_TI2V].revision,
+)
+
+#: The Wan2.1 pin (the pin of the text assets' provenance — a DiT / VAE container claiming it is
+#: refused, ADR 0121 decision 9).
+_PINNED_WAN21 = Provenance(
+    license=SOURCES[DEFAULT_MODEL].license,
+    notice=NOTICE_FILENAME,
+    upstream_revision=SOURCES[DEFAULT_MODEL].revision,
 )
 
 #: A copy of the Wan2.2 TS side's accepted set (`WAN22_TI2V_GENERATION` of `descriptor.ts` — the TS
@@ -514,12 +462,6 @@ def _pin(model: str) -> dict[str, str]:
     return {"repo": SOURCES[model].repo, "revision": SOURCES[model].revision}
 
 
-@pytest.fixture
-def wan22_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the fixture containers claim the Wan2.2 pin (overriding the autouse Wan2.1 pin)."""
-    stamp_fixture_provenance(monkeypatch, _PINNED22)
-
-
 def _stamped(
     monkeypatch: pytest.MonkeyPatch, provenance: Provenance, make: Callable[[], list[bytes]]
 ) -> list[bytes]:
@@ -530,34 +472,29 @@ def _stamped(
         return make()
 
 
-def _render22(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
+def _render(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
     return TI2V_PIPELINE.card_profiles["wan-ti2v"](
         manifest, repo=f"hdae/{WAN22_REPO_NAME}", host_assets=host_assets
     )
 
 
-def _card22(manifest: Mapping[str, Any], repo: str = "hdae/x") -> str:
-    """Rebuild only the Wan2.2 card."""
+def _card(manifest: Mapping[str, Any], repo: str = "hdae/x") -> str:
+    """Rebuild only the card (the abbreviation table passed is the source of truth of the
+    distribution recipe)."""
     return render_wan_model_card(manifest, repo, WAN_QUANT_ABBREVIATIONS, card=WAN22_CARD)
 
 
-def _build_sources22(root: Path, **overrides: Any) -> WanSources:
-    """Reproduce the Wan2.2 series (i8 DiT, f16 VAE, the Wan2.1 text assets, umT5) with fake
-    assets."""
-    return _build_sources(root, generation=WAN22, **overrides)
-
-
 @pytest.fixture
-def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str, Any]]:
-    """A Wan2.2 distribution in the published form (text_encoder is a cross-repository reference to
-    the umT5 repository)."""
-    sources = _build_sources22(tmp_path)
+def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """A distribution in the published form (text_encoder is a cross-repository reference to the
+    umT5 repository)."""
+    sources = _build_sources(tmp_path)
     out_dir = tmp_path / "models" / WAN22_REPO_NAME
     manifest = assemble_family(
         [wan_plan(sources, generation=WAN22)],
         out_dir,
         _TI2V,
-        render_card=_render22,
+        render_card=_render,
         root_files=TI2V_PIPELINE.root_files,
         external=(_reference(_assemble_umt5(tmp_path, sources)),),
     )
@@ -565,132 +502,16 @@ def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str,
 
 
 class TestLayout:
-    def test_it_places_the_graphs_and_the_assets_under_the_model_subtree(self, assembled) -> None:
-        """The transformer has 2 per storage label (`model.f16.krm` / `model.i8.krm`), the VAE
-        decoder 1 each, and 2 assets. The text_encoder is a cross-repository reference, so not a
-        single byte is placed. The VAE encoder is a Wan2.2-only component, so it is not placed (even
-        though it is in the all-generation table, the 2.1 distribution does not change)."""
-        out_dir, _ = assembled
-        own = {
-            role: WAN_OUTPUT_PATHS[role]
-            for role in (*WAN21.container_roles, WAN_TEXT_EMBEDS_ROLE, WAN_TOKENIZER_ROLE)
-            if role != UMT5_ROLE
-        }
-        expected = [
-            f"{DEFAULT_MODEL}/{rel}"
-            for rel in placed_paths(
-                own,
-                {name: labels for name, labels in WAN21.weights.items() if name != UMT5_ROLE},
-                # The transformer containers have one more part, dedicated to the `rope_base` asset.
-                {WAN_TRANSFORMER_F16_ROLE: 4, WAN_TRANSFORMER_I8_ROLE: 4},
-            )
-        ]
-        assert _present(out_dir) == sorted(
-            [*expected, MANIFEST_FILENAME, MODEL_CARD_FILENAME, "LICENSE.md", NOTICE_FILENAME]
-        )
-        assert list(out_dir.rglob(f"{WAN_TEXT_ENCODER_ROLE}/*")) == []
-        assert list(out_dir.rglob("vae_encoder*")) == []
-        assert WAN_OUTPUT_PATHS[WAN_TRANSFORMER_F16_ROLE] == "transformer/model.f16.krm"
-        assert WAN_OUTPUT_PATHS[WAN_TRANSFORMER_I8_ROLE] == "transformer/model.i8.krm"
-        assert WAN_OUTPUT_PATHS[WAN_TOKENIZER_ROLE] == "umt5_tokenizer/tokenizer.json"
-
     def test_it_never_carries_the_series_goldens(self, assembled) -> None:
         out_dir, _ = assembled
         assert list(out_dir.rglob("io.*")) == []
         assert list(out_dir.rglob("pipeline_steps.*")) == []
         assert list(out_dir.rglob("reference.*")) == []
 
-    def test_a_vae_encoder_beside_the_wan21_vae_is_never_carried(self, tmp_path: Path) -> None:
-        """Even with an encoder container in the 2.1 f16 series, the 2.1 plan does not pick it up
-        (the encoder is a Wan2.2-only component — the all-generation weights table reaches 2.1 too,
-        so the generation field must narrow it)."""
-        sources = _build_sources(tmp_path)
-        for role in WAN_VAE_ENCODER_ROLES:
-            write_component(sources.series / role / WAN_MODEL_FILE, _graph_container(role))
-        plan = wan_plan(sources)
-        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.artifacts)
-        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.weights)
-        for quant in plan.quants.values():
-            assert not set(WAN_VAE_ENCODER_ROLES) & set(quant["weights"])
-
-    def test_the_manifest_declares_the_three_seats_and_the_model_assets(self, assembled) -> None:
-        """There are 3 quant presets: `f16`, the reference preset `f16+dit8` and the practical
-        preset `f16+dit8-a8-attn8-s16` (the default) (ADR 0120 decision 1, ruling 4 of 2026-10-04),
-        and every preset selects the text_encoder i8 (weights is a complete mapping — ADR 0119
-        addendum B). The assets are the per-model `text_embeds` and `umt5_tokenizer` (independent of
-        the quant — addendum C)."""
-        _, manifest = assembled
-        model = _model(manifest)
-        assert manifest["defaultModel"] == DEFAULT_MODEL
-        assert model["pipeline"] == WAN_PIPELINE
-        # The VAE encoder (Wan2.2 only) is not in the 2.1 weights — the 2.1 manifest is unchanged.
-        assert list(model["weights"]) == [
-            WAN_TEXT_ENCODER_ROLE,
-            WAN_TRANSFORMER_ROLE,
-            WAN_VAE_FIRST_ROLE,
-            WAN_VAE_NEXT_ROLE,
-        ]
-        assert list(model["weights"][WAN_TEXT_ENCODER_ROLE]) == ["i8"]
-        assert list(model["weights"][WAN_TRANSFORMER_ROLE]) == ["f16", "i8"]
-        # The VAE decoder i8 (Wan2.2 only — ADR 0133 decision 7) is not in the 2.1 weights.
-        assert list(model["weights"][WAN_VAE_FIRST_ROLE]) == ["f16"]
-        assert list(model["weights"][WAN_VAE_NEXT_ROLE]) == ["f16"]
-        assert list(model["assets"]) == [WAN_TEXT_EMBEDS_ROLE, WAN_TOKENIZER_ROLE]
-        assert model["assets"][WAN_TEXT_EMBEDS_ROLE]["path"] == (
-            f"{DEFAULT_MODEL}/{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}"
-        )
-        assert model["assets"][WAN_TOKENIZER_ROLE]["path"] == (
-            f"{DEFAULT_MODEL}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
-        )
-        assert list(model["quants"]) == ["f16", "f16+dit8", "f16+dit8-a8-attn8-s16"]
-        assert model["defaultQuant"] == "f16+dit8-a8-attn8-s16"
-        vae = {WAN_VAE_FIRST_ROLE: "f16", WAN_VAE_NEXT_ROLE: "f16"}
-        text = {WAN_TEXT_ENCODER_ROLE: "i8"}
-        quants = model["quants"]
-        assert quants["f16"]["weights"] == {**text, WAN_TRANSFORMER_ROLE: "f16", **vae}
-        assert quants["f16+dit8"]["weights"] == {**text, WAN_TRANSFORMER_ROLE: "i8", **vae}
-        assert quants["f16+dit8-a8-attn8-s16"]["weights"] == quants["f16+dit8"]["weights"]
-        assert quants["f16"]["session"] == {}
-        # The reference preset has the same i8 weights as the practical preset and an empty
-        # session (the counterpart of the local A/B check — ADR 0110 decision 5 ②).
-        assert quants["f16+dit8"]["session"] == {}
-        assert quants["f16+dit8-a8-attn8-s16"]["session"] == {
-            "linearCompute": "a8",
-            "attentionCompute": "a8",
-            "attentionScoreStorage": "f16",
-        }
-
     def test_the_pipeline_config_has_exactly_the_fields_the_loader_accepts(self, assembled) -> None:
         _, manifest = assembled
         config = _model(manifest)["pipelineConfig"]
         assert {key: tuple(value) for key, value in config.items()} == _CONFIG_KEYS
-        assert config == WAN_PIPELINE_CONFIG
-
-    def test_it_reassembles_to_the_same_bytes(self, tmp_path: Path) -> None:
-        """Assembling twice from the same series gives the same bytes for the manifest and every
-        file (deterministic)."""
-        sources = _build_sources(tmp_path)
-        out_dir = tmp_path / "models" / WAN_REPO_NAME
-
-        def digest() -> dict[str, bytes]:
-            return {path: (out_dir / path).read_bytes() for path in _present(out_dir)}
-
-        first = assemble_family([wan_plan(sources)], out_dir, DEFAULT_MODEL)
-        before = digest()
-        assert first == assemble_family([wan_plan(sources)], out_dir, DEFAULT_MODEL)
-        assert digest() == before
-        assert verify_dist(out_dir)
-
-    def test_the_repository_ships_the_apache_license_and_the_change_notice(self, assembled) -> None:
-        out_dir, _ = assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
-        notice = (out_dir / NOTICE_FILENAME).read_text(encoding="utf-8")
-        assert "Apache License, Version 2.0" in notice
-        # The weights of the i8 presets are modifications of the distribution, so they are in the
-        # notice (MUST: the text corresponds to the distribution).
-        prose = " ".join(notice.split())
-        assert "**int8 transformer**" in prose
-        assert "keep the source float32 values" in prose
 
     def test_the_notice_says_where_the_text_encoder_comes_from(self, assembled) -> None:
         """The text_encoder is a cross-repository reference (the umT5 repository), the embedding
@@ -751,8 +572,8 @@ class TestTheTextEncoderReference:
         with pytest.raises(DistError, match="differs from the bytes this assembly builds"):
             assemble_family(
                 [wan_plan(sources)],
-                tmp_path / "models" / WAN_REPO_NAME,
-                DEFAULT_MODEL,
+                tmp_path / "models" / WAN22_REPO_NAME,
+                _TI2V,
                 external=(_reference(umt5_dir),),
             )
 
@@ -773,16 +594,6 @@ class TestTheStorageGates:
             containers={"vae_decoder_next": _graph_container("vae_decoder_next", storage=storage)},
         )
         with pytest.raises(DistError, match=r"vae_decoder_next: .* has no f16"):
-            wan_plan(sources)
-
-    def test_it_refuses_the_i8_series_in_the_f16_transformer_seat(self, tmp_path: Path) -> None:
-        sources = _build_sources(
-            tmp_path,
-            containers={
-                WAN_TRANSFORMER_F16_ROLE: _graph_container(WAN_TRANSFORMER_ROLE, storage="i8")
-            },
-        )
-        with pytest.raises(DistError, match=r"transformer_f16: .* has no f16"):
             wan_plan(sources)
 
     def test_it_refuses_the_f16_series_in_the_i8_transformer_seat(self, tmp_path: Path) -> None:
@@ -979,28 +790,18 @@ class TestTheContainerProvenance:
         with pytest.raises(DistError, match="a different revision"):
             wan_plan(sources)
 
-    def test_it_refuses_a_wan22_model_of_the_source_table(self, tmp_path: Path) -> None:
-        """Even a Wan2.2 model in the source table is not assembled into the Wan2.1 distribution
-        (`karume-wan2.1`)."""
-        assert "ti2v-5b" in SOURCES
-        with pytest.raises(DistError, match=r"unknown Wan2\.1 model 'ti2v-5b'"):
-            wan_plan(_build_sources(tmp_path), "ti2v-5b")
-
 
 class TestTheRopeBaseAsset:
-    @pytest.mark.parametrize(
-        ("role", "storage"),
-        [(WAN_TRANSFORMER_F16_ROLE, "f16"), (WAN_TRANSFORMER_I8_ROLE, "i8")],
-        ids=["f16", "i8"],
-    )
-    def test_it_refuses_a_transformer_without_the_rope_base_tables(
-        self, tmp_path: Path, role: str, storage: str
-    ) -> None:
+    def test_it_refuses_a_transformer_without_the_rope_base_tables(self, tmp_path: Path) -> None:
         """A DiT without the base table would fail only after the user's fromPretrained has
         downloaded the weights."""
         sources = _build_sources(
             tmp_path,
-            containers={role: _graph_container(WAN_TRANSFORMER_ROLE, storage=storage, rope=None)},
+            containers={
+                WAN_TRANSFORMER_I8_ROLE: _graph_container(
+                    WAN_TRANSFORMER_ROLE, storage="i8", rope=None
+                )
+            },
         )
         with pytest.raises(DistError, match=r"asset 'rope_base' is missing"):
             wan_plan(sources)
@@ -1009,29 +810,30 @@ class TestTheRopeBaseAsset:
         sources = _build_sources(
             tmp_path,
             containers={
-                WAN_TRANSFORMER_F16_ROLE: _graph_container(
-                    "transformer", rope=(WAN_ROPE_BASE_ASSET, "ple-index")
+                WAN_TRANSFORMER_I8_ROLE: _graph_container(
+                    "transformer", storage="i8", rope=(WAN_ROPE_BASE_ASSET, "ple-index")
                 )
             },
         )
         with pytest.raises(DistError, match="has role 'ple-index'"):
             wan_plan(sources)
 
-    def test_it_refuses_rope_base_tables_that_differ_between_the_seats(
+    def test_it_refuses_rope_base_tables_that_differ_between_the_containers(
         self, tmp_path: Path
     ) -> None:
-        """The f16 / i8 containers hold base tables of the same geometry — if only one had a
-        different table, RoPE would go wrong for that preset alone."""
-        sources = _build_sources(
-            tmp_path,
-            containers={
-                WAN_TRANSFORMER_I8_ROLE: _graph_container(
-                    WAN_TRANSFORMER_ROLE, storage="i8", rope_payload=b"other-rope-table"
-                )
-            },
+        """Transformer containers that ship side by side hold base tables of the same geometry — if
+        only one had a different table, RoPE would go wrong for that preset alone (the check of
+        `assert_shared_rope_base`, called directly with two containers)."""
+        same = tmp_path / "same" / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE
+        other = tmp_path / "other" / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE
+        write_component(same, _graph_container(WAN_TRANSFORMER_ROLE, storage="i8"))
+        write_component(
+            other,
+            _graph_container(WAN_TRANSFORMER_ROLE, storage="i8", rope_payload=b"other-rope-table"),
         )
+        assert_shared_rope_base([same, same])
         with pytest.raises(DistError, match="is not byte-identical"):
-            wan_plan(sources)
+            assert_shared_rope_base([same, other])
 
 
 class TestTheVaeChunkPair:
@@ -1213,11 +1015,6 @@ class TestTheTextEmbeddingAsset:
 
 
 class TestTheModelCard:
-    def test_it_is_the_only_profile_and_is_resolved_without_a_choice(self) -> None:
-        profiles = PIPELINE.card_profiles
-        assert list(profiles) == ["wan"]
-        assert resolve_card_renderer(PIPELINE, None) is profiles["wan"]
-
     def test_the_quant_table_explains_the_abbreviation_in_the_seat_names(self, assembled) -> None:
         """The abbreviation mapping is **always** printed (ADR 0074 decision 4) — so that it is
         readable which component `dit8` refers to."""
@@ -1225,43 +1022,23 @@ class TestTheModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "In a quant name, `dit` is the `transformer` component." in card
         quants = card.split("### Quants")[1]
-        assert "| `f16+dit8-a8-attn8-s16` (default) |" in quants
-        assert "| `f16` |" in quants
-        assert "(default)" not in quants.replace("| `f16+dit8-a8-attn8-s16` (default) |", "")
-
-    def test_the_overview_names_every_graph_of_the_manifest(self, assembled) -> None:
-        _overview_names_every_graph(*assembled)
-
-    def test_it_refuses_a_pipeline_it_does_not_describe(self, assembled) -> None:
-        _, manifest = assembled
-        foreign = json.loads(json.dumps(manifest))
-        foreign["models"][DEFAULT_MODEL]["pipeline"] = "siglip2/1"
-        with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
-            _card(foreign)
+        assert "| `i8-a8-attn8-online-conv8` (default) |" in quants
+        assert "| `f16+dit8` |" in quants
+        assert "(default)" not in quants.replace("| `i8-a8-attn8-online-conv8` (default) |", "")
 
     def test_the_title_is_followed_by_the_house_sentence(self, assembled) -> None:
         _, manifest = assembled
         lines = _card(manifest).splitlines()
-        title = lines.index("# Wan2.1 T2V 1.3B — Karume")
+        title = lines.index("# Wan2.2 TI2V 5B — Karume")
         assert lines[title + 2] == (
-            "This is an unofficial conversion of Wan-AI/Wan2.1-T2V-1.3B-Diffusers for Karume."
+            "This is an unofficial conversion of Wan-AI/Wan2.2-TI2V-5B-Diffusers for Karume."
             " It is not affiliated with or endorsed by Wan-AI."
         )
-
-    def test_it_refuses_to_attribute_a_wan22_model(self, assembled) -> None:
-        """Even for a Wan2.2 model in the source table, the Wan2.1 card does not write its
-        attribution."""
-        _, manifest = assembled
-        foreign = json.loads(json.dumps(manifest))
-        foreign["models"] = {"ti2v-5b": foreign["models"][DEFAULT_MODEL]}
-        assert "ti2v-5b" in SOURCES
-        with pytest.raises(ValueError, match=r"'ti2v-5b' is not a Wan2\.1 model"):
-            _card(foreign)
 
     def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        upstream = SOURCES[DEFAULT_MODEL]
+        upstream = SOURCES[_TI2V]
         assert f"base_model: {upstream.repo}" in card
         assert f"license: {upstream.license}" in card
         assert f"at commit `{upstream.revision}`" in card
@@ -1276,108 +1053,13 @@ class TestTheModelCard:
     def test_the_usage_names_the_declared_repository(self, assembled) -> None:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert f'repo: "hdae/{WAN_REPO_NAME}"' in card
-        assert "await Pipeline.fromPretrained(" in card
+        assert f'repo: "hdae/{WAN22_REPO_NAME}"' in card
+        assert "await Ti2vPipeline.fromPretrained(" in card
         assert "fromAssets" not in card
-
-    def test_the_defaults_come_from_the_manifest(self, assembled) -> None:
-        """The defaults are not baked in but drawn from pipelineConfig (assembling with values that
-        differ from the real thing gives different values)."""
-        _, manifest = assembled
-        changed = json.loads(json.dumps(manifest))
-        changed["models"][DEFAULT_MODEL]["pipelineConfig"] = {
-            "scheduler": {"shift": 7.5},
-            "defaults": {"steps": 23, "guidance": 4.25},
-        }
-        card = _card(changed)
-        assert "- **steps**: 23" in card
-        assert "- **guidance**: 4.25" in card
-        assert "- **shift** (flow-matching shift): 7.5" in card
 
     def test_it_renders_the_same_bytes_for_the_same_manifest(self, assembled) -> None:
         _, manifest = assembled
         assert _card(manifest) == _card(manifest)
-
-    def test_the_accepted_inputs_match_the_typescript_side(self) -> None:
-        """The card's accepted set equals the TS accepted set (the other side is
-        wan_pipeline_test.ts)."""
-        fixture = json.loads(_CARD_LIMITS_FIXTURE.read_text(encoding="utf-8"))
-        assert fixture == {
-            "acceptedSizes": [
-                {"width": width, "height": height} for width, height in WAN_ACCEPTED_SIZES
-            ],
-            "minFrames": WAN_FRAMES[0],
-            "maxFrames": WAN_FRAMES[1],
-        }, (
-            "after changing WAN_ACCEPTED_SIZES / WAN_FRAMES in card.py, align the fixture and"
-            " descriptor.ts too"
-        )
-
-    def test_it_names_the_measured_resources_with_their_conditions(self, assembled) -> None:
-        out_dir, _ = assembled
-        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert "## Resources" in card
-        assert f"with the `{WAN_RESOURCE_QUANT}` quant" in card
-        assert "6.19 GiB" in card
-        assert "3.32 GiB" in card
-        prose = " ".join(card.split())
-        assert "took 10.4 s and peaked at 6.30 GiB" in prose
-        assert "A 50-step run through the text encoder has not been done yet." in prose
-        assert "`maxStorageBufferBindingSize` (128 MiB)" in card
-
-    def test_it_names_the_browser_run_and_what_has_not_run_in_a_browser(self, assembled) -> None:
-        """The browser claims only the conditions it actually ran, and says the paths and presets
-        it did not run have not run (ADR 0118 step 9)."""
-        out_dir, _ = assembled
-        prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
-        assert "Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run" in prose
-        assert "81 frames) in 46.1 minutes" in prose
-        assert (
-            "The text encoder on the GPU and the int8 quants have not been run in a browser yet."
-            in prose
-        )
-        assert "Browsers are not verified yet" not in prose
-        assert "Browsers have not been checked yet" not in prose
-
-    def test_it_names_the_measured_figures_of_every_seat(self, assembled) -> None:
-        """The per-preset transformer rows stay as measured; fields that were not measured are not
-        guessed and say not measured."""
-        out_dir, _ = assembled
-        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert "| `f16` | 33 | 17.1 s | 5.15 GiB | ~30 minutes |" in card
-        assert "| `f16+dit8` | 81 | not measured | not measured | not run |" in card
-        assert "| `f16+dit8-a8-attn8-s16` | 33 | 8.5 s | 4.02 GiB | 952 s (~16 minutes) |" in card
-        assert (
-            "| `f16+dit8-a8-attn8-s16` | 81 | 34.0 s | 5.46 GiB | 3,703 s (~62 minutes) |" in card
-        )
-        assert "have not been measured" not in card
-        prose = " ".join(card.split())
-        assert "a relative RMS error of 0.107 at 33 frames and 0.210 at 81 frames" in prose
-        assert "no clear degradation was seen" in prose
-        assert "the default quant stays" not in prose
-
-    def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled) -> None:
-        """A preset not in the table does not guess numbers and says not measured (the order of the
-        presets is as in the manifest)."""
-        _, manifest = assembled
-        changed = json.loads(json.dumps(manifest))
-        quants = changed["models"][DEFAULT_MODEL]["quants"]
-        quants["f16+other"] = quants[WAN_RESOURCE_QUANT]
-        assert "f16+other" not in WAN_QUANT_TRANSFORMER
-        card = _card(changed)
-        assert "The other quants (`f16+other`) have not been measured yet." in card
-        assert "| `f16+other` |" not in card.split("### Quants")[0]
-
-    def test_it_refuses_a_manifest_without_the_measured_quant(self, assembled) -> None:
-        """A distribution without the measured preset does not claim resource numbers (no guessed
-        numbers are printed)."""
-        _, manifest = assembled
-        changed = json.loads(json.dumps(manifest))
-        quants = changed["models"][DEFAULT_MODEL]["quants"]
-        quants["i8"] = quants.pop(WAN_RESOURCE_QUANT)
-        changed["models"][DEFAULT_MODEL]["defaultQuant"] = "i8"
-        with pytest.raises(ValueError, match=f"quant '{WAN_RESOURCE_QUANT}'"):
-            _card(changed)
 
 
 class TestTheModelCardOnTheTextEncoder:
@@ -1395,7 +1077,7 @@ class TestTheModelCardOnTheTextEncoder:
     def test_a_self_contained_build_says_the_encoder_is_stored_here(self, tmp_path: Path) -> None:
         """Even assembled without a cross-repository reference (one repository of 8 GiB), the card
         describes the facts."""
-        manifest = assemble_family([wan_plan(_build_sources(tmp_path))], tmp_path / "x", "t2v-1.3b")
+        manifest = assemble_family([wan_plan(_build_sources(tmp_path))], tmp_path / "x", _TI2V)
         card = " ".join(_card(manifest).split())
         assert "stored in this repository" in card
         assert UMT5_REPO_NAME not in card
@@ -1438,7 +1120,7 @@ class TestTheModelCardOnTheTextEncoder:
             "every quant declares `maxBufferSize` ≥ 1,050,148,864 bytes and"
             " `maxStorageBufferBindingSize` ≥ 1,050,148,864 bytes" in prose
         )
-        _model(changed)["quants"]["f16"]["requiredLimits"]["maxBufferSize"] += 1
+        _model(changed)["quants"]["f16+dit8"]["requiredLimits"]["maxBufferSize"] += 1
         with pytest.raises(ValueError, match="requiredLimits differ"):
             _card(changed)
 
@@ -1466,11 +1148,11 @@ class TestReferenceRevisionSources:
     def _argv(root: Path, *extra: str) -> list[str]:
         return [
             "--pipeline",
-            "wan",
+            "wan-ti2v",
             "--series",
             str(root / "outputs" / "series"),
             "--out",
-            str(root / "models" / WAN_REPO_NAME),
+            str(root / "models" / WAN22_REPO_NAME),
             *extra,
         ]
 
@@ -1513,16 +1195,15 @@ class TestReferenceRevisionSources:
 
     def _text_encoder_refs(self, root: Path) -> list[Mapping[str, Any]]:
         manifest = json.loads(
-            (root / "models" / WAN_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+            (root / "models" / WAN22_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         return _model(manifest)["weights"][WAN_TEXT_ENCODER_ROLE]["i8"]["container"]["parts"]
 
-    def test_both_generations_declare_the_umt5_text_encoder(self) -> None:
+    def test_the_pipeline_declares_the_umt5_text_encoder(self) -> None:
         """The reference the runbook used to spell as options: `hdae/karume-umt5-xxl`, model
         `xxl`, role `text_encoder`."""
         expected = (CrossRepoReference("karume-umt5-xxl", "xxl", ("text_encoder",)),)
 
-        assert PIPELINE.references(DEFAULT_MODEL) == expected
         assert TI2V_PIPELINE.references(WAN22.default_model) == expected
 
     def test_publishing_with_the_placeholder_is_refused_before_anything_is_written(
@@ -1535,7 +1216,7 @@ class TestReferenceRevisionSources:
 
         with pytest.raises(DistError, match=dist.ALLOW_PLACEHOLDER_FLAG):
             dist.main(argv)
-        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+        assert not (tmp_path / "models" / WAN22_REPO_NAME).exists()
 
     def test_a_development_mirror_declares_the_placeholder_explicitly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1554,7 +1235,7 @@ class TestReferenceRevisionSources:
 
         dist.main(self._argv(tmp_path, "--ref-revision", f"{UMT5_REPO_NAME}={_UMT5_REVISION}"))
 
-        assert verify_dist(tmp_path / "models" / WAN_REPO_NAME)
+        assert verify_dist(tmp_path / "models" / WAN22_REPO_NAME)
         assert {ref["revision"] for ref in self._text_encoder_refs(tmp_path)} == {_UMT5_REVISION}
 
     def test_a_build_without_a_revision_source_is_refused(
@@ -1565,7 +1246,7 @@ class TestReferenceRevisionSources:
 
         with pytest.raises(DistError, match=r"reference \['karume-umt5-xxl'\] across"):
             dist.main(self._argv(tmp_path))
-        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+        assert not (tmp_path / "models" / WAN22_REPO_NAME).exists()
 
     def test_the_hub_pins_the_referenced_main_and_confirms_the_borrowed_files(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1591,7 +1272,7 @@ class TestReferenceRevisionSources:
                 self._argv(tmp_path, "--resolve-refs", "hf"),
                 get=self._hub(umt5_dir, oids={stale: "f" * 64}),
             )
-        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+        assert not (tmp_path / "models" / WAN22_REPO_NAME).exists()
 
     def test_the_sources_exclude_each_other(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1613,7 +1294,7 @@ class TestReferenceRevisionSources:
                 ),
                 get=self._hub(umt5_dir),
             )
-        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+        assert not (tmp_path / "models" / WAN22_REPO_NAME).exists()
 
     def test_an_abbreviated_declaration_is_not_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1624,13 +1305,13 @@ class TestReferenceRevisionSources:
 
         with pytest.raises(SystemExit):
             dist.main(self._argv(tmp_path, "--allow-placeholder"))
-        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+        assert not (tmp_path / "models" / WAN22_REPO_NAME).exists()
 
     def test_the_placeholder_is_forty_zeros(self) -> None:
         """The form passes hub's parse (40 lowercase hex digits) — which is why the shape check does
         not stop it."""
         assert dist.PLACEHOLDER_REVISION == "0" * 40
-        declared = wan_references(DEFAULT_MODEL)
+        declared = wan_references(_TI2V)
         pins = partial(dist.reference_pins, resolve=None, get=self._unreachable)
         assert pins(declared, {}, allow_placeholder=True) == (
             {UMT5_REPO_NAME: dist.PLACEHOLDER_REVISION},
@@ -1650,14 +1331,6 @@ class TestReferenceRevisionSources:
 class TestTheWritersSpellTheSameNames:
     """The distribution recipe does not import torch, so it holds the spellings itself — they match
     the writers (which import torch)."""
-
-    def test_the_series_names(self) -> None:
-        from wan import export_dit, export_vae, text_embeds
-
-        assert export_dit.SERIES.name == WAN_SERIES
-        assert export_dit.I8_SERIES.name == WAN_I8_SERIES
-        assert export_vae.SERIES_NAME == WAN_SERIES
-        assert text_embeds.SERIES_NAME == WAN_TEXT_EMBEDS_SERIES
 
     def test_the_embedding_asset_format(self) -> None:
         from wan import text_embeds
@@ -1709,20 +1382,19 @@ class TestTheWritersSpellTheSameNames:
         set are the spelling of the writer's `--shared` (ADR 0134)."""
         from wan import export_vae
 
-        assert WAN21.vae_tiles[0] == export_vae.VAE_SERIES[DEFAULT_MODEL].tile
         assert WAN22.vae_tiles[0] == export_vae.VAE_SERIES[_TI2V].tile
         assert export_vae.shared_target(WAN_VAE_FIRST_ROLE, 32) == WAN_VAE_FIRST_32_ROLE
         assert export_vae.shared_target(WAN_VAE_NEXT_ROLE, 32) == WAN_VAE_NEXT_32_ROLE
 
     def test_the_rope_base_asset_and_the_context_input(self) -> None:
-        from wan import export_dit
+        from wan import dit_common, ti2v_export_dit
 
-        assert (export_dit.ROPE_BASE_ASSET, export_dit.ROPE_BASE_ROLE) == (
+        assert (dit_common.ROPE_BASE_ASSET, dit_common.ROPE_BASE_ROLE) == (
             WAN_ROPE_BASE_ASSET,
             WAN_ROPE_BASE_ROLE,
         )
-        assert export_dit.MODEL_FILE == WAN_MODEL_FILE
-        assert WAN_DIT_CONTEXT_INPUT in export_dit.INPUT_NAMES
+        assert ti2v_export_dit.MODEL_FILE == WAN_MODEL_FILE
+        assert WAN_DIT_CONTEXT_INPUT in ti2v_export_dit.INPUT_NAMES
 
     def test_the_wan22_series_names(self) -> None:
         """The i8 series of the Wan2.2 DiT and the f16 series of the VAE (writers
@@ -1751,56 +1423,6 @@ class TestTheGenerationTables:
     all-generation table without the Wan2.2-only VAE encoder, VAE decoder i8 and 32-latent-tile set
     — the 2.1 distribution is unchanged)."""
 
-    def test_the_wan21_tables_are_the_full_tables_without_the_wan22_only_roles(self) -> None:
-        encoder = {
-            *WAN_VAE_ENCODER_ROLES,
-            WAN_VAE_FIRST_I8_ROLE,
-            WAN_VAE_NEXT_I8_ROLE,
-            *WAN_VAE_LENDER_ROLES,
-        }
-        assert WAN21.vae_encoder_roles == ()
-        # The Wan2.1 decoder has only the default-tile (32) set with weights (the tile of the
-        # writer's table).
-        assert WAN21.vae_tiles == (32,)
-        assert WAN21.container_roles == (
-            WAN_TEXT_ENCODER_ROLE,
-            WAN_TRANSFORMER_F16_ROLE,
-            WAN_TRANSFORMER_I8_ROLE,
-            WAN_VAE_FIRST_ROLE,
-            WAN_VAE_NEXT_ROLE,
-        )
-        assert WAN21.container_roles == tuple(
-            role for role in WAN_CONTAINER_ROLES if role not in encoder
-        )
-        assert WAN21.transformer_roles == (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
-        assert WAN21.storage_requirements == {
-            role: required
-            for role, required in WAN_STORAGE_REQUIREMENTS.items()
-            if role not in encoder
-        }
-        assert WAN21.storage_forbidden == {
-            role: forbidden
-            for role, forbidden in WAN_STORAGE_FORBIDDEN.items()
-            if role not in encoder
-        }
-        assert WAN21.weights == {
-            name: {label: files for label, files in labels.items() if files.file not in encoder}
-            for name, labels in WAN_WEIGHTS.items()
-            if name not in encoder
-        }
-        assert (WAN21.vae_labels, WAN21.vae_decoder_roles) == (
-            ("f16",),
-            (WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE),
-        )
-        assert (WAN21.repo_name, WAN21.pipeline, WAN21.series, WAN21.i8_series) == (
-            WAN_REPO_NAME,
-            WAN_PIPELINE,
-            WAN_SERIES,
-            WAN_I8_SERIES,
-        )
-        assert WAN21.pipeline_config == WAN_PIPELINE_CONFIG
-        assert PIPELINE.root_files["NOTICE.md"] == WAN21.notice
-
     def test_the_wan22_tables_hold_only_the_int8_transformer(self) -> None:
         assert WAN22.container_roles == (
             *WAN_VAE_ENCODER_ROLES,
@@ -1822,11 +1444,11 @@ class TestTheGenerationTables:
         assert "f16" in WAN22.storage_forbidden[WAN_TRANSFORMER_I8_ROLE]
         assert "f16" not in WAN22.quants
 
-    def test_only_wan22_carries_the_vae_encoder_in_f16(self) -> None:
-        """Only Wan2.2 distributes the 3 encoder graphs (ADR 0121 decision 11), treated like the
-        decoder: the f16 series, one file with storage label f16, `<component>/model.f16.krm`, f16
-        required and other compressed storage forbidden."""
-        assert (WAN21.vae_encoder, WAN22.vae_encoder) == (False, True)
+    def test_the_vae_encoder_is_carried_in_f16(self) -> None:
+        """The 3 encoder graphs (ADR 0121 decision 11) are treated like the decoder: the f16 series,
+        one file with storage label f16, `<component>/model.f16.krm`, f16 required and other
+        compressed storage forbidden."""
+        assert WAN22.vae_encoder
         assert WAN_VAE_ENCODER_ROLES == (
             WAN_VAE_ENCODER_PRE_ROLE,
             WAN_VAE_ENCODER_ATTN_ROLE,
@@ -1840,15 +1462,14 @@ class TestTheGenerationTables:
             assert WAN_OUTPUT_PATHS[role] == f"{role}/model.f16.krm"
             assert WAN22.storage_requirements[role] == "f16"
             assert WAN22.storage_forbidden[role] == WAN_STORAGE_FORBIDDEN[WAN_VAE_FIRST_ROLE]
-            assert role not in WAN21.weights
         # The order of a generation's weights is the order of the all-generation table (the order of
         # the I2V steps — the encoder first).
         assert list(WAN22.weights) == list(WAN_GRAPH_ROLES)
 
-    def test_only_wan22_carries_the_vae_decoder_in_int8(self) -> None:
-        """ADR 0133 decision 7: only in Wan2.2 do the 2 decoder graphs come as 2 each, f16 / i8. i8
-        is `<graph name>/model.i8.krm`, with i8 required and other compressed storage (f16
-        included) forbidden."""
+    def test_the_vae_decoder_is_carried_in_int8_too(self) -> None:
+        """ADR 0133 decision 7: the 2 decoder graphs come as 2 each, f16 / i8. i8 is
+        `<graph name>/model.i8.krm`, with i8 required and other compressed storage (f16 included)
+        forbidden."""
         assert WAN22.vae_labels == ("f16", "i8")
         assert WAN22.vae_decoder_roles == (
             WAN_VAE_FIRST_ROLE,
@@ -1873,7 +1494,6 @@ class TestTheGenerationTables:
             }
             assert WAN22.storage_requirements[i8_role] == "i8"
             assert "f16" in WAN22.storage_forbidden[i8_role]
-            assert i8_role not in WAN21.container_roles
 
     def test_the_int8_vae_decoder_comes_from_the_i8_series(self, tmp_path: Path) -> None:
         """The i8 decoder is `<graph name>/model.krm` at the same series root as the DiT i8
@@ -1889,15 +1509,12 @@ class TestTheGenerationTables:
         assert placements[WAN_VAE_FIRST_ROLE] == (
             tmp_path / WAN22_SERIES / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE
         )
-        assert not {WAN_VAE_FIRST_I8_ROLE, WAN_VAE_NEXT_I8_ROLE} & set(
-            wan_placements(wan_sources(tmp_path), WAN21)
-        )
 
-    def test_only_wan22_carries_the_32_tile_pair_per_storage_label(self, tmp_path: Path) -> None:
-        """ADR 0134 decision 5: the 32-latent-tile set exists only in Wan2.2, one set per storage
-        label, with roles under the same rules as the decoder (f16 is the graph name, i8 has the
-        `_i8` suffix), `<graph name>/model.<label>.krm`, and `<graph name>/model.krm` at the same
-        series root as the lender (the 16 set of the same label)."""
+    def test_the_32_tile_pair_is_carried_per_storage_label(self, tmp_path: Path) -> None:
+        """ADR 0134 decision 5: the 32-latent-tile set, one set per storage label, with roles under
+        the same rules as the decoder (f16 is the graph name, i8 has the `_i8` suffix),
+        `<graph name>/model.<label>.krm`, and `<graph name>/model.krm` at the same series root as
+        the lender (the 16 set of the same label)."""
         assert WAN22.vae_tiles == (16, 32)
         assert (WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE) == (
             "vae_decoder_first_32",
@@ -1928,26 +1545,18 @@ class TestTheGenerationTables:
             assert placements[i8_role] == tmp_path / WAN22_I8_SERIES / graph / WAN_MODEL_FILE
             assert WAN22.storage_requirements[f16_role] == "f16"
             assert WAN22.storage_requirements[i8_role] == "i8"
-            assert graph not in WAN21.weights
-        assert not set(WAN_VAE_LENDER_ROLES) & set(WAN21.container_roles)
-        assert not set(WAN_VAE_LENDER_ROLES) & set(wan_placements(wan_sources(tmp_path), WAN21))
-
-    def test_the_driver_offers_wan_ti2v_right_after_wan(self) -> None:
-        names = list(dist.PIPELINES)
-        assert names[names.index("wan") + 1] == "wan-ti2v"
-        assert dist.PIPELINES["wan-ti2v"] is TI2V_PIPELINE
 
 
 class TestTheWan22Distribution:
     """The distribution of `--pipeline wan-ti2v` (ADR 0121 step 8 — `karume-wan2.2`, model
     `ti2v-5b`)."""
 
-    def test_it_places_the_int8_transformer_the_vae_and_the_assets(self, assembled22) -> None:
+    def test_it_places_the_int8_transformer_the_vae_and_the_assets(self, assembled) -> None:
         """The transformer is a single i8 file, the VAE decoder 2 each of f16 / i8 (ADR 0133), the
         32-latent-tile set 2 each of f16 / i8 (ADR 0134 — only the 2-document part 0 and an empty
         const region), the encoder 1 each, and 2 assets. The text_encoder is a cross-repository
         reference. The encoder goldens (`vae_encoder.*`) are not distributed."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         own = {
             role: WAN_OUTPUT_PATHS[role]
             for role in (
@@ -1981,7 +1590,7 @@ class TestTheWan22Distribution:
         assert list(out_dir.rglob("pipeline_steps.*")) == []
         assert list(out_dir.rglob("vae_encoder.*")) == []
 
-    def test_the_manifest_declares_the_five_seats(self, assembled22) -> None:
+    def test_the_manifest_declares_the_five_seats(self, assembled) -> None:
         """Five presets: the reference, the practical (s16) and the online-attention preset (ADR
         0132 decision 6) on the f16 VAE decoder, then the int8 VAE decoder's reference `i8` and
         practical `i8-a8-attn8-online-conv8` (ADR 0133 decision 6); no f16 preset; the default is
@@ -1989,7 +1598,7 @@ class TestTheWan22Distribution:
         visual check; the online and s16 presets stay as siblings). Every preset takes the f16 VAE
         encoder (even for T2V alone — the ruling in the addendum on step 9's plan and step 9a's
         results). The weights are ordered as the I2V stages."""
-        _, manifest = assembled22
+        _, manifest = assembled
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
         assert list(manifest["models"]) == [_TI2V]
@@ -2078,8 +1687,8 @@ class TestTheWan22Distribution:
             "int8 transformer and VAE, int8 activations, online attention"
         )
 
-    def test_the_pipeline_config_is_the_official_720p_setting(self, assembled22) -> None:
-        _, manifest = assembled22
+    def test_the_pipeline_config_is_the_official_720p_setting(self, assembled) -> None:
+        _, manifest = assembled
         config = manifest["models"][_TI2V]["pipelineConfig"]
         assert {key: tuple(value) for key, value in config.items()} == _CONFIG_KEYS
         assert config == {"scheduler": {"shift": 5.0}, "defaults": {"steps": 50, "guidance": 5.0}}
@@ -2087,10 +1696,9 @@ class TestTheWan22Distribution:
     def test_the_repository_and_the_default_model(self) -> None:
         assert TI2V_PIPELINE.default_model == _TI2V
         assert TI2V_PIPELINE.repo_name(_TI2V) == "karume-wan2.2" == WAN22_REPO_NAME
-        assert PIPELINE.repo_name(DEFAULT_MODEL) == WAN_REPO_NAME
 
-    def test_it_reassembles_to_the_same_bytes(self, tmp_path: Path, wan22_provenance) -> None:
-        sources = _build_sources22(tmp_path)
+    def test_it_reassembles_to_the_same_bytes(self, tmp_path: Path) -> None:
+        sources = _build_sources(tmp_path)
         out_dir = tmp_path / "models" / WAN22_REPO_NAME
 
         def digest() -> dict[str, bytes]:
@@ -2102,25 +1710,28 @@ class TestTheWan22Distribution:
         assert digest() == before
         assert verify_dist(out_dir)
 
-    def test_the_text_assets_are_the_wan21_series_files(self, tmp_path: Path, assembled22) -> None:
-        """The 2 assets are the very files of the Wan2.1 series (ADR 0121 decision 9 —
+    def test_the_text_assets_are_the_wan21_series_files(self, tmp_path: Path, assembled) -> None:
+        """The 2 assets are the very files of the Wan2.1 text series (ADR 0121 decision 9 —
         byte-identical in the distribution too)."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         series = tmp_path / "outputs" / "series"
-        wan21, wan22 = wan_sources(series, WAN21), wan_sources(series, WAN22)
-        assert (wan22.text_embeds, wan22.tokenizer) == (wan21.text_embeds, wan21.tokenizer)
+        sources = wan_sources(series, WAN22)
+        assert WAN_TEXT_EMBEDS_SERIES == "wan2.1-t2v-1.3b-text-embeds"
+        assert umt5_tokenizer.SERIES_NAME == "wan2.1-umt5-tokenizer"
+        assert sources.text_embeds == series / WAN_TEXT_EMBEDS_SERIES / WAN_TEXT_EMBEDS_FILE
+        assert sources.tokenizer == (
+            series / umt5_tokenizer.SERIES_NAME / umt5_tokenizer.ASSET_FILE
+        )
         placed = out_dir / _TI2V
         assert (placed / WAN_OUTPUT_PATHS[WAN_TEXT_EMBEDS_ROLE]).read_bytes() == (
-            wan21.text_embeds.read_bytes()
+            sources.text_embeds.read_bytes()
         )
         assert (placed / WAN_OUTPUT_PATHS[WAN_TOKENIZER_ROLE]).read_bytes() == (
-            wan21.tokenizer.read_bytes()
+            sources.tokenizer.read_bytes()
         )
 
-    def test_the_repository_ships_the_apache_license_and_the_wan22_notice(
-        self, assembled22
-    ) -> None:
-        out_dir, _ = assembled22
+    def test_the_repository_ships_the_apache_license_and_the_wan22_notice(self, assembled) -> None:
+        out_dir, _ = assembled
         assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "modified form of the Wan2.2 TI2V 5B checkpoint" in prose
@@ -2162,25 +1773,21 @@ class TestTheWan22ProvenanceSplit:
     against the Wan2.2 pin, the 2 text assets against the Wan2.1 pin. A mix-up fails in either
     direction."""
 
-    def test_the_split_pins_pass(self, tmp_path: Path, wan22_provenance) -> None:
-        plan = wan_plan(_build_sources22(tmp_path), generation=WAN22)
+    def test_the_split_pins_pass(self, tmp_path: Path) -> None:
+        plan = wan_plan(_build_sources(tmp_path), generation=WAN22)
         assert plan.name == _TI2V
         assert plan.pipeline == WAN22_PIPELINE
 
-    def test_it_refuses_embeddings_that_name_the_wan22_pin(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
-        sources = _build_sources22(tmp_path, embeds=_text_embeds(source=_pin(_TI2V)))
+    def test_it_refuses_embeddings_that_name_the_wan22_pin(self, tmp_path: Path) -> None:
+        sources = _build_sources(tmp_path, embeds=_text_embeds(source=_pin(_TI2V)))
         with pytest.raises(
             DistError, match=r"the embeddings' provenance .* differs from the upstream pin"
         ):
             wan_plan(sources, generation=WAN22)
 
-    def test_it_refuses_a_tokenizer_that_names_the_wan22_pin(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
+    def test_it_refuses_a_tokenizer_that_names_the_wan22_pin(self, tmp_path: Path) -> None:
         source = {**_pin(_TI2V), "subfolder": WAN_TOKENIZER_SUBFOLDER}
-        sources = _build_sources22(tmp_path, tokenizer=_tokenizer_asset(source=source))
+        sources = _build_sources(tmp_path, tokenizer=_tokenizer_asset(source=source))
         with pytest.raises(
             DistError, match=r"the tokenizer's provenance .* differs from the upstream pin"
         ):
@@ -2198,47 +1805,28 @@ class TestTheWan22ProvenanceSplit:
         ],
     )
     def test_it_refuses_a_container_baked_from_the_wan21_pin(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wan22_provenance, role: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
     ) -> None:
-        container = _stamped(monkeypatch, _PINNED, lambda: _default_container(role))
-        sources = _build_sources22(tmp_path, containers={role: container})
+        container = _stamped(monkeypatch, _PINNED_WAN21, lambda: _default_container(role))
+        sources = _build_sources(tmp_path, containers={role: container})
         injected = re.escape(str(wan_placements(sources, WAN22)[role].parent))
         with pytest.raises(DistError, match=rf"{injected}.*a different revision"):
             wan_plan(sources, generation=WAN22)
 
-    def test_the_wan21_plan_still_reads_both_from_the_wan21_pin(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The pair: the Wan2.1 plan checks the DiT / VAE and the text assets against the Wan2.1 pin
-        (a DiT with the Wan2.2 pin fails)."""
-        assert WAN21.text_model == DEFAULT_MODEL
-        dit = _stamped(
-            monkeypatch,
-            _PINNED22,
-            lambda: _graph_container(WAN_TRANSFORMER_ROLE, storage="i8"),
-        )
-        sources = _build_sources(tmp_path, containers={WAN_TRANSFORMER_I8_ROLE: dit})
-        with pytest.raises(DistError, match="a different revision"):
-            wan_plan(sources)
-
 
 class TestTheWan22Gates:
-    def test_it_refuses_an_f16_transformer_in_the_int8_seat(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
-        sources = _build_sources22(
+    def test_it_refuses_an_f16_transformer_in_the_int8_seat(self, tmp_path: Path) -> None:
+        sources = _build_sources(
             tmp_path,
             containers={WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE)},
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* has no i8"):
             wan_plan(sources, generation=WAN22)
 
-    def test_it_refuses_a_mixed_i4_series_in_the_int8_seat(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
+    def test_it_refuses_a_mixed_i4_series_in_the_int8_seat(self, tmp_path: Path) -> None:
         """A mixed series that satisfies "contains i8" — only the forbidden table rejects it (the
         same check as 2.1)."""
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path,
             containers={
                 WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE, storage="i4")
@@ -2247,12 +1835,10 @@ class TestTheWan22Gates:
         with pytest.raises(DistError, match=r"transformer_i8: .* has i4"):
             wan_plan(sources, generation=WAN22)
 
-    def test_an_f16_transformer_beside_the_vae_is_never_carried(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
+    def test_an_f16_transformer_beside_the_vae_is_never_carried(self, tmp_path: Path) -> None:
         """Even with a DiT in the f16 series, the Wan2.2 placement table does not pick it up (the
         f16 DiT is not distributed)."""
-        sources = _build_sources22(tmp_path)
+        sources = _build_sources(tmp_path)
         write_component(
             sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
             _graph_container(WAN_TRANSFORMER_ROLE),
@@ -2263,15 +1849,14 @@ class TestTheWan22Gates:
             WAN_TEXT_EMBEDS_ROLE,
             WAN_TOKENIZER_ROLE,
         }
-        assert WAN_TRANSFORMER_F16_ROLE not in plan.artifacts
 
     @pytest.mark.parametrize("role", [WAN_VAE_FIRST_I8_ROLE, WAN_VAE_NEXT_I8_ROLE])
     def test_it_refuses_an_f16_vae_decoder_in_the_int8_seat(
-        self, tmp_path: Path, wan22_provenance, role: str
+        self, tmp_path: Path, role: str
     ) -> None:
         """The mix-up of plugging an f16-series decoder into the i8 preset (fails because the
         requirement is absent — ADR 0133 decision 7)."""
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path, containers={role: _graph_container(_VAE_I8_GRAPHS[role])}
         )
         with pytest.raises(DistError, match=rf"{role}: .* has no i8"):
@@ -2280,11 +1865,11 @@ class TestTheWan22Gates:
     @pytest.mark.parametrize("role", WAN_VAE_ENCODER_ROLES)
     @pytest.mark.parametrize("storage", ["f32", "i8"])
     def test_it_refuses_a_vae_encoder_without_f16_storage(
-        self, tmp_path: Path, wan22_provenance, role: str, storage: str
+        self, tmp_path: Path, role: str, storage: str
     ) -> None:
         """The mix-up of plugging a plain f32 / other-storage series into the encoder preset (the
         same check as the decoder)."""
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path, containers={role: _graph_container(role, storage=storage)}
         )
         with pytest.raises(DistError, match=rf"{role}: .* has no f16"):
@@ -2292,11 +1877,11 @@ class TestTheWan22Gates:
 
     @pytest.mark.parametrize("role", WAN_VAE_ENCODER_ROLES)
     def test_it_refuses_a_series_without_one_of_the_vae_encoder_graphs(
-        self, tmp_path: Path, wan22_provenance, role: str
+        self, tmp_path: Path, role: str
     ) -> None:
         """The encoder is a component fetched even for T2V-only use — a series missing even one is
         not assembled."""
-        sources = _build_sources22(tmp_path)
+        sources = _build_sources(tmp_path)
         missing = wan_placements(sources, WAN22)[role]
         for part in missing.parent.iterdir():
             part.unlink()
@@ -2306,12 +1891,12 @@ class TestTheWan22Gates:
 
     @pytest.mark.parametrize("role", sorted(WAN_VAE_LENDER_ROLES))
     def test_every_32_tile_container_borrows_everything_from_its_lender(
-        self, tmp_path: Path, wan22_provenance, role: str
+        self, tmp_path: Path, role: str
     ) -> None:
         """ADR 0134 decision 1: the borrower holds not a single byte outside part 0, every
         initializer is a shared declaration, and the lender (the 16 set of the same label) holds
         the named keys as data with the same dtype and shape."""
-        placements = wan_placements(_build_sources22(tmp_path), WAN22)
+        placements = wan_placements(_build_sources(tmp_path), WAN22)
         borrower = placements[role]
 
         assert_shared_decoder(borrower, placements[WAN_VAE_LENDER_ROLES[role]])
@@ -2320,14 +1905,14 @@ class TestTheWan22Gates:
 
     @pytest.mark.parametrize("role", [WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_I8_ROLE])
     def test_it_refuses_a_32_tile_container_that_carries_weight_bytes(
-        self, tmp_path: Path, wan22_provenance, role: str
+        self, tmp_path: Path, role: str
     ) -> None:
         """The mix-up of plugging a container that holds weights into the preset of a borrowing set
         (the storage check looks at the lender, so it passes — only the sharing check rejects
         it)."""
         storage = "i8" if role.endswith("_i8") else "f16"
         graph = _VAE_SHARED_GRAPHS[role]
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path, containers={role: _graph_container(graph, storage=storage)}
         )
         with pytest.raises(
@@ -2337,11 +1922,11 @@ class TestTheWan22Gates:
 
     @pytest.mark.parametrize("role", [WAN_VAE_FIRST_32_I8_ROLE, WAN_VAE_NEXT_32_ROLE])
     def test_it_refuses_a_32_tile_container_naming_a_tensor_its_lender_lacks(
-        self, tmp_path: Path, wan22_provenance, role: str
+        self, tmp_path: Path, role: str
     ) -> None:
         """The form of a series where only the lender was rebaked (keys the borrower names are
         absent from the lender)."""
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path, containers={role: _shared_container(role, mark="vae_decoder_other")}
         )
         with pytest.raises(
@@ -2351,12 +1936,12 @@ class TestTheWan22Gates:
         ):
             wan_plan(sources, generation=WAN22)
 
-    def test_it_refuses_a_wan21_model(self, tmp_path: Path, wan22_provenance) -> None:
+    def test_it_refuses_a_wan21_model(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match=r"unknown Wan2\.2 model 't2v-1\.3b'"):
-            wan_plan(_build_sources22(tmp_path), DEFAULT_MODEL, WAN22)
+            wan_plan(_build_sources(tmp_path), DEFAULT_MODEL, WAN22)
 
-    def test_it_refuses_rope_base_without_its_asset(self, tmp_path: Path, wan22_provenance) -> None:
-        sources = _build_sources22(
+    def test_it_refuses_rope_base_without_its_asset(self, tmp_path: Path) -> None:
+        sources = _build_sources(
             tmp_path,
             containers={
                 WAN_TRANSFORMER_I8_ROLE: _graph_container(
@@ -2369,13 +1954,11 @@ class TestTheWan22Gates:
         ):
             wan_plan(sources, generation=WAN22)
 
-    def test_a_vae_pair_of_different_tiles_points_to_the_wan22_writer(
-        self, tmp_path: Path, wan22_provenance
-    ) -> None:
+    def test_a_vae_pair_of_different_tiles_points_to_the_wan22_writer(self, tmp_path: Path) -> None:
         """The rebake hint of the sharing check names the generation's writer (the default of 2.1's
         `export_vae` writes the 2.1 series, so it has no effect on the 2.2 set)."""
         latent = (WAN_VAE_LATENT_INPUT, [48, 1, 4, 4])
-        sources = _build_sources22(
+        sources = _build_sources(
             tmp_path,
             containers={
                 WAN_VAE_FIRST_ROLE: _vae_container(WAN_VAE_FIRST_ROLE, [latent]),
@@ -2412,8 +1995,8 @@ class TestTheWan22ModelCard:
             " the TS side too"
         )
 
-    def test_it_describes_wan22(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_describes_wan22(self, assembled) -> None:
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         upstream = SOURCES[_TI2V]
         assert "# Wan2.2 TI2V 5B — Karume" in card
@@ -2458,11 +2041,11 @@ class TestTheWan22ModelCard:
             " default, and the 10 GB class keeps 16" in prose
         )
 
-    def test_the_overview_names_every_graph_of_the_manifest(self, assembled22) -> None:
-        _overview_names_every_graph(*assembled22)
+    def test_the_overview_names_every_graph_of_the_manifest(self, assembled) -> None:
+        _overview_names_every_graph(*assembled)
 
-    def test_it_says_49_frames_did_not_run_through_the_pipeline_class(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_says_49_frames_did_not_run_through_the_pipeline_class(self, assembled) -> None:
+        out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "and 33 frames at 1280 × 704 in 50-step runs." in prose
         assert (
@@ -2475,15 +2058,15 @@ class TestTheWan22ModelCard:
     def test_the_usage_suggests_the_typescript_defaults(self) -> None:
         """The default comment of Usage is drawn from the generation's defaults (a copy of
         `defaults` of `descriptor.ts`), and the defaults are within the accepted set."""
-        for card in (WAN21_CARD, WAN22_CARD):
-            assert card.default_size in card.accepted_sizes
-            low, high = card.frames
-            assert low <= card.default_frames <= high
-            assert (card.default_frames - 1) % 4 == 0
+        card = WAN22_CARD
+        assert card.default_size in card.accepted_sizes
+        low, high = card.frames
+        assert low <= card.default_frames <= high
+        assert (card.default_frames - 1) % 4 == 0
         assert (WAN22_CARD.default_size, WAN22_CARD.default_frames) == ((1280, 704), 33)
 
-    def test_it_carries_none_of_the_wan21_sizes_or_frame_counts(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_carries_none_of_the_wan21_sizes_or_frame_counts(self, assembled) -> None:
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         for figure in ("832", "480", "81"):
             assert re.search(rf"\b{figure}\b", card) is None, figure
@@ -2493,8 +2076,8 @@ class TestTheWan22ModelCard:
         assert "`f16` quant with the precomputed embeddings" not in " ".join(card.split())
         assert re.search(r"(?<!\w)Pipeline\.fromPretrained\(", card) is None
 
-    def test_it_attributes_the_text_assets_to_the_wan21_checkpoint(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_attributes_the_text_assets_to_the_wan21_checkpoint(self, assembled) -> None:
+        out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         text = SOURCES[DEFAULT_MODEL]
         assert f"[{text.repo}](https://huggingface.co/{text.repo}) at commit `{text.revision}`" in (
@@ -2509,8 +2092,8 @@ class TestTheWan22ModelCard:
         assert "second, int8 copy" not in prose
         assert "the transformer shipped only in int8" in prose
 
-    def test_it_names_the_measured_resources_and_what_was_not_measured(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_names_the_measured_resources_and_what_was_not_measured(self, assembled) -> None:
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "| `f16+dit8` | 33 | 21.8 s | 7.86 GiB | 2,143 s | 439 s | 43 min 3 s |" in card
         assert (
@@ -2573,12 +2156,12 @@ class TestTheWan22ModelCard:
         assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
-    def test_it_names_the_121_frame_row_with_its_own_gpu_and_reading(self, assembled22) -> None:
+    def test_it_names_the_121_frame_row_with_its_own_gpu_and_reading(self, assembled) -> None:
         """The 121-frame row is only for the practical preset — a full run on the RTX 3080 Ti
         development machine, with a different GPU and a different reading (nvidia-smi, whole GPU)
         from the B570 rows, and it says thermal limiting is included. The reference preset was not
         run at 121."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert (
             "| `f16+dit8-a8-attn8-s16` | 121 | not measured | 11.09 GiB | 3,068 s | 710 s |"
@@ -2645,7 +2228,7 @@ class TestTheWan22ModelCard:
         assert "2 GiB buffers" not in prose
 
     def test_it_says_121_frames_fit_12_gib_and_the_b570_is_checked_only_up_to_57_frames(
-        self, assembled22
+        self, assembled
     ) -> None:
         """The accepted upper bound of 121 is claimed by the fact that it completed in Chrome on the
         development machine (RTX 3080 Ti, 12 GiB) and the RTX 5070 Ti, with the caveat that the peak
@@ -2655,7 +2238,7 @@ class TestTheWan22ModelCard:
         the other lengths it says unknown. Saying only 121 is unsupported would read as 61–117
         running, so it is written as a range. It says that if it does not fit, it fails in the
         middle of execution rather than at admission."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
             "121 frames at 1280 × 704 (the `f16+dit8-a8-attn8-s16` quant) ran 50 steps the same way"
@@ -2714,53 +2297,48 @@ class TestTheWan22ModelCard:
         assert "Not run in a browser yet." not in prose
         assert "which has not been checked yet" not in prose
 
-    def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled22) -> None:
-        _, manifest = assembled22
+    def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled) -> None:
+        _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         quants = changed["models"][_TI2V]["quants"]
         quants["f16+other"] = quants[_REFERENCE]
-        card = _card22(changed)
+        card = _card(changed)
         assert (
             f"The other quants (`{_I8}` / `{_CONV8}` / `f16+other`) have not been measured yet."
             in card
         )
         assert "| `f16+other` |" not in card.split("### Quants")[0]
 
-    def test_it_refuses_a_manifest_without_a_measured_seat(self, assembled22) -> None:
-        _, manifest = assembled22
+    def test_it_refuses_a_manifest_without_a_measured_seat(self, assembled) -> None:
+        _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         model = changed["models"][_TI2V]
         model["quants"] = {"i8": model["quants"][_REFERENCE]}
         model["defaultQuant"] = "i8"
         with pytest.raises(ValueError, match="no quant whose execution resources were measured"):
-            _card22(changed)
+            _card(changed)
 
-    def test_the_defaults_come_from_the_manifest(self, assembled22) -> None:
-        _, manifest = assembled22
+    def test_the_defaults_come_from_the_manifest(self, assembled) -> None:
+        _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         changed["models"][_TI2V]["pipelineConfig"] = {
             "scheduler": {"shift": 7.5},
             "defaults": {"steps": 23, "guidance": 4.25},
         }
-        card = _card22(changed)
+        card = _card(changed)
         assert "- **steps**: 23" in card
         assert "- **shift** (flow-matching shift): 7.5" in card
 
-    def test_it_refuses_a_wan21_model_or_pipeline(self, assembled22) -> None:
-        _, manifest = assembled22
+    def test_it_refuses_a_wan21_model_or_pipeline(self, assembled) -> None:
+        _, manifest = assembled
         foreign_model = json.loads(json.dumps(manifest))
         foreign_model["models"] = {DEFAULT_MODEL: foreign_model["models"][_TI2V]}
         with pytest.raises(ValueError, match=r"'t2v-1\.3b' is not a Wan2\.2 model"):
-            _card22(foreign_model)
+            _card(foreign_model)
         foreign_pipeline = json.loads(json.dumps(manifest))
-        foreign_pipeline["models"][_TI2V]["pipeline"] = WAN_PIPELINE
+        foreign_pipeline["models"][_TI2V]["pipeline"] = "wan/1"
         with pytest.raises(ValueError, match=WAN22_SUPPORTED_PIPELINE):
-            _card22(foreign_pipeline)
-
-    def test_the_wan21_card_refuses_a_wan22_manifest(self, assembled22) -> None:
-        _, manifest = assembled22
-        with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
-            _card(manifest)
+            _card(foreign_pipeline)
 
 
 def _frontmatter(card: str) -> str:
@@ -2771,27 +2349,18 @@ def _frontmatter(card: str) -> str:
 class TestTheWan22ImageToVideoCard:
     """The I2V description in the Wan2.2 card (ADR 0121 step 9c): the inputs (`image` / `fit`), the
     usage, the verification figures (copies of the addenda "results of step 9a" and "results of step
-    9b" and of the test constants), and the scope of the quality figures (measured on T2V). The
-    Wan2.1 card has not a single I2V line (`wan.Pipeline` of 2.1 rejects `image`)."""
+    9b" and of the test constants), and the scope of the quality figures (measured on T2V)."""
 
-    def test_it_tags_image_to_video_and_keeps_the_single_pipeline_tag(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_it_tags_image_to_video_and_keeps_the_single_pipeline_tag(self, assembled) -> None:
+        out_dir, _ = assembled
         head = _frontmatter((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8"))
         # HF has one pipeline tag — it stays text-to-video, and I2V is claimed with tags.
         assert "pipeline_tag: text-to-video\n" in head
         assert "pipeline_tag: image-to-video" not in head
         assert "tags:\n  - text-to-video\n  - image-to-video\n  - video-generation\n" in head
 
-    def test_the_wan21_card_carries_no_image_to_video_lines(self, assembled) -> None:
+    def test_it_describes_the_image_and_fit_inputs(self, assembled) -> None:
         out_dir, _ = assembled
-        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert "image-to-video" not in card
-        assert "image to video" not in card
-        assert "- **image**" not in card
-        assert "- **fit**" not in card
-
-    def test_it_describes_the_image_and_fit_inputs(self, assembled22) -> None:
-        out_dir, _ = assembled22
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         inputs = card.split("## Accepted inputs", 1)[1].split("\n## ", 1)[0]
         prose = " ".join(inputs.split())
@@ -2833,8 +2402,8 @@ class TestTheWan22ImageToVideoCard:
             < inputs.index("Anything outside these sets")
         )
 
-    def test_the_usage_shows_an_image_to_video_call(self, assembled22) -> None:
-        out_dir, _ = assembled22
+    def test_the_usage_shows_an_image_to_video_call(self, assembled) -> None:
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         usage = card.split("## Usage", 1)[1].split("\n## ", 1)[0]
         assert "  image: { data: rgb, width: imageWidth, height: imageHeight }," in usage
@@ -2878,9 +2447,9 @@ class TestTheWan22ImageToVideoCard:
         assert usage.count("```") == 4
 
     def test_it_explains_the_conditioning_in_the_overview_and_the_attribution(
-        self, assembled22
+        self, assembled
     ) -> None:
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
             "at every step the first latent frame of the transformer's input is replaced with it"
@@ -2907,12 +2476,12 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "neither has image to video" not in prose
 
-    def test_it_copies_the_image_to_video_verification_figures(self, assembled22) -> None:
+    def test_it_copies_the_image_to_video_verification_figures(self, assembled) -> None:
         """The figures are copies of the addenda "results of step 9a / 9b" and the test constants
         (`WAN_I2V_ENCODER_BAND` 7.8e-5, `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3, `FINAL_RATIO_BAND`
         3.9e-3, `FRAME_RATIO_BAND` 8.9e-3, the T2V latents.1 band 9.5e-4, fault injection 138–358
         times)."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         section = card.split("## Determinism and verification", 1)[1].split("\n## ", 1)[0]
         prose = " ".join(section.split())
@@ -2955,10 +2524,10 @@ class TestTheWan22ImageToVideoCard:
         # The T2V comparison item says T2V.
         assert "- **Text to video against the upstream reference**" in prose
 
-    def test_the_quality_figures_say_which_task_they_were_measured_on(self, assembled22) -> None:
+    def test_the_quality_figures_say_which_task_they_were_measured_on(self, assembled) -> None:
         """The T2V figures and the I2V figures (the A/B 0.046 of step 9d and the 12 visual pairs)
         are kept apart within the same sentence."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
             "On image to video the same first-step check holds at 1280 × 704 with 33 frames (one"
@@ -3001,11 +2570,11 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
 
-    def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled22) -> None:
+    def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled) -> None:
         """The table is all T2V. For I2V it writes only the peak of the encoder alone (addendum
         "results of step 9a") and the 50-step wall time (the result file of the step 9b full run),
         and says the VRAM peak of one clip has not been measured."""
-        out_dir, _ = assembled22
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         section = card.split("## Resources", 1)[1].split("\n## ", 1)[0]
         prose = " ".join(section.split())
@@ -3033,31 +2602,6 @@ _REAL_PRESENT = SERIES_CHECKS and (
     and _REAL.text_encoder.parent.is_dir()
     and _REAL.tokenizer.is_file()
 )
-
-
-@pytest.mark.skipif(
-    SERIES_CHECKS and not _REAL_PRESENT,
-    reason=f"no real series: {_REAL.series} / {_REAL.i8_series} / {_REAL.text_encoder.parent}",
-)
-@requires_series
-class TestTheRealSeries:
-    """The plan can be built from the real series (the outputs of `wan.export_dit` (f16 / i8) /
-    `wan.export_vae` / `wan.text_embeds` / `wan.umt5_export` / `wan.umt5_tokenizer`).
-
-    It reads only the 2 documents of the containers, the binding tables, the assets (declarations
-    and the base RoPE table), the header of the embedding asset and the tokenizer asset (about
-    8 MB) (no weight payloads are read).
-    """
-
-    def test_the_plan_passes_every_gate(self) -> None:
-        plan = wan_plan(_REAL)
-        assert plan.pipeline == WAN_PIPELINE
-        assert set(plan.artifacts) == {
-            *WAN21.container_roles,
-            WAN_TEXT_EMBEDS_ROLE,
-            WAN_TOKENIZER_ROLE,
-        }
-        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.artifacts)
 
 
 _REAL22 = wan_sources(SERIES_ROOT, WAN22)

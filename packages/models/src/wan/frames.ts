@@ -17,7 +17,7 @@
  * and then get +0.5, pinning the shadows to mid-grey).
  */
 
-import type { GeneratedVideo } from "./pipeline.ts";
+import type { GeneratedVideo } from "./types.ts";
 
 export const frameToRgba = (
   video: Pick<GeneratedVideo, "frames" | "width" | "height" | "data">,

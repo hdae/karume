@@ -56,7 +56,7 @@ maintainer's ruling of 2026-11-06).
   - Put after the release by the maintainer's rulings of 2026-11-19: the GEMV derivation's evidence rules
     (perf-ledger K-113; built 2026-11-20; the registered tables derived again under them 2026-11-21), and the bf16 shapes
     that could take a parallel row of the default profile — both in item 6 of "The move to maintained specs (ADR 0152)" below; the first
-    publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16"; "Completing EmbeddingGemma" (parked 2026-11-22);
+    publication of the 2.9B Anima distribution — "Keep bf16 where the upstream is bf16";
     and EmbeddingGemma 2 ("EmbeddingGemma 2" below).
   - Put after the release by the maintainer's ruling of 2026-11-20: `apple-metal-3` keeps matching the M2 alone, and an
     Apple adapter that reports no description (the M5) gets a table derived from its own records — on the M5 the M2's
@@ -104,8 +104,6 @@ maintainer's ruling of 2026-11-06).
       `embeddinggemma2` recipe and its upstream snapshot under `inputs/embeddinggemma2/`.
     - The attention hook of the Gemma 4 recipe refuses `attention_mask=None`, so the EmbeddingGemma 2 recipe carries
       a bidirectional hook of its own; one shared helper for the Gemma-line recipes is not built.
-    - The comment on the tolerance of `packages/e2e/tests/e2e_embeddinggemma_test.ts` says its relative term is
-      "about 1/4 of atol"; it is 2.5 times atol.
   - **Moving the pinned transformers from 5.14.1 to 5.23.0 (filed 2026-11-21; a task of its own by the maintainer's
     ruling of that day, each difference in a result confirmed one by one when it is done)**: the pin stays 5.14.1 for
     every dependency group and every per-run `--with` but the EmbeddingGemma 2 recipe's, which adds 5.23.0 per run. A
@@ -137,8 +135,8 @@ maintainer's ruling of 2026-11-06).
       `extend` gains 6 ranges and widens 2, `prepend` loses U+11A3A); `packages/models/tests/fixtures/anima-text/parity.json` and
       the distributed T5 table would change when regenerated. No check is red.
     - Not re-checked on 5.23.0 (assets absent here): the umT5, Wan and Qwen3.5 tokenizer fixtures, the MOSS stage-0
-      records, the real-weight exports of siglip2, birefnet, depth-anything, deberta, minicpm5, embeddinggemma and
-      sbv2, and the batch>1 EmbeddingGemma entry of known-issues (written for the 5.14 line).
+      records, the real-weight exports of siglip2, birefnet, depth-anything, deberta and
+      sbv2.
     - Comments in `packages/models/src` still name transformers 5.14.1 as the source of truth (the T5 / umT5 /
       Qwen2 / Qwen3.5 tokenizers, the image preprocessing, the umT5 relative positions, Gemma 4 vision).
 
@@ -147,8 +145,6 @@ maintainer's ruling of 2026-11-06).
   order on 2026-11-15)**. Each item is its own commit with its behaviour tests. Item 1 has landed; what has landed of
   items 2 to 7 is described by the specs it cites. Left:
   2. **Records of a run** (the WGSL a test dispatches, `outputs/references/`, the verification cache's records):
-     - Wan2.1's pipeline file (`e2e_wan_pipeline_test.ts`) is not shortened: its case IDs carry no frame count and its
-       cases run the default 33 frames.
      - A mismatch reports the differing bytes of the two artifacts; a distance per artifact type (pixels, samples,
        tensor values) is not built.
   3. **Kernel selection as one table per op and dispatch programs**
@@ -323,7 +319,7 @@ maintainer's ruling of 2026-11-06).
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
-  - Still to inspect: the families whose upstream dtype was not read (EmbeddingGemma, MiniCPM5, SBV2's front and voice),
+  - Still to inspect: the families whose upstream dtype was not read (SBV2's front and voice),
     and whether the `:wbf16` GEMM kernels (M > 1) have their geometry per adapter: the geometry sweep's linear cases
     measure f16 storage only (`CaseWeight` in `packages/runtime/src/tune/cases.ts`); the GEMV side has bf16 rows.
 
@@ -366,7 +362,7 @@ maintainer's ruling of 2026-11-06).
        (decision 2).
     4. The checks of decision 4 (A, P, F, B, G, E): before a `KARUME_UPSTREAM_PARITY` file is retired it is mapped to its
        replacement (a file without one keeps its opt-in lane); patch fidelity for the recipes without a `--verify` mode
-       (deberta, embeddinggemma, gemma4, gemma4_qat, irodori, minicpm5, moss, qwen3_5 on 2026-11-09); deviation records per
+       (deberta, gemma4, gemma4_qat, irodori, moss, qwen3_5 on 2026-11-09); deviation records per
        family, starting from BiRefNet's post-processing (ADR 0125) and Gemma 4's vision masks (ADR 0144 decision 1).
   - **Records**: Wan2.2's untiled VAE distance (torch tiled against untiled on the same latents — an ADR 0121 addendum and
     ADR 0147 decision 10); the inventory of published presets with no recorded verification (the self A/B check, the
@@ -435,7 +431,7 @@ maintainer's ruling of 2026-11-06).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
   The acceptance of Qwen3 / MiniCPM5 / E4B / gemma4-qat and the adoption records of K-25 to K-44 are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Remaining = the cost study of sharing the gate/up input (perf-ledger K-50, whose step 0 measurement has not run); isolating the cause of the GPU Instance loss in Chrome;
-  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B and MiniCPM5; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
+  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
 - **Continued verification of the 9/11 review** (investigation 2026-09-10, [follow-up record](research/2026-09-10-codex-mtp-optimization.md)):
   Decide whether `artifacts.staged_publication` allows several writers to the same final, and if needed design locking and recovery from interruption.
   The follow-up tests of the GPU edge-channel protection on M2 / browsers and whole-model performance measurement remain.
@@ -480,8 +476,8 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
     0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
     [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
-    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`,
-    `vowel-detector` and `wan` (Wan2.1). `fusion-hints`' search itself is back as the fusion candidate search of
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the example
+    `qwen3`. `fusion-hints`' search itself is back as the fusion candidate search of
     `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
     `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
@@ -622,7 +618,7 @@ maintainer's ruling of 2026-11-06).
 - **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
   stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
   would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
-  umT5, BiRefNet, Depth Anything, SigLIP2, vowel-detector, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
+  umT5, BiRefNet, Depth Anything, SigLIP2, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
   Gemma 4 26B and the q4_0 QAT line, and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report
   already binds and plans those with a local mirror.
 
@@ -647,20 +643,17 @@ maintainer's ruling of 2026-11-06).
   **Adjacent small items of stage 9 (filed 2026-10-10, review)**:
   (a) the distribution assembly (`tools/export-recipes/wan/distribution.py`) does not check the input/output contract of the VAE encoder's 3 containers (input names, symbols, the shape chain pre → attn → post) (the decoder's 2 containers have the pair check `assert_vae_chunk_pair` — a series with only one of them rebuilt passes assembly and is first rejected at admission in the user's `fromPretrained`; filed 2026-10-10, review G4-01, a candidate for the fix wave)
   **Adjacent small items of stages 5 / 6 (filed 2026-10-05)**:
-  (a) the tile reference reader and helper functions are duplicated across the Wan VAE e2e tests (`readTileFixture` in `e2e_wan_ti2v_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tile32_test.ts`; `planMeta` in those two and `e2e_wan_vae_tiles_test.ts`; `compare` and `absMax` in `e2e_wan_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tiles_test.ts`; `poisonFrames` in those two plus `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_a8_test.ts`; `roundUpTwoDigits` — see (d)) → into a shared test helper
-  (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in `tools/export-recipes/wan/` (`text_embeds.py`, `vae_tiling.py`, `few_step_ref.py`, `ti2v_few_step_ref.py`, `export_vae.py`, `export_vae_encoder.py`) → into `_shared`
+  (a) the tile reference reader and helper functions are duplicated across the Wan VAE e2e tests (`readTileFixture` and `planMeta` in `e2e_wan_ti2v_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tile32_test.ts`; `poisonFrames` in those two and `e2e_wan_ti2v_vae_a8_test.ts`; `roundUpTwoDigits` — see (d)) → into a shared test helper
+  (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in `tools/export-recipes/wan/` (`text_embeds.py`, `vae_tiling.py`, `ti2v_few_step_ref.py`, `export_vae.py`, `export_vae_encoder.py`) → into `_shared`
   (c) the existing 5 DiT inputs have no dtype check (only the 2 inputs added for 2.2 check the dtype)
-  (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts` and `e2e_wan_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
-  (e) the messages of the `pipelineConfig` reader have no owner prefix (the message cannot tell whether the 2.1 or the 2.2 class failed)
-  (f) the 2.1, 2.2 T2V and 2.2 I2V end-to-end e2e tests (`e2e_wan_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`), and the 2.1 test keeps its own verbatim copy of the contact sheet that the two 2.2 tests import from `packages/models/tests/helpers/wan-video-artifacts.ts`
+  (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
+  (f) the 2.2 T2V and I2V end-to-end e2e tests (`e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`)
   (g) there is no host test combining the admission of the gpu path (`admitWanText`) with the 48 ch, 7-input DiT (stage 6 results)
-  (h) `video_size` in `tools/export-recipes/wan/pipeline_ref.py` hard-codes 16 ch and compression 8 (unusable for 2.2 — stage 6 results)
   (i) `planWanRequest` checks only the element count of the injected `latents`, not the shape (stage 6 results)
   **Adjacent small items of stage 4 (filed 2026-10-05, deferred in review)**:
   (a) move `filePresent` into a neutral test helper (today the VAE helper `packages/models/tests/helpers/wan-ti2v-vae.ts` imports it from the DiT helper `wan-ti2v-dit.ts` in the same directory — the VAE tests depend on importing the DiT helper)
-  (b) make the drop-cache fault injection of the shared helper `packages/models/tests/helpers/wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run both the 2.1 and the 2.2 lane)
+  (b) make the drop-cache fault injection of the shared helper `packages/models/tests/helpers/wan-vae-chunk-loop.ts` assert that the named cache exists in the graph (with a missing name it silently injects no fault — run the 2.2 lane)
   (c) a closed form of DupUp3D (put up0 / up1 on the fused upsample2x) — perf-ledger K-77
-  (d) in the step "the fault-injection loop matches the product path at Uint32 when there is no fault" of the 2.1 VAE chunk e2e (`e2e_wan_vae_tiles_test.ts`), refill the frames with poison values before `decodeWithFault(none)` as well and assert 0 non-finite (the 2.2 e2e was fixed in stage 4 — after the fix, run the 2.1 VAE chunk e2e for real)
   **Adjacent small items of stage 3 (filed 2026-10-04, proposals)**:
   (b) add a paragraph "how to swap it into Wan" to the model card of the experimental mirror (the fine-tuned umT5)
   (c) add a check that compares the model card of the local distribution mirror with the card the recipe draws today (to find missed rebuilds)
@@ -701,7 +694,7 @@ maintainer's ruling of 2026-11-06).
   [recon-2](research/2026-08-14-model-expansion-recon-2.md).
 - **Performance candidates**: the 🚧 rows of [perf-ledger](perf-ledger.md) are the source of truth for filing, adoption and order.
 - **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
-  2026-11-21, before "Completing EmbeddingGemma", with which it shares the pipeline and the mask work). Built: the
+  2026-11-21). Built: the
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
   token length up to 8,192 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
   recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, presets `bf16` (default) and `i8`
@@ -874,7 +867,7 @@ maintainer's ruling of 2026-11-06).
      - `embeddinggemma.Pipeline` takes audio parts `{ type: "audio", audio }` (`MonoAudio`, 16 kHz mono f32) with
        `audio: true` (the weights role `audio`, fetched only then; `vision` and `audio` may be on together). The host
        front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames with the FFT moved to `src/audio/fft.ts`
-       (the vowel detector's, its second user): the windowed product in f32 as upstream's (since 2026-11-23 — the
+       (first written for the vowel detector): the windowed product in f32 as upstream's (since 2026-11-23 — the
        review found that the 5.12e-4 gap of the first build was upstream's f32 product, not its f32 FFT), the FFT and
        the rest in f64; its frames are within one ulp (4.77e-7) of upstream's f32 frames, and their bits equal
        upstream's arithmetic with an f64 FFT (the recipe's `audio-front-end.json`). Refused, never adjusted:
@@ -899,20 +892,20 @@ maintainer's ruling of 2026-11-06).
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
   no ORT comparison harness exists today (the workbench's `gemma4-bench` entry compares Karume's own arms), so resuming needs
-  one as a browser application (ADR 0127). Remaining targets = EmbeddingGemma (requires completion on the models side)
-  and **KokoroTTS** (corrected 2026-08-16 — the original Irodori was a typo. Kokoro runs on the Transformers stack, so
+  one as a browser application (ADR 0127). Remaining target =
+  **KokoroTTS** (corrected 2026-08-16 — the original Irodori was a typo. Kokoro runs on the Transformers stack, so
   it is easy to compare; requires Kokoro-82M support on the karume side = the model expansion candidate above, waiting
   for LSTM multi-output). In future, widen it into a comparison matrix that includes browser ONNX + native PyTorch
   (ruled unnecessary for now). The norms for measurement conditions (graph capture ON / freeDimensionOverrides / IO
   binding / checking EP partitioning, recording native EP or JSEP) have their source of truth in
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md).
 - **Rolling generation events out to other families (waiting for demand)**: stage events for sbv2 / birefnet / depth /
-  siglip2 / vowel (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the
+  siglip2 (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the
   **generation loop** of anima / irodori (today a throw from onEvent is the step-granular means of cancellation — the
   slot is kept in reserve). MOSS-Image's generation entry has neither events nor cancellation. **AbortSignal on the
   construction path is implemented for anima / irodori / Wan / MOSS** (`anima.PipelineOptions.signal` — checked at stage
   boundaries, passed through to the fetch layer, `signal.reason` propagated as is), so that is the precedent for the
-  style (the construction `signal` of sbv2 / birefnet / depth / siglip2 / vowel / gemma / umT5 is only passed through to
+  style (the construction `signal` of sbv2 / birefnet / depth / siglip2 / gemma / umT5 is only passed through to
   the fetch layer, with no checks at stage boundaries). **The generation-loop slot is implemented on the LLM surface**
   (ADR [0083](decisions/0083-generation-api-surface.md) decision 5) **and on Wan** (`wan.GenerateRequest.signal`) —
   rolling it out to other families still waits for demand.
@@ -922,7 +915,7 @@ maintainer's ruling of 2026-11-06).
   [0033](decisions/0033-vae-fixed-tile-decode.md) addendum.
 - **RAM-saving sequential tile assembly for Wan's VAE (filed 2026-10-11, Codex deep review R6A-016)**: the Wan version of the anima
   candidate above. `decodeWanVaeTiles` (`packages/models/src/wan/vae-tiles.ts`) accumulates all tiles in an array, then allocates the final video and
-  composites, so for Wan2.1's 832×480, 81 frames the 12 tiles' 764,411,904 B and the output's 388,177,920 B are alive at the same time
+  composites, so (computed when filed, on Wan2.1's 832×480 × 81 frames) the 12 tiles' 764,411,904 B and the output's 388,177,920 B are alive at the same time
   (computed from the shapes; RSS not measured). Candidate: decode row by row, paste into the output, and keep only the row above and the tile to the left. Conditions: keep the blend
   order (vertical → horizontal), and decide adoption after confirming bit identity with today's output by a Uint32 comparison. To measure: RSS for 33 / 81
   frames, readback wait, GPU time (for Wan2.2, measure the same quantities at 1280×704 and at the exit of patchify space).
@@ -989,10 +982,6 @@ maintainer's ruling of 2026-11-06).
   internal but shared by every test tolerance, the e2e ones included — option A's per-op table is implemented.
   [research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §8.2).
 
-- **minicpm5's `export_decode` still bakes the RoPE table** (an asymmetry: only gemma4 moved to host supply, with ADR
-  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)).
-  Whether to align it with host supply is a separate ruling.
-
 - **Adjacent filings of the memory management wave** (source of truth = ADR [0089](decisions/0089-memory-limits-preflight.md)
   Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)):
   allocation in `GpuContext.createResident` still relies on errorScope (run-time transients fail before allocation in the planning-time
@@ -1021,15 +1010,13 @@ maintainer's ruling of 2026-11-06).
   is outdated by the additions of the gemma4 generation API, the GEMV family and the tokenizer)
 - Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open (the per-family ledgers,
   `tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`, hold more `Unverified` rows than this list — for example
-  vowel_detector's and Irodori v4-Large's):
+  Irodori v4-Large's):
   rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
-  **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF** — its publication is held in
-  parked "HF publication of karume-sbv2-fn".
-  The Code license of the code-dependency block is still Unverified in the deberta, minicpm5 and embeddinggemma ledgers
-  (deberta's Attribution too).
+  The Code license of the code-dependency block is still Unverified in the deberta ledger
+  (its Attribution too).
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
-  ([container-v1](container-v1.md) §2.3). The recipes of anima, irodori (main and dacvae) and vowel_detector, and
+  ([container-v1](container-v1.md) §2.3). The recipes of anima and irodori (main and dacvae), and
   gemma4's `export.py`, still declare a `PROVENANCE` without it, so they **start filling it at their next re-export**
   (through `tools/export-recipes/_shared/upstream.py`; on the same occasion as the `sym_max` field of W-G4-4, which
   `Provenance` does not have yet)
@@ -1047,17 +1034,6 @@ maintainer's ruling of 2026-11-06).
   and its withdrawal of 2026-10-18). Order not ruled
 
 ## parked (with revival conditions)
-
-- **Completing EmbeddingGemma** (the first model, `google/embeddinggemma-300m`: models pipeline / distribution,
-  batch>1 export, runtime attention_mask wiring) — parked by the maintainer 2026-11-22: EmbeddingGemma 2 covers the use
-  (Apache-2.0, 8,192 tokens), and no fine-tune of the first model worth serving was found. Revival = a use for the first
-  model (an existing index of its vectors, a fine-tune worth serving), or the quant presets of EmbeddingGemma 2 turning
-  out much larger or slower than the first model's. What exists stays as it is (the recipe, its tests, the
-  limitations section). The tokenizer is shared with Gemma 4 and its assets are compiled separately (ADR
-  [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6). The wall in the conversion stage of the batch>1 export is
-  in [known-issues](known-issues.md). Its recipe must declare its window with `karume.band.to_band_form`: the family
-  `embeddinggemma` refuses a graph value holding the token length on two axes, which the folded `[1, 1, T, T]` band
-  mask is.
 
 - **Quantized weight delta as a way to ship or store a LoRA** (on hold, the maintainer 2026-11-15). The integer difference
   between `Q(W + ΔW)` and the distributed `Q(W)`; the measurement is
@@ -1082,13 +1058,6 @@ maintainer's ruling of 2026-11-06).
   The page-fault mechanism is **PoC'd in a spike outside the repository; practical viability uncertain** (on revival, transcribe the spike's measurements into
   research before entering a design spike — later section "MoE page-fault").
 
-- **HF publication of karume-sbv2-fn** (ruling to hold, 2026-08-20 — in wave K it briefly swung to "publish with source attribution",
-  but that was withdrawn). The upstream's written terms = only "commercial use OK, no credit needed, merging
-  free" on the Booth distribution page; **redistribution is not mentioned**, and the distributor's identity is unconfirmed. Revival = confirming with the distributor whether redistribution is allowed,
-  or a new maintainer ruling. The build method (separate pipeline `--pipeline sbv2-fn` — carrying the FN line's attribution) is kept.
-  The attribution is minimal (quoting the terms; no details of the distributor — ruling 2026-08-20, `a7ed68e0`). No permanent local mirror
-  (ruling 2026-08-30 — the e2e check was moved to jvnv, whose licence statement is positive; the fn mirror was deleted.
-  Regeneration = the dist command in assets-layout, from `inputs/sbv2/FN*`)
 - **Port of SBV2 `adjust_word2ph`** (ruling not to adopt, 2026-08-21 — ADR 0072 decision 8). The word2ph redistribution for accepting edits that change
   the phoneme count (replacing readings that do not align with word boundaries). The reference is the **upstream**
   Style-Bert-VITS2 semantics (LCS diff + 1..6 clamp, the residue raises), not the fork that AivisSpeech
@@ -1105,6 +1074,3 @@ maintainer's ruling of 2026-11-06).
   [research 2026-08-03](research/2026-08-03-demo-w8-perf-recon.md)), regenerating the f32 anima series
 - The by-design constraints (rank≤4 / OOB NaN / non-finite input / zero-element dimensions / cancellation granularity and others) have their source of truth in
   limitations.md — only items with real demand are promoted here
-- **Prerequisite for the first publication of vowel-detector (filed 2026-09-24)** (first publication on hold — maintainer's ruling 2026-10-15): the recipe reads the upstream `feature_config.json`
-  directly under `inputs/vowel-detector/`. This development machine holds the whole upstream repository, so before assembly
-  run `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` once.

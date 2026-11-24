@@ -1,4 +1,4 @@
-"""Tests of the Wan2.1 recipe.
+"""Tests of the Wan recipe.
 
 This is a package so that the **basenames of `<family>/tests/test_export.py` do not collide** when
 more families are added (pytest's default import mode loads a test in a directory without

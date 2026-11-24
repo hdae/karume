@@ -40,9 +40,9 @@ class TestFixtureName:
         assert vae_tiling.fixture_name("wide", 16, 16) == "vae_tiles.wide.safetensors"
         assert vae_tiling.fixture_name("wide", 32, 16) == "vae_tiles.wide.t32.safetensors"
 
-    @pytest.mark.parametrize(("patch_size", "tile"), [(None, 32), (2, 16)])
+    @pytest.mark.parametrize(("patch_size", "tile"), [(2, 16)])
     def test_the_default_tile_is_the_series_tile_of_the_generation(
-        self, patch_size: int | None, tile: int
+        self, patch_size: int, tile: int
     ):
         assert vae_tiling.default_tile_of(patch_size) == tile
 
@@ -130,7 +130,7 @@ class TestCliTile:
         [
             ("ti2v-5b", 20, "--tile 20 is not a multiple of 16"),
             ("ti2v-5b", 24, "--tile 24 is not a multiple of 16"),
-            ("t2v-1.3b", 40, "--tile 40 is not a multiple of 16"),
+            ("ti2v-5b", 40, "--tile 40 is not a multiple of 16"),
             ("ti2v-5b", 0, "--tile must be a positive integer (0)"),
             ("ti2v-5b", -16, "--tile must be a positive integer (-16)"),
             ("ti2v-5b", 4, "--tile 4 is not above the minimum overlap 4 (latents)"),

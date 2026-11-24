@@ -189,9 +189,9 @@ the card credits (source repository, source directories and version, license ter
 Naming one is **required** whenever a pipeline declares more than one profile, because a silent
 default would keep the previous family's attribution on the next family's repository, where every
 table and snippet still reads correctly and only the credit is wrong. Every recipe pipeline
-declares a single profile — SBV2's two voice families are separate pipelines (`sbv2` for JVNV,
-`sbv2-fn` for FN) — so the pipeline decides the attribution and the flag may be omitted; the moment
-a pipeline gains a second profile, the same rule starts demanding it.
+declares a single profile — a voice family with its own legal facts gets its own pipeline (SBV2's
+`sbv2` is the JVNV family) — so the pipeline decides the attribution and the flag may be omitted;
+the moment a pipeline gains a second profile, the same rule starts demanding it.
 
 ## Verification commands (all of them, after any change)
 

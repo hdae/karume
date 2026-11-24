@@ -38,7 +38,6 @@ from wan import (
     dit_patch,
     dit_probe,
     export_vae_encoder,
-    few_step_ref,
     i2v_preprocess_ref,
     prompts,
     text_embeds,
@@ -123,9 +122,8 @@ class TestCases:
         ]
         assert len({case.seed for case in CASES}) == len(CASES)
 
-    def test_the_seeds_are_not_shared_with_the_t2v_and_the_wan21_references(self):
+    def test_the_seeds_are_not_shared_with_the_t2v_reference(self):
         others = {case.seed for case in ti2v_few_step_ref.FIXTURE_CASES}
-        others |= {case.seed for case in few_step_ref.FIXTURE_CASES}
 
         assert not {case.seed for case in CASES} & others
 
@@ -160,7 +158,7 @@ class TestCases:
         assert REF.SERIES.name == "wan2.2-ti2v-5b-i8-dyn"
         assert path.name == "pipeline_steps_i2v.band-boxing-cats.safetensors"
         # Does not mix with the spelling of the T2V references (`pipeline_steps.*`).
-        assert not path.name.startswith(few_step_ref.FIXTURE_PREFIX)
+        assert not path.name.startswith(ti2v_few_step_ref.FIXTURE_PREFIX)
 
 
 def _pseudo_velocity(_index: int, timestep: torch.Tensor, model_input: torch.Tensor):

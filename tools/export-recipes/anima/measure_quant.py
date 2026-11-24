@@ -919,8 +919,8 @@ def save_images(images: dict[str, torch.Tensor], out: Path) -> str:
 # same instance (activation i8 on top of weight i8), whereas this is **a comparison between
 # methods**, so each configuration first restores the pristine weights (the plain f32 weights).
 # Applying without restoring would measure "MXFP4 on top of NF4", and the method comparison itself
-# would not hold (the same discipline as the EG / MiniCPM5 scripts). Labels, baselines and output
-# file names are not shared with the table above either.
+# would not hold (the same discipline as the EmbeddingGemma 2 scripts). Labels, baselines and
+# output file names are not shared with the table above either.
 #
 # The four methods brought in are the winners that survived the screening of two cheap families
 # (ADR 0069 addendum 5):

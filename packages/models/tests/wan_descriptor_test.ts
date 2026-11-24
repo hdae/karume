@@ -5,11 +5,7 @@
 
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import {
-  WAN21_GENERATION,
-  WAN22_TI2V_GENERATION,
-  type WanGenerationDescriptor,
-} from "../src/wan/descriptor.ts";
+import { WAN22_TI2V_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
 import { TEMPORAL_COMPRESSION } from "../src/wan/plan.ts";
 
 /** Whether a frame count fits the VAE's temporal compression (4n+1). */
@@ -59,7 +55,6 @@ const inconsistencies = (generation: WanGenerationDescriptor): string[] => {
 };
 
 const GENERATIONS: readonly (readonly [string, WanGenerationDescriptor])[] = [
-  ["Wan2.1", WAN21_GENERATION],
   ["Wan2.2", WAN22_TI2V_GENERATION],
 ];
 
@@ -73,13 +68,13 @@ describe("internal consistency of the generation descriptors", () => {
   // An empty accepted set and an inverted range cannot contain the defaults, so the defaults'
   // disagreement shows up as well.
   it("control: a descriptor with one field broken at a time is caught as a disagreement of that field", () => {
-    const base = WAN21_GENERATION;
+    const base = WAN22_TI2V_GENERATION;
     const broken: readonly (readonly [WanGenerationDescriptor, readonly string[]])[] = [
       [
         { ...base, acceptedSizes: [] },
-        ["the accepted set is empty", "the default size 832×480 is not in the accepted set"],
+        ["the accepted set is empty", "the default size 1280×704 is not in the accepted set"],
       ],
-      [{ ...base, minFrames: 6 }, ["an end of the frame range 6..81 is not 4n+1"]],
+      [{ ...base, minFrames: 6 }, ["an end of the frame range 6..121 is not 4n+1"]],
       [
         { ...base, minFrames: 37, maxFrames: 29 },
         [
@@ -91,19 +86,19 @@ describe("internal consistency of the generation descriptors", () => {
       [{ ...base, vaePatchSize: 1.5 }, ["vaePatchSize 1.5 is not a positive integer"]],
       [
         { ...base, defaults: { ...base.defaults, width: 480 } },
-        ["the default size 480×480 is not in the accepted set"],
+        ["the default size 480×704 is not in the accepted set"],
       ],
       [
         { ...base, defaults: { ...base.defaults, frames: 32 } },
         ["the default frame count 32 is not 4n+1"],
       ],
       [
-        { ...base, defaults: { ...base.defaults, frames: 85 } },
-        ["the default frame count 85 is outside 5..81"],
+        { ...base, defaults: { ...base.defaults, frames: 125 } },
+        ["the default frame count 125 is outside 5..121"],
       ],
       [
         { ...base, latents: { mean: base.latents.mean, std: base.latents.std.slice(1) } },
-        ["the counts of mean (16) and std (15) differ"],
+        ["the counts of mean (48) and std (47) differ"],
       ],
     ];
     for (const [generation, messages] of broken) {

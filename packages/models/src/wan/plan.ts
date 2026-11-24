@@ -4,8 +4,7 @@
  *
  * The only difference between paths is how the prompt is looked up ({@link PromptGate} —
  * `./text-stage.ts`); per-generation values (accepted set, frame range, defaults) are received as
- * arguments from the generation descriptor (`./descriptor.ts`). Shared by the Wan2.1 / 2.2 classes
- * (ADR 0121 decision 10).
+ * arguments from the generation descriptor (`./descriptor.ts`) (ADR 0121 decision 10).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
@@ -65,7 +64,7 @@ export type WanGenerationKnobs = {
   readonly height: number;
   /**
    * The latent shape `[C, F', H/s, W/s]` (C is the latent channel count of the VAE graph declaration,
-   * s the spatial compression `wanSpatialCompression` — `[16, F', H/8, W/8]` for Wan2.1).
+   * s the spatial compression `wanSpatialCompression` — `[48, F', H/16, W/16]` for Wan2.2).
    */
   readonly latentShape: readonly [number, number, number, number];
   readonly initial: InitialNoise;
@@ -122,9 +121,7 @@ export type PromptGate<Text> = {
 
 /**
  * The request fields the check reads (the observer and cancellation are read by the stages —
- * `GenerateRequest`). The I2V fields (`image` / `fit`) exist only in Wan2.2's request type
- * ({@link Ti2vGenerateRequest}), but the check reads them in one body regardless of generation — an
- * `image` that a JS caller passes to the Wan2.1 class, slipping past the type, is rejected here too.
+ * `GenerateRequest`; the I2V fields `image` / `fit` come from {@link Ti2vGenerateRequest}).
  */
 type WanPlanRequest = Pick<
   Ti2vGenerateRequest,
@@ -192,7 +189,7 @@ const assertRgb8Shaped = (image: unknown): void => {
  * `image` is present (the value of a field itself is checked before the combination of fields — `fit:
  * "cover"` without `image` also fails as a misspelling).
  *
- * I2V (a request that passes `image` — only for a generation of input form `"ti2v"`) chooses the
+ * I2V (a request that passes `image`) chooses the
  * output size within the accepted set from the image's aspect ratio and an explicit `width` /
  * `height`, and finishes preprocessing (fitting the size → `[-1, 1]` → patchify —
  * `i2v-preprocess.ts`) here (all input errors fail before touching the GPU). A request that does not
@@ -204,7 +201,7 @@ const assertRgb8Shaped = (image: unknown): void => {
  * call that bypassed admission (an asset mismatch — a plain `Error`).
  *
  * `vaeTile` 32 plans with the geometry of the 32-latent pair (`tile32.layout`); without that pair
- * (`tile32` omitted or its layout undefined — Wan2.1, or a preset without the `_32` roles) it is a
+ * (`tile32` omitted or its layout undefined — a preset without the `_32` roles) it is a
  * `ModelInputError` naming the preset. The overlap stays 64 px of output (ADR 0121 decision 6).
  */
 export const planWanRequest = <Text>(
@@ -283,18 +280,8 @@ export const planWanRequest = <Text>(
       `frames ${frames} is not in the accepted set (4n+1 in ${generation.minFrames}..${generation.maxFrames})`,
     );
   }
-  // The check of the I2V fields (ADR 0121 decisions 10 and 11). Only a generation whose DiT has
-  // condition inputs (input form "ti2v") takes a condition image. A field whose value is undefined is read as
-  // absent (the same reading as 2.2's T2V — it carries no image, so it does not create the false
-  // expectation that I2V runs on 2.1).
-  if (
-    generation.ditInputForm !== "ti2v" &&
-    (request.image !== undefined || request.fit !== undefined)
-  ) {
-    throw new ModelInputError(
-      "image / fit (generation from an image) is not accepted by this generation (Wan2.2's wan.Ti2vPipeline accepts it)",
-    );
-  }
+  // The check of the I2V fields (ADR 0121 decision 11). A field whose value is undefined is read as
+  // absent (the same reading as T2V).
   if (request.fit !== undefined && !isWanI2vFit(request.fit)) {
     throw new Error(`fit '${String(request.fit)}' is neither 'crop' nor 'stretch'`);
   }

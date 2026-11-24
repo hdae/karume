@@ -9,8 +9,8 @@ pipeline says.
 **Attribution is an axis separate from the template** ({@link Sbv2CardProfile}). Even with the same
 SBV2 template, the source, license and citations change completely depending on which family's
 weights are shipped, so only that part is split out into a profile. Which profile renders the card
-is **decided by the Pipeline** — each voice family has its own Pipeline (`sbv2` = JVNV, `sbv2-fn` =
-FN — `sbv2/distribution.py`) that holds exactly one profile, so the caller has nothing to choose.
+is **decided by the Pipeline** — each voice family has its own Pipeline (`sbv2` = JVNV —
+`sbv2/distribution.py`) that holds exactly one profile, so the caller has nothing to choose.
 
 MUST: **every number, download size, quant table, dtype label, style table and speaker table is
 derived from the manifest** (the same MUST of `karume.modelcard` applies as is). The only constants
@@ -104,7 +104,7 @@ class Sbv2CardProfile:
     repository would leave the table and the usage correct while the attribution stays that of the
     previous family — an error nobody can notice until after shipping, so it is held here as a
     separate field (which one is used is fixed by each family's Pipeline holding exactly one —
-    `PIPELINE` / `FN_PIPELINE` in `sbv2/distribution.py`).
+    `PIPELINE` in `sbv2/distribution.py`).
 
     `attribution` is the lines themselves because what goes into this field is prose that cannot be
     derived (summaries of license terms, citations, redistribution terms). Only the two lines that
@@ -128,47 +128,6 @@ class Sbv2CardProfile:
     source_revision: str | None
     #: The attribution items that follow Voices / Architecture (the Markdown lines themselves).
     attribution: tuple[str, ...]
-
-
-# ---- FN (a single model) ------------------------------------------------
-
-#: License (checked on the source 2026-08-20): the source HF repository **declares no license and
-#: has no model card**. The terms of use are on the author's Booth distribution page, so no SPDX
-#: identifier applies; `other` is used and `license_link` points to that page.
-#: DECIDED: attribution is kept **minimal** (about "converted this model from Booth" — no quoting of
-#: the terms and no details of the distributor. Maintainer ruling of 2026-08-20 — the "HF
-#: publication of karume-sbv2-fn" item under parked in `docs/backlog.md`. The HF publication of FN
-#: itself is also on hold under that item).
-SBV2_FN_METADATA = CardMetadata(
-    pipeline_tag=SBV2_PIPELINE_TAG,
-    base_model=("rufflet17/voice_models",),
-    base_model_relation="quantized",
-    license="other",
-    license_name="upstream-distribution-terms",
-    license_link="https://booth.pm/ja/items/6695672",
-    tags=("text-to-speech", "webgpu", "japanese"),
-)
-
-SBV2_FN_PROFILE = Sbv2CardProfile(
-    metadata=SBV2_FN_METADATA,
-    title="Style-Bert-VITS2 — Karume",
-    source_dirs=("FN/",),
-    source_version="2.6.1-JP-Extra",
-    # Unconfirmed: `refs/main` of the HF cache (`4fe4895a…`) was written when FN1–FN10 were
-    # retrieved on 2026-08-09, while the distribution's default model FN4 comes from a separate
-    # retrieval on 2026-08-07. There is no evidence it was the same revision, so none is declared.
-    source_revision=None,
-    attribution=(
-        "- **Source**: converted from the author's Style-Bert-VITS2 voice-model set distributed",
-        f"  on [Booth]({SBV2_FN_METADATA.license_link}) so it runs on this stack. See that page",
-        "  for the distribution terms.",
-        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
-        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
-        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
-        "  in the container format as the `text_encoder` component, so that license travels with",
-        "  this repository too.",
-    ),
-)
 
 
 # ---- JVNV (a family) ----------------------------------------------------
@@ -250,7 +209,6 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
 #: omitted would silently bring back the previous family's attribution every time a new family is
 #: shipped (`karume.dist` requires it explicitly).
 SBV2_CARD_PROFILES: Mapping[str, Sbv2CardProfile] = {
-    "fn": SBV2_FN_PROFILE,
     "jvnv": SBV2_JVNV_PROFILE,
 }
 

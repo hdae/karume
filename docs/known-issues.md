@@ -86,8 +86,9 @@ is not known. What Chrome on Metal (Dawn / Tint) does with the kernel rewrites i
   fused side, and **the rounding barrier of the workgroup memory round trip does not act as a barrier on Metal** (the
   form that the doc of src/kernels/gru-scan.ts anticipated — "the rounding barrier is not a guarantee of the WGSL
   specification"). It surfaces when H=128 = the reduction length grows.
-  The real harm, as elsewhere, is only that "the cross-path atol=0 check does not hold on Metal" — the actual quality is
-  ensured by the vowel-detector golden (a tolerance check) being green on M2. Root-cause candidate = strengthening the
+  The observed harm, as elsewhere, is only that "the cross-path atol=0 check does not hold on Metal" (1–64 ULP, no
+  NaN). No tolerance check on real weights covers the op on M2: no distributed model uses `gru_scan` (the one that did
+  was removed before 0.24.0). Root-cause candidate = strengthening the
   expression form of the rounding barrier
   (a bitcast round trip was measured to be ineffective, so another means — grouped with the root-cause candidate below;
   needs a real-M2 loop; not started).
@@ -184,7 +185,7 @@ an unroll that is not 4, 238 of them 16-column variants, which never differ on t
 - **Impact**: what does not hold on Metal is the statement "this rewrite changed no word", not the output. The
   product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
   (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
-  seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 and MiniCPM5 lines.
+  seed 0). Affected in the last bits on Metal: the decode attention of the Gemma 4 lines.
   The grouped form of `expert_linear` (a run of 2 to 768 tokens over weight rows of 64 words or more) takes the
   words that its 4-word unrolled loop leaves with one loop per row for this reason: with every row's word in one
   loop body, the M2 rounded the rows after the first of a walk unlike the one-row form (55 of 72 cases at each of
@@ -328,26 +329,6 @@ release decision, **it is accepted that 1 census check of verify stays red on M2
 equivalence of parallel and sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does
 not require timing).
 
-## EmbeddingGemma batch>1 export does not pass the conversion stage
-
-`python -m embeddinggemma.export --batch N` (N>1, on the tools/export-recipes side — the launch form follows the
-recipe separation of ADR 0065) fails loudly in core's `karume/convert.py`
-(B=1 succeeds as before). The mechanism has 2 stages:
-
-1. transformers (the 5.14 line) `masking_utils.find_packed_sequence_indices` enters the packed-sequence branch during
-   tracing because of the mismatch between `position_ids [1,T]` inside `Gemma3TextModel` and `batch_size=N`, and
-   `aten.eq.Tensor` / `aten.index.Tensor` / `aten.ne.Scalar` survive into the IR (at B=1 this mismatch does not occur,
-   and it is absorbed by the existing Tmax constant + `sym_prefix_slice` folding).
-2. Removing this branch with a monkeypatch then hits, for the band mask's `aten.bitwise_or.Tensor`, the constraint that
-   **a bool constant cannot be an IR v1 initializer** (f32 / i32 only). Moreover, the same
-   patch **triggers the same error even at B=1** — the existence of the packed-sequence branch itself is a premise of the
-   current band-mask constant-folding pattern, and even a patch meant to be eager-equivalent is not
-   safe (measured A/B, 2026-08-11).
-
-The root fix is a generalisation on the convert/normalize side (turning bool constants into f32/i32, or extending
-initializer dtypes + supporting mask folding for batch>1), which needs a design decision on the core conversion
-foundation. The `--batch` flag itself is kept in a form that can be used as is once the generalisation lands.
-
 ## hub: narrowing weights to `drafter` only in `evictCachedAssets` still deletes the shared assets (tokenizer)
 
 `evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` can be written with the intent "keep the main model,
@@ -415,7 +396,7 @@ The acquisition of the actual run is not matched.
   `KARUME_REFERENCE` can record another adapter's output into that row. It does not happen on single-GPU machines.
 - Of the e2e tests with sha256 rows, those that acquire the GPU themselves (the Wan pipeline / swap files, MOSS-Image's
   pipeline and generate files, the Qwen3.5 encoder, the Gemma 4 26B cut model, the runtime-side real-asset e2e, the
-  real-asset e2e of depth_anything / birefnet / vowel_detector in `packages/e2e`) match the actual GPU itself right after
+  real-asset e2e of depth_anything / birefnet in `packages/e2e`) match the actual GPU itself right after
   acquisition (`verifyRunningGpu` / `assertAdapterMatchesEnvironment`). The Wan e2e tests without sha256 rows (the dit /
   umt5 / ab / vae files) match it too.
 - Fix candidates: inject the GPU from the test (it must be acquired with the same features the pipeline requests
@@ -613,7 +594,7 @@ The chunk graphs and their input shapes are the same at every length (one latent
 should not depend on the clip's length. In the 5-frame runs the executor reports a largest window mean of about 1.3 s for
 `vae_decoder_first` and 1.2–1.5 s for `vae_decoder_next`, with 660 and 720 windows over budget; at 9 frames it reports
 105 ms and 48 ms with 54 and 0 over budget. The int8 decoder on int8 activations (`i8-a8-attn8-online-conv8`) is not
-affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked: other sizes, Wan2.1, Chrome, other GPUs.
+affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked: other sizes, Chrome, other GPUs.
 
 - Impact: a 5-frame clip (the shortest the descriptor accepts) decodes in about 2.6 times the time of a 17-frame clip.
   The outputs are finite and deterministic (the same sha256 in two runs). The default lane's short seed cases run 9 frames

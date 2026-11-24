@@ -17,15 +17,12 @@ is the source of truth of the accepted set.
         --resolve-refs hf                                  # references karume-irodori-v4-small
     uv run python dist.py --pipeline irodori-large \\
         --resolve-refs hf                                  # v4-large (codec at v4-small)
-    uv run python dist.py --pipeline sbv2-fn              # the FN line (HF publication on hold)
     uv run python dist.py --pipeline sbv2 \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
     uv run python dist.py --pipeline siglip2 \\
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # a BiRefNet_HR derivative (own repo)
     uv run python dist.py --pipeline umt5                  # umT5-XXL encoder (referenced by Wan)
-    uv run python dist.py --pipeline wan --allow-placeholder-ref
-                                                           # Wan2.1 T2V 1.3B (not published)
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
     uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT
@@ -123,7 +120,6 @@ from karume.dist import main as dist_main
 from moss import distribution as moss_distribution
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
-from vowel_detector import distribution as vowel_detector_distribution
 from wan import distribution as wan_distribution
 from wan import umt5_distribution
 from wan.umt5_intake import ALLOW_UNDECLARED_LICENSE_FLAG, Umt5IntakeError, load_intake
@@ -134,9 +130,6 @@ PIPELINES: Mapping[str, Pipeline] = {
     "anima": anima_distribution.OFFICIAL_PIPELINE,
     "anima-extra": anima_distribution.EXTRA_PIPELINE,
     "sbv2": sbv2_distribution.PIPELINE,
-    # The voice families have different licenses (JVNV = CC BY-SA 4.0, FN = Booth's distribution
-    # terms), so they are separate entries.
-    "sbv2-fn": sbv2_distribution.FN_PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
     # The v4-Large line is tagged `license: gemma` upstream, so its repository root carries other
     # legal texts than the MIT line's — a separate entry.
@@ -147,16 +140,14 @@ PIPELINES: Mapping[str, Pipeline] = {
     # repository root differs, so the Pipeline is a separate entry too.
     "lucida": birefnet_distribution.LUCIDA_PIPELINE,
     "depth-anything": depth_anything_distribution.PIPELINE,
-    "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
     # The q4_0 QAT line of the `gemma4/1` contract (`karume-gemma4-qat` — E2B / E4B / 12B with
     # their QAT drafters) and the mobile QAT family (`karume-gemma4-qat-mobile` — contract
     # `gemma4-qat/1`).
     "gemma4-qat": gemma4_distribution.QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": gemma4_qat_distribution.PIPELINE,
-    "wan": wan_distribution.PIPELINE,
-    # Wan's generations are separate repositories (ADR 0092 decision 2 — `karume-wan2.2`), so the
-    # Pipeline is a separate entry too.
+    # Wan2.2 TI2V 5B (`karume-wan2.2` — Wan's generations are separate repositories, ADR 0092
+    # decision 2).
     "wan-ti2v": wan_distribution.TI2V_PIPELINE,
     # What Wan's text_encoder references (ADR 0119 addendum D — a components-only repository; no
     # TS family reads it).

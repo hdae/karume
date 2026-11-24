@@ -4,10 +4,9 @@
 //
 // Three things are pinned:
 //
-// (1) The defensive branches of the condition mask (fail loudly) — passing a condition with the input
-//     form "t2v", and building I2V with a temporal patch ≠ 1. The current public API cannot reach them
-//     (the plan rejects 2.1's image first, and `wanDitPatch` fixes the temporal patch at 1), so this
-//     pins that they do not silently pass when the wiring changes.
+// (1) The defensive branch of the condition mask (fail loudly) — building I2V with a temporal patch ≠ 1.
+//     The current public API cannot reach it (`wanDitPatch` fixes the temporal patch at 1), so this
+//     pins that it does not silently pass when the wiring changes.
 // (2) The condition mask is true only on the tokens of the first latent frame, `[0, rows·cols)`.
 // (3) The replacement computes upstream diffusers' formula `(1 − m)·condition + m·latents` verbatim —
 //     giving the same values as upstream down to signed zeros. Simplifying it to "copy the first frame"
@@ -36,14 +35,6 @@ const assertSameValue = (actual: number, expected: number, label: string): void 
   assert(Object.is(actual, expected), `${label}: ${signed(actual)} (expected ${signed(expected)})`);
 
 describe("wanConditionMask (the I2V condition mask)", () => {
-  it("passing a condition latent with the input form 't2v' throws that there is no condition-mask input", () => {
-    assertThrows(
-      () => wanConditionMask("t2v", GRID, PATCH, true, OWNER),
-      Error,
-      `${OWNER}: a DiT of input form 't2v' does not accept a condition latent`,
-    );
-  });
-
   it("I2V with a temporal patch other than 1 throws that the first latent frame does not align with a token frame", () => {
     const patch: WanPatchGeometry = { ...PATCH, patchFrames: 2 };
     // A grid of the 4 latent frames divided by a temporal patch of 2 (only the patch changes, keeping

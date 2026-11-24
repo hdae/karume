@@ -29,16 +29,16 @@ import hashlib
 import json
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 
 from wan import (
+    dit_common,
     dit_probe,
-    export_dit,
     export_vae,
-    few_step_ref,
     prompts,
     text_embeds,
     ti2v_few_step_ref,
@@ -122,11 +122,6 @@ class TestCases:
         ]
         assert len({case.seed for case in CASES}) == len(CASES)
         assert len({case.prompt for case in CASES}) == len(CASES)
-
-    def test_the_seeds_are_not_shared_with_the_wan21_reference(self):
-        assert not {case.seed for case in CASES} & {
-            case.seed for case in few_step_ref.FIXTURE_CASES
-        }
 
     def test_only_the_band_cases_observe_the_m_s_path(self):
         assert [case.observes_m_s for case in CASES] == [True, True, False]
@@ -484,6 +479,28 @@ def _read_fixture(path: str) -> dict[str, torch.Tensor]:
         return {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
 
 
+class TestDenormalize:
+    def test_it_inverts_the_upstream_latent_normalization(self):
+        """Catches mixing up the mean and the standard deviation (the inverse of `·std + mean`, or
+        `mean` / `std` swapped)."""
+        generator = torch.Generator().manual_seed(0)
+        mean = torch.randn(16, generator=generator).tolist()
+        std = (torch.rand(16, generator=generator) + 0.5).tolist()
+        pipeline = SimpleNamespace(
+            vae=SimpleNamespace(
+                dtype=torch.float32,
+                config=SimpleNamespace(z_dim=16, latents_mean=mean, latents_std=std),
+            )
+        )
+        raw = torch.randn(1, 16, 2, 3, 4, generator=generator)
+        view = (1, 16, 1, 1, 1)
+        normalized = (raw - torch.tensor(mean).view(view)) / torch.tensor(std).view(view)
+
+        restored = ti2v_few_step_ref.denormalize_latents(pipeline, normalized)
+
+        assert torch.allclose(restored, raw, atol=1e-5, rtol=0)
+
+
 class TestDecodeFrames:
     """The second-phase composition (inverse normalization → tiled decode → unpatchify → clamp)
     gives the same values as upstream's decode. The shared synthetic VAE has mean 0 and std 1, so
@@ -533,17 +550,17 @@ class TestQuantizedDit:
     @pytest.fixture
     def tiny_upstream(self, monkeypatch):
         monkeypatch.setattr(
-            ti2v_few_step_ref.export_dit, "load_transformer", lambda _model: _tiny_dit()
+            ti2v_few_step_ref.dit_common, "load_transformer", lambda _model: _tiny_dit()
         )
 
     def test_the_loaded_dit_is_on_the_i8_grid_with_the_real_pair_processors(self, tiny_upstream):
         # The raw randomly initialised weights are not on the i8 grid (the empty check below is
         # not vacuous).
-        assert export_dit.unrounded_weights("i8", _tiny_dit())
+        assert dit_common.unrounded_weights("i8", _tiny_dit())
 
         model = ti2v_few_step_ref.load_quantized_transformer()
 
-        assert export_dit.unrounded_weights("i8", model) == []
+        assert dit_common.unrounded_weights("i8", model) == []
         assert {type(block.attn1.processor).__name__ for block in model.blocks} == {
             "WanRealPairAttnProcessor"
         }

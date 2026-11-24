@@ -2,8 +2,8 @@
 // (stage 3 of ADR 0005).
 //
 // Where the tiny golden (tests/e2e_golden_test.ts) owns "coverage of the op contracts", real-weight
-// SBV2 (tests/e2e_sbv2_test.ts) "real weights on the acoustic-chain side" and EmbeddingGemma
-// (tests/e2e_embeddinggemma_test.ts) "text models with a single-vector output", this one owns
+// SBV2 (tests/e2e_sbv2_test.ts) "real weights on the acoustic-chain side" and EmbeddingGemma 2
+// (tests/e2e_embeddinggemma2_test.ts) "text models with a single-vector output", this one owns
 // **text condition encoders that return a token sequence** (a sequence output `[1,T,H]`).
 // The containers are the f32 graphs of the distribution mirror `models/karume-irodori-v4-small/`
 // (opened through its manifest — ADR 0139 decision 1); the per-target torch goldens are

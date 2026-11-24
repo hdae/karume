@@ -14,8 +14,7 @@ questions it has to answer.
 
 ## Upstream sources
 
-- **Voice weights** — two families with different provenance, kept apart as card profiles:
-  [rufflet17/voice_models](https://huggingface.co/rufflet17/voice_models) and
+- **Voice weights** — the JVNV family (one card profile per voice family):
   [litagin/style_bert_vits2_jvnv](https://huggingface.co/litagin/style_bert_vits2_jvnv).
 - **Text encoder weights** — [ku-nlp/deberta-v2-large-japanese-char-wwm](https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm),
   re-distributed in every SBV2 repository (exported by `../deberta/`).
@@ -29,17 +28,6 @@ questions it has to answer.
 
 One block per upstream above. Complete every row before anything built from this recipe is
 published.
-
-### rufflet17/voice_models (FN voice family)
-
-| Item                     | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/rufflet17/voice_models>                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Revision used            | `4fe4895a9c9750cce1da6a2e95e9bff1fc40bdd9` (HF cache `refs/main` — local fetch record, 2026-09-25)                                                                                                                                                                                                                                                                                                                                                         |
-| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                                                                                                                                                                                                                                                                                                              |
-| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Weights license          | None stated — the repository has no license metadata and no README (interview 2026-09-25); not redistributable until clarified. Separately, the author's Booth distribution page — <https://booth.pm/ja/items/6695672> (checked 2026-08-20) — allows commercial use, requires no credit and allows merging, but **does not address redistribution in writing**. Publication of the converted FN repository is **on hold** (2026-08-20 decision — backlog). |
-| Attribution requirements | Unknown (no license) — the HF repository states no terms (interview 2026-09-25); the Booth page's "no credit required" (checked 2026-08-20) does not cover redistribution.                                                                                                                                                                                                                                                                                 |
 
 ### litagin/style_bert_vits2_jvnv (JVNV voice family)
 

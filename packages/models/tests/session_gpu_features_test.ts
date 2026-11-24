@@ -282,7 +282,7 @@ test("assertAcquiredGpuCapabilities: a preset that declares neither passes on an
 });
 
 /**
- * The construction code of the nine families that check the GPU after acquiring it. Each must go
+ * The construction code of the eight families that check the GPU after acquiring it. Each must go
  * through the helper after `options.gpu ?? (await acquireGpu(...))` — a family that writes the two
  * checks by hand can drop one of them for a device it acquired itself, and no type check notices.
  */
@@ -294,7 +294,6 @@ const ACQUIRING_FAMILIES = [
   "birefnet/pipeline.ts",
   "depth-anything/pipeline.ts",
   "siglip2/pipeline.ts",
-  "vowel-detector/pipeline.ts",
   "embeddinggemma/pipeline.ts",
 ] as const;
 

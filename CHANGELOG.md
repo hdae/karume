@@ -35,6 +35,14 @@ measurements in `docs/research/`.
   measured table, as before) or `adapters` (two or more, a shared table) — so the type of `GeometryProfile`'s
   `provenance.adapter` is optional; code that reads it narrows on `provenance.adapters === undefined` first. Every
   table saved before keeps the `adapter` form, and `parseGeometryProfileJson` reads both.
+- `@karume/models`: the vowel detector is removed — the subpath `@karume/models/vowel-detector` (`Pipeline`,
+  `Assets`, `FromPretrainedOptions`, `PipelineOptions`, `Result`, `LabSegment` and its re-export of `ModelInputError`)
+  and the barrel namespace `vowelDetector`. Its distribution was never published. `ModelInputError` and `decodeWav`
+  stay in the barrel; the `gru_scan` / `gru_scan_reverse` ops stay in `@karume/runtime`.
+- `@karume/models/wan`: the Wan2.1 T2V 1.3B class `Pipeline` (pipeline `wan/1`) is removed, and with it
+  `wan.Pipeline` in the barrel. Its distribution `karume-wan2.1` was never published. `Ti2vPipeline` (Wan2.2 TI2V
+  5B, pipeline `wan-ti2v/1`) and the public types it uses (`GenerateRequest`, `GenerateEvent`, `GeneratedVideo`,
+  `LatentSnapshot`, `PipelineOptions`, `FromPretrainedOptions`, `Assets`, `RunComponent`) stay unchanged.
 
 ### Added
 

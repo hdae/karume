@@ -73,20 +73,9 @@ model therefore needs nothing but `--model-dir` pointing at its directory — th
 derived from that directory's name (`inputs/sbv2/F1/` → `outputs/series/sbv2-F1/`), so two
 speakers cannot silently overwrite each other's assets.
 
-#### Record: the non-public FN series
-
-Kept as the record for the non-public FN series (the mirrors and series are no longer kept locally
-— re-export from `inputs/sbv2/FN*` when needed; the dist command is in
-[`docs/assets-layout.md`](../../../docs/assets-layout.md)). The FN speaker `FN4` comes from HF
-`rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
-`style_vectors.npy` / `style_settings.json` (the same content is also packed in `zip/FN_sbv2.zip`,
-but the unpacked directory can be fetched file by file, so the zip is unnecessary). The publisher
-declares the model free to modify. Place the 3 files the exporter reads under `inputs/sbv2/FN4/`
-and pass `--model-dir inputs/sbv2/FN4` (`style_settings.json` is not read). `FN4` is a
-Style-Bert-VITS2 JP-Extra model (`version: 2.6.1-JP-Extra`) with `n_speakers: 1`, a
-`sampling_rate` of 44100, and 4 styles (`data.style2id` = Neutral / high / low / NSFW). The measured
-figures further down (node counts, storage sizes, tolerances, equivalence) were taken on `FN4`, which
-has the same architecture as the JVNV speakers.
+The measured figures further down (node counts, storage sizes, tolerances, equivalence) were taken
+on `FN4` (`version: 2.6.1-JP-Extra`, 4 styles), a voice from HF `rufflet17/voice_models` that this
+recipe no longer exports; it has the same architecture as the JVNV speakers.
 
 ### Generation and comparison
 
@@ -264,7 +253,7 @@ where only the raw weights are in place and export has not been run yet), and wh
 series (f32 / f16 / i8)**, and the tolerances are **derived from measurements per series × target**
 (no reuse across series — re-deriving one would silently move the other). There is no i4 series
 here: the distribution's `i4` quant is covered on the distribution form by the WAV sha256 gate
-(`packages/models/tests/e2e_sbv2_wav_test.ts`). The measured values below come from the FN speaker;
+(`packages/models/tests/e2e_sbv2_wav_test.ts`). The measured values below come from `FN4`;
 F1 passes every target and case under the same tolerances, which were not re-derived (the NOTE
 on the series table in `e2e_sbv2_test.ts`):
 

@@ -100,7 +100,6 @@ import {
 } from "../../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../../src/siglip2/pipeline.ts";
 import { UMT5_ENCODER_SESSION_POLICY } from "../../src/umt5/encoder.ts";
-import { VOWEL_DETECTOR_SESSION_POLICY } from "../../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../../src/wan/family.ts";
 
 // --------------------------------------------------------------------------- Key
@@ -125,9 +124,7 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
-  "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
-  wan: WAN_SESSION_POLICY,
-  // Wan2.2 TI2V shares 2.1's acceptance table (the common admission — `family.ts`).
+  // Wan2.2 TI2V reads the Wan family's acceptance table (the family admission — `family.ts`).
   "wan-ti2v": WAN_SESSION_POLICY,
 };
 
@@ -271,11 +268,6 @@ type FamilyAxes = {
   readonly anima: { readonly transformer: "step" };
   readonly sbv2: { readonly front: "run"; readonly voice: "run" };
   /** Phase `pass` is one DiT forward (one CFG step is two passes, conditional / unconditional). */
-  readonly wan: { readonly transformer: "pass" };
-  /**
-   * Wan2.2 TI2V likewise (the shared modules' DiT stage reports the component name and phase — the
-   * same spelling as 2.1).
-   */
   readonly "wan-ti2v": { readonly transformer: "pass" };
   /** MOSS-Image: the DiT pair's two graphs; phase `pass` is one forward of a graph. */
   readonly "moss-image": { readonly dit: "pass"; readonly dit_skip22: "pass" };
@@ -520,11 +512,6 @@ const ANIMA_MODELS = [
   "anima-copycat-20260610",
 ] as const;
 const SBV2_MODELS = ["F1", "F2", "M1", "M2"] as const;
-/**
- * The Wan2.1 T2V 1.3B DiT: 307 linears (k ∈ {64, 256, 1536, 4096, 8960} — all i8 × k % 4 == 0,
- * including the M = 1 time MLP and `time_proj` — ADR 0120 decision 2, research §2.2).
- */
-const WAN_DIT_LINEARS = { variant: 307, reference: 0 } as const;
 /**
  * The Wan2.2 TI2V 5B DiT: 310 linear dispatches (307 i8 weights, the same layout as 2.1, but the
  * time MLP (2 linears and `time_proj`) runs twice at M = 1, which adds 3 nodes on the same weights
@@ -904,17 +891,8 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
   // --- wan (the preset's session reaches only the DiT = transformer) --------
   {
-    // The distribution mirror's practical preset `f16+dit8-a8-attn8-s16` (ADR 0120 decision 4).
+    // The Wan2.2 distribution mirror's practical preset `f16+dit8-a8-attn8-s16` (ADR 0121 step 8a).
     // attentionCompute / attentionScoreStorage are not derived (file header).
-    family: "wan",
-    models: ["t2v-1.3b"],
-    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
-    census: { transformer: { pass: { linearCompute: WAN_DIT_LINEARS } } },
-  },
-  {
-    // The Wan2.2 distribution mirror's practical preset `f16+dit8-a8-attn8-s16` (ADR 0121 step 8a —
-    // the same bundle as 2.1). attentionCompute / attentionScoreStorage are not derived, as in the
-    // 2.1 row (file header).
     family: "wan-ti2v",
     models: ["ti2v-5b"],
     seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },

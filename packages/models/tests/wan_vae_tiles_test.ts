@@ -1,7 +1,8 @@
-// The host side of the tiled decode of the Wan2.1 video VAE (ADR 0118 decision 2, stage 5 — pure
-// functions that need neither a GPU nor assets).
+// The host side of the tiled decode of the Wan video VAE (ADR 0118 decision 2, stage 5 — pure
+// functions that need neither a GPU nor assets), frozen on the geometry of the Wan2.1 T2V 1.3B VAE
+// (latent tile 32, scale 8, no unpatchify — the same table as the Python side).
 //
-// The reference comparison and the degenerate check on a real GPU are in `e2e_wan_vae_tiles_test.ts`.
+// The reference comparison on a real GPU is in `e2e_wan_ti2v_vae_tiles_test.ts`.
 // This file pins the **frozen geometry table** (the same values as the Python side — frozen twice, ADR
 // 0033 addendum 9a), the layout invariants and the analytic solutions of the stitching.
 
@@ -26,15 +27,16 @@ import {
   wanVaeTileCount,
   type WanVaeTilePlan,
 } from "../src/wan/vae-tiles.ts";
-import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 import { finishWanVaeFrames } from "../src/wan/tile-decode.ts";
 
 /** The real tile edge (latent — the chunk graph's default input shape) and the scale. */
 const TILE = 32;
 const SCALE = 8;
 const LAYOUT = { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE, sampleChannels: 3 };
-/** Wan2.1's minimum overlap (latent) = 64 px ÷ spatial compression 8 (scale 8 × unpatchify 1). */
-const MIN_OVERLAP = wanVaeMinTileOverlap(SCALE, WAN21_GENERATION.vaePatchSize);
+/** The unpatchify factor of this geometry (none — the generation field `vaePatchSize`). */
+const NO_UNPATCHIFY = { vaePatchSize: 1 } as const;
+/** The minimum overlap (latent) = 64 px ÷ spatial compression 8 (scale 8 × unpatchify 1). */
+const MIN_OVERLAP = wanVaeMinTileOverlap(SCALE, NO_UNPATCHIFY.vaePatchSize);
 
 /**
  * Start positions for tile edge 32 and minimum overlap 8 (latent extent → start positions), frozen with
@@ -523,7 +525,7 @@ test("unpatchifyWanVaeFrames: rejects mismatched factors, shapes, channel counts
   );
 });
 
-const OWNER = "wan.Pipeline";
+const OWNER = "wan.Ti2vPipeline";
 
 /**
  * A degenerate one-tile plan (scale 2, `sampleChannels` output channels). The end-of-stage checks read only
@@ -553,7 +555,7 @@ test("finishWanVaeFrames: generations without unpatchify (p = 1) give the same v
   const got = finishWanVaeFrames(
     assembled,
     { ...RGB, tiles: finishTiles(3, 4, 6) },
-    WAN21_GENERATION,
+    NO_UNPATCHIFY,
     OWNER,
   );
   assertStrictEquals(got, assembled);
@@ -588,7 +590,7 @@ test("finishWanVaeFrames: checks the shape per dimension (rejects a mismatched u
   // Finishes a 12-channel output asset with a descriptor without unpatchify (576 elements, the same as RGB
   // [3, 2, 8, 12]).
   assertThrows(
-    () => finishWanVaeFrames(assembled, PATCHED, WAN21_GENERATION, OWNER),
+    () => finishWanVaeFrames(assembled, PATCHED, NO_UNPATCHIFY, OWNER),
     Error,
     `${OWNER}: VAE output shape [12, 2, 4, 6] (unpatchify 1 gives [12, 2, 4, 6]) differs from [3, 2, 8, 12]`,
   );

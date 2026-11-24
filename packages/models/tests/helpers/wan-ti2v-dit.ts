@@ -49,7 +49,7 @@ export const wanTi2vMirrorPresent = (): boolean => mirrorPresent(WAN_TI2V_DIST_R
 /** Opens the mirror's int8 transformer with range reads (the transformer is int8 in every preset). */
 export const openTi2vTransformer = (): Promise<OpenedContainer> =>
   openWanTi2vComponent(WAN_TI2V_COMPONENT, "i8");
-/** The asset's name (`ROPE_BASE_ASSET` of `wan/export_dit.py` — the same slot for 5B). */
+/** The asset's name (`ROPE_BASE_ASSET` of `wan/dit_common.py` — the same slot for 5B). */
 const ROPE_BASE_ASSET = "rope_base";
 
 /** The patch of Wan2.2 TI2V-5B (`(1,2,2)`, 48 latent channels — the transformer's config). */

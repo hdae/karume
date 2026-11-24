@@ -9,7 +9,7 @@ deliberate change: the DiT is read in f32 for the references (bf16 → f32 is ex
 are the same values; only the arithmetic is f32).
 
 The initial noise of the references is torch's CPU `randn` from a seeded generator, injected as
-`latents=` (the Wan precedent — `wan.few_step_ref`); karume's own seeded noise (splitmix64 +
+`latents=` (the Wan precedent — `wan.ti2v_few_step_ref`); karume's own seeded noise (splitmix64 +
 Box–Muller) is a different sequence, and its tests read these latents from the records.
 
 MUST: diffusers and transformers are imported inside the functions (the `moss` group is not in the

@@ -2,14 +2,12 @@
 reference fixtures — ADR 0118 / 0121).
 
 The spatial extent of the chunk graphs (`wan/vae_patch.py`) is a fixed tile of `t×t` latents (the
-input shape of the asset; the default is the series table `export_vae.VAE_SERIES` — 32 for 2.1, 16
-for 2.2).
-The host cuts the full frame (832×480 = 60×104 latents) into tiles, decodes them, blends the
+input shape of the asset; the default is the series table `export_vae.VAE_SERIES` — 16).
+The host cuts the full frame (1280×704 = 44×80 latents) into tiles, decodes them, blends the
 overlaps and stitches them together (always tiled — ADR 0118 decision 2, the video version of
 ADR 0033 / 0038 §4). This module is the **Python-side source of truth of the geometry and the
 blending**, and the script for the reference fixtures read by the GPU comparison
-(`packages/models/tests/e2e_wan_vae_tiles_test.ts` for 2.1,
-`packages/models/tests/e2e_wan_ti2v_vae_tiles_test.ts` for 2.2).
+(`packages/e2e/tests/e2e_wan_ti2v_vae_tiles_test.ts`).
 The TS side is `packages/models/src/wan/vae-tiles.ts`.
 
 ## Geometry = rounded evenly spaced snapped placement (a deliberate deviation from upstream)
@@ -20,9 +18,8 @@ between 0 and `extent − tile` **evenly with rounding** (the same rule as Anima
 P-3, `plan_tile_axis` in `anima/tiling.py`). The count is the smallest that satisfies "the overlap
 of each adjacent pair is at least the minimum". The source of truth for the minimum is the output's
 {@link MIN_OVERLAP_PX}; the latent value is derived by dividing it by the spatial compression (graph
-ratio × unpatchify factor) ({@link min_overlap_latent} — ADR 0121 decision 6). For Wan2.1,
-{@link WAN21_MIN_OVERLAP_LATENT} = 8. 832×480 (60×104 latents, tile 32) gives 12 tiles at rows
-0 / 14 / 28 × columns 0 / 24 / 48 / 72 (overlaps of 18 latents on rows and 8 latents on columns).
+ratio × unpatchify factor) ({@link min_overlap_latent} — ADR 0121 decision 6): 4 latents for
+Wan2.2 (64 px ÷ 8 ÷ 2).
 
 ## Blend, paste, clamp
 
@@ -51,26 +48,15 @@ also applies it per frame inside the graph).
 
 ## Fixtures (`vae_tiles.<case>.safetensors` at the series root)
 
-Wan2.1:
-
-- `band` (sets the band): the tiled reference `frames` of a fixed-seed latent `[16,9,60,104]`
-  (832×480, 33 frames) and the **non-tiled** reference `frames_full` (the chunk loop of upstream's
-  non-tiled `_decode`, before clamping — for observing the approximation error of tiling. Not a
-  check).
-- `accept` (decides acceptance): another seed, **portrait** `[16,3,104,60]` (480×832, 9 frames).
-  Both the tile positions and the chunk boundaries differ from band. Swapping rows and columns only
-  shows up in the values for a shape whose height and width differ (on a square it is an
-  involution).
-- The meta carries the geometry (start positions, blend widths) — compared against the TS plan (on
-  top of the double freeze of ADR 0033 addendum 9a, a comparison through the fixture is added).
-
-Wan2.2 (`--model ti2v-5b` — {@link TI2V_FIXTURE_CASES}, tile 16, overlap 4 latents) has three:
-`band` (832×480×81), `accept` (480×832×9, with the non-tiled reference) and `wide` (1280×704×5 — a
-size whose blend width differs per pair). `frames` are in patchify space before clamping, and the
-meta adds `patch_size`. Only `accept` also writes the RGB `frames_rgb [3, F, H, W]` with upstream's
-unpatchify → clamp applied (to compare the end of the GPU VAE stage — the host's unpatchify — with
-upstream's function itself). The 2.1 fixtures come from the same formulas, tensors and meta alike,
-as before the 2.2 path was added.
+Wan2.2 ({@link TI2V_FIXTURE_CASES}, tile 16, overlap 4 latents) has three: `band` (832×480×81),
+`accept` (480×832×9, with the **non-tiled** reference `frames_full` — the chunk loop of upstream's
+non-tiled `_decode`, for observing the approximation error of tiling, not a check) and `wide`
+(1280×704×5 — a size whose blend width differs per pair). Swapping rows and columns only shows up in
+the values for a shape whose height and width differ (on a square it is an involution). `frames`
+are in patchify space before clamping, and the meta carries the geometry (start positions, blend
+widths — compared against the TS plan) and `patch_size`. Only `accept` also writes the RGB
+`frames_rgb [3, F, H, W]` with upstream's unpatchify → clamp applied (to compare the end of the GPU
+VAE stage — the host's unpatchify — with upstream's function itself).
 
 The weights are rounded to f16-representable values before the reference is taken (ADR 0006 —
 `export_vae.load_vae(round_f16=True)`).
@@ -84,10 +70,9 @@ whose latent is smaller than the tile on either axis cannot be fed to the fixed-
 named in the summary; named with `--case` it is refused before the VAE is loaded. At tile 32 this
 leaves Wan2.2 with `wide` only (`band` and `accept` are 30 latents on one axis).
 
-    uv run --group wan --inexact python -m wan.vae_tiling                # band + accept
+    uv run --group wan --inexact python -m wan.vae_tiling                # band + accept + wide
     uv run --group wan --inexact python -m wan.vae_tiling --case accept  # one case only
-    uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b  # Wan2.2
-    uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b --tile 32  # *.t32
+    uv run --group wan --inexact python -m wan.vae_tiling --tile 32      # *.t32
 
 MUST: touch diffusers only inside functions (the `wan` group is not in the default sync —
 `tests/test_optional_group_imports.py`).
@@ -110,7 +95,6 @@ from safetensors.torch import save_file
 
 from _shared.paths import SERIES_ROOT
 from wan import export_vae, vae_patch
-from wan.sources import DEFAULT_MODEL
 
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
@@ -120,8 +104,6 @@ if TYPE_CHECKING:
 #: from it by {@link min_overlap_latent} (no latent value is held per generation — ADR 0121
 #: decision 6).
 MIN_OVERLAP_PX = 64
-#: The unpatchify factor of Wan2.1's VAE (upstream `config.patch_size` is None = 1 — no unpatchify).
-WAN21_VAE_PATCH_SIZE = 1
 
 
 def _is_positive_int(value: object) -> bool:
@@ -157,11 +139,6 @@ def min_overlap_latent(scale: int, patch_size: int) -> int:
     return MIN_OVERLAP_PX // compression
 
 
-#: Wan2.1's overlap (latents) = 64 ÷ (`export_vae.SPATIAL_SCALE` 8 × 1) = 8. The Python side has no
-#: opened graph, so the graph ratio is the recipe's declared value (the same value as the frame side
-#: `tile * SPATIAL_SCALE` of the exported chunk graph).
-WAN21_MIN_OVERLAP_LATENT = min_overlap_latent(export_vae.SPATIAL_SCALE, WAN21_VAE_PATCH_SIZE)
-
 #: File name of the reference fixtures (placed at the series root — `vae_tiles.<case>.safetensors`).
 FIXTURE_PREFIX = "vae_tiles."
 FIXTURE_SUFFIX = ".safetensors"
@@ -185,13 +162,13 @@ def fixture_name(case_name: str, tile: int, default_tile: int) -> str:
     return f"{FIXTURE_PREFIX}{case_name}{fixture_tile_suffix(tile, default_tile)}{FIXTURE_SUFFIX}"
 
 
-def default_tile_of(patch_size: int | None) -> int:
+def default_tile_of(patch_size: int) -> int:
     """The series tile of the generation that `patch_size` names (`export_vae.VAE_SERIES`).
 
-    `write_fixture` already receives `patch_size` as the generation's identity (it picks the
-    `reference` string and the meta by it), so the default tile is looked up the same way instead of
-    being passed alongside. MUST: an ambiguous or unknown generation fails loudly — a guessed
-    default tile would put a non-default reference under a default name.
+    `write_fixture` already receives `patch_size` as the generation's identity (it checks it against
+    the upstream config and records it in the meta), so the default tile is looked up the same way
+    instead of being passed alongside. MUST: an ambiguous or unknown generation fails loudly — a
+    guessed default tile would put a non-default reference under a default name.
     """
     tiles = {
         series.tile for series in export_vae.VAE_SERIES.values() if series.patch_size == patch_size
@@ -277,9 +254,9 @@ def plan_tile_axis(extent: int, tile: int, min_overlap: int) -> TileAxis:
     `ceil(span / (tile − min_overlap)) + 1` (`span = extent − tile`); the start positions are
     `round(i · span / (count − 1))` (0.5 rounds up).
 
-    MUST: `min_overlap` has no default — its value differs per generation
-    ({@link min_overlap_latent}), so if forgetting to pass it silently went through with the 2.1
-    value, another generation's plan would quietly shift.
+    MUST: `min_overlap` has no default — its value follows the spatial compression
+    ({@link min_overlap_latent}), so if forgetting to pass it silently went through with a default,
+    another compression's plan would quietly shift.
     """
     if tile < 1:
         raise ValueError(f"tile width {tile} is less than 1")
@@ -494,15 +471,10 @@ class FixtureCase:
     rgb: bool = False
 
 
-#: The band case and the acceptance case differ in the latent (seed), the chunk boundaries (number
-#: of chunks) and the tile positions (height and width).
-FIXTURE_CASES = (
-    FixtureCase("band", seed=20261012, chunks=9, height=60, width=104, role="band", full=True),
-    FixtureCase("accept", seed=20261013, chunks=3, height=104, width=60, role="accept", full=False),
-)
-
-#: The Wan2.2 TI2V-5B cases (tile 16, 48 latent channels). Built the same way as 2.1; the seeds
-#: differ from both 2.1's and stage 4's chunk sequences (`export_vae.TI2V_FIXTURE_CASES`):
+#: The Wan2.2 TI2V-5B cases (tile 16, 48 latent channels). The band case and the acceptance cases
+#: differ in the latent (seed), the chunk boundaries (number of chunks) and the tile positions
+#: (height and width); the seeds differ from stage 4's chunk sequences
+#: (`export_vae.TI2V_FIXTURE_CASES`):
 #:
 #: - `band`: 832×480×81 (30×52 latents, 21 chunks) — the one that sets the band (stage 5 of
 #:   ADR 0121's acceptance table).
@@ -521,13 +493,10 @@ TI2V_FIXTURE_CASES = (
 
 #: Model name (a key of `export_vae.VAE_SERIES`) → the case table.
 FIXTURE_CASES_BY_MODEL: dict[str, tuple[FixtureCase, ...]] = {
-    "t2v-1.3b": FIXTURE_CASES,
     "ti2v-5b": TI2V_FIXTURE_CASES,
 }
 
-#: The fixture meta `reference` (the reference's provenance). The 2.1 value is the same string as
-#: before the 2.2 path was added.
-FIXTURE_REFERENCE = "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
+#: The fixture meta `reference` (the reference's provenance).
 FIXTURE_REFERENCE_IN_PATCHIFY_SPACE = (
     "snapped-tile decode with upstream blend_v / blend_h in patchify space"
     " before unpatchify and clamp (CPU f32)"
@@ -568,13 +537,13 @@ def write_fixture(
     out_root: Path,
     *,
     min_overlap: int,
-    patch_size: int | None,
+    patch_size: int,
 ) -> dict[str, Any]:
     """Writes one case (latent + tiled reference; the non-tiled reference too for `full`, RGB too
     for `rgb`). Returns a summary.
 
     MUST: `min_overlap` (latents) and `patch_size` have no defaults — if forgetting to pass them
-    silently went through with the 2.1 values, another generation's fixture would quietly shift.
+    silently went through with default values, another generation's fixture would quietly shift.
     `patch_size` fails unless it matches the upstream config (so the meta's `patch_size` and
     `reference` cannot disagree with the real model).
     """
@@ -582,11 +551,6 @@ def write_fixture(
         raise ValueError(
             f"patch_size {patch_size!r} differs from the upstream config's"
             f" {vae.config.patch_size!r}"
-        )
-    if case.rgb and patch_size is None:
-        raise ValueError(
-            f"frames_rgb of case {case.name} is only for a generation that patchifies"
-            " (patch_size is None)"
         )
     # Resolved before the decode so an unknown generation fails before minutes of CPU work.
     path = out_root / fixture_name(case.name, tile, default_tile_of(patch_size))
@@ -614,13 +578,10 @@ def write_fixture(
         "chunks": str(case.chunks),
         "role": case.role,
         "weights": "f16-rounded",
-        "reference": (
-            FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_IN_PATCHIFY_SPACE
-        ),
+        "reference": FIXTURE_REFERENCE_IN_PATCHIFY_SPACE,
         **plan.meta(),
+        "patch_size": str(patch_size),
     }
-    if patch_size is not None:
-        metadata["patch_size"] = str(patch_size)
     if case.rgb:
         # The same order as the end of upstream `_decode` (unpatchify → clamp). unpatchify is a
         # permutation, so the band in patchify space can be used as is.
@@ -639,9 +600,7 @@ def write_fixture(
         summary["vs_full"] = observed
         tensors["frames_full"] = full.contiguous()
         metadata["frames_full"] = (
-            "upstream non-tiled _decode chunk loop before clamp (CPU f32)"
-            if patch_size is None
-            else "upstream non-tiled _decode chunk loop before unpatchify and clamp (CPU f32)"
+            "upstream non-tiled _decode chunk loop before unpatchify and clamp (CPU f32)"
         )
     summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)
 
@@ -658,8 +617,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--model",
         choices=sorted(export_vae.VAE_SERIES),
-        default=DEFAULT_MODEL,
-        help=f"model (series, tile and cases come from the table — default {DEFAULT_MODEL})",
+        default=export_vae.DEFAULT_MODEL,
+        help="model (series, tile and cases come from the table — default"
+        f" {export_vae.DEFAULT_MODEL})",
     )
     tiles = ", ".join(f"{model}: {series.tile}" for model, series in export_vae.VAE_SERIES.items())
     parser.add_argument(
@@ -679,8 +639,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="series root (default: the model's series — the value in the table of decision 7)",
     )
-    # choices is the union over all models (each model has its own table — `wide` is 2.2 only). A
-    # name that is not in the selected model's table fails after parsing.
+    # choices is the union over all models (each model has its own table). A name that is not in
+    # the selected model's table fails after parsing.
     names = list(
         dict.fromkeys(case.name for cases in FIXTURE_CASES_BY_MODEL.values() for case in cases)
     )
@@ -700,7 +660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if tile <= 0:
         parser.error(f"--tile must be a positive integer ({tile})")
     out = args.out if args.out is not None else SERIES_ROOT / series.series
-    min_overlap = min_overlap_latent(export_vae.SPATIAL_SCALE, series.patch_size or 1)
+    min_overlap = min_overlap_latent(export_vae.SPATIAL_SCALE, series.patch_size)
     if tile <= min_overlap:
         # The plan (`plan_tile_axis`) fails too, but only after the VAE is read — fail before.
         parser.error(f"--tile {tile} is not above the minimum overlap {min_overlap} (latents)")

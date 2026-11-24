@@ -2,8 +2,8 @@
 its reproducibility.
 
 No test runs umT5 (bf16, about 11 GiB, 2.5 minutes a prompt). The generated asset is checked
-(shapes, valid lengths, normalized strings) as the Wan2.1 distribution ships it — read from the
-mirror `models/karume-wan2.1/` through its manifest (ADR 0139 decision 1; SKIP without it).
+(shapes, valid lengths, normalized strings) as the Wan2.2 distribution ships it — read from the
+mirror `models/karume-wan2.2/` through its manifest (ADR 0139 decision 1; SKIP without it).
 Generation: `uv run --group wan --inexact python -m wan.text_embeds`.
 """
 
@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from wan import prompts, text_embeds
-from wan.distribution import WAN21, WAN_TEXT_EMBEDS_ROLE
+from wan.distribution import WAN22, WAN_TEXT_EMBEDS_ROLE
 from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
 from wan.sources import DEFAULT_MODEL, SOURCES
 
@@ -182,7 +182,7 @@ def generated_asset():
     from real_assets import mirror_asset
 
     return text_embeds.read_asset(
-        mirror_asset(WAN21.repo_name, WAN21.default_model, WAN_TEXT_EMBEDS_ROLE)
+        mirror_asset(WAN22.repo_name, WAN22.default_model, WAN_TEXT_EMBEDS_ROLE)
     )
 
 

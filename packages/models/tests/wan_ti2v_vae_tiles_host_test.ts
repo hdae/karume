@@ -15,7 +15,8 @@
 //   fixture `fixtures/wan-latents/wan22-ti2v.json` (on the other side, the recipe's
 //   `wan/tests/test_ti2v_generation_stats.py` compares it with the pinned config).
 // - **Real-asset layout** (only on machines with the two chunk graphs): the layout derived from the declarations
-//   matches the plan's literal, passes the 2.2 descriptor's admission, and fails with the 2.1 descriptor.
+//   matches the plan's literal, passes the 2.2 descriptor's admission, and fails with a descriptor of 16
+//   statistics or of no unpatchify.
 //
 // The real-asset case reads the two f16 chunk graphs of the distribution mirror `models/karume-wan2.2/` (through its
 // manifest — ADR 0139 decision 1) and SKIPs explicitly without the mirror (ADR 0005; the mirror's completeness is the
@@ -27,7 +28,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import type { WanPipelineConfig } from "../src/wan/config.ts";
-import { WAN21_GENERATION, WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
+import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
 import { WAN22_LATENTS_MEAN, WAN22_LATENTS_STD } from "../src/wan/latents.ts";
 import { planWanRequest, type PromptGate } from "../src/wan/plan.ts";
 import {
@@ -288,7 +289,7 @@ const prepared = async (component: string): Promise<PreparedModel> =>
 
 test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V VAE tiles on the real assets (no GPU needed): the layout matches the plan's literal, passes the 2.2 " +
-    "descriptor's admission, and fails with the 2.1 descriptor",
+    "descriptor's admission, and fails with a descriptor of 16 statistics or of no unpatchify",
   async () => {
     const layout = wanVaeChunkLayout(await prepared(FIRST), await prepared(NEXT));
     assertEquals(
@@ -302,20 +303,23 @@ test.skipIf(!MIRROR_PRESENT)(
     );
     assertWanVaeMatchesGeneration(layout, WAN22_TI2V_GENERATION, OWNER);
     assertWanVaeTilesCover(layout, WAN22_TI2V_GENERATION, OWNER);
-    assertThrows(
-      () => assertWanVaeMatchesGeneration(layout, WAN21_GENERATION, OWNER),
-      Error,
-      `${OWNER}: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 48 channels`,
-    );
-    // It fails on the output channel count too, not only on the number of statistics (a descriptor with 2.1's factor
-    // and 48 statistics).
+    // A descriptor with the statistics of a 16-channel latent (the count, not the values, is checked).
+    const sixteen = { mean: Array<number>(16).fill(0), std: Array<number>(16).fill(1) };
     assertThrows(
       () =>
         assertWanVaeMatchesGeneration(
           layout,
-          { ...WAN21_GENERATION, latents: WAN22_TI2V_GENERATION.latents },
+          { ...WAN22_TI2V_GENERATION, latents: sixteen },
           OWNER,
         ),
+      Error,
+      `${OWNER}: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 48 channels`,
+    );
+    // It fails on the output channel count too, not only on the number of statistics (a descriptor without
+    // unpatchify and with the 48 statistics).
+    assertThrows(
+      () =>
+        assertWanVaeMatchesGeneration(layout, { ...WAN22_TI2V_GENERATION, vaePatchSize: 1 }, OWNER),
       Error,
       `${OWNER}: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3`,
     );

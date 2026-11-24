@@ -1,7 +1,7 @@
 """Script-level contracts of `siglip2/export.py` (the part that needs no real weights).
 
 The emit with real weights is manual (the same discipline as the existing tests of
-`deberta/export.py` / `embeddinggemma/export.py`). What is pinned here is only the discipline whose
+`deberta/export.py` / `embeddinggemma2/export.py`). What is pinned here is only the discipline whose
 breakage would give a **false PASS**:
 
 - the graph has **exactly one output, pooler_output** (a second one would silently shift the

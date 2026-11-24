@@ -1409,7 +1409,7 @@ class CalibRig:
     """The scaffolding of one calibrated configuration (stage sequence, scan, inputs to the first
     stage).
 
-    Unlike the minicpm5 / EG rigs, it is **rebuilt per configuration** — this script reloads BERT
+    It is **rebuilt per configuration** — this script reloads BERT
     from the plain weights per configuration so that methods do not stack (the same pristine
     approach as {@link quantized_bert_feature}), so the stages and the first stage's inputs are tied
     to that model.

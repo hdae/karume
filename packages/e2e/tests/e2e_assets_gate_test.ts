@@ -2,7 +2,7 @@
 // tests/gpu_gate_test.ts).
 //
 // The real-weight e2e tests (birefnet / dacvae / deberta / depth_anything / embeddinggemma / gemma4
-// / irodori / minicpm5 / sbv2 / siglip2 / vowel_detector) are `ignore: !available ||
+// / irodori / sbv2 / siglip2) are `ignore: !available ||
 // !GPU_AVAILABLE`, and `available` is false when the listing of the series root is empty. On a
 // machine that has a GPU but not a single real-weight asset (a new work machine, or a worktree
 // taken to another host), they all SKIP and the full verify (`vp test`) still turns green — a silent
@@ -26,7 +26,7 @@
 // ignore would make "the gate works" indistinguishable from "the gate is gone" (the same reason as
 // the GPU gate).
 //
-// NOTE: it looks only at the one root `outputs/series/` shared by the 11 real-weight e2e tests. The
+// NOTE: it looks only at the one root `outputs/series/` shared by the real-weight e2e tests. The
 // distribution mirrors (`models/`) belong to distribution_gate_test.ts; their SKIPs are outside
 // this gate's reach.
 //

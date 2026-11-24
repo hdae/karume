@@ -1,11 +1,10 @@
 """The contract of `wan/export_vae.py` — the IR of the two chunk graphs meets the rules of
 decision 2.
 
-Wan2.1 is exported with the real weights (latent tile 8), Wan2.2 with the synthetic VAE
-(`ti2v_synthetic_vae` of conftest, latent tile 4 — the same structure as the 5B, so the ops and
-the node order are the same and only the declared shapes change) (the graph structure does not
-depend on the tile edge). The full-size summary (tile 32 for 2.1, tile 16 for 2.2) comes from
-`python -m wan.export_vae [--model ti2v-5b]` (the VAE section of the README).
+Wan2.2 is exported with the synthetic VAE (`ti2v_synthetic_vae` of conftest, latent tile 4 — the
+same structure as the 5B, so the ops and the node order are the same and only the declared shapes
+change) (the graph structure does not depend on the tile edge). The full-size summary (tile 16)
+comes from `python -m wan.export_vae` (the VAE section of the README).
 
 What it checks:
 
@@ -19,8 +18,7 @@ What it checks:
   and an op outside the vocabulary
 - `--dtype i8` (ADR 0133 decision 7): in the i8 export of the synthetic 2.2 VAE, only the
   convolution weights become `int8-sym` (one scale per output channel), the graph structure and
-  the other storage are the same as in the f16 run, no fixtures are written, and a model without
-  an i8 series is refused
+  the other storage are the same as in the f16 run, and no fixtures are written
 - `--shared` (ADR 0134 decision 1): with the f16 / i8 sets of the synthetic 2.2 VAE (tile 4) as
   lenders, the tile-8 set `<target>_8` is written into the same series root; every initializer is
   a shared declaration with the same key, shape and storage as the lender, no weight bytes are
@@ -52,123 +50,6 @@ from karume.verify import BoundGraph, ir_graph_from_container, verify_container
 from wan import export_vae, vae_patch
 from wan.sources import SOURCES
 
-TILE = 8
-
-
-@pytest.fixture(scope="module")
-def vae(wan_snapshot):
-    pytest.importorskip("diffusers")
-    from diffusers import AutoencoderKLWan
-
-    return AutoencoderKLWan.from_pretrained(
-        wan_snapshot, subfolder="vae", torch_dtype=torch.float32
-    ).eval()
-
-
-@pytest.fixture(scope="module")
-def exported(vae) -> dict[bool, tuple[IrGraph, vae_patch.WanVaeChunkDecoder]]:
-    """The first / next IR (keyed by `first`)."""
-    graphs = {}
-    for first in (True, False):
-        module = vae_patch.WanVaeChunkDecoder(vae, first=first).eval()
-        with torch.no_grad():
-            graph, _ = export_module(
-                module,
-                export_vae.example_inputs(module, TILE),
-                preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-            )
-        graphs[first] = (graph, module)
-    return graphs
-
-
-class TestChunkGraphs:
-    @pytest.mark.parametrize("first", [True, False])
-    def test_the_graph_keeps_the_contract_of_the_adr(self, exported, first: bool):
-        graph, module = exported[first]
-
-        export_vae.assert_chunk_graph(graph, module, TILE)
-
-    @pytest.mark.parametrize("first", [True, False])
-    def test_there_is_no_pad_and_only_conv3d_weights_are_rank5(self, exported, first: bool):
-        graph, _ = exported[first]
-        rank5 = {name for name, value in graph.values.items() if len(value.shape) >= 5}
-        weights = {node.ins[1] for node in graph.nodes if node.op == "conv3d"}
-
-        assert "pad" not in {node.op for node in graph.nodes}
-        assert rank5 == weights
-        assert rank5 <= set(graph.initializers)
-        assert all(len(graph.values[name].shape) == 5 for name in rank5)
-
-    def test_both_graphs_use_the_same_op_set(self, exported):
-        first_ops = set(exported[True][0].required_ops)
-        next_ops = set(exported[False][0].required_ops)
-
-        assert first_ops == next_ops == export_vae.EXPECTED_OPS
-
-    def test_only_next_runs_the_two_time_convs(self, exported):
-        """conv3d: post-quant 1, shortcut 1, with cache 30 (first) / 32 (next)."""
-        counts = {
-            first: Counter(node.op for node in exported[first][0].nodes) for first in exported
-        }
-
-        assert counts[True]["conv3d"] == 32
-        assert counts[False]["conv3d"] == 34
-        assert counts[True]["cat"] == 30
-        assert counts[False]["cat"] == 32
-
-    def test_next_frames_are_four_per_chunk(self, exported):
-        first_graph, _ = exported[True]
-        next_graph, _ = exported[False]
-
-        assert first_graph.values[first_graph.outputs[0]].shape == [3, 1, 8 * TILE, 8 * TILE]
-        assert next_graph.values[next_graph.outputs[0]].shape == [3, 4, 8 * TILE, 8 * TILE]
-
-
-class TestTheCheckItself:
-    """If the check loosened, swapping caches of the same shape would slip through — fault
-    injection confirms the red."""
-
-    def test_two_swapped_cache_outputs_are_caught(self, exported):
-        graph, module = exported[False]
-        broken = copy.deepcopy(graph)
-        # cache_01 and cache_02 have the same shape [384, 2, t, t] — a shape check alone cannot
-        # tell them apart.
-        broken.outputs[2], broken.outputs[3] = broken.outputs[3], broken.outputs[2]
-
-        with pytest.raises(export_vae.ChunkGraphError, match="swapped order"):
-            export_vae.assert_chunk_graph(broken, module, TILE)
-
-    def test_an_op_outside_the_set_is_caught(self, exported):
-        graph, module = exported[True]
-        broken = copy.deepcopy(graph)
-        broken.nodes.append(IrNode(op="pad", ins=[graph.outputs[0]], outs=["padded"], attrs={}))
-
-        with pytest.raises(export_vae.ChunkGraphError, match="pad"):
-            export_vae.assert_chunk_graph(broken, module, TILE)
-
-    def test_a_rank6_value_is_caught(self, exported):
-        graph, module = exported[True]
-        broken = copy.deepcopy(graph)
-        name = next(iter(name for name in broken.values if name not in broken.initializers))
-        broken.values[name] = IrValue(dtype="f32", shape=[1, 1, 1, 1, 1, 1])
-
-        with pytest.raises(export_vae.ChunkGraphError, match="rank 6"):
-            export_vae.assert_chunk_graph(broken, module, TILE)
-
-
-class TestFixtureCases:
-    def test_band_and_accept_differ_in_latents_and_chunk_boundaries(self):
-        band, accept, long = export_vae.FIXTURE_CASES
-
-        assert (band.role, accept.role) == ("band", "accept")
-        assert band.seed != accept.seed
-        assert band.chunks != accept.chunks
-        assert band.chunks == 9  # 33 frames = 1 tile of the first target (ADR 0118)
-        # Acceptance at 81 frames (ADR 0118 step 8): 1 + 4·20 = 81. The band stays band (acceptance
-        # side).
-        assert (long.name, long.role, long.chunks) == ("long", "accept", 21)
-        assert long.seed not in {band.seed, accept.seed}
-
 
 class TestTheSetIsPublishedTogether:
     """first / next / the fixtures are placed as one set — a real run that fails midway does not
@@ -187,7 +68,7 @@ class TestTheSetIsPublishedTogether:
         for target in export_vae.TARGETS:
             (root / target).mkdir(parents=True)
             (root / target / export_vae.MODEL_FILE).write_text(self.OLD)
-        for case in export_vae.FIXTURE_CASES:
+        for case in export_vae.TI2V_FIXTURE_CASES:
             export_vae.fixture_path(root, case).write_text(self.OLD)
 
         class Decoder:
@@ -242,13 +123,14 @@ class TestTheSetIsPublishedTogether:
             (root / target / export_vae.MODEL_FILE).read_text() for target in export_vae.TARGETS
         ]
         fixtures = [
-            export_vae.fixture_path(root, case).read_text() for case in export_vae.FIXTURE_CASES
+            export_vae.fixture_path(root, case).read_text()
+            for case in export_vae.TI2V_FIXTURE_CASES
         ]
         return graphs + fixtures
 
     def _emit(self, root: Path, targets=export_vae.TARGETS) -> dict:
         return export_vae.emit_targets(
-            targets, None, 16, root, None, cases=export_vae.FIXTURE_CASES, patch_size=None
+            targets, None, 16, root, None, cases=export_vae.TI2V_FIXTURE_CASES
         )
 
     def test_a_complete_run_replaces_every_member(self, series):
@@ -256,11 +138,11 @@ class TestTheSetIsPublishedTogether:
 
         assert self._contents(series) == [
             *(f"{target}-new" for target in export_vae.TARGETS),
-            *(f"{case.seed}-new" for case in export_vae.FIXTURE_CASES),
+            *(f"{case.seed}-new" for case in export_vae.TI2V_FIXTURE_CASES),
         ]
         assert sorted(path.name for path in series.iterdir()) == sorted(
             [*export_vae.TARGETS]
-            + [export_vae.fixture_path(series, case).name for case in export_vae.FIXTURE_CASES]
+            + [export_vae.fixture_path(series, case).name for case in export_vae.TI2V_FIXTURE_CASES]
         )
 
     def test_a_failure_in_the_second_graph_leaves_the_first_untouched(self, series, monkeypatch):
@@ -286,7 +168,7 @@ class TestTheSetIsPublishedTogether:
         written = export_vae.save_file
 
         def failing(tensors, path, metadata):
-            if metadata["seed"] == str(export_vae.FIXTURE_CASES[1].seed):
+            if metadata["seed"] == str(export_vae.TI2V_FIXTURE_CASES[1].seed):
                 raise OSError("fails writing a fixture (fault injection)")
             written(tensors, path, metadata)
 
@@ -347,8 +229,8 @@ class TestTi2vChunkGraphs:
         assert graph.values[graph.outputs[0]].shape == [12, frames, side, side]
 
     def test_both_graphs_use_the_same_op_set(self, ti2v_exported):
-        """The shortcuts are only reshape / expand / permute / slice / add — the same op set as
-        2.1."""
+        """The shortcuts are only reshape / expand / permute / slice / add — no op outside
+        {@link wan.export_vae.EXPECTED_OPS}."""
         first_ops = set(ti2v_exported[True][0].required_ops)
         next_ops = set(ti2v_exported[False][0].required_ops)
 
@@ -368,8 +250,8 @@ class TestTi2vChunkGraphs:
         assert counts[False]["cat"] == 32
 
     def test_three_channel_frames_are_caught_in_a_ti2v_graph(self, ti2v_exported):
-        """The check can fail: the frame channels are derived from the module (2.1's 3 is not held
-        as a literal)."""
+        """The check can fail: the frame channels are derived from the module (the 3 pixel channels
+        of a VAE without patchify are not held as a literal)."""
         graph, module = ti2v_exported[False]
         broken = copy.deepcopy(graph)
         side = 8 * TI2V_TILE
@@ -389,12 +271,48 @@ class TestTi2vChunkGraphs:
             export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
 
 
-class TestVaeSeries:
-    def test_the_wan21_row_is_the_existing_series(self):
-        assert export_vae.VAE_SERIES["t2v-1.3b"] == export_vae.VaeSeries(
-            "wan2.1-t2v-1.3b-f16-dyn", 32, None, export_vae.FIXTURE_CASES
+class TestTheCheckItself:
+    """If the check loosened, swapping caches of the same shape would slip through — fault
+    injection confirms the red (on the synthetic 2.2 VAE)."""
+
+    def test_two_swapped_cache_outputs_are_caught(self, ti2v_exported):
+        graph, module = ti2v_exported[False]
+        broken = copy.deepcopy(graph)
+        # Two cache outputs of the same shape — a shape check alone cannot tell them apart.
+        shapes = [list(graph.values[output].shape) for output in graph.outputs[1:]]
+        left, right = next(
+            (i, j)
+            for i in range(len(shapes))
+            for j in range(i + 1, len(shapes))
+            if shapes[i] == shapes[j]
+        )
+        broken.outputs[1 + left], broken.outputs[1 + right] = (
+            broken.outputs[1 + right],
+            broken.outputs[1 + left],
         )
 
+        with pytest.raises(export_vae.ChunkGraphError, match="swapped order"):
+            export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
+
+    def test_an_op_outside_the_set_is_caught(self, ti2v_exported):
+        graph, module = ti2v_exported[True]
+        broken = copy.deepcopy(graph)
+        broken.nodes.append(IrNode(op="pad", ins=[graph.outputs[0]], outs=["padded"], attrs={}))
+
+        with pytest.raises(export_vae.ChunkGraphError, match="pad"):
+            export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
+
+    def test_a_rank6_value_is_caught(self, ti2v_exported):
+        graph, module = ti2v_exported[True]
+        broken = copy.deepcopy(graph)
+        name = next(iter(name for name in broken.values if name not in broken.initializers))
+        broken.values[name] = IrValue(dtype="f32", shape=[1, 1, 1, 1, 1, 1])
+
+        with pytest.raises(export_vae.ChunkGraphError, match="rank 6"):
+            export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
+
+
+class TestVaeSeries:
     def test_the_ti2v_row(self):
         """ADR 0121 decisions 6 / 7: series `wan2.2-ti2v-5b-f16-dyn`, latent tile 16, patch 2."""
         series = export_vae.VAE_SERIES["ti2v-5b"]
@@ -419,10 +337,9 @@ class TestVaeSeries:
     def test_every_model_has_a_pinned_source(self):
         assert set(export_vae.VAE_SERIES) <= set(SOURCES)
 
-    def test_only_ti2v_has_an_i8_series_and_it_is_the_dit_series(self):
+    def test_the_i8_series_is_the_dit_series(self):
         """ADR 0133 decision 7: the Wan2.2 VAE i8 is written into the same series root as the DiT
         i8 container (the component directory differs, so it does not overlap `transformer/`)."""
-        assert export_vae.VAE_SERIES["t2v-1.3b"].i8_series is None
         assert export_vae.VAE_SERIES["ti2v-5b"].i8_series == "wan2.2-ti2v-5b-i8-dyn"
         assert export_vae.TI2V_I8_SERIES_NAME == "wan2.2-ti2v-5b-i8-dyn"
 
@@ -437,13 +354,13 @@ class TestSeriesConfigGate:
             config=SimpleNamespace(patch_size=patch_size, scale_factor_spatial=scale_factor_spatial)
         )
 
-    def test_the_configs_of_both_generations_pass(self):
-        export_vae.assert_series_config(self._vae(None, 8), export_vae.VAE_SERIES["t2v-1.3b"])
+    def test_the_config_of_the_series_passes(self):
         export_vae.assert_series_config(self._vae(2, 16), export_vae.VAE_SERIES["ti2v-5b"])
 
-    def test_a_vae_of_the_other_generation_is_refused(self):
+    def test_a_vae_of_another_generation_is_refused(self):
+        """A VAE without patchify (`patch_size` None, compression 8) does not fit the series."""
         with pytest.raises(export_vae.ChunkGraphError, match="patch_size"):
-            export_vae.assert_series_config(self._vae(2, 16), export_vae.VAE_SERIES["t2v-1.3b"])
+            export_vae.assert_series_config(self._vae(None, 8), export_vae.VAE_SERIES["ti2v-5b"])
 
     def test_a_spatial_compression_off_the_graph_ratio_is_refused(self):
         """If the compression stays 8 for 2.2, the premises of the host overlap and of the frame
@@ -467,7 +384,6 @@ def written(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path, object]:
         root,
         source,
         cases=export_vae.TI2V_FIXTURE_CASES,
-        patch_size=2,
     )
     return summary, root, vae
 
@@ -545,9 +461,9 @@ class TestCommandLine:
         captured: dict = {}
 
         def emit_targets(
-            targets, vae, tile, out_root, source, *, cases, patch_size, weight_dtype, weight_scales
+            targets, vae, tile, out_root, source, *, cases, weight_dtype, weight_scales
         ):
-            captured.update(tile=tile, out=out_root, cases=cases, patch_size=patch_size)
+            captured.update(tile=tile, out=out_root, cases=cases)
             storage.update(dtype=weight_dtype, scales=weight_scales)
             return {}
 
@@ -563,24 +479,14 @@ class TestCommandLine:
         monkeypatch.setattr(export_vae, "emit_targets", emit_targets)
         return captured
 
-    def test_the_default_model_writes_the_wan21_series(self, emitted, capsys):
-        export_vae.main([])
-
-        assert emitted == {
-            "tile": 32,
-            "out": SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn",
-            "cases": export_vae.FIXTURE_CASES,
-            "patch_size": None,
-        }
-
-    def test_the_ti2v_model_writes_its_own_series(self, emitted, capsys):
-        export_vae.main(["--model", "ti2v-5b"])
+    @pytest.mark.parametrize("argv", [[], ["--model", "ti2v-5b"]], ids=["default", "ti2v-5b"])
+    def test_the_ti2v_model_writes_its_own_series(self, emitted, capsys, argv: list[str]):
+        export_vae.main(argv)
 
         assert emitted == {
             "tile": 16,
             "out": SERIES_ROOT / "wan2.2-ti2v-5b-f16-dyn",
             "cases": export_vae.TI2V_FIXTURE_CASES,
-            "patch_size": 2,
         }
 
     def test_an_explicit_out_and_no_fixtures(self, emitted, tmp_path, capsys):
@@ -602,16 +508,8 @@ class TestCommandLine:
             "tile": 16,
             "out": SERIES_ROOT / "wan2.2-ti2v-5b-i8-dyn",
             "cases": (),
-            "patch_size": 2,
         }
         assert storage == {"dtype": "i8", "scales": self.SCALES, "quantized": "ti2v-5b"}
-
-    def test_i8_on_a_model_without_an_i8_series_is_refused(self, emitted, storage, capsys):
-        with pytest.raises(SystemExit):
-            export_vae.main(["--model", "t2v-1.3b", "--dtype", "i8"])
-
-        assert "has no VAE i8 series" in capsys.readouterr().err
-        assert (emitted, storage) == ({}, {})
 
 
 @pytest.fixture(scope="module")
@@ -630,7 +528,6 @@ def written_i8(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path]:
         root,
         source,
         cases=(),
-        patch_size=2,
         weight_dtype="i8",
         weight_scales=scales,
     )
@@ -720,7 +617,6 @@ class TestTi2vI8Writer:
                 root,
                 None,
                 cases=export_vae.TI2V_FIXTURE_CASES,
-                patch_size=2,
                 weight_dtype="i8",
                 weight_scales={},
             )

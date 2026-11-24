@@ -4,9 +4,8 @@
 It pins the side where a breakage raises no exception and **only the numbers drift silently**:
 
 - layer-by-layer f32 / f64 is bit-identical to the reference run on the whole upstream model (f32
-  is `reference_dit_layers`, f64 is `model.double()` + `reference_dit_f64` — how the Wan2.1 goldens
-  are made) (with the rounding of both the f16 and the i8 series, and with all 3 sources: the
-  in-memory model, the container and the checkpoint)
+  is `reference_dit_layers`, f64 is `model.double()` + `reference_dit_f64`) (with both the f16 and
+  the i8 rounding, and with all 3 sources: the in-memory model, the container and the checkpoint)
 - the i8 dequantization of the container is done in f32 (doing it in f64 splits from the existing
   goldens — the values are `test_it_reads_every_weight_at_the_fake_quant_value`, and the rejection
   of a source that returns f64 values is `test_a_source_returning_f64_is_rejected`)
@@ -14,13 +13,11 @@ It pins the side where a breakage raises no exception and **only the numbers dri
 - the f64 path stops if it creates a floating-point value other than f64 (weight loading is
   outside the watch)
 - the table of upstream mmap offsets matches the actual addresses of `from_pretrained`
-- the comparison (`compare_tensors`) catches a one-bit difference
 - the graph of the meta trace of the 5B probe has the same structure as the real-weight export,
   and the per-row-block i8 gives the same values as fake-quant
 
 Runs only on a synthetic model (a small randomly initialised `WanTransformer3DModel` —
-`test_dit_patch.TINY_DIT`). The comparison with the real 1.3B goldens takes long, so it is
-`python -m wan.dit_reference compare` (runbook).
+`test_dit_patch.TINY_DIT`).
 """
 
 from __future__ import annotations
@@ -35,7 +32,7 @@ import pytest
 import torch
 from torch import nn
 
-from wan import dit_patch, dit_reference, export_dit
+from wan import dit_common, dit_patch, dit_reference
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
 #: The synthetic layer count (num_layers of TINY_DIT).
@@ -58,7 +55,7 @@ def _inputs(seed: int = 11) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
 def _rounded(dtype: str, seed: int = 20261004) -> nn.Module:
     model = _tiny(seed)
-    export_dit.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
+    dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
     return model
 
 
@@ -196,14 +193,15 @@ def _upstream(checkpoint: Path) -> nn.Module:
 
 
 def _container(model: nn.Module, dtype: str, directory: Path) -> Path:
-    """Round the synthetic model and write a container of the same form as the series (an export
-    with the same arguments as `export_dit.emit`)."""
+    """Round the synthetic model and write a container of the same form as the series (the
+    5-input S-form export)."""
     from karume.container import Provenance
     from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
     from karume.pipeline import export_to_file
+    from wan import dit_probe
 
     wrapper = dit_patch.WanDitTokens(model)
-    _, scales = export_dit.fake_quant(dtype, model, wrapper)
+    _, scales = dit_common.fake_quant(dtype, model, wrapper)
     latents, timestep, embeds = _inputs()
     inputs = (
         dit_patch.dit_patchify(latents, (1, 2, 2)),
@@ -211,14 +209,14 @@ def _container(model: nn.Module, dtype: str, directory: Path) -> Path:
         embeds,
         *dit_patch.dit_rope_tables(model.rope, TINY_LATENT),
     )
-    path = directory / export_dit.MODEL_FILE
+    path = directory / "model.krm"
     export_to_file(
         wrapper,
         inputs,
         path,
         provenance=Provenance(license="apache-2.0"),
-        graph_name=export_dit.TARGET,
-        dynamic_shapes=export_dit.dynamic_shapes(),
+        graph_name="transformer",
+        dynamic_shapes=dit_probe.dynamic_shapes(),
         symbol_names=("S",),
         weight_dtype=dtype,
         weight_scales=scales,
@@ -347,7 +345,7 @@ class TestTheCheckpointSource:
         self, dtype: str, checkpoint: Path
     ) -> None:
         model = _upstream(checkpoint)
-        export_dit.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
+        dit_common.fake_quant(dtype, model, dit_patch.WanDitTokens(model))
         source = dit_reference.CheckpointDitWeights(
             checkpoint, dtype, dit_reference.quant_keys(model.config)
         )
@@ -366,7 +364,7 @@ class TestTheCheckpointSource:
         """The quantization targets = the keys of the scale ledger of the export's
         `fake_quant_i8` (the linears and the patch embedding)."""
         model = _tiny()
-        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+        report = dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
 
         assert dit_reference.quant_keys(model.config) == frozenset(report.scales)
         assert "patch_embedding.weight" in report.scales
@@ -376,95 +374,8 @@ class TestTheCheckpointSource:
             dit_reference.CheckpointDitWeights(checkpoint, "i8")
 
 
-class TestCompareTensors:
-    def _file(self, tmp_path: Path, tensors: dict[str, torch.Tensor]) -> Path:
-        from safetensors.torch import save_file
-
-        path = tmp_path / "reference.case.safetensors"
-        save_file(tensors, str(path))
-        return path
-
-    def test_identical_tensors_have_no_mismatch(self, tmp_path: Path) -> None:
-        tensors = {"output": torch.randn(3, 4), "timestep": torch.tensor([7], dtype=torch.int32)}
-
-        result = dit_reference.compare_tensors(tensors, self._file(tmp_path, tensors))
-
-        assert result == {"keys": ["output", "timestep"], "mismatched": {}}
-
-    def test_one_flipped_bit_and_a_missing_key_are_named(self, tmp_path: Path) -> None:
-        tensors = {"output": torch.randn(3, 4), "block.00": torch.randn(2)}
-        path = self._file(tmp_path, tensors)
-        flipped = tensors["output"].clone()
-        flipped.view(torch.int32)[1, 2] ^= 1
-
-        result = dit_reference.compare_tensors({"output": flipped, "extra": torch.ones(1)}, path)
-
-        assert set(result["mismatched"]) == {"output", "block.00", "extra"}
-        assert "bits differ" in result["mismatched"]["output"]
-        assert result["mismatched"]["block.00"] == "missing from the written side"
-        assert result["mismatched"]["extra"] == "missing from the existing file"
-
-    def test_negative_zero_is_not_equal_to_zero(self, tmp_path: Path) -> None:
-        path = self._file(tmp_path, {"output": torch.zeros(2)})
-
-        result = dit_reference.compare_tensors({"output": torch.tensor([0.0, -0.0])}, path)
-
-        assert "output" in result["mismatched"]
-
-    def test_only_the_named_keys_are_compared(self, tmp_path: Path) -> None:
-        path = self._file(tmp_path, {"output": torch.zeros(2), "output.f64": torch.ones(2)})
-
-        result = dit_reference.compare_tensors({"output.f64": torch.ones(2)}, path, ["output.f64"])
-
-        assert result == {"keys": ["output.f64"], "mismatched": {}}
-
-
-def _row(case: str, mode: str, version: int = dit_reference.COMPARE_VERSION) -> dict[str, Any]:
-    return {"case": case, "status": "equal", "mode": mode, "compare_version": version}
-
-
-class TestTheResumeMarker:
-    """The rows of `results.jsonl` this run counts as "done" (the resume marker)."""
-
-    def _write(self, tmp_path: Path, text: str) -> Path:
-        path = tmp_path / dit_reference.RESULTS_FILE
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def _lines(self, *rows: dict[str, Any]) -> str:
-        return "".join(json.dumps(row) + "\n" for row in rows)
-
-    def test_an_f64_only_row_does_not_count_for_a_full_run(self, tmp_path: Path) -> None:
-        """Skipping a full run because of an f64-only row would turn green without comparing the
-        f32 output and blocks."""
-        path = self._write(tmp_path, self._lines(_row("a", "f64-only"), _row("b", "full")))
-
-        assert sorted(dit_reference._done(path, "full")) == ["b"]
-        assert sorted(dit_reference._done(path, "f64-only")) == ["a", "b"]
-
-    def test_a_row_of_another_compare_version_does_not_count(self, tmp_path: Path) -> None:
-        old = {"case": "a", "status": "equal"}  # a row without the version field (version 1)
-        path = self._write(
-            tmp_path,
-            self._lines(
-                old, _row("b", "full", dit_reference.COMPARE_VERSION - 1), _row("c", "full")
-            ),
-        )
-
-        assert sorted(dit_reference._done(path, "full")) == ["c"]
-
-    def test_a_half_written_last_line_is_dropped_and_cut_off(self, tmp_path: Path) -> None:
-        whole = self._lines(_row("a", "full"))
-        path = self._write(tmp_path, whole + json.dumps(_row("b", "full"))[:17])
-
-        assert sorted(dit_reference._done(path, "full")) == ["a"]
-        assert path.read_text(encoding="utf-8") == whole
-
-    def test_an_unreadable_line_before_the_last_fails_loudly(self, tmp_path: Path) -> None:
-        path = self._write(tmp_path, '{"case": \n' + self._lines(_row("a", "full")))
-
-        with pytest.raises(dit_reference.DitReferenceError, match=":1: unreadable row"):
-            dit_reference._done(path, "full")
+class TestTheNumericEnvironment:
+    """What the result rows record about the environment the f32 bit-exactness depends on."""
 
     def test_the_numeric_environment_records_the_mkl_switches(self, monkeypatch) -> None:
         monkeypatch.setenv("MKL_CBWR", "COMPATIBLE")
@@ -476,38 +387,6 @@ class TestTheResumeMarker:
         assert environment["env"]["OMP_NUM_THREADS"] == "3"
         assert environment["threads"] == torch.get_num_threads()
         assert environment["torch"] == torch.__version__
-
-
-class TestTheExportDitRoute:
-    """`export_dit.float64_references` goes through the layer-by-layer path and does not change
-    the Wan2.1 whole-model f64 values."""
-
-    def test_it_reproduces_the_whole_model_f64_reference(self, monkeypatch) -> None:
-        model = _rounded("i8")
-        spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
-        monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-        monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
-        inputs = export_dit.case_inputs(model, spec)
-
-        references = export_dit.float64_references(model, [spec], "i8")
-
-        (reference,) = references.values()
-        assert list(references) == [spec.name((1, 2, 2))]
-        assert torch.equal(reference.output, _whole_f64(model, inputs))
-
-    @pytest.mark.parametrize("dtype", ["f16", "i8"])
-    def test_a_model_before_the_fake_quant_is_refused(self, dtype: str) -> None:
-        """If the call order breaks and a model before rounding is passed, it stops (no unrounded
-        f64 golden is written)."""
-        spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
-
-        with pytest.raises(AssertionError, match="was given unrounded"):
-            export_dit.float64_references(_tiny(), [spec], dtype)
-
-    def test_cases_without_an_f64_reference_take_nothing(self) -> None:
-        spec = export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 2)
-
-        assert export_dit.float64_references(_rounded("f16"), [spec], "f16") == {}
 
 
 # ---- the 5B probe (`wan.dit_probe`) ------------------------------------------------------
@@ -547,7 +426,7 @@ class TestTheProbe:
 
         assert _structure(meta_graph) == _structure(real_graph)
         assert len(targets) == len(
-            export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model)).scales
+            dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model)).scales
         )
         assert sorted(key for key, value in tensors.items() if value.is_meta) == sorted(
             dict(model.named_parameters())
@@ -560,7 +439,7 @@ class TestTheProbe:
 
         export, summary = dit_probe.prepare(checkpoint, stage=_stage, sym_max=256, chunk_rows=5)
         model = _upstream(checkpoint)
-        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+        report = dit_common.fake_quant_i8(model, dit_patch.WanDitTokens(model))
         state = model.state_dict()
 
         assert sorted(export.fixed) == sorted(report.scales)
@@ -605,23 +484,22 @@ class TestTheProbeMemory:
 
         monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
-        monkeypatch.setattr(export_dit, "load_transformer", never)
+        monkeypatch.setattr(dit_common, "load_transformer", never)
 
         with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
-            dit_probe.run_eager("t2v-1.3b", tmp_path)
+            dit_probe.run_eager("ti2v-5b", tmp_path)
 
     def test_the_default_outputs_live_under_the_bench_root(self) -> None:
         from _shared.paths import BENCH_ROOT
         from wan import dit_probe
         from wan.sources import SOURCES
 
-        assert set(dit_probe.BENCH_NAMES) == set(SOURCES)
-        for model in SOURCES:
+        assert set(dit_probe.BENCH_NAMES) <= set(SOURCES)
+        for model in dit_probe.BENCH_NAMES:
             assert dit_probe.default_out(model).parent.parent == BENCH_ROOT
-        assert dit_reference.DEFAULT_OUT.parent.parent == BENCH_ROOT
 
 
-_PROBE_SPEC = export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 1)
+_PROBE_SPEC = dit_common.CaseSpec("band", TINY_LATENT, 999, 5, 1)
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
@@ -703,8 +581,8 @@ class TestTheBlockHooks:
 def _tiny_text(monkeypatch) -> None:
     from wan import dit_probe
 
-    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
     monkeypatch.setattr(dit_probe, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
@@ -726,14 +604,14 @@ class TestTheProbeDiagnosis:
         save_file({"boxing-cats": embeds}, str(asset), metadata={METADATA_KEY: "{}"})
         monkeypatch.setattr(dit_probe, "TEXT_EMBEDS_ASSET", asset)
         writer = dit_reference.LayerwiseDit(_tiny().config)
-        spec = export_dit.CaseSpec("probe", TINY_LATENT, 999, 5, 1)
+        spec = dit_common.CaseSpec("probe", TINY_LATENT, 999, 5, 1)
 
         synthetic = dit_probe.probe_inputs(writer, spec)
         named = dit_probe.probe_inputs(writer, spec, "boxing-cats")
 
         assert all(
             torch.equal(a, b)
-            for a, b in zip(synthetic, export_dit.case_inputs(writer, spec), strict=True)
+            for a, b in zip(synthetic, dit_common.case_inputs(writer, spec), strict=True)
         )
         assert torch.equal(named[0], synthetic[0])
         assert torch.equal(named[1], synthetic[1])

@@ -1,12 +1,12 @@
 """Script that writes the real-weight Gemma 4 E2B / E4B (text decoder, `--model e2b|e4b`, default
 e2b) in the **one-shot form** to `model.krm` (IR v2) + golden io.
 
-The mirror of `minicpm5/export.py` (`input_ids[1,T] → logits[1,T,262144]`, no KV cache), but the
-acceptance has two more focal points:
+A one-shot causal LM graph (`input_ids[1,T] → logits[1,T,262144]`, no KV cache) whose acceptance
+has two focal points besides GQA:
 
 - the **band masks of the two layer types** (sliding / full — 28 / 7 layers for E2B, 35 / 7 for
-  E4B) both fold into a T-independent Tmax constant + `sym_prefix_slice` (ADR 0010 — the same
-  mechanism as the band mask of `embeddinggemma/export.py`, in two **causal** variants).
+  E4B) both fold into a T-independent Tmax constant + `sym_prefix_slice` (ADR 0010, in two
+  **causal** variants).
 - **mixed quantization** (embeddings i8 × linears i4 — ADR 0069 decision 5 /
   `weight_dtype_overrides`) runs through a real model. E2B has a vocabulary of 262144 × a PLE
   table of 8960 columns, a form in which "the embeddings are most of the weights", so neither i4
@@ -20,9 +20,8 @@ series `outputs/series/gemma4-<model>/`); every form (layer count, head count, K
 dimensions) is derived from the upstream config — the script has no number that branches on the
 model name.
 
-transformers is **pinned to 5.14.1** (the same reason as `minicpm5/export.py` — a change of the
-modeling code changes the graph form). It is not added to pyproject.toml / uv.lock but added
-temporarily with `--with`.
+transformers is **pinned to 5.14.1** (a change of the modeling code changes the graph form). It
+is not added to pyproject.toml / uv.lock but added temporarily with `--with`.
 
 ## What goes into the graph
 
@@ -39,10 +38,10 @@ form is written ({@link assert_ir_form} matches it layer by layer, in layer orde
 
 ## Emitting GQA / MQA in its "true form"
 
-Gemma 4 E2B is an 8:1 MQA (`num_key_value_heads` 1), E4B a 4:1 GQA (2). The reason for the detour
-and its method are the same as in `minicpm5/export.py` — {@link gqa_sdpa_attention} is registered
-at transformers' public extension point (`AttentionInterface.register`) and calls SDPA with
-`enable_gqa=True`, without `repeat_kv`.
+Gemma 4 E2B is an 8:1 MQA (`num_key_value_heads` 1), E4B a 4:1 GQA (2). transformers' `sdpa` path
+materialises k / v to the q heads with `repeat_kv` whenever a mask is passed, so {@link
+gqa_sdpa_attention} is registered at transformers' public extension point
+(`AttentionInterface.register`) and calls SDPA with `enable_gqa=True`, without `repeat_kv`.
 The IR's attention becomes `q[1,8,T,D] / k[1,Hkv,T,D] / v[1,Hkv,T,D]`
 (Hkv = `num_key_value_heads`).
 
@@ -97,7 +96,7 @@ for compressed storage (`emit.eligible_compressed_initializers`).
     outputs/series/gemma4-<model>/model.krm             weights, constants + the 2 descriptors
     outputs/series/gemma4-<model>/io.<case>.safetensors inputs and torch CPU expected outputs
 
-The io tensor key convention is the same as tiny golden / DeBERTa / EmbeddingGemma / MiniCPM5
+The io tensor key convention is the same as tiny golden / DeBERTa / EmbeddingGemma 2
 (`input.<graph input name>` / `output.<position>`). The logits have a vocabulary of 262144, so each
 case takes `T × 1.05MB` (627MB for `context-en` at T=598) — disk is plentiful, so every row is
 written.
@@ -217,8 +216,8 @@ SYM_MAX = 768
 NEG_INF = float("-inf")
 
 #: The name registered with `AttentionInterface`. **It contains none of `sdpa` /
-#: `flash_attention` / `flex_attention` as a substring** (the same reason as `minicpm5/export.py`
-#: — a partial name match branches into backend-specific dispatch checks).
+#: `flash_attention` / `flex_attention` as a substring** (a partial name match branches into
+#: backend-specific dispatch checks).
 ATTENTION_NAME = "karume_gqa"
 
 #: The layer types that appear in `config.layer_types` (= the mask dictionary's keys = the keys of
@@ -295,7 +294,7 @@ CONTEXT_EN = (
 
 #: The fixed golden texts (`(case name, text)`). T, `<bos>` included, is spread to 6 / 10 / 598
 #: (far from the 0/1 specialization, on both sides of `sliding_window` 512, inside the bound 768).
-#: `capital-ja` has the same **paired structure** as minicpm5 (the lead-in
+#: `capital-ja` has a **paired structure** (the lead-in
 #: 「フランスの首都はパリ、」), a form whose continuation is more determined than the plain
 #: 「日本の首都は」.
 GOLDEN_CASES: tuple[tuple[str, str], ...] = (

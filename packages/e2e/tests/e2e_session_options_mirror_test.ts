@@ -40,7 +40,6 @@ import {
   toSessionOptions,
 } from "../../models/src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../../models/src/siglip2/pipeline.ts";
-import { VOWEL_DETECTOR_SESSION_POLICY } from "../../models/src/vowel-detector/pipeline.ts";
 import { UMT5_ENCODER_SESSION_POLICY } from "../../models/src/umt5/encoder.ts";
 import { WAN_SESSION_POLICY } from "../../models/src/wan/family.ts";
 
@@ -65,9 +64,7 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
-  "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
-  wan: WAN_SESSION_POLICY,
-  // Wan2.2 TI2V shares the policy of 2.1 (the shared admission — `family.ts`).
+  // Wan2.2 TI2V reads the Wan family's policy (the family admission — `family.ts`).
   "wan-ti2v": WAN_SESSION_POLICY,
 };
 

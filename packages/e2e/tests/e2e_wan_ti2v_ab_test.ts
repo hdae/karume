@@ -8,8 +8,8 @@
  * under the same band (a describe for each of the 2 presets per T2V case; the fault injections and I2V run for s16
  * only).
  *
- * The steps, the verdict and the fault injections are the one implementation shared with 2.1 (`e2e_wan_ab_test.ts`)
- * ({@link registerWanAbCase} of `helpers/wan-ab-gate.ts`): capture the step-1 latent (step 1 of a 2-step run) with the
+ * The steps, the verdict and the fault injections are the implementation of `helpers/wan-ab-gate.ts`
+ * ({@link registerWanAbCase}): capture the step-1 latent (step 1 of a 2-step run) with the
  * reference partner and abort → do the same twice independently with the practical preset → determinism (the 2 runs
  * are bit-identical), census (in every pass of the practical preset's DiT exactly 310 linears are i8a8 and 0 linears
  * are on the reference path — the `wan-ti2v` row of the bundle's census table; at least 1 for each of the 2 attention

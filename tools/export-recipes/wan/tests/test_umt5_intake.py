@@ -1047,7 +1047,7 @@ class TestTheMirror:
         ("extra", "match"),
         [
             (["--model", UMT5_DEFAULT_MODEL], "differs from the intake name"),
-            (["--pipeline", "wan"], "--intake applies only to --pipeline umt5"),
+            (["--pipeline", "wan-ti2v"], "--intake applies only to --pipeline umt5"),
         ],
     )
     def test_mixing_with_other_models_or_pipelines_is_refused(self, roots, extra, match):

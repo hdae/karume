@@ -730,7 +730,7 @@ const textOf = (
 // ---- hooks for observation and fault injection (module doc "Hooks for observation and fault injection") ----------
 
 /**
- * The input names of the DiT's S-shaped graph (the forward argument names of the recipe's `wan/export_dit.py` /
+ * The input names of the DiT's S-shaped graph (the forward argument names of the recipe's `wan/dit_common.py` /
  * `wan/ti2v_export_dit.py` — the same spelling as the private constants of the product's `dit-loop.ts`. If they
  * differ, {@link f32Input} / {@link boolInput} fail naming them).
  */

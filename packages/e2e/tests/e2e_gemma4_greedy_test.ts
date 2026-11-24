@@ -9,8 +9,8 @@
 // (pin the exit artifact itself — however much the numbers move, green while the sequence does not
 // split, red when it does).
 //
-// The model it mirrors is `e2e_minicpm5_greedy_test.ts` (no KV sharing, full attention only,
-// uniform f32 storage); what this one adds are three points specific to Gemma 4:
+// Beyond a plain decoder (no KV sharing, full attention only, uniform storage), it checks three
+// points specific to Gemma 4:
 //
 // - **Two kinds, sliding + full** (the 28 sliding layers are ring slots with a 512 window, the 7
 //   full layers the whole context). The longest case T=598 exceeds the window, so the ring eviction

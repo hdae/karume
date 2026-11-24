@@ -7,9 +7,8 @@ EmbeddingGemma 2** only.
 
 The repository `karume-embeddinggemma-2` holds one model today, `text` — the text tower of
 `google/embeddinggemma-2`, its vision tower and its audio tower. Its contract is
-`embeddinggemma/1`, the TypeScript family `embeddinggemma`, which the first EmbeddingGemma will join
-later from a repository of its own (another licence, so another `Pipeline` with other root files).
-The model ships three graphs and one asset:
+`embeddinggemma/1`, the TypeScript family `embeddinggemma`. The model ships three graphs and one
+asset:
 
 - `model` — the text tower, mean pooling and L2 normalisation as one graph, `input_ids` /
   `pool_mask` `[1, T]` and the soft rows of a tower (`soft_embeds` `[1, T, 512]`, `soft_mask`
@@ -183,7 +182,7 @@ def embeddinggemma2_role(dtype: str, role: str = EMBEDDINGGEMMA2_ROLE) -> str:
 
 
 #: The representative container path inside a series and the asset file inside the tokenizer
-#: series (mirrors of `embeddinggemma.export.MODEL_FILE` and the name of
+#: series (mirrors of `embeddinggemma2.export.MODEL_FILE` and the name of
 #: `embeddinggemma2.tokenizer.ASSET_PATH` — held equal by the tests).
 EMBEDDINGGEMMA2_MODEL_FILE = "model.krm"
 EMBEDDINGGEMMA2_TOKENIZER_FILE = "tokenizer.json"
@@ -277,8 +276,9 @@ EMBEDDINGGEMMA2_QUANTS: Mapping[str, Any] = {
         "weights": {role: EMBEDDINGGEMMA2_I8_DTYPE for role in EMBEDDINGGEMMA2_GRAPH_SERIES},
         "session": {},
         "label": "Half size (int8)",
-        "description": "The token table and every linear layer stored as int8 (one scale per row)"
-        " and computed in f32.",
+        "description": "The token table, image position tables and every linear layer and"
+        " convolution stored as int8 (one scale per row), computed in f32; the audio tower's two"
+        " subsampling convolutions stay bf16.",
     },
 }
 EMBEDDINGGEMMA2_DEFAULT_QUANT = EMBEDDINGGEMMA2_DTYPE

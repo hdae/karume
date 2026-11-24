@@ -1,5 +1,5 @@
 /**
- * Wan2.1's prompt layer — preprocessing (a mirror of `prompt_clean`) → the umT5 tokenizer (including
+ * Wan's prompt layer — preprocessing (a mirror of `prompt_clean`) → the umT5 tokenizer (including
  * the accepted-set check) (ADR 0119 decisions 1, 2 and 4).
  *
  * The tokenizer and the accepted-set check are the single implementation shared with the standalone

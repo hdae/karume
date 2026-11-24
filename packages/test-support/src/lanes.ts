@@ -51,13 +51,6 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("birefnet", both("birefnet")),
   family("depth-anything", both("depth_anything")),
   family("siglip2", both("siglip2")),
-  family("vowel-detector", both("vowel_detector")),
-  family("minicpm5", both("minicpm5")),
-  family(
-    "embeddinggemma",
-    [`${E2E}/e2e_embeddinggemma*_test.ts`],
-    [`${E2E}/e2e_embeddinggemma2*_test.ts`],
-  ),
   family("embeddinggemma2", both("embeddinggemma2")),
   family("deberta", [`${E2E}/e2e_deberta*_test.ts`]),
   family("wan", both("wan"), both("wan_ti2v")),
@@ -86,7 +79,7 @@ export const LANES: readonly Lane[] = [CORE_LANE, ...FAMILY_LANES];
  * their lanes only when `KARUME_ALL_FAMILIES=1` is set (`KARUME_ALL_FAMILIES=1 vp test --project
  * models:siglip2`). The release run uses the default set.
  */
-export const LOW_PRIORITY_FAMILIES: readonly string[] = ["minicpm5", "siglip2"];
+export const LOW_PRIORITY_FAMILIES: readonly string[] = ["siglip2"];
 
 /** The lanes a run without `KARUME_ALL_FAMILIES=1` executes. */
 export const defaultLanes = (

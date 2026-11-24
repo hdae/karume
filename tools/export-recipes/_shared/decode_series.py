@@ -35,7 +35,7 @@ from karume.artifacts import swap_into_place
 from karume.convert import normalize_boundary_tensor
 
 #: File name of the greedy golden (`greedy.<case>.safetensors`). Its readers are the TS-side
-#: acceptance check and `minicpm5/sweep_w4.py`. The extension is the same as the one-shot
+#: acceptance checks. The extension is the same as the one-shot
 #: `io.*`, but `_shared` does not import families, so the spelling is held here.
 GREEDY_PREFIX = "greedy."
 GREEDY_SUFFIX = ".safetensors"

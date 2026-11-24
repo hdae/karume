@@ -15,8 +15,9 @@ Three levels are pinned:
 
 The latent is spatially 8×8 (64 px) with 5 chunks (the smallest count that goes through the first
 chunk, the second chunk on the `'Rep'` path of `time_conv`, and the third and later chunks where
-the cache holds 2 frames). The real-size values at tile 32 with 9 chunks are measured by
-`python -m wan.export_vae --verify` (the VAE section of the README).
+the cache holds 2 frames). The real-size values at tile 32 with 9 chunks were measured on the same
+Wan2.1 VAE with the `--verify` mode of `wan.export_vae` (2026-10-02 — the mode now runs the Wan2.2
+VAE).
 """
 
 from __future__ import annotations

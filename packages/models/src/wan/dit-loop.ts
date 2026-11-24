@@ -3,14 +3,11 @@
  * (patchify → DiT → unpatchify → CFG → UniPC — {@link runWanDenoise}).
  *
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
- * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one DiT stage.
- * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10).
- * `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1, `"wan.Ti2vPipeline"` for Wan2.2).
+ * time) are defined by the doc at the top of `./ti2v-pipeline.ts`; this module only runs the one DiT
+ * stage (ADR 0121 decision 10). `owner` is the message prefix (`"wan.Ti2vPipeline"`).
  *
- * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./pipeline.ts` with
- * `import type` (type-only references are erased, so there is no import cycle). Even with the
- * `vae_encoder` stage added at stage 9 (I2V) they stay in `./pipeline.ts` — type-only references cause
- * no cycle, so there is no reason to move them to a separate module.
+ * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./types.ts` with
+ * `import type` (type-only references are erased, so there is no import cycle).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
@@ -22,7 +19,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { GenerateEvent, RunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./types.ts";
 import type { WanDitInputForm } from "./descriptor.ts";
 import type { WanGenerationKnobs } from "./plan.ts";
 import {
@@ -45,7 +42,7 @@ export const TRANSFORMER = "transformer";
 /** The asset name of the RoPE base table declared by the `transformer` container (role `rope-base`). */
 export const ROPE_BASE = "rope_base";
 
-/** Input names of the DiT's S-shaped graph (forward argument names of recipe `wan/export_dit.py`). */
+/** Input names of the DiT's S-shaped graph (forward argument names of recipe `wan/dit_common.py`). */
 const DIT_TOKENS = "tokens";
 const DIT_TIMESTEPS_PROJ = "timesteps_proj";
 export const DIT_CONTEXT = "encoder_hidden_states";
@@ -60,19 +57,24 @@ const DIT_CONDITION_MASK = "condition_mask";
 
 /**
  * A form outside the exhaustive set (a descriptor or internal state holding an out-of-type value —
- * not silently run as t2v).
+ * not silently run as the known form).
  */
 const unknownDitInputForm = (form: never, owner: string): Error =>
-  new Error(`${owner}: unknown DiT input form '${String(form)}' ("t2v" / "ti2v")`);
+  new Error(`${owner}: unknown DiT input form '${String(form)}' ("ti2v")`);
 
 /** The set of graph input names per DiT input form (an unknown form fails loudly). */
 const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] => {
-  const t2v = [DIT_TOKENS, DIT_TIMESTEPS_PROJ, DIT_CONTEXT, DIT_ROPE_COS, DIT_ROPE_SIN];
   switch (form) {
-    case "t2v":
-      return t2v;
     case "ti2v":
-      return [...t2v, DIT_TIMESTEPS_PROJ_CONDITION, DIT_CONDITION_MASK];
+      return [
+        DIT_TOKENS,
+        DIT_TIMESTEPS_PROJ,
+        DIT_CONTEXT,
+        DIT_ROPE_COS,
+        DIT_ROPE_SIN,
+        DIT_TIMESTEPS_PROJ_CONDITION,
+        DIT_CONDITION_MASK,
+      ];
     default:
       throw unknownDitInputForm(form, owner);
   }
@@ -81,8 +83,8 @@ const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] 
 /**
  * The DiT patch (the stride is the upstream transformer config's `patch_size [1, 2, 2]` — an
  * architecture constant). The channel count comes from the VAE chunk graph declaration (axis 0 of
- * `latent` — `WanVaeChunkLayout.latentChannels`) (16 for Wan2.1). The last dimension of the graph's
- * `tokens` (`C·1·2·2` — 64 for Wan2.1) is matched by {@link ditContract} at construction.
+ * `latent` — `WanVaeChunkLayout.latentChannels`) (48 for Wan2.2). The last dimension of the graph's
+ * `tokens` (`C·1·2·2` — 192 for Wan2.2) is matched by {@link ditContract} at construction.
  *
  * NOTE: `export` is for the family admission and for tests that pin the checks without a GPU (not on
  * the `mod.ts` / subpath surface — ADR 0008).
@@ -178,12 +180,12 @@ export type DitContract = {
  * no bounds, so no bound matching is needed).
  *
  * MUST: the set of graph input names matches exactly what `form` (the generation descriptor's
- * `ditInputForm`) expects. The host builds only the expected inputs, so an extra input (a sixth one in
- * a 2.1 declaration, or a TI2V DiT opened as 2.1) would get as far as the Session's input check. This
- * check comes **after** the checks of the existing five — it does not change the message for an asset
- * missing an input (the "'X' is missing" wording). For TI2V the dtype and shape of the two extra inputs are checked too
- * (the condition-side time is f32 with the same `[1, W]` as `timesteps_proj`; the condition mask is a
- * bool `[1, S, 1]` with the same symbol S as `tokens`).
+ * `ditInputForm`) expects. The host builds only the expected inputs, so an extra input (an eighth
+ * one, or a declaration without the condition inputs) would get as far as the Session's input check.
+ * This check comes **after** the checks of the first five inputs — it does not change the message for
+ * an asset missing one of them (the "'X' is missing" wording). The dtype and shape of the two
+ * condition inputs are checked too (the condition-side time is f32 with the same `[1, W]` as
+ * `timesteps_proj`; the condition mask is a bool `[1, S, 1]` with the same symbol S as `tokens`).
  *
  * NOTE: `export` is for the family admission and for tests that pin the checks without a GPU (not on
  * the `mod.ts` / subpath surface — ADR 0008).
@@ -249,8 +251,6 @@ export const ditContract = (
     );
   }
   switch (form) {
-    case "t2v":
-      break;
     case "ti2v":
       assertInput(owner, transformer, DIT_TIMESTEPS_PROJ_CONDITION, "f32", [1, projWidth]);
       assertInput(owner, transformer, DIT_CONDITION_MASK, "bool", [1, sequence, 1]);
@@ -299,14 +299,11 @@ type DitConditionInputs = {
 };
 
 /**
- * The inputs of one DiT forward (the S-shaped graph's inputs — 5 for t2v, 7 for ti2v with the two of
- * `condition` added). The arrays the host built are passed as is (not copied — a borrow that is not
- * modified until the run settles). When `condition` is undefined only the five are passed (keys,
- * order and arrays the same as before the condition inputs were added — the bytes that reach the
- * Wan2.1 Session do not change).
+ * The inputs of one DiT forward (the S-shaped graph's 7 inputs — the five of the generation side and
+ * the two of `condition`). The arrays the host built are passed as is (not copied — a borrow that is
+ * not modified until the run settles).
  *
- * MUST: this is the only place that builds the DiT inputs (ADR 0121 decision 10 — shared by 2.1 and
- * 2.2).
+ * MUST: this is the only place that builds the DiT inputs (ADR 0121 decision 10).
  *
  * NOTE: `export` is for tests that pin how the inputs are built without a GPU (not on the `mod.ts` /
  * subpath surface — ADR 0008).
@@ -323,35 +320,30 @@ export const ditInputs = (input: {
     readonly sin: Float32Array<ArrayBuffer>;
   };
   readonly ropeShape: readonly number[];
-  readonly condition: DitConditionInputs | undefined;
+  readonly condition: DitConditionInputs;
 }): RunInputs => ({
   [DIT_TOKENS]: { dtype: "f32", shape: input.tokenShape, data: input.tokens },
   [DIT_TIMESTEPS_PROJ]: { dtype: "f32", shape: input.projShape, data: input.proj },
   [DIT_CONTEXT]: { dtype: "f32", shape: input.contextShape, data: input.context },
   [DIT_ROPE_COS]: { dtype: "f32", shape: input.ropeShape, data: input.rope.cos },
   [DIT_ROPE_SIN]: { dtype: "f32", shape: input.ropeShape, data: input.rope.sin },
-  ...(input.condition === undefined
-    ? {}
-    : {
-        [DIT_TIMESTEPS_PROJ_CONDITION]: {
-          dtype: "f32",
-          shape: input.projShape,
-          data: input.condition.proj,
-        },
-        [DIT_CONDITION_MASK]: {
-          dtype: "bool",
-          shape: input.condition.maskShape,
-          data: input.condition.mask,
-        },
-      }),
+  [DIT_TIMESTEPS_PROJ_CONDITION]: {
+    dtype: "f32",
+    shape: input.projShape,
+    data: input.condition.proj,
+  },
+  [DIT_CONDITION_MASK]: {
+    dtype: "bool",
+    shape: input.condition.maskShape,
+    data: input.condition.mask,
+  },
 });
 
 /**
- * The condition mask (ADR 0121 decision 3 — built once before the loop). A DiT of input form "t2v" has
- * no condition inputs, so it is undefined (fails loudly if a condition latent is passed). For "ti2v",
- * a text-only request (T2V — an axis separate from the input form) gives all false, and I2V
- * (`conditioned`) sets true the tokens of the first latent frame — the `rows·cols` tokens that come
- * first and contiguous under the token index `(f·H' + h)·W' + w` (880 at 1280×704).
+ * The condition mask (ADR 0121 decision 3 — built once before the loop). A text-only request (T2V)
+ * gives all false, and I2V (`conditioned`) sets true the tokens of the first latent frame — the
+ * `rows·cols` tokens that come first and contiguous under the token index `(f·H' + h)·W' + w`
+ * (880 at 1280×704).
  *
  * MUST: I2V is built only when the temporal patch is 1 — it assumes the frame of the first tokens
  * matches the first latent frame (upstream diffusers' `first_frame_mask[0][0][:, ::2, ::2]` assumes the
@@ -366,15 +358,8 @@ export const wanConditionMask = (
   patch: WanPatchGeometry,
   conditioned: boolean,
   owner: string,
-): Uint32Array<ArrayBuffer> | undefined => {
+): Uint32Array<ArrayBuffer> => {
   switch (form) {
-    case "t2v":
-      if (conditioned) {
-        throw new Error(
-          `${owner}: a DiT of input form 't2v' does not accept a condition latent (it has no condition mask input)`,
-        );
-      }
-      return undefined;
     case "ti2v": {
       const mask = new Uint32Array(grid.count);
       if (conditioned) {
@@ -452,9 +437,9 @@ export const withWanFirstFrameCondition = (
  * and the model input is the same in both forms — the replaced elements do not flow into other
  * elements).
  *
- * When `condition` is undefined (a text-only request), only the same arrays as before run (the
- * condition mask is all false, the condition-side time is the same array as the generation side, the
- * model input is the latent itself — the T2V sha rows do not change).
+ * When `condition` is undefined (a text-only request), the condition mask is all false, the
+ * condition-side time is the same array as the generation side and the model input is the latent
+ * itself.
  *
  * MUST: check the finiteness of the latent after each step's update (an O(N) host scan — about 2.1
  * million elements per step at 81 frames). Passing a non-finite latent silently to the next step and
@@ -485,7 +470,7 @@ export const runWanDenoise = async (
   const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
   const contextShape = [1, dit.contextRows, dit.contextWidth];
   const projShape = [1, dit.projWidth];
-  // An unknown form, or a form that takes no condition, fails here (before the Session is created).
+  // An unknown form fails here (before the Session is created).
   const conditionMask = wanConditionMask(dit.form, grid, patch, condition !== undefined, owner);
   const maskShape = [1, grid.count, 1];
   // The condition-side time (upstream's `first_frame_mask · t` — the first frame's tokens get t = 0).
@@ -516,10 +501,7 @@ export const runWanDenoise = async (
     ): Promise<Float32Array<ArrayBuffer>> => {
       // For T2V the condition-side time is the same array as the generation side (decision 3 — both
       // only read it, a borrow).
-      const conditionInputs =
-        conditionMask === undefined
-          ? undefined
-          : { proj: conditionProj ?? proj, mask: conditionMask, maskShape };
+      const conditionInputs = { proj: conditionProj ?? proj, mask: conditionMask, maskShape };
       const outputs = await session.run(
         ditInputs({
           tokens,

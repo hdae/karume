@@ -103,7 +103,6 @@ const BINDINGS: Readonly<Record<string, Readonly<Record<string, Binding>>>> = {
   "karume-umt5-xxl": { text_encoder: { L: 512 } },
   // The full token length (the upstream context — the bound of the folded RoPE tables).
   "karume-embeddinggemma-2": { model: { T: 8192 } },
-  "karume-wan2.1": { transformer: { S: 14040 } },
   // ti2v at 1280 × 704: the latent grid 80 × 44.
   "karume-wan2.2": {
     transformer: { S: 7920 },

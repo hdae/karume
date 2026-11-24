@@ -1,5 +1,5 @@
 /**
- * The host side of the 3D RoPE tables of Wan2.1's DiT — reading the container asset `rope_base`
+ * The host side of the 3D RoPE tables of Wan's DiT — reading the container asset `rope_base`
  * (per-axis base tables) and reordering it into the S-shaped graph's inputs `rope_cos` /
  * `rope_sin [1,S,1,head_dim]` (ADR 0118 decision 3).
  *

@@ -7,7 +7,7 @@
  * WAN22_TI2V_GENERATION)` — overlap of 4 latents) and run (tiles outside, chunks inside, one tile = one batch — the same
  * `decodeWanVaeTiled` as 2.1). The comparison target is the recipe's tile reference (`tools/export-recipes/wan/
  * vae_tiling.py --model ti2v-5b` — the same geometry, upstream's blend verbatim in patchify space, CPU f32, weights
- * rounded to f16) **before unpatchify and clamp**. The skeleton is 2.1's `e2e_wan_vae_tiles_test.ts`; the handling
+ * rounded to f16) **before unpatchify and clamp**. The handling
  * while the band is not derived yet is the same as the step-4 chunk-sequence comparison (section "Chunk sequence" below).
  *
  * ## Checks
@@ -64,8 +64,7 @@
  * 2.1, one tile = one batch, only the frames read back), and the output is compared with upstream's untiled `_decode`
  * chunk loop (diffusers, CPU f32, weights rounded to f16) **before unpatchify and clamp**. The references and fixtures
  * are written by `tools/export-recipes/wan/export_vae.py --model ti2v-5b` and read from the test-asset root (the table
- * is in `helpers/wan-ti2v-vae.ts`). The skeleton is the same as 2.1's `e2e_wan_vae_tiles_test.ts`, and the
- * fault-injection loop is the shared `helpers/wan-vae-chunk-loop.ts`.
+ * is in `helpers/wan-ti2v-vae.ts`). The fault-injection loop is `helpers/wan-vae-chunk-loop.ts`.
  *
  * ### How the band is set
  *

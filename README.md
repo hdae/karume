@@ -46,6 +46,6 @@ download.
 Development runs on Node 24 with [Dawn](https://www.npmjs.com/package/webgpu) as the WebGPU
 implementation (pnpm workspace, Vite+ toolchain; see [docs/decisions/0127](docs/decisions/0127-node-dawn-toolchain.md)).
 A Node application passes its WebGPU implementation to `acquireGpu({ gpu })`; browsers use
-`navigator.gpu`. The command-line examples of 0.14.0 (Gemma 4 QAT, MiniCPM5, Qwen3, Anima, …)
+`navigator.gpu`. The command-line examples of 0.14.0 (Gemma 4 QAT, Qwen3, Anima, …)
 are being rebuilt as browser applications; until then they remain on the
 [v0.14.0 tag](https://github.com/hdae/karume/tree/v0.14.0/examples).

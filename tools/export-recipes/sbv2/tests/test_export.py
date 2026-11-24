@@ -1871,13 +1871,11 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
     loudly.
     """
 
-    @pytest.mark.parametrize(
-        ("name", "family"), [("FN4", "fn"), ("FN", "fn"), ("F1", "jvnv"), ("M2", "jvnv")]
-    )
+    @pytest.mark.parametrize(("name", "family"), [("F1", "jvnv"), ("M2", "jvnv")])
     def test_a_known_prefix_resolves_to_its_family(self, name: str, family: str) -> None:
         assert export_sbv2.sbv2_family(Path("inputs/sbv2") / name) == family
 
-    @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4"])
+    @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4", "FN4"])
     def test_an_unknown_directory_name_fails_loudly(self, name: str) -> None:
         # Fails with a dedicated type (with a plain `ValueError`, the caller's `except` could not
         # tell this legal-fact check from a generic "bad argument" — the repository's convention is
@@ -1892,7 +1890,7 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         only one grows)."""
         assert set(export_sbv2.SBV2_FAMILY_DIRS) == set(SBV2_CARD_PROFILES)
 
-    @pytest.mark.parametrize(("name", "family"), [("FN4", "fn"), ("F1", "jvnv")])
+    @pytest.mark.parametrize(("name", "family"), [("F1", "jvnv")])
     def test_the_license_comes_from_the_card_profile(self, name: str, family: str) -> None:
         provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / name)
 
@@ -1903,8 +1901,8 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         """`upstreamRevision` is the upstream checkpoint's revision (container-v1 §2.3).
 
         The config's `version` (`2.0-JP-Extra`) is shared by every model of the same generation,
-        so it cannot identify a checkpoint — since minicpm5 writes a SHA into the same field, the
-        field's meaning is not split (W-RC5-3).
+        so it cannot identify a checkpoint — since the Wan recipe writes a SHA into the same field,
+        the field's meaning is not split (W-RC5-3).
         """
         provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / "F1")
 

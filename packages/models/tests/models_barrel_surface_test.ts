@@ -73,7 +73,6 @@ test("barrel: the namespace names follow the subpath keys", () => {
   assertEquals(namespaceOf("./sbv2"), "sbv2");
   assertEquals(namespaceOf("./depth-anything"), "depthAnything");
   assertEquals(namespaceOf("./gemma4-qat-mobile"), "gemma4QatMobile");
-  assertEquals(namespaceOf("./vowel-detector"), "vowelDetector");
 });
 
 test("barrel: each family namespace is its subpath's module (identity)", async () => {
@@ -261,7 +260,7 @@ test("barrel: the gemma surface (thin — no assembly entry points)", async () =
 //   (a new family table that was not folded into `src/sources.ts` is red — the spread there
 //   cannot be enumerated at run time).
 //
-// A family without a table (`./vowel-detector`, families not distributed yet) exports none.
+// A family without a table (one not distributed yet) exports none.
 
 /** The subpaths of the distributed families; each exports its source table as `SOURCES`. */
 const SOURCE_TABLE_SUBPATHS: readonly string[] = [

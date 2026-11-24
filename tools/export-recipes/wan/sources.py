@@ -78,9 +78,9 @@ class Component:
     text: bool = False
 
 
-#: The table of upstream sources. Keys are the model names of the distribution (model `t2v-1.3b`
-#: of `models/karume-wan2.1/` — ADR 0118 decision 7; model `ti2v-5b` of `models/karume-wan2.2/` —
-#: ADR 0121 decisions 1 / 10).
+#: The table of upstream sources. Keys are model names: `ti2v-5b` is the model of
+#: `models/karume-wan2.2/` (ADR 0121 decisions 1 / 10); `t2v-1.3b` is the Wan2.1 checkpoint the text
+#: assets and the TS host fixtures are made from (ADR 0118 decision 7).
 SOURCES: dict[str, UpstreamSource] = {
     "t2v-1.3b": UpstreamSource(
         repo="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
@@ -94,13 +94,15 @@ SOURCES: dict[str, UpstreamSource] = {
     ),
 }
 
-#: The default model (the default of the Wan2.1 scripts — {@link WAN21_MODELS}).
+#: The default model (the default of the scripts pinned to the Wan2.1 checkpoint —
+#: {@link WAN21_MODELS}).
 DEFAULT_MODEL = "t2v-1.3b"
 
-#: The models that the Wan2.1 scripts (series location, case table and text step fixed to Wan2.1)
-#: accept with `--model`. Using `sorted(SOURCES)` as the choices would open a way to write the 5B
-#: into the Wan2.1 series location when `ti2v-5b` is passed (closed at step 0 of ADR 0121, when
-#: `ti2v-5b` was added to the table).
+#: The models that the scripts pinned to the Wan2.1 checkpoint (the text assets and the TS host
+#: fixtures — `text_embeds`, `umt5_tokenizer`, `umt5_host_fixture`, `umt5_export`, `scheduler_ref`,
+#: `dit_host_fixture`) accept with `--model`. Using `sorted(SOURCES)` as the choices would let
+#: `ti2v-5b` write them from another checkpoint under the Wan2.1 names (closed at step 0 of ADR
+#: 0121, when `ti2v-5b` was added to the table).
 WAN21_MODELS: tuple[str, ...] = ("t2v-1.3b",)
 
 #: The models that the Wan2.2 distribution (`karume-wan2.2`) distributes — one set shared by the
@@ -122,9 +124,14 @@ COMPONENTS: dict[str, tuple[Component, ...]] = {
         Component(
             "transformer",
             fetch=True,
-            why="DiT (steps 2 / 3) — fp32 safetensors in 2 shards, about 5.7 GB",
+            why="DiT — the TS host fixture of the DiT host steps; fp32 safetensors in 2 shards,"
+            " about 5.7 GB",
         ),
-        Component("vae", fetch=True, why="video VAE (steps 4 / 5) — fp32, about 0.5 GB"),
+        Component(
+            "vae",
+            fetch=True,
+            why="video VAE — the real-weight tests of the VAE rewrite; fp32, about 0.5 GB",
+        ),
         Component("scheduler", fetch=True, why="UniPC config (shift 3.0 — decision 5)"),
         Component(
             "text_encoder",

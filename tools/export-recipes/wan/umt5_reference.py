@@ -16,7 +16,7 @@ weights are read differs.
   (`rounded` of `umt5_export.quantize_rows`) — the same weights the GPU runs. F32 tables
   (relative-position tables, RMSNorm) are taken as is. The f64 reference widens these f32 values
   to f64 (re-rounding in f64 would make the scale and the rounded values disagree with the f32
-  reference — the same rule as the DiT's `export_dit.float64_references`).
+  reference — the same rule as the DiT's layer-by-layer reference, `wan.dit_reference`).
 - **Computation**: the upstream forward is **spelled out** ({@link encode_layerwise}): token
   embedding → per layer [RMSNorm → self-attention (relative-position bias, no scale, softmax) →
   residual → RMSNorm → FFN with gated GELU (tanh approximation — ruling (a) of the 10c

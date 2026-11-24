@@ -28,7 +28,6 @@ from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION
 
 import dist
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
-from embeddinggemma.export import MODEL_FILE as SINGLE_COMPONENT_FILE
 from embeddinggemma2 import distribution as eg2
 from embeddinggemma2 import export, tokenizer
 from embeddinggemma2 import sources as upstream_sources
@@ -1576,7 +1575,7 @@ class TestMirroredConstants:
         assert tuple(name for name, *_ in eg2.EMBEDDINGGEMMA2_GRAPH_INPUTS) == export.GRAPH_INPUTS
 
     def test_the_file_names_are_the_writers(self) -> None:
-        assert eg2.EMBEDDINGGEMMA2_MODEL_FILE == SINGLE_COMPONENT_FILE
+        assert eg2.EMBEDDINGGEMMA2_MODEL_FILE == export.MODEL_FILE
         assert tokenizer.ASSET_PATH.name == eg2.EMBEDDINGGEMMA2_TOKENIZER_FILE
 
     def test_the_vision_constants_are_the_tower_exports(self) -> None:

@@ -4,16 +4,15 @@
  * the generation descriptor ({@link assertWanVaeMatchesGeneration}, {@link assertWanVaeTilesCover}).
  *
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
- * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one VAE stage.
- * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10). Every Session of the stage plans with
+ * time) are defined by the doc at the top of `./ti2v-pipeline.ts`; this module only runs the one VAE
+ * stage (ADR 0121 decision 10). Every Session of the stage plans with
  * the VAE decoder's fusion rules (`../vae/fusion-rules.ts` — `models/vae_rms_silu` first).
  * Per-generation values (accepted set, de-normalization statistics, unpatchify factor) are received
  * as arguments from the generation descriptor (`./descriptor.ts`). The latent and exit channel
  * counts, the tile edge and the graph's input / output spatial ratio are read from the graph
- * declarations (`wanVaeChunkLayout`). `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1,
- * `"wan.Ti2vPipeline"` for Wan2.2).
+ * declarations (`wanVaeChunkLayout`). `owner` is the message prefix (`"wan.Ti2vPipeline"`).
  *
- * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./pipeline.ts` with
+ * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./types.ts` with
  * `import type` (type-only references are erased, so there is no import cycle).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
@@ -33,7 +32,7 @@ import { disposeSteps } from "../session/dispose-steps.ts";
 import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import { vaeDecoderFusionRules } from "../vae/fusion-rules.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { GenerateEvent, RunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./types.ts";
 import type { PlanLayout, WanGenerationKnobs } from "./plan.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import { firstNonFinite } from "./graph-io.ts";
@@ -102,7 +101,7 @@ export const wanSpatialCompression = (
  * (`wanVaeMinTileOverlap` — fails loudly if it does not divide evenly).
  *
  * NOTE: `export` is so that the plan check, the admission check and the GPU comparison
- * (`e2e_wan_vae_tiles_test.ts`) go through the production derivation (not on the `mod.ts` / subpath
+ * (`e2e_wan_ti2v_vae_tiles_test.ts`) go through the production derivation (not on the `mod.ts` / subpath
  * surface — ADR 0008).
  */
 export const planWanGenerationTiles = (

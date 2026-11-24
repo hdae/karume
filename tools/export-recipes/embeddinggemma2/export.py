@@ -1,9 +1,8 @@
 """Script that writes the text tower of EmbeddingGemma 2 (sentence embeddings) to an IR v2 container
 + golden io.
 
-The second EmbeddingGemma recipe, after `embeddinggemma/export.py` (the first one, whose structure
-and staged publication it follows). The artifacts go under `outputs/series/` and are kept out of
-commits by the repository root's `.gitignore` (the f32 weights are about 1.1 GB).
+The artifacts go under `outputs/series/` and are kept out of commits by the repository root's
+`.gitignore` (the f32 weights are about 1.1 GB).
 
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export
     uv run --with 'transformers==5.23.0' python -m embeddinggemma2.export --dtype bf16
@@ -178,9 +177,9 @@ none ({@link build_cases} refuses them); the inputs holding an image are the ref
     outputs/series/embeddinggemma-2-text-bf16/…                    the same with `--dtype bf16`
     outputs/series/embeddinggemma-2-text-i8/…                      `--dtype i8` (its own goldens)
 
-The io tensor key convention is the first recipe's (`input.<graph input name>` /
-`output.<position>`). `pool_mask` is all ones, for the same reason as there; `soft_embeds` and
-`soft_mask` are zeros and false (no golden text holds a soft row).
+The io tensor keys are `input.<graph input name>` / `output.<position>` ({@link INPUT_PREFIX} /
+{@link OUTPUT_PREFIX}). `pool_mask` is all ones (every token is pooled, the prompt's included);
+`soft_embeds` and `soft_mask` are zeros and false (no golden text holds a soft row).
 
 Every run also writes the golden texts to a fixture tracked in git,
 {@link GOLDEN_CASE_FIXTURE} ({@link write_golden_case_fixture}): the case names, the prompt names
@@ -205,16 +204,6 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import REPO_ROOT, SERIES_ROOT
-from embeddinggemma.export import (
-    GRAPH_NAME,
-    INPUT_PREFIX,
-    IO_PREFIX,
-    IO_SUFFIX,
-    MODEL_FILE,
-    OUTPUT_PREFIX,
-    _l2_normalize,
-    _masked_mean,
-)
 from embeddinggemma2 import sources
 from embeddinggemma2.tokenizer import REQUIRED_TRANSFORMERS
 from karume.artifacts import staged_publication
@@ -251,6 +240,22 @@ TABLE_MODULE = "embed_tokens"
 #: front matter at the pinned revision (`THIRD_PARTY_NOTICES.md`).
 LICENSE = "apache-2.0"
 
+#: The representative path of the output container inside a series (the text graph's and the two
+#: towers').
+MODEL_FILE = "model.krm"
+
+#: The container's graph name = **the component name of the distribution** (= the key in `weights`
+#: of `karume.json` — container-v1 §2.1). The text graph takes the convention of a single-component
+#: series (`model`); it does not match the series directory name (`embeddinggemma-2-text`).
+GRAPH_NAME = "model"
+
+#: The golden io files (`io.<case>.safetensors`) and their tensor keys (`input.<graph input name>` /
+#: `output.<position>`) — the convention the text graph and the two towers share.
+IO_PREFIX = "io."
+IO_SUFFIX = ".safetensors"
+INPUT_PREFIX = "input."
+OUTPUT_PREFIX = "output."
+
 #: The weights file name of the upstream checkpoint (HF's spelling — not the output container).
 CHECKPOINT_FILE = "model.safetensors"
 
@@ -286,6 +291,11 @@ POOLING_CONFIG: Mapping[str, Any] = {
 #: How the Transformer stage calls the model for text (`sentence_bert_config.json`): the forward,
 #: and its `last_hidden_state` (the per-token 768-dim projections) as the token embeddings.
 TEXT_MODALITY: Mapping[str, str] = {"method": "forward", "method_output_name": "last_hidden_state"}
+
+#: Lower bound of the masked-mean denominator (same value as sentence-transformers' Pooling).
+POOL_EPS = 1e-9
+#: Lower bound of the L2 normalisation denominator (same value as sentence-transformers' Normalize).
+NORM_EPS = 1e-12
 
 #: Upper bound of the symbolic dimension T — the folding's evaluation point and the most tokens one
 #: text may encode to. It is the upstream model's context window (the model card at the pinned
@@ -677,6 +687,30 @@ def load_text_model(directory: Path) -> tuple[nn.Module, Any]:
     # Left as a buffer, inv_freq is not a leaf of constant folding, and sin / cos stay in the IR.
     assert_rope_lifted(model, "embeddinggemma2")
     return model, composite
+
+
+def _masked_mean(hidden: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
+    """Masked mean of `[1,T,H]` over the token axis (same as `sentence_transformers`' Pooling).
+
+    MUST: do not use `keepdim=True` (the IR's reduce has no keepdim). The denominator, the `[1]` of
+    `sum(dim=1)`, is brought back to `[1,1]` with `unsqueeze` before the broadcast division
+    (`unsqueeze` is lowered to `reshape` by normalisation).
+    """
+    total = torch.sum(hidden * pool_mask.unsqueeze(-1), dim=1)
+    count = torch.sum(pool_mask, dim=1).unsqueeze(-1)
+    return total / torch.clamp(count, min=POOL_EPS)
+
+
+def _l2_normalize(x: torch.Tensor) -> torch.Tensor:
+    """L2-normalise `[1,H]` over the last dimension (same as `sentence_transformers`' Normalize).
+
+    MUST: write it as `x * x` + `sum(dim=-1)` + `sqrt`, not `x ** 2` or `linalg.vector_norm`
+    (`pow` / `linalg_vector_norm` are not in the IR vocabulary). The order `clamp_min → division` is
+    kept from the original implementation — replacing it with `+eps` loses the property of returning
+    0 for a zero input.
+    """
+    norm = torch.sqrt(torch.sum(x * x, dim=-1)).clamp(min=NORM_EPS).unsqueeze(-1)
+    return x / norm
 
 
 def embed(

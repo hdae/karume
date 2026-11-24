@@ -3,10 +3,9 @@
 It runs diffusers' `WanPipeline` unmodified on the CPU in f32 for two steps (with CFG, guidance 5.0,
 shift 5.0) at 1280×704 with 17 frames (latent `[48,5,44,80]`, S = 4,400) and produces the latents
 (before the VAE) and the RGB frames from tiled decode → unpatchify → clamp of them. The GPU end to
-end (`wan.Ti2vPipeline`) is compared with these values within a band. It is the 2.2 version of
-2.1's `wan/few_step_ref.py`; the 2.1 script and `pipeline_ref.py` do not change
-(`pipeline_ref.video_size` hard-codes 16 ch and scale 8) — only `pipeline_ref.pad_text_embeds` and
-`few_step_ref.denormalize_latents` are used.
+end (`wan.Ti2vPipeline`) is compared with these values within a band. The text context goes in
+through `pipeline_ref.pad_text_embeds`, and the de-normalization before the decode is upstream's
+({@link denormalize_latents}).
 
 ## Inputs
 
@@ -28,12 +27,12 @@ end (`wan.Ti2vPipeline`) is compared with these values within a band. It is the 
 1. Phase 1 (DiT): run every case for two steps with `WanPipeline(expand_timesteps=False)`. Time
    takes the one-dimensional timestep path (the time MLP with M = 1, modulation `[B,6,C]`), the same
    as decision 4's T2V form. The DiT outputs are recorded with a forward hook, and the cond / uncond
-   split is decided by the value of the text context the hook received (the same as
-   `few_step_ref` — independent of the call order).
+   split is decided by the value of the text context the hook received (independent of the call
+   order).
 2. Observation (not a gate): the two decision cases also run two steps with `expand_timesteps=True`
    (the upstream default, the M = S path where the timestep is `[1,S]`), and the latents of each
    step are written to `observed_m_s.latents.<i>`. The hook is a different one (it checks that the
-   timestep is `[1,S]` with a single value — `int()` of `few_step_ref` does not take `[S]`).
+   timestep is `[1,S]` with a single value — the phase-1 hook's `int()` does not take `[S]`).
 3. Phase 2 (VAE): release the DiT (fail loudly if a reference remains), and make the frames through
    step 5's 2.2 path (`vae_tiling` — blend in patchify space → upstream unpatchify → clamp).
 
@@ -100,12 +99,11 @@ from torch import nn
 
 from _shared.paths import SERIES_ROOT
 from wan import (
+    dit_common,
     dit_patch,
     dit_probe,
     dit_reference,
-    export_dit,
     export_vae,
-    few_step_ref,
     pipeline_ref,
     prompts,
     text_embeds,
@@ -131,7 +129,7 @@ LATENT_SHAPE = (48, 5, 44, 80)
 #: and checked).
 FLOW_SHIFT = 5.0
 
-#: The CFG strength (the same value as the 2.1 reference).
+#: The CFG strength (the shared reference setting).
 GUIDANCE_SCALE = pipeline_ref.GUIDANCE_SCALE
 
 #: The series root (the i8 DiT characterizes the reference preset, so it goes in the i8 DiT
@@ -140,6 +138,10 @@ SERIES = ti2v_export_dit.SERIES
 
 #: The VAE series (the source of truth of the tile and the patchify factor).
 VAE_SERIES = export_vae.VAE_SERIES[MODEL]
+
+#: The reference file name (at the series root — `pipeline_steps.<case>.safetensors`).
+FIXTURE_PREFIX = "pipeline_steps."
+FIXTURE_SUFFIX = ".safetensors"
 
 #: The metadata's `weights` (the DiT is i8 RTN fake-quant, the VAE is f16 representable values).
 WEIGHTS = "dit-i8-rtn-fake-quant+vae-f16-rounded"
@@ -175,8 +177,8 @@ class FixtureCase:
         return self.role == "band"
 
 
-#: 2 decision cases (they decide the band) + 1 acceptance case. The seeds differ from both the 2.1
-#: reference (20261030–33) and the DiT golden (the low part of the 20262000s).
+#: 2 decision cases (they decide the band) + 1 acceptance case. The seeds differ from the DiT golden
+#: (the low part of the 20262000s).
 #: MUST: do not change the decision cases or the band after seeing the result of `accept`.
 FIXTURE_CASES = (
     FixtureCase("band-boxing-cats", role="band", seed=20262101, prompt="boxing-cats"),
@@ -246,8 +248,8 @@ def token_count(transformer: nn.Module, latent_shape: Sequence[int]) -> int:
 def load_quantized_transformer(model: str = MODEL) -> nn.Module:
     """Load the DiT whole in f32 and round it to i8 representable values (the same procedure as
     `ti2v_export_dit.eager_full`)."""
-    upstream = export_dit.load_transformer(model)
-    report = export_dit.fake_quant_i8(upstream, dit_patch.WanDitTokensTi2v(upstream))
+    upstream = dit_common.load_transformer(model)
+    report = dit_common.fake_quant_i8(upstream, dit_patch.WanDitTokensTi2v(upstream))
     print(f"[fake-quant] transformer: {report.describe()}", flush=True)
     return upstream
 
@@ -439,8 +441,8 @@ def denoise_case(
     handle = pipeline.transformer.register_forward_hook(record_forward, with_kwargs=True)
     started = time.perf_counter()
     try:
-        # attention is pinned to the CPU flash path, as in `export_dit`'s reference (leaving no
-        # path that silently falls back to MATH — the same as `few_step_ref`).
+        # attention is pinned to the CPU flash path, as in the DiT goldens' reference (leaving no
+        # path that silently falls back to MATH).
         with torch.no_grad(), dit_patch.flash_attention_only():
             final = _call(pipeline, embeds, names, latents_init, _step_recorder(steps))
     finally:
@@ -565,6 +567,28 @@ def assert_released(released: weakref.ref[nn.Module]) -> None:
         raise AssertionError("a reference to the DiT remains — release it before phase 2 (VAE)")
 
 
+# Third-party code notice. `denormalize_latents` below is adapted from `WanPipeline.__call__` in
+# huggingface/diffusers (`src/diffusers/pipelines/wan/pipeline_wan.py`, `diffusers==0.39.0`):
+# the de-normalization before `vae.decode` is verbatim.
+# License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream
+# copyright notice, copied verbatim from the header of that file:
+#
+#   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
+def denormalize_latents(pipeline: WanPipeline, latents: torch.Tensor) -> torch.Tensor:
+    """The de-normalization right before upstream's decode (`latents / (1 / std) + mean` — the
+    order of operations is also upstream's)."""
+    latents = latents.to(pipeline.vae.dtype)
+    latents_mean = (
+        torch.tensor(pipeline.vae.config.latents_mean)
+        .view(1, pipeline.vae.config.z_dim, 1, 1, 1)
+        .to(latents.device, latents.dtype)
+    )
+    latents_std = 1.0 / torch.tensor(pipeline.vae.config.latents_std).view(
+        1, pipeline.vae.config.z_dim, 1, 1, 1
+    ).to(latents.device, latents.dtype)
+    return latents / latents_std + latents_mean
+
+
 def decode_frames(
     pipeline: WanPipeline, latents: torch.Tensor, plan: vae_tiling.TilePlan, patch_size: int
 ) -> torch.Tensor:
@@ -576,7 +600,7 @@ def decode_frames(
     """
     with torch.no_grad():
         patchified = vae_tiling.tiled_decode_unclamped(
-            pipeline.vae, few_step_ref.denormalize_latents(pipeline, latents), plan
+            pipeline.vae, denormalize_latents(pipeline, latents), plan
         )
     rgb: torch.Tensor = vae_tiling.unpatchify_frames(patchified, patch_size).clamp(-1.0, 1.0)[0]
     return rgb
@@ -698,7 +722,7 @@ def generate(
             )
         tensors = case_tensors(denoised, frames, vae)
         metadata = case_metadata(denoised, plan, patch_size, flow_shift, common)
-        path = out_root / f"{few_step_ref.FIXTURE_PREFIX}{case.name}{few_step_ref.FIXTURE_SUFFIX}"
+        path = out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
         staging = path.with_name(path.name + ".staging")
         out_root.mkdir(parents=True, exist_ok=True)
         save_file(

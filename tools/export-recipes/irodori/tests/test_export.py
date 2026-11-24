@@ -1,7 +1,7 @@
 """Script-level contracts of `irodori/export.py` (the part that needs no real weights).
 
 Emitting from the real weights is manual (the same discipline as the tests of the existing
-`deberta/export.py` / `embeddinggemma/export.py`). Pinned here is only the discipline whose
+`deberta/export.py` / `embeddinggemma2/export.py`). Pinned here is only the discipline whose
 breakage would give a **false pass**:
 
 - The reference (the golden's expectation) can only be taken **before patching** (if it could be

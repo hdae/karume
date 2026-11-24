@@ -1,7 +1,7 @@
 """CLI that compares rewritten Wan outputs with an existing series (ADR 0121 step 4 — checking
-that the 2.1 series is unchanged).
+that a series is unchanged).
 
-After a recipe change, the 2.1 outputs (the VAE chunk graphs, fixtures and so on) are rewritten
+After a recipe change, the outputs (the VAE chunk graphs, fixtures and so on) are rewritten
 into a scratch directory and compared with the existing series, only for the items named with
 `--require`. Because this is a check, what the design avoids is saying "match" when the two differ
 (a false match):
@@ -46,10 +46,6 @@ and their reasons). The exit code is 0 only when there is no mismatch, 1 when th
 containing NUL, a duplicate, a name nested inside another `--require`, a root that is not a
 directory), and 3 for an unreadable file (permissions and so on — OSError; standard output stays
 empty and the reason goes to standard error).
-
-This is a separate entry point from the `--check` of export_dit (`series_mismatches` — only the
-bytes directly under a component directory) (the design of ADR 0121 step 4 — export_dit itself is
-not changed).
 """
 
 from __future__ import annotations

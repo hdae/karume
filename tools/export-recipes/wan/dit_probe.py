@@ -14,7 +14,7 @@ of `/proc` every second and VmHWM per stage) as JSON, and writes the same to `<c
 Nothing is written to the series (`outputs/series/`). `reference` compares with the `eager` result
 in the same place, so pass the same `--out` to both when they run on different days.
 
-The DiT patch of `prepare` / `eager` stays in step 0's form, the same as Wan2.1 (one time input —
+The DiT patch of `prepare` / `eager` stays in step 0's form (one time input —
 `dit_patch.WanDitTokens`), and the 5B configuration passes the check of that premise (`image_dim` /
 `added_kv_proj_dim` are None). The product's I2V-capable graph (2 time inputs, a condition mask —
 ADR 0121 decision 3) is written by step 1's `wan.ti2v_export_dit`, which passes its own trace
@@ -43,7 +43,7 @@ activations")
 
 Read the full upstream in f32 with `from_pretrained`, apply the i8 fake-quant through the S-shaped
 wrapper, run the plain upstream forward (the reference) and the patched eager on one S = 192 case,
-and apply the `export_dit.eager_failures` check (the same function as `wan.export_dit`). In
+and apply the `dit_common.eager_failures` check (the same check as `wan.ti2v_export_dit`). In
 addition, confirm that the f32 of the layer-by-layer reference (`wan.dit_reference` — the same
 in-memory weights) is bit-identical to the upstream f32, and take the layer-by-layer f64 too.
 
@@ -118,9 +118,9 @@ from karume.ir import IrGraph
 from karume.pipeline import export_module
 from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
 from karume.verify import assert_op_contracts, assert_runtime_support
-from wan import dit_patch, dit_reference, export_dit
+from wan import dit_common, dit_patch, dit_reference
 from wan.pipeline_ref import pad_text_embeds
-from wan.sources import SOURCES, local_snapshot
+from wan.sources import local_snapshot
 from wan.umt5_export import CHUNK_ROWS, Checkpoint, MemoryMonitor, quantize_rows
 
 #: The default model (Wan2.2 TI2V-5B — ADR 0121).
@@ -128,7 +128,7 @@ DEFAULT_MODEL = "ti2v-5b"
 
 #: Model → the distribution name of the default output location (`outputs/bench/<distribution
 #: name>/` — `docs/assets-layout.md`).
-BENCH_NAMES: dict[str, str] = {"t2v-1.3b": "karume-wan2.1", "ti2v-5b": "karume-wan2.2"}
+BENCH_NAMES: dict[str, str] = {"ti2v-5b": "karume-wan2.2"}
 
 #: The base amount added to the estimate of the eager peak (the process base, activations, the
 #: fake-quant temporaries — from the 1.3B measurement, the 0.59 GiB left after subtracting the full
@@ -140,12 +140,13 @@ EAGER_BASE_BYTES = int(0.6 * 2**30)
 MEMORY_HEADROOM_BYTES = 1 * 2**30
 
 #: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — ADR 0121 decision 3) and the lower bound
-#: (the same as Wan2.1).
+#: (`dit_common.DIT_SYM_MIN`).
 SYM_MAX = 27_280
-SYM_MIN = export_dit.DIT_SYM_MIN
+SYM_MIN = dit_common.DIT_SYM_MIN
 
-#: The case to measure (the head of `export_dit.CASES` = the band-deciding S = 192, t = 999).
-PROBE_CASE = export_dit.CASES[0]
+#: The case to measure (S = 192, t = 999; the seed and the valid text length are fixed so the
+#: probe outputs keep their names and values from run to run).
+PROBE_CASE = dit_common.CaseSpec("band", (3, 16, 16), 999, 24, 20261002)
 
 #: The spelling of the eager / reference output files (`<command>.<case>.safetensors`).
 EAGER_PREFIX = "eager."
@@ -223,7 +224,7 @@ def meta_wrapper(config: Mapping[str, Any]) -> dit_patch.WanDitTokens:
     return dit_patch.WanDitTokens(dit_reference.meta_model(config))
 
 
-def meta_inputs(config: Mapping[str, Any], spec: export_dit.CaseSpec) -> tuple[torch.Tensor, ...]:
+def meta_inputs(config: Mapping[str, Any], spec: dit_common.CaseSpec) -> tuple[torch.Tensor, ...]:
     """The example inputs of the trace (meta — values do not affect the trace; the weights are meta,
     so the inputs are meta too)."""
     patch = [int(size) for size in config["patch_size"]]
@@ -242,8 +243,8 @@ def meta_inputs(config: Mapping[str, Any], spec: export_dit.CaseSpec) -> tuple[t
 
 
 def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
-    """The same form as `export_dit.dynamic_shapes`, with only the upper bound raised to 5B's
-    accepted maximum."""
+    """The symbolic dimensions per input (the RoPE tables share `S` with the tokens), with the upper
+    bound at 5B's accepted maximum."""
     tokens = Dim("S", min=SYM_MIN, max=sym_max)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens})
 
@@ -262,7 +263,7 @@ def trace(
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
     declared = [entry.name for entry in graph.inputs]
-    if declared != list(export_dit.INPUT_NAMES):
+    if declared != list(dit_common.INPUT_NAMES):
         raise DitProbeError(f"the graph input names do not match the declaration: {declared}")
     targets = {
         fqn: axis for fqn, _, axis in iter_quant_targets(wrapper, op_types=QUANT_MODULE_TYPES)
@@ -314,7 +315,7 @@ def prepare(
     """trace → plain → quantize (up to trace with `trace_only`). Returns the material and the
     summary fields.
 
-    `tracer` replaces the trace (the default is the 2.1-form {@link trace}; the I2V-capable graph
+    `tracer` replaces the trace (the default is the 5-input {@link trace}; the I2V-capable graph
     uses `wan.ti2v_export_dit.trace` — the rest of the material building (plain / quantize) goes
     through the same single path).
     """
@@ -400,12 +401,12 @@ def run_prepare(model: str, *, trace_only: bool, sym_max: int) -> dict[str, Any]
 
 def _probe_spec(
     latent: tuple[int, int, int] | None, timestep: int | None = None
-) -> export_dit.CaseSpec:
+) -> dit_common.CaseSpec:
     """The case to measure (default {@link PROBE_CASE}; passing `latent` / `timestep` gives another
     grid or another time with the same valid length / seed)."""
     if latent is None and timestep is None:
         return PROBE_CASE
-    return export_dit.CaseSpec(
+    return dit_common.CaseSpec(
         "probe",
         PROBE_CASE.latent_shape if latent is None else latent,
         PROBE_CASE.timestep if timestep is None else timestep,
@@ -414,7 +415,7 @@ def _probe_spec(
     )
 
 
-def _case_name(spec: export_dit.CaseSpec, config: Mapping[str, Any]) -> str:
+def _case_name(spec: dit_common.CaseSpec, config: Mapping[str, Any]) -> str:
     patch_t, patch_h, patch_w = (int(size) for size in config["patch_size"])
     return spec.name((patch_t, patch_h, patch_w))
 
@@ -427,23 +428,23 @@ def run_eager(model: str, out: Path) -> dict[str, Any]:
     require_available("load", estimate["peak"])
     with MemoryMonitor() as monitor:
         with monitor.stage("load") as record:
-            upstream = export_dit.load_transformer(model)
+            upstream = dit_common.load_transformer(model)
             record.details["parameters"] = sum(p.numel() for p in upstream.parameters())
         with monitor.stage("fake-quant") as record:
             wrapper = dit_patch.WanDitTokens(upstream)
-            rounded, _ = export_dit.fake_quant("i8", upstream, wrapper)
+            rounded, _ = dit_common.fake_quant("i8", upstream, wrapper)
             record.details["rounded"] = rounded
         with monitor.stage("reference"):
-            case = export_dit.build_case(upstream, spec)
+            case = dit_common.build_case(upstream, spec)
         with monitor.stage("eager") as record:
-            report, _ = export_dit.eager_report(wrapper, upstream, case)
-            failures = export_dit.eager_failures(report)
+            report, _ = dit_common.eager_report(wrapper, upstream, case)
+            failures = dit_common.eager_failures(report)
             record.details["failures"] = len(failures)
         require_available("layerwise", estimate["layerwise_f64"])
         with monitor.stage("layerwise") as record:
             writer = dit_reference.LayerwiseDit(upstream.config)
             source = dit_reference.ModuleWeights(upstream)
-            latents, timestep, text = export_dit.case_inputs(upstream, spec)
+            latents, timestep, text = dit_common.case_inputs(upstream, spec)
             f32 = writer.forward(source, torch.float32, latents, timestep, text)
             f64 = writer.forward(source, torch.float64, latents, timestep, text)
             record.details["f32_seconds"] = round(f32.seconds, 1)
@@ -460,13 +461,13 @@ def run_eager(model: str, out: Path) -> dict[str, Any]:
         "eager": report,
         "eager_failures": failures,
         "layerwise_f32_equals_upstream": bool(torch.equal(f32.output, case.reference)),
-        "upstream_f32_vs_layerwise_f64": export_dit._ratio(case.reference, f64.output),
+        "upstream_f32_vs_layerwise_f64": dit_common._ratio(case.reference, f64.output),
         "memory_estimate_gib": {key: round(value / _GIB, 2) for key, value in estimate.items()},
         "stages": [record.to_dict() for record in monitor.records],
     }
 
 
-#: The default text input (synthetic random — `export_dit.case_inputs`). Any other value is a tensor
+#: The default text input (synthetic random — `dit_common.case_inputs`). Any other value is a tensor
 #: name in the embeddings asset.
 SYNTHETIC_TEXT = "synthetic"
 
@@ -481,15 +482,15 @@ GROWTH_SPILL = "growth-spill"
 
 
 def probe_inputs(
-    model: Any, spec: export_dit.CaseSpec, text: str = SYNTHETIC_TEXT
+    model: Any, spec: dit_common.CaseSpec, text: str = SYNTHETIC_TEXT
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The probe's inputs (latent, timestep, context `[1,512,4096]`).
 
-    If `text` is synthetic, exactly `export_dit.case_inputs`. If it is a name in the embeddings
+    If `text` is synthetic, exactly `dit_common.case_inputs`. If it is a name in the embeddings
     asset, the latent is the same random draw of the same seed (`case_inputs` draws the latent
     first) and only the context becomes that embedding — only the text differs.
     """
-    latents, timestep, synthetic = export_dit.case_inputs(model, spec)
+    latents, timestep, synthetic = dit_common.case_inputs(model, spec)
     if text == SYNTHETIC_TEXT:
         return latents, timestep, synthetic
     from wan.text_embeds import read_asset
@@ -627,7 +628,7 @@ def run_reference(
         "text": text,
         "blocks": writer.layers if blocks is None else blocks,
         "text_rows": int((embeds[0].abs().sum(dim=-1) != 0).sum()),
-        "f32_vs_f64": export_dit._ratio(results["f32"].output, results["f64"].output),
+        "f32_vs_f64": dit_common._ratio(results["f32"].output, results["f64"].output),
         "output": _difference(results["f32"].output, results["f64"].output),
         "stages": [record.to_dict() for record in monitor.records],
     }
@@ -689,7 +690,7 @@ def _probe_run(text: str) -> ProbeRun:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("command", choices=("prepare", "eager", "reference"))
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(BENCH_NAMES))
     parser.add_argument(
         "--out",
         type=Path,

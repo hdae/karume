@@ -10,8 +10,7 @@ f32 and declare no knob, and `quant` picks one). Its vision tower is the weights
 only with `vision: true`; its audio tower likewise the weights role `audio`, built only with
 `audio: true`. Each preset gives the towers the storage it gives the text tower: the checkpoint's
 bf16 values in `bf16`, per-row int8 in `i8` (the audio tower's two subsampling convolutions keep
-their bf16 values there). The first EmbeddingGemma
-joins the family later with its own manifest values.
+their bf16 values there).
 The public surface is [`embeddinggemma.ts`](../../embeddinggemma.ts) (also re-exported from the
 barrel as the namespace `embeddinggemma`); everything here is internal.
 

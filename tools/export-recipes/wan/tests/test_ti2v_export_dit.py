@@ -42,7 +42,7 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-from wan import dit_patch, dit_probe, dit_reference, export_dit, ti2v_export_dit
+from wan import dit_common, dit_patch, dit_probe, dit_reference, ti2v_export_dit
 from wan.tests.test_dit_patch import EXPECTED_OPS, TINY_DIT
 
 #: The synthetic layer count (num_layers of TINY_DIT).
@@ -99,8 +99,8 @@ def _tiny_text(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
     )
     monkeypatch.setattr(dit_probe, "TEXT_EMBEDS_ASSET", asset)
     monkeypatch.setattr(dit_probe, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
-    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
-    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_common, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(dit_common, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
@@ -145,7 +145,6 @@ class TestTheCases:
         assert {case.tokens(self.PATCH) for case in cases} == {192}
         assert len({case.name(self.PATCH) for case in cases}) == len(cases)
         assert len({case.seed for case in cases}) == len(cases)
-        assert not {case.seed for case in cases} & {spec.seed for spec in export_dit.CASES}
 
     def test_every_context_is_a_fixed_prompt_and_every_prompt_is_used(self) -> None:
         """The contexts are the 4 fixed prompts of the embedding assets (synthetic random values
@@ -381,14 +380,16 @@ class TestTheSeriesWriter:
                 output = handle.get_tensor("output")
                 f64 = handle.get_tensor("output.f64")
             assert output.dtype == f64.dtype == torch.float32
-            assert not torch.equal(output, f64)
+            # The f64 forward differs from the f32 reference by the rounding only.
+            distance = float((f64 - output).abs().max())
+            assert 0 < distance < 1e-5 * float(f64.abs().max()), name
 
     def test_every_eager_report_passed_the_gate_and_records_the_per_token_path(
         self, written
     ) -> None:
         _, summary = written
         for report in summary["eager"]:
-            assert export_dit.eager_failures(report) == [], report["case"]
+            assert dit_common.eager_failures(report) == [], report["case"]
             assert report["trunk_bit_exact"] is True
             observed = "per_token_timestep_vs_reference_ratio" in report
             assert observed is report["case"].startswith("band-"), report["case"]
@@ -426,7 +427,7 @@ class TestTheSeriesWriter:
                 return real(block, hidden, text, condition, generation, mask, rope)
 
             monkeypatch.setattr(dit_patch, "_ti2v_block", swapped)
-            expected_error: type[Exception] = export_dit.EagerEquivalenceError
+            expected_error: type[Exception] = dit_common.EagerEquivalenceError
         else:
             monkeypatch.setattr(ti2v_export_dit, "EXPECTED_5B", {"linear_nodes": 1})
             expected_error = ti2v_export_dit.Ti2vExportError
@@ -448,7 +449,7 @@ def _point_eager_full_at(patch: pytest.MonkeyPatch, checkpoint: Path, series: Pa
         return WanTransformer3DModel.from_pretrained(checkpoint, torch_dtype=torch.float32).eval()
 
     _point_at_tiny(patch, checkpoint, series)
-    patch.setattr(export_dit, "load_transformer", load)
+    patch.setattr(dit_common, "load_transformer", load)
 
 
 class TestTheFullEager:
@@ -509,7 +510,7 @@ class TestTheFullEager:
         self, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
         _point_eager_full_at(monkeypatch, checkpoint, tmp_path / ti2v_export_dit.SERIES_NAME)
-        monkeypatch.setattr(export_dit, "load_transformer", _never_load)
+        monkeypatch.setattr(dit_common, "load_transformer", _never_load)
 
         with pytest.raises(
             ti2v_export_dit.Ti2vExportError, match="the installed goldens are incomplete"
@@ -521,7 +522,7 @@ class TestTheFullEager:
     ) -> None:
         target, _ = written
         _point_eager_full_at(monkeypatch, checkpoint, target.parent)
-        monkeypatch.setattr(export_dit, "load_transformer", _never_load)
+        monkeypatch.setattr(dit_common, "load_transformer", _never_load)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
 
         with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
@@ -586,7 +587,6 @@ class TestTheFullCases:
 
         assert len({case.name(self.PATCH) for case in every}) == len(every)
         assert len({case.seed for case in every}) == len(every)
-        assert not {case.seed for case in full} & {spec.seed for spec in export_dit.CASES}
         assert all(case.name(self.PATCH).startswith(case.role) for case in full)
 
     def test_every_fixed_prompt_is_a_context_in_both_roles(self) -> None:
@@ -651,12 +651,12 @@ class TestTheFullGoldenWriter:
         assert {name: after[name] for name in before} == before
         added = sorted(set(after) - set(before))
         assert added == sorted(
-            file for name in _full_names() for file in export_dit.case_file_names(name)
+            file for name in _full_names() for file in dit_common.case_file_names(name)
         )
         assert [row["status"] for row in summary["cases"]] == ["written"] * 3
         assert summary["passed"] is True
         for report in summary["eager"]:
-            assert export_dit.eager_failures(report) == [], report["case"]
+            assert dit_common.eager_failures(report) == [], report["case"]
             assert "per_token_timestep_vs_reference_ratio" not in report
         assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
 
@@ -725,13 +725,13 @@ class TestTheFullGoldenWriter:
 
         monkeypatch.setattr(dit_patch, "_ti2v_block", swapped)
 
-        with pytest.raises(export_dit.EagerEquivalenceError):
+        with pytest.raises(dit_common.EagerEquivalenceError):
             ti2v_export_dit.write_full()
 
         # The first T2V case is placed because a modulation mix-up has no effect on it (both sides
         # at the same time), and it stops at the second I2V case.
         assert sorted(set(_digests(full_series)) - set(before)) == sorted(
-            export_dit.case_file_names(_full_names()[0])
+            dit_common.case_file_names(_full_names()[0])
         )
         assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
 
@@ -804,19 +804,13 @@ class TestTheFullGoldenWriter:
 
 
 class TestTheQuantObservation:
-    def test_the_cases_are_the_decision_cases_of_each_model(self) -> None:
-        five_b = ti2v_export_dit._observe_cases("ti2v-5b", (1, 2, 2))
-        one_three = ti2v_export_dit._observe_cases("t2v-1.3b", (1, 2, 2))
+    def test_the_cases_are_the_decision_cases(self) -> None:
+        five_b = ti2v_export_dit._observe_cases((1, 2, 2))
 
         assert [form for _, _, form, _ in five_b] == ["t2v"] * 3 + ["i2v"] * 3
-        assert len(one_three) == 6
-        assert {form for _, _, form, _ in one_three} == {"t2v"}
-        assert all(name.startswith("band-") for name, *_ in five_b + one_three)
-        # The contexts are built the same way for the two models (the same prompts in the same
-        # order).
-        assert [text for *_, text in five_b] == [text for *_, text in one_three]
+        assert all(name.startswith("band-") for name, *_ in five_b)
 
-    def test_it_measures_both_models_and_compares_their_worst_case(
+    def test_it_measures_every_decision_case(
         self, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
         _tiny_text(monkeypatch, tmp_path)
@@ -824,10 +818,7 @@ class TestTheQuantObservation:
 
         summary = ti2v_export_dit.observe_quant()
 
-        for model in ti2v_export_dit.OBSERVE_MODELS:
-            rows = summary["models"][model]["cases"]
-            assert len(rows) == 6
-            assert all(0 < row["ratio"] < 1 for row in rows)
-        factor = summary["models"]["ti2v-5b"]["worst"] / summary["models"]["t2v-1.3b"]["worst"]
-        assert summary["worst_factor_5b_over_1_3b"] == factor
-        assert summary["escalate"] is (factor > ti2v_export_dit.ESCALATE_FACTOR)
+        rows = summary["models"]["ti2v-5b"]["cases"]
+        assert len(rows) == 6
+        assert all(0 < row["ratio"] < 1 for row in rows)
+        assert summary["models"]["ti2v-5b"]["worst"] == max(row["ratio"] for row in rows)

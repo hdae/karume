@@ -1,9 +1,14 @@
-// The GPU-free parts of the Wan2.1 pipeline (`src/wan/`) — the input checks (the asset path and the
-// GPU path), the `pipelineConfig` check, the family admission's graph-declaration checks (DiT and
-// umT5), the construction entry (the path spelling, the umT5 declaration, abort), where the default
-// negative comes from, the text-embedding asset checks, latent denormalisation, RGBA conversion of
-// frames, the RNG, and `generate` run on mock Sessions (the order and teardown of the text stage, the
-// cleanup and non-finite checks, abort). The real-GPU run is e2e_wan_pipeline_test.ts.
+// The GPU-free parts of the Wan family's shared pipeline body (`src/wan/`) — the input checks (the
+// asset path and the GPU path), the `pipelineConfig` check, the family admission's graph-declaration
+// checks (DiT and umT5), the construction entry (the path spelling, the umT5 declaration, abort),
+// where the default negative comes from, the text-embedding asset checks, latent denormalisation, RGBA
+// conversion of frames, the RNG, and generation (`generateWanVideo` of family.ts) run on mock
+// Sessions (the order and teardown of the text stage, the cleanup and non-finite checks, abort).
+//
+// The checks of the shared body run on a test generation ({@link GENERATION} — a 16-channel latent and
+// an 832×480 / 480×832 accepted set, the geometry these checks were first written on); the Wan2.2
+// generation's own values are checked in wan_ti2v_pipeline_test.ts. The real-GPU run is
+// e2e_wan_ti2v_pipeline_test.ts.
 
 import { readTextFile } from "@karume/test-support/fs";
 import {
@@ -20,12 +25,19 @@ import { describe, it, test } from "vite-plus/test";
 import { parseManifest } from "@karume/hub";
 import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
-import { type GenerateRequest, Pipeline, type PipelineOptions } from "../src/wan/pipeline.ts";
-import { planWanGeneration, planWanGpuGeneration, WAN21_FAMILY } from "../src/wan/family.ts";
+import type { GeneratedVideo, GenerateRequest, PipelineOptions } from "../src/wan/types.ts";
+import { type Ti2vGenerateRequest, Ti2vPipeline } from "../src/wan/ti2v-pipeline.ts";
+import {
+  generateWanVideo,
+  ownWanRequestLatents,
+  planWanGeneration,
+  planWanGpuGeneration,
+  WAN22_TI2V_FAMILY,
+  type WanFamilySpec,
+} from "../src/wan/family.ts";
 import { ditContract, ditInputs, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
 import {
-  WAN21_GENERATION,
   WAN22_TI2V_GENERATION,
   type WanDitInputForm,
   type WanGenerationDescriptor,
@@ -40,21 +52,12 @@ import {
 import type { GraphOwner } from "../src/hub/components.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
 import { wanParityCase, wanParityCases, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
-import {
-  declaredContainer,
-  parseIrDeclarationValue,
-  partAssets,
-  tensorlessContainer,
-  writeContainer,
-} from "./helpers/container-fixture.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
-import { readTextIfPresent } from "./helpers/read-if-present.ts";
-import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
 import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
-import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import {
   findWanTextEmbedding,
   padWanTextEmbedding,
@@ -63,10 +66,54 @@ import {
   type WanTextEmbeds,
   WanTextEmbedsError,
 } from "../src/wan/text-embeds.ts";
-import { denormalizeWanLatents, WAN_LATENTS_MEAN, WAN_LATENTS_STD } from "../src/wan/latents.ts";
+import { denormalizeWanLatents } from "../src/wan/latents.ts";
 import { frameToRgba } from "../src/wan/frames.ts";
 import { WanRandn } from "../src/wan/random.ts";
 import { parseWanPipelineConfig, type WanPipelineConfig } from "../src/wan/config.ts";
+
+/**
+ * The 16-channel latent statistics of the test generation (the f32 values of the Wan2.1 T2V 1.3B
+ * VAE's config, kept here as test data: means and stds spread widely enough that the order of the
+ * denormalisation's operations shows in the last bit).
+ */
+const LATENTS_16 = {
+  mean: [
+    -0.757099986076355, -0.708899974822998, -0.911300003528595, 0.10750000178813934,
+    -0.1745000034570694, 0.9653000235557556, -0.1517000049352646, 1.5507999658584595,
+    0.41339999437332153, -0.07150000333786011, 0.5516999959945679, -0.36320000886917114,
+    -0.19220000505447388, -0.9496999979019165, 0.25029999017715454, -0.2921000123023987,
+  ],
+  std: [
+    2.8183999061584473, 1.4541000127792358, 2.327500104904175, 2.6558001041412354,
+    1.219599962234497, 1.770799994468689, 2.6052000522613525, 2.0743000507354736, 3.268699884414673,
+    2.152600049972534, 2.8652000427246094, 1.5578999519348145, 1.638200044631958,
+    1.1253000497817993, 2.8250999450683594, 1.9160000085830688,
+  ],
+} as const;
+
+/**
+ * The test generation the checks of the shared body run on: a 16-channel latent, a VAE of graph ratio
+ * 8 without unpatchify, and 832×480 / 480×832 × 4n+1 frames in 5..81 (default 832×480, 33 frames —
+ * the geometry of Wan2.1 T2V 1.3B, which these checks were written on). No generation of src carries
+ * it: the shared body takes every one of these values from the descriptor.
+ */
+const GENERATION: WanGenerationDescriptor = {
+  latents: LATENTS_16,
+  acceptedSizes: [
+    { width: 832, height: 480 },
+    { width: 480, height: 832 },
+  ],
+  minFrames: 5,
+  maxFrames: 81,
+  defaults: { frames: 33, width: 832, height: 480 },
+  fps: 16,
+  vaePatchSize: 1,
+  ditInputForm: "ti2v",
+};
+
+/** The family spec of the checks (the class's owner, pipeline and sources with {@link GENERATION}). */
+const FAMILY: WanFamilySpec = { ...WAN22_TI2V_FAMILY, generation: GENERATION };
+const OWNER = FAMILY.owner;
 
 /** One row of the embedding asset (a small width for tests). */
 type Row = {
@@ -139,9 +186,9 @@ const buildAsset = (
 };
 
 const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
-/** The geometry of the distributed VAE chunk graph (latent tile 32, scale 8 — `8t / t`, output RGB 3). */
+/** The VAE chunk graph geometry of the test generation (latent tile 32, scale 8 — `8t / t`, output RGB 3). */
 const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 3 };
-/** The distribution's `pipelineConfig` (`WAN_PIPELINE_CONFIG` of the recipe `wan/distribution.py` — the reference setting). */
+/** A `pipelineConfig` of the test generation (the reference setting — 50 steps, guide 5.0, shift 3.0). */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<GenerateRequest>) =>
   planWanGeneration(
@@ -149,8 +196,8 @@ const plan = (request: Partial<GenerateRequest>) =>
     EMBEDS,
     LAYOUT,
     CONFIG,
-    WAN21_FAMILY.generation,
-    WAN21_FAMILY.owner,
+    FAMILY.generation,
+    FAMILY.owner,
   );
 
 describe("text-embedding asset", () => {
@@ -360,8 +407,8 @@ describe("planWanGeneration (the entry check of generate)", () => {
           embeds,
           LAYOUT,
           CONFIG,
-          WAN21_FAMILY.generation,
-          WAN21_FAMILY.owner,
+          FAMILY.generation,
+          FAMILY.owner,
         ),
       ModelInputError,
       "0 negative rows",
@@ -372,8 +419,8 @@ describe("planWanGeneration (the entry check of generate)", () => {
         embeds,
         LAYOUT,
         CONFIG,
-        WAN21_FAMILY.generation,
-        WAN21_FAMILY.owner,
+        FAMILY.generation,
+        FAMILY.owner,
       ).negative,
       undefined,
     );
@@ -452,8 +499,8 @@ describe("planWanGeneration (the entry check of generate)", () => {
       EMBEDS,
       LAYOUT,
       config,
-      WAN21_FAMILY.generation,
-      WAN21_FAMILY.owner,
+      FAMILY.generation,
+      FAMILY.owner,
     );
     assertEquals([resolved.steps, resolved.guidance, resolved.shift], [23, 4.25, 7.5]);
     const explicit = planWanGeneration(
@@ -461,8 +508,8 @@ describe("planWanGeneration (the entry check of generate)", () => {
       EMBEDS,
       LAYOUT,
       config,
-      WAN21_FAMILY.generation,
-      WAN21_FAMILY.owner,
+      FAMILY.generation,
+      FAMILY.owner,
     );
     assertEquals([explicit.steps, explicit.guidance, explicit.shift], [2, 1, 1.5]);
     assertEquals(explicit.negative, undefined, "an explicit guidance 1 wins over the default 4.25");
@@ -545,7 +592,7 @@ describe("family admission: the VAE tiles cover every accepted size", () => {
 
   it("latent tile 32 (the distribution) and 60 (exactly the short side) cover both 832×480 and 480×832", () => {
     for (const tile of [32, 60]) {
-      assertWanVaeTilesCover(layoutOf(tile), WAN21_FAMILY.generation, WAN21_FAMILY.owner);
+      assertWanVaeTilesCover(layoutOf(tile), FAMILY.generation, FAMILY.owner);
     }
   });
 
@@ -556,7 +603,7 @@ describe("family admission: the VAE tiles cover every accepted size", () => {
       [64, "smaller than tile width 64"],
     ] as const) {
       const error = assertThrows(
-        () => assertWanVaeTilesCover(layoutOf(tile), WAN21_FAMILY.generation, WAN21_FAMILY.owner),
+        () => assertWanVaeTilesCover(layoutOf(tile), FAMILY.generation, FAMILY.owner),
         Error,
         reason,
       );
@@ -567,7 +614,7 @@ describe("family admission: the VAE tiles cover every accepted size", () => {
 
   it("rejects an asset whose scale makes the latent of an accepted size non-integral", () => {
     assertThrows(
-      () => assertWanVaeTilesCover(layoutOf(32, 7), WAN21_FAMILY.generation, WAN21_FAMILY.owner),
+      () => assertWanVaeTilesCover(layoutOf(32, 7), FAMILY.generation, FAMILY.owner),
       Error,
       "is not integral",
     );
@@ -580,24 +627,15 @@ describe("family admission: the VAE graph declaration × the generation descript
     return wanVaeChunkLayout(first, next);
   };
 
-  it("the distribution's declaration (latent 16, output 3) matches the Wan2.1 descriptor (16 statistics, unpatchify 1)", () => {
-    assertWanVaeMatchesGeneration(
-      layoutOf({ latent: 16, sample: 3 }),
-      WAN21_GENERATION,
-      "wan.Pipeline",
-    );
+  it("the declaration of latent 16 and output 3 matches the test descriptor (16 statistics, unpatchify 1)", () => {
+    assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), GENERATION, OWNER);
   });
 
   it("rejects an asset whose statistics count differs from the latent channel count (the element count divides and the denormalisation would pass silently)", () => {
     const error = assertThrows(
-      () =>
-        assertWanVaeMatchesGeneration(
-          layoutOf({ latent: 8, sample: 3 }),
-          WAN21_GENERATION,
-          "wan.Pipeline",
-        ),
+      () => assertWanVaeMatchesGeneration(layoutOf({ latent: 8, sample: 3 }), GENERATION, OWNER),
       Error,
-      "wan.Pipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
+      `${OWNER}: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels`,
     );
     assert(!(error instanceof ModelInputError), "an asset inconsistency is not an input error");
   });
@@ -605,27 +643,21 @@ describe("family admission: the VAE graph declaration × the generation descript
   it("also rejects a descriptor where only the std count differs from the latent channel count (mean and std are checked separately)", () => {
     // A synthetic descriptor (mean has 16 entries and matches the latent; only std has 8).
     const stdOnly: WanGenerationDescriptor = {
-      ...WAN21_GENERATION,
-      latents: { mean: WAN21_GENERATION.latents.mean, std: Array<number>(8).fill(1) },
+      ...GENERATION,
+      latents: { mean: GENERATION.latents.mean, std: Array<number>(8).fill(1) },
     };
     assertThrows(
-      () =>
-        assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), stdOnly, "wan.Pipeline"),
+      () => assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), stdOnly, OWNER),
       Error,
-      "wan.Pipeline: the denormalization statistics (mean 16, std 8) do not match the VAE latent's 16 channels",
+      `${OWNER}: the denormalization statistics (mean 16, std 8) do not match the VAE latent's 16 channels`,
     );
   });
 
   it("rejects an asset whose output channel count differs from RGB × unpatchify²", () => {
     assertThrows(
-      () =>
-        assertWanVaeMatchesGeneration(
-          layoutOf({ latent: 16, sample: 12 }),
-          WAN21_GENERATION,
-          "wan.Pipeline",
-        ),
+      () => assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 12 }), GENERATION, OWNER),
       Error,
-      "wan.Pipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
+      `${OWNER}: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3`,
     );
   });
 });
@@ -635,7 +667,7 @@ describe("spatial compression (graph ratio × unpatchify): the latent size, the 
   // latent tile 16 → output 128 (graph ratio 8), unpatchify 2 → spatial compression 16, output 12 =
   // RGB 3 × 2². Dividing by the graph ratio alone would double both the latent and the overlap.
   const SYNTHETIC: WanGenerationDescriptor = {
-    ...WAN21_GENERATION,
+    ...GENERATION,
     latents: { mean: [0, 0, 0, 0], std: [1, 1, 1, 1] },
     vaePatchSize: 2,
   };
@@ -646,7 +678,7 @@ describe("spatial compression (graph ratio × unpatchify): the latent size, the 
     planWanRequest({ prompt: "p" }, gate, layout, CONFIG, generation);
 
   it("the synthetic declaration passes the comparison with the descriptor, and the spatial compression is 8 × 2 = 16", () => {
-    assertWanVaeMatchesGeneration(layout, SYNTHETIC, "wan.Pipeline");
+    assertWanVaeMatchesGeneration(layout, SYNTHETIC, OWNER);
     assertEquals(wanSpatialCompression(layout, SYNTHETIC), 16);
   });
 
@@ -666,7 +698,7 @@ describe("spatial compression (graph ratio × unpatchify): the latent size, the 
       assertEquals(axis.starts.length, Math.ceil(span / (axis.tile - overlap)) + 1);
     }
     // The coverage check also plans with the same size and passes.
-    assertWanVaeTilesCover(layout, SYNTHETIC, "wan.Pipeline");
+    assertWanVaeTilesCover(layout, SYNTHETIC, OWNER);
   });
 
   it("a size not divisible by the compression 16 (840×480 — divisible by the graph ratio 8 alone) is rejected by the check and the plan alike", () => {
@@ -676,7 +708,7 @@ describe("spatial compression (graph ratio × unpatchify): the latent size, the 
       defaults: { ...SYNTHETIC.defaults, width: 840 },
     };
     assertThrows(
-      () => assertWanVaeTilesCover(layout, wide, "wan.Pipeline"),
+      () => assertWanVaeTilesCover(layout, wide, OWNER),
       Error,
       "with spatial compression 16 (VAE scale 128 / 16 × unpatchify 2), the latent of 840×480 is not integral",
     );
@@ -704,7 +736,7 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
     readonly proj: readonly StubDim[];
     readonly context: readonly StubDim[];
   };
-  /** The same declaration as the distribution (`[1, S, 64]` and so on — the forward of the recipe `wan/export_dit.py`). */
+  /** A declaration of the 16-channel test latent (`[1, S, 64]` and so on — the five generation-side inputs). */
   const VALID: DitShapes = {
     tokens: [1, "S", 64],
     output: [1, "S", 64],
@@ -713,8 +745,13 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
     proj: [1, 256],
     context: [1, 512, 4096],
   };
-  /** The DiT patch built from the distribution's VAE latent (16 channels). */
+  /** The DiT patch built from the test VAE latent (16 channels). */
   const DIT_PATCH = wanDitPatch(16);
+  /** The two condition inputs (valid for every {@link VALID} variation — `timesteps_proj [1, 256]`, symbol S). */
+  const CONDITION_INPUTS = [
+    { name: "timesteps_proj_condition", shape: [1, 256] },
+    { name: "condition_mask", shape: [1, "S", 1], dtype: "bool" },
+  ] as const;
   const transformerOf = (patch: Partial<DitShapes>) => {
     const shapes = { ...VALID, ...patch };
     return stubModel({
@@ -725,20 +762,21 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
         { name: "encoder_hidden_states", shape: shapes.context },
         { name: "rope_cos", shape: shapes.ropeCos },
         { name: "rope_sin", shape: shapes.ropeSin },
+        ...CONDITION_INPUTS,
       ],
       outputs: ["out"],
       values: { out: shapes.output },
     });
   };
 
-  it("the distribution's declaration passes, and the context and timestep widths are taken from the declaration", () => {
-    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "t2v", "wan.Pipeline"), {
+  it("the valid declaration passes, and the context and timestep widths are taken from the declaration", () => {
+    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "ti2v", OWNER), {
       output: "out",
       projWidth: 256,
       contextRows: 512,
       contextWidth: 4096,
       patch: DIT_PATCH,
-      form: "t2v",
+      form: "ti2v",
     });
   });
 
@@ -748,7 +786,7 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
 
   it("fails when the VAE latent channel count does not match the DiT tokens width (the patch is built from the VAE declaration)", () => {
     assertThrows(
-      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "t2v", "wan.Pipeline"),
+      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "ti2v", OWNER),
       Error,
       "'tokens' shape",
     );
@@ -782,7 +820,7 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
     ];
     for (const [label, patch, message] of rejected) {
       assertThrows(
-        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
+        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "ti2v", OWNER),
         Error,
         message,
         label,
@@ -790,11 +828,11 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
     }
   });
 
-  /** The 5 t2v names (`INPUT_NAMES` of `wan/export_dit.py`) — used for the expected set message. */
-  const T2V_NAMES = "tokens, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin";
-  const TI2V_NAMES = `${T2V_NAMES}, timesteps_proj_condition, condition_mask`;
+  /** The five generation-side names — used for the expected set message. */
+  const BASE_NAMES = "tokens, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin";
+  const TI2V_NAMES = `${BASE_NAMES}, timesteps_proj_condition, condition_mask`;
 
-  it("the check of the input name set comes after the existing 5 checks (the message for a 2.1 asset missing an input does not change)", () => {
+  it("the check of the input name set comes after the checks of the first five (the message for an asset missing one of them does not change)", () => {
     const missing = stubModel({
       symbols: ["S"],
       inputs: [
@@ -802,18 +840,19 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
         { name: "timesteps_proj", shape: VALID.proj },
         { name: "encoder_hidden_states", shape: VALID.context },
         { name: "rope_cos", shape: VALID.ropeCos },
+        ...CONDITION_INPUTS,
       ],
       outputs: ["out"],
       values: { out: VALID.output },
     });
     assertThrows(
-      () => ditContract(missing, ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
+      () => ditContract(missing, ROPE, DIT_PATCH, "ti2v", OWNER),
       Error,
-      "wan.Pipeline: transformer graph input 'rope_sin' is missing",
+      `${OWNER}: transformer graph input 'rope_sin' is missing`,
     );
   });
 
-  it("fault injection: a 6th input in the 2.1 declaration fails because it does not match the t2v set", () => {
+  it("fault injection: an 8th input fails because it does not match the ti2v set", () => {
     const extra = stubModel({
       symbols: ["S"],
       inputs: [
@@ -822,31 +861,26 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
         { name: "encoder_hidden_states", shape: VALID.context },
         { name: "rope_cos", shape: VALID.ropeCos },
         { name: "rope_sin", shape: VALID.ropeSin },
+        ...CONDITION_INPUTS,
         { name: "attention_mask", shape: [1, "S"] },
       ],
       outputs: ["out"],
       values: { out: VALID.output },
     });
     assertThrows(
-      () => ditContract(extra, ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
+      () => ditContract(extra, ROPE, DIT_PATCH, "ti2v", OWNER),
       Error,
-      `wan.Pipeline: transformer graph inputs are [${T2V_NAMES}, attention_mask]` +
-        ` (expected: [${T2V_NAMES}] — input form 't2v')`,
+      `${OWNER}: transformer graph inputs are [${TI2V_NAMES}, attention_mask]` +
+        ` (expected: [${TI2V_NAMES}] — input form 'ti2v')`,
     );
   });
 
-  it("an unknown input form is not silently treated as t2v but fails (a value outside the type — a JS caller, a broken descriptor)", () => {
+  it("an unknown input form is not silently run as the known form but fails (a value outside the type — a JS caller, a broken descriptor)", () => {
     assertThrows(
       () =>
-        Reflect.apply(ditContract, undefined, [
-          transformerOf({}),
-          ROPE,
-          DIT_PATCH,
-          "i2v",
-          "wan.Pipeline",
-        ]),
+        Reflect.apply(ditContract, undefined, [transformerOf({}), ROPE, DIT_PATCH, "i2v", OWNER]),
       Error,
-      `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+      `${OWNER}: unknown DiT input form 'i2v' ("ti2v")`,
     );
     // Even combined with a broken asset (a missing input), the unknown-form message comes first
     // (independent of the asset's contents).
@@ -857,9 +891,9 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
       values: { out: VALID.output },
     });
     assertThrows(
-      () => Reflect.apply(ditContract, undefined, [broken, ROPE, DIT_PATCH, "i2v", "wan.Pipeline"]),
+      () => Reflect.apply(ditContract, undefined, [broken, ROPE, DIT_PATCH, "i2v", OWNER]),
       Error,
-      `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+      `${OWNER}: unknown DiT input form 'i2v' ("ti2v")`,
     );
   });
 
@@ -889,7 +923,7 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
         input.name !== name ? [input] : replacement === undefined ? [] : [replacement],
       );
 
-    it("the valid form passes and returns the form as ti2v (the numeric fields come from the declaration as for t2v)", () => {
+    it("the valid 48-channel form passes and returns the form as ti2v (the numeric fields come from the declaration)", () => {
       assertEquals(ditContract(ti2vOf(TI2V_VALID), ROPE, TI2V_PATCH, "ti2v", "wan.Ti2vPipeline"), {
         output: "out",
         projWidth: 256,
@@ -906,7 +940,7 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
           "condition_mask missing",
           replaced("condition_mask"),
           "ti2v",
-          `wan.Ti2vPipeline: transformer graph inputs are [${T2V_NAMES}, timesteps_proj_condition]` +
+          `wan.Ti2vPipeline: transformer graph inputs are [${BASE_NAMES}, timesteps_proj_condition]` +
             ` (expected: [${TI2V_NAMES}] — input form 'ti2v')`,
         ],
         [
@@ -947,17 +981,10 @@ describe("family admission: the DiT graph declaration × the shapes the host bui
           "wan.Ti2vPipeline: transformer graph input 'timesteps_proj_condition' has dtype bool, not f32",
         ],
         [
-          "opening the TI2V declaration as t2v (2 extra inputs)",
-          TI2V_VALID,
-          "t2v",
-          `wan.Ti2vPipeline: transformer graph inputs are [${TI2V_NAMES}]` +
-            ` (expected: [${T2V_NAMES}] — input form 't2v')`,
-        ],
-        [
-          "opening the 5-input 2.1 declaration as ti2v",
+          "a 5-input declaration (without the condition inputs) opened as ti2v",
           TI2V_VALID.slice(0, 5),
           "ti2v",
-          `wan.Ti2vPipeline: transformer graph inputs are [${T2V_NAMES}]` +
+          `wan.Ti2vPipeline: transformer graph inputs are [${BASE_NAMES}]` +
             ` (expected: [${TI2V_NAMES}] — input form 'ti2v')`,
         ],
       ];
@@ -992,14 +1019,18 @@ describe("ditInputs (the one place that builds the inputs of one DiT forward)", 
     ropeShape: [1, 3, 1, 1],
   };
 
-  it("without a condition (t2v) there are exactly 5 keys, keeping the order and the array identity (no copy)", () => {
-    const inputs = ditInputs({ ...BASE, condition: undefined });
+  it("there are 7 in order: the five generation-side inputs keep their arrays (no copy), the condition-side timestep is f32 with the same shape as the generation side, the mask is bool (still borrowed)", () => {
+    const mask = new Uint32Array(3);
+    const maskShape = [1, 3, 1];
+    const inputs = ditInputs({ ...BASE, condition: { proj: BASE.proj, mask, maskShape } });
     assertEquals(Object.keys(inputs), [
       "tokens",
       "timesteps_proj",
       "encoder_hidden_states",
       "rope_cos",
       "rope_sin",
+      "timesteps_proj_condition",
+      "condition_mask",
     ]);
     const expected: readonly [string, Float32Array, readonly number[]][] = [
       ["tokens", BASE.tokens, BASE.tokenShape],
@@ -1014,21 +1045,6 @@ describe("ditInputs (the one place that builds the inputs of one DiT forward)", 
       assertStrictEquals(tensor.data, data, name);
       assertStrictEquals(tensor.shape, shape, name);
     }
-  });
-
-  it("with a condition (ti2v) there are 7: the condition-side timestep is f32 with the same shape as the generation side, the mask is bool (still borrowed)", () => {
-    const mask = new Uint32Array(3);
-    const maskShape = [1, 3, 1];
-    const inputs = ditInputs({ ...BASE, condition: { proj: BASE.proj, mask, maskShape } });
-    assertEquals(Object.keys(inputs), [
-      "tokens",
-      "timesteps_proj",
-      "encoder_hidden_states",
-      "rope_cos",
-      "rope_sin",
-      "timesteps_proj_condition",
-      "condition_mask",
-    ]);
     const proj = hostTensor(inputs, "timesteps_proj_condition");
     assertEquals(proj.dtype, "f32");
     assertStrictEquals(proj.data, BASE.proj);
@@ -1041,23 +1057,9 @@ describe("ditInputs (the one place that builds the inputs of one DiT forward)", 
 });
 
 describe("the model card's accepted set (compared through a fixture)", () => {
-  // The other side is the recipe's `wan/tests/test_distribution.py` (it compares card.py's table with
-  // the same fixture).
-  it("the accepted sizes and frame range equal the fixture wan-card-limits.json", async () => {
-    const fixture: unknown = JSON.parse(
-      await readTextFile(new URL("./fixtures/wan-card-limits.json", import.meta.url)),
-    );
-    const { acceptedSizes, minFrames, maxFrames } = WAN21_GENERATION;
-    assertEquals(
-      fixture,
-      { acceptedSizes, minFrames, maxFrames },
-      "when the accepted set of descriptor.ts changes, update the fixture and WAN_ACCEPTED_SIZES / WAN_FRAMES of card.py too",
-    );
-  });
-
-  // The card of the Wan2.2 TI2V-5B distribution (`karume-wan2.2`) is pinned the same way (ADR 0121
-  // step 8 — on the other side, the same recipe's test compares `WAN22_ACCEPTED_SIZES` /
-  // `WAN22_FRAMES` of card.py with the same fixture).
+  // The card of the Wan2.2 TI2V-5B distribution (`karume-wan2.2`) keeps a copy of the accepted set
+  // (ADR 0121 step 8 — on the other side, the recipe's `wan/tests/test_distribution.py` compares
+  // `WAN22_ACCEPTED_SIZES` / `WAN22_FRAMES` of card.py with the same fixture).
   it("the accepted sizes and frame range of Wan2.2 TI2V equal the fixture wan-ti2v-card-limits.json", async () => {
     const fixture: unknown = JSON.parse(
       await readTextFile(new URL("./fixtures/wan-ti2v-card-limits.json", import.meta.url)),
@@ -1121,31 +1123,23 @@ describe("pipelineConfig (the check of the manifest's declaration)", () => {
 });
 
 describe("latent denormalisation", () => {
-  it("the constants are the f32 values themselves (f64 decimals would disagree with the values the denormalisation uses)", () => {
-    assertEquals(WAN_LATENTS_MEAN.length, 16);
-    assertEquals(WAN_LATENTS_STD.length, 16);
-    for (const value of [...WAN_LATENTS_MEAN, ...WAN_LATENTS_STD]) {
-      assertEquals(Math.fround(value), value);
-    }
-  });
-
   it("in upstream's order (divide by the reciprocal of std, then add mean), the last bit differs from the multiplication order", () => {
     const perChannel = 4096;
     const latents = new Float32Array(16 * perChannel).map((_, index) =>
       Math.fround(Math.sin(index) * 3),
     );
-    const got = denormalizeWanLatents(latents, WAN21_GENERATION.latents);
+    const got = denormalizeWanLatents(latents, GENERATION.latents);
     let differsFromProduct = 0;
     for (let channel = 0; channel < 16; channel += 1) {
-      const inverse = Math.fround(1 / WAN_LATENTS_STD[channel]);
+      const inverse = Math.fround(1 / LATENTS_16.std[channel]);
       for (let index = 0; index < perChannel; index += 1) {
         const at = channel * perChannel + index;
         assertEquals(
           got[at],
-          Math.fround(Math.fround(latents[at] / inverse) + WAN_LATENTS_MEAN[channel]),
+          Math.fround(Math.fround(latents[at] / inverse) + LATENTS_16.mean[channel]),
         );
         const product = Math.fround(
-          Math.fround(latents[at] * WAN_LATENTS_STD[channel]) + WAN_LATENTS_MEAN[channel],
+          Math.fround(latents[at] * LATENTS_16.std[channel]) + LATENTS_16.mean[channel],
         );
         if (product !== got[at]) differsFromProduct += 1;
       }
@@ -1155,14 +1149,14 @@ describe("latent denormalisation", () => {
       "the multiplication order also matched (a mix-up of the order is not pinned)",
     );
     assertThrows(
-      () => denormalizeWanLatents(new Float32Array(17), WAN21_GENERATION.latents),
+      () => denormalizeWanLatents(new Float32Array(17), GENERATION.latents),
       Error,
       "not divisible",
     );
   });
 
   it("statistics with different mean and std counts fail loudly (the channel count is not silently taken from one of them)", () => {
-    const { mean, std } = WAN21_GENERATION.latents;
+    const { mean, std } = GENERATION.latents;
     assertThrows(
       () => denormalizeWanLatents(new Float32Array(16), { mean, std: std.slice(1) }),
       Error,
@@ -1247,18 +1241,20 @@ describe("the RNG of the initial noise", () => {
 });
 
 /**
- * A `Pipeline` run on mock Sessions (needs neither a GPU nor assets — pins the cleanup and non-finite
- * checks along the `generate` path). The DiT Session returns an output filled with `ditValue`, and
- * the VAE runs the one-tile = one-batch procedure (`decodeWanVaeTile`) on a fake GpuContext, filling
- * the frames read back with `vaeValue`.
+ * The family's generation body (`generateWanVideo` of family.ts) run on mock Sessions with the test
+ * family ({@link FAMILY}) (needs neither a GPU nor assets — pins the cleanup and non-finite checks
+ * along the `generate` path). The DiT Session returns an output filled with `ditValue`, and the VAE
+ * runs the one-tile = one-batch procedure (`decodeWanVaeTile`) on a fake GpuContext, filling the
+ * frames read back with `vaeValue`. Each call takes ownership of the request's latents first, as the
+ * class's `generate` does (`ownWanRequestLatents`); the class's serialization chain is checked
+ * through the class in wan_ti2v_pipeline_test.ts.
  *
- * NOTE: the constructor is TS `private` (manifest checks and asset comparison are not bypassed — ADR
- * 0008), so `Reflect.construct` passes the internal state directly (only tests bypass private). The
- * public construction entry (`fromAssets`) needs the bytes of krm containers and acquiring the GPU,
- * which a CPU unit test cannot do. The internal state's shape is `WanState` of family.ts, but the
- * arguments of `Reflect.construct` are not type-checked, so the fields built here are kept in step by
- * hand — a missing field fails with a TypeError inside generate, which disagrees with the message each
- * test checks and turns it red.
+ * NOTE: the public construction entry (`fromAssets`) needs the bytes of krm containers and acquiring
+ * the GPU, which a CPU unit test cannot do, so the internal state is built here and passed with
+ * `Reflect.apply` (only tests build it by hand). Its shape is `WanState` of family.ts, but the
+ * arguments of `Reflect.apply` are not type-checked, so the fields built here are kept in step by hand
+ * — a missing field fails with a TypeError inside generate, which disagrees with the message each test
+ * checks and turns it red.
  */
 const mockPipeline = (options: {
   readonly ditValue?: number;
@@ -1274,8 +1270,8 @@ const mockPipeline = (options: {
   /** Called inside the umT5 run (the abort injection point). */
   readonly onUmt5Run?: (tokens: number) => void;
   /**
-   * The DiT input form of the internal state (`"t2v"` when omitted). Values outside the type can be
-   * passed too (`Reflect.construct` does not check types — this pins the unknown-form check).
+   * The DiT input form of the internal state (`"ti2v"` when omitted). Values outside the type can be
+   * passed too (`Reflect.apply` does not check types — this pins the unknown-form check).
    */
   readonly ditForm?: string;
 }) => {
@@ -1409,19 +1405,20 @@ const mockPipeline = (options: {
       contextRows: gpuText ? 512 : 4,
       contextWidth: WIDTH,
       patch: wanDitPatch(16),
-      form: options.ditForm ?? "t2v",
+      form: options.ditForm ?? "ti2v",
     },
     textEmbeds: EMBEDS,
     text,
   };
-  const pipeline: Pipeline = Reflect.construct(Pipeline, [state]);
+  const run = (request: Ti2vGenerateRequest): Promise<GeneratedVideo> =>
+    Reflect.apply(generateWanVideo, undefined, [FAMILY, state, ownWanRequestLatents(request)]);
   /**
    * Runs a request of 5 frames and 2 steps (4 DiT runs, 12 VAE tiles) and pushes the observed events
    * onto `log`. The prompt is `cats` on the asset path and the fixture's fixed prompt `boxing-cats` (28
    * tokens) on the GPU path.
    */
   const generate = (onEvent?: GenerateRequest["onEvent"], request: Partial<GenerateRequest> = {}) =>
-    pipeline.generate({
+    run({
       prompt: gpuText ? wanParityCase("fixed-boxing-cats").text : "Two cats.",
       frames: 5,
       steps: 2,
@@ -1440,7 +1437,7 @@ const mockPipeline = (options: {
   return { log, generate, ditContexts, ditRuns };
 };
 
-describe("Pipeline.generate (mock Sessions)", () => {
+describe("generate (mock Sessions)", () => {
   it("control: with finite DiT / VAE outputs it runs to the end and returns frames clamped to [-1, 1]", async () => {
     const { log, generate } = mockPipeline({ vaeValue: 2 });
     const video = await generate();
@@ -1457,20 +1454,8 @@ describe("Pipeline.generate (mock Sessions)", () => {
     assertEquals(log.at(-1), "vae_decoder:end");
   });
 
-  it("the result carries Wan2.1's fps 16 (a fact of the upstream generation — not a request knob)", async () => {
-    const { generate } = mockPipeline({});
-    assertEquals((await generate()).fps, 16);
-  });
-
   describe("the DiT input form (ADR 0121 decision 3)", () => {
-    const T2V_KEYS = ["tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin"];
-
-    it("t2v passes exactly 5 inputs to every run (no condition inputs added — the inputs reaching the 2.1 Session do not change)", async () => {
-      const { generate, ditRuns } = mockPipeline({});
-      await generate();
-      assertEquals(ditRuns.length, 4);
-      for (const inputs of ditRuns) assertEquals(Object.keys(inputs), T2V_KEYS);
-    });
+    const BASE_KEYS = ["tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin"];
 
     it("ti2v (T2V) has 7: the condition mask is an all-zero u32 [1, S, 1] built only once, and the condition-side timestep is the same array as the generation side's", async () => {
       const { generate, ditRuns } = mockPipeline({ ditForm: "ti2v" });
@@ -1479,7 +1464,7 @@ describe("Pipeline.generate (mock Sessions)", () => {
       const masks = new Set<unknown>();
       for (const inputs of ditRuns) {
         assertEquals(Object.keys(inputs), [
-          ...T2V_KEYS,
+          ...BASE_KEYS,
           "timesteps_proj_condition",
           "condition_mask",
         ]);
@@ -1500,12 +1485,12 @@ describe("Pipeline.generate (mock Sessions)", () => {
       assertEquals(masks.size, 1, "the condition mask was rebuilt per run");
     });
 
-    it("an unknown form fails before the DiT Session is set up (it is not silently run as t2v)", async () => {
+    it("an unknown form fails before the DiT Session is set up (it is not silently run as the known form)", async () => {
       const { log, generate } = mockPipeline({ ditForm: "i2v" });
       await assertRejects(
         () => generate(),
         Error,
-        `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+        `${OWNER}: unknown DiT input form 'i2v' ("ti2v")`,
       );
       assert(!log.includes("create:transformer"), `the DiT Session was set up: ${log}`);
     });
@@ -1565,37 +1550,7 @@ describe("Pipeline.generate (mock Sessions)", () => {
   });
 });
 
-describe("Pipeline.generate: the I2V fields (image / fit, Wan2.2 only — a JS caller slips past the types)", () => {
-  /** A generation request with one field set that TS types do not allow (the 2.1 request type has no `image` / `fit`). */
-  const requestWith = (key: string, value: unknown): Partial<GenerateRequest> => {
-    const request: Partial<GenerateRequest> = {};
-    Object.defineProperty(request, key, { value, enumerable: true });
-    return request;
-  };
-  const IMAGE = { data: new Uint8Array(4 * 4 * 3), width: 4, height: 4 };
-  const MESSAGE =
-    "image / fit (generation from an image) is not accepted by this generation (Wan2.2's wan.Ti2vPipeline accepts it)";
-
-  for (const [key, value] of [
-    ["image", IMAGE],
-    ["fit", "crop"],
-  ] as const) {
-    it(`passing ${key} is a ModelInputError without setting up a single Session (it points to the 2.2 class)`, async () => {
-      const { log, generate } = mockPipeline({});
-      await assertRejects(
-        () => generate(undefined, requestWith(key, value)),
-        ModelInputError,
-        MESSAGE,
-      );
-      assertEquals(
-        log.filter((entry) => entry.startsWith("create:")),
-        [],
-      );
-    });
-  }
-});
-
-describe("Pipeline.generate: vaeTile (ADR 0134 — Wan2.1 has no 32-latent decoder pair)", () => {
+describe("generate: vaeTile without the 32-latent decoder pair (ADR 0134 — the preset carries no _32 roles)", () => {
   it("vaeTile 32 is a ModelInputError naming the preset, before any Session is built", async () => {
     const { log, generate } = mockPipeline({});
     await assertRejects(
@@ -1628,7 +1583,7 @@ describe("planWanGpuGeneration (the entry check of the GPU path)", () => {
       encoder,
       LAYOUT,
       CONFIG,
-      WAN21_FAMILY.generation,
+      FAMILY.generation,
     );
 
   it("turns the prompt into the same id sequence as upstream, and an omitted negative encodes the official sample_neg_prompt through the same check", () => {
@@ -1701,10 +1656,10 @@ describe("the default negative (the official sample_neg_prompt)", () => {
 });
 
 /**
- * The text-embedding asset the Wan2.1 distribution ships (ADR 0139 decision 1 — the local mirror
- * built by `dist.py`; a machine without it SKIPs only the case below).
+ * The text-embedding asset the published Wan2.2 distribution ships (ADR 0139 decision 1; a machine
+ * without the mirror SKIPs only the case below).
  */
-const WAN_MIRROR = mirrorRoot("karume-wan2.1");
+const WAN_MIRROR = mirrorRoot("karume-wan2.2");
 const textEmbedsMirror = mirrorPresent(WAN_MIRROR)
   ? await readMirrorAsset(WAN_MIRROR, "text_embeds")
   : undefined;
@@ -1712,7 +1667,7 @@ if (textEmbedsMirror === undefined) {
   console.warn(
     `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/6, or a sibling it references is ` +
       "absent), so the check of the default negative against the asset's row is SKIPPED (the check against the " +
-      `recipe's text runs on the fixture). Assemble the mirror: ${WAN_ASSEMBLE_COMMAND}`,
+      "recipe's text runs on the fixture). Fetch the karume-wan2.2 and karume-umt5-xxl distributions into models/",
   );
 }
 
@@ -1787,7 +1742,7 @@ describe("family admission: the umT5 graph declaration × the shapes the host bu
   const buckets = VALID.inputs[1];
 
   it("the distribution's declaration passes, and the output name is taken from the declaration", () => {
-    assertEquals(umt5Contract(umt5Of({}), DIT, "wan.Pipeline"), { output: "out" });
+    assertEquals(umt5Contract(umt5Of({}), DIT, OWNER), { output: "out" });
   });
 
   it("a mismatch of input name, width, symbol, dtype, count or storage fails by name before umT5 is fetched (a plain Error)", () => {
@@ -1844,7 +1799,7 @@ describe("family admission: the umT5 graph declaration × the shapes the host bu
     ];
     for (const [label, patch, message] of rejected) {
       const error = assertThrows(
-        () => umt5Contract(umt5Of(patch), DIT, "wan.Pipeline"),
+        () => umt5Contract(umt5Of(patch), DIT, OWNER),
         Error,
         message,
         label,
@@ -1858,23 +1813,23 @@ describe("family admission: the umT5 graph declaration × the shapes the host bu
 
   it("fails for a pair where the valid-length limit 512 exceeds the DiT's context row count", () => {
     assertThrows(
-      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }, "wan.Pipeline"),
+      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }, OWNER),
       Error,
       "valid-length upper limit 512 exceeds the DiT context row count 256",
     );
   });
 });
 
-/** The manifest the construction-entry tests use (the skeleton of `models/karume-wan2.1/karume.json` — declarations only). */
+/** The manifest the construction-entry tests use (the skeleton of `models/karume-wan2.2/karume.json` — declarations only). */
 const wanManifest = (weightNames: readonly string[]) =>
   parseManifest(
     JSON.stringify({
       format: "karume/6",
       generator: "karume/0.1.0",
-      defaultModel: "t2v-1.3b",
+      defaultModel: "ti2v-5b",
       models: {
-        "t2v-1.3b": {
-          pipeline: "wan/1",
+        "ti2v-5b": {
+          pipeline: "wan-ti2v/1",
           weights: Object.fromEntries(
             weightNames.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
           ),
@@ -1889,13 +1844,20 @@ const wanManifest = (weightNames: readonly string[]) =>
             },
           },
           defaultQuant: "f16",
-          pipelineConfig: { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } },
+          pipelineConfig: { scheduler: { shift: 5 }, defaults: { steps: 50, guidance: 5 } },
         },
       },
     }),
   );
-const WITH_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next", "text_encoder"];
-const WITHOUT_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next"];
+const WITHOUT_UMT5 = [
+  "transformer",
+  "vae_decoder_first",
+  "vae_decoder_next",
+  "vae_encoder_pre",
+  "vae_encoder_attn",
+  "vae_encoder_post",
+];
+const WITH_UMT5 = [...WITHOUT_UMT5, "text_encoder"];
 
 /** Construction options with one field set to a value TS types do not allow (reproducing a JS caller's misspelling). */
 const optionsWith = (key: string, value: unknown): PipelineOptions => {
@@ -1923,7 +1885,7 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
   it("an unknown textEncoder spelling is a plain Error before any asset is touched (treated like a misspelt model / quant name)", async () => {
     const error = await assertRejects(
       () =>
-        Pipeline.fromAssets(
+        Ti2vPipeline.fromAssets(
           { manifest: wanManifest(WITH_UMT5), assets: {} },
           optionsWith("textEncoder", "cpu"),
         ),
@@ -1935,7 +1897,7 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
 
   it("on the default gpu path, a manifest that does not declare umT5 fails before any container is opened, pointing to precomputed", async () => {
     await assertRejects(
-      () => Pipeline.fromAssets({ manifest: wanManifest(WITHOUT_UMT5), assets: {} }),
+      () => Ti2vPipeline.fromAssets({ manifest: wanManifest(WITHOUT_UMT5), assets: {} }),
       Error,
       "no umT5 component 'text_encoder' (the default textEncoder \"gpu\" takes it",
     );
@@ -1943,90 +1905,22 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
 
   it("precomputed gets as far as admission without opening the umT5 component, and gpu needs the umT5 container", async () => {
     // The same assets (only the umT5 container is missing); only the set of components each path opens
-    // differs. precomputed opens 3 components and fails at admission's graph check (the VAE chunk
-    // graph) = it did not touch umT5.
+    // differs. precomputed opens the 6 video components and fails at admission's graph check (the VAE
+    // chunk graph) = it did not touch umT5.
     const manifest = wanManifest(WITH_UMT5);
     await assertRejects(
       () =>
-        Pipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }, { textEncoder: "precomputed" }),
+        Ti2vPipeline.fromAssets(
+          { manifest, assets: SHELL_COMPONENTS },
+          { textEncoder: "precomputed" },
+        ),
       WanVaeChunkError,
     );
     await assertRejects(
-      () => Pipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }),
+      () => Ti2vPipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }),
       Error,
       "component 'text_encoder' has no container",
     );
-  });
-
-  it("admission compares the VAE declaration with the descriptor (a mismatch of latent or output channel count fails before the raw RoPE table is read)", async () => {
-    // A declaration-only VAE meeting the chunk-graph agreement (latent tile 32, scale 8, one cache). The
-    // DiT stays a shell, so an asset that gets through the comparison fails with another message when
-    // the raw RoPE table is read (the control that pins the comparison's wiring).
-    const vae = async (name: string, frames: number, latent: number, sample: number) =>
-      partAssets(
-        name,
-        await writeContainer({
-          graphs: {
-            [name]: parseIrDeclarationValue({
-              format: "karume-ir",
-              version: 2,
-              requires: { ops: ["mul"] },
-              symbols: [],
-              inputs: [
-                { name: "latent", dtype: "f32", shape: [latent, 1, 32, 32] },
-                { name: "cache_00", dtype: "f32", shape: [16, 2, 32, 32] },
-              ],
-              outputs: ["frame", "cache_00_out"],
-              initializers: {},
-              values: {
-                frame: { dtype: "f32", shape: [sample, frames, 256, 256] },
-                cache_00_out: { dtype: "f32", shape: [16, 2, 32, 32] },
-              },
-              states: {},
-              nodes: [
-                { op: "mul", ins: ["latent", "latent"], outs: ["frame"], attrs: {} },
-                { op: "mul", ins: ["cache_00", "cache_00"], outs: ["cache_00_out"], attrs: {} },
-              ],
-            }),
-          },
-          consts: [],
-          weights: [],
-          assets: [],
-          provenance: { license: "test" },
-        }),
-      );
-    const build = async (latent: number, sample: number) =>
-      Pipeline.fromAssets(
-        {
-          manifest: wanManifest(WITHOUT_UMT5),
-          assets: {
-            ...SHELL_COMPONENTS,
-            ...(await vae("vae_decoder_first", 1, latent, sample)),
-            ...(await vae("vae_decoder_next", 4, latent, sample)),
-          },
-        },
-        { textEncoder: "precomputed" },
-      );
-    const rejected: readonly [string, number, number, string][] = [
-      [
-        "output 12",
-        16,
-        12,
-        "wan.Pipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
-      ],
-      [
-        "latent 8",
-        8,
-        3,
-        "wan.Pipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
-      ],
-    ];
-    for (const [label, latent, sample, message] of rejected) {
-      await assertRejects(() => build(latent, sample), Error, message, label);
-    }
-    // Control: the distribution's declaration (latent 16, output 3) passes the comparison and the tile
-    // check, and fails at the shell DiT's raw RoPE table.
-    await assertRejects(() => build(16, 3), Error, "'rope_base'");
   });
 
   it("an already-aborted signal rejects with the reason as is, before any asset is touched", async () => {
@@ -2036,7 +1930,7 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
     const reason = new Error("stop button");
     controller.abort(reason);
     const error = await assertRejects(() =>
-      Pipeline.fromAssets(
+      Ti2vPipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
       ),
@@ -2049,7 +1943,7 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
     const reason = new Error("stop button (while running)");
     setTimeout(() => controller.abort(reason), 0);
     const error = await assertRejects(() =>
-      Pipeline.fromAssets(
+      Ti2vPipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
       ),
@@ -2058,40 +1952,7 @@ describe("the construction entry (path spelling, the umT5 declaration, the compo
   });
 });
 
-/** The manifest of the distribution mirror (written by `dist.py --pipeline wan` — a machine without it SKIPs only the case below). */
-const DIST_MANIFEST = new URL("../../../models/karume-wan2.1/karume.json", import.meta.url);
-const distManifestText = await readTextIfPresent(DIST_MANIFEST);
-if (distManifestText === undefined) {
-  console.warn(
-    `[karume] ${DIST_MANIFEST.pathname} is absent, so the check that a build without quant resolves to the practical preset is SKIPPED. ` +
-      `Assemble it: ${WAN_ASSEMBLE_COMMAND}`,
-  );
-}
-
-/** The default preset (ruling 4 of ADR 0120 on 2026-10-04 — the most practical preset today. The source of truth is the recipe's `WAN_DEFAULT_QUANT`). */
-const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
-
-test.skipIf(distManifestText === undefined)(
-  "the distribution's default preset: a build without quant resolves to the practical preset (reading only the manifest karume.json)",
-  async () => {
-    assert(distManifestText !== undefined);
-    // The preset is resolved in the family admission (before the weights are read). Passing a shared
-    // GPU whose limits are all 0 makes every preset fail on the requiredLimits it declares (the umT5
-    // vocabulary embedding), and that message names the resolved preset — observing the preset without
-    // using weights or a GPU.
-    await assertRejects(
-      () =>
-        Pipeline.fromAssets(
-          { manifest: parseManifest(distManifestText), assets: SHELL_COMPONENTS },
-          { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
-        ),
-      Error,
-      `wan.Pipeline: quant '${PRACTICAL_QUANT}': this GPU does not meet the required device limits`,
-    );
-  },
-);
-
-describe("Pipeline.generate (mock Sessions, the text stage of the GPU path)", () => {
+describe("generate (mock Sessions, the text stage of the GPU path)", () => {
   it("the text stage runs positive → negative and tears down, then sets up the DiT stage (the Session's run options are {})", async () => {
     const generated = mockPipeline({ textEncoder: "gpu" });
     await generated.generate();
@@ -2160,7 +2021,7 @@ describe("Pipeline.generate (mock Sessions, the text stage of the GPU path)", ()
   });
 });
 
-describe("ownership of the initial noise (latents) in Pipeline.generate", () => {
+describe("ownership of the initial noise (latents) in generate", () => {
   /** A latent of 5 frames [16, 2, 60, 104] (the value varies per element — a mix-up shows in the DiT input). */
   const initialLatents = () =>
     new Float32Array(16 * 2 * 60 * 104).map((_, index) => ((index % 97) - 48) / 64);
@@ -2197,33 +2058,6 @@ describe("ownership of the initial noise (latents) in Pipeline.generate", () => 
     }
   });
 
-  it("generates from the values at call time even when the caller rewrites latents while the call waits its turn (finite and NaN)", async () => {
-    // Baseline: the same two calls in order, nothing rewritten (the second call's first DiT run is
-    // index 4 — 2 steps × uncond / cond for the first call).
-    const baseline = mockPipeline({});
-    await baseline.generate();
-    const offset = baseline.ditRuns.length;
-    await baseline.generate(undefined, { latents: initialLatents() });
-    const expected = baseline.ditRuns[offset].tokens;
-    assert(expected.dtype === "f32");
-    for (const value of [7, Number.NaN]) {
-      const { generate, ditRuns } = mockPipeline({});
-      // The first call holds the serialization chain, so the second waits its turn; the caller
-      // rewrites its array right after the call returns (inside that wait).
-      const first = generate();
-      const latents = initialLatents();
-      const second = generate(undefined, { latents });
-      latents.fill(value);
-      await Promise.all([first, second]);
-      const tokens = ditRuns[offset].tokens;
-      assert(tokens.dtype === "f32" && tokens.data.length === expected.data.length);
-      const differs = tokens.data.findIndex(
-        (entry, index) => !Object.is(entry, expected.data[index]),
-      );
-      assertEquals(differs, -1, `the DiT ran with the rewritten value ${value}`);
-    }
-  });
-
   it("does not turn a latents value that is not a Float32Array into one (the entry check still rejects it by name)", async () => {
     const { generate, log } = mockPipeline({});
     const latents = Array.from(initialLatents()) as unknown as Float32Array<ArrayBuffer>;
@@ -2239,7 +2073,7 @@ describe("ownership of the initial noise (latents) in Pipeline.generate", () => 
   });
 });
 
-describe("abort in Pipeline.generate (mock Sessions — signal.reason is not wrapped, the Session is torn down, the next one runs)", () => {
+describe("abort in generate (mock Sessions — signal.reason is not wrapped, the Session is torn down, the next one runs)", () => {
   it("an abort after step 1 takes effect before step 2, tears down the DiT Session, does not set up the VAE stage, and the next generate runs", async () => {
     const { log, generate } = mockPipeline({});
     const controller = new AbortController();

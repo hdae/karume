@@ -509,7 +509,7 @@ test("postprocessing: α uses the whole 8-bit range (the saturated side is not c
 // Both declarations run on an input whose values differ per declaration, so if the pipeline ignored
 // the declaration and stuck to one procedure, one of the declarations would fail. A fake Session
 // and a fake GPU suffice (only `run` is touched), so the state is built directly and passed to the
-// private constructor (the same approach as `vowel_detector_pipeline_test.ts`).
+// private constructor.
 
 /**
  * The graph's dimensions (non-square) and the input image's dimensions (upscaling — the direction

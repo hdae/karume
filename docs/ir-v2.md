@@ -317,8 +317,8 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   cannot be written in `values{}` are canonical in the "State slots (`states{}`)" section below — only bindings from inputs
   take part in resolving ordinary values. The appearance **may be a derived form** — from the actual size of `"2T"` or `"T+8"`
   the solution is uniquely determined by `(size − offset) / coeff`, and a size that does not divide fails loudly
-  ([ADR 0057](decisions/0057-derived-dim-binding.md). The vowel-detection CRNN can declare its length axis only as `2T`
-  because of the stride 2 of its first conv).
+  ([ADR 0057](decisions/0057-derived-dim-binding.md). A CRNN whose first conv has stride 2 can declare its length axis
+  only as `2T`).
 - The grammar has a single canonical source: the conformance case table `packages/runtime/tests/fixtures/dim-grammar.json` (three sections: valid / invalid /
   binding evaluation). The TS implementation and the Python implementation (from M1) are checked against the same table.
 

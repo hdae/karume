@@ -282,7 +282,7 @@ The attention follows upstream's masks with the block on sliding layers only, no
 
 `attentionScoreStorage: "f16"` stores S through `pack2x16float`, whose rounding WGSL leaves open. Vulkan on the RTX 3080 Ti rounds to
 nearest with ties to even, and D3D12 on the RTX 5070 Ti rounds toward zero, so the same input gives an S up to one f16 step apart. This
-touches the presets that end in `-s16`, Anima's and Wan2.1's defaults among them. The output within one environment stays deterministic.
+touches the presets that end in `-s16`, Anima's default among them. The output within one environment stays deterministic.
 Other backends are not known: the `score-f16-store` check of the workbench's `kernel-check` entry names the rounding of the one it runs on. An integer store costs
 3–5% of the attention route, so it is not used (ADR [0031](decisions/0031-attention-score-f16-storage.md) addendum 2026-11-07).
 
@@ -303,7 +303,7 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   and **it does not happen when both sides are multiples of 32 px**. With the `bf16+dit8-a8-attn8`
   preset only ③PV falls back. Cross-attention (N = 512) and ①QK (D = 128) are always as declared.
   The accepted set is not narrowed.
-- **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
+- **Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
   declared.
 - **MOSS-Image** (`@karume/models/moss`, a local distribution only): its practical preset declares the online kernel, which
   runs every key length, so on a device with an online form every forward runs as declared (the
@@ -345,8 +345,8 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   VAE stage with `i8-a8-attn8-online-conv8` on the RTX 3080 Ti is 0.81–0.83× of tile 16 at 17
   frames and 0.70× at 33 frames (the ADR's kill line of 0.8× was ruled on the 33-frame clip).
 - The pair is accepted only when the preset's weights carry `vae_decoder_first_32` /
-  `vae_decoder_next_32` (Wan2.2's presets do; Wan2.1 has none, so `vaeTile: 32` is a
-  `ModelInputError` there). The output differs from tile 16's in the blended seams, so the sha256
+  `vae_decoder_next_32` (Wan2.2's presets do; on a preset without them `vaeTile: 32` is a
+  `ModelInputError`). The output differs from tile 16's in the blended seams, so the sha256
   rows carry the tile in the case id.
 
 ## On devices without dp4a, a8 does not get faster (a warning only, no fallback)
@@ -360,7 +360,7 @@ the sibling preset without a8; it reports once per device with `console.warn` at
 (what happened, and the ways out = the preset with the same weights and no a8 (every distribution
 has one — checked by the distribution gate test) or `"f32"`) — ADR
 [0128](decisions/0128-default-preset-original-weights.md) decision 5. Using a distribution that has a8
-in its default (anima / irodori / wan2.1 / wan2.2) with its default on a GPU without dp4a produces
+in its default (anima / irodori / wan2.2) with its default on a GPU without dp4a produces
 this warning.
 
 ## With w8a8 (`linearCompute: "a8"`) the propagation granularity of non-finite values is the same, but the sign of Inf does not match the f32 path
@@ -414,7 +414,7 @@ The counts are pinned by `packages/runtime/tests/codegen_dispatch_test.ts`.
 
 `conv3d` (ADR [0118](decisions/0118-wan21-video-generation.md) decision 1) has the same skeleton and
 becomes `DispatchLimitError` at `Tout·Hout·Wout > 8,388,480` (the default tileN 128 × 65,535). The
-maximum of Wan2.1's VAE chunk graphs (tile 32) is 4 × 256 × 256 = 262,144, which does not reach it.
+maximum of Wan2.2's VAE chunk graphs (the 32-latent pair) is 4 × 256 × 256 = 262,144, which does not reach it.
 
 GPU-side coordinate arithmetic is i32, so `conv1d` / `conv2d` / `conv3d` that break
 `input length + 2·padding ≤ 2^31 − 1` on any axis become `CodegenError` at Session construction (a wrapped coordinate would
@@ -1208,7 +1208,7 @@ paid with a re-run, so the output is bit-identical to full residency. Its constr
 ## Auxiliary-asset safetensors require coverage of the data section and element alignment (may be rejected even when the official `safe_open` reads them)
 
 The strict reader `parseSafetensors`, which reads auxiliary assets that are not containers (sbv2's
-style table, anima's rope base table, vowel-detector's tables and so on), requires that the data
+style table, anima's rope base table and so on), requires that the data
 section be "covered with no gaps, and the absolute offset of each tensor aligned to the element size of
 its dtype", and rejects violations with `SafetensorsError` (the canonical ruling is ADR
 [0063](decisions/0063-safetensors-physical-layout.md)). A file that places a 4-byte type right after
@@ -1423,6 +1423,8 @@ section** (Codex deep review R2B-001).
   `aten.gru` does not fit in the IR).
 - **LSTM is not in the vocabulary** (`aten.lstm` fails loudly as an unsupported op). The points for an
   extension are in ADR [0056](decisions/0056-gru-scan.md) decision 8.
+- Execution time is proportional to the sequence length (the time loop is sequential within one
+  workgroup — performance not measured).
 
 ## The gated delta rule scan runs head dims 128 only on the GPU, has no state slots, and leaves positive g unspecified (ADR 0135)
 
@@ -1445,29 +1447,6 @@ section** (Codex deep review R2B-001).
   that is `B · Hv > 16,383`) the dispatch fails loudly (there is no grid-stride).
 - Measured only on the RTX 3080 Ti under Node + Dawn (Vulkan) at B = 1: other GPUs and backends,
   B > 1 on the GPU and the real MOSS `A_log` / `dt_bias` are not measured (ADR 0135 open point 10).
-
-## Vowel detection: the input's 10ms frame count is **even**, and the limit is the distribution's declaration (ADR 0056 / 0057)
-
-- The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd
-  lengths are not accepted** — `bindSymbols` fails with `actual 285 does not have the declared form '2T'`
-  (no rounding). The caller **truncates** the last frame before passing it
-  (`vowelDetector.Pipeline.detect` and the real-weight E2E do so).
-  Matching the length with right zero padding is **forbidden** (the backward GRU carries state back
-  from the pad, and the `.lab` changes anywhere in the utterance — measurements in the ADR 0056
-  addendum).
-- The length range is `pipelineConfig.minFrames` / `maxFrames` (the distribution's declaration = the
-  range of the symbolic dimension `T` at bake time, converted to input-side 10ms frame units — **twice**
-  the numbers of `Dim(min, max)`, not those numbers themselves). **The IR does not carry symbol
-  ranges**, so this check in the pipeline is the only thing that can stop out-of-range values. Both
-  exceeding the upper limit **and falling below the lower limit** fail loudly (no truncation — a
-  `.lab` whose tail was silently dropped cannot be told apart from a normal result. Filling the lower
-  side with right zero padding is forbidden for the same reason — the backward GRU carries state back
-  from the pad). The current distribution is 60,000 frames = 10 minutes, based on the largest
-  intermediate tensor = the gates on the GRU input side `[T,1,384]` f32 = 1,536 B/20ms frame → 46.1MB
-  (a 2.9× margin against the spec default `maxStorageBufferBindingSize` of 128MiB = 134.2MB).
-  **Longer lengths are not measured**.
-- Even within the limit, execution time is proportional to the length (the time loop is sequential
-  within one workgroup — performance not measured).
 
 ## The relative-position tables of flow / voice are graph inputs — generating them is the host's responsibility
 
@@ -1698,56 +1677,7 @@ for the transformer as int8, 3.6 GiB as bf16). A float component whose tensors m
 weight part is downloaded. The distribution must carry a name map (manifest `karume/6`). Not built: other families,
 int4 targets, LoRA ([backlog](backlog.md)).
 
-## Wan2.1: accepted sizes are 832×480 / 480×832 only, and frame counts only 4n+1 from 5 to 81 (prompt acceptance depends on the text encoder route — ADR 0118 / 0119)
-
-By-design constraints of `wan.Pipeline` in `@karume/models/wan`. Every input-caused rejection becomes a `ModelInputError` at
-the entry of `generate` (`planWanGeneration` — before touching the GPU) (ADR [0118](decisions/0118-wan21-video-generation.md)
-Consequences).
-
-- **Accepted set**: sizes 832×480 / 480×832, frame counts 4n+1 from 5 to 81 (default 33). steps is an integer from 1 to
-  1,000 (the upper limit is `num_train_timesteps` — integer timesteps are only `trunc(σ·1000)` from 0 to 999, so beyond it
-  timesteps necessarily repeat. Rejected before the σ sequence is built. The manifest's `defaults.steps` has the same
-  range), guidance is a finite number of at least 1 (1 means CFG is not run — the same as upstream's `guidance_scale > 1`.
-  Passing `negativePrompt` with guidance 1 is rejected), shift is a positive finite number. Accepted were 33 / 81 frames at
-  832×480 and the VAE at 480×832 (ADR 0118 steps 5 / 6 / 8). The model card and the fixture hold copies of the sizes and
-  frame counts (the doc of `WAN21_GENERATION` in `packages/models/src/wan/descriptor.ts`).
-- **Prompt acceptance depends on the route**: the default `textEncoder: "gpu"` accepts any sentence (umT5 runs on the GPU —
-  the acceptance conditions are in "text encoder route" below). `"precomputed"` accepts only the 4 precomputed ones (3
-  positive + 1 negative), and only a string that exactly matches the original text or the normalized string of the text
-  embedding asset (listed by `wan.Pipeline.prompts`).
-- **A timing (`gpuTiming`) device is rejected at construction**: the runtime does not open a batch on a timing device, so
-  the VAE stage (1 tile = 1 batch) cannot run. GPU time does not appear in the diagnostics, so look at the elapsed time,
-  VRAM (fdinfo and diagnostics) and the submit statistics.
-- **The DiT stage and the VAE stage are not resident at the same time**: each stage sets up a Session and folds it, and the
-  VAE is opened after the DiT is closed (the same as the default `"per-stage"` of ADR
-  [0112](decisions/0112-anima-transformer-residency.md)). There is no opt-in like Anima's DiT residency, so the DiT weights
-  are uploaded to the GPU again on every generate. The VRAM peak is the DiT stage (on the B570, 6.19 GiB at 33 frames /
-  7.31 GiB at 81 frames — ADR 0118 steps 6 / 8).
-- **The VAE always decodes in tiles** (fixed tiles of latent 32 — ADR 0118 ruling 1): there is an approximation difference
-  from the official non-tiled decode (a ratio of 8.2e-2 observed at step 5).
-- **The initial noise of a seed is a different sequence from torch's `randn`** (the same splitmix64 + Box–Muller as Anima —
-  ADR 0118 decision 5): the same seed as the official implementation does not give the same video. To match a reference,
-  pass `latents` from outside.
-- Abort (`signal`): accepted both at construction (`wan.PipelineOptions.signal` — passed to the fetch layer) and in generation
-  (`wan.GenerateRequest.signal` — checked at stage boundaries, at every DiT step and at every VAE tile. The open Session is
-  folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9, 2026-10-03). Within one stage (one run) the
-  work is indivisible, and an abort takes effect at the next boundary.
-- **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows
-  that exist today are those of `node-nvidia-geforce-rtx-3080-ti` (`KARUME_REFERENCE=write` creates your machine's rows). The 50-step cases are compared only with the opt-in
-  (`KARUME_WAN_FULL_PIPELINE=1`) and have no row under this key: their rows were written under the `deno-*` keys and were deleted with them on 2026-11-15.
-
-- The DiT's i8 presets (ADR [0120](decisions/0120-wan-dit-w8a8-seat.md), 2026-10-03): the reference preset `f16+dit8` and the practical preset `f16+dit8-a8-attn8-s16` were added to the distribution. The GPU numeric checks (r check, self A/B check) and the visual A/B (steps 3–6) are done (2026-10-03 to 04). The default is the practical preset (ruling of 2026-10-04 — `f16` is chosen explicitly with `quant: "f16"`). The practical preset's a8 is not faster on Metal (M2) (measured in K-70 — it becomes a preset that only costs quality). (→ 2026-10-17: when a8 is requested on a device without dp4a, the runtime warns once per device — ADR 0128 decision 5)
-- Chrome (step 9 ✅ — the range confirmed is the precomputed route (`textEncoder: "precomputed"`), the `f16` preset, 832×480, 81 frames, 50 steps. RTX 5070 Ti, ADR 0118 addendum 2026-10-04 "step 9: 81 frames × 50 steps complete in Chrome on the RTX 5070 Ti". As of the same addendum, the GPU route and the practical preset had not been run in Chrome): the default binding limit of 128 MiB is not enough even for the VAE's largest value of 192 MiB. `acquireGpu` requests the adapter values,
-  so the actual limit depends on the adapter, and the required minimum is the FFN intermediate of 503,193,600 B (33 frames) / 1,174,118,400 B (81 frames). The environment key
-  changes with the WebGPU Developer Features flag (separate sha rows).
-- Text encoder route (ADR 0119, 2026-10-03): the default `textEncoder: "gpu"` runs umT5-XXL on the GPU and accepts any prompt (2–512 tokens;
-  out-of-vocabulary and in-text special tokens, HTML entity candidates (`R&D` → `R & D`), mojibake, C1 and characters unassigned in Unicode 16.0.0 are rejected with `ModelInputError`).
-  `"precomputed"` accepts only the 4 of the embedding asset and does not fetch the umT5 component. The umT5 component is a cross-repository reference to the separate repository `karume-umt5-xxl`, and locally it
-  needs the `crossRepo` mapping (not needed for a construction that replaces `text_encoder` — ADR
-  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) addendum "step d: replacing a cross-repository slot needs no `crossRepo` mapping"). The `requiredLimits` of every quant preset declare a binding / buffer limit of
-  1,050,148,864 B for the vocabulary embedding (the same for precomputed).
-
-## Wan2.1: what the umT5 replacement (`components: { text_encoder }`) does not check (ADR 0122 decision 7)
+## Wan: what the umT5 replacement (`components: { text_encoder }`) does not check (ADR 0122 decision 7)
 
 The acceptance conditions of replacing with a compatible umT5 (component replacement — ADR [0108](decisions/0108-container-format.md) decision 19 /
 [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 7) are limited to those decided mechanically from the two manifests and the container
@@ -1774,8 +1704,8 @@ and the conditions for reviving them, are in ADR 0122 "Alternatives not taken").
 
 ## Wan2.2: accepted sizes are 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121; I2V uses the same 2 sizes; 121 frames confirmed to complete on the 12 GiB class (the 10 GB class was confirmed up to 57 frames — ADR 0121)
 
-By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/wan`. Input-caused rejections become `ModelInputError` at the same entry as Wan2.1 (before touching the GPU)
-(outside the accepted set fails loudly).
+By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/wan`. Input-caused rejections become `ModelInputError` at the entry of `generate`
+(`planWanGeneration` — before touching the GPU; outside the accepted set fails loudly).
 
 - **Accepted set**: sizes 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121 (default 1280×704, 33 frames — fixed on 2026-10-09). The sizes and frame counts are
   `WAN22_TI2V_GENERATION` in `packages/models/src/wan/descriptor.ts` (ADR [0121](decisions/0121-wan22-ti2v-5b.md) addendum (2026-10-05)
@@ -1830,11 +1760,30 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   The I2V 2-step × 9-frame end-to-end run has a boxing-cats row (1280×704) for both presets. The opt-in cases — 121 frames (`KARUME_WAN_TI2V_121F=1`), the 50-step runs (`KARUME_WAN_TI2V_FULL_PIPELINE=1`) and the remaining I2V cases (`KARUME_WAN_TI2V_I2V_FULL=1`) — have no row under this key: their rows were written under the `deno-*` keys, which no lane could check, and were deleted with them on 2026-11-15.
 - **The VAE always decodes in tiles** (tiles of latent 16, overlap of latent 4, blended in patchify space and then unpatchified — ADR 0121 decision 6;
   28 tiles at 1280×704): there is an approximation difference from the official non-tiled decode (a ratio of 1.2e-1 observed on the stage-5 comparison case 480×832×9).
-- **Same as Wan2.1**: rejecting a timing (`gpuTiming`) device at construction; not keeping the DiT stage and the VAE stage resident at the same time; the seed's initial noise being
-  a different sequence from torch's `randn`; how abort (`signal`) takes effect; the text encoder route (`"precomputed"` accepts the same 4 as 2.1 —
-  the embedding asset is byte-identical to the 2.1 series; the `"gpu"` umT5 is a cross-repository reference to `karume-umt5-xxl`); replacing umT5 (`components: { text_encoder }`) and
-  the 3 things it does not check are as in the Wan2.1 section above (the body of construction and generation is
-  shared with 2.1 in `packages/models/src/wan/family.ts`).
+- **A timing (`gpuTiming`) device is rejected at construction**: the runtime does not open a batch on a timing device, so
+  the VAE stage (1 tile = 1 batch) cannot run. GPU time does not appear in the diagnostics, so look at the elapsed time,
+  VRAM (fdinfo and diagnostics) and the submit statistics.
+- **The DiT stage and the VAE stage are not resident at the same time**: each stage sets up a Session and folds it, and the
+  VAE is opened after the DiT is closed (the same as the default `"per-stage"` of ADR
+  [0112](decisions/0112-anima-transformer-residency.md)). There is no opt-in like Anima's DiT residency, so the DiT weights
+  are uploaded to the GPU again on every generate.
+- **The initial noise of a seed is a different sequence from torch's `randn`** (the same splitmix64 + Box–Muller as Anima —
+  ADR [0118](decisions/0118-wan21-video-generation.md) decision 5): the same seed as the official implementation does not give
+  the same video. To match a reference, pass `latents` from outside.
+- Abort (`signal`): accepted both at construction (`wan.PipelineOptions.signal` — passed to the fetch layer) and in generation
+  (`wan.GenerateRequest.signal` — checked at stage boundaries, at every DiT step and at every VAE tile. The open Session is
+  folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9). Within one stage (one run) the work is
+  indivisible, and an abort takes effect at the next boundary.
+- Text encoder route (ADR 0119): the default `textEncoder: "gpu"` runs umT5-XXL on the GPU and accepts any prompt (2–512 tokens;
+  out-of-vocabulary and in-text special tokens, HTML entity candidates (`R&D` → `R & D`), mojibake, C1 and characters unassigned in
+  Unicode 16.0.0 are rejected with `ModelInputError`). `"precomputed"` accepts only the 4 prompts of the embedding asset (3 positive
+  + 1 negative — the asset built from the umT5 of the Wan2.1 T2V 1.3B checkpoint, ADR 0121 decision 9; listed by
+  `wan.Ti2vPipeline.prompts`) and does not fetch the umT5 component. The umT5 component is a cross-repository reference to the
+  separate repository `karume-umt5-xxl`, and locally it needs the `crossRepo` mapping (not needed for a construction that
+  replaces `text_encoder` — ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) addendum "step d: replacing a
+  cross-repository slot needs no `crossRepo` mapping"). The `requiredLimits` of every quant preset declare a binding / buffer
+  limit of 1,050,148,864 B for the vocabulary embedding (the same for precomputed). What replacing umT5
+  (`components: { text_encoder }`) does not check is in the section above.
 - **Constraints of I2V (`image` / `fit` — ADR 0121 decision 11, stage 9)**:
   - The sizes are only the 2 sizes of the same accepted set as T2V. When `width` / `height` are omitted, the one closer to the image's aspect ratio is chosen (1280×704 if width ≥ height). The official implementation
     chooses a free size within an area limit (1248×704 for a 16:9 image), so with the same image `fit: "crop"` can cut more here.
@@ -1855,7 +1804,7 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
     is stage 9d.
 - The distribution `karume-wan2.2` is published on Hugging Face since 0.14.0 (`wan.SOURCES["wan2.2"]`; the recipe is `dist.py --pipeline wan-ti2v`, ADR 0121
   stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
-  manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
+  manifest and assets assembled from the series containers.
 
 ## MOSS-Image: text as prompt strings (or precomputed embeddings on the internal entry); the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
@@ -1920,31 +1869,6 @@ Every input-caused rejection is a `ModelInputError` before any GPU work.
   image; pass `latents` to reproduce upstream's initial noise.
 - **sha256 rows exist only for the RTX 3080 Ti under Node** (`node-nvidia-geforce-rtx-3080-ti`); another machine
   SKIPs those cases explicitly with a red reference guard until it writes its rows.
-
-## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
-
-The exported graph (script `tools/export-recipes/embeddinggemma/export.py`) has no `attention_mask`
-input. The bidirectional + sliding-window band mask is baked in as **a constant of Tmax=512**
-(the first T is cut out with `sym_prefix_slice`), and there is no path that hides padding from attention.
-For a sequence with padding, **the caller packs it to shorten T** (for a single sequence this is strictly
-equivalent to torch eager).
-
-Mechanism: ADR 0016's proof that the safe-softmax guard is inactive requires evaluating the actual mask values, which does
-not hold for a run-time input placeholder (`_eval_static` rejects it — "single sequence assumed" is not a workaround
-but a consequence of the design). The graph input `pool_mask` is **for pooling only** and is not wired to attention
-(mixing in 0 would give a shape eager does not have, "the model sees it but the pooling discards it" —
-always pass all ones).
-
-Related: since `SYM_MAX = 512`, T > 512 fails at Session construction (the config's
-max_position_embeddings is 2048). Raising it is to be done together with a ruling on the band mask constant growing with Tmax²
-(512 → 2MB / 2048 → 32MB). The attention band ([below](#attention-band-dense-routes-only-never-beside-the-mask-every-score-still-computed))
-removes that constant, but it cannot sit beside a padding mask yet.
-
-The design for lifting it (run-time mask support) is settled in
-[decisions/0044](decisions/0044-runtime-attention-mask.md) (accepted), and **the mechanism is
-implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` — 2026-08-11). What remains is
-only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
-is kept as is or lowered to its decomposition — ADR 0044 Consequences).
 
 ## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text, images and 16 kHz audio of at most 30 s, no batch
 
@@ -2095,7 +2019,7 @@ the vision tower with `vision: true` and the audio tower with `audio: true` — 
 
 ## Irodori text side (backbone / projector): no run-time attention_mask; an empty caption and T=1 are not representable
 
-The same static scheme as EmbeddingGemma (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
+A static scheme (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
 is measured on every emit by a standing check in the export script (`_static_scheme_evidence` in
 `tools/export-recipes/irodori/export.py` — measured at most 8.3e-6, check 1e-3. If it breaks, the whole export fails).
 The T5Gemma 2 backbone of v4-Large follows the same scheme under the same check; its sliding window is a constant in
@@ -2554,10 +2478,10 @@ tiny numeric differences). This measurement was the direct motivation for moving
 directory (`outputs/verify/`) are defined by ADR [0106](decisions/0106-device-keyed-references.md).
 
 The series with rows (2026-11-19): in `packages/models/tests/fixtures/references/` the PNG / WAV of anima / sbv2 /
-irodori (the three Irodori lines in one file), the real images of birefnet / depth-anything, the f32 output of the
-whole chain of vowel-detector (safetensors), the token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat /
+irodori (the three Irodori lines in one file), the real images of birefnet / depth-anything, the
+token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat /
 gemma4-qat-mobile, the hidden states and logits of the Gemma 4 26B cut model, MOSS-Image, its Qwen3.5 text encoder,
-and Wan2.1 / Wan2.2; in `packages/runtime/tests/fixtures/references/` the goldens of siglip2 and gemma4 (runtime-side
+and Wan2.2; in `packages/runtime/tests/fixtures/references/` the goldens of siglip2 and gemma4 (runtime-side
 e2e — `<series>-golden.json`). The rows of anima, whose artifact is a PNG, are the sha of the pixels before compression (RGB8); the bytes of the PNG
 (the IDAT deflate depends on the runtime's zlib implementation) are not in the rows (2026-10-17, ADR 0106 addendum).
 
