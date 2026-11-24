@@ -656,8 +656,9 @@ class TestCoreArguments:
 
 #: The README sentence that spells out the accepted set (the names usable as `--pipeline` arguments,
 #: in backquotes). "13 pipeline seats across 10 families" in the same section is another sentence
-#: about the **number of families**, so it is not picked up.
-README_ACCEPTED_SET = re.compile(r"The accepted set is (?P<names>[^.]+)\.")
+#: about the **number of families**, so it is not picked up. A name may hold a period
+#: (`anima-2.9b`), so only a period outside backquotes ends the sentence.
+README_ACCEPTED_SET = re.compile(r"The accepted set is (?P<names>(?:`[^`]*`|[^.`])+)\.")
 
 
 class TestReadme:
