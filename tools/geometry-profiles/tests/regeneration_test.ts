@@ -86,17 +86,39 @@ describe("regenerating a registered table from the records its i8a8-linear famil
   }
 });
 
-/** Every record any family of `id` cites, once, in the order the families cite them. */
+/**
+ * Every record any family of `id` cites, once, in an order that keeps every family's own order. A
+ * family's entry lists the records with a row of it in the order the derivation was given them,
+ * so records given in such an order give every entry back; the order of first appearance does not
+ * when two families cite records the other does not between ones they share. Ties go by first
+ * appearance.
+ */
 const citedByEveryFamily = (id: string): { paths: string[]; sha256: string[] } => {
   const families = BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.id === id)?.provenance
     ?.families;
   if (families === undefined) throw new Error(`${id} has no provenance`);
-  const cited = new Map<string, string>();
+  const cited = new Map<string, { sha256: string; before: Set<string> }>();
   for (const entry of Object.values(families)) {
     const shas = entry.sha256.split(", ");
-    entry.sweep.split(", ").forEach((path, index) => cited.set(path, shas[index] ?? ""));
+    const paths = entry.sweep.split(", ");
+    paths.forEach((path, index) => {
+      const known = cited.get(path) ?? { sha256: shas[index] ?? "", before: new Set<string>() };
+      const previous = paths[index - 1];
+      if (previous !== undefined) known.before.add(previous);
+      cited.set(path, known);
+    });
   }
-  return { paths: [...cited.keys()], sha256: [...cited.values()] };
+  const ordered: string[] = [];
+  while (ordered.length < cited.size) {
+    const next = [...cited.entries()].find(
+      ([path, { before }]) =>
+        !ordered.includes(path) && [...before].every((earlier) => ordered.includes(earlier)),
+    );
+    if (next === undefined)
+      throw new Error(`${id}: its families cite records in orders that conflict`);
+    ordered.push(next[0]);
+  }
+  return { paths: ordered, sha256: ordered.map((path) => cited.get(path)?.sha256 ?? "") };
 };
 
 /**
