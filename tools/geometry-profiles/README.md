@@ -107,10 +107,11 @@ node tools/geometry-profiles/generate.ts intel-xe2 --vendor=intel --architecture
   --records=outputs/workbench/browser-intel-arc-b570/geometry-sweep_<time>.json
 ```
 
-A shared table from two devices' records (how `apple-metal-3-shared` was made; a registered id takes no match):
+A shared table regenerated from two devices' records (`apple-metal-3-shared`; a registered id takes no match — its
+first table also took `--vendor=apple --architecture=metal-3`):
 
 ```sh
-node tools/geometry-profiles/generate.ts apple-metal-3-shared --shared --vendor=apple --architecture=metal-3 \
+node tools/geometry-profiles/generate.ts apple-metal-3-shared --shared \
   --records=outputs/workbench/browser-apple-m5/geometry-sweep_<time>.json,outputs/workbench/browser-apple-m2/geometry-sweep_<time>.json
 ```
 
