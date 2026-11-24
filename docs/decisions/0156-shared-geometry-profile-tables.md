@@ -99,3 +99,22 @@ slower, or screened out by the quick look, in some case of the other five.
 - Left: an M2 full sweep, which re-derives
   `apple-metal-3`'s tile families and lets the shared table compare every candidate on both devices; the M1, M3 and M4
   are not measured.
+
+## Addendum (2026-11-24) — a family one device covers only in part keeps the default (provisional)
+
+- **Decision** (the maintainer's ruling of 2026-11-24): in a shared derivation on a base (the generator regenerating a
+  registered shared table), a family that some device covers only in part — a case of the family's current case set
+  with no usable row of the default geometry on that device: no row at all, or only failed default rows — keeps the
+  default in every field of the family, and the verdict line of each field names the device and the cases. Before, such
+  records were refused, as they are for a measured table. A family every device covers in full is derived as before, and
+  a candidate's failure in a case a device did measure still counts against it. The measured derivation keeps its
+  refusal, and a derivation without a base is unchanged.
+- **Why**: the Apple M2 cannot complete the `i8a8-conv3d` family. In its sweep of 2026-11-24 the default kernel of one
+  case alone exceeded Metal's command-buffer time limit, the device was lost, and the sweep stopped before the
+  family's last case; a sweep taken again meets the same limit, so the refusal asked for records that cannot be taken.
+  The rule extends decision 4's "a field some device has no case of keeps the default" from a field to a family and
+  keeps the refusal's protection: no choice goes into a shape that some device did not measure. What changes is that
+  the outcome is a recorded default instead of a refusal.
+- **Provisional**: to be revisited once the sweep survives a device lost to the time limit (today it stops, and every
+  row of the case it was running is recorded with the same device-lost error, indistinguishable from a geometry's own
+  failure). The rules as built are in [spec/geometry-profiles.md](../spec/geometry-profiles.md#shared-tables).

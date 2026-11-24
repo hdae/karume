@@ -110,8 +110,9 @@
  *
  * With `shared`, one table comes from the records of two or more adapters of one vendor and
  * architecture ({@link deriveSharedProfile}): each adapter's records are judged as above on their
- * own, and a geometry is taken only when it passes the rule on every adapter. Without it, records of
- * two adapters are refused.
+ * own, and a geometry is taken only when it passes the rule on every adapter. With `base`, a family
+ * some adapter covers only in part keeps the default instead of being refused. Without `shared`,
+ * records of two adapters are refused.
  */
 import {
   defaultGemmGeometry,
@@ -1777,6 +1778,60 @@ const sharedDevices = (
   }));
 };
 
+/**
+ * A family one device of a shared derivation covers only in part: the device has a row of the
+ * family, and some case of the family's current case set has no usable row of the default geometry
+ * on it — no row at all, or only failed default rows.
+ */
+type PartialFamily = {
+  readonly family: GeometryProfileFamily;
+  readonly label: string;
+  /** The cases without a usable default row, in the order of the current case set. */
+  readonly missing: readonly { readonly caseId: string; readonly failed: boolean }[];
+};
+
+/**
+ * The families each device covers only in part ({@link PartialFamily}), per device in the order
+ * of `devices`, per family in the fixed order. A family a device has no row of is not partial
+ * there (its fields keep the default by the rule of a class some device has no case of).
+ *
+ * A case counts as covered when some record of the device has a row of the default geometry of it
+ * that did not fail: without one there is no baseline on that device, so no geometry can be shown
+ * faster there (a device that cannot run the default in a case — Metal's command-buffer time limit
+ * — never gets one, however often it is swept).
+ */
+const partialFamilies = (
+  devices: readonly { readonly label: string; readonly sources: readonly SweepSource[] }[],
+): readonly PartialFamily[] =>
+  devices.flatMap(({ label, sources }) => {
+    const rows = sources.flatMap((source) => source.rows);
+    const covered = new Set(
+      rows.filter((row) => row.isDefault && row.error === undefined).map((row) => row.caseId),
+    );
+    const swept = new Set(rows.map((row) => row.caseId));
+    return familiesOf(rows).flatMap((family) => {
+      const missing = familyEntries(SWEEP_CASES, family)
+        .filter(({ id }) => !covered.has(id))
+        .map(({ id }) => ({ caseId: id, failed: swept.has(id) }));
+      return missing.length === 0 ? [] : [{ family, label, missing }];
+    });
+  });
+
+/** `Apple M2 covers family i8a8-conv3d only in part: no usable row of the default geometry in …`. */
+const partialReason = (partial: readonly PartialFamily[]): string =>
+  `${partial
+    .map(
+      ({ family, label, missing }) =>
+        `${label} covers family ${family} only in part: no usable row of the default geometry in ${missing
+          .map(
+            ({ caseId, failed }) => `${caseId} (${failed ? "the default's row failed" : "no row"})`,
+          )
+          .join(", ")}`,
+    )
+    .join(
+      "; ",
+    )} (regenerated on a base, a shared table takes a geometry for a family only where every device measured every case of its case set)`;
+
 /** One device's eligibility of a geometry in one class (its own cases, its own default). */
 type DeviceEligibility = { readonly label: string; readonly eligibility: Eligibility };
 
@@ -1797,7 +1852,9 @@ const perDeviceText = (entries: readonly DeviceEligibility[]): string =>
  * per device by {@link judgeCandidate}, on that device's cases against that device's default: a
  * geometry is eligible only when it is eligible on every device, and among those the one with the
  * largest geometric mean of the per-device geometric means is adopted (ties by ascending name).
- * No ratio of one device is read against another's.
+ * No ratio of one device is read against another's. A field of a family some device covers only in
+ * part (`partial`: the entries of the field's family) keeps the default, its reason naming each
+ * such device and its cases; every device's rows still go through the default-row checks first.
  */
 const judgeSharedSlot = (
   spec: SlotSpec,
@@ -1807,6 +1864,7 @@ const judgeSharedSlot = (
     readonly excluded: readonly ExcludedCase[];
   }[],
   minSpeedup: number,
+  partial: readonly PartialFamily[],
 ): SharedSlotVerdict => {
   const read = devices.map((device) => ({
     label: device.label,
@@ -1832,6 +1890,7 @@ const judgeSharedSlot = (
     },
     rejected,
   });
+  if (partial.length > 0) return keepDefault(partialReason(partial));
   if (present.length === 0) return keepDefault(NO_CASE);
   const missing = read.filter(({ rows }) => rows === undefined).map(({ label }) => label);
   if (missing.length > 0) {
@@ -1934,6 +1993,13 @@ const judgeSharedSlot = (
  * the largest geometric mean of the per-device geometric means is adopted (devices weigh equally,
  * not cases). A class some group has no case of keeps the default.
  *
+ * With `onBase` (the derivation regenerates a table — `DeriveGeometryProfileOptions.base`), every
+ * field of a family some group covers only in part ({@link partialFamilies}) keeps the default,
+ * its reason naming the group and the cases: carrying over promises that every covered family is
+ * derived from every case of its case set, and where a device cannot give that, the family's
+ * fields hold the default openly instead of a choice for shapes that device did not measure.
+ * (The measured derivation refuses such records instead — {@link carryOver}.)
+ *
  * MUST: vendor and architecture are given and description is not (the table is matched by vendor
  * and architecture, below every table matched by description); every record is of that vendor and
  * architecture; every record carries a description, the records of one description are of one
@@ -1941,7 +2007,7 @@ const judgeSharedSlot = (
  */
 export const deriveSharedProfile = (
   sources: readonly SweepSource[],
-  options: ProfileTarget & { readonly minSpeedup: number },
+  options: ProfileTarget & { readonly minSpeedup: number; readonly onBase: boolean },
 ): readonly SharedSlotVerdict[] => {
   if (sources.length === 0) throw new Error("No sweep records");
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
@@ -1972,6 +2038,7 @@ export const deriveSharedProfile = (
     label: device.label,
     ...slotRowsOf(device.sources, segments, i8a8Segments),
   }));
+  const partial = options.onBase ? partialFamilies(devices) : [];
   return profileSlots(segments, i8a8Segments).map((spec) =>
     judgeSharedSlot(
       spec,
@@ -1981,6 +2048,7 @@ export const deriveSharedProfile = (
         excluded: excludedBySlot.get(spec.slot) ?? [],
       })),
       options.minSpeedup,
+      partial.filter(({ family }) => family === profileSlotFamily(spec.slot)),
     ),
   );
 };
@@ -2648,9 +2716,11 @@ const withBaseFields = (
  *   again); a `base` carrying `attentionOnline` without the block or without its `kernels`, and a
  *   block with `kernels` on a `base` without `attentionOnline`, are refused.
  * - A shared derivation (`shared`) takes only a shared table whose adapters are the records'
- *   adapters (as a set); each adapter's records cover a family they have a row of completely, and a
- *   covered family one adapter has no row of (which keeps the default) is refused unless the base
- *   holds the default for it. A measured derivation takes only a measured table.
+ *   adapters (as a set). The completeness check above is the measured derivation's: a family one
+ *   adapter covers only in part keeps the default in a shared derivation, named in its verdicts
+ *   ({@link deriveSharedProfile} with `onBase`), and a covered family one adapter has no row of
+ *   (which keeps the default) is refused unless the base holds the default for it. A measured
+ *   derivation takes only a measured table.
  */
 const carryOver = (
   base: GeometryProfile,
@@ -2707,23 +2777,26 @@ const carryOver = (
   }
   const rows = sources.flatMap((source) => source.rows);
   const covered = familiesOf(rows);
-  // Each device's records cover a family they have a row of as completely as one adapter's must. A
-  // shared table's family that one device has no row of keeps the default (deriveSharedProfile), so
-  // it is derived only where the base holds the default for it too: elsewhere it would silently go
-  // back to the default
+  // A measured table's records cover a family they have a row of completely. A shared table's family
+  // that one device covers only in part keeps the default, named in its verdicts
+  // (deriveSharedProfile with onBase — partialFamilies); one that a device has no row of keeps the
+  // default too, so it is derived only where the base holds the default for it: elsewhere it would
+  // silently go back to the default
   const groups = shared
     ? devices.map((device) => ({
         label: device.label,
-        of: ` of ${device.label}`,
         rows: device.sources.flatMap((source) => source.rows),
       }))
-    : [{ label: "", of: "", rows }];
+    : [{ label: "", rows }];
   for (const group of groups) {
     const swept = new Set(group.rows.map((row) => row.caseId));
     const own = familiesOf(group.rows);
     for (const family of covered) {
-      if (shared && !own.includes(family)) {
-        if (familyKernelsId(base, family) !== familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family)) {
+      if (shared) {
+        if (
+          !own.includes(family) &&
+          familyKernelsId(base, family) !== familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family)
+        ) {
           throw new Error(
             `The records of ${group.label} have no row of family ${family}, and the base table '${base.id}' holds other than the default there: a shared field takes a geometry only where every device measured it, ` +
               "so the family would silently go back to the default — sweep it on that device too",
@@ -2734,7 +2807,7 @@ const carryOver = (
       const missing = familyEntries(SWEEP_CASES, family).filter(({ id }) => !swept.has(id));
       if (missing.length > 0) {
         throw new Error(
-          `The records${group.of} cover family ${family} only in part (no row of ${missing.map(({ id }) => id).join(", ")}): with a base, a covered family is derived from every case of its current case set, ` +
+          `The records cover family ${family} only in part (no row of ${missing.map(({ id }) => id).join(", ")}): with a base, a covered family is derived from every case of its current case set, ` +
             "or its unswept fields would silently go back to the default — sweep the missing cases",
         );
       }
@@ -3159,7 +3232,10 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * Its `linearGemv` is carried as it is: GEMV sweep records decide it (`deriveLinearGemvChoices`).
    * The records must cover every family they have a row of completely (every case of its current
    * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
-   * these options. With `shared`, `base` is a shared table of the records' adapters.
+   * these options. With `shared`, `base` is a shared table of the records' adapters, and a family
+   * some adapter covers only in part (a case of its case set with no row of the default geometry
+   * there, or only failed ones) keeps the default in every field, its verdict lines naming the
+   * adapter and the cases.
    */
   readonly base?: GeometryProfile;
   /**
@@ -3249,7 +3325,7 @@ export const deriveGeometryProfile = (
         "A shared table carries tile geometries only: attention-bench records (the online attention's key axis) are not derived for it",
       );
     }
-    const sharedVerdicts = deriveSharedProfile(sources, spec);
+    const sharedVerdicts = deriveSharedProfile(sources, { ...spec, onBase: base !== undefined });
     const sharedCarry = base === undefined ? undefined : carryOver(base, sources, false, true);
     return {
       profile: buildGeometryProfile(

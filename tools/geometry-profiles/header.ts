@@ -257,6 +257,13 @@ export const profileHeader = (input: HeaderInput): string => {
           "the one with the largest geometric mean over the devices of each device's geometric mean is",
           "taken, else the default stays. A field some device has no case of keeps the default. No timing",
           "of one device is compared with another's.",
+          ...(base === undefined
+            ? []
+            : [
+                "Regenerated on the registered table, a family some device covers only in part (a case of its",
+                "case set with no usable row of the default geometry there) keeps the default in every field;",
+                "its lines below name the device and the cases.",
+              ]),
           "Within one device, a case whose default re-measurement ratio lies outside 0.9–1.1 (or whose",
           "re-measurement failed or is missing) is dropped from that record's ratios, as is an observation",
           "whose timestamp rounding could move its ratio by more than 1%; output mismatches and failures",
