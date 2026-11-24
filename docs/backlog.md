@@ -940,8 +940,8 @@ maintainer's ruling of 2026-11-06).
   the opt-in exact expert cache (ADR [0146](decisions/0146-exact-expert-cache.md)) pays a miss with a re-run, and
   Chrome's fence and upload costs are measured there ([research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md)
   §6.1). Whether the spike's mechanism still adds anything next to it is not ruled. The start condition is
-  subordinate to parked "value-dependent execution selection in the IR". The first unit stops at transcribing the spike's measurements into
-  [research](research/) as a point-in-time snapshot.
+  subordinate to parked "value-dependent execution selection in the IR". The spike itself was deleted on 2026-11-24 (its
+  Deno measurements are superseded by the Chrome ones above); the findings in this item are what remains of it.
 - The MoE seam (fixed-k routing can be expressed with static shapes — do not bake the absence of experts into the dense API).
 
 - **Remaining items of GEMV row blocks (filed 2026-09-07, consequence of K-21)**: ① a sweep of the parallelism target
@@ -1055,8 +1055,8 @@ maintainer's ruling of 2026-11-06).
   Adding a "not-yet-arrived initializer" slot is also deferred as subordinate to this item (same ruling). Revival = real shipping demand for an MoE
   that does not fit in VRAM. The first homework then = a close first-hand reading of predictive offloading (SiDA arXiv:2310.18859 / HOBBIT
   arXiv:2411.01433) (the current reading: the readback can be removed, but the wall of keeping the host-side pool resident remains).
-  The page-fault mechanism is **PoC'd in a spike outside the repository; practical viability uncertain** (on revival, transcribe the spike's measurements into
-  research before entering a design spike — later section "MoE page-fault").
+  The page-fault mechanism is **PoC'd in a spike outside the repository; practical viability uncertain** (the spike is deleted; its findings are in the
+  later section "MoE page-fault").
 
 - **Port of SBV2 `adjust_word2ph`** (ruling not to adopt, 2026-08-21 — ADR 0072 decision 8). The word2ph redistribution for accepting edits that change
   the phoneme count (replacing readings that do not align with word boundaries). The reference is the **upstream**
