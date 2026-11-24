@@ -2,6 +2,9 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "anima-2.9b-preview-v1-cfg": {
+      "node-nvidia-geforce-rtx-3080-ti": "51f3525f998cfd150bf1b4536f5ae8cd68ec3fc2ddff2b79b1fda13a092f4697"
+    },
     "base-cfg": {
       "node-nvidia-geforce-rtx-3080-ti": "0f15a1034b4cd691d349fc95bae1b444c5c7537701c55ded3196964d1a0bd2b2"
     },
