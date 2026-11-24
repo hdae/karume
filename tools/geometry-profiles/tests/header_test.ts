@@ -4,7 +4,7 @@
  * base, and the same text for the same inputs (no date, machine or absolute path). No GPU.
  */
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { GeometryProfile } from "@karume/runtime";
 import { deriveGeometryProfile } from "@karume/runtime/tune";
 import { describe, it } from "vite-plus/test";
@@ -120,6 +120,26 @@ describe("profileHeader", () => {
         " *   bare record; Node.js/24; timestamps not quantised; checkout not recorded\n",
       ),
       true,
+    );
+  });
+
+  it("keeps a verdict that quotes a multi-line error on one comment line", () => {
+    const header = profileHeader({
+      ...input(),
+      verdicts: [
+        "- field: failed in case-a (Error: device lost: timeout\n - While handling it\n    at f (x.mm:1)\n)",
+      ],
+    });
+    for (const line of header.split("\n").slice(1, -2)) {
+      assert(
+        line === " *" || line.startsWith(" * "),
+        `a header line left the comment prefix: ${line}`,
+      );
+    }
+    assert(
+      header.includes(
+        "failed in case-a (Error: device lost: timeout - While handling it at f (x.mm:1) )",
+      ),
     );
   });
 

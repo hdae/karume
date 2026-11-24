@@ -269,8 +269,8 @@ maintainer's ruling of 2026-11-06).
          M5's adopted geometries); the M1, M3 and M4 are not measured; a rule for a shared table's GEMV choices and
          attention key axis (a shared table derives neither);
        - the geometry sweep does not survive a device lost to Metal's command-buffer time limit (it stops, and every row
-         of the case it was running is recorded with the device-lost error); once it does, revisit the provisional rule
-         that a family one device covers only in part keeps the default in a shared table (ADR
+         of the case it was running is recorded with the device-lost error); once it does, check whether the provisional
+         rule "a family one device covers only in part keeps the default in a shared table" is still needed at all (ADR
          [0156](decisions/0156-shared-geometry-profile-tables.md) addendum 2026-11-24);
        - the tile families of `nvidia-ampere` and `apple-metal-3` are carried over from records of
          `karume-geometry-sweep/3`, which no longer derive a table: each is derived again from a new sweep on its

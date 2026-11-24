@@ -301,7 +301,9 @@ export const profileHeader = (input: HeaderInput): string => {
           "sequential keys whose cases disagree and the rows with packed activations.",
         ]),
     "",
-    ...input.verdicts,
+    // A verdict can quote a record's error text, which may span lines: a line break inside it would
+    // leave the following lines outside the comment's ` * ` prefix.
+    ...input.verdicts.map((verdict) => verdict.replace(/\s*\n\s*/g, " ")),
   ];
   const broken = lines.find((line) => line.includes("*/"));
   if (broken !== undefined) {

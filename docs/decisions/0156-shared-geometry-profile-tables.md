@@ -111,10 +111,12 @@ slower, or screened out by the quick look, in some case of the other five.
   refusal, and a derivation without a base is unchanged.
 - **Why**: the Apple M2 cannot complete the `i8a8-conv3d` family. In its sweep of 2026-11-24 the default kernel of one
   case alone exceeded Metal's command-buffer time limit, the device was lost, and the sweep stopped before the
-  family's last case; a sweep taken again meets the same limit, so the refusal asked for records that cannot be taken.
+  family's last case; a sweep taken again is expected to meet the same limit, so the refusal asked for records that
+  cannot be taken.
   The rule extends decision 4's "a field some device has no case of keeps the default" from a field to a family and
   keeps the refusal's protection: no choice goes into a shape that some device did not measure. What changes is that
   the outcome is a recorded default instead of a refusal.
-- **Provisional**: to be revisited once the sweep survives a device lost to the time limit (today it stops, and every
+- **Provisional**: once the sweep survives a device lost to the time limit, check whether this rule is still needed at
+  all — if the missing cases can then be recorded as what they are, the refusal comes back (today the sweep stops, and every
   row of the case it was running is recorded with the same device-lost error, indistinguishable from a geometry's own
   failure). The rules as built are in [spec/geometry-profiles.md](../spec/geometry-profiles.md#shared-tables).
