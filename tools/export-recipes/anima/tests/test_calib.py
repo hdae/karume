@@ -47,6 +47,7 @@ from torch import nn
 from anima import calib, pipeline_ref
 from anima import export as export_anima
 from anima.distribution import (
+    ANIMA_2_9B_MODEL_NAME,
     ANIMA_BASE_MODEL_NAME,
     ANIMA_MODELS,
     ANIMA_TURBO_MODEL_NAME,
@@ -494,10 +495,14 @@ class TestCalibConditions:
         """Everything but Turbo is many steps + CFG — one step is 2 forwards.
 
         The step counts copy the visual rulings (base line = 20 (2026-08-22) / aesthetic line =
-        30 (2026-09-01)) — reading them again from the pipeline_config they are derived from
-        would make the test vacuous, so the expected values are written here as constants.
+        30 (2026-09-01) / Anima-2.9B = 28 (2026-11-24)) — reading them again from the
+        pipeline_config they are derived from would make the test vacuous, so the expected values
+        are written here as constants.
         """
-        expected_steps = {name: 30 if "aesthetic" in name else 20 for name in CFG_MODELS}
+        expected_steps = {
+            name: 28 if name == ANIMA_2_9B_MODEL_NAME else 30 if "aesthetic" in name else 20
+            for name in CFG_MODELS
+        }
         assert CFG_MODELS, "no model uses CFG (the test checks nothing)"
         for model in CFG_MODELS:
             conditions = calib.calib_conditions(model)

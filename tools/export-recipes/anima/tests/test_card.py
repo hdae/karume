@@ -202,12 +202,15 @@ def _extra_manifest() -> dict[str, Any]:
 
 
 def _2_9b_manifest() -> dict[str, Any]:
-    """The shape of the 2.9B repository (karume-anima-2.9b) — one model, on the CFG side."""
+    """The shape of the 2.9B repository (karume-anima-2.9b) — one model, on the CFG side. Its
+    steps are inside the upstream recommendation the card says the default is in, and are not
+    the recipe's 28, so a step count written into the card instead of read from the manifest
+    shows."""
     manifest = _two_model_manifest(LAYERED, OFFICIAL_SECOND)
     del manifest["models"][OFFICIAL_SECOND]
     defaults = manifest["models"][LAYERED]["pipelineConfig"]["defaults"]
     defaults["guidanceScale"] = 4
-    defaults["steps"] = 21
+    defaults["steps"] = 30
     return manifest
 
 
@@ -613,8 +616,11 @@ class TestLayeredCard:
         self, layered_card: str
     ) -> None:
         flat = " ".join(layered_card.split())
-        assert "**21 steps / guidance 4** by default" in flat
-        assert "The upstream card recommends 28–50 steps at guidance 3.5–5" in flat
+        assert "**30 steps / guidance 4** by default" in flat
+        assert (
+            "The default is inside the upstream card's recommendation, 28–50 steps at guidance"
+            " 3.5–5;" in flat
+        )
 
     def test_it_points_the_reader_at_the_official_text_stack(self, layered_card: str) -> None:
         assert "[hdae/karume-anima](https://huggingface.co/hdae/karume-anima)" in layered_card

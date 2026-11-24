@@ -508,6 +508,24 @@ ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
+#: Defaults of Anima-2.9B (the 40-block layer expansion). Uses CFG, like base.
+#:
+#: The step count is **28** and the guidance **4**, the visual verdict of 2026-11-24 on the default
+#: preset: 20 / 28 / 50 steps at seeds 42-45 × 3 prompts at 1024², then the Playground's four sample
+#: prompts at 896×1152 and 832×1216 with guidance 4 / 4.5 / 5 at 28 steps. 20 steps tended to melt,
+#: 28 was steadier, and 50 was not clearly better for its time; guidance 4 was kept. 28 is also the
+#: low end of the upstream card's recommendation (28-50 steps / CFG 3.5-5). A user who wants more
+#: passes `steps`.
+ANIMA_2_9B_PIPELINE_CONFIG: Mapping[str, Any] = {
+    "scheduler": ANIMA_SCHEDULER,
+    "defaults": {
+        "steps": 28,
+        "guidanceScale": 4,
+        "resolution": ANIMA_RESOLUTION,
+        "negativePrompt": ANIMA_NEGATIVE_PROMPT,
+    },
+}
+
 #: The storage vocabulary **required** in each role's binding table (a presence check). An actual
 #: incident is the reason: plain f32 assets, meant as an f16 series but built without `--dtype`,
 #: passed assembly, loading and execution and **were not caught until the PNG reference
@@ -683,13 +701,12 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
         storages=("i8", "bf16"),
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
-    # The upstream card recommends 28-50 steps at CFG 3.5-5; the defaults stay the base model's (20
-    # steps, CFG 4, Euler shift 3), the only configuration its images were made and checked with
-    # here — whether to adopt the upstream's range is open (docs/backlog.md).
+    # Anima-2.9B has defaults of its own (28 steps, CFG 4 — the visual verdict at
+    # `ANIMA_2_9B_PIPELINE_CONFIG`); the scheduler is the base's (Euler, shift 3).
     ANIMA_2_9B_MODEL_NAME: AnimaModel(
         lora_sha256=None,
         storages=("i8", "bf16"),
-        pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+        pipeline_config=ANIMA_2_9B_PIPELINE_CONFIG,
     ),
 }
 

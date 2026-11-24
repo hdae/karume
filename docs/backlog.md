@@ -312,9 +312,11 @@ maintainer's ruling of 2026-11-06).
 - **Anima-2.9B — the first publication of `karume-anima-2.9b` (filed 2026-11-24; after the 0.23.0 release)**. The recipe
   builds the layer-expanded model into a repository of its own (ADR [0087](decisions/0087-anima-official-extra-repos.md)
   addendum of 2026-11-24 — a modified model, not a fine-tune), under the ADR 0154 names: the local mirror
-  `models/karume-anima-2.9b` holds its six presets, with the text stack referenced from `karume-anima`. The RTX 3080 Ti
-  has a sha256 row for its default preset (512², CFG 4, 20 steps — `e2e_anima_test.ts`), and its fusion counts at 40 blocks
-  are pinned (`e2e_anima_fusion_counts_test.ts`). Left, in order:
+  `models/karume-anima-2.9b` holds its six presets, with the text stack referenced from `karume-anima`. Its defaults are
+  28 steps at CFG 4 (the maintainer's visual verdict of 2026-11-24 — the low end of the upstream card's 28–50 steps,
+  CFG 3.5–5). The RTX 3080 Ti has a sha256 row for its default preset (512², CFG 4, 20 steps passed explicitly, the base's
+  check knobs — `e2e_anima_test.ts`), and its fusion counts at 40 blocks are pinned (`e2e_anima_fusion_counts_test.ts`).
+  Left, in order:
   - The maintainer's visual A/B of `bf16` and the default `bf16+dit8-a8-attn8-s16` (ADR 0147 decision 3 (2); seeds 42–45 ×
     two or three prompts). The images seen so far were made under the old names, with an f16 text stack.
   - The licence interview and the review of the notice and the card: the open rows of the ledger block
@@ -322,8 +324,6 @@ maintainer's ruling of 2026-11-06).
     (the file beside the upstream weights is the v1.2 text before upstream's fix of two section references; the recipe
     bundles the fixed text, as for the other two repositories) and whether the author asks for more than the CircleStone
     terms.
-  - Whether to adopt the upstream card's sampling recommendation (28–50 steps, CFG 3.5–5) as the defaults; the recipe keeps
-    the base's (20 steps, CFG 4), the only ones checked here.
   - `bf16-c16` has not run on the 2.9B (no Anima e2e case runs it); the A/B band is the base's only.
   - A browser check in the Playground (RTX 5070 Ti, M2): the default preset downloads 4.02 GiB, its DiT weights are
     2,666 MiB.

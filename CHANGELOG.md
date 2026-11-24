@@ -115,7 +115,7 @@ measurements in `docs/research/`.
   `Gazingstars123/Anima-2.9B`), a third party's layer expansion of the Anima base model — its transformer deepened from
   28 to 40 blocks — gets a distribution repository of its own, read by `anima.Pipeline` like the other Anima models.
   Its presets are the Anima ones (`bf16`, `bf16+dit8`, `bf16+dit8-a8`, `bf16+dit8-a8-attn8`, `bf16+dit8-a8-attn8-s16`
-  (default) and `bf16-c16`) with the base model's defaults (20 steps, guidance 4): the default preset downloads
+  (default) and `bf16-c16`), and its defaults are 28 steps at guidance 4: the default preset downloads
   4.02 GiB, `bf16` 6.61 GiB. Its text encoder, VAE decoder and tokenizers are referenced from `karume-anima`. Until it
   is published it is a local mirror built with `dist.py --pipeline anima-2.9b`; `anima.SOURCES` has no entry for it.
 

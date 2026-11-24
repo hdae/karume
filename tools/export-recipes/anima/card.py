@@ -318,7 +318,8 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 #: The upstream card's sampling recommendation for Anima-2.9B (**a fact absent from the manifest** —
-#: the distribution's defaults are the base model's, the only ones checked here; read from
+#: the distribution's defaults, 28 steps / guidance 4, sit inside it, at its low end in steps (the
+#: visual verdict at `ANIMA_2_9B_PIPELINE_CONFIG` in `distribution.py`); read from
 #: `inputs/anima/anima-2.9b-original/README.md`, "Generation (Recommendation)", 2026-11-24).
 ANIMA_2_9B_UPSTREAM_RECOMMENDATION = "28–50 steps at guidance 3.5–5"
 
@@ -338,8 +339,9 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
-        "  what makes the **negative prompt take effect**. The upstream card recommends",
-        f"  {ANIMA_2_9B_UPSTREAM_RECOMMENDATION}; pass `steps` / `guidanceScale` to follow it.",
+        "  what makes the **negative prompt take effect**. The default is inside the upstream",
+        f"  card's recommendation, {ANIMA_2_9B_UPSTREAM_RECOMMENDATION}; pass `steps` /",
+        "  `guidanceScale` to move within it.",
         "- The text encoder, VAE and tokenizers are the official Anima ones, shared with",
         "  [hdae/karume-anima](https://huggingface.co/hdae/karume-anima).",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"

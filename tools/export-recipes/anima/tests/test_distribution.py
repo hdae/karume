@@ -2532,7 +2532,8 @@ class TestUnpublishedModel:
         ]
         assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
         defaults = entry["pipelineConfig"]["defaults"]
-        assert (defaults["steps"], defaults["guidanceScale"]) == (20, 4)
+        # Its own defaults (the visual verdict of 2026-11-24), not the base's 20 steps.
+        assert (defaults["steps"], defaults["guidanceScale"]) == (28, 4)
 
     def test_without_the_official_mirror_the_build_names_it(self, tmp_path: Path) -> None:
         """No mirror (the autouse fixture's empty root): the borrowed roles cannot be taken, and

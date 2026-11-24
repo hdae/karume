@@ -796,8 +796,9 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-dpmpp"))(
 // separately — not a single cross-repository path is put on the session repo, so if the fetch layer
 // mixes them up with the session repo, it fails with a 404.
 //
-// The knobs are the same as the CFG check of the plain base (every extra variant is a fine-tune
-// that defaults to CFG, and Anima-2.9B keeps the base's defaults).
+// The knobs are the same as the CFG check of the plain base, passed explicitly (every extra variant
+// is a fine-tune that defaults to CFG; Anima-2.9B defaults to CFG 4 too, at 28 steps, but its check
+// keeps the base's 20 so it stays the same check at a lower cost).
 
 /**
  * Bakes one model of a referencing distribution (`dir`, its manifest text) with the CFG check's
