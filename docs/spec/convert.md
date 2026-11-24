@@ -144,8 +144,8 @@ holds no function and no tensor operation (select, slice, reshape): a tensor goe
 A distribution carries its family's map: the recipe declares the file (`Pipeline.name_map` of the exporter), the
 assembly checks that it is JSON with the format tag below, copies it to `name-map.json` at the repository root and
 references it from the manifest as `nameMap` (`karume/6` — ADR [0153](../decisions/0153-manifest-v6-name-map.md)), a
-reference the hub checks like every file reference. Anima's two repositories, `karume-anima` and `karume-anima-extra`,
-carry the map above. `fromSingleFile` of `@karume/models` reads it from the distribution ([single-file](single-file.md)):
+reference the hub checks like every file reference. Anima's repositories (`karume-anima`, `karume-anima-extra` and the
+unpublished `karume-anima-2.9b`) carry the map above. `fromSingleFile` of `@karume/models` reads it from the distribution ([single-file](single-file.md)):
 fetched through the hub and checked with `parseNameMap` (below); `placeTensors` takes a map as a value.
 
 | Field | What it is |
@@ -208,7 +208,7 @@ Refused with one `ConvertError`, every problem listed together:
 Anima's map has four layouts. The single file: `model.diffusion_model.` or `net.` is stripped, `llm_adapter.*` goes to
 `text_conditioner` with that prefix removed, and every other key goes to `transformer` through diffusers' 23 Cosmos 2.0
 renames and 8 exclusions, as `anima/single_file.py` runs them. The single file without a prefix: the same markers and
-the same components, with no prefix stripped (a 40-block fine-tune is saved this way; the rules name no block index,
+the same components, with no prefix stripped (a 40-block layer-expanded model is saved this way; the rules name no block index,
 so they hold for any block count). The diffusers repository's `transformer` and `text_conditioner` files: their keys
 as they are. Every initializer name carries `model.`, the attribute of the recipe's wrapper module.
 

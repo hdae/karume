@@ -100,6 +100,8 @@ uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
 uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anima-copycat-20260610 \
     --out ../../models/karume-anima-extra --resolve-refs hf
                                                      # → models/karume-anima-extra/ (fine-tunes; the text stack is referenced in karume-anima)
+uv run python dist.py --pipeline anima-2.9b --resolve-refs hf
+                                                     # → models/karume-anima-2.9b/ (the 40-block layer-expanded model; the text stack is referenced in karume-anima)
 uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/ (umT5-XXL encoder; i8 — ADR 0119)
 uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                      # → models/karume-wan2.2/ (Wan2.2 TI2V 5B; text_encoder is referenced in karume-umt5-xxl — ADR 0121)

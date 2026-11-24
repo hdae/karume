@@ -1625,7 +1625,7 @@ default `"per-stage"`. By-design constraints:
   headroom (not measured).
 - **The numbers above are the 28-block DiT's.** Anima-2.9B (`karume-anima-2.9b`, not published yet) has 40 blocks of the
   same width: its DiT weights are 2,666 MiB for the default preset and 5,317 MiB for `bf16` (the sum of the manifest's
-  part sizes, 2026-11-24 — the same sum gives 1,872 / 3,732 MiB for the 28-block DiT, matching the values above), so
+  part sizes, 2026-11-24 — the same sum gives 1,872 / 3,732 MiB for the 28-block DiT, within 3 MiB of the values above), so
   residency adds about 0.8 GiB more for the default preset and about 1.5 GiB more for `bf16` than the 28-block DiT
   (speculation — its runtime accounting and chain peak are not measured). With `bf16`, residency is not expected to fit
   an 8 GB-class GPU (speculation, not measured).

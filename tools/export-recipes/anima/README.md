@@ -73,7 +73,7 @@ uv run python -m anima.civitai --air "urn:air:anima:checkpoint:civitai:2544636@2
 # a community fine-tune shipped as a single ComfyUI-style file: rebuild it into a diffusers
 # layout first, then export from that directory. Such a checkpoint carries its own llm_adapter,
 # so the text_conditioner has to be exported per model (the base one would be the wrong weights).
-# A file without a key prefix and a deeper DiT (a 40-block fine-tune) take the same path: the
+# A file without a key prefix and a deeper DiT (a 40-block layer-expanded model) take the same path: the
 # block count comes from the checkpoint's keys, and the transformer's config.json is base's with
 # that count. The rebuild reads base's configs, its text conditioner and the linked parts, not
 # base's transformer weights.
