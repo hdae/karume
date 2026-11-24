@@ -71,7 +71,7 @@
     "members": {
       "packages/convert": {
         "dependencies": [
-          "jsr:@karume/runtime@0.23"
+          "jsr:@karume/runtime@0.24"
         ]
       },
       "packages/hub": {
@@ -82,10 +82,10 @@
       "packages/models": {
         "dependencies": [
           "jsr:@hdae/yomi@~0.4.2",
-          "jsr:@karume/convert@0.23",
-          "jsr:@karume/hub@0.23",
-          "jsr:@karume/runtime@0.23",
-          "jsr:@karume/safetensors@0.23"
+          "jsr:@karume/convert@0.24",
+          "jsr:@karume/hub@0.24",
+          "jsr:@karume/runtime@0.24",
+          "jsr:@karume/safetensors@0.24"
         ]
       }
     }
