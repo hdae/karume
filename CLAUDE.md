@@ -148,6 +148,7 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
   rule and not edited to follow one; a new ADR only for a choice among alternatives. The target of inline `DECIDED:`
   (reasons). Error messages and diagnostics do not cite ADR numbers
 - `docs/backlog.md` — **the source of truth for the order of phases, work items and their status** (now / next / later / release / parked)
+- `docs/models.md` — the standing of every model family (published / built but not published / component / removed) and the rule for a new model
 - `docs/ir-v2.md` — IR format spec / `docs/op-vocabulary.md` — op vocabulary ledger / `docs/container-v1.md` — the
   container format (`krm` / `krg`)
 - `docs/glossary.md` — term → meaning → source (the meaning lives at the source; add a row when a new term enters docs) /
