@@ -8,7 +8,7 @@
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
  * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
  * directory only reached as a cross-repo reference (umT5) is mounted for the direct route only, and
- * so is a distribution that is not published yet (EmbeddingGemma 2): its family has no `SOURCES`
+ * so is a distribution that is not published yet (EmbeddingGemma 2, Anima-2.9B): it has no `SOURCES`
  * entry, so there is no public repo name to serve it under.
  */
 
@@ -41,6 +41,10 @@ export const MOUNTS = {
     directory: "models/karume-anima-extra",
     hfRepo: anima.SOURCES["anima-extra"].repo,
   },
+  // Anima-2.9B, not published yet (no `anima.SOURCES` entry): the direct route only, until its
+  // first publication gives it the object form. Its text encoder, VAE and tokenizers come from the
+  // `anima` mount through the page's `crossRepo` mapping.
+  "anima-2.9b": "models/karume-anima-2.9b",
   "birefnet-hr": {
     directory: "models/karume-birefnet-hr",
     hfRepo: birefnet.SOURCES["birefnet-hr"].repo,

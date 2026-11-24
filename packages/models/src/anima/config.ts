@@ -39,6 +39,12 @@ export const ANIMA_PIPELINE_MAJOR = 1;
  * - `"anima-extra"` = `hdae/karume-anima-extra` (**third-party fine-tunes** together, default =
  *   `anima-wai-v1.0`)
  *
+ * A third repository, `karume-anima-2.9b` (Anima-2.9B, a layer-expanded model — ADR 0087 addendum of
+ * 2026-11-24), is not published yet, so it has no entry here: there is no revision to pin, and an
+ * entry would put a key on the public surface that can only fail. docs/release-runbook.md §3 adds
+ * `"anima-2.9b"` at its first publication — the same as EmbeddingGemma 2, which has no table before
+ * its first publication. Until then a local mirror of it is passed as a source handle.
+ *
  * Both are one repository = several models, so a repository reference alone does not pick one — to
  * use a non-default model, write `fromPretrained(SOURCES["anima"], { model })`.
  *

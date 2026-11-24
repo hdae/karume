@@ -43,6 +43,12 @@ instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly with
 | `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), first published in 0.21.0) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
 | `karume-irodori-v4-large` (ADR [0151](decisions/0151-irodori-v4-large.md), first published in 0.22.0) | `karume-irodori-v4-small` (model `v4-small`) | the codec pair `codec_encoder` / `codec_decoder` in f16 and i8 (`IRODORI_PUBLISHED`); the tokenizer asset is its own |
 
+One more referencing repository is built but not on the Hub yet: `karume-anima-2.9b` (Anima-2.9B — ADR
+[0087](decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24) references `karume-anima` (model `anima-v1.0`)
+for the same roles as `karume-anima-extra` (`ANIMA_EXTRA_SHARED_ROLES`). Its first publication is the checklist "First
+publication of `karume-anima-2.9b`" in §3; until then its local mirror is built offline with
+`uv run python dist.py --pipeline anima-2.9b --ref-revision karume-anima=<the SHA of anima.SOURCES["anima"]>`.
+
 The Wan procedure is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
 
 1. **Upload `karume-anima` first** (with the fragmentation countermeasures of §2; the 5 official variants (`anima-turbo-v1.1` (default) /
@@ -138,7 +144,8 @@ Gemma Terms of Use instead of the MIT texts, and it references only v4-small (th
 
 If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
-**when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
+**when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra — and
+`karume-anima-2.9b` once it is published — for `karume-anima`,
 `karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` and
 `karume-irodori-v4-large` for `karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`).
 
@@ -466,6 +473,29 @@ them `umt5.Encoder`, `umt5.SOURCES` and `wan.SOURCES` — ADR 0136).
       `karume-wan2.2` to "published" (the mirrors themselves were on the all-skip guard before publication)
 - [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is one `SOURCES` line in each of `./umt5` and `./wan`
       (the barrel's `.` entry lists the namespaces only, so it does not change)
+
+### First publication of `karume-anima-2.9b` (a new repository of the Anima family — ADR [0087](decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24)
+
+The family has a table already, so this adds one entry and the checks that name the repository. Only with the
+maintainer's explicit OK, after the maintainer's visual A/B, the licence review of its ledger block
+(`tools/export-recipes/anima/THIRD_PARTY_NOTICES.md`, "Gazingstars123/Anima-2.9B") and its notice and card:
+
+- [ ] **Build after `karume-anima`'s main is final** (§0): in `tools/export-recipes`,
+      `uv run python dist.py --pipeline anima-2.9b --resolve-refs hf` (the default `--out` is `models/karume-anima-2.9b`; its
+      own roles come from `outputs/series/anima-2.9b-preview-v1-{bf16,bf16-dyn,i8-dyn}`, the borrowed ones from
+      `models/karume-anima/`), then the placeholder check of §0 on `models/karume-anima-2.9b/karume.json`
+- [ ] Upload it (§2): `tools/release/hf-upload.zsh upload karume-anima-2.9b` (a new repository — nothing to delete)
+- [ ] Pin it: add `"anima-2.9b"` → `hdae/karume-anima-2.9b` with main's SHA to `SOURCES` in `packages/models/src/anima/config.ts`
+      (and drop the note there that it has none), add the key to the `anima.SOURCES` row of `packages/models/tests/sources_test.ts`
+      and update the named counts, and add `("anima-2.9b", ["anima-2.9b-preview-v1"], None, "karume-anima-2.9b")` to
+      `RELEASE_REPOSITORIES` in `tools/export-recipes/tests/test_dist_driver.py`
+- [ ] Pin its published containers for later builds: the sha256 of part 0 of its `text_conditioner_bf16`, `transformer_bf16`
+      and `transformer_i8` in `ANIMA_PUBLISHED_PART0` (`tools/export-recipes/anima/distribution.py`), and drop the model
+      from `_UNPUBLISHED` in `tools/export-recipes/anima/tests/test_distribution.py`
+- [ ] Give its mount the object form with `hfRepo: anima.SOURCES["anima-2.9b"].repo` (`packages/local-distributions/mounts.ts`),
+      and move it to "published" in the note of `DISTRIBUTIONS` in `packages/runtime/tests/distribution_gate_test.ts`
+- [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is the one `SOURCES` line of
+      `./anima`
 
 ## 4. JSR publish
 

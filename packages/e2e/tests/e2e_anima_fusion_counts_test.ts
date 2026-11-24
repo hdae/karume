@@ -86,6 +86,24 @@ const EXTRA_MANIFEST: ContainerManifest | undefined = EXTRA_AVAILABLE
   ? JSON.parse(await readTextFile(new URL("karume.json", EXTRA_DIR)))
   : undefined;
 
+/**
+ * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1, not published
+ * yet): its own 40-block transformer and text conditioner, and the official text encoder / VAE
+ * decoder as cross-repository references (the same shape as extra), so it is readable only once
+ * the official mirror is in place.
+ */
+const LAYERED_DIR = new URL("../../../models/karume-anima-2.9b/", import.meta.url);
+const LAYERED_AVAILABLE = ASSETS_AVAILABLE && (await exists(new URL("karume.json", LAYERED_DIR)));
+if (!LAYERED_AVAILABLE) {
+  console.warn(
+    `[karume] ${LAYERED_DIR.pathname} has no karume.json (or the referenced ${ANIMA_DIR.pathname} is` +
+      " absent), so the fusion hit counts of Anima-2.9B SKIP (build it with dist.py --pipeline anima-2.9b)",
+  );
+}
+const LAYERED_MANIFEST: ContainerManifest | undefined = LAYERED_AVAILABLE
+  ? JSON.parse(await readTextFile(new URL("karume.json", LAYERED_DIR)))
+  : undefined;
+
 /** The graph of a component of the official repository's default model (turbo). */
 const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
   const manifest = ANIMA_MANIFEST as ContainerManifest;
@@ -411,3 +429,81 @@ for (const model of EXTRA_MODELS) {
     },
   );
 }
+
+/**
+ * The fusion hit counts of Anima-2.9B's 40-block DiT (counted 2026-11-24 on the local mirror): every
+ * per-block count of the 28-block DiT grows with the block count — rope 2 per block (q and k of the
+ * self-attention) = 80, adaln 3 per block + the head's = 121, linearPrologue 1 per block (the FFN
+ * down projection) = 40 on the i8 seat under a8, attentionPermute 2 per block (self and cross) = 80
+ * on the a8 attention seat that stores S and 4 per block = 160 on the online seat — and silu stays
+ * at the 2 outside the blocks. The text conditioner is its own; the text encoder and VAE decoder are
+ * the official ones it references, with the official counts.
+ */
+const LAYERED_MODEL = "anima-2.9b-preview-v1";
+const LAYERED_DIT: FusionCounts = { ...NONE, silu: 2, rope: 80, adaln: 121 };
+const layeredA8 = (quant: "i8" | "bf16"): FusionCounts => ({
+  ...LAYERED_DIT,
+  linearPrologue: quant === "i8" ? 40 : 0,
+});
+
+test.skipIf(!LAYERED_AVAILABLE)(
+  "the real Anima-2.9B assets hold one model whose text encoder and VAE decoder are cross-repository references",
+  () => {
+    const manifest = LAYERED_MANIFEST as ContainerManifest;
+    assertEquals(Object.keys(manifest.models), [LAYERED_MODEL]);
+    const crossed = ["text_encoder", "text_conditioner", "transformer", "vae_decoder"].filter(
+      (component) =>
+        Object.keys(manifest.models[LAYERED_MODEL].weights[component]).some(
+          (dtype) => containerPart0(manifest, LAYERED_MODEL, component, dtype).repo !== undefined,
+        ),
+    );
+    assertEquals(
+      crossed,
+      [...EXTRA_CROSS_REPO_COMPONENTS],
+      "components held as cross-repository references",
+    );
+  },
+);
+
+test.skipIf(!LAYERED_AVAILABLE)(
+  "fusion hit counts of the real Anima-2.9B (40 blocks, including the shared components it references)",
+  async () => {
+    const manifest = LAYERED_MANIFEST as ContainerManifest;
+    const read = (component: string, dtype: string): Promise<IrGraph> =>
+      readDistributionGraph(LAYERED_DIR, manifest, LAYERED_MODEL, component, dtype, MIRRORS);
+    for (const quant of ["i8", "bf16"] as const) {
+      const graph = await read("transformer", quant);
+      assertEquals(fusionCounts(graph, ditShapes(4096)), LAYERED_DIT, `${quant}: 1024px（S=4096）`);
+      assertEquals(fusionCounts(graph, ditShapes(1024)), LAYERED_DIT, `${quant}: 512px（S=1024）`);
+      assertEquals(a8Counts(graph, ditShapes(4096)), layeredA8(quant), `${quant} a8: S=4096`);
+      assertEquals(
+        attn8Counts(graph, ditShapes(4096)),
+        { ...layeredA8(quant), attentionPermute: 80 },
+        `${quant} a8 attention: S=4096`,
+      );
+      assertEquals(
+        onlineCounts(graph, ditShapes(4096)),
+        { ...layeredA8(quant), attentionPermute: 160 },
+        `${quant} a8 attention, online: S=4096`,
+      );
+    }
+    assertEquals(
+      fusionCounts(await read("text_encoder", "bf16"), { input_ids: [1, 64] }),
+      { ...NONE, silu: 28, rope: 56, identityExpand: 112 },
+      "text encoder (cross-repository)",
+    );
+    assertEquals(
+      fusionCounts(await read("text_conditioner", "bf16"), {
+        source_hidden_states: [1, 64, 1024],
+        target_input_ids: [1, 512],
+      }),
+      { ...NONE, rope: 24, identityExpand: 48 },
+      "conditioner",
+    );
+    assertEquals(
+      fusionCounts(await read("vae_decoder", "bf16"), { latents: [1, 16, 64, 64] }),
+      { ...NONE, silu: 29, upsample2x: 3 },
+      "VAE decoder (cross-repository, one tile)",
+    );
+  },
+);

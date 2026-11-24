@@ -74,6 +74,7 @@ const ANIMA: Readonly<Record<string, Binding>> = {
  */
 const BINDINGS: Readonly<Record<string, Readonly<Record<string, Binding>>>> = {
   "karume-anima": ANIMA,
+  "karume-anima-2.9b": ANIMA,
   "karume-anima-extra": ANIMA,
   "karume-gemma4": GEMMA_DECODE,
   "karume-gemma4-qat": GEMMA_DECODE,

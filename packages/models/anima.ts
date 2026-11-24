@@ -62,6 +62,9 @@ export type { Residency, ResidencyAction, ResidencyReason } from "./src/anima/re
  * - `SOURCES["anima-extra"]` = `hdae/karume-anima-extra` (third-party fine-tunes;
  *   default = wai)
  *
+ * Anima-2.9B's repository (`karume-anima-2.9b`) is not published yet and has no entry; a local
+ * mirror of it is passed as a source handle.
+ *
  * In both, models other than the default are chosen with `{ model }`. **There is no default entry**
  * (the caller spells out which entry to use).
  *

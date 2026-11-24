@@ -175,6 +175,22 @@ if (extraManifestText === undefined) {
 }
 const EXTRA_RUNNABLE = RUNNABLE && extraManifestText !== undefined;
 
+/**
+ * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1, not published
+ * yet). Its 40-block transformer and its text conditioner are its own; its text encoder, VAE
+ * decoder and tokenizers are cross-repository references into the official repository, as for the
+ * extra variants, so it runs only together with the official mirror ({@link ASSETS_DIR}).
+ */
+const LAYERED_ASSETS_DIR = new URL("../../../models/karume-anima-2.9b/", import.meta.url);
+const layeredManifestText = await readTextIfPresent(new URL("karume.json", LAYERED_ASSETS_DIR));
+if (layeredManifestText === undefined) {
+  console.warn(
+    `[karume] ${LAYERED_ASSETS_DIR.pathname} has no karume.json, so Anima-2.9B's e2e SKIPs` +
+      " (build it with dist.py --pipeline anima-2.9b in tools/export-recipes)",
+  );
+}
+const LAYERED_RUNNABLE = RUNNABLE && layeredManifestText !== undefined;
+
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -781,7 +797,32 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-dpmpp"))(
 // mixes them up with the session repo, it fails with a 404.
 //
 // The knobs are the same as the CFG check of the plain base (every extra variant is a fine-tune
-// that defaults to CFG).
+// that defaults to CFG, and Anima-2.9B keeps the base's defaults).
+
+/**
+ * Bakes one model of a referencing distribution (`dir`, its manifest text) with the CFG check's
+ * knobs and compares the sha, after checking that its selection really crosses repositories.
+ */
+const assertCrossRepositoryPng = async (
+  label: string,
+  dir: URL,
+  manifestText: string,
+  model: string,
+): Promise<void> => {
+  const manifest = parseManifest(manifestText);
+  const sessionOrigin = originKey(REPO, REVISION_SHA);
+  const crossOrigins = [...servedOrigins(manifest, BASE_REFERENCE.quant, dir, model).keys()].filter(
+    (key) => key !== sessionOrigin,
+  );
+  // Fail the day the distribution goes back to one with no cross-repository reference, instead of
+  // silently turning into "the cross-repository check".
+  if (crossOrigins.length === 0) {
+    throw new Error(
+      `the selection of ${model} contains no cross-repository reference (the check loses its meaning)`,
+    );
+  }
+  await assertBaseReferencePng(label, { source: { dir, manifest, model } });
+};
 
 /** The extra variants (case ID = `extra-<model>-cfg`). */
 const EXTRA_MODELS = ["anima-wai-v1.0", "anima-copycat-20260610"] as const;
@@ -792,25 +833,28 @@ for (const model of EXTRA_MODELS) {
   test.skipIf(!EXTRA_RUNNABLE || references.lacksReference(label))(
     `e2e(real GPU): extra ${model} built with its cross-repository references, CFG ${BASE_REFERENCE.guidanceScale} / ` +
       `${BASE_REFERENCE.steps}step PNG matches the reference sha256`,
-    async () => {
-      const manifest = parseManifest(extraManifestText as string);
-      const sessionOrigin = originKey(REPO, REVISION_SHA);
-      const crossOrigins = [
-        ...servedOrigins(manifest, BASE_REFERENCE.quant, EXTRA_ASSETS_DIR, model).keys(),
-      ].filter((key) => key !== sessionOrigin);
-      // Fail the day the distribution goes back to one with no cross-repository reference, instead
-      // of silently turning into "the cross-repository check".
-      if (crossOrigins.length === 0) {
-        throw new Error(
-          `the selection of ${model} contains no cross-repository reference (the check loses its meaning)`,
-        );
-      }
-      await assertBaseReferencePng(label, {
-        source: { dir: EXTRA_ASSETS_DIR, manifest, model },
-      });
-    },
+    () => assertCrossRepositoryPng(label, EXTRA_ASSETS_DIR, extraManifestText as string, model),
   );
 }
+
+/**
+ * Anima-2.9B (case ID = `<model>-cfg`): the 40-block DiT on the real GPU, with the official text
+ * stack it references.
+ */
+const LAYERED_MODEL = "anima-2.9b-preview-v1";
+const LAYERED_CASE = `${LAYERED_MODEL}-cfg`;
+
+test.skipIf(!LAYERED_RUNNABLE || references.lacksReference(LAYERED_CASE))(
+  `e2e(real GPU): ${LAYERED_MODEL} (40 blocks) built with its cross-repository references, CFG ` +
+    `${BASE_REFERENCE.guidanceScale} / ${BASE_REFERENCE.steps}step PNG matches the reference sha256`,
+  () =>
+    assertCrossRepositoryPng(
+      LAYERED_CASE,
+      LAYERED_ASSETS_DIR,
+      layeredManifestText as string,
+      LAYERED_MODEL,
+    ),
+);
 
 // --- fromPretrained (fetch layer included) --------------------------------------------
 //
@@ -1623,8 +1667,9 @@ const CASE_IDS: readonly string[] = [
   "fromPretrained-512",
   "onEvent-1024",
   // On a machine without the extra mirror the whole section SKIPs — not counted as missing
-  // reference values.
+  // reference values; the same for Anima-2.9B's mirror.
   ...(EXTRA_RUNNABLE ? EXTRA_MODELS.map(extraCaseIdOf) : []),
+  ...(LAYERED_RUNNABLE ? [LAYERED_CASE] : []),
 ];
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 

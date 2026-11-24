@@ -1,5 +1,5 @@
 /**
- * The Anima page's form: the model choice over the two distributions, the manifest's defaults of a
+ * The Anima page's form: the model choice over the three distributions, the manifest's defaults of a
  * model, and the pure step from the form to a generation request. The pipeline still validates every
  * request itself (`ModelInputError`); the checks here only reject before touching the GPU what the
  * page can tell is wrong, naming the field.
@@ -17,13 +17,17 @@ import {
 import type { Choice } from "@/components/choice-select";
 import { modelChoices } from "@/lib/presets";
 
-/** The two mounts the page reads: the official models and the third-party fine-tunes. */
-export const ANIMA_MOUNTS = ["anima", "anima-extra"] as const;
+/**
+ * The three mounts the page reads: the official models, the third-party fine-tunes and the
+ * layer-expanded Anima-2.9B (not published yet — the direct route only).
+ */
+export const ANIMA_MOUNTS = ["anima", "anima-extra", "anima-2.9b"] as const;
 export type AnimaMount = (typeof ANIMA_MOUNTS)[number];
 
 export const MOUNT_LABELS: Readonly<Record<AnimaMount, string>> = {
   anima: "Official",
   "anima-extra": "Fine-tune",
+  "anima-2.9b": "Layer-expanded",
 };
 
 /** One model of one mount (the select's value is {@link modelKey} of it). */
@@ -55,7 +59,10 @@ export const animaModelChoices = (manifests: AnimaManifests): readonly Choice<st
     }));
   });
 
-/** The page's default model: the official `defaultModel`, else the fine-tunes' (whichever loaded). */
+/**
+ * The page's default model: the official `defaultModel`, else the first loaded mount's in mount
+ * order.
+ */
 export const defaultModelRef = (manifests: AnimaManifests): ModelRef | undefined => {
   for (const mount of ANIMA_MOUNTS) {
     const manifest = manifests[mount];

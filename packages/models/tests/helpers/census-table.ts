@@ -511,6 +511,15 @@ const ANIMA_MODELS = [
   "anima-wai-v1.0",
   "anima-copycat-20260610",
 ] as const;
+/**
+ * Anima-2.9B's DiT (`karume-anima-2.9b` — the transformer deepened to 40 blocks): 646 linears, 16
+ * per block more than the 28-block graph's 454 (40 × 16 + the 6 outside the blocks). Counted from
+ * the graphs of the local mirror's i8 and bf16 transformers (2026-11-24, `linear` nodes and their
+ * weight residency: all 646 i8 with k % 4 == 0, all 646 bf16), by the same count that gives 454 on
+ * the 28-block mirrors.
+ */
+const ANIMA_2_9B_DIT_LINEARS = { variant: 646, reference: 0 } as const;
+const ANIMA_2_9B_MODELS = ["anima-2.9b-preview-v1"] as const;
 const SBV2_MODELS = ["F1", "F2", "M1", "M2"] as const;
 /**
  * The Wan2.2 TI2V 5B DiT: 310 linear dispatches (307 i8 weights, the same layout as 2.1, but the
@@ -877,6 +886,31 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     models: ANIMA_MODELS,
     seats: { linearCompute: "f16", attentionCompute: "f16" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
+  },
+  // The same four bundles on Anima-2.9B's 40-block DiT (attention seats not derived, as above).
+  {
+    family: "anima",
+    models: ANIMA_2_9B_MODELS,
+    seats: { linearCompute: "a8" },
+    census: { transformer: { step: { linearCompute: ANIMA_2_9B_DIT_LINEARS } } },
+  },
+  {
+    family: "anima",
+    models: ANIMA_2_9B_MODELS,
+    seats: { linearCompute: "a8", attentionCompute: "a8" },
+    census: { transformer: { step: { linearCompute: ANIMA_2_9B_DIT_LINEARS } } },
+  },
+  {
+    family: "anima",
+    models: ANIMA_2_9B_MODELS,
+    seats: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    census: { transformer: { step: { linearCompute: ANIMA_2_9B_DIT_LINEARS } } },
+  },
+  {
+    family: "anima",
+    models: ANIMA_2_9B_MODELS,
+    seats: { linearCompute: "f16", attentionCompute: "f16" },
+    census: { transformer: { step: { linearCompute: ANIMA_2_9B_DIT_LINEARS } } },
   },
   // --- sbv2 (the preset's session reaches only front / voice) ---------------
   {

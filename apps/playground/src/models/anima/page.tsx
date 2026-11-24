@@ -105,9 +105,9 @@ const GPU_PLAIN: Omit<AcquireGpuOptions, "onDeviceLost"> = {};
 const GPU_WITH_F16: Omit<AcquireGpuOptions, "onDeviceLost"> = { shaderF16: true };
 
 /**
- * The fine-tunes take the text encoder, the VAE and the tokenizers from the official repository;
- * on the direct route its files come from the `anima` mount (the cached route follows the
- * manifest's cross-repo reference on `/hf/`).
+ * The fine-tunes and the layer-expanded model take the text encoder, the VAE and the tokenizers
+ * from the official repository; on the direct route its files come from the `anima` mount (the
+ * cached route follows the manifest's cross-repo reference on `/hf/`).
  */
 const REPO_HOLDERS: RepoHolders<AnimaMount> = { [SOURCES["anima"].repo]: "anima" };
 
@@ -128,13 +128,16 @@ export const AnimaPage = () => {
     index.kind === "ready" ? index.index[mount] : undefined;
   const officialManifest = useManifest("anima", statusOf("anima"));
   const extraManifest = useManifest("anima-extra", statusOf("anima-extra"));
+  const layeredManifest = useManifest("anima-2.9b", statusOf("anima-2.9b"));
   const manifestStates: Readonly<Record<AnimaMount, ManifestState>> = {
     anima: officialManifest,
     "anima-extra": extraManifest,
+    "anima-2.9b": layeredManifest,
   };
   const manifests: AnimaManifests = {
     ...(officialManifest.kind === "ready" ? { anima: officialManifest.manifest } : {}),
     ...(extraManifest.kind === "ready" ? { "anima-extra": extraManifest.manifest } : {}),
+    ...(layeredManifest.kind === "ready" ? { "anima-2.9b": layeredManifest.manifest } : {}),
   };
 
   const [form, setForm] = useState<AnimaForm>(() => initialForm(SAMPLE_PROMPTS[0]?.prompt ?? ""));
@@ -400,7 +403,7 @@ export const AnimaPage = () => {
               <AlertDescription>
                 The dev server has no <code>{state.directory}</code>; its models are not offered.
                 {mount === "anima"
-                  ? " The fine-tunes need it too on the direct route (their text encoder, VAE and tokenizers live there)."
+                  ? " The fine-tunes and the layer-expanded model need it too on the direct route (their text encoder, VAE and tokenizers live there)."
                   : null}
               </AlertDescription>
             </Alert>
@@ -428,7 +431,9 @@ export const AnimaPage = () => {
                     ? "Waiting for a manifest…"
                     : chosen.mount === "anima"
                       ? `Official model (${chosenStatus?.directory ?? "anima"}).`
-                      : `Third-party fine-tune (${chosenStatus?.directory ?? "anima-extra"}); its text encoder, VAE and tokenizers come from the official distribution.`
+                      : chosen.mount === "anima-2.9b"
+                        ? `Third-party layer expansion, 40 transformer blocks (${chosenStatus?.directory ?? "anima-2.9b"}); its text encoder, VAE and tokenizers come from the official distribution.`
+                        : `Third-party fine-tune (${chosenStatus?.directory ?? "anima-extra"}); its text encoder, VAE and tokenizers come from the official distribution.`
                 }
               >
                 <ChoiceSelect

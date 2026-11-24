@@ -96,6 +96,7 @@ const official = animaLikeManifest(["turbo", "base"], {
   negative: "low quality",
 });
 const extra = animaLikeManifest(["wai"], { crossRepo: true, guidance: 4 });
+const layered = animaLikeManifest(["anima-2.9b-preview-v1"], { crossRepo: true, guidance: 4 });
 
 const turboDefaults: ModelDefaults = modelDefaults(official, "turbo");
 const cfgDefaults: ModelDefaults = { ...turboDefaults, guidanceScale: 4 };
@@ -128,6 +129,24 @@ describe("animaModelChoices", () => {
       "anima-extra/wai",
     ]);
   });
+
+  it("lists the layer-expanded mount's model last, under its own label", () => {
+    expect(
+      animaModelChoices({ anima: official, "anima-extra": extra, "anima-2.9b": layered }),
+    ).toEqual([
+      { value: "anima/turbo", label: "Official · turbo (default)" },
+      { value: "anima/base", label: "Official · base" },
+      { value: "anima-extra/wai", label: "Fine-tune · wai (default)" },
+      {
+        value: "anima-2.9b/anima-2.9b-preview-v1",
+        label: "Layer-expanded · anima-2.9b-preview-v1 (default)",
+      },
+    ]);
+    expect(parseModelKey("anima-2.9b/anima-2.9b-preview-v1")).toEqual({
+      mount: "anima-2.9b",
+      model: "anima-2.9b-preview-v1",
+    });
+  });
 });
 
 describe("defaultModelRef", () => {
@@ -142,6 +161,13 @@ describe("defaultModelRef", () => {
     expect(defaultModelRef({ "anima-extra": extra })).toEqual({
       mount: "anima-extra",
       model: "wai",
+    });
+  });
+
+  it("falls back to the layer-expanded model's default when only that manifest loaded", () => {
+    expect(defaultModelRef({ "anima-2.9b": layered })).toEqual({
+      mount: "anima-2.9b",
+      model: "anima-2.9b-preview-v1",
     });
   });
 

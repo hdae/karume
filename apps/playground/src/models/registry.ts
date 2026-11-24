@@ -51,10 +51,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/anima",
     title: "Anima",
     summary:
-      "Text → image with the official Anima models and the third-party fine-tunes (which share the official text encoder and VAE).",
+      "Text → image with the official Anima models, the third-party fine-tunes and the layer-expanded Anima-2.9B (which share the official text encoder and VAE).",
     group: "Image",
     icon: SparklesIcon,
-    mounts: ["anima", "anima-extra"],
+    mounts: ["anima", "anima-extra", "anima-2.9b"],
   },
   {
     path: "/moss-image",

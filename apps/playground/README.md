@@ -66,6 +66,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `umt5` | `models/karume-umt5-xxl` | — (served as the cross-repo reference of Wan's manifest) | Wan2.2 |
 | `anima` | `models/karume-anima` | `hdae/karume-anima` (plus the revision `anima-extra` references — below) | Anima |
 | `anima-extra` | `models/karume-anima-extra` | `hdae/karume-anima-extra` | Anima |
+| `anima-2.9b` | `models/karume-anima-2.9b` | — (not published yet: the direct route only) | Anima |
 | `birefnet-hr` | `models/karume-birefnet-hr` | `hdae/karume-birefnet-hr` | BiRefNet |
 | `lucida` | `models/karume-lucida` | `hdae/karume-lucida` | BiRefNet |
 | `depth-anything` | `models/karume-depth-anything-v2` | `hdae/karume-depth-anything-v2` | Depth Anything V2 |
@@ -266,10 +267,11 @@ machine running Chrome:
 
 ## The Anima page
 
-Text → image with `anima.Pipeline` (`@karume/models/anima`), over both Anima distributions: the five
-official models of `karume-anima` (mount `anima`) and the two third-party fine-tunes of
-`karume-anima-extra` (mount `anima-extra`). The fine-tunes take their text encoder, VAE and
-tokenizers from the official repository. On the cached route the hub follows that cross-repo
+Text → image with `anima.Pipeline` (`@karume/models/anima`), over the three Anima distributions: the
+five official models of `karume-anima` (mount `anima`), the two third-party fine-tunes of
+`karume-anima-extra` (mount `anima-extra`) and the layer-expanded Anima-2.9B of `karume-anima-2.9b`
+(mount `anima-2.9b`, not published yet, so the direct route only). The fine-tunes and Anima-2.9B take
+their text encoder, VAE and tokenizers from the official repository. On the cached route the hub follows that cross-repo
 reference on `/hf/` (the alias revision above). On the direct route the page maps every repository
 the manifest references to the mount that holds it (`hdae/karume-anima` → `anima`), and fails loudly
 when that mount is missing.
@@ -289,7 +291,7 @@ left. One generation runs at a time.
 
 | Control | What it does |
 | --- | --- |
-| Model | Every model of both manifests ("Official · …" / "Fine-tune · …"), each mount's `defaultModel` marked "(default)". The official default (`anima-turbo-v1.1`) is preselected; without the official distribution, the fine-tunes' default. |
+| Model | Every model of the three manifests ("Official · …" / "Fine-tune · …" / "Layer-expanded · …"), each mount's `defaultModel` marked "(default)". The official default (`anima-turbo-v1.1`) is preselected; without the official distribution, the first loaded mount's default in that order. |
 | Preset | The model's `quants`, `defaultQuant` preselected and marked, the manifest's description as the hint: `bf16` (the upstream weights bit for bit), the int8 presets (the transformer in int8, the other components bf16) and `bf16-c16` (the `bf16` weights computed in f16: choosing it acquires the GPU with shader-f16, and a hint says so, or shows that the acquisition failed). |
 | Source | **Cached** (default, the HF-compatible route through the hub's CacheStorage) or **Direct** (`localDirectory` over plain fetch, nothing cached). |
 | Prompt | Free text (Danbooru-style tags work best), with four sample prompts. |
@@ -329,7 +331,7 @@ without it.
 | Field | What |
 | --- | --- |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`; `device.features` lists `shader-f16` only for an f16 preset's run |
-| `distribution` | `mount` (`anima` / `anima-extra`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `distribution` | `mount` (`anima` / `anima-extra` / `anima-2.9b`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model` | `name`, `isDefault` (the mount's `defaultModel`) |
 | `preset` | `quant`, `label`, `isDefault` |

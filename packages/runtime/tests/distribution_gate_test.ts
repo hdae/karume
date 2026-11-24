@@ -16,7 +16,7 @@
 // 2026-09-25). Mirrors that no e2e reads yet (siglip2 and others) are listed too — matching the
 // guard's reach to "what the e2e reads today" would bring the silent SKIP back the day an e2e is
 // added and the guard update is forgotten. A mirror that the e2e roots on is listed even when
-// unpublished (embeddinggemma-2).
+// unpublished (embeddinggemma-2, anima-2.9b).
 //
 // It checks **more than presence** (ADR 0108 stage 3, acceptance item ②). A `karume.json` that is
 // present but still of an old major, or that declares a part that is missing or whose length
@@ -102,7 +102,7 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * 0.14.0, `karume-moss-image`, first published in 0.15.1, `karume-gemma4-qat-mobile`, published
  * under this name in 0.16.0, `karume-irodori-v4.1-small-mf`, first published in 0.21.0, and
  * `karume-irodori-v4-large`, first published in 0.22.0) + the unpublished
- * `karume-embeddinggemma-2`.
+ * `karume-embeddinggemma-2` and `karume-anima-2.9b`.
  *
  * The two published ones were on the guard's roster before publication: `karume-umt5-xxl` is the
  * cross-repo reference root of the e2e of Wan's GPU path (ADR 0119 stage 10d — without it the
@@ -131,9 +131,14 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * `karume-embeddinggemma-2` is unpublished (a local mirror built by `dist.py --pipeline
  * embeddinggemma-2`), but the pipeline e2e of the EmbeddingGemma family
  * (`e2e_embeddinggemma2_pipeline_test.ts`) roots on it and SKIPs on its absence.
+ *
+ * `karume-anima-2.9b` is unpublished too (a local mirror built by `dist.py --pipeline
+ * anima-2.9b`), and its cross-repository case in `e2e_anima_test.ts` and its section of
+ * `e2e_anima_fusion_counts_test.ts` root on it and SKIP on its absence.
  */
 const DISTRIBUTIONS = [
   "karume-anima",
+  "karume-anima-2.9b",
   "karume-anima-extra",
   "karume-birefnet-hr",
   "karume-depth-anything-v2",

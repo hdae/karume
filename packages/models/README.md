@@ -16,7 +16,8 @@ counterpart of diffusers' `from_single_file`). The file's tensors are placed wit
 distribution's name map and converted against its presets while each session reads them (with
 `@karume/safetensors` and `@karume/convert`, which this package depends on); the pipeline reads
 the file for as long as it lives. `retainConverted: true` keeps the converted weights in host
-memory (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as bf16), so only the
+memory (Anima's transformer: about 1.8 GiB as int8, 3.6 GiB as bf16; the 40-block
+Anima-2.9B's, not published yet: about 2.6 and 5.2 GiB), so only the
 first session build reads and converts the file
 ([spec](https://github.com/hdae/karume/blob/main/docs/spec/single-file.md)):
 
