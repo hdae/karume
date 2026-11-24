@@ -64,9 +64,9 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | --- | --- | --- | --- |
 | `wan22` | `models/karume-wan2.2` | `hdae/karume-wan2.2` | Wan2.2 |
 | `umt5` | `models/karume-umt5-xxl` | — (served as the cross-repo reference of Wan's manifest) | Wan2.2 |
-| `anima` | `models/karume-anima` | `hdae/karume-anima` (plus the revision `anima-extra` references — below) | Anima |
+| `anima` | `models/karume-anima` | `hdae/karume-anima` (plus the revisions `anima-extra` and `anima-2.9b` reference — below) | Anima |
 | `anima-extra` | `models/karume-anima-extra` | `hdae/karume-anima-extra` | Anima |
-| `anima-2.9b` | `models/karume-anima-2.9b` | — (not published yet: the direct route only) | Anima |
+| `anima-2.9b` | `models/karume-anima-2.9b` | `hdae/karume-anima-2.9b` | Anima |
 | `birefnet-hr` | `models/karume-birefnet-hr` | `hdae/karume-birefnet-hr` | BiRefNet |
 | `lucida` | `models/karume-lucida` | `hdae/karume-lucida` | BiRefNet |
 | `depth-anything` | `models/karume-depth-anything-v2` | `hdae/karume-depth-anything-v2` | Depth Anything V2 |
@@ -100,9 +100,9 @@ the pages show a disabled state naming the directory.
   (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`). A reference no mount holds is logged at
   startup and answers 404.
 
-**A referenced revision of a served repo (the Anima rule).** `karume-anima-extra` takes the text
-encoder, the VAE and the tokenizers from `hdae/karume-anima` at the revision its manifest declares,
-while the `anima` mount is served at its own computed revision. One directory holds one revision, so
+**A referenced revision of a served repo (the Anima rule).** `karume-anima-extra` and
+`karume-anima-2.9b` take the text encoder, the VAE and the tokenizers from `hdae/karume-anima` at
+the revision their manifests declare, while the `anima` mount is served at its own computed revision. One directory holds one revision, so
 by default the server refuses that (the table fails loudly). The `anima` mount opts in with
 `aliasReferencedRevisions: true`, which makes the declared revision an **alias** of the directory:
 
@@ -270,7 +270,7 @@ machine running Chrome:
 Text → image with `anima.Pipeline` (`@karume/models/anima`), over the three Anima distributions: the
 five official models of `karume-anima` (mount `anima`), the two third-party fine-tunes of
 `karume-anima-extra` (mount `anima-extra`) and the layer-expanded Anima-2.9B of `karume-anima-2.9b`
-(mount `anima-2.9b`, not published yet, so the direct route only). The fine-tunes and Anima-2.9B take
+(mount `anima-2.9b`). The fine-tunes and Anima-2.9B take
 their text encoder, VAE and tokenizers from the official repository. On the cached route the hub follows that cross-repo
 reference on `/hf/` (the alias revision above). On the direct route the page maps every repository
 the manifest references to the mount that holds it (`hdae/karume-anima` → `anima`), and fails loudly

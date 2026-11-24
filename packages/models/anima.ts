@@ -56,17 +56,17 @@ export type { Residency, ResidencyAction, ResidencyReason } from "./src/anima/re
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
- * The repositories are split by "official / further training" (ADR 0087), so two entries:
+ * The repositories are split by "official / further training" (ADR 0087), plus one for a
+ * layer-expanded model, so three entries:
  *
  * - `SOURCES["anima"]` = `hdae/karume-anima` (the official models; default = Turbo)
  * - `SOURCES["anima-extra"]` = `hdae/karume-anima-extra` (third-party fine-tunes;
  *   default = wai)
+ * - `SOURCES["anima-2.9b"]` = `hdae/karume-anima-2.9b` (Anima-2.9B, a layer-expanded model; one
+ *   model)
  *
- * Anima-2.9B's repository (`karume-anima-2.9b`) is not published yet and has no entry; a local
- * mirror of it is passed as a source handle.
- *
- * In both, models other than the default are chosen with `{ model }`. **There is no default entry**
- * (the caller spells out which entry to use).
+ * In the first two, models other than the default are chosen with `{ model }`. **There is no
+ * default entry** (the caller spells out which entry to use).
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
  * is as the first argument of `fromPretrained`. To pin reproducibility yourself, write your own

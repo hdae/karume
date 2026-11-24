@@ -144,8 +144,8 @@ holds no function and no tensor operation (select, slice, reshape): a tensor goe
 A distribution carries its family's map: the recipe declares the file (`Pipeline.name_map` of the exporter), the
 assembly checks that it is JSON with the format tag below, copies it to `name-map.json` at the repository root and
 references it from the manifest as `nameMap` (`karume/6` — ADR [0153](../decisions/0153-manifest-v6-name-map.md)), a
-reference the hub checks like every file reference. Anima's repositories (`karume-anima`, `karume-anima-extra` and the
-unpublished `karume-anima-2.9b`) carry the map above. `fromSingleFile` of `@karume/models` reads it from the distribution ([single-file](single-file.md)):
+reference the hub checks like every file reference. Anima's repositories (`karume-anima`, `karume-anima-extra` and
+`karume-anima-2.9b`) carry the map above. `fromSingleFile` of `@karume/models` reads it from the distribution ([single-file](single-file.md)):
 fetched through the hub and checked with `parseNameMap` (below); `placeTensors` takes a map as a value.
 
 | Field | What it is |

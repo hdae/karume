@@ -1052,16 +1052,19 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
 #: The text encoder, the VAE decoder and the tokenizers are held by the base model for every model
 #: ({@link anima_published_holder}); the rest by the model itself.
 #:
-#: A model without an entry is not published yet: it is built from its series, except the roles
-#: another model holds, which it takes as that model published them ({@link
-#: anima_unpublished_sources} — today Anima-2.9B, whose text encoder, VAE decoder and tokenizers are
-#: the base's). Its own entry is added once its containers are published, and its later builds take
+#: A model without an entry is built from its series, except the roles another model holds, which
+#: it takes as that model published them ({@link anima_unpublished_sources}) — the path of a model
+#: before its first publication and of a deliberate re-export (below). Every model has an entry
+#: today: a new one gets its entry once its containers are published, and its later builds take
 #: them from the mirror like every other model's.
 #:
 #: Recorded 2026-11-18 from the published manifests of `karume-anima` at
 #: `a5fac03dc6563657b4e5c797c78cc3c813912a3e` and `karume-anima-extra` at
 #: `15731a612517df0064db69e8cb7c9825fce00c91`; the local mirrors' manifests were compared with them
 #: the same day (every entry equal), and every part 0 and tokenizer file with its declared sha256.
+#: The Anima-2.9B entry was recorded 2026-11-24 from the local mirror of `karume-anima-2.9b`, which
+#: holds the bytes of its first publication (`anima.SOURCES["anima-2.9b"]` in `@karume/models`):
+#: each part 0's sha256 equals the one the mirror's manifest declares.
 #: Re-exporting a model's containers is a deliberate change: remove its entry here.
 ANIMA_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
     ANIMA_BASE_MODEL_NAME: {
@@ -1102,6 +1105,11 @@ ANIMA_PUBLISHED_PART0: Mapping[str, Mapping[str, str]] = {
         "text_conditioner_bf16": "f8e9ac410b92502d6d62e7623f3d20ebc0eabddd539a8ba268e5fc5b512f039c",
         "transformer_bf16": "eefac1ff92f0b1a6da8673be517a3dd7302b4b8d6fcae2adeb5e88e3f2e462a7",
         "transformer_i8": "4deb4f2b3abc412d5e8ed43f67a63be3c11d23fec1c4d311a2a9ebc91103a3e2",
+    },
+    ANIMA_2_9B_MODEL_NAME: {
+        "text_conditioner_bf16": "ebc07621f3593404104682a9acfc4b5a5cf7db1d817e2aa69d4a28d947d8ea64",
+        "transformer_bf16": "b747454f208df2da551bb4616f7b8e3ab2697801da46294b5fee3fd36afd63a4",
+        "transformer_i8": "2aa0145604bdeee32e32410fa87541a0b54802d31b25755d57055b8125a90102",
     },
 }
 
@@ -1641,8 +1649,8 @@ EXTRA_PIPELINE = Pipeline(
 #: The entry for `--pipeline anima-2.9b` (the 2.9B repository karume-anima-2.9b — Anima-2.9B).
 #: MUST: a separate Pipeline from the other two, for the same reason as theirs: its notice names a
 #: third party's layer expansion, which neither of theirs does. It borrows the official text stack
-#: like extra ({@link _official_text_stack_references}); until its first publication its own roles
-#: come from its series ({@link anima_unpublished_sources}).
+#: like extra ({@link _official_text_stack_references}) and, like every published model, is built
+#: from its published containers in the local mirrors ({@link anima_published_sources}).
 ANIMA_2_9B_PIPELINE = Pipeline(
     default_model=ANIMA_2_9B_MODEL_NAME,
     repo_name=_2_9b_repo_name,

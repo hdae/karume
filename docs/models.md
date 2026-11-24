@@ -16,6 +16,7 @@ runs only with `KARUME_ALL_FAMILIES=1`.
 | --- | --- | --- | --- | --- |
 | `karume-anima` | `anima-turbo-v1.1` (default), `anima-v1.0`, `anima-aesthetic-v1.1`, `anima-turbo-v1.0`, `anima-aesthetic-v1.0` | `./anima` | `bf16+dit8-a8-attn8-s16` | `models:anima` (yes) |
 | `karume-anima-extra` | `anima-wai-v1.0`, `anima-copycat-20260610` (third-party fine-tunes; the text stack is referenced from `karume-anima`) | `./anima` | `bf16+dit8-a8-attn8-s16` | `models:anima` (yes) |
+| `karume-anima-2.9b` | `anima-2.9b-preview-v1` (a layer-expanded Anima; the text stack is referenced from `karume-anima`) | `./anima` | `bf16+dit8-a8-attn8-s16` | `models:anima` (yes) |
 | `karume-irodori-v4-small` | `v4-small` | `./irodori` | `i8-a8` | `models:irodori` (yes) |
 | `karume-irodori-v4.1-small` | `v4.1-small` | `./irodori` | `i8-a8` | `models:irodori` (yes) |
 | `karume-irodori-v4.1-small-mf` | `v4.1-small-mf` | `./irodori` | `i8` | `models:irodori` (yes) |
@@ -34,16 +35,15 @@ runs only with `KARUME_ALL_FAMILIES=1`.
 
 ## Built but not yet published
 
-The recipe builds these repositories and the e2e lanes run them on the local mirror, but no `SOURCES` entry pins them,
-so `fromPretrained` cannot resolve them from the Hub yet.
+The recipe builds this repository and its e2e lane runs it on the local mirror, but no `SOURCES` entry pins it, so
+`fromPretrained` cannot resolve it from the Hub yet.
 
 | Repository | Models | Subpath | Default preset | Lane (runs by default) |
 | --- | --- | --- | --- | --- |
-| `karume-anima-2.9b` | `anima-2.9b-preview-v1` (a layer-expanded Anima; the text stack is referenced from `karume-anima`) | `./anima` | `bf16+dit8-a8-attn8-s16` | `models:anima` (yes) |
 | `karume-embeddinggemma-2` | `text` (EmbeddingGemma 2's text tower) | `./embeddinggemma` | `bf16` | `models:embeddinggemma2` (yes) |
 
-The first publication of each is a checklist in §3 of the [release runbook](release-runbook.md) (`karume-anima-2.9b`
-has its own; EmbeddingGemma 2 follows "First publication of a family").
+Its first publication is a checklist in §3 of the [release runbook](release-runbook.md) (EmbeddingGemma 2 follows
+"First publication of a family").
 
 ## Components of another model
 

@@ -193,10 +193,10 @@ describe("crossRepoMounts", () => {
 });
 
 describe("the mounts other distributions reference", () => {
-  // karume-anima-extra borrows from karume-anima, the rebuilt karume-irodori-v4.1-small from
-  // karume-irodori-v4-small, karume-irodori-v4.1-small-mf from both small Irodori repositories, and
-  // karume-irodori-v4-large its codec pair from karume-irodori-v4-small, each at the revision its
-  // manifest pins — not the revision these mounts are served at. Without the opt-in
+  // karume-anima-extra and karume-anima-2.9b borrow from karume-anima, the rebuilt
+  // karume-irodori-v4.1-small from karume-irodori-v4-small, karume-irodori-v4.1-small-mf from both
+  // small Irodori repositories, and karume-irodori-v4-large its codec pair from
+  // karume-irodori-v4-small, each at the revision its manifest pins — not the revision these mounts are served at. Without the opt-in
   // the serving table throws, and /models/index.json builds it, so every page would fail
   // (plugin.ts).
   it.each(["anima", "irodori-v4", "irodori-v4.1"] as const)(

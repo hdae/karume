@@ -558,12 +558,12 @@ names.
 
 ## Assembling the distributions (`dist.py --pipeline anima` / `anima-extra` / `anima-2.9b`)
 
-The seven shipped models are built from the **published containers in the local mirrors**, not from series (ADR
+The eight shipped models are built from the **published containers in the local mirrors**, not from series (ADR
 [0154](../../../docs/decisions/0154-anima-bf16-preset-names.md) decision 6 — pinned like Irodori's, ADR
 [0149](../../../docs/decisions/0149-irodori-rare-token-split.md) decision 5). `ANIMA_PUBLISHED_PART0` in
 `distribution.py` pins part 0 of every container, and each tokenizer file, by sha256 as published; part 0's descriptor
-declares the sha256 of the other parts. The build reads `models/karume-anima/` and `models/karume-anima-extra/`; every
-model takes its text encoder, VAE decoder and tokenizers from the official base model's entry, the rest from its own.
+declares the sha256 of the other parts. The build reads `models/karume-anima/`, `models/karume-anima-extra/` and
+`models/karume-anima-2.9b/`; every model takes its text encoder, VAE decoder and tokenizers from the official base model's entry, the rest from its own.
 `--series` is not read for these models.
 
 ```sh
@@ -579,14 +579,16 @@ uv run python dist.py --pipeline anima-2.9b \
 ```
 
 **Anima-2.9B** (`anima-2.9b-preview-v1`, repository `karume-anima-2.9b` — ADR
-[0087](../../../docs/decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24) is not published yet, so it
-has no entry in `ANIMA_PUBLISHED_PART0`. Its own roles come from its series — `outputs/series/anima-2.9b-preview-v1-bf16`
-(the text conditioner), `-bf16-dyn` and `-i8-dyn` (the transformer); the base's text encoder, VAE decoder and tokenizers
-come from `models/karume-anima/` as published, pinned and checked part by part like a borrowed container, and the
-distribution references them there. Every model without an entry is built this way (`anima_unpublished_sources`); the
-series records (the LoRA attribution) are checked as for any build from series. The series were exported on 2026-11-17
-from the upstream single file through `anima.single_file` and `anima.export` (the 40-block path above). At its first
-publication its containers' part 0 is pinned in `ANIMA_PUBLISHED_PART0`, and later builds take them from the mirror.
+[0087](../../../docs/decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24; first published in 0.24.0) is
+built the same way: its own roles (the text conditioner and the transformer) come from `models/karume-anima-2.9b/`, and
+the base's text encoder, VAE decoder and tokenizers from `models/karume-anima/`, checked part by part like any borrowed
+container; the distribution references them there. Its first publication was built from its series —
+`outputs/series/anima-2.9b-preview-v1-bf16` (the text conditioner), `-bf16-dyn` and `-i8-dyn` (the transformer),
+exported on 2026-11-17 from the upstream single file through `anima.single_file` and `anima.export` (the 40-block path
+above); later builds do not read them. A model without an entry in `ANIMA_PUBLISHED_PART0` (a new one before its first
+publication) is built that way: its own roles from its series, the roles another model holds as published
+(`anima_unpublished_sources`), with the series records (the LoRA attribution) checked as for any build from series; its
+containers' part 0 is pinned at its first publication.
 
 - The build writes into a mirror only when its output is that mirror, and it replaces its output wholesale. A build
   whose output is a mirror it reads (`--out` omitted builds into `models/<repository>`, and the default selection is

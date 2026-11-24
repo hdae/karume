@@ -222,9 +222,9 @@ class TestDefaultPlaces:
 #: How each published repository is built (pipeline, the `--model` list, `--repo`) → the output
 #: directory `models/<name>/`. `tools/release/hf-upload.zsh` uploads this directory to
 #: `hdae/<name>`, so unless the card's Usage example names it, the published card points at
-#: another repository. A repository not published yet (`karume-embeddinggemma-2`,
-#: `karume-anima-2.9b`) is not listed: the TS `SOURCES` it is matched against get its entry at the
-#: first publication (docs/release-runbook.md §3).
+#: another repository. A repository not published yet (`karume-embeddinggemma-2`) is not listed:
+#: the TS `SOURCES` it is matched against get its entry at the first publication
+#: (docs/release-runbook.md §3).
 RELEASE_REPOSITORIES = [
     (
         "anima",
@@ -239,6 +239,7 @@ RELEASE_REPOSITORIES = [
         "karume-anima",
     ),
     ("anima-extra", ["anima-wai-v1.0", "anima-copycat-20260610"], None, "karume-anima-extra"),
+    ("anima-2.9b", ["anima-2.9b-preview-v1"], None, "karume-anima-2.9b"),
     ("birefnet", ["1024", "2048"], None, "karume-birefnet-hr"),
     ("lucida", ["1024", "2048"], None, "karume-lucida"),
     ("depth-anything", ["small"], None, "karume-depth-anything-v2"),
@@ -311,7 +312,7 @@ class TestDeclaredReferencesOfThePublishedRepositories:
         for reference in declared_references(dist.PIPELINES[pipeline], models):
             assert reference.repo_name in published - {directory}, reference
 
-    def test_the_five_referencing_repositories(self) -> None:
+    def test_the_six_referencing_repositories(self) -> None:
         referencing = {
             directory: sorted(
                 reference.repo_name
@@ -321,6 +322,7 @@ class TestDeclaredReferencesOfThePublishedRepositories:
         }
         assert {name: repos for name, repos in referencing.items() if repos} == {
             "karume-anima-extra": ["karume-anima"],
+            "karume-anima-2.9b": ["karume-anima"],
             "karume-irodori-v4-large": ["karume-irodori-v4-small"],
             "karume-irodori-v4.1-small": ["karume-irodori-v4-small"],
             "karume-irodori-v4.1-small-mf": [

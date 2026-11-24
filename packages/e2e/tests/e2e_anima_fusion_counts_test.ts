@@ -87,8 +87,7 @@ const EXTRA_MANIFEST: ContainerManifest | undefined = EXTRA_AVAILABLE
   : undefined;
 
 /**
- * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1, not published
- * yet): its own 40-block transformer and text conditioner, and the official text encoder / VAE
+ * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1): its own 40-block transformer and text conditioner, and the official text encoder / VAE
  * decoder as cross-repository references (the same shape as extra), so it is readable only once
  * the official mirror is in place.
  */

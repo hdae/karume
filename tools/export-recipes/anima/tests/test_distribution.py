@@ -408,21 +408,46 @@ def _no_real_mirrors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 #: The models the synthetic mirrors hold ({@link published_mirrors}): the official default and the
 #: base (which holds the text stack every model takes as published) in the official repository,
-#: and one fine-tune in the extra one.
+#: one fine-tune in the extra one, and Anima-2.9B in its own.
 _MIRRORED: Mapping[str, tuple[str, ...]] = {
     OFFICIAL_REPO_NAME: (ANIMA_TURBO_MODEL_NAME, ANIMA_BASE_MODEL_NAME),
     EXTRA_REPO_NAME: ("anima-wai-v1.0",),
+    ANIMA_2_9B_REPO_NAME: (ANIMA_2_9B_MODEL_NAME,),
 }
 
 
 #: The models not published yet: built from their series except the roles another model holds
 #: (`anima_unpublished_sources`). A model leaves this set in the commit that pins its published
-#: containers in `ANIMA_PUBLISHED_PART0` (the pin test refuses a model in both).
-_UNPUBLISHED: frozenset[str] = frozenset({ANIMA_2_9B_MODEL_NAME})
+#: containers in `ANIMA_PUBLISHED_PART0` (the pin test refuses a model in both). Empty since
+#: Anima-2.9B, the last one, was published (0.24.0).
+_UNPUBLISHED: frozenset[str] = frozenset()
+
+
+def _drop_pins(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """Remove `model`'s entry from the published pins in force (the real table, or the synthetic
+    mirrors' — {@link published_mirrors}): the state of a model before its first publication, and
+    the first step of a deliberate re-export (`ANIMA_PUBLISHED_PART0`'s comment)."""
+    monkeypatch.setattr(
+        anima_distribution,
+        "ANIMA_PUBLISHED_PART0",
+        {
+            holder: roles
+            for holder, roles in anima_distribution.ANIMA_PUBLISHED_PART0.items()
+            if holder != model
+        },
+    )
+
+
+@pytest.fixture
+def unpinned_mirrors(published_mirrors: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The synthetic published mirrors ({@link published_mirrors}) with Anima-2.9B's own pins
+    removed ({@link _drop_pins}), so its build takes the path of a model without an entry."""
+    _drop_pins(monkeypatch, ANIMA_2_9B_MODEL_NAME)
+    return published_mirrors
 
 
 def _build_unpublished_series(series_dir: Path) -> AnimaSources:
-    """The series of the model not published yet, as they are on disk: its own transformer and
+    """Anima-2.9B's series as a build without its pins reads them: its own transformer and
     text-conditioner series only. The base's text-stack series and the tokenizer series are gone
     (`outputs/series/anima-bf16` / `anima-demo` — ADR 0154), so a build that read them would fail
     instead of passing on a copy of the same bytes."""
@@ -2459,12 +2484,142 @@ class TestPublishedContainers:
         } == weights
 
 
+class TestAnima29bFromItsMirror:
+    """Anima-2.9B is published (0.24.0): like every published model it is built from the published
+    containers in the local mirrors — its own text conditioner and transformer from its repository's
+    mirror, the base's text encoder, VAE decoder and tokenizers from the official one, which the
+    distribution references. No series is read."""
+
+    @staticmethod
+    def _build(tmp_path: Path, out_dir: Path | None = None) -> Path:
+        out = tmp_path / "dist" if out_dir is None else out_dir
+        main(
+            [
+                "--pipeline",
+                "anima-2.9b",
+                "--series",
+                str(tmp_path / "no-series"),
+                "--out",
+                str(out),
+                dist.ALLOW_PLACEHOLDER_FLAG,
+            ]
+        )
+        return out
+
+    def test_it_is_pinned_for_its_own_roles_and_its_pipeline_builds_it_by_default(self) -> None:
+        assert set(ANIMA_PUBLISHED_PART0[ANIMA_2_9B_MODEL_NAME]) == {
+            "text_conditioner_bf16",
+            "transformer_bf16",
+            "transformer_i8",
+        }
+        assert ANIMA_2_9B_PIPELINE.default_model == ANIMA_2_9B_MODEL_NAME
+
+    def test_its_own_roles_come_from_its_mirror_and_the_borrowed_ones_from_the_official_mirror(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        out_dir = self._build(tmp_path)
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
+        official = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        base = official["models"][ANIMA_BASE_MODEL_NAME]
+        for role in ANIMA_BASE_SHARED_ROLES:
+            refs = _role_refs(entry, role)
+            assert {ref.get("repo") for ref in refs} == {"hdae/karume-anima"}, role
+            assert [ref["sha256"] for ref in refs] == [
+                ref["sha256"] for ref in _role_refs(base, role)
+            ], role
+        mirror = published_mirrors / ANIMA_2_9B_REPO_NAME
+        published = json.loads((mirror / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        for role in ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"):
+            refs = _role_refs(entry, role)
+            assert not any("repo" in ref for ref in refs), role
+            assert refs == _role_refs(published["models"][ANIMA_2_9B_MODEL_NAME], role), role
+            for ref in refs:
+                path = ref["path"]
+                assert (out_dir / path).read_bytes() == (mirror / path).read_bytes(), path
+        assert not (tmp_path / "no-series").exists()
+
+    def test_its_presets_are_the_bf16_derivation_with_the_shared_default(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        out_dir = self._build(tmp_path)
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
+        assert sorted(entry["quants"]) == [
+            "bf16",
+            "bf16+dit8",
+            "bf16+dit8-a8",
+            "bf16+dit8-a8-attn8",
+            "bf16+dit8-a8-attn8-s16",
+            "bf16-c16",
+        ]
+        assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
+        defaults = entry["pipelineConfig"]["defaults"]
+        # Its own defaults (the visual verdict of 2026-11-24), not the base's 20 steps.
+        assert (defaults["steps"], defaults["guidanceScale"]) == (28, 4)
+
+    def test_its_sources_borrow_exactly_the_base_text_stack(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        sources = anima_published_sources(
+            ANIMA_2_9B_MODEL_NAME, published_mirrors, tmp_path / "view"
+        )
+
+        assert sorted(sources.borrowed) == sorted(ANIMA_BASE_SHARED_ROLES)
+        assert {
+            role: repo for role, repo in sources.holders.items() if role not in sources.borrowed
+        } == dict.fromkeys(
+            ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"), ANIMA_2_9B_REPO_NAME
+        )
+        assert sources.repository == ANIMA_2_9B_REPO_NAME
+
+    def test_a_part_0_of_its_own_that_is_not_the_published_one_fails_before_a_byte_is_written(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        mirror = published_mirrors / ANIMA_2_9B_REPO_NAME
+        manifest = json.loads((mirror / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        part0 = _role_refs(manifest["models"][ANIMA_2_9B_MODEL_NAME], "transformer_i8")[0]
+        target = mirror / part0["path"]
+        target.write_bytes(target.read_bytes()[:-1] + b"\x00")
+
+        with pytest.raises(DistError, match=r"is not the published file of karume-anima-2\.9b"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+        assert not (tmp_path / f"dist{STAGING_SUFFIX}").exists()
+
+    def test_without_its_mirror_the_build_names_it(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        shutil.rmtree(published_mirrors / ANIMA_2_9B_REPO_NAME)
+
+        with pytest.raises(DistError, match=r"No local mirror of karume-anima-2\.9b"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+
+    def test_a_build_into_the_official_mirror_is_refused(self, published_mirrors: Path) -> None:
+        """The 2.9B build reads the official mirror for the borrowed roles; none of that mirror's
+        models belongs in the 2.9B repository, so the only way out is another `--out`."""
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        before = TestPublishedContainers._snapshot(published_mirrors)
+
+        with pytest.raises(DistError, match=r"would be lost .* pass another --out$"):
+            main(["--pipeline", "anima-2.9b", "--out", str(mirror), dist.ALLOW_PLACEHOLDER_FLAG])
+        assert TestPublishedContainers._snapshot(published_mirrors) == before
+
+
 class TestUnpublishedModel:
-    """A model not published yet (Anima-2.9B) is built from its own series — the transformer and
-    the text conditioner — and takes the roles another model holds (the base's text encoder, VAE
-    decoder and tokenizers) as published from the official mirror: the base's series are no longer
-    on disk, and the 2.9B repository only references those roles. Every check of both paths holds:
-    the series' records, the pins and every part of a borrowed container."""
+    """A model without an entry in `ANIMA_PUBLISHED_PART0` — a new one before its first
+    publication, or one whose entry was removed for a deliberate re-export — is built from its own
+    series and takes the roles another model holds as published from their mirror. The subject is
+    Anima-2.9B with its own pins removed ({@link _drop_pins}): its transformer and text conditioner
+    come from its series, the base's text encoder, VAE decoder and tokenizers from the official
+    mirror (the base's series are no longer on disk, and the 2.9B repository only references those
+    roles). Every check of both paths holds: the series' records, the pins and every part of a
+    borrowed container."""
 
     @staticmethod
     def _build(tmp_path: Path, out_dir: Path | None = None) -> Path:
@@ -2482,12 +2637,8 @@ class TestUnpublishedModel:
         )
         return out
 
-    def test_it_is_not_published_and_its_pipeline_builds_it_by_default(self) -> None:
-        assert ANIMA_2_9B_MODEL_NAME not in ANIMA_PUBLISHED_PART0
-        assert ANIMA_2_9B_PIPELINE.default_model == ANIMA_2_9B_MODEL_NAME
-
     def test_its_own_roles_come_from_its_series_and_the_borrowed_ones_from_the_official_mirror(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         sources = _build_unpublished_series(tmp_path / "series")
         out_dir = self._build(tmp_path)
@@ -2495,7 +2646,7 @@ class TestUnpublishedModel:
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
         official = json.loads(
-            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+            (unpinned_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         base = official["models"][ANIMA_BASE_MODEL_NAME]
         for role in ANIMA_BASE_SHARED_ROLES:
@@ -2514,44 +2665,26 @@ class TestUnpublishedModel:
             placed = out_dir / ANIMA_2_9B_MODEL_NAME / OUTPUT_PATHS[role]
             assert read_component(placed) == read_component(series / "model.krm"), role
 
-    def test_its_presets_are_the_bf16_derivation_with_the_shared_default(
-        self, tmp_path: Path, published_mirrors: Path
+    def test_without_the_official_mirror_the_build_names_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _build_unpublished_series(tmp_path / "series")
-        out_dir = self._build(tmp_path)
-
-        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
-        assert sorted(entry["quants"]) == [
-            "bf16",
-            "bf16+dit8",
-            "bf16+dit8-a8",
-            "bf16+dit8-a8-attn8",
-            "bf16+dit8-a8-attn8-s16",
-            "bf16-c16",
-        ]
-        assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
-        defaults = entry["pipelineConfig"]["defaults"]
-        # Its own defaults (the visual verdict of 2026-11-24), not the base's 20 steps.
-        assert (defaults["steps"], defaults["guidanceScale"]) == (28, 4)
-
-    def test_without_the_official_mirror_the_build_names_it(self, tmp_path: Path) -> None:
         """No mirror (the autouse fixture's empty root): the borrowed roles cannot be taken, and
         there is no series to fall back to."""
+        _drop_pins(monkeypatch, ANIMA_2_9B_MODEL_NAME)
         _build_unpublished_series(tmp_path / "series")
         with pytest.raises(DistError, match="No local mirror of karume-anima"):
             self._build(tmp_path)
         assert not (tmp_path / "dist").exists()
 
     def test_a_borrowed_part_0_that_is_not_the_published_one_fails_before_a_byte_is_written(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         _build_unpublished_series(tmp_path / "series")
         manifest = json.loads(
-            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+            (unpinned_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         part0 = _role_refs(manifest["models"][ANIMA_BASE_MODEL_NAME], "vae_decoder_bf16")[0]
-        target = published_mirrors / OFFICIAL_REPO_NAME / part0["path"]
+        target = unpinned_mirrors / OFFICIAL_REPO_NAME / part0["path"]
         target.write_bytes(target.read_bytes()[:-1] + b"\x00")
 
         with pytest.raises(DistError, match="is not the published file of karume-anima"):
@@ -2560,16 +2693,16 @@ class TestUnpublishedModel:
         assert not (tmp_path / f"dist{STAGING_SUFFIX}").exists()
 
     def test_a_later_borrowed_part_that_differs_fails_before_a_byte_is_written(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         """MUST: the borrowed container is only referenced, so nothing compares its later parts
         except the plan."""
         _build_unpublished_series(tmp_path / "series")
         manifest = json.loads(
-            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+            (unpinned_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         parts = _role_refs(manifest["models"][ANIMA_BASE_MODEL_NAME], "text_encoder_bf16")
-        target = published_mirrors / OFFICIAL_REPO_NAME / parts[1]["path"]
+        target = unpinned_mirrors / OFFICIAL_REPO_NAME / parts[1]["path"]
         payload = bytearray(target.read_bytes())
         payload[-1] ^= 0xFF
         target.write_bytes(bytes(payload))
@@ -2579,7 +2712,7 @@ class TestUnpublishedModel:
         assert not (tmp_path / "dist").exists()
 
     def test_a_series_with_a_baked_lora_is_refused(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         """The series' own records are checked as for a build from series."""
         sources = _build_unpublished_series(tmp_path / "series")
@@ -2590,7 +2723,7 @@ class TestUnpublishedModel:
         assert not (tmp_path / "dist").exists()
 
     def test_a_missing_series_of_its_own_fails_by_name(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         sources = _build_unpublished_series(tmp_path / "series")
         shutil.rmtree(sources.text_conditioner["bf16"])
@@ -2598,21 +2731,22 @@ class TestUnpublishedModel:
         with pytest.raises(DistError, match=f"{ANIMA_2_9B_MODEL_NAME}-bf16"):
             self._build(tmp_path)
 
-    def test_a_build_into_the_official_mirror_is_refused(self, published_mirrors: Path) -> None:
-        """The 2.9B build reads the official mirror for the borrowed roles; none of that mirror's
-        models belongs in the 2.9B repository, so the only way out is another `--out`."""
-        mirror = published_mirrors / OFFICIAL_REPO_NAME
-        before = TestPublishedContainers._snapshot(published_mirrors)
+    def test_a_build_into_the_official_mirror_is_refused(self, unpinned_mirrors: Path) -> None:
+        """Without its own pins the 2.9B build still reads the official mirror for the borrowed
+        roles; none of that mirror's models belongs in the 2.9B repository, so the only way out is
+        another `--out`."""
+        mirror = unpinned_mirrors / OFFICIAL_REPO_NAME
+        before = TestPublishedContainers._snapshot(unpinned_mirrors)
 
         with pytest.raises(DistError, match=r"would be lost .* pass another --out$"):
             main(["--pipeline", "anima-2.9b", "--out", str(mirror), dist.ALLOW_PLACEHOLDER_FLAG])
-        assert TestPublishedContainers._snapshot(published_mirrors) == before
+        assert TestPublishedContainers._snapshot(unpinned_mirrors) == before
 
     def test_the_sources_hold_the_borrowed_roles_only_as_published(
-        self, tmp_path: Path, published_mirrors: Path
+        self, tmp_path: Path, unpinned_mirrors: Path
     ) -> None:
         sources = anima_unpublished_sources(
-            tmp_path / "series", ANIMA_2_9B_MODEL_NAME, published_mirrors, tmp_path / "view"
+            tmp_path / "series", ANIMA_2_9B_MODEL_NAME, unpinned_mirrors, tmp_path / "view"
         )
 
         assert sorted(sources.published.placements) == sorted(ANIMA_BASE_SHARED_ROLES)
@@ -2848,7 +2982,6 @@ class TestLegalTexts:
     ) -> None:
         """The 2.9B repository's root carries its own modification notice, the same `LICENSE.md`
         and, in the notice, the attribution, the rights grant and the NVIDIA notice."""
-        _build_unpublished_series(tmp_path / "series")
         out_dir = self._run(tmp_path, pipeline="anima-2.9b", model=ANIMA_2_9B_MODEL_NAME)
 
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")

@@ -8,8 +8,8 @@
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
  * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
  * directory only reached as a cross-repo reference (umT5) is mounted for the direct route only, and
- * so is a distribution that is not published yet (EmbeddingGemma 2, Anima-2.9B): it has no `SOURCES`
- * entry, so there is no public repo name to serve it under.
+ * so is a distribution that is not published yet (EmbeddingGemma 2): it has no `SOURCES` entry, so
+ * there is no public repo name to serve it under.
  */
 
 import * as anima from "@karume/models/anima";
@@ -29,9 +29,10 @@ export const MOUNTS = {
   wan22: { directory: "models/karume-wan2.2", hfRepo: wan.SOURCES["wan2.2"].repo },
   // The cross-repo reference of Wan's manifest (its text encoder).
   umt5: "models/karume-umt5-xxl",
-  // karume-anima-extra takes its text encoder and VAE from karume-anima at the revision its manifest
-  // declares, while this mount is served at its own revision: the opt-in lets the declared revision
-  // alias this directory for exactly the files the reference names (plugin.ts).
+  // karume-anima-extra and karume-anima-2.9b take their text encoder and VAE from karume-anima at
+  // the revision their manifests declare, while this mount is served at its own revision: the opt-in
+  // lets each declared revision alias this directory for exactly the files the references name
+  // (plugin.ts).
   anima: {
     directory: "models/karume-anima",
     hfRepo: anima.SOURCES["anima"].repo,
@@ -41,10 +42,10 @@ export const MOUNTS = {
     directory: "models/karume-anima-extra",
     hfRepo: anima.SOURCES["anima-extra"].repo,
   },
-  // Anima-2.9B, not published yet (no `anima.SOURCES` entry): the direct route only, until its
-  // first publication gives it the object form. Its text encoder, VAE and tokenizers come from the
-  // `anima` mount through the page's `crossRepo` mapping.
-  "anima-2.9b": "models/karume-anima-2.9b",
+  "anima-2.9b": {
+    directory: "models/karume-anima-2.9b",
+    hfRepo: anima.SOURCES["anima-2.9b"].repo,
+  },
   "birefnet-hr": {
     directory: "models/karume-birefnet-hr",
     hfRepo: birefnet.SOURCES["birefnet-hr"].repo,

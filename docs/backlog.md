@@ -284,7 +284,7 @@ maintainer's ruling of 2026-11-06).
     under `docs/spec/`, one move per commit.
   - **To decide**: the open points of ADR 0152 (its section "Open").
 
-- **Anima-2.9B — the first publication of `karume-anima-2.9b` (filed 2026-11-24; after the 0.23.0 release)**. The recipe
+- **Anima-2.9B — the first publication of `karume-anima-2.9b` (filed 2026-11-24; published in 0.24.0)**. The recipe
   builds the layer-expanded model into a repository of its own (ADR [0087](decisions/0087-anima-official-extra-repos.md)
   addendum of 2026-11-24 — a modified model, not a fine-tune), under the ADR 0154 names: the local mirror
   `models/karume-anima-2.9b` holds its six presets, with the text stack referenced from `karume-anima`. Its defaults are
@@ -300,8 +300,9 @@ maintainer's ruling of 2026-11-06).
     base's only.
   - A browser check in the Playground (RTX 5070 Ti, M2): the default preset downloads 4.02 GiB, its DiT weights are
     2,666 MiB.
-  - Publication with the maintainer's explicit OK and the pin: the checklist "First publication of `karume-anima-2.9b`" in
-    [the release runbook](release-runbook.md) §3.
+  - Publication with the maintainer's explicit OK and the pin: published in 0.24.0 and pinned as
+    `anima.SOURCES["anima-2.9b"]` (the checklist "First publication of `karume-anima-2.9b`" in
+    [the release runbook](release-runbook.md) §3).
   - `tools/export-recipes/anima/eval_dist.py` (the evaluation distribution of the rejected i4 experiment — perf-ledger
     Q-9) no longer runs: it reads every role from series under `outputs/series/`, and the base text stack, the
     tokenizers and the published models' series are no longer kept there (distribution builds read the published
@@ -323,8 +324,9 @@ maintainer's ruling of 2026-11-06).
   and the RTX 3080 Ti's sha256 rows (CHANGELOG, Unreleased); the maintainer approved the default preset's images, the
   notice text and the preset labels and descriptions on 2026-11-19. The numerics check of bf16 storage computed in f16
   (`packages/runtime/tests/gpu_f16_compute_test.ts`) has not run on D3D12 or Metal.
-  - Anima's two repositories were published as the bf16 builds on 2026-11-20. The unpublished Anima-2.9B was built under
-    the new names on 2026-11-24 (its own repository, `karume-anima-2.9b`); what is left of it is the item "Anima-2.9B" above.
+  - Anima's two repositories were published as the bf16 builds on 2026-11-20. Anima-2.9B was built under the new names on
+    2026-11-24 and published in 0.24.0 (its own repository, `karume-anima-2.9b`); what is left of it is the item
+    "Anima-2.9B" above.
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.

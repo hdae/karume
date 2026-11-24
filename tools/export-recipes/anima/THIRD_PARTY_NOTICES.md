@@ -35,8 +35,8 @@ questions it has to answer.
   weights derive from the same CircleStone base, so the upstream license flows through; the
   per-source permission fields differ and are listed below.
 - **Third-party layer-expanded model** — `anima-2.9b-preview-v1` (HF `Gazingstars123/Anima-2.9B`),
-  redistributed from its own `karume-anima-2.9b` repository (ADR 0087 addendum of 2026-11-24; not
-  published yet). Its weights derive from the CircleStone base, so the upstream license flows
+  redistributed from its own `karume-anima-2.9b` repository (ADR 0087 addendum of 2026-11-24;
+  first published in 0.24.0). Its weights derive from the CircleStone base, so the upstream license flows
   through; the block below lists what the local files establish.
 - **Distilled LoRA** — the official CircleStone Labs "Anima Turbo LoRA" (see the inventory row
   below). It used to be baked into the weights at export time (`lora.py`); **that path is retired

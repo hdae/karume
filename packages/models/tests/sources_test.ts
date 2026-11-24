@@ -98,11 +98,12 @@ const FAMILIES: readonly Family[] = [
   {
     name: "anima.SOURCES",
     sources: anima.SOURCES,
-    // The repository of the official models and the repository of third-party fine-tunes (ADR
-    // 0087). extra takes its text stack from the official one by cross-repository reference, but
-    // **the manifest itself comes from its own repository** (the cross-reference lives inside the
+    // The repository of the official models, the repository of third-party fine-tunes (ADR 0087)
+    // and the repository of the layer-expanded Anima-2.9B (its addendum of 2026-11-24). extra and
+    // 2.9b take their text stack from the official one by cross-repository reference, but **the
+    // manifest itself comes from its own repository** (the cross-reference lives inside the
     // manifest).
-    keys: ["anima", "anima-extra"],
+    keys: ["anima", "anima-extra", "anima-2.9b"],
     load: (ref, options) => anima.Pipeline.fromPretrained(ref, options),
   },
   {
@@ -199,7 +200,7 @@ for (const { name, sources, keys } of FAMILIES) {
 // The totals of families and public repositories are spelled out too. A new repository (birefnet-hr
 // / lucida in iteration b, umT5 / Wan2.2 in 0.14.0) fails this, so an entry missing from the merge
 // into `KARUME_SOURCES` cannot pass silently.
-test("11 families have a source table, with 17 published repositories", () => {
+test("11 families have a source table, with 18 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -216,7 +217,7 @@ test("11 families have a source table, with 17 published repositories", () => {
       "moss.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 17);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 18);
 });
 
 for (const { name, sources } of FAMILIES) {

@@ -19,7 +19,7 @@ import { modelChoices } from "@/lib/presets";
 
 /**
  * The three mounts the page reads: the official models, the third-party fine-tunes and the
- * layer-expanded Anima-2.9B (not published yet — the direct route only).
+ * layer-expanded Anima-2.9B.
  */
 export const ANIMA_MOUNTS = ["anima", "anima-extra", "anima-2.9b"] as const;
 export type AnimaMount = (typeof ANIMA_MOUNTS)[number];

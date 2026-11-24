@@ -32,27 +32,23 @@ export const ANIMA_PIPELINE_MAJOR = 1;
  *
  * A key is the HF repository basename without `karume-` (`"karume-" + key` gives the basename back
  * — the check in `tests/sources_test.ts` covers this invariant). The repositories are split along
- * "official / fine-tuned" (ADR 0087) into two:
+ * "official / fine-tuned" (ADR 0087) into two, plus a third for a layer-expanded model:
  *
  * - `"anima"` = `hdae/karume-anima` (the official models together — 5 variants of Turbo / Base /
  *   Aesthetic, default = Turbo)
  * - `"anima-extra"` = `hdae/karume-anima-extra` (**third-party fine-tunes** together, default =
  *   `anima-wai-v1.0`)
+ * - `"anima-2.9b"` = `hdae/karume-anima-2.9b` (Anima-2.9B, a layer-expanded model, one model —
+ *   ADR 0087 addendum of 2026-11-24; first published in 0.24.0)
  *
- * A third repository, `karume-anima-2.9b` (Anima-2.9B, a layer-expanded model — ADR 0087 addendum of
- * 2026-11-24), is not published yet, so it has no entry here: there is no revision to pin, and an
- * entry would put a key on the public surface that can only fail. docs/release-runbook.md §3 adds
- * `"anima-2.9b"` at its first publication — the same as EmbeddingGemma 2, which has no table before
- * its first publication. Until then a local mirror of it is passed as a source handle.
+ * The first two are one repository = several models, so a repository reference alone does not pick
+ * one — to use a non-default model, write `fromPretrained(SOURCES["anima"], { model })`.
  *
- * Both are one repository = several models, so a repository reference alone does not pick one — to
- * use a non-default model, write `fromPretrained(SOURCES["anima"], { model })`.
- *
- * `anima-extra` does not ship the text stack (`text_encoder` / `vae_decoder` / `tokenizer` /
- * `tokenizer_2`) itself and **borrows it by cross-repository reference** from the official
- * repository (the revision `"anima"` points at) (ADR 0038 §7). So the two are not independent: when
- * the official one is re-uploaded, extra is rebuilt too (the MUST on publication order is in
- * docs/release-runbook.md).
+ * `anima-extra` and `anima-2.9b` do not ship the text stack (`text_encoder` / `vae_decoder` /
+ * `tokenizer` / `tokenizer_2`) themselves and **borrow it by cross-repository reference** from the
+ * official repository (the revision `"anima"` points at) (ADR 0038 §7). So they are not
+ * independent of it: when the official one is re-uploaded, both are rebuilt too (the MUST on
+ * publication order is in docs/release-runbook.md).
  *
  * Pass it as **the opt-in for following the package version automatically** — to pin
  * reproducibility yourself, write your own `{ repo, revision }` instead of this table
@@ -79,6 +75,10 @@ export const SOURCES = {
   "anima-extra": {
     repo: "hdae/karume-anima-extra",
     revision: "533123f9e28976c93ec2126f3301bdc6f6a61a0c",
+  },
+  "anima-2.9b": {
+    repo: "hdae/karume-anima-2.9b",
+    revision: "94e4112e759302c60e20ba1a9113bc46d273d5c6",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

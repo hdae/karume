@@ -33,21 +33,16 @@ repository borrows is the recipe's declaration (`Pipeline.references` — ADR 00
 the commit. **The publication build passes `--resolve-refs hf`** (`tools/export-recipes/dist.py`): it reads the referenced
 repository's main from the HF API and, before writing anything, requires every borrowed file to be in that commit with the bytes of
 the local mirror under `models/` — a stale SHA, a referenced mirror rebuilt but not uploaded, or a renamed path fails the build
-instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are five referencing repositories on the Hub today:
+instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are six referencing repositories on the Hub today:
 
 | Referencing repository | Referenced repository | Borrowed roles (the recipe's declaration) |
 | --- | --- | --- |
 | `karume-anima-extra` (fine-tuned models — ADR 0087, the same shape as the former turbo → anima direction) | `karume-anima` (model `anima-v1.0`) | `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` / `tokenizer_2` (`ANIMA_BASE_SHARED_ROLES`) |
+| `karume-anima-2.9b` (Anima-2.9B — ADR [0087](decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24, first published in 0.24.0) | `karume-anima` (model `anima-v1.0`) | the same roles as `karume-anima-extra` (`ANIMA_BASE_SHARED_ROLES`) |
 | `karume-wan2.2` (ADR [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d", ADR [0121](decisions/0121-wan22-ti2v-5b.md) decision 9) | `karume-umt5-xxl` (model `xxl`) | `text_encoder` (`WAN_TEXT_ENCODER_REFERENCE`) |
 | `karume-irodori-v4.1-small` | `karume-irodori-v4-small` (model `v4-small`) | 26 roles = 90 files, 5,637 MiB: every graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and `tokenizer` (`IRODORI_V41_SHARED_ROLES`) |
 | `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), first published in 0.21.0) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
 | `karume-irodori-v4-large` (ADR [0151](decisions/0151-irodori-v4-large.md), first published in 0.22.0) | `karume-irodori-v4-small` (model `v4-small`) | the codec pair `codec_encoder` / `codec_decoder` in f16 and i8 (`IRODORI_PUBLISHED`); the tokenizer asset is its own |
-
-One more referencing repository is built but not on the Hub yet: `karume-anima-2.9b` (Anima-2.9B — ADR
-[0087](decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24) references `karume-anima` (model `anima-v1.0`)
-for the same roles as `karume-anima-extra` (`ANIMA_BASE_SHARED_ROLES`). Its first publication is the checklist "First
-publication of `karume-anima-2.9b`" in §3; until then its local mirror is built offline with
-`uv run python dist.py --pipeline anima-2.9b --ref-revision karume-anima=<the SHA of anima.SOURCES["anima"]>`.
 
 The Wan procedure is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
 
@@ -144,8 +139,8 @@ Gemma Terms of Use instead of the MIT texts, and it references only v4-small (th
 
 If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
-**when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra — and
-`karume-anima-2.9b` once it is published — for `karume-anima`,
+**when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra and
+`karume-anima-2.9b` for `karume-anima`,
 `karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` and
 `karume-irodori-v4-large` for `karume-irodori-v4-small`, `karume-irodori-v4.1-small-mf` for `karume-irodori-v4.1-small`).
 
@@ -494,8 +489,8 @@ maintainer's explicit OK, after the maintainer's visual A/B, the licence review 
       from `_UNPUBLISHED` in `tools/export-recipes/anima/tests/test_distribution.py`
 - [ ] Give its mount the object form with `hfRepo: anima.SOURCES["anima-2.9b"].repo` (`packages/local-distributions/mounts.ts`),
       and move it to "published" in the note of `DISTRIBUTIONS` in `packages/runtime/tests/distribution_gate_test.ts`
-- [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is the one `SOURCES` line of
-      `./anima`
+- [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that nothing changes: the snapshot lists
+      names and kinds only, and `./anima` exports `SOURCES` already (a new key is not a new line)
 
 ## 4. JSR publish
 

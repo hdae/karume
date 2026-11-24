@@ -176,8 +176,7 @@ if (extraManifestText === undefined) {
 const EXTRA_RUNNABLE = RUNNABLE && extraManifestText !== undefined;
 
 /**
- * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1, not published
- * yet). Its 40-block transformer and its text conditioner are its own; its text encoder, VAE
+ * Anima-2.9B's distribution (`models/karume-anima-2.9b/` — anima-2.9b-preview-v1). Its 40-block transformer and its text conditioner are its own; its text encoder, VAE
  * decoder and tokenizers are cross-repository references into the official repository, as for the
  * extra variants, so it runs only together with the official mirror ({@link ASSETS_DIR}).
  */

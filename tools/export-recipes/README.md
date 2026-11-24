@@ -75,8 +75,7 @@ uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1
     --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 --model anima-aesthetic-v1.0 \
     --out ../../models/karume-anima                     # the 5 official variants
 uv run python dist.py --pipeline anima-2.9b \
-    --resolve-refs hf                                   # Anima-2.9B (references karume-anima;
-                                                        # not published)
+    --resolve-refs hf                                   # Anima-2.9B (references karume-anima)
 uv run python dist.py --pipeline irodori                # v4-small
 uv run python dist.py --pipeline irodori --model v4.1-small \
     --resolve-refs hf                                   # references karume-irodori-v4-small
