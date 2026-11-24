@@ -37,7 +37,7 @@ instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly with
 
 | Referencing repository | Referenced repository | Borrowed roles (the recipe's declaration) |
 | --- | --- | --- |
-| `karume-anima-extra` (fine-tuned models — ADR 0087, the same shape as the former turbo → anima direction) | `karume-anima` (model `anima-v1.0`) | `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` / `tokenizer_2` (`ANIMA_EXTRA_SHARED_ROLES`) |
+| `karume-anima-extra` (fine-tuned models — ADR 0087, the same shape as the former turbo → anima direction) | `karume-anima` (model `anima-v1.0`) | `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` / `tokenizer_2` (`ANIMA_BASE_SHARED_ROLES`) |
 | `karume-wan2.2` (ADR [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d", ADR [0121](decisions/0121-wan22-ti2v-5b.md) decision 9) | `karume-umt5-xxl` (model `xxl`) | `text_encoder` (`WAN_TEXT_ENCODER_REFERENCE`) |
 | `karume-irodori-v4.1-small` | `karume-irodori-v4-small` (model `v4-small`) | 26 roles = 90 files, 5,637 MiB: every graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and `tokenizer` (`IRODORI_V41_SHARED_ROLES`) |
 | `karume-irodori-v4.1-small-mf` (ADR [0150](decisions/0150-irodori-meanflow.md), first published in 0.21.0) | `karume-irodori-v4-small` (model `v4-small`) and `karume-irodori-v4.1-small` (model `v4.1-small`) | at v4-small 19 roles = 62 files, 3,158 MiB: backbone, the two projectors, speaker and the codec pair in f32 / f16 / i8, and `tokenizer`; at v4.1-small `duration_*` = 9 files, 146 MiB (`IRODORI_PUBLISHED`, `IRODORI_TOKENIZER_HOLDERS`) |
@@ -45,7 +45,7 @@ instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly with
 
 One more referencing repository is built but not on the Hub yet: `karume-anima-2.9b` (Anima-2.9B — ADR
 [0087](decisions/0087-anima-official-extra-repos.md) addendum of 2026-11-24) references `karume-anima` (model `anima-v1.0`)
-for the same roles as `karume-anima-extra` (`ANIMA_EXTRA_SHARED_ROLES`). Its first publication is the checklist "First
+for the same roles as `karume-anima-extra` (`ANIMA_BASE_SHARED_ROLES`). Its first publication is the checklist "First
 publication of `karume-anima-2.9b`" in §3; until then its local mirror is built offline with
 `uv run python dist.py --pipeline anima-2.9b --ref-revision karume-anima=<the SHA of anima.SOURCES["anima"]>`.
 

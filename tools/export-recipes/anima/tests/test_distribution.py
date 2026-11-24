@@ -46,8 +46,8 @@ from anima.distribution import (
     ANIMA_AESTHETIC_MODEL_NAME,
     ANIMA_ASSETS,
     ANIMA_BASE_MODEL_NAME,
+    ANIMA_BASE_SHARED_ROLES,
     ANIMA_DEFAULT_QUANT,
-    ANIMA_EXTRA_SHARED_ROLES,
     ANIMA_MODELS,
     ANIMA_PUBLISHED_PART0,
     ANIMA_QUANT_ABBREVIATIONS,
@@ -2151,7 +2151,7 @@ class TestPublishedContainers:
         entry for every model — the extra repository references exactly these; the rest is each
         model's own, in its own repository."""
         for model in ANIMA_MODELS:
-            for role in ANIMA_EXTRA_SHARED_ROLES:
+            for role in ANIMA_BASE_SHARED_ROLES:
                 assert anima_published_holder(model, role) == (
                     OFFICIAL_REPO_NAME,
                     ANIMA_BASE_MODEL_NAME,
@@ -2218,7 +2218,7 @@ class TestPublishedContainers:
     ) -> None:
         published = anima_published_sources("anima-wai-v1.0", published_mirrors, tmp_path / "view")
 
-        for role in ANIMA_EXTRA_SHARED_ROLES:
+        for role in ANIMA_BASE_SHARED_ROLES:
             assert published.holders[role] == OFFICIAL_REPO_NAME, role
         for role in ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"):
             assert published.holders[role] == EXTRA_REPO_NAME, role
@@ -2498,7 +2498,7 @@ class TestUnpublishedModel:
             (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         base = official["models"][ANIMA_BASE_MODEL_NAME]
-        for role in ANIMA_EXTRA_SHARED_ROLES:
+        for role in ANIMA_BASE_SHARED_ROLES:
             refs = _role_refs(entry, role)
             assert {ref.get("repo") for ref in refs} == {"hdae/karume-anima"}, role
             assert [ref["sha256"] for ref in refs] == [
@@ -2615,7 +2615,7 @@ class TestUnpublishedModel:
             tmp_path / "series", ANIMA_2_9B_MODEL_NAME, published_mirrors, tmp_path / "view"
         )
 
-        assert sorted(sources.published.placements) == sorted(ANIMA_EXTRA_SHARED_ROLES)
+        assert sorted(sources.published.placements) == sorted(ANIMA_BASE_SHARED_ROLES)
         assert sources.published.borrowed == tuple(sources.published.placements)
         assert sources.published.repository == ANIMA_2_9B_REPO_NAME
 

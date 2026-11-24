@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ import pytest
 from anima.card import (
     ANIMA_2_9B_ORIGINS_INTRO,
     ANIMA_2_9B_TITLE,
+    ANIMA_2_9B_UPSTREAM_DESCRIPTION,
     ANIMA_EXTRA_TITLE,
     ANIMA_OFFICIAL_TITLE,
     ATTRIBUTION_NOTICE,
@@ -594,7 +596,24 @@ class TestLayeredCard:
         assert EXTRA_ORIGINS_INTRO[0] not in layered_card
         flat = " ".join(layered_card.split())
         assert "deepened from 28 to 40 blocks" in flat
-        assert "fine-tune" not in flat
+        # The card's own words never call it a community fine-tune (that is the extra repository's
+        # statement); the upstream card's quoted description is the only place "fine-tune" appears.
+        assert "community fine-tune" not in flat
+        own_words = flat
+        for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION:
+            assert f"> {quote}" in layered_card
+            own_words = own_words.replace(quote, "")
+        assert "fine-tune" not in own_words
+        assert "trained further" not in flat
+
+    def test_the_quoted_description_is_the_upstream_card_verbatim(self) -> None:
+        """A quote that drifted from the upstream card would put words in the author's mouth."""
+        upstream_card = Path(__file__).parents[4] / "inputs/anima/anima-2.9b-original/README.md"
+        if not upstream_card.is_file():
+            pytest.skip(f"the upstream card is not on this machine ({upstream_card})")
+        text = upstream_card.read_text(encoding="utf-8")
+        for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION:
+            assert quote in text
 
     def test_it_lists_the_origin_with_the_revision_read(self, layered_card: str) -> None:
         upstream = UPSTREAM_MODELS[LAYERED]

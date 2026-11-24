@@ -87,7 +87,8 @@ ANIMA_AESTHETIC_MODEL_NAME = "anima-aesthetic-v1.1"
 
 #: Model name of Anima-2.9B (HF `Gazingstars123/Anima-2.9B`; the upstream's version name
 #: `preview-v1` is kept — ADR 0077): a third party's layer expansion of the Anima base model, its
-#: transformer deepened from 28 to 40 blocks of the same width and trained further. It is a
+#: transformer deepened from 28 to 40 blocks of the same width (how it was trained is the upstream
+#: card's to say — the distribution's card quotes it). It is a
 #: modified model rather than a fine-tune, so it has a repository of its own
 #: ({@link ANIMA_2_9B_REPO_NAME} — ADR 0087 addendum of 2026-11-24). Its text encoder, VAE decoder
 #: and tokenizers are the base model's bytes; its text conditioner and transformer are its own.
@@ -114,8 +115,8 @@ def text_stack_role(component: str, storage: str) -> str:
     """The role name of a text-stack placement (a key of {@link OUTPUT_PATHS}):
     `<component>_<storage>`, the same form as the transformer's `transformer_<storage>`.
 
-    The extra repository's cross-repository references are derived through this function
-    ({@link ANIMA_EXTRA_SHARED_ROLES}).
+    The cross-repository references of the extra and 2.9B repositories are derived through this
+    function ({@link ANIMA_BASE_SHARED_ROLES}).
     """
     return f"{component}_{storage}"
 
@@ -302,8 +303,10 @@ ANIMA_2_9B_NOTICE_MARKDOWN = notice_markdown(
         "- The bf16 series of every component keeps the values of the upstream BF16 weights",
         "  unchanged (no rounding or quantization).",
         "- The model in this repository is a third party's layer expansion of the CircleStone",
-        "  Anima base model: its transformer was deepened from 28 to 40 blocks and trained",
-        "  further. Its origin, author and license terms are stated in README.md.",
+        "  Anima base model: its transformer was deepened from 28 to 40 blocks. For an accurate",
+        "  description of how it was made and trained, refer to the upstream model card",
+        "  (https://huggingface.co/Gazingstars123/Anima-2.9B). Its origin, author and license",
+        "  terms are stated in README.md.",
     )
 )
 
@@ -1138,12 +1141,12 @@ def anima_published_holder(model: str, role: str) -> tuple[str, str]:
     """(repository, model) whose published entry a role of `model` is taken from.
 
     The text encoder, the VAE decoder and the tokenizers are the base model's for every model
-    ({@link ANIMA_EXTRA_SHARED_ROLES} — the parts fine-tunes and the layer expansion do not touch;
+    ({@link ANIMA_BASE_SHARED_ROLES} — the parts fine-tunes and the layer expansion do not touch;
     the official repository folds them into `shared/`, and the extra and 2.9B repositories
     reference them there instead of storing them). Every other role is the model's own, in its own
     repository.
     """
-    if role in ANIMA_EXTRA_SHARED_ROLES:
+    if role in ANIMA_BASE_SHARED_ROLES:
         return OFFICIAL_REPO_NAME, ANIMA_BASE_MODEL_NAME
     return anima_repository(model), model
 
@@ -1566,12 +1569,13 @@ def _2_9b_repo_name(_model: str) -> str:
     return ANIMA_2_9B_REPO_NAME
 
 
-#: Roles every model outside the official repository — the fine-tunes of the extra repository and
-#: the model of the 2.9B one — borrows from the official repository instead of storing them (ADR
-#: 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the VAE decoder in every text-stack
-#: storage, and both tokenizers — the official text stack, byte-identical. Not `text_conditioner`:
-#: every such model has its own ({@link text_conditioner_series}).
-ANIMA_EXTRA_SHARED_ROLES: tuple[str, ...] = (
+#: Roles held by the base model that every model outside the official repository — the fine-tunes
+#: of the extra repository and the model of the 2.9B one — borrows from the official repository
+#: instead of storing them (ADR 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the
+#: VAE decoder in every text-stack storage, and both tokenizers — the official text stack,
+#: byte-identical. Not `text_conditioner`: every such model has its own ({@link
+#: text_conditioner_series}).
+ANIMA_BASE_SHARED_ROLES: tuple[str, ...] = (
     *(
         text_stack_role(component, storage)
         for storage in ANIMA_TEXT_STACK_SERIES
@@ -1589,7 +1593,7 @@ def _official_text_stack_references(_model: str) -> tuple[CrossRepoReference, ..
         CrossRepoReference(
             repo_name=OFFICIAL_REPO_NAME,
             model=ANIMA_BASE_MODEL_NAME,
-            roles=ANIMA_EXTRA_SHARED_ROLES,
+            roles=ANIMA_BASE_SHARED_ROLES,
         ),
     )
 

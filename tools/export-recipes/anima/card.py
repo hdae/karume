@@ -323,6 +323,20 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
 #: `inputs/anima/anima-2.9b-original/README.md`, "Generation (Recommendation)", 2026-11-24).
 ANIMA_2_9B_UPSTREAM_RECOMMENDATION = "28–50 steps at guidance 3.5–5"
 
+#: What the upstream card says about how Anima-2.9B was made, quoted **verbatim** (the same file,
+#: "Overview" and "Training/Dataset", read 2026-11-24). What was trained is the author's statement
+#: and cannot be measured from the weights, so the card quotes it rather than rewording it; the
+#: block count is the one part this recipe states itself (read from the checkpoint's header).
+#: `test_card.py` compares the quotes with the local copy of that file when it is present.
+ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
+    "Anima-2.9B is a fine-tune and layer-expansion of"
+    " [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima). The base Anima"
+    " model targets anime, illustration, and non-photorealistic art; this release continues"
+    " training on that foundation with the expanded architecture.",
+    "As of preview v1, only the new layers have been trained, with roughly 70% of the compute"
+    " spent on 1024px",
+)
+
 
 def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
     defaults = default_model(manifest)["pipelineConfig"]["defaults"]
@@ -332,11 +346,15 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         f"[{base_model}](https://huggingface.co/{base_model}), a layer expansion of the",
         "CircleStone **Anima** base model by a third party — its transformer deepened from 28 to",
-        "40 blocks of the same width (about 2.9B parameters) and trained further — converted into",
+        "40 blocks of the same width (about 2.9B parameters) — converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
         "first part carries the graph and model descriptors). Runs as-is in the browser and in",
         "Deno.",
         "",
+        'Its card (at the revision listed under "Models and their origins" below) describes it',
+        "as follows:",
+        "",
+        *(line for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION for line in (f"> {quote}", "")),
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
         "  what makes the **negative prompt take effect**. The default is inside the upstream",
