@@ -43,8 +43,7 @@
  * MUST: maps are read only through `Object.hasOwn` / own entries (cross-cutting invariant).
  *
  * This family has no table of public distribution repositories: nothing of it is published yet, so
- * there is no `SOURCES` (the same as `vowel-detector` — docs/release-runbook.md §3 adds it at the
- * first publication).
+ * there is no `SOURCES` (docs/release-runbook.md §3 adds it at the first publication).
  *
  * MUST: modules are side-effect free (CLAUDE.md).
  */

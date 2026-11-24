@@ -218,7 +218,7 @@ an unroll that is not 4, 238 of them 16-column variants, which never differ on t
 
 ## On Metal, the VAE fusion rule `models/vae_rms_silu` differs from the unfused plan (measured 2026-11-17; recorded by the ruling of 2026-11-12)
 
-The Wan (2.1 and 2.2) and anima pipelines pass the fusion rule `models/vae_rms_silu` by default to their VAE decoder
+The Wan2.2 and anima pipelines pass the fusion rule `models/vae_rms_silu` by default to their VAE decoder
 Sessions on every backend (ADR [0148](decisions/0148-external-fusion-rules.md) addendum of 2026-11-12 on it). Its bit
 identity with the unfused plan rests on a rounding barrier: each value the unfused plan stores passes an XOR with a mask
 that is 0 at run time, which keeps the compiler from contracting a multiply-add across it. That form is measured to hold

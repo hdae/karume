@@ -7,7 +7,8 @@ is not in the Core ATen decomposition table — the same reason as `torchvision:
 
 The problem this solves: the decomposition of `aten.gru.input` is **unrolled T times** by a Python
 loop, so `torch.export` specializes the length axis (`Specializations unexpectedly required (T)`).
-In vowel-detector, T10=200 gives 8,434 nodes, and every length needs its own graph.
+In a CRNN with a 2-layer bidirectional GRU, T=200 gives 8,434 nodes, and every length needs its
+own graph.
 
 MUST: the body (the eager implementation) is written as **a verbatim copy of torch's GRU
 decomposition**. The golden expectations are taken by running this implementation eagerly, so a
