@@ -61,6 +61,8 @@ import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/inde
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { NVIDIA_AMPERE } from "../src/kernels/geometry-profiles/nvidia-ampere.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
+import { APPLE_M5 } from "../src/kernels/geometry-profiles/apple-m5.ts";
+import { APPLE_METAL_3_SHARED } from "../src/kernels/geometry-profiles/apple-metal-3-shared.ts";
 import {
   assertGemmGeometry,
   defaultGemmGeometry,
@@ -306,14 +308,57 @@ describe("the public list BUILTIN_GEOMETRY_PROFILES is a deeply frozen copy", ()
   it("the values equal the generated constants, and the constants themselves are not frozen (loading does not rewrite another module's values)", () => {
     // A copy missing a field (the frozen copy forgetting to copy a new field of the type) also
     // fails here
-    assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]);
-    for (const profile of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]) {
+    assertEquals(BUILTIN_GEOMETRY_PROFILES, [
+      APPLE_METAL_3,
+      NVIDIA_AMPERE,
+      NVIDIA_BLACKWELL,
+      APPLE_M5,
+      APPLE_METAL_3_SHARED,
+    ]);
+    for (const profile of [
+      APPLE_METAL_3,
+      NVIDIA_AMPERE,
+      NVIDIA_BLACKWELL,
+      APPLE_M5,
+      APPLE_METAL_3_SHARED,
+    ]) {
       assert(!Object.isFrozen(profile), `${profile.id}: the generated constant was frozen`);
       assert(
         !Object.isFrozen(profile.gemmRows[0].geometry),
         `${profile.id}: the geometry was frozen`,
       );
     }
+  });
+});
+
+// SPEC: docs/spec/geometry-profiles.md#the-three-levels
+describe("the Apple tables of the built-in list: measured, predicted and the default", () => {
+  const apple = { vendor: "apple", architecture: "metal-3" } as const;
+
+  it("an adapter that reports Apple M2 or Apple M5 gets that device's measured table (by description)", () => {
+    assertEquals(selectGeometryProfile({ ...apple, description: "Apple M2" }).id, "apple-metal-3");
+    assertEquals(selectGeometryProfile({ ...apple, description: "Apple M5" }).id, "apple-m5");
+  });
+
+  it("an adapter of that vendor and architecture with an empty, absent or unmeasured description gets the shared table (predicted, by vendor and architecture)", () => {
+    for (const adapter of [
+      { ...apple, description: "" },
+      apple,
+      { ...apple, description: "Apple M3" },
+    ]) {
+      assertEquals(
+        selectGeometryProfile(adapter).id,
+        "apple-metal-3-shared",
+        JSON.stringify(adapter),
+      );
+    }
+  });
+
+  it("an Apple adapter of another architecture gets the default", () => {
+    assertStrictEquals(
+      selectGeometryProfile({ vendor: "apple", architecture: "metal-2", description: "" }),
+      DEFAULT_GEOMETRY_PROFILE,
+    );
   });
 });
 

@@ -152,6 +152,58 @@ export type GeometryProfileFamilyProvenance = {
 };
 
 /**
+ * One swept adapter as its records name it: the 4 fields of `GPUAdapterInfo` (an empty string stays
+ * a value).
+ */
+export type GeometryProfileAdapter = {
+  readonly vendor: string;
+  readonly architecture: string;
+  readonly device: string;
+  readonly description: string;
+};
+
+/**
+ * The adapters a generated table was derived from, in one of two forms. A measured table holds
+ * `adapter`: the one adapter every record agrees with on all four fields. A shared table holds
+ * `adapters`: two or more adapters of one vendor and architecture, each with a description of its
+ * own ({@link sharedAdaptersViolation}), in the order their records were given — it is matched by
+ * vendor and architecture and predicts for the adapters of that vendor and architecture that no
+ * table names by description.
+ * SPEC: docs/spec/geometry-profiles.md#shared-tables
+ */
+export type GeometryProfileAdapters =
+  | { readonly adapter: GeometryProfileAdapter; readonly adapters?: undefined }
+  | { readonly adapters: readonly GeometryProfileAdapter[]; readonly adapter?: undefined };
+
+/**
+ * Why a shared table's `provenance.adapters` is not one (undefined when it is), as the rest of a
+ * sentence about the list: fewer than two adapters, an adapter without a description, or two
+ * adapters of one description. A shared derivation tells devices apart by their descriptions and
+ * needs two of them, so such a list names fewer than two devices. The injection check, the JSON
+ * reader and matching all read the list by this rule.
+ * SPEC: docs/spec/geometry-profiles.md#shared-tables
+ */
+export const sharedAdaptersViolation = (
+  adapters: readonly GeometryProfileAdapter[],
+): string | undefined => {
+  if (adapters.length < 2) {
+    return `names ${adapters.length} adapter${adapters.length === 1 ? "" : "s"} (a shared table is derived from two or more)`;
+  }
+  const seen = new Map<string, number>();
+  for (const [index, { description }] of adapters.entries()) {
+    if (description === "") {
+      return `[${index}] has no description (a shared table tells its devices apart by their descriptions)`;
+    }
+    const twin = seen.get(description);
+    if (twin !== undefined) {
+      return `[${twin}] and [${index}] are one device (both ${JSON.stringify(description)} — a shared table tells its devices apart by their descriptions and names each once)`;
+    }
+    seen.set(description, index);
+  }
+  return undefined;
+};
+
+/**
  * A GEMM geometry profile = a static table of tile geometries per op × bucket (DECIDED: ADR 0115).
  * The embedded tables (`./geometry-profiles/`) are chosen by the adapter's (vendor, architecture,
  * description), and users can inject, with `acquireGpu({ geometryProfile })`, a table made from
@@ -241,17 +293,7 @@ export type GeometryProfile = {
    * `./tune` does the matching. The runtime (`assertGeometryProfile`, the injection entry point of
    * `acquireGpu`) checks only the shape (the field types) and does not use it for matching.
    */
-  readonly provenance?: {
-    /**
-     * The swept adapter (the 4 fields of `GPUAdapterInfo` — an empty string stays a value;
-     * identical across all records).
-     */
-    readonly adapter: {
-      readonly vendor: string;
-      readonly architecture: string;
-      readonly device: string;
-      readonly description: string;
-    };
+  readonly provenance?: GeometryProfileAdapters & {
     /**
      * Per op family ({@link GeometryProfileFamily}), the records and matching keys of that family.
      * A family that no record has a case of has no entry: its fields are the default (matching
@@ -995,16 +1037,43 @@ const rulesOf = <Geometry>(
 };
 
 /**
- * The shape of `provenance` (field types only). Matching its content is the job of
- * `geometryProfileMismatch` in `@karume/runtime/tune`, and the runtime does not read it — it is
- * checked here because a value that passes the guard is typed as {@link GeometryProfile}, so a value
- * that differs from the type declaration must not pass.
+ * The shape of `provenance` (field types, and a shared table's adapter list by
+ * {@link sharedAdaptersViolation}). Matching its content is the job of `geometryProfileMismatch` in
+ * `@karume/runtime/tune`, and the runtime does not read it — it is checked here because a value
+ * that passes the guard is typed as {@link GeometryProfile}, so a value that differs from the type
+ * declaration must not pass.
  */
 const assertProvenanceShape = (value: unknown, where: string): void => {
   const provenance = recordOf(value, where, "provenance");
-  const adapter = recordOf(provenance.adapter, where, "provenance.adapter");
-  for (const key of ["vendor", "architecture", "device", "description"] as const) {
-    stringOf(adapter[key], where, `provenance.adapter.${key}`);
+  const adapterShape = (entry: unknown, path: string): GeometryProfileAdapter => {
+    const adapter = recordOf(entry, where, path);
+    return {
+      vendor: stringOf(adapter.vendor, where, `${path}.vendor`),
+      architecture: stringOf(adapter.architecture, where, `${path}.architecture`),
+      device: stringOf(adapter.device, where, `${path}.device`),
+      description: stringOf(adapter.description, where, `${path}.description`),
+    };
+  };
+  // The two forms of GeometryProfileAdapters: a measured table's one adapter, or a shared table's
+  // list — never both and never neither
+  if (provenance.adapters === undefined) {
+    adapterShape(provenance.adapter, "provenance.adapter");
+  } else {
+    if (provenance.adapter !== undefined) {
+      throw new CodegenError(
+        `${where}: provenance has both adapter and adapters (a table is measured on one adapter or shared by several, not both)`,
+      );
+    }
+    if (!Array.isArray(provenance.adapters)) {
+      throw new CodegenError(`${where}: provenance.adapters is not an array`);
+    }
+    const adapters = denseEntriesOf(provenance.adapters, where, "provenance.adapters").map(
+      (entry, index) => adapterShape(entry, `provenance.adapters[${index}]`),
+    );
+    const violation = sharedAdaptersViolation(adapters);
+    if (violation !== undefined) {
+      throw new CodegenError(`${where}: provenance.adapters ${violation}`);
+    }
   }
   const families = recordOf(provenance.families, where, "provenance.families");
   for (const family of GEOMETRY_PROFILE_FAMILIES) {

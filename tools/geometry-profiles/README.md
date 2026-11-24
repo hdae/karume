@@ -11,6 +11,11 @@ derived from them, and every other family is carried over from the registered ta
 whole table from all its historical records, and it never lifts an old record format. A new adapter's first table has
 no base.
 
+A table is measured (matched by the adapter's description, from that device's records), or predicted (matched by vendor
+and architecture). `--shared` derives a shared table: one predicted table from the records of two or more devices of
+one vendor and architecture, a geometry taken only where it passes the adoption rule on every device
+([the spec](../../docs/spec/geometry-profiles.md#shared-tables)).
+
 GEMV sweep records (`--gemv-records`, the workbench's `gemv-sweep` entry) derive the table's GEMV choices of linear
 (`linearGemv`) with `deriveLinearGemvChoices` of `@karume/runtime/tune`, onto the table the sweep records give (or
 onto the registered table when only GEMV records are given). Without them, a table that carries the field keeps it.
@@ -24,6 +29,8 @@ From the repository root:
 node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
   [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] \
   [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
+node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] \
+  [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
 node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-records=<path>[,<path>…]] [--dry-run]
 ```
 
@@ -42,6 +49,17 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   are reported in the verdict lines, not refused, and so are the current groups without a usable reference. The field
   is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
+- `--shared` takes records of two or more devices of the vendor and architecture, told apart by their descriptions:
+  every record must carry a non-empty description (a browser record has one only when the browser reports it — in
+  Chrome, with the WebGPU developer-features flag, `chrome://flags/#enable-webgpu-developer-features`), the records
+  of one description must agree on the device id too, and at least two descriptions are needed. The records are
+  grouped by description and each group is read as one adapter's; a geometry is
+  adopted only when, on every device, its output is identical and it is at least the threshold faster than that
+  device's default on every case of the field the device's records hold, and among those the one with the largest
+  geometric mean of the per-device geometric means is taken. A field some device has no case of keeps the default. A
+  first shared table needs `--vendor` and `--architecture` and takes no `--description`; a registered one is
+  regenerated onto records of its own adapters. A shared table carries tile geometries only: `--attention-bench`,
+  `--gemv-records` and `--gemv-plan` are usage errors beside it. Its verdict lines give each device's ratios.
 - `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
   keep their own ×1.10.
 - Without `--dry-run` it writes the table file and prints what it wrote and the verdict lines. With `--dry-run` it
@@ -89,6 +107,13 @@ node tools/geometry-profiles/generate.ts intel-xe2 --vendor=intel --architecture
   --records=outputs/workbench/browser-intel-arc-b570/geometry-sweep_<time>.json
 ```
 
+A shared table from two devices' records (how `apple-metal-3-shared` was made; a registered id takes no match):
+
+```sh
+node tools/geometry-profiles/generate.ts apple-metal-3-shared --shared --vendor=apple --architecture=metal-3 \
+  --records=outputs/workbench/browser-apple-m5/geometry-sweep_<time>.json,outputs/workbench/browser-apple-m2/geometry-sweep_<time>.json
+```
+
 ## What a record may be
 
 - A workbench record (`karume-workbench/1`, written by `apps/workbench`): the `geometry-sweep` entry's record for
@@ -116,6 +141,8 @@ inputs give the same bytes):
   the checkout commit and whether it was dirty; for a bare record: what the record carries);
 - "Carried over": the families taken from the registered table and the last commit that touched the table file, so
   their adoption lines are one `git show <commit>:<path>` away (absent for a first table);
+- for a shared table: the devices it predicts from and that it is matched without a description, the records listed
+  under the device each is of, and the shared adoption rule;
 - "Adoption": the adoption rule with the threshold used (left out when no sweep record was given), the GEMV choices'
   rule when GEMV records were given, then the derivations' verdict lines. The GEMV choices are named among the things
   derived or carried over like an op family.

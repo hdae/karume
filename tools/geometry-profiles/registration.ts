@@ -22,30 +22,42 @@ export class RegistrationError extends Error {
 const lastLineIndex = (lines: readonly string[], pattern: RegExp): number =>
   lines.findLastIndex((line) => pattern.test(line));
 
-/** The two edits of one file: an import after the last table import, the list extended in place. */
+/** The 1-based line of a character offset of `text`. */
+const lineAt = (text: string, offset: number): number => text.slice(0, offset).split("\n").length;
+
+/**
+ * The two edits of one file: an import after the last table import, the list extended in place.
+ * `list` matches the list statement over one line or several (the formatter wraps a long one) and
+ * captures its names; `render` writes the statement on one line for a list of names (the
+ * formatter wraps it again).
+ */
 const fileEdits = (
   path: string,
   text: string,
   imports: RegExp,
   list: RegExp,
+  render: (names: string) => string,
   importLine: string,
   constant: string,
 ): string[] => {
-  const lines = text.split("\n");
-  const importAt = lastLineIndex(lines, imports);
-  const listAt = lastLineIndex(lines, list);
-  if (importAt < 0 || listAt < 0) {
+  const importAt = lastLineIndex(text.split("\n"), imports);
+  const found = [...text.matchAll(list)].at(-1);
+  if (importAt < 0 || found === undefined) {
     throw new RegistrationError(
       `${path}: cannot find ${importAt < 0 ? "the table imports" : "the list of tables"} (register the table by hand)`,
     );
   }
-  const extended = lines[listAt].replace(list, (whole, items: string) =>
-    whole.replace(`[${items}]`, `[${items}, ${constant}]`),
-  );
+  const names = (found[1] ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  const first = lineAt(text, found.index);
+  const last = lineAt(text, found.index + found[0].length);
+  const lines = first === last ? `line ${first} becomes` : `lines ${first}–${last} become`;
   return [
     `  ${path}`,
     `    after line ${importAt + 1}, add: ${importLine}`,
-    `    line ${listAt + 1} becomes: ${extended.trim()}`,
+    `    ${lines}: ${render([...names, constant].join(", "))}`,
   ];
 };
 
@@ -58,7 +70,8 @@ export const registrationEdits = (id: string, indexText: string, testText: strin
       INDEX_PATH,
       indexText,
       /^import \{ [A-Z0-9_]+ \} from "\.\/[a-z0-9-]+\.ts";$/,
-      /\[([A-Z0-9_, ]+)\]\.map\(freezeGeometryProfile\)/,
+      /\[([A-Z0-9_,\s]+)\]\.map\(\s*freezeGeometryProfile,?\s*\)/g,
+      (names) => `[${names}].map(freezeGeometryProfile),`,
       `import { ${constant} } from "./${id}.ts";`,
       constant,
     ),
@@ -66,7 +79,8 @@ export const registrationEdits = (id: string, indexText: string, testText: strin
       PROFILE_TEST_PATH,
       testText,
       /^import \{ [A-Z0-9_]+ \} from "\.\.\/src\/kernels\/geometry-profiles\/[a-z0-9-]+\.ts";$/,
-      /assertEquals\(BUILTIN_GEOMETRY_PROFILES, \[([A-Z0-9_, ]+)\]\);/,
+      /assertEquals\(BUILTIN_GEOMETRY_PROFILES, \[([A-Z0-9_,\s]+)\]\);/g,
+      (names) => `assertEquals(BUILTIN_GEOMETRY_PROFILES, [${names}]);`,
       `import { ${constant} } from "../src/kernels/geometry-profiles/${id}.ts";`,
       constant,
     ),

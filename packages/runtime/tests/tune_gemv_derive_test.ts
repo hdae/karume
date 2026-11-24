@@ -1346,6 +1346,21 @@ describe("deriveLinearGemvChoices: the refusals", () => {
     refused(inputs, "differs from table 'test-gpu''s provenance \"0x9999\"", withProvenance);
   });
 
+  it("refuses a shared table (one derived from several adapters), even when the records are of one of its adapters: a shared table carries tile geometries only", () => {
+    const shared: GeometryProfile = {
+      ...TABLE,
+      provenance: {
+        adapters: [GEMV_ADAPTER, { ...GEMV_ADAPTER, description: "Other GPU" }],
+        families: {},
+      },
+    };
+    refused(
+      [input("a.json", specs), input("bb.json", specs)],
+      "Table 'test-gpu' is a shared table (derived from 2 adapters): it carries tile geometries only",
+      shared,
+    );
+  });
+
   it("takes records whose description differs from the table's provenance (a driver update), while records that disagree on it are still refused", () => {
     const table: GeometryProfile = {
       ...TABLE,

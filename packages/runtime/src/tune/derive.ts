@@ -105,6 +105,13 @@
  * family `base` has no entry for), an uncovered family keeps the default and gets no entry. A
  * base's `linearGemv` (the GEMV choices, which only GEMV sweep records decide —
  * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is.
+ *
+ * ## Shared tables (ADR 0156)
+ *
+ * With `shared`, one table comes from the records of two or more adapters of one vendor and
+ * architecture ({@link deriveSharedProfile}): each adapter's records are judged as above on their
+ * own, and a geometry is taken only when it passes the rule on every adapter. Without it, records of
+ * two adapters are refused.
  */
 import {
   defaultGemmGeometry,
@@ -1313,23 +1320,31 @@ const judgeCandidate = (
   };
 };
 
-const judgeSlot = (
-  spec: SlotSpec,
-  slotRows: readonly SlotRow[],
-  excluded: readonly ExcludedCase[],
-  minSpeedup: number,
-): SlotVerdict => {
-  if (slotRows.length === 0) {
-    const { name, geometry } = spec.fallback();
-    return {
-      slot: spec.slot,
-      scope: spec.scope,
-      cases: [],
-      outcome: { kind: "default", name, geometry, reason: "the sweeps have no case of this class" },
-      rejected: [],
-      excluded,
-    };
-  }
+/** A candidate of a class: its geometry and its rows per case (dropped rows included). */
+type SlotCandidate = {
+  readonly geometry: Geometry;
+  readonly observations: ReadonlyMap<string, readonly SlotRow[]>;
+};
+
+/**
+ * The rows of one class read for judging (records of one adapter): its cases, the cases dropped from
+ * the ratio material in every sweep, the sweep's default row and the candidates by name.
+ */
+type SlotRows = {
+  readonly cases: readonly string[];
+  readonly unmeasured: ReadonlySet<string>;
+  readonly defaultRow: SweepObservation;
+  readonly candidates: ReadonlyMap<string, SlotCandidate>;
+};
+
+/** The reason of a class no record has a case of. */
+const NO_CASE = "the sweeps have no case of this class";
+
+/**
+ * Reads a class's rows (one or more, records of one adapter) for judging, after the checks of its
+ * default rows (fails loudly).
+ */
+const readSlotRows = (spec: SlotSpec, slotRows: readonly SlotRow[]): SlotRows => {
   // The default-row check and the case list include the rows dropped from the ratio material (only
   // the ratio observations are dropped — the baseline check, output match and failures apply to the
   // record itself)
@@ -1379,7 +1394,28 @@ const judgeSlot = (
     entry.observations.set(row.caseId, [...(entry.observations.get(row.caseId) ?? []), slotRow]);
     byName.set(row.geometry, entry);
   }
-  const judged = [...byName.entries()]
+  return { cases, unmeasured, defaultRow, candidates: byName };
+};
+
+const judgeSlot = (
+  spec: SlotSpec,
+  slotRows: readonly SlotRow[],
+  excluded: readonly ExcludedCase[],
+  minSpeedup: number,
+): SlotVerdict => {
+  if (slotRows.length === 0) {
+    const { name, geometry } = spec.fallback();
+    return {
+      slot: spec.slot,
+      scope: spec.scope,
+      cases: [],
+      outcome: { kind: "default", name, geometry, reason: NO_CASE },
+      rejected: [],
+      excluded,
+    };
+  }
+  const { cases, unmeasured, defaultRow, candidates } = readSlotRows(spec, slotRows);
+  const judged = [...candidates.entries()]
     .map(([name, entry]) => ({
       name,
       geometry: entry.geometry,
@@ -1477,36 +1513,16 @@ export const deriveProfile = (
   }
   const seen = new Map<string, string>();
   for (const source of sources) {
-    const twin = seen.get(source.sha256);
-    // Counting the same record twice would give that record's observations double weight
-    if (twin !== undefined) {
-      throw new Error(`The same sweep is passed twice (${twin} and ${source.path})`);
-    }
-    seen.set(source.sha256, source.path);
-    // MUST: measurements of different adapters are not mixed (a table is a per-adapter answer —
-    // B570 and M2 point in opposite directions). When description is given, only sweeps of that
-    // model (other models of the same vendor / architecture are not mixed)
-    const { vendor, architecture, description } = source.adapter;
-    if (
-      options.optIn !== true &&
-      (vendor !== options.vendor ||
-        (options.architecture !== undefined && architecture !== options.architecture) ||
-        (options.description !== undefined && description !== options.description))
-    ) {
-      throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} / ${description} does not match the requested ${targetLabel(
-          options,
-        )}`,
-      );
-    }
+    assertRequestedSource(source, seen, options);
     // MUST: all sweeps agree on all four adapter fields (two empty values match, one empty value
     // does not — ADR 0117 decision 4). The table's provenance holds a single adapter, and matching
     // (geometryProfileMismatch) looks at those four fields. With optIn or without description (the
     // CLI's --opt-in / --description, removed in 0.15) the check above does not look at
     // description, so mixing other models of the same vendor / architecture (M2 and M5, say) is
-    // stopped here too
+    // stopped here too. A table from several adapters is a shared table, derived by a rule of its
+    // own (deriveSharedProfile — no timing of one adapter is read against another's)
     const first = sources[0].adapter;
-    for (const field of ["vendor", "architecture", "device", "description"] as const) {
+    for (const field of ADAPTER_FIELDS) {
       if (source.adapter[field] !== first[field]) {
         throw new Error(
           `${source.path}: adapter ${field} ${JSON.stringify(source.adapter[field])} differs from ${
@@ -1516,6 +1532,66 @@ export const deriveProfile = (
       }
     }
   }
+  const { bySlot, excludedBySlot } = slotRowsOf(sources, segments, i8a8Segments);
+  return profileSlots(segments, i8a8Segments).map((spec) =>
+    judgeSlot(
+      spec,
+      bySlot.get(spec.slot) ?? [],
+      excludedBySlot.get(spec.slot) ?? [],
+      options.minSpeedup,
+    ),
+  );
+};
+
+/** The four adapter fields a record names (`GPUAdapterInfo`'s). */
+const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
+
+/**
+ * The checks of one record against the records before it and the requested target (fails loudly):
+ * the same record twice, and an adapter the target does not take.
+ */
+const assertRequestedSource = (
+  source: SweepSource,
+  seen: Map<string, string>,
+  options: ProfileTarget,
+): void => {
+  const twin = seen.get(source.sha256);
+  // Counting the same record twice would give that record's observations double weight
+  if (twin !== undefined) {
+    throw new Error(`The same sweep is passed twice (${twin} and ${source.path})`);
+  }
+  seen.set(source.sha256, source.path);
+  // MUST: measurements of different adapters are not mixed (a table is a per-adapter answer —
+  // B570 and M2 point in opposite directions). When description is given, only sweeps of that
+  // model (other models of the same vendor / architecture are not mixed)
+  const { vendor, architecture, description } = source.adapter;
+  if (
+    options.optIn !== true &&
+    (vendor !== options.vendor ||
+      (options.architecture !== undefined && architecture !== options.architecture) ||
+      (options.description !== undefined && description !== options.description))
+  ) {
+    throw new Error(
+      `${source.path}: adapter ${vendor} / ${architecture} / ${description} does not match the requested ${targetLabel(
+        options,
+      )}`,
+    );
+  }
+};
+
+/**
+ * The rows of records of one adapter by class, each marked as ratio material or not, and per class
+ * the cases and observations dropped from the ratio material ({@link deriveProfile}'s material and
+ * rounding checks).
+ */
+const slotRowsOf = (
+  sources: readonly SweepSource[],
+  segments: readonly RowsSegment[],
+  i8a8Segments: readonly RowsSegment<I8a8LinearSlot, I8a8Geometry>[],
+): {
+  readonly bySlot: ReadonlyMap<ProfileSlot, readonly SlotRow[]>;
+  readonly excludedBySlot: ReadonlyMap<ProfileSlot, readonly ExcludedCase[]>;
+} => {
   const bySlot = new Map<ProfileSlot, SlotRow[]>();
   const excludedBySlot = new Map<ProfileSlot, ExcludedCase[]>();
   for (const source of sources) {
@@ -1591,15 +1667,354 @@ export const deriveProfile = (
       excludedBySlot.set(slot, [...(excludedBySlot.get(slot) ?? []), excluded]);
     }
   }
+  return { bySlot, excludedBySlot };
+};
+
+// ---------------------------------------------------------------------------
+// Shared tables: one table from the records of several adapters of one vendor and architecture
+// (SPEC: docs/spec/geometry-profiles.md#shared-tables — DECIDED: ADR 0156)
+// ---------------------------------------------------------------------------
+
+/** One device of a shared derivation: its adapter and the label its verdicts name it by. */
+type SharedDevice = {
+  readonly adapter: SweepAdapter;
+  /** The adapter's description (a shared derivation tells devices apart by it). */
+  readonly label: string;
+};
+
+/** One device's ratios of a geometry eligible on it (over that device's cases of the class). */
+export type SharedDeviceRatios = {
+  readonly label: string;
+  readonly geomean: number;
+  readonly min: number;
+  readonly max: number;
+};
+
+/**
+ * The verdict on one field of a shared table ({@link deriveSharedProfile}): per device its cases
+ * and exclusions, the outcome — the adopted geometry with its geometric mean over the devices and
+ * each device's ratios, or the default with the reason — and the geometries not taken.
+ */
+export type SharedSlotVerdict = {
+  readonly slot: ProfileSlot;
+  readonly scope: string;
+  /** In the order the devices' first records were given. */
+  readonly devices: readonly {
+    readonly label: string;
+    /** The device's cases of the class (ascending by id; empty when it has none). */
+    readonly cases: readonly string[];
+    readonly excluded: readonly ExcludedCase[];
+  }[];
+  readonly outcome:
+    | {
+        readonly kind: "adopted";
+        readonly name: string;
+        readonly geometry: Geometry;
+        /** The geometric mean over the devices of each device's geometric mean. */
+        readonly geomean: number;
+        readonly perDevice: readonly SharedDeviceRatios[];
+      }
+    | {
+        readonly kind: "default";
+        readonly name: string;
+        readonly geometry: Geometry;
+        readonly reason: string;
+      };
+  /** The geometries not taken and why, with the ratio per device (ascending by name). */
+  readonly rejected: readonly { readonly name: string; readonly reason: string }[];
+};
+
+/** The identity of an adapter by its four fields. */
+const adapterKey = (adapter: SweepAdapter): string =>
+  JSON.stringify(ADAPTER_FIELDS.map((field) => adapter[field]));
+
+/**
+ * The records grouped by device, in the order each device's first record was given, each labelled
+ * by its description.
+ *
+ * MUST: a shared derivation tells devices apart by the adapter's description, so every record
+ * carries one and the records of one description agree on all four fields. Grouping by the four
+ * fields would let one GPU pass as two devices — Chrome reports the same machine with its
+ * developer-features flag (a description and a device id) and without it (both empty) — and the
+ * rule of at least two devices would then hold on one machine.
+ */
+const sharedDevices = (
+  sources: readonly SweepSource[],
+): readonly (SharedDevice & { readonly sources: readonly SweepSource[] })[] => {
+  const groups = new Map<
+    string,
+    { adapter: SweepAdapter; firstPath: string; sources: SweepSource[] }
+  >();
+  for (const source of sources) {
+    const { description } = source.adapter;
+    if (description === "") {
+      throw new Error(
+        `${source.path}: the adapter reports no description, so its records cannot be told apart from another device's (a shared derivation tells devices apart by their descriptions) — sweep where the adapter reports its description (in Chrome, with the WebGPU developer-features flag: chrome://flags/#enable-webgpu-developer-features)`,
+      );
+    }
+    const group = groups.get(description);
+    if (group === undefined) {
+      groups.set(description, {
+        adapter: source.adapter,
+        firstPath: source.path,
+        sources: [source],
+      });
+      continue;
+    }
+    for (const field of ADAPTER_FIELDS) {
+      if (source.adapter[field] !== group.adapter[field]) {
+        throw new Error(
+          `${source.path}: adapter ${field} ${JSON.stringify(source.adapter[field])} differs from ${group.firstPath}'s ${JSON.stringify(group.adapter[field])} under the same description ${JSON.stringify(description)} (a shared derivation tells devices apart by their descriptions, so the records of one description must be of one adapter)`,
+        );
+      }
+    }
+    group.sources.push(source);
+  }
+  return [...groups.values()].map(({ adapter, sources: grouped }) => ({
+    adapter,
+    label: adapter.description,
+    sources: grouped,
+  }));
+};
+
+/** One device's eligibility of a geometry in one class (its own cases, its own default). */
+type DeviceEligibility = { readonly label: string; readonly eligibility: Eligibility };
+
+/** `Apple M5: ×1.300 (×1.250–×1.350); Apple M2: linear-m1024: ×0.950 < ×1.050`. */
+const perDeviceText = (entries: readonly DeviceEligibility[]): string =>
+  entries
+    .map(({ label, eligibility }) =>
+      eligibility.eligible
+        ? `${label}: ${formatRatio(eligibility.geomean)} (${formatRatio(eligibility.min)}–${formatRatio(eligibility.max)})`
+        : `${label}: ${eligibility.reason}`,
+    )
+    .join("; ");
+
+/**
+ * The verdict on one field of a shared table. A device that has no case of the class keeps the
+ * field at the default (named in the reason). Otherwise each device's rows are read as one
+ * adapter's ({@link readSlotRows} — its default-row checks included) and each geometry is judged
+ * per device by {@link judgeCandidate}, on that device's cases against that device's default: a
+ * geometry is eligible only when it is eligible on every device, and among those the one with the
+ * largest geometric mean of the per-device geometric means is adopted (ties by ascending name).
+ * No ratio of one device is read against another's.
+ */
+const judgeSharedSlot = (
+  spec: SlotSpec,
+  devices: readonly {
+    readonly label: string;
+    readonly slotRows: readonly SlotRow[];
+    readonly excluded: readonly ExcludedCase[];
+  }[],
+  minSpeedup: number,
+): SharedSlotVerdict => {
+  const read = devices.map((device) => ({
+    label: device.label,
+    excluded: device.excluded,
+    rows: device.slotRows.length === 0 ? undefined : readSlotRows(spec, device.slotRows),
+  }));
+  const listed = read.map(({ label, excluded, rows }) => ({
+    label,
+    cases: rows?.cases ?? [],
+    excluded,
+  }));
+  const present = read.flatMap(({ label, rows }) => (rows === undefined ? [] : [{ label, rows }]));
+  const fallback = spec.fallback();
+  const keepDefault = (reason: string, rejected: SharedSlotVerdict["rejected"] = []) => ({
+    slot: spec.slot,
+    scope: spec.scope,
+    devices: listed,
+    outcome: {
+      kind: "default" as const,
+      name: present[0]?.rows.defaultRow.geometry ?? fallback.name,
+      geometry: present[0]?.rows.defaultRow.geometryParams ?? fallback.geometry,
+      reason,
+    },
+    rejected,
+  });
+  if (present.length === 0) return keepDefault(NO_CASE);
+  const missing = read.filter(({ rows }) => rows === undefined).map(({ label }) => label);
+  if (missing.length > 0) {
+    return keepDefault(
+      `no case of this class in the records of ${missing.join(", ")} (a shared table takes a geometry only for a class every device measured)`,
+    );
+  }
+  const geometries = new Map<string, Geometry>();
+  for (const { rows } of present) {
+    for (const [name, candidate] of rows.candidates) {
+      const known = geometries.get(name);
+      if (known !== undefined && geometryKey(known) !== geometryKey(candidate.geometry)) {
+        throw new Error(`${spec.slot}: geometryParams of geometry ${name} differ between records`);
+      }
+      geometries.set(name, candidate.geometry);
+    }
+  }
+  const judged = [...geometries.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([name, geometry]) => ({
+      name,
+      geometry,
+      perDevice: present.map(({ label, rows }): DeviceEligibility => ({
+        label,
+        // A geometry a device has no row of is judged on no observation: not measured there
+        eligibility: judgeCandidate(
+          rows.cases,
+          rows.candidates.get(name)?.observations ?? new Map<string, readonly SlotRow[]>(),
+          rows.unmeasured,
+          minSpeedup,
+        ),
+      })),
+    }));
+  const eligible = judged
+    .flatMap((candidate) => {
+      const ratios = candidate.perDevice.flatMap(({ label, eligibility }) =>
+        eligibility.eligible ? [{ label, ...eligibility }] : [],
+      );
+      return ratios.length === candidate.perDevice.length
+        ? [{ ...candidate, ratios, geomean: geometricMean(ratios.map((entry) => entry.geomean)) }]
+        : [];
+    })
+    // Descending geometric mean, ties by ascending name (decided independently of input order)
+    .sort((left, right) => right.geomean - left.geomean || (left.name < right.name ? -1 : 1));
+  const winner = eligible[0];
+  const rejected = judged
+    .filter((candidate) => candidate.name !== winner?.name)
+    .map((candidate) => {
+      const ratios = perDeviceText(candidate.perDevice);
+      const own = eligible.find((entry) => entry.name === candidate.name);
+      return {
+        name: candidate.name,
+        reason:
+          own === undefined
+            ? ratios
+            : `${belowAdopted(own.geomean, winner.geomean)} over the devices — ${ratios}`,
+      };
+    });
+  if (winner === undefined) {
+    const dropped = present.find(({ rows }) => rows.unmeasured.size === rows.cases.length);
+    return keepDefault(
+      dropped === undefined
+        ? `no geometry matches the output in every case at ${formatRatio(minSpeedup)} or faster on every device`
+        : `every case of the class was dropped from the ratio material in every sweep of ${dropped.label}`,
+      rejected,
+    );
+  }
+  return {
+    slot: spec.slot,
+    scope: spec.scope,
+    devices: listed,
+    outcome: {
+      kind: "adopted",
+      name: winner.name,
+      geometry: winner.geometry,
+      geomean: winner.geomean,
+      perDevice: winner.ratios.map(({ label, geomean, min, max }) => ({
+        label,
+        geomean,
+        min,
+        max,
+      })),
+    },
+    rejected,
+  };
+};
+
+/**
+ * Produces the per-field verdicts of a **shared table** from the sweep records of two or more
+ * adapters of one vendor and architecture (a pure function — SPEC:
+ * docs/spec/geometry-profiles.md#shared-tables, DECIDED: ADR 0156).
+ *
+ * The records are grouped by device, told apart by the adapter's description
+ * ({@link sharedDevices}). Inside one group every rule of
+ * {@link deriveProfile} applies as it does to a measured table — the records of a group combine,
+ * the material and rounding checks drop the same observations, a geometry must match the default's
+ * output and reach `minSpeedup` on every case of the class the group holds. Timings are never
+ * compared or pooled across groups: every ratio is a geometry against its own device's default on
+ * that device. A geometry is eligible only when it is eligible in every group, and the one with
+ * the largest geometric mean of the per-device geometric means is adopted (devices weigh equally,
+ * not cases). A class some group has no case of keeps the default.
+ *
+ * MUST: vendor and architecture are given and description is not (the table is matched by vendor
+ * and architecture, below every table matched by description); every record is of that vendor and
+ * architecture; every record carries a description, the records of one description are of one
+ * adapter, and the records hold at least two descriptions. Anything else throws.
+ */
+export const deriveSharedProfile = (
+  sources: readonly SweepSource[],
+  options: ProfileTarget & { readonly minSpeedup: number },
+): readonly SharedSlotVerdict[] => {
+  if (sources.length === 0) throw new Error("No sweep records");
+  const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
+  const i8a8Segments = i8a8LinearSegments(I8A8_LINEAR_ROWS_BOUNDS);
+  if (options.optIn === true) {
+    throw new Error(
+      "A shared table is matched by vendor and architecture: it cannot be an injection-only table",
+    );
+  }
+  if (options.architecture === undefined) {
+    throw new Error("A shared derivation needs both vendor and architecture");
+  }
+  if (options.description !== undefined) {
+    throw new Error(
+      "A shared table is matched without a description (it predicts for the adapters of its vendor and architecture that no table names by description): drop description",
+    );
+  }
+  const target = { vendor: options.vendor, architecture: options.architecture };
+  const seen = new Map<string, string>();
+  for (const source of sources) assertRequestedSource(source, seen, target);
+  const devices = sharedDevices(sources);
+  if (devices.length < 2) {
+    throw new Error(
+      `A shared derivation needs the records of at least two devices (told apart by their descriptions); every record given is of ${devices[0].label} — derive a measured table of one adapter instead`,
+    );
+  }
+  const grouped = devices.map((device) => ({
+    label: device.label,
+    ...slotRowsOf(device.sources, segments, i8a8Segments),
+  }));
   return profileSlots(segments, i8a8Segments).map((spec) =>
-    judgeSlot(
+    judgeSharedSlot(
       spec,
-      bySlot.get(spec.slot) ?? [],
-      excludedBySlot.get(spec.slot) ?? [],
+      grouped.map(({ label, bySlot, excludedBySlot }) => ({
+        label,
+        slotRows: bySlot.get(spec.slot) ?? [],
+        excluded: excludedBySlot.get(spec.slot) ?? [],
+      })),
       options.minSpeedup,
     ),
   );
 };
+
+/**
+ * The verdict lines of a shared table (the same lines in the generated file's header and on
+ * standard output): per field, the adopted geometry with its geometric mean over the devices and
+ * each device's ratios, or the default and why; then per device its dropped cases and observations,
+ * and the geometries not taken with each device's ratio or reason.
+ */
+export const sharedVerdictLines = (verdicts: readonly SharedSlotVerdict[]): string[] =>
+  verdicts.flatMap((verdict) => {
+    const counts = verdict.devices
+      .map(({ label, cases }) => `${label} ${cases.length} cases`)
+      .join(", ");
+    const head = `${verdict.slot} (${verdict.scope}; ${counts})`;
+    const { outcome } = verdict;
+    const line =
+      outcome.kind === "adopted"
+        ? `- ${head}: adopted ${outcome.name} ${formatRatio(outcome.geomean)} over the devices (${outcome.perDevice
+            .map(
+              ({ label, geomean, min, max }) =>
+                `${label} ${formatRatio(geomean)} (${formatRatio(min)}–${formatRatio(max)})`,
+            )
+            .join(", ")})`
+        : `- ${head}: keeps the default ${outcome.name} (${outcome.reason})`;
+    return [
+      line,
+      ...verdict.devices.flatMap(({ excluded }) =>
+        excluded.map((entry) => `  - ${excludedCaseLine(entry)}`),
+      ),
+      ...verdict.rejected.map(({ name, reason }) => `  - ${name}: ${reason}`),
+    ];
+  });
 
 /**
  * The list of verdicts (the same lines in the generated file's header comment and on standard
@@ -2232,11 +2647,16 @@ const withBaseFields = (
  *   when present) are checked against the current runtime (stale: measure the attention bench
  *   again); a `base` carrying `attentionOnline` without the block or without its `kernels`, and a
  *   block with `kernels` on a `base` without `attentionOnline`, are refused.
+ * - A shared derivation (`shared`) takes only a shared table whose adapters are the records'
+ *   adapters (as a set); each adapter's records cover a family they have a row of completely, and a
+ *   covered family one adapter has no row of (which keeps the default) is refused unless the base
+ *   holds the default for it. A measured derivation takes only a measured table.
  */
 const carryOver = (
   base: GeometryProfile,
   sources: readonly SweepSource[],
   benchGiven: boolean,
+  shared: boolean,
 ): CarryOver => {
   const where = `Base table '${base.id}'`;
   const { provenance } = base;
@@ -2245,12 +2665,36 @@ const carryOver = (
       `${where} has no provenance (nothing to carry over — a base is a table derived from sweeps)`,
     );
   }
-  const adapter = sources[0].adapter;
-  for (const field of ["vendor", "architecture", "device", "description"] as const) {
-    if (provenance.adapter[field] !== adapter[field]) {
+  // A measured derivation's records are one adapter's whatever their description (deriveProfile)
+  const devices = shared ? sharedDevices(sources) : [];
+  if (provenance.adapters !== undefined) {
+    if (!shared) {
       throw new Error(
-        `${where}: adapter ${field} ${JSON.stringify(provenance.adapter[field])} differs from the sweep records' ${JSON.stringify(adapter[field])} (a table is carried over only onto records of the same adapter)`,
+        `${where} is a shared table (derived from ${provenance.adapters.length} adapters): it is regenerated by a shared derivation`,
       );
+    }
+    // A shared table's families all stand on the same devices: a family carried onto records of
+    // other devices would cite evidence the table's adapters do not name
+    const keys = (adapters: readonly SweepAdapter[]): string =>
+      adapters.map(adapterKey).sort().join("\n");
+    if (keys(provenance.adapters) !== keys(devices.map((device) => device.adapter))) {
+      throw new Error(
+        `${where}: its adapters (${provenance.adapters.map((adapter) => ADAPTER_FIELDS.map((field) => adapter[field]).join(" / ")).join("; ")}) are not the sweep records' (${devices.map((device) => ADAPTER_FIELDS.map((field) => device.adapter[field]).join(" / ")).join("; ")}) — a shared table is carried over only onto records of the same adapters`,
+      );
+    }
+  } else {
+    if (shared) {
+      throw new Error(
+        `${where} is a measured table (one adapter): a shared derivation does not take it as its base`,
+      );
+    }
+    const adapter = sources[0].adapter;
+    for (const field of ADAPTER_FIELDS) {
+      if (provenance.adapter[field] !== adapter[field]) {
+        throw new Error(
+          `${where}: adapter ${field} ${JSON.stringify(provenance.adapter[field])} differs from the sweep records' ${JSON.stringify(adapter[field])} (a table is carried over only onto records of the same adapter)`,
+        );
+      }
     }
   }
   // The type says `families` is an object, but a table saved by an earlier runtime (the single
@@ -2263,14 +2707,37 @@ const carryOver = (
   }
   const rows = sources.flatMap((source) => source.rows);
   const covered = familiesOf(rows);
-  const swept = new Set(rows.map((row) => row.caseId));
-  for (const family of covered) {
-    const missing = familyEntries(SWEEP_CASES, family).filter(({ id }) => !swept.has(id));
-    if (missing.length > 0) {
-      throw new Error(
-        `The records cover family ${family} only in part (no row of ${missing.map(({ id }) => id).join(", ")}): with a base, a covered family is derived from every case of its current case set, ` +
-          "or its unswept fields would silently go back to the default — sweep the missing cases",
-      );
+  // Each device's records cover a family they have a row of as completely as one adapter's must. A
+  // shared table's family that one device has no row of keeps the default (deriveSharedProfile), so
+  // it is derived only where the base holds the default for it too: elsewhere it would silently go
+  // back to the default
+  const groups = shared
+    ? devices.map((device) => ({
+        label: device.label,
+        of: ` of ${device.label}`,
+        rows: device.sources.flatMap((source) => source.rows),
+      }))
+    : [{ label: "", of: "", rows }];
+  for (const group of groups) {
+    const swept = new Set(group.rows.map((row) => row.caseId));
+    const own = familiesOf(group.rows);
+    for (const family of covered) {
+      if (shared && !own.includes(family)) {
+        if (familyKernelsId(base, family) !== familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family)) {
+          throw new Error(
+            `The records of ${group.label} have no row of family ${family}, and the base table '${base.id}' holds other than the default there: a shared field takes a geometry only where every device measured it, ` +
+              "so the family would silently go back to the default — sweep it on that device too",
+          );
+        }
+        continue;
+      }
+      const missing = familyEntries(SWEEP_CASES, family).filter(({ id }) => !swept.has(id));
+      if (missing.length > 0) {
+        throw new Error(
+          `The records${group.of} cover family ${family} only in part (no row of ${missing.map(({ id }) => id).join(", ")}): with a base, a covered family is derived from every case of its current case set, ` +
+            "or its unswept fields would silently go back to the default — sweep the missing cases",
+        );
+      }
     }
   }
   const families: CarryOver["families"][number][] = [];
@@ -2362,19 +2829,25 @@ const carriedAttentionBench = (base: GeneratedProfile): AttentionBenchProvenance
   return block;
 };
 
-const slotGeometry = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): Geometry => {
+/** What a table's field takes from a verdict: a measured table's or a shared table's. */
+type SlotChoice = {
+  readonly slot: ProfileSlot;
+  readonly outcome: { readonly geometry: Geometry };
+};
+
+const slotGeometry = (verdicts: readonly SlotChoice[], slot: ProfileSlot): Geometry => {
   const verdict = verdicts.find((entry) => entry.slot === slot);
   if (verdict === undefined) throw new Error(`${slot} has no verdict`);
   return verdict.outcome.geometry;
 };
 
-const gemmSlot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): GemmGeometry => {
+const gemmSlot = (verdicts: readonly SlotChoice[], slot: ProfileSlot): GemmGeometry => {
   const geometry = slotGeometry(verdicts, slot);
   if ("tileK" in geometry) throw new Error(`${slot} holds an i8a8 geometry`);
   return geometry;
 };
 
-const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geometry => {
+const i8a8Slot = (verdicts: readonly SlotChoice[], slot: ProfileSlot): I8a8Geometry => {
   const geometry = slotGeometry(verdicts, slot);
   if (!("tileK" in geometry)) throw new Error(`${slot} holds a geometry of the f32 skeleton`);
   return geometry;
@@ -2394,7 +2867,9 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * family carried over (`carry` — {@link carryOver}) takes the base's fields and entry verbatim. Any
  * other family gets no entry, and its fields must build the default table's kernels (they are the
  * default by the verdicts — a failure here means the verdicts were not the derivation's). adapter
- * is the four fields as they are ({@link deriveProfile} has checked that every record agrees).
+ * is the four fields as they are ({@link deriveProfile} has checked that every record agrees); a
+ * shared table (`spec.shared` — {@link deriveSharedProfile}) has `adapters` instead, each adapter
+ * of the records once in the order its first record was given.
  * With attention-bench records (`attention` — ADR 0117 addendum 2026-11-12), the table carries
  * `attentionOnline: { keyWords: "tiled" }` exactly when their verdict adopted it, and
  * `provenance.attentionBench` (the records' paths / sha256 / dates joined with `", "`, the id of the
@@ -2403,9 +2878,9 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * (if any) with it. A carried base brings its `linearGemv` as it is (no sweep record decides it).
  */
 export const buildGeometryProfile = (
-  spec: { readonly id: string } & ProfileTarget,
+  spec: { readonly id: string; readonly shared?: boolean } & ProfileTarget,
   sources: readonly SweepSource[],
-  verdicts: readonly SlotVerdict[],
+  verdicts: readonly SlotChoice[],
   attention?: AttentionBenchDerivation,
   carry?: CarryOver,
 ): GeneratedProfile => {
@@ -2482,11 +2957,23 @@ export const buildGeometryProfile = (
           shapes: attentionBenchShapeSetId(),
           ...(adopted ? { kernels: generatedAttentionKernelsId(table) } : {}),
         };
-  const { vendor, architecture, device, description } = sources[0].adapter;
+  const adapterOf = ({ vendor, architecture, device, description }: SweepAdapter) => ({
+    vendor,
+    architecture,
+    device,
+    description,
+  });
+  const adapters =
+    spec.shared === true ? sharedDevices(sources).map((device) => adapterOf(device.adapter)) : [];
+  if (spec.shared === true && adapters.length < 2) {
+    throw new Error(
+      `Generated table '${spec.id}': a shared table needs the records of two or more adapters (${adapters.length} given)`,
+    );
+  }
   const generated: GeneratedProfile = {
     ...table,
     provenance: {
-      adapter: { vendor, architecture, device, description },
+      ...(spec.shared === true ? { adapters } : { adapter: adapterOf(sources[0].adapter) }),
       families: generatedFamilies(table, sources, carry),
       ...(attentionBench === undefined ? {} : { attentionBench }),
     },
@@ -2672,9 +3159,18 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * Its `linearGemv` is carried as it is: GEMV sweep records decide it (`deriveLinearGemvChoices`).
    * The records must cover every family they have a row of completely (every case of its current
    * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
-   * these options.
+   * these options. With `shared`, `base` is a shared table of the records' adapters.
    */
   readonly base?: GeometryProfile;
+  /**
+   * Derive a **shared table** from the records of two or more adapters of one vendor and
+   * architecture ({@link deriveSharedProfile} — SPEC: docs/spec/geometry-profiles.md#shared-tables):
+   * it needs `vendor` and `architecture`, takes no `description`, no `optIn` and no
+   * `attentionBench`, tells the devices apart by their descriptions (every record carries one), and
+   * writes `provenance.adapters`. Omitted or false, the records must agree on
+   * all four adapter fields (a measured table).
+   */
+  readonly shared?: boolean;
 };
 
 /** The return value of {@link deriveGeometryProfile} (the table and the verdict lines). */
@@ -2697,15 +3193,18 @@ export type GeometryProfileDerivation = {
  * The verdict lines of a derivation: {@link verdictLines} per field, except one line per field of a
  * family carried over from the base, naming the base table and the sweeps of its entry.
  */
-const derivationVerdictLines = (
-  verdicts: readonly SlotVerdict[],
+const derivationVerdictLines = <
+  Verdict extends { readonly slot: ProfileSlot; readonly scope: string },
+>(
+  verdicts: readonly Verdict[],
   carry: CarryOver | undefined,
+  linesOf: (verdicts: readonly Verdict[]) => string[],
 ): string[] =>
   verdicts.flatMap((verdict) => {
     const family = profileSlotFamily(verdict.slot);
     const carried = carry?.families.find((entry) => entry.family === family);
     return carry === undefined || carried === undefined
-      ? verdictLines([verdict])
+      ? linesOf([verdict])
       : [
           `- ${verdict.slot} (${verdict.scope}): carried over from table '${carry.base.id}' (family ${family}, sweeps ${carried.entry.sweep})`,
         ];
@@ -2723,8 +3222,9 @@ const carriedAttentionLine = (base: GeometryProfile, block: AttentionBenchProven
  * decision 4, ADR 0116, ADR 0117 decision 3) and the table's values come from the single
  * {@link buildGeometryProfile}, so they equal the tables the CLI and the GPU lab (both removed in
  * 0.15) built. With `base`, the families the records do not cover are carried over from it
- * ({@link carryOver} — ADR 0117 addendum 2026-11-12). Input that fails a check throws with the reason
- * (fail loudly).
+ * ({@link carryOver} — ADR 0117 addendum 2026-11-12). With `shared`, the table is a shared table of
+ * several adapters ({@link deriveSharedProfile}); it carries tile geometries only. Input that fails
+ * a check throws with the reason (fail loudly).
  */
 export const deriveGeometryProfile = (
   reports: readonly GeometrySweepInput[],
@@ -2739,11 +3239,32 @@ export const deriveGeometryProfile = (
   const sources = reports.map(({ report, path, sha256 }) =>
     parseSweepReport(report, { path, sha256 }),
   );
-  const { attentionBench, base, ...target } = options;
+  const { attentionBench, base, shared, ...target } = options;
   const spec = { ...target, minSpeedup };
+  if (shared === true) {
+    // MUST: a shared table carries tile geometries only — the online attention's key axis is read
+    // from attention-bench records of one adapter, and no rule combines them across devices
+    if (attentionBench !== undefined) {
+      throw new Error(
+        "A shared table carries tile geometries only: attention-bench records (the online attention's key axis) are not derived for it",
+      );
+    }
+    const sharedVerdicts = deriveSharedProfile(sources, spec);
+    const sharedCarry = base === undefined ? undefined : carryOver(base, sources, false, true);
+    return {
+      profile: buildGeometryProfile(
+        { ...spec, shared: true },
+        sources,
+        sharedVerdicts,
+        undefined,
+        sharedCarry,
+      ),
+      verdicts: derivationVerdictLines(sharedVerdicts, sharedCarry, sharedVerdictLines),
+    };
+  }
   const verdicts = deriveProfile(sources, spec);
   const carry =
-    base === undefined ? undefined : carryOver(base, sources, attentionBench !== undefined);
+    base === undefined ? undefined : carryOver(base, sources, attentionBench !== undefined, false);
   const attention =
     attentionBench === undefined
       ? undefined
@@ -2752,7 +3273,7 @@ export const deriveGeometryProfile = (
   return {
     profile: buildGeometryProfile(spec, sources, verdicts, attention, carry),
     verdicts: [
-      ...derivationVerdictLines(verdicts, carry),
+      ...derivationVerdictLines(verdicts, carry, verdictLines),
       ...(attention !== undefined
         ? attentionOnlineVerdictLines(attention.verdict)
         : carry === undefined || carriedBench === undefined

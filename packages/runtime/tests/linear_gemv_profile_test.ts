@@ -1259,7 +1259,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       }
       assertStrictEquals(resolveGeometryProfile(profile).linearGemv, GEMV, profile.id);
     }
-    assertEquals(carrying, ["apple-metal-3", "nvidia-ampere", "nvidia-blackwell"]);
+    assertEquals(carrying, ["apple-metal-3", "nvidia-ampere", "nvidia-blackwell", "apple-m5"]);
     const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere");
     assert(ampere !== undefined);
     const changed = new Map(AMPERE_CHANGED_PARALLEL_SHAPES.map((row) => [rowKey(row), row]));
@@ -1359,6 +1359,10 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     );
   });
 
+  it("apple-m5's are the default's with what the Apple M5's records adopt in place: none of the default's exceptions with another variant, 43 more sequential exceptions, and 66 parallel rows changed or added", () => {
+    assertDerivedFrom("apple-m5", new Map(), { ownExceptions: 43, changed: 49, added: 17 });
+  });
+
   it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {
     // The memory estimate has no adapter and plans its fusions with the default profile's choices.
     // The fusion pass reads two things of them: which shapes have a parallel row (the
@@ -1398,7 +1402,7 @@ describe("a table without the GEMV choices runs with the default profile's, reso
       );
       assertEquals(packedAdded, [], `${profile.id}: an added row with packed activations`);
     }
-    assertEquals(tables, 3);
+    assertEquals(tables, 4);
   });
 
   it("resolveGeometryProfile fills in the default's choices and keeps every other field of the table, and keeps a table's own", () => {

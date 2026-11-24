@@ -22,6 +22,8 @@ import type { I8a8Geometry } from "../i8a8-geometry.ts";
 import { APPLE_METAL_3 } from "./apple-metal-3.ts";
 import { NVIDIA_AMPERE } from "./nvidia-ampere.ts";
 import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
+import { APPLE_M5 } from "./apple-m5.ts";
+import { APPLE_METAL_3_SHARED } from "./apple-metal-3-shared.ts";
 
 /**
  * A deeply frozen copy of one table (a pure function that does not modify its argument).
@@ -29,7 +31,8 @@ import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
  * NOTE: it does not live in geometry-profile.ts because of a cycle: that module imports this list as a
  * value (the default argument of selection) — with an import order that evaluates this module first,
  * that module's `const` is not yet initialised and access throws. Every geometry is a flat object of
- * numbers only, so a one-level copy is already deep. `provenance` nests `adapter`, `families` (one
+ * numbers only, so a one-level copy is already deep. `provenance` nests `adapter` (or a shared
+ * table's `adapters`, a list of flat objects), `families` (one
  * entry per op family, each with its `userAgent` — an array of strings) and `attentionBench`,
  * `attentionOnline` is one flat object, and `linearGemv` nests its variants and its rows of flat
  * objects, so those are copied and frozen too. The families are walked
@@ -90,7 +93,13 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       ? {}
       : {
           provenance: Object.freeze({
-            adapter: Object.freeze({ ...profile.provenance.adapter }),
+            ...(profile.provenance.adapters === undefined
+              ? { adapter: Object.freeze({ ...profile.provenance.adapter }) }
+              : {
+                  adapters: Object.freeze(
+                    profile.provenance.adapters.map((adapter) => Object.freeze({ ...adapter })),
+                  ),
+                }),
             families: Object.freeze(
               Object.fromEntries(
                 Object.entries(profile.provenance.families).map(([family, entry]) => [
@@ -113,5 +122,7 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
 };
 
 export const BUILTIN_GEOMETRY_PROFILES: readonly GeometryProfile[] = Object.freeze(
-  [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL].map(freezeGeometryProfile),
+  [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL, APPLE_M5, APPLE_METAL_3_SHARED].map(
+    freezeGeometryProfile,
+  ),
 );

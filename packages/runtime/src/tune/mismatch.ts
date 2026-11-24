@@ -11,7 +11,9 @@ import {
   DEFAULT_GEOMETRY_PROFILE,
   GEOMETRY_PROFILE_FAMILIES,
   type GeometryProfile,
+  type GeometryProfileAdapter,
   type GeometryProfileFamily,
+  sharedAdaptersViolation,
 } from "../kernels/geometry-profile.ts";
 import {
   attentionBenchKernelsId,
@@ -22,6 +24,9 @@ import {
 } from "./fingerprint.ts";
 
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
+
+/** The fields a shared table's adapters are compared by (they agree on them by derivation). */
+const SHARED_ADAPTER_FIELDS = ["vendor", "architecture"] as const;
 
 /**
  * A key derived by the current runtime, or the reason it cannot be derived: a geometry or a kernel
@@ -115,6 +120,57 @@ const attentionBenchMismatch = (
   return undefined;
 };
 
+type AdapterInfo = Pick<GPUAdapterInfo, "vendor" | "architecture" | "device" | "description">;
+
+/** A measured table: the four fields of its one adapter (undefined when they match). */
+const measuredAdapterMismatch = (
+  id: string,
+  adapter: GeometryProfileAdapter,
+  adapterInfo: AdapterInfo,
+): string | undefined => {
+  for (const field of ADAPTER_FIELDS) {
+    if (adapter[field] !== adapterInfo[field]) {
+      return `Table '${id}': adapter ${field} differs (table ${JSON.stringify(
+        adapter[field],
+      )} / this adapter ${JSON.stringify(adapterInfo[field])} — a table made on another machine or another adapter)`;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * A shared table: vendor and architecture of each adapter it was derived from (undefined when they
+ * match). Device and description are not compared: the table predicts for the adapters of that
+ * vendor and architecture it was not measured on. A list that names fewer than two devices — fewer
+ * than two adapters, or adapters a shared derivation would not tell apart
+ * (`sharedAdaptersViolation`) — is not a shared table's (the derivation refuses one device), so it
+ * is a mismatch rather than a weaker check of a measured one.
+ */
+const sharedAdapterMismatch = (
+  id: string,
+  adapters: readonly GeometryProfileAdapter[],
+  adapterInfo: AdapterInfo,
+): string | undefined => {
+  // The type says a list, but a table read back with JSON.parse and a cast may hold anything there;
+  // this function promises a message instead of a TypeError
+  const listed: unknown = adapters;
+  if (!Array.isArray(listed) || listed.length < 2) {
+    return `Table '${id}': its provenance.adapters is ${JSON.stringify(listed)} (a shared table names two or more adapters)`;
+  }
+  const violation = sharedAdaptersViolation(adapters);
+  if (violation !== undefined) return `Table '${id}': its provenance.adapters ${violation}`;
+  for (const adapter of adapters) {
+    for (const field of SHARED_ADAPTER_FIELDS) {
+      if (adapter[field] !== adapterInfo[field]) {
+        return `Table '${id}': adapter ${field} differs (the shared table's ${JSON.stringify(
+          adapter[field],
+        )} / this adapter ${JSON.stringify(adapterInfo[field])} — a shared table predicts for one vendor and architecture)`;
+      }
+    }
+  }
+  return undefined;
+};
+
 /**
  * Whether the table `profile` may be applied to this adapter and the current runtime. Returns the
  * message of the first mismatch, or `undefined` when everything matches. Does not throw.
@@ -122,8 +178,11 @@ const attentionBenchMismatch = (
  * What is compared (all by exact string equality, in this order):
  * 1. `provenance` is present (a table without it = a hand-written table → nothing to match
  *    against).
- * 2. The four adapter fields (`vendor` / `architecture` / `device` / `description` — empty strings
- *    are compared as values too).
+ * 2. A measured table (`provenance.adapter`): the four adapter fields (`vendor` / `architecture` /
+ *    `device` / `description` — empty strings are compared as values too). A shared table
+ *    (`provenance.adapters`, two or more): `vendor` and `architecture` of each of its adapters —
+ *    it is made for the adapters of that vendor and architecture it was not measured on.
+ *    SPEC: docs/spec/geometry-profiles.md#shared-tables
  * 3. `provenance.families` is an object (a table saved in the earlier shape, without per-family
  *    entries, is returned as a mismatch — not thrown).
  * 4. Per op family, in the fixed family order (`GEOMETRY_PROFILE_FAMILIES`): with an entry in
@@ -152,19 +211,17 @@ export const geometryProfileMismatch = (
   profile: GeometryProfile,
   // Requires only the adapter fields that are compared (`GPUAdapterInfo` and
   // `GpuContext.adapterInfo` can be passed as is)
-  adapterInfo: Pick<GPUAdapterInfo, "vendor" | "architecture" | "device" | "description">,
+  adapterInfo: AdapterInfo,
 ): string | undefined => {
   const { provenance } = profile;
   if (provenance === undefined) {
     return `Table '${profile.id}' has no provenance (nothing to match against — a hand-written table or one not made from sweeps)`;
   }
-  for (const field of ADAPTER_FIELDS) {
-    if (provenance.adapter[field] !== adapterInfo[field]) {
-      return `Table '${profile.id}': adapter ${field} differs (table ${JSON.stringify(
-        provenance.adapter[field],
-      )} / this adapter ${JSON.stringify(adapterInfo[field])} — a table made on another machine or another adapter)`;
-    }
-  }
+  const adapterMismatch =
+    provenance.adapters === undefined
+      ? measuredAdapterMismatch(profile.id, provenance.adapter, adapterInfo)
+      : sharedAdapterMismatch(profile.id, provenance.adapters, adapterInfo);
+  if (adapterMismatch !== undefined) return adapterMismatch;
   // The type says `families` is an object, but a table saved by an earlier runtime (the single
   // top-level keys) and read back with JSON.parse and a cast has none; reading its entries would
   // throw a TypeError, and this function promises a message instead

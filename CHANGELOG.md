@@ -31,6 +31,10 @@ measurements in `docs/research/`.
   staleRows }` (was `{ current, unsteady, stale, staleRows }`), and `LinearGemvStaleGroup` has no `cause` (only a
   group whose case is not current is stale). The plan lists, at a case and row count where a reference's fastest
   time is not repeated, every candidate read against it, and no candidate whose reference the sweep does not measure.
+- `@karume/runtime`: a table's `provenance` names its adapters in one of two forms — `adapter` (one adapter, a
+  measured table, as before) or `adapters` (two or more, a shared table) — so the type of `GeometryProfile`'s
+  `provenance.adapter` is optional; code that reads it narrows on `provenance.adapters === undefined` first. Every
+  table saved before keeps the `adapter` form, and `parseGeometryProfileJson` reads both.
 
 ### Added
 
@@ -88,9 +92,31 @@ measurements in `docs/research/`.
   additive 0 / −inf mask; it is refused on the states form, beside the mask and with `attentionCompute: "a8"`. The exporter (PyPI
   `karume`) gains `karume.band.to_band_form`, with which a recipe declares the band on exported attention nodes in place
   of their mask. The workbench's `kernel-check` entry runs a fourteenth check, `attention-band`.
+- `@karume/runtime/tune`: `deriveGeometryProfile` derives a **shared table** with `shared: true` — one table from the
+  sweep records of two or more adapters of one vendor and architecture, matched by vendor and architecture without a
+  description. The adapters are told apart by their descriptions: every record must carry one (a record without one,
+  or records of one description with two device ids, are refused). Each adapter's records are read as a measured
+  table's; a geometry is adopted only when, on every adapter, its output is identical and it is at least the
+  threshold faster than that adapter's own default in every case of the field, and among those the one with the largest geometric mean of the per-adapter geometric means is taken. No
+  timing of one adapter is compared with another's. A shared table carries tile geometries only (no
+  `attentionOnline`, no `linearGemv`), and its provenance names every adapter (`provenance.adapters`);
+  `geometryProfileMismatch` compares a shared table's vendor and architecture with the adapter's.
+  `deriveLinearGemvChoices` and `planGemvMeasurements` refuse a shared table. Without `shared` nothing changes: records
+  of two adapters are refused.
 
 ### Changed
 
+- `@karume/runtime`: two embedded tables for Apple `metal-3` adapters. `apple-m5` is the Apple M5's measured table,
+  matched by the description `Apple M5` (Chrome reports it with its developer-features flag). `apple-metal-3-shared`
+  is a shared table of the M5 and the M2, matched by vendor and architecture: every Apple `metal-3` adapter that
+  reports no description (Chrome without the flag) or one no table names runs it in place of the default profile —
+  other tile geometries for linear / matmul / bmm at 33 to 64 rows, for conv2d, and for the i8a8 linear up to 256
+  rows, the same output bits. `apple-metal-3` still matches `Apple M2` alone. `apple-m5` carries the M5's own GEMV
+  choices, derived from two GEMV sweep records of the M5 in Chrome: 43 sequential exceptions of int4 and int8 shapes
+  (the same words, ×1.10 to ×1.77 per dispatch at one row), 49 of the default's parallel rows with another row block
+  (18 of them with other lanes) and 17 rows added (6 bf16), so with linear at `reorder` a Session on the M5 adds in
+  another order on 35 shapes, inside the band. `apple-metal-3-shared` carries none: its adapters run the default
+  profile's, as before.
 - `@karume/runtime`: the three embedded tables carry GEMV choices derived again from their devices' GEMV sweep
   records under those rules, so on their adapters the GEMV of linear runs other kernels on some shapes — a matter of
   speed there. A sequential variant changes no output bit, so Sessions at `exact` write what they wrote; with linear
