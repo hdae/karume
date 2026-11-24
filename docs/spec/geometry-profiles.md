@@ -172,13 +172,16 @@ matched without a description: the predicted table of [the three levels](#the-th
 - **The verdict lines** give, per field, each device's number of cases; for an adopted geometry its geometric mean
   over the devices and each device's geometric mean, smallest and largest ratio; for every geometry not taken each
   device's ratios or the reason it is not eligible there.
-- `apple-metal-3-shared` is derived from the Apple M5's full sweep of 2026-11-23 and three Apple M2 records of the same
-  day that time the geometries the M5 adopts (`i8a8-linear`, `conv2d`, and `gemm`). Of the nine fields the M5's own
-  table adopts, it takes four: `gemmRows` 33 to 64 rows `reg64x32r4x4w8:tas-tb-un` (M5 ×1.688, M2 ×1.337), both
-  `conv2d` fields `igemm64x64:wg16x8:tas-tb-un:dec` (×1.368, ×1.634) and `igemm32x64:wg16x8:tas-tb-un:dec` (×1.488,
-  ×1.722), and `i8a8.linear` up to 256 rows `tile16x64r4x4w16x4k32` (×2.188, ×2.274). The M5's other five are slower
-  than the default on the M2 in some case or screened out there by the quick look. The fused attention, the i8a8
-  attention and conv3d keep the default: the M2's records have no case of them.
+- `apple-metal-3-shared` is derived from the Apple M5's full sweep of 2026-11-23 and five Apple M2 records: three of the
+  same day that time the geometries the M5 adopts, and the M2's full sweep in two parts, both stopped by a device lost
+  to Metal's command-buffer time limit (2026-11-23: 39 of 78 cases; 2026-11-24: 35 of 37). It takes six
+  fields: `gemmRows` 17 to 32 rows `reg32x32r2x4w8` (M5 ×1.260, M2 ×1.309) and 33 to 64 rows `reg64x32r4x4w8` (×1.532,
+  ×1.485), the `conv2d` fields `igemm64x64:wg16x8:tas-tb-un:dec` (×1.368, ×1.622) and `igemm32x64:wg16x4:dec` (×1.434,
+  ×1.865), and `i8a8.linear` up to 256 rows `tile16x64r4x4w16x4k32` (×2.188, ×2.275) and 257 to 512 rows
+  `tile64x64r8x4w16x8k32` (×1.072, ×1.116). In every other field but one no geometry passes on both devices — the fused
+  attention and the i8a8 attention among them. `i8a8.conv3d` keeps the default because the M2 covers `i8a8-conv3d`
+  only in part: the default row of `i8a8-conv3d-cin1024-cout512-k333-in6x128x128` failed (the device was lost) and
+  `i8a8-conv3d-cin512-cout256-k333-in6x256x256` has no row.
 
 ## The GEMV choices of linear
 

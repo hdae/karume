@@ -118,7 +118,7 @@ measurements in `docs/research/`.
   matched by the description `Apple M5` (Chrome reports it with its developer-features flag). `apple-metal-3-shared`
   is a shared table of the M5 and the M2, matched by vendor and architecture: every Apple `metal-3` adapter that
   reports no description (Chrome without the flag) or one no table names runs it in place of the default profile —
-  other tile geometries for linear / matmul / bmm at 33 to 64 rows, for conv2d, and for the i8a8 linear up to 256
+  other tile geometries for linear / matmul / bmm at 17 to 64 rows, for conv2d, and for the i8a8 linear up to 512
   rows, the same output bits. `apple-metal-3` still matches `Apple M2` alone. `apple-m5` carries the M5's own GEMV
   choices, derived from two GEMV sweep records of the M5 in Chrome: 43 sequential exceptions of int4 and int8 shapes
   (the same words, ×1.10 to ×1.77 per dispatch at one row), 49 of the default's parallel rows with another row block
