@@ -605,11 +605,21 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
 ## On the RTX 3080 Ti development machine, two slowdowns distort measurements (filed 2026-11-19; the machine, not a product bug)
 
 - **The slow mode** ([research 2026-10-25](research/2026-10-25-speed-recon-3080ti.md) §9.3): tiled GEMM-class kernels
-  run ×15–42 slower for whole submits, in episodes of 5–8 submits (about 14 s) that recur under sustained gap-free load
-  and once after a wake from idle; other kernels in the same submits are unaffected. The memory controller reads
+  run ×15–42 slower for whole submits, in episodes; other kernels in the same submits are unaffected. What starts an
+  episode (measured 2026-11-24 by replaying the dispatches of one Anima DiT run; Node + Dawn / Vulkan): full load that
+  drops to an empty queue — or to a single workgroup — and resumes, with a period under about one second (episodes at
+  0.59–0.97 s, none at 1.13 s and 1.7 s). The same dispatches replayed without a gap ran 370 s without an episode,
+  which corrects the earlier reading here that sustained gap-free load starts one. An episode begins at a resume and
+  ends at the fourth resume after it. The memory controller reads
   96–100% busy while clocks and power stay at P0, and no thermal or power-brake counter fires. It attaches to the
-  pipeline object: a fresh pipeline from the same WGSL runs at normal speed. Not seen on the RTX 5070 Ti. The mechanism
-  is open; the display was detached from the card on 2026-11-19 to see whether it stops (no result yet). The sequential
+  pipeline object: a fresh pipeline from the same WGSL runs at normal speed in that episode and slows in the next. Not
+  seen on the RTX 5070 Ti. The mechanism is open, and which of the card, the Linux Vulkan driver and Node + Dawn it
+  belongs to is not separated; the display was detached from the card on 2026-11-19 to see whether it stops (it did
+  not). In a generation it shows as single steps of 25–31 s: an Anima denoise with guidance at 1024² stalls so on the
+  presets whose DiT run takes under a second (int8 attention: about 0.83 s on Anima-2.9B, one or more stalled steps
+  per image, which makes the default preset slower per image than `bf16` on this machine), and `bf16+dit8-a8` stalls
+  the same way at 768² and not at 1024². The workbench entry `anima-step-timing` records it; on the RTX 5070 Ti
+  (Chrome 158 / D3D12) the same entry timed 228 steps with DiT runs of 0.43–0.99 s and no stalled step. The sequential
   GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
   §6), which spreads the rounds of a GEMV sweep's baseline — in the turbo mode too (216 of 690 groups of two `full`
   records of 2026-11-20 beyond ×1.25), so it is not the thermal throttling below; the derivation reads a reference at its fastest time
