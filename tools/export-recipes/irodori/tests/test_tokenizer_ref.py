@@ -865,13 +865,17 @@ class TestAssetSplitKey:
 
 
 def _unigram_tokenizer(vocab):
-    """A real `tokenizers` Unigram over `vocab` with the pre-tokenizer of the real asset."""
-    from tokenizers import Tokenizer, models, pre_tokenizers
-
-    tokenizer = Tokenizer(
-        models.Unigram([tuple(row) for row in vocab], unk_id=0, byte_fallback=False)
+    """A real `tokenizers` Unigram over `vocab` with the pre-tokenizer of the real asset.
+    `tokenizers` is not a declared dependency (it arrives only through transformers in the optional
+    groups); a test that calls this in an environment without it SKIPs."""
+    tokenizers = pytest.importorskip(
+        "tokenizers", reason="tokenizers is not installed (it comes with transformers' groups)"
     )
-    tokenizer.pre_tokenizer = pre_tokenizers.Metaspace(
+
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.Unigram([tuple(row) for row in vocab], unk_id=0, byte_fallback=False)
+    )
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Metaspace(
         replacement=tok.METASPACE, prepend_scheme="never", split=False
     )
     return tokenizer
