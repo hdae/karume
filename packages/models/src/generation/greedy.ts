@@ -65,7 +65,7 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
    * count** (prefill including pad rows, decode one row), with 0 in both for pad rows (the value
    * contract of ADR 0066 addendum 6). The return value is spread into the run's inputs as is, so
    * this is the only supplier of position-dependent graph inputs (gemma4's RoPE cos / sin —
-   * `gemma/rope.ts`; `position_ids` of the MiniCPM5 decode series).
+   * `gemma/rope.ts`).
    *
    * MUST: a **synchronous pure function** (the same value for the same `(ids, positions)`).
    * `sequence.ts` is asynchronous because it needs a place to wait for GB-scale lazy loads (PLE
@@ -88,7 +88,7 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   /**
    * **Exclusive upper bound** of the absolute positions that can be looked up (positions are
    * `0..maxPosition-1` — the position limit the model declares. For series that ship with the RoPE
-   * table baked in, the table's row count is the limit as is; the MiniCPM5 decode series has 512).
+   * table baked in, the table's row count is the limit as is).
    *
    * MUST: not optional. A position beyond the limit raises no exception (the OOB gather of a series
    * with a baked table is non-finite by design — limitations; even a series without a table attends

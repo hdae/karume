@@ -81,8 +81,8 @@ import { assertU32Params } from "../codegen/params.ts";
  * Lanes per workgroup. **One lane = one hidden unit**, so it equals the hidden-width limit
  * {@link GRU_SCAN_MAX_HIDDEN} and is derived from it rather than kept as a number in two places.
  * The limit itself is also checked by the contract layer (ops/shapes.ts), so it lives in the
- * neutral codegen/limits.ts (the only measured shape is vowel-detector's 2-layer BiGRU with
- * H = 128 — ADR 0056 decision 5).
+ * neutral codegen/limits.ts (the only measured shape is a 2-layer BiGRU with H = 128 — ADR 0056
+ * decision 5).
  */
 export const GRU_SCAN_WORKGROUP_SIZE = GRU_SCAN_MAX_HIDDEN;
 

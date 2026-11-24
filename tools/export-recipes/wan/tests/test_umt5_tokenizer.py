@@ -212,7 +212,7 @@ class TestAgainstUpstream:
     def test_the_shared_table_builder_bakes_the_series_asset_byte_for_byte(self, upstream):
         """With the T5 table fields shared with the `karume-umt5-xxl` asset (`t5_table_fields`), the
         Wan asset is still byte-identical to the one the distributions ship (the published Wan2.2
-        mirror's `umt5_tokenizer`; the local-only Wan2.1 mirror ships the same file)."""
+        mirror's `umt5_tokenizer`)."""
         shipped = mirror_asset(WAN22.repo_name, WAN22.default_model, WAN_TOKENIZER_ROLE)
         truth, tables, _ = upstream
 

@@ -23,8 +23,8 @@
 // passes even with wrong values). Together the two pin both "the right repo" and "it is actually
 // used".
 //
-// A family without a public repository (vowel-detector) has no table at all and is outside this
-// check (ADR 0073 decision 1).
+// A family without a public repository has no table at all and is outside this check (ADR 0073
+// decision 1).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";

@@ -207,7 +207,7 @@ const BIAS = (i: number): number => (((i * 3) % 13) - 6) * 0.11;
 const CASES: readonly Geometry[] = [
   // Smallest shape (T = 2 = the minimum where the state is carried at least once)
   { time: 2, batch: 1, hidden: 3 },
-  // The vowel-detector hidden width (H = 128) at its real size
+  // The hidden width of the measured 2-layer BiGRU (H = 128 — ADR 0056 decision 5)
   { time: 4, batch: 1, hidden: 128 },
   // H exactly the workgroup width (the limit of 1 lane = 1 hidden unit — the edge lane is
   // effective)

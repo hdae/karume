@@ -11,7 +11,7 @@
  * fusion candidate search (`packages/e2e/tests/helpers/fusion-candidates.ts`, unit-tested in
  * `fusion_candidates_test.ts`) keeps the maximal windows and ranks them, and the family
  * fusion-count tests reproduce known hit counts with fusion off (anima) and pin known misses as
- * candidates (MOSS-Image, Wan2.1, Irodori).
+ * candidates (MOSS-Image, Irodori).
  */
 
 import { test } from "vite-plus/test";

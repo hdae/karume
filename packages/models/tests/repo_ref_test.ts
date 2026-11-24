@@ -187,11 +187,9 @@ test("fromPretrained: birefnet also points at its source table (birefnet.SOURCES
   assertMatch(error.message, /(?<![\w.])SOURCES\["birefnet-hr"\] \(@karume\/models\/birefnet\)/);
 });
 
-test("fromPretrained: umT5 and Wan2.2 point at their source tables when ref is missing; the unpublished Wan2.1 does not", async () => {
+test("fromPretrained: umT5 and Wan2.2 point at their source tables when ref is missing", async () => {
   // 0.14.0 added the source tables (then `UMT5_SOURCES` / `WAN_SOURCES`) with the families' first
-  // publication. Wan2.1 and 2.2 share the load body (`loadWanFromPretrained`), but the table has no
-  // Wan2.1 key — this checks, through the public surface that goes through the shared body, that
-  // 2.1 alone is not pointed at a key that does not exist (③).
+  // publication.
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
   const umt5Error = await assertRejects(

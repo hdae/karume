@@ -10,7 +10,7 @@
  * The rule is on by default with no option to turn it off (docs/kernel-rules.md 4(a): a rule
  * u32-identical to the unfused plan takes no boolean key). Its evidence is the fused-against-unfused
  * u32 check (packages/e2e/tests/e2e_vae_rms_silu_rule_test.ts) and its hits on the real graphs
- * (the Wan2.1, Wan2.2 and anima fusion-count tests of packages/e2e). A caller that gives the same
+ * (the Wan2.2 and anima fusion-count tests of packages/e2e). A caller that gives the same
  * rule again is refused by the Session (a rule given twice).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).

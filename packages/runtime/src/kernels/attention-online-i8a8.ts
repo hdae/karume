@@ -153,7 +153,7 @@ export const attentionOnlineI8a8Eligible = (depth: number, cols: number): boolea
  * addendum 2026-11-12) — a row length two of them disagree on reads the wrong words without an
  * exception.
  * MUST: `whole` keeps the key and the WGSL of the kernel before the addendum byte for byte, so the
- * outputs of every `N % 4 == 0` shape (every accepted Wan2.1 / Wan2.2 size) are unchanged by
+ * outputs of every `N % 4 == 0` shape (every accepted Wan2.2 size) are unchanged by
  * construction.
  *
  * `tiled` (perf-ledger K-106): the producer writes Vᵀ already in the kernel's key order
