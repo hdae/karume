@@ -316,9 +316,8 @@ maintainer's ruling of 2026-11-06).
   28 steps at CFG 4 (the maintainer's visual verdict of 2026-11-24 — the low end of the upstream card's 28–50 steps,
   CFG 3.5–5). The RTX 3080 Ti has a sha256 row for its default preset (512², CFG 4, 20 steps passed explicitly, the base's
   check knobs — `e2e_anima_test.ts`), and its fusion counts at 40 blocks are pinned (`e2e_anima_fusion_counts_test.ts`).
-  Left, in order:
-  - The maintainer's visual A/B of `bf16` and the default `bf16+dit8-a8-attn8-s16` (ADR 0147 decision 3 (2); seeds 42–45 ×
-    two or three prompts). The images seen so far were made under the old names, with an f16 text stack.
+  The maintainer's visual A/B of `bf16` and the default `bf16+dit8-a8-attn8-s16` (ADR 0147 decision 3 (2); seeds 42–45 ×
+  three prompts at 1024², 20 steps) found no problem (2026-11-24). Left, in order:
   - The licence interview and the review of the notice and the card: the open rows of the ledger block
     (`tools/export-recipes/anima/THIRD_PARTY_NOTICES.md`, "Gazingstars123/Anima-2.9B") — which CircleStone text to attach
     (the file beside the upstream weights is the v1.2 text before upstream's fix of two section references; the recipe
