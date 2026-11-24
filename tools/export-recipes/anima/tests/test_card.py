@@ -1,5 +1,5 @@
-"""Anima's model card rendering (`anima.card`) — the two cards of the official repository and the
-fine-tune repository.
+"""Anima's model card rendering (`anima.card`) — the cards of the official repository, the
+fine-tune repository and the 2.9B repository.
 
 The real `models/karume-anima/karume.json` is not used — the job here is to see that the values
 of a fake manifest show up in the text as they are (= not a single hand-written number is mixed
@@ -18,7 +18,8 @@ repository (CircleStone's 5 variants together, default = Turbo) and the fine-tun
 (third-party fine-tunes) differ in both the license notice and the introduction of the origins
 section. Turbo became an official checkpoint, so **the attribution section for a baked-in LoRA is
 gone entirely** (the old turbo-only card and its attribution check were removed in that
-iteration).
+iteration). A third card joined on 2026-11-24 (ADR 0087 addendum): the 2.9B repository's, for a
+layer-expanded model whose source is on the Hub.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from typing import Any
 import pytest
 
 from anima.card import (
+    ANIMA_2_9B_ORIGINS_INTRO,
+    ANIMA_2_9B_TITLE,
     ANIMA_EXTRA_TITLE,
     ANIMA_OFFICIAL_TITLE,
     ATTRIBUTION_NOTICE,
@@ -39,6 +42,7 @@ from anima.card import (
     RIGHTS_GRANT_STATEMENT,
     SUPPORTED_PIPELINE,
     UPSTREAM_MODELS,
+    render_2_9b_card,
     render_base_card,
     render_extra_card,
 )
@@ -58,6 +62,9 @@ OFFICIAL_SECOND = "anima-aesthetic-v1.1"
 #: `allowDifferentLicense` is false — the one that gets the no-relicensing note).
 EXTRA_DEFAULT = "anima-wai-v1.0"
 EXTRA_SECOND = "anima-copycat-20260610"
+
+#: The model of the 2.9B repository (Anima-2.9B — its only model).
+LAYERED = "anima-2.9b-preview-v1"
 
 
 def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
@@ -194,6 +201,16 @@ def _extra_manifest() -> dict[str, Any]:
     return manifest
 
 
+def _2_9b_manifest() -> dict[str, Any]:
+    """The shape of the 2.9B repository (karume-anima-2.9b) — one model, on the CFG side."""
+    manifest = _two_model_manifest(LAYERED, OFFICIAL_SECOND)
+    del manifest["models"][OFFICIAL_SECOND]
+    defaults = manifest["models"][LAYERED]["pipelineConfig"]["defaults"]
+    defaults["guidanceScale"] = 4
+    defaults["steps"] = 21
+    return manifest
+
+
 def _official(manifest: dict[str, Any]) -> str:
     return render_base_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
 
@@ -210,6 +227,11 @@ def card() -> str:
 @pytest.fixture
 def extra_card() -> str:
     return _extra(_extra_manifest())
+
+
+@pytest.fixture
+def layered_card() -> str:
+    return render_2_9b_card(_2_9b_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
 def _quant_row(card: str, name: str) -> str:
@@ -540,6 +562,112 @@ class TestExtraCard:
 
         with pytest.raises(ValueError):
             _extra(manifest)
+
+
+class TestLayeredCard:
+    """The 2.9B repository's card (`render_2_9b_card`) — Anima-2.9B, a third party's layer
+    expansion with a repository of its own (ADR 0087 addendum of 2026-11-24): neither an official
+    release nor a community fine-tune, and its source is on the Hub."""
+
+    def test_it_titles_the_repository_as_its_own(self, layered_card: str) -> None:
+        assert f"# {ANIMA_2_9B_TITLE}" in layered_card
+        assert f"# {ANIMA_OFFICIAL_TITLE}" not in layered_card
+        assert f"# {ANIMA_EXTRA_TITLE}" not in layered_card
+
+    def test_its_house_sentence_names_the_hub_repository_and_its_author(
+        self, layered_card: str
+    ) -> None:
+        """Its author, not CircleStone — the License section states CircleStone's
+        non-endorsement in the licence's words."""
+        assert _house_sentence(layered_card) == (
+            "This is an unofficial conversion of Gazingstars123/Anima-2.9B for Karume. It is not"
+            " affiliated with or endorsed by Gazingstars123."
+        )
+
+    def test_it_introduces_the_model_as_a_layer_expansion(self, layered_card: str) -> None:
+        for line in ANIMA_2_9B_ORIGINS_INTRO:
+            assert line in layered_card
+        assert OFFICIAL_ORIGINS_INTRO[0] not in layered_card
+        assert EXTRA_ORIGINS_INTRO[0] not in layered_card
+        flat = " ".join(layered_card.split())
+        assert "deepened from 28 to 40 blocks" in flat
+        assert "fine-tune" not in flat
+
+    def test_it_lists_the_origin_with_the_revision_read(self, layered_card: str) -> None:
+        upstream = UPSTREAM_MODELS[LAYERED]
+        assert upstream.source == "https://huggingface.co/Gazingstars123/Anima-2.9B"
+        assert f"### `{LAYERED}` — {upstream.title}" in layered_card
+        assert f"- **Author**: {upstream.author}" in layered_card
+        assert f"- **Source**: {upstream.source}" in layered_card
+        assert (
+            "- **Converted from**: `Anima-2.9B-preview-v1.safetensors`"
+            " (revision `9f9cb502dbae7a616c3cc5a530633427fe735665`)"
+        ) in layered_card.splitlines()
+
+    def test_a_row_without_a_revision_prints_none(self, card: str, extra_card: str) -> None:
+        """The rows written before the field keep their line as it was."""
+        for text in (card, extra_card):
+            assert "(revision `" not in text
+
+    def test_it_states_the_upstream_sampling_recommendation_beside_the_defaults(
+        self, layered_card: str
+    ) -> None:
+        flat = " ".join(layered_card.split())
+        assert "**21 steps / guidance 4** by default" in flat
+        assert "The upstream card recommends 28–50 steps at guidance 3.5–5" in flat
+
+    def test_it_points_the_reader_at_the_official_text_stack(self, layered_card: str) -> None:
+        assert "[hdae/karume-anima](https://huggingface.co/hdae/karume-anima)" in layered_card
+
+    def test_it_carries_every_legal_text_and_no_third_party_permission_note(
+        self, layered_card: str
+    ) -> None:
+        _, _, license_section = layered_card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        flat = " ".join(section.split())
+        for text in (ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT, NVIDIA_NOTICE):
+            assert text in section
+        assert (
+            "not an official product of CircleStone Labs LLC, and it is not endorsed, approved or"
+            " validated by CircleStone Labs LLC." in flat
+        )
+        assert "do not relicense it" not in flat
+        assert "community fine-tunes are redistributed" not in flat
+
+    def test_its_front_matter_names_the_hub_repository_and_the_bundled_license(
+        self, card: str, layered_card: str
+    ) -> None:
+        """The `base_model` is the repository it converts; the license fields are the official
+        card's, the same bundled text."""
+        head = layered_card.split("---")[1]
+        assert "base_model: Gazingstars123/Anima-2.9B" in head
+        assert "base_model_relation: quantized" in head
+        official = card.split("---")[1]
+        assert head == official.replace(
+            "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers",
+            "base_model: Gazingstars123/Anima-2.9B",
+        )
+
+    def test_it_carries_the_same_skeleton(self, layered_card: str) -> None:
+        headings = [line for line in layered_card.splitlines() if line.startswith("## ")]
+        assert headings == [
+            "## What is this",
+            "## Models and their origins",
+            "## License",
+            "## Models",
+            "## Usage",
+            f"## Model: {LAYERED}",
+        ]
+
+    def test_it_states_the_manifest_format_once(self, layered_card: str) -> None:
+        assert layered_card.count(card_format_statement(_2_9b_manifest()["format"])) == 1
+
+    def test_it_refuses_another_pipelines_manifest(self) -> None:
+        manifest = _2_9b_manifest()
+        manifest["models"][LAYERED]["pipeline"] = "sbv2/1"
+
+        with pytest.raises(ValueError):
+            render_2_9b_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
 class TestFrontmatter:

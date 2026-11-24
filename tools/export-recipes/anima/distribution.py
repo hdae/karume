@@ -5,9 +5,9 @@ verification) lives in `karume.dist`. This module holds only **Anima-specific fa
 from which series directory, at which path of the distribution and under which dtype label to lay
 it out, and which quant is the default.
 
-The public surface is two Pipelines ({@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} — ADR
-0087) — the repository's dist driver (`tools/export-recipes/dist.py`) merges them into core's
-PIPELINES.
+The public surface is three Pipelines ({@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} — ADR
+0087 — and {@link ANIMA_2_9B_PIPELINE}, its addendum of 2026-11-24) — the repository's dist driver
+(`tools/export-recipes/dist.py`) merges them into core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from anima.card import (
     ATTRIBUTION_NOTICE,
     NVIDIA_NOTICE,
     RIGHTS_GRANT_STATEMENT,
+    render_2_9b_card,
     render_base_card,
     render_extra_card,
 )
@@ -83,6 +84,14 @@ ANIMA_BASE_MODEL_NAME = "anima-v1.0"
 #: high-quality style — upstream's naming as is). It carries its own text_conditioner (its
 #: llm_adapter differs from base — {@link text_conditioner_series}).
 ANIMA_AESTHETIC_MODEL_NAME = "anima-aesthetic-v1.1"
+
+#: Model name of Anima-2.9B (HF `Gazingstars123/Anima-2.9B`; the upstream's version name
+#: `preview-v1` is kept — ADR 0077): a third party's layer expansion of the Anima base model, its
+#: transformer deepened from 28 to 40 blocks of the same width and trained further. It is a
+#: modified model rather than a fine-tune, so it has a repository of its own
+#: ({@link ANIMA_2_9B_REPO_NAME} — ADR 0087 addendum of 2026-11-24). Its text encoder, VAE decoder
+#: and tokenizers are the base model's bytes; its text conditioner and transformer are its own.
+ANIMA_2_9B_MODEL_NAME = "anima-2.9b-preview-v1"
 
 #: Pipeline contract (ADR 0041 §2 — per model).
 ANIMA_PIPELINE = "anima/1"
@@ -279,6 +288,22 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
         "  unchanged (no rounding or quantization).",
         "- Every model in this repository is a community fine-tune of the CircleStone",
         "  Anima base model; its origin, author and license terms are stated in README.md.",
+    )
+)
+
+#: Notice of the 2.9B repository (karume-anima-2.9b — Anima-2.9B). The upstream file is BF16
+#: throughout (928 tensors, header read 2026-11-24), so the bf16 line holds as in the other two.
+#: The model is a third party's modification of the CircleStone model, not Karume's, so the line
+#: that says so names it as such and leaves the origin to the README (the same reason as extra's).
+ANIMA_2_9B_NOTICE_MARKDOWN = notice_markdown(
+    (
+        CONTAINER_MODIFICATION,
+        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
+        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
+        "  unchanged (no rounding or quantization).",
+        "- The model in this repository is a third party's layer expansion of the CircleStone",
+        "  Anima base model: its transformer was deepened from 28 to 40 blocks and trained",
+        "  further. Its origin, author and license terms are stated in README.md.",
     )
 )
 
@@ -658,6 +683,14 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
         storages=("i8", "bf16"),
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
+    # The upstream card recommends 28-50 steps at CFG 3.5-5; the defaults stay the base model's (20
+    # steps, CFG 4, Euler shift 3), the only configuration its images were made and checked with
+    # here — whether to adopt the upstream's range is open (docs/backlog.md).
+    ANIMA_2_9B_MODEL_NAME: AnimaModel(
+        lora_sha256=None,
+        storages=("i8", "bf16"),
+        pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+    ),
 }
 
 #: The accepted set per repository. **A different Pipeline means a different legal text (NOTICE) at
@@ -666,7 +699,9 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
 #: extra** (ruling of 2026-09-01 — ADR 0087): the official repository (karume-anima) holds
 #: CircleStone's 5 variants with Turbo as the default, and the extra repository
 #: (karume-anima-extra) holds third-party fine-tunes and references the text stack in the official
-#: repository across repositories.
+#: repository across repositories. A third repository (karume-anima-2.9b) holds Anima-2.9B, a
+#: layer-expanded model rather than a fine-tune (ruling of 2026-11-24 — ADR 0087 addendum); it
+#: references the official text stack the same way.
 OFFICIAL_MODELS: tuple[str, ...] = (
     ANIMA_TURBO_MODEL_NAME,
     ANIMA_BASE_MODEL_NAME,
@@ -675,6 +710,7 @@ OFFICIAL_MODELS: tuple[str, ...] = (
     "anima-aesthetic-v1.0",
 )
 EXTRA_MODELS: tuple[str, ...] = ("anima-wai-v1.0", "anima-copycat-20260610")
+ANIMA_2_9B_MODELS: tuple[str, ...] = (ANIMA_2_9B_MODEL_NAME,)
 
 
 @dataclass(frozen=True)
@@ -996,6 +1032,12 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
 #: The text encoder, the VAE decoder and the tokenizers are held by the base model for every model
 #: ({@link anima_published_holder}); the rest by the model itself.
 #:
+#: A model without an entry is not published yet: it is built from its series, except the roles
+#: another model holds, which it takes as that model published them ({@link
+#: anima_unpublished_sources} — today Anima-2.9B, whose text encoder, VAE decoder and tokenizers are
+#: the base's). Its own entry is added once its containers are published, and its later builds take
+#: them from the mirror like every other model's.
+#:
 #: Recorded 2026-11-18 from the published manifests of `karume-anima` at
 #: `a5fac03dc6563657b4e5c797c78cc3c813912a3e` and `karume-anima-extra` at
 #: `15731a612517df0064db69e8cb7c9825fce00c91`; the local mirrors' manifests were compared with them
@@ -1068,16 +1110,21 @@ class AnimaPublished:
 
 def anima_repository(model: str) -> str:
     """The distribution repository a model is published in."""
-    return OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME
+    if model in OFFICIAL_MODELS:
+        return OFFICIAL_REPO_NAME
+    if model in ANIMA_2_9B_MODELS:
+        return ANIMA_2_9B_REPO_NAME
+    return EXTRA_REPO_NAME
 
 
 def anima_published_holder(model: str, role: str) -> tuple[str, str]:
     """(repository, model) whose published entry a role of `model` is taken from.
 
     The text encoder, the VAE decoder and the tokenizers are the base model's for every model
-    ({@link ANIMA_EXTRA_SHARED_ROLES} — the parts fine-tunes do not touch; the official repository
-    folds them into `shared/`, and the extra repository references them there instead of storing
-    them). Every other role is the model's own, in its own repository.
+    ({@link ANIMA_EXTRA_SHARED_ROLES} — the parts fine-tunes and the layer expansion do not touch;
+    the official repository folds them into `shared/`, and the extra and 2.9B repositories
+    reference them there instead of storing them). Every other role is the model's own, in its own
+    repository.
     """
     if role in ANIMA_EXTRA_SHARED_ROLES:
         return OFFICIAL_REPO_NAME, ANIMA_BASE_MODEL_NAME
@@ -1125,6 +1172,16 @@ def _published_roles(model: str) -> list[str]:
     ]
 
 
+def _mirror_roles(model: str) -> list[str]:
+    """The roles a build of `model` takes as published from the local mirrors: every role of a
+    published model ({@link ANIMA_PUBLISHED_PART0}); for a model not published yet, only the roles
+    another model holds ({@link anima_published_holder}) — its own come from its series."""
+    roles = _published_roles(model)
+    if model in ANIMA_PUBLISHED_PART0:
+        return roles
+    return [role for role in roles if anima_published_holder(model, role)[1] != model]
+
+
 def _part_view_root(model: str) -> Path:
     """A new directory for one build's part view (links only), removed when the process exits —
     the plan only points at it, and the assembly that reads it runs later in the same process."""
@@ -1147,12 +1204,13 @@ def anima_published_sources(
     Without `view_root` the view is a temporary directory removed when the process exits.
 
     It reads the manifests and links, nothing more: whether the bytes are the published ones is
-    checked by {@link assert_anima_published}. It cannot build a model whose containers are not in
-    the mirrors, nor a storage the mirrors do not hold (an i4 transformer, a new model) — those
-    still come from series ({@link anima_sources}).
+    checked by {@link assert_anima_published}. The roles are {@link _mirror_roles}': every role of
+    a published model, only the roles another model holds for a model not published yet (its own
+    come from its series — {@link anima_unpublished_sources}). A storage the mirrors do not hold
+    (an i4 transformer) still comes from series ({@link anima_sources}).
     """
     view = _part_view_root(model) if view_root is None else view_root
-    roles = _published_roles(model)
+    roles = _mirror_roles(model)
     manifests: dict[str, Mapping[str, Any]] = {}
     placements: dict[str, Path] = {}
     pins: dict[str, str] = {}
@@ -1242,19 +1300,56 @@ def assert_anima_published(published: AnimaPublished) -> None:
                 )
 
 
+@dataclass(frozen=True)
+class AnimaUnpublished:
+    """The assembly inputs of a model not published yet ({@link anima_unpublished_sources}): the
+    roles it stores itself from its series, and the roles another model holds as that model
+    published them."""
+
+    #: The model's series ({@link anima_sources}). Only the roles {@link published} does not hold
+    #: are placed from it; the series' own records (the LoRA attribution, the i4 calibration
+    #: conditions) are checked as for a build from series.
+    series: AnimaSources
+    #: The roles another model holds ({@link _mirror_roles} — the base's text encoder, VAE decoder
+    #: and tokenizers), taken from the local mirrors and pinned like a published model's
+    #: ({@link assert_anima_published}).
+    published: AnimaPublished
+
+
+def anima_unpublished_sources(
+    series_dir: Path, model: str, dist_root: Path, view_root: Path | None = None
+) -> AnimaUnpublished:
+    """The inputs of a model {@link ANIMA_PUBLISHED_PART0} does not list: its own roles from the
+    series under `series_dir` (`outputs/series/`), the roles another model holds from the local
+    mirrors under `dist_root` (`models/`).
+
+    The base's text-stack series is no longer on disk (`outputs/series/anima-bf16` — ADR 0154,
+    Context), and an extra or 2.9B repository only references those roles: taking
+    them as published is what the reference is reconciled against anyway, and the pin proves they
+    are the published bytes. A model that holds every role itself (the base, re-exported on purpose)
+    reads no mirror.
+    """
+    return AnimaUnpublished(
+        series=anima_sources(series_dir, model),
+        published=anima_published_sources(model, dist_root, view_root),
+    )
+
+
 def anima_plan(
-    sources: AnimaSources | AnimaPublished,
+    sources: AnimaSources | AnimaPublished | AnimaUnpublished,
     model: str = ANIMA_BASE_MODEL_NAME,
     *,
     spec: AnimaModel | None = None,
 ) -> ModelPlan:
     """Builds the plan for one Anima model (all checks are done here — not a byte is written).
 
-    `sources` is the model's series ({@link AnimaSources}) or its published containers
-    ({@link AnimaPublished}). The series' own records (the LoRA attribution, the i4 calibration
-    conditions) are checked on series only: a published container is pinned by its digest instead
-    and keeps the provenance it was published with. The rope-table equality and the storage checks
-    apply to both.
+    `sources` is the model's series ({@link AnimaSources}), its published containers
+    ({@link AnimaPublished}), or both for a model not published yet ({@link AnimaUnpublished} —
+    its own roles from the series, the roles another model holds as published, each placed where
+    the series would have put it). The series' own records (the LoRA attribution, the i4
+    calibration conditions) are checked on series only: a published container is pinned by its
+    digest instead and keeps the provenance it was published with. The rope-table equality and the
+    storage checks apply to every input.
 
     `spec` is **the slot for an explicit override** (when omitted it is looked up by model name =
     the distribution path). Only the visual-evaluation assembly (`anima.eval_dist`) overrides it,
@@ -1269,10 +1364,17 @@ def anima_plan(
         assert_anima_published(sources)
         placements = dict(sources.placements)
     else:
-        assert_lora_provenance(sources, spec.lora_sha256)
+        series = sources.series if isinstance(sources, AnimaUnpublished) else sources
+        assert_lora_provenance(series, spec.lora_sha256)
         if "i4" in spec.storages:
-            assert_calib_provenance(sources, spec)
-        placements = anima_placements(sources)
+            assert_calib_provenance(series, spec)
+        placements = anima_placements(series)
+        if isinstance(sources, AnimaUnpublished):
+            assert_anima_published(sources.published)
+            placements = {
+                role: sources.published.placements.get(role, path)
+                for role, path in placements.items()
+            }
     assert_shared_rope_base(transformer_containers(placements))
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
@@ -1294,8 +1396,9 @@ def anima_plan(
 
 def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> ModelPlan:
     """Builds the plan for one Anima model (the CLI dispatches here): from the published containers
-    in the local mirrors under {@link DIST_ROOT} for a model {@link ANIMA_PUBLISHED_PART0} lists,
-    from the `--series` parent otherwise.
+    in the local mirrors under {@link DIST_ROOT} for a model {@link ANIMA_PUBLISHED_PART0} lists;
+    otherwise its own roles from the `--series` parent and the roles another model holds from the
+    mirrors ({@link anima_unpublished_sources}).
 
     MUST: `allowed` is **the models allowed in that Pipeline's repository**. A different Pipeline
     means a different NOTICE (modification notice) at the repository root, so assembling with the
@@ -1311,7 +1414,7 @@ def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> M
         )
     if model in ANIMA_PUBLISHED_PART0:
         return anima_plan(anima_published_sources(model, DIST_ROOT), model)
-    return anima_plan(anima_sources(series_dir, model), model)
+    return anima_plan(anima_unpublished_sources(series_dir, model, DIST_ROOT), model)
 
 
 def assert_output_keeps_mirrors(
@@ -1334,14 +1437,14 @@ def assert_output_keeps_mirrors(
     """
     root = DIST_ROOT if dist_root is None else dist_root
     target = out_dir.resolve()
-    # A model outside `allowed` is refused by the plan with its own message; one without pins
-    # reads no mirror.
+    # A model outside `allowed` is refused by the plan with its own message; one not published yet
+    # reads the mirrors for the roles another model holds only.
     read = sorted(
         {
             anima_published_holder(model, role)[0]
             for model in models
-            if model in allowed and model in ANIMA_PUBLISHED_PART0
-            for role in _published_roles(model)
+            if model in allowed
+            for role in _mirror_roles(model)
         }
     )
     for repo in read:
@@ -1419,6 +1522,9 @@ OFFICIAL_REPO_NAME = "karume-anima"
 #: Distribution name of the extra repository.
 EXTRA_REPO_NAME = "karume-anima-extra"
 
+#: Distribution name of the 2.9B repository (Anima-2.9B — {@link ANIMA_2_9B_MODEL_NAME}).
+ANIMA_2_9B_REPO_NAME = "karume-anima-2.9b"
+
 
 def _official_repo_name(_model: str) -> str:
     """The official repository name (the model name is ignored).
@@ -1438,10 +1544,16 @@ def _extra_repo_name(_model: str) -> str:
     return EXTRA_REPO_NAME
 
 
-#: Roles every fine-tune of the extra repository borrows from the official repository instead of
-#: storing them (ADR 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the VAE decoder
-#: in every text-stack storage, and both tokenizers — the official text stack, byte-identical. Not
-#: `text_conditioner`: every extra model has its own ({@link text_conditioner_series}).
+def _2_9b_repo_name(_model: str) -> str:
+    """The 2.9B repository name (the model name is ignored, as for the other two)."""
+    return ANIMA_2_9B_REPO_NAME
+
+
+#: Roles every model outside the official repository — the fine-tunes of the extra repository and
+#: the model of the 2.9B one — borrows from the official repository instead of storing them (ADR
+#: 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the VAE decoder in every text-stack
+#: storage, and both tokenizers — the official text stack, byte-identical. Not `text_conditioner`:
+#: every such model has its own ({@link text_conditioner_series}).
 ANIMA_EXTRA_SHARED_ROLES: tuple[str, ...] = (
     *(
         text_stack_role(component, storage)
@@ -1452,10 +1564,10 @@ ANIMA_EXTRA_SHARED_ROLES: tuple[str, ...] = (
 )
 
 
-def _extra_references(_model: str) -> tuple[CrossRepoReference, ...]:
-    """`Pipeline.references` of the extra repository: every model borrows the official text
-    stack. The referenced model is the base (`anima-v1.0`) — the text stack is built from the base
-    series, and the official repository folds it into `shared/` for all five variants."""
+def _official_text_stack_references(_model: str) -> tuple[CrossRepoReference, ...]:
+    """`Pipeline.references` of the extra and 2.9B repositories: every model borrows the official
+    text stack. The referenced model is the base (`anima-v1.0`) — it holds the text stack, and the
+    official repository folds it into `shared/` for all five variants."""
     return (
         CrossRepoReference(
             repo_name=OFFICIAL_REPO_NAME,
@@ -1466,9 +1578,10 @@ def _extra_references(_model: str) -> tuple[CrossRepoReference, ...]:
 
 
 #: The family's name map (`karume-name-map/1` — `docs/spec/convert.md`, "The name map"), beside
-#: this recipe, where both the upstream tensor names and the initializer names are known. Both
-#: repositories carry it (`karume.dist.Pipeline.name_map`): the fine-tunes of the extra one ship in
-#: the same layouts as the official variants.
+#: this recipe, where both the upstream tensor names and the initializer names are known. Every
+#: repository carries it (`karume.dist.Pipeline.name_map`): the fine-tunes of the extra one ship in
+#: the same layouts as the official variants, and so does the 40-block model of the 2.9B one (the
+#: rules rename by pattern, whatever the block count).
 NAME_MAP_PATH = Path(__file__).with_name("name-map.json")
 
 #: The entry for `--pipeline anima` (the official repository karume-anima — CircleStone's 5
@@ -1490,8 +1603,8 @@ OFFICIAL_PIPELINE = Pipeline(
 
 #: The entry for `--pipeline anima-extra` (the extra repository karume-anima-extra — third-party
 #: fine-tunes).
-#: The text stack is referenced in the official repository ({@link _extra_references}; the
-#: publication order is docs/release-runbook.md §0).
+#: The text stack is referenced in the official repository ({@link
+#: _official_text_stack_references}; the publication order is docs/release-runbook.md §0).
 EXTRA_PIPELINE = Pipeline(
     default_model="anima-wai-v1.0",
     repo_name=_extra_repo_name,
@@ -1500,6 +1613,23 @@ EXTRA_PIPELINE = Pipeline(
         "anima-extra": partial(render_extra_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
     },
     root_files=root_files(EXTRA_NOTICE_MARKDOWN),
-    references=_extra_references,
+    references=_official_text_stack_references,
+    name_map=NAME_MAP_PATH,
+)
+
+#: The entry for `--pipeline anima-2.9b` (the 2.9B repository karume-anima-2.9b — Anima-2.9B).
+#: MUST: a separate Pipeline from the other two, for the same reason as theirs: its notice names a
+#: third party's layer expansion, which neither of theirs does. It borrows the official text stack
+#: like extra ({@link _official_text_stack_references}); until its first publication its own roles
+#: come from its series ({@link anima_unpublished_sources}).
+ANIMA_2_9B_PIPELINE = Pipeline(
+    default_model=ANIMA_2_9B_MODEL_NAME,
+    repo_name=_2_9b_repo_name,
+    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, ANIMA_2_9B_MODELS),
+    card_profiles={
+        "anima-2.9b": partial(render_2_9b_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
+    },
+    root_files=root_files(ANIMA_2_9B_NOTICE_MARKDOWN),
+    references=_official_text_stack_references,
     name_map=NAME_MAP_PATH,
 )

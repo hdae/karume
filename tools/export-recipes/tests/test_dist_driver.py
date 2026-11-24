@@ -27,6 +27,7 @@ import pytest
 
 import dist
 from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
+from anima.distribution import ANIMA_2_9B_PIPELINE
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
 from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
 from birefnet.distribution import LUCIDA_PIPELINE
@@ -62,6 +63,7 @@ from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
 RECIPE_PIPELINES = {
     "anima": ANIMA_OFFICIAL_PIPELINE,
     "anima-extra": ANIMA_EXTRA_PIPELINE,
+    "anima-2.9b": ANIMA_2_9B_PIPELINE,
     "sbv2": SBV2_PIPELINE,
     "irodori": IRODORI_PIPELINE,
     "irodori-large": IRODORI_LARGE_PIPELINE,
@@ -107,23 +109,23 @@ class TestRegistry:
         assert dist.DEFAULT_PIPELINE == "anima"
         assert dist.DEFAULT_PIPELINE in dist.PIPELINES
 
-    def test_the_two_anima_repositories_stay_separate_pipelines(self) -> None:
-        """The official models (`anima`) and the fine-tunes (`anima-extra`) are **separate
-        entries** (the split axis of ADR 0087).
+    def test_the_three_anima_repositories_stay_separate_pipelines(self) -> None:
+        """The official models (`anima`), the fine-tunes (`anima-extra`) and the layer-expanded
+        Anima-2.9B (`anima-2.9b`) are **separate entries** (the split axis of ADR 0087 and its
+        addendum of 2026-11-24).
 
-        `root_files` is one fixed set per Pipeline, so folding them into one would make one
+        `root_files` is one fixed set per Pipeline, so folding two into one would make one
         repository's modification notice disagree with its contents — it still reads as valid
         prose, so `verify_dist` and the manifest check both pass, and nobody notices until it is
         distributed.
         """
-        official = dist.PIPELINES["anima"]
-        extra = dist.PIPELINES["anima-extra"]
+        pipelines = [dist.PIPELINES[name] for name in ("anima", "anima-extra", "anima-2.9b")]
 
-        assert official is not extra
-        assert official.root_files["NOTICE.md"] != extra.root_files["NOTICE.md"]
+        assert len({id(pipeline) for pipeline in pipelines}) == 3
+        assert len({pipeline.root_files["NOTICE.md"] for pipeline in pipelines}) == 3
 
-    def test_both_anima_repositories_and_no_other_declare_the_recipe_name_map(self) -> None:
-        """Anima's name map (`tools/export-recipes/anima/name-map.json`) goes into both of its
+    def test_every_anima_repository_and_no_other_declare_the_recipe_name_map(self) -> None:
+        """Anima's name map (`tools/export-recipes/anima/name-map.json`) goes into each of its
         repositories (ADR 0153); no other family has one yet, so none declares one."""
         recipe_map = (REPO_ROOT / "tools" / "export-recipes" / "anima" / "name-map.json").resolve()
 
@@ -133,7 +135,11 @@ class TestRegistry:
             if pipeline.name_map is not None
         }
 
-        assert declaring == {"anima": recipe_map, "anima-extra": recipe_map}
+        assert declaring == {
+            "anima": recipe_map,
+            "anima-extra": recipe_map,
+            "anima-2.9b": recipe_map,
+        }
         assert_name_map(recipe_map)
 
     def test_the_two_birefnet_repositories_stay_separate_pipelines(self) -> None:
@@ -161,6 +167,7 @@ class TestRegistry:
         expected = {
             "anima",
             "anima-extra",
+            "anima-2.9b",
             "sbv2",
             "irodori",
             "irodori-large",
@@ -215,7 +222,9 @@ class TestDefaultPlaces:
 #: How each published repository is built (pipeline, the `--model` list, `--repo`) → the output
 #: directory `models/<name>/`. `tools/release/hf-upload.zsh` uploads this directory to
 #: `hdae/<name>`, so unless the card's Usage example names it, the published card points at
-#: another repository.
+#: another repository. A repository not published yet (`karume-embeddinggemma-2`,
+#: `karume-anima-2.9b`) is not listed: the TS `SOURCES` it is matched against get its entry at the
+#: first publication (docs/release-runbook.md §3).
 RELEASE_REPOSITORIES = [
     (
         "anima",

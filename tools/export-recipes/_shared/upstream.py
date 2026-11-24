@@ -212,6 +212,8 @@ def assert_upstream_provenance(container: Path, *, license: str, revision: str |
 UPSTREAM_AUTHORS: Mapping[str, str] = {
     # anima — the licensor in the CircleStone licence's attribution notice.
     "circlestone-labs": "CircleStone Labs LLC",
+    # anima — Anima-2.9B's publisher (its card names no one else; the account name as it is).
+    "Gazingstars123": "Gazingstars123",
     # birefnet / lucida — the copyright lines of the bundled MIT licence.
     "ZhengPeng7": "ZhengPeng",
     "egeorcun": "egeorcun",

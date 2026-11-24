@@ -12,7 +12,7 @@ that do not exist** in the manifest.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 
@@ -65,6 +65,15 @@ ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 #: Title of the extra repository (karume-anima-extra — third-party fine-tunes).
 ANIMA_EXTRA_TITLE = "Anima Extra — Karume"
 
+#: The front matter of the 2.9B repository (karume-anima-2.9b). The model it converts is on the
+#: Hub, so that repository is its `base_model` (the relation stays `quantized`: re-encoded, an int8
+#: series beside it). The license is the CircleStone one the upstream card states for a derivative
+#: model, linked to the text this repository bundles, as for the other two.
+ANIMA_2_9B_METADATA = replace(ANIMA_METADATA, base_model=("Gazingstars123/Anima-2.9B",))
+
+#: Title of the 2.9B repository.
+ANIMA_2_9B_TITLE = "Anima 2.9B — Karume"
+
 
 @dataclass(frozen=True)
 class UpstreamModel:
@@ -84,6 +93,10 @@ class UpstreamModel:
     #: Permission fields of the origin page (checked at the source — retrieved on
     #: {@link PERMISSIONS_RETRIEVED} below).
     permissions: tuple[tuple[str, str], ...]
+    #: The commit of the source repository the file was read at (`None` = not recorded — the
+    #: rows written before this field). A third party's repository may replace its file under the
+    #: same name, so its row pins the bytes the conversion read.
+    revision: str | None = None
 
 
 #: Date the permission fields were checked at the source (shown "as of" in the card — the facts
@@ -155,6 +168,18 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDerivatives", "true"),
             ("allowDifferentLicense", "false"),
         ),
+    ),
+    # Anima-2.9B (a layer expansion with its own repository, karume-anima-2.9b). It is on the Hub,
+    # so there are no permission fields; its card states the CircleStone license for a derivative
+    # model. The revision is the one the conversion read
+    # (`inputs/anima/anima-2.9b-original/REVISION.txt`).
+    "anima-2.9b-preview-v1": UpstreamModel(
+        title="Anima-2.9B preview v1",
+        author="Gazingstars123",
+        source="https://huggingface.co/Gazingstars123/Anima-2.9B",
+        file="Anima-2.9B-preview-v1.safetensors",
+        permissions=(),
+        revision="9f9cb502dbae7a616c3cc5a530633427fe735665",
     ),
 }
 
@@ -285,6 +310,38 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
         "  what makes the **negative prompt take effect**. The official models (base / Aesthetic /",
         "  Turbo) live in [hdae/karume-anima](https://huggingface.co/hdae/karume-anima).",
+        "- Not readable by diffusers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+#: The upstream card's sampling recommendation for Anima-2.9B (**a fact absent from the manifest** —
+#: the distribution's defaults are the base model's, the only ones checked here; read from
+#: `inputs/anima/anima-2.9b-original/README.md`, "Generation (Recommendation)", 2026-11-24).
+ANIMA_2_9B_UPSTREAM_RECOMMENDATION = "28–50 steps at guidance 3.5–5"
+
+
+def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
+    defaults = default_model(manifest)["pipelineConfig"]["defaults"]
+    base_model = ANIMA_2_9B_METADATA.base_model[0]
+    return [
+        "## What is this",
+        "",
+        f"[{base_model}](https://huggingface.co/{base_model}), a layer expansion of the",
+        "CircleStone **Anima** base model by a third party — its transformer deepened from 28 to",
+        "40 blocks of the same width (about 2.9B parameters) and trained further — converted into",
+        "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
+        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
+        "Deno.",
+        "",
+        f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
+        f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
+        "  what makes the **negative prompt take effect**. The upstream card recommends",
+        f"  {ANIMA_2_9B_UPSTREAM_RECOMMENDATION}; pass `steps` / `guidanceScale` to follow it.",
+        "- The text encoder, VAE and tokenizers are the official Anima ones, shared with",
+        "  [hdae/karume-anima](https://huggingface.co/hdae/karume-anima).",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -432,7 +489,8 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
             f"- **Source**: {upstream.source}",
         ]
         if upstream.file is not None:
-            lines.append(f"- **Converted from**: `{upstream.file}`")
+            at = "" if upstream.revision is None else f" (revision `{upstream.revision}`)"
+            lines.append(f"- **Converted from**: `{upstream.file}`{at}")
         if upstream.permissions:
             lines += [
                 "",
@@ -509,6 +567,13 @@ EXTRA_ORIGINS_INTRO = (
     "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
     "cross-repository references in `karume.json`.",
 )
+ANIMA_2_9B_ORIGINS_INTRO = (
+    "The model below is a third party's layer expansion of the CircleStone Anima base model,",
+    "not an official CircleStone release. The text encoder, VAE and tokenizers are the official",
+    "ones, shared with the official repository",
+    "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
+    "cross-repository references in `karume.json`.",
+)
 
 
 def _introduction(manifest: Mapping[str, Any], title: str) -> list[str]:
@@ -578,6 +643,40 @@ def render_extra_card(
             _extra_overview(manifest),
             [""],
             _origins(manifest, EXTRA_ORIGINS_INTRO),
+            [""],
+            _base_license(manifest),
+            [""],
+            models(manifest),
+            [""],
+            _usage(manifest, repo),
+            *model_sections(
+                manifest,
+                (partial(quants, abbreviations=abbreviations, host_assets=host_assets), _defaults),
+            ),
+        )
+    )
+
+
+def render_2_9b_card(
+    manifest: Mapping[str, Any],
+    repo: str,
+    abbreviations: Mapping[str, str],
+    host_assets: Mapping[FileRefKey, int] = {},
+) -> str:
+    """The `README.md` body of the 2.9B repository's distribution (Anima-2.9B).
+
+    The house sentence names the repository the card converts, from its `base_model`
+    ({@link ANIMA_2_9B_METADATA}) — its author, not CircleStone, whose non-endorsement the License
+    section states in the licence's words.
+    """
+    require_pipeline(manifest, SUPPORTED_PIPELINE)
+    return render(
+        (
+            frontmatter(ANIMA_2_9B_METADATA),
+            introduction(ANIMA_2_9B_TITLE, hf_upstreams(ANIMA_2_9B_METADATA.base_model)),
+            _2_9b_overview(manifest),
+            [""],
+            _origins(manifest, ANIMA_2_9B_ORIGINS_INTRO),
             [""],
             _base_license(manifest),
             [""],

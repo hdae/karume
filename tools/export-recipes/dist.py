@@ -12,6 +12,9 @@ is the source of truth of the accepted set.
         --model anima-wai-v1.0 --model anima-copycat-20260610 \\
         --out ../../models/karume-anima-extra \\
         --resolve-refs hf                                  # fine-tunes (reference karume-anima)
+    uv run python dist.py --pipeline anima-2.9b \\
+        --resolve-refs hf                                  # Anima-2.9B (references karume-anima;
+                                                           # not published)
     uv run python dist.py --pipeline irodori               # v4-small (self-contained)
     uv run python dist.py --pipeline irodori --model v4.1-small \\
         --resolve-refs hf                                  # references karume-irodori-v4-small
@@ -129,6 +132,9 @@ from wan.umt5_intake import assert_outside_distribution_root as intake_outside_d
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": anima_distribution.OFFICIAL_PIPELINE,
     "anima-extra": anima_distribution.EXTRA_PIPELINE,
+    # Anima-2.9B, a layer-expanded model (its own repository — ADR 0087 addendum of 2026-11-24; a
+    # local mirror, not published).
+    "anima-2.9b": anima_distribution.ANIMA_2_9B_PIPELINE,
     "sbv2": sbv2_distribution.PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
     # The v4-Large line is tagged `license: gemma` upstream, so its repository root carries other
@@ -173,6 +179,10 @@ OUTPUT_CHECKS: Mapping[str, Callable[[Path, Sequence[str]], None]] = {
     "anima-extra": partial(
         anima_distribution.assert_output_keeps_mirrors,
         allowed=anima_distribution.EXTRA_MODELS,
+    ),
+    "anima-2.9b": partial(
+        anima_distribution.assert_output_keeps_mirrors,
+        allowed=anima_distribution.ANIMA_2_9B_MODELS,
     ),
 }
 

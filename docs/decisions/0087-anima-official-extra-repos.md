@@ -70,3 +70,26 @@ upstream's lines: five models = three lines × versions (v1.0 / v1.1; Base has v
   plans' references agreeing. The former check "cross-repo only when building one model"
   (2026-08-24, when `karume-anima-turbo` held one model) stopped holding once extra held two; the real
   ambiguity, "one role name pointing at different bytes", is checked directly instead.
+
+## Addendum (2026-11-24) — Anima-2.9B gets a repository of its own
+
+- **Context.** `Gazingstars123/Anima-2.9B` (`anima-2.9b-preview-v1`) is not a fine-tune of the base: its transformer
+  was deepened from 28 to 40 blocks of the same width (12 inserted blocks, about 2.9B parameters) and trained further.
+  Decision 1's split had two places for it: the extra repository ("fine-tuned", where third-party models go), or a
+  repository of its own.
+- **Decision (the maintainer's ruling of 2026-11-24).** It goes in **`karume-anima-2.9b`**, a third repository with its
+  own Pipeline (`--pipeline anima-2.9b`), notice and card — not in `karume-anima-extra`. The reason: it is a modified
+  model, not a fine-tune, and ordinary fine-tunes are now read with `fromSingleFile` (an upstream single file converted
+  while a Session reads it), so the extra repository is expected to be deprecated later; a model that will outlive it
+  does not go in. Nothing is added to the extra repository, and it is not deprecated by this addendum.
+- **What stays as decided.** Decision 3 applies unchanged: its text encoder, VAE decoder and both tokenizers are the
+  official base's bytes and are referenced across repositories from `karume-anima` (model `anima-v1.0`), the same roles
+  extra borrows; its text conditioner and transformer are its own. Decision 4 applies too: one notice per Pipeline, and
+  its notice names the third party's layer expansion instead of a community fine-tune.
+- **Alternative not chosen.** Adding it to `karume-anima-extra` would have reused that repository's notice, card and
+  Playground entry, and cost a rebuild and upload of the whole extra repository; it would also tie the model to a
+  repository expected to be retired, and the extra notice ("community fine-tune") would not describe it.
+- **Consequences.** Until its first publication the model has no published pin: its own roles are built from its
+  series and the borrowed ones from the official mirror (`anima_unpublished_sources` in
+  `tools/export-recipes/anima/distribution.py`), and it has no `SOURCES` entry (the release runbook adds one at the first
+  publication). The publication order is the extra repository's: `karume-anima` first, then this one.

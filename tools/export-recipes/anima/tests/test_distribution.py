@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -37,6 +38,11 @@ from _shared.container_read import read_asset
 from anima import distribution as anima_distribution
 from anima.card import ATTRIBUTION_NOTICE, NVIDIA_NOTICE, RIGHTS_GRANT_STATEMENT
 from anima.distribution import (
+    ANIMA_2_9B_MODEL_NAME,
+    ANIMA_2_9B_MODELS,
+    ANIMA_2_9B_NOTICE_MARKDOWN,
+    ANIMA_2_9B_PIPELINE,
+    ANIMA_2_9B_REPO_NAME,
     ANIMA_AESTHETIC_MODEL_NAME,
     ANIMA_ASSETS,
     ANIMA_BASE_MODEL_NAME,
@@ -76,6 +82,7 @@ from anima.distribution import (
     anima_published_sources,
     anima_quants,
     anima_sources,
+    anima_unpublished_sources,
     anima_weights,
     notice_markdown,
     seat_base_storage,
@@ -406,6 +413,23 @@ _MIRRORED: Mapping[str, tuple[str, ...]] = {
     OFFICIAL_REPO_NAME: (ANIMA_TURBO_MODEL_NAME, ANIMA_BASE_MODEL_NAME),
     EXTRA_REPO_NAME: ("anima-wai-v1.0",),
 }
+
+
+#: The models not published yet: built from their series except the roles another model holds
+#: (`anima_unpublished_sources`). A model leaves this set in the commit that pins its published
+#: containers in `ANIMA_PUBLISHED_PART0` (the pin test refuses a model in both).
+_UNPUBLISHED: frozenset[str] = frozenset({ANIMA_2_9B_MODEL_NAME})
+
+
+def _build_unpublished_series(series_dir: Path) -> AnimaSources:
+    """The series of the model not published yet, as they are on disk: its own transformer and
+    text-conditioner series only. The base's text-stack series and the tokenizer series are gone
+    (`outputs/series/anima-bf16` / `anima-demo` — ADR 0154), so a build that read them would fail
+    instead of passing on a copy of the same bytes."""
+    sources = _build_series(series_dir, model=ANIMA_2_9B_MODEL_NAME, mark=b"-layered")
+    for gone in (*sources.base.values(), sources.tokenizers.parent):
+        shutil.rmtree(gone)
+    return sources
 
 
 def _role_refs(entry: Mapping[str, Any], role: str) -> list[Mapping[str, Any]]:
@@ -805,10 +829,18 @@ class TestModelVariants:
         series."""
         base = anima_sources(tmp_path / "series", ANIMA_BASE_MODEL_NAME)
         wai = anima_sources(tmp_path / "series", "anima-wai-v1.0")
+        # The layer expansion's conditioner differs from the base's too (its third part, the
+        # weights, differs — measured 2026-11-24).
+        layered = anima_sources(tmp_path / "series", ANIMA_2_9B_MODEL_NAME)
 
         assert base.text_conditioner == base.base
         assert wai.text_conditioner != wai.base
         assert wai.text_conditioner["bf16"].name == "anima-wai-v1.0-bf16"
+        assert layered.text_conditioner["bf16"].name == f"{ANIMA_2_9B_MODEL_NAME}-bf16"
+        assert layered.transformer == {
+            "i8": tmp_path / "series" / f"{ANIMA_2_9B_MODEL_NAME}-i8-dyn",
+            "bf16": tmp_path / "series" / f"{ANIMA_2_9B_MODEL_NAME}-bf16-dyn",
+        }
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
         """The default entry matches turbo's (changing the model does not change what the default
@@ -863,23 +895,44 @@ class TestPipelineMembership:
         with pytest.raises(DistError, match="does not belong in this pipeline's repository"):
             anima_dist_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME, EXTRA_MODELS)
 
-    def test_the_two_lists_partition_the_accepted_models(self) -> None:
-        """MUST: every model is in **exactly one** of the two.
+    def test_the_2_9b_pipeline_refuses_the_other_repositories_models(self, tmp_path: Path) -> None:
+        for model in (ANIMA_TURBO_MODEL_NAME, "anima-wai-v1.0"):
+            with pytest.raises(DistError, match="does not belong in this pipeline's repository"):
+                anima_dist_plan(tmp_path / "series", model, ANIMA_2_9B_MODELS)
+
+    def test_the_other_pipelines_refuse_the_2_9b_model(self, tmp_path: Path) -> None:
+        for allowed in (OFFICIAL_MODELS, EXTRA_MODELS):
+            with pytest.raises(DistError, match="does not belong in this pipeline's repository"):
+                anima_dist_plan(tmp_path / "series", ANIMA_2_9B_MODEL_NAME, allowed)
+
+    def test_the_three_lists_partition_the_accepted_models(self) -> None:
+        """MUST: every model is in **exactly one** of the three.
 
         An overlap would ship the same model under 2 notices; a gap would silently create a
         model that is in the accepted set yet cannot be assembled from any repository (not
         readable from the choices of `--pipeline`).
         """
-        official, extra = set(OFFICIAL_MODELS), set(EXTRA_MODELS)
+        official, extra, layered = set(OFFICIAL_MODELS), set(EXTRA_MODELS), set(ANIMA_2_9B_MODELS)
 
-        assert official | extra == set(ANIMA_MODELS)
+        assert official | extra | layered == set(ANIMA_MODELS)
         assert official & extra == set()
+        assert official & layered == set()
+        assert extra & layered == set()
 
-    def test_the_two_repositories_declare_different_modifications(self) -> None:
-        """If the notices were folded into one (= the same text), one of them would be a lie."""
-        assert OFFICIAL_NOTICE_MARKDOWN != EXTRA_NOTICE_MARKDOWN
+    def test_the_three_repositories_declare_different_modifications(self) -> None:
+        """If two notices were folded into one (= the same text), one of them would be a lie: the
+        extra one names community fine-tunes, the 2.9B one a third party's layer expansion, and
+        neither statement belongs in another repository's notice."""
+        notices = (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN, ANIMA_2_9B_NOTICE_MARKDOWN)
+        assert len(set(notices)) == 3
         assert "community fine-tune" in EXTRA_NOTICE_MARKDOWN
         assert "community fine-tune" not in OFFICIAL_NOTICE_MARKDOWN
+        assert "community fine-tune" not in ANIMA_2_9B_NOTICE_MARKDOWN
+        flat = " ".join(ANIMA_2_9B_NOTICE_MARKDOWN.split())
+        assert "a third party's layer expansion of the CircleStone Anima base model" in flat
+        assert "deepened from 28 to 40 blocks" in flat
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+            assert "layer expansion" not in notice
 
     def test_neither_notice_claims_a_baked_lora(self) -> None:
         """Baking went away on 2026-09-01 — if it remained in the notice, the stated modifications
@@ -889,7 +942,7 @@ class TestPipelineMembership:
         not made is not extra wording but **a wrong notice** (plausible prose as values go, so
         it would surface only after shipping).
         """
-        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN, ANIMA_2_9B_NOTICE_MARKDOWN):
             assert "LoRA" not in notice
 
     def test_neither_notice_claims_an_int4_series(self) -> None:
@@ -901,7 +954,7 @@ class TestPipelineMembership:
         fixed on the Pipeline and cannot see the manifest, so the slots and the text move
         **independently** = they need to be cross-checked.
         """
-        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN, ANIMA_2_9B_NOTICE_MARKDOWN):
             assert "int4" not in notice
             assert "int8-quantized series of the transformer was added" in notice
         assert not any("i4" in spec.storages for spec in ANIMA_MODELS.values())
@@ -917,7 +970,7 @@ class TestPipelineMembership:
         """
         assert all("bf16" in spec.storages for spec in ANIMA_MODELS.values())
         assert not any("f16" in spec.storages for spec in ANIMA_MODELS.values())
-        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN, ANIMA_2_9B_NOTICE_MARKDOWN):
             flat = " ".join(notice.split())
             assert (
                 "The bf16 series of every component keeps the values of the upstream BF16 weights"
@@ -2071,14 +2124,21 @@ class TestPublishedContainers:
             files.file for labels in anima_weights(spec).values() for files in labels.values()
         } | set(ANIMA_ASSETS.values())
 
-    def test_every_shipped_model_has_a_pin_for_every_role_it_places(self) -> None:
-        """MUST: a model without pins would fall back to series that are no longer on disk, and a
-        role without a pin fails the build — and no pin is left that no model places."""
+    def test_every_model_has_a_pin_for_every_role_it_takes_as_published(self) -> None:
+        """MUST: a shipped model without pins would fall back to series that are no longer on
+        disk, and a role without a pin fails the build — and no pin is left that no model places.
+
+        A model not published yet ({@link _UNPUBLISHED}) has no pins of its own on purpose: its own
+        roles come from its series. The roles it takes from another model are pinned like
+        everyone's, and being both pinned and listed as unpublished is refused too.
+        """
         used: set[tuple[str, str]] = set()
         for model, spec in ANIMA_MODELS.items():
-            assert model in ANIMA_PUBLISHED_PART0, model
+            assert (model in ANIMA_PUBLISHED_PART0) != (model in _UNPUBLISHED), model
             for role in self._roles(spec):
                 _, holder = anima_published_holder(model, role)
+                if model in _UNPUBLISHED and holder == model:
+                    continue
                 assert role in ANIMA_PUBLISHED_PART0[holder], (model, role)
                 used.add((holder, role))
         pinned = {
@@ -2096,7 +2156,13 @@ class TestPublishedContainers:
                     OFFICIAL_REPO_NAME,
                     ANIMA_BASE_MODEL_NAME,
                 )
-            repo = OFFICIAL_REPO_NAME if model in OFFICIAL_MODELS else EXTRA_REPO_NAME
+            repo = (
+                OFFICIAL_REPO_NAME
+                if model in OFFICIAL_MODELS
+                else ANIMA_2_9B_REPO_NAME
+                if model in ANIMA_2_9B_MODELS
+                else EXTRA_REPO_NAME
+            )
             for role in ("text_conditioner_bf16", "transformer_bf16", "transformer_i8"):
                 assert anima_published_holder(model, role) == (repo, model)
 
@@ -2393,6 +2459,166 @@ class TestPublishedContainers:
         } == weights
 
 
+class TestUnpublishedModel:
+    """A model not published yet (Anima-2.9B) is built from its own series — the transformer and
+    the text conditioner — and takes the roles another model holds (the base's text encoder, VAE
+    decoder and tokenizers) as published from the official mirror: the base's series are no longer
+    on disk, and the 2.9B repository only references those roles. Every check of both paths holds:
+    the series' records, the pins and every part of a borrowed container."""
+
+    @staticmethod
+    def _build(tmp_path: Path, out_dir: Path | None = None) -> Path:
+        out = tmp_path / "dist" if out_dir is None else out_dir
+        main(
+            [
+                "--pipeline",
+                "anima-2.9b",
+                "--series",
+                str(tmp_path / "series"),
+                "--out",
+                str(out),
+                dist.ALLOW_PLACEHOLDER_FLAG,
+            ]
+        )
+        return out
+
+    def test_it_is_not_published_and_its_pipeline_builds_it_by_default(self) -> None:
+        assert ANIMA_2_9B_MODEL_NAME not in ANIMA_PUBLISHED_PART0
+        assert ANIMA_2_9B_PIPELINE.default_model == ANIMA_2_9B_MODEL_NAME
+
+    def test_its_own_roles_come_from_its_series_and_the_borrowed_ones_from_the_official_mirror(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        sources = _build_unpublished_series(tmp_path / "series")
+        out_dir = self._build(tmp_path)
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
+        official = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        base = official["models"][ANIMA_BASE_MODEL_NAME]
+        for role in ANIMA_EXTRA_SHARED_ROLES:
+            refs = _role_refs(entry, role)
+            assert {ref.get("repo") for ref in refs} == {"hdae/karume-anima"}, role
+            assert [ref["sha256"] for ref in refs] == [
+                ref["sha256"] for ref in _role_refs(base, role)
+            ], role
+        own = {
+            "text_conditioner_bf16": sources.text_conditioner["bf16"] / "text_conditioner",
+            "transformer_bf16": sources.transformer["bf16"] / "transformer",
+            "transformer_i8": sources.transformer["i8"] / "transformer",
+        }
+        for role, series in own.items():
+            assert not any("repo" in ref for ref in _role_refs(entry, role)), role
+            placed = out_dir / ANIMA_2_9B_MODEL_NAME / OUTPUT_PATHS[role]
+            assert read_component(placed) == read_component(series / "model.krm"), role
+
+    def test_its_presets_are_the_bf16_derivation_with_the_shared_default(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        _build_unpublished_series(tmp_path / "series")
+        out_dir = self._build(tmp_path)
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        entry = manifest["models"][ANIMA_2_9B_MODEL_NAME]
+        assert sorted(entry["quants"]) == [
+            "bf16",
+            "bf16+dit8",
+            "bf16+dit8-a8",
+            "bf16+dit8-a8-attn8",
+            "bf16+dit8-a8-attn8-s16",
+            "bf16-c16",
+        ]
+        assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
+        defaults = entry["pipelineConfig"]["defaults"]
+        assert (defaults["steps"], defaults["guidanceScale"]) == (20, 4)
+
+    def test_without_the_official_mirror_the_build_names_it(self, tmp_path: Path) -> None:
+        """No mirror (the autouse fixture's empty root): the borrowed roles cannot be taken, and
+        there is no series to fall back to."""
+        _build_unpublished_series(tmp_path / "series")
+        with pytest.raises(DistError, match="No local mirror of karume-anima"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+
+    def test_a_borrowed_part_0_that_is_not_the_published_one_fails_before_a_byte_is_written(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        _build_unpublished_series(tmp_path / "series")
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        part0 = _role_refs(manifest["models"][ANIMA_BASE_MODEL_NAME], "vae_decoder_bf16")[0]
+        target = published_mirrors / OFFICIAL_REPO_NAME / part0["path"]
+        target.write_bytes(target.read_bytes()[:-1] + b"\x00")
+
+        with pytest.raises(DistError, match="is not the published file of karume-anima"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+        assert not (tmp_path / f"dist{STAGING_SUFFIX}").exists()
+
+    def test_a_later_borrowed_part_that_differs_fails_before_a_byte_is_written(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """MUST: the borrowed container is only referenced, so nothing compares its later parts
+        except the plan."""
+        _build_unpublished_series(tmp_path / "series")
+        manifest = json.loads(
+            (published_mirrors / OFFICIAL_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        parts = _role_refs(manifest["models"][ANIMA_BASE_MODEL_NAME], "text_encoder_bf16")
+        target = published_mirrors / OFFICIAL_REPO_NAME / parts[1]["path"]
+        payload = bytearray(target.read_bytes())
+        payload[-1] ^= 0xFF
+        target.write_bytes(bytes(payload))
+
+        with pytest.raises(DistError, match="is not the part 1 the published part 0 of"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+
+    def test_a_series_with_a_baked_lora_is_refused(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        """The series' own records are checked as for a build from series."""
+        sources = _build_unpublished_series(tmp_path / "series")
+        _bake_lora_record(sources.transformer["i8"])
+
+        with pytest.raises(DistError, match="received a series that carries a"):
+            self._build(tmp_path)
+        assert not (tmp_path / "dist").exists()
+
+    def test_a_missing_series_of_its_own_fails_by_name(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        sources = _build_unpublished_series(tmp_path / "series")
+        shutil.rmtree(sources.text_conditioner["bf16"])
+
+        with pytest.raises(DistError, match=f"{ANIMA_2_9B_MODEL_NAME}-bf16"):
+            self._build(tmp_path)
+
+    def test_a_build_into_the_official_mirror_is_refused(self, published_mirrors: Path) -> None:
+        """The 2.9B build reads the official mirror for the borrowed roles; none of that mirror's
+        models belongs in the 2.9B repository, so the only way out is another `--out`."""
+        mirror = published_mirrors / OFFICIAL_REPO_NAME
+        before = TestPublishedContainers._snapshot(published_mirrors)
+
+        with pytest.raises(DistError, match=r"would be lost .* pass another --out$"):
+            main(["--pipeline", "anima-2.9b", "--out", str(mirror), dist.ALLOW_PLACEHOLDER_FLAG])
+        assert TestPublishedContainers._snapshot(published_mirrors) == before
+
+    def test_the_sources_hold_the_borrowed_roles_only_as_published(
+        self, tmp_path: Path, published_mirrors: Path
+    ) -> None:
+        sources = anima_unpublished_sources(
+            tmp_path / "series", ANIMA_2_9B_MODEL_NAME, published_mirrors, tmp_path / "view"
+        )
+
+        assert sorted(sources.published.placements) == sorted(ANIMA_EXTRA_SHARED_ROLES)
+        assert sources.published.borrowed == tuple(sources.published.placements)
+        assert sources.published.repository == ANIMA_2_9B_REPO_NAME
+
+
 @pytest.mark.usefixtures("published_mirrors")
 class TestModelCard:
     """`karume dist` writes the model card **after** assembly + verification (built from the
@@ -2566,7 +2792,7 @@ class TestLegalTexts:
                 str(tmp_path / "series"),
                 "--out",
                 str(out_dir),
-                *((dist.ALLOW_PLACEHOLDER_FLAG,) if pipeline == "anima-extra" else ()),
+                *((dist.ALLOW_PLACEHOLDER_FLAG,) if pipeline != "anima" else ()),
                 *extra,
             ]
         )
@@ -2615,6 +2841,20 @@ class TestLegalTexts:
         assert notice == EXTRA_NOTICE_MARKDOWN
         self._assert_license_layout((out_dir / "LICENSE.md").read_bytes())
         assert ATTRIBUTION_NOTICE in notice
+
+    def test_the_2_9b_repository_ships_its_own_notice_with_every_legal_text(
+        self, tmp_path: Path
+    ) -> None:
+        """The 2.9B repository's root carries its own modification notice, the same `LICENSE.md`
+        and, in the notice, the attribution, the rights grant and the NVIDIA notice."""
+        _build_unpublished_series(tmp_path / "series")
+        out_dir = self._run(tmp_path, pipeline="anima-2.9b", model=ANIMA_2_9B_MODEL_NAME)
+
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        assert notice == ANIMA_2_9B_NOTICE_MARKDOWN
+        self._assert_license_layout((out_dir / "LICENSE.md").read_bytes())
+        for text in (ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT, NVIDIA_NOTICE):
+            assert text in notice
 
     def test_the_notice_specifies_that_the_rights_are_granted_directly_by_the_company(
         self, tmp_path: Path
@@ -2719,18 +2959,23 @@ class TestLegalTexts:
         assert (out_dir / "LICENSE.md").is_file()
         assert (out_dir / "NOTICE.md").is_file()
 
-    def test_both_pipelines_declare_exactly_the_two_legal_seats(self) -> None:
-        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
+    def test_every_pipeline_declares_exactly_the_two_legal_seats(self) -> None:
+        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE, ANIMA_2_9B_PIPELINE):
             assert sorted(pipeline.root_files) == ["LICENSE.md", "NOTICE.md"]
 
-    def test_both_pipelines_ship_the_same_license_text(self) -> None:
+    def test_every_pipeline_ships_the_same_license_text(self) -> None:
         """Only one upstream license applies — what differs per repository is only the modification
         notice (§3(a) is the same text)."""
         assert OFFICIAL_PIPELINE.root_files["LICENSE.md"] == EXTRA_PIPELINE.root_files["LICENSE.md"]
+        assert (
+            OFFICIAL_PIPELINE.root_files["LICENSE.md"]
+            == ANIMA_2_9B_PIPELINE.root_files["LICENSE.md"]
+        )
 
 
 class TestPipelineEntry:
-    """The 2 lines plugged into the driver ({@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE}).
+    """The 3 lines plugged into the driver ({@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} /
+    {@link ANIMA_2_9B_PIPELINE}).
 
     The name, the repository name and the attribution are checked independently per repository
     (why they cannot be folded into one: {@link TestPipelineMembership}).
@@ -2739,14 +2984,16 @@ class TestPipelineEntry:
     def test_the_model_name_is_a_legal_path_segment(self) -> None:
         """A model name is both a manifest key and a directory name in the repository (ADR 0041 §6 /
         §9)."""
-        for model in (*OFFICIAL_MODELS, *EXTRA_MODELS):
+        for model in (*OFFICIAL_MODELS, *EXTRA_MODELS, *ANIMA_2_9B_MODELS):
             assert assert_model_name(model) == model
 
     def test_it_names_the_default_model_and_its_repository(self) -> None:
         assert OFFICIAL_PIPELINE.default_model == ANIMA_TURBO_MODEL_NAME
         assert EXTRA_PIPELINE.default_model == EXTRA_MODELS[0]
+        assert ANIMA_2_9B_PIPELINE.default_model == ANIMA_2_9B_MODELS[0]
         assert OFFICIAL_PIPELINE.repo_name(OFFICIAL_PIPELINE.default_model) == "karume-anima"
         assert EXTRA_PIPELINE.repo_name(EXTRA_PIPELINE.default_model) == "karume-anima-extra"
+        assert ANIMA_2_9B_PIPELINE.repo_name(ANIMA_2_9B_MODEL_NAME) == "karume-anima-2.9b"
 
     def test_the_repository_name_does_not_depend_on_the_model(self) -> None:
         """Several models per repository (ADR 0087) — whichever model is assembled, there is one
@@ -2758,41 +3005,55 @@ class TestPipelineEntry:
         """
         assert {OFFICIAL_PIPELINE.repo_name(model) for model in OFFICIAL_MODELS} == {"karume-anima"}
         assert {EXTRA_PIPELINE.repo_name(model) for model in EXTRA_MODELS} == {"karume-anima-extra"}
+        assert {ANIMA_2_9B_PIPELINE.repo_name(model) for model in ANIMA_2_9B_MODELS} == {
+            "karume-anima-2.9b"
+        }
 
-    def test_the_extra_repository_references_the_official_text_stack(self) -> None:
+    def test_the_extra_and_2_9b_repositories_reference_the_official_text_stack(self) -> None:
         """The bf16 text encoder and VAE decoder and both tokenizers (ADR 0038 §7 addendum
         2026-10-28; ADR 0154); the official repository is self-contained."""
-        for model in EXTRA_MODELS:
-            (reference,) = EXTRA_PIPELINE.references(model)
-            assert reference.repo == "hdae/karume-anima"
-            assert reference.model == ANIMA_BASE_MODEL_NAME
-            assert sorted(reference.roles) == [
-                "text_encoder_bf16",
-                "tokenizer",
-                "tokenizer_2",
-                "vae_decoder_bf16",
-            ]
+        for pipeline, models in (
+            (EXTRA_PIPELINE, EXTRA_MODELS),
+            (ANIMA_2_9B_PIPELINE, ANIMA_2_9B_MODELS),
+        ):
+            for model in models:
+                (reference,) = pipeline.references(model)
+                assert reference.repo == "hdae/karume-anima"
+                assert reference.model == ANIMA_BASE_MODEL_NAME
+                assert sorted(reference.roles) == [
+                    "text_encoder_bf16",
+                    "tokenizer",
+                    "tokenizer_2",
+                    "vae_decoder_bf16",
+                ]
         for model in OFFICIAL_MODELS:
             assert OFFICIAL_PIPELINE.references(model) == ()
 
     def test_one_attribution_needs_no_choice(self) -> None:
         """There is only one attribution per repository (nothing is asked when there is no
         choice)."""
-        for pipeline, profile in ((OFFICIAL_PIPELINE, "anima"), (EXTRA_PIPELINE, "anima-extra")):
+        for pipeline, profile in (
+            (OFFICIAL_PIPELINE, "anima"),
+            (EXTRA_PIPELINE, "anima-extra"),
+            (ANIMA_2_9B_PIPELINE, "anima-2.9b"),
+        ):
             assert len(pipeline.card_profiles) == 1
             assert resolve_card_renderer(pipeline, None) is pipeline.card_profiles[profile]
 
-    def test_the_two_repositories_render_different_cards(self) -> None:
-        """Official / fine-tune differ in both the title and the introduction of the origins section
-        — mixing up the renderers would swap the attributions."""
-        assert (
-            OFFICIAL_PIPELINE.card_profiles["anima"]
-            is not EXTRA_PIPELINE.card_profiles["anima-extra"]
-        )
+    def test_the_three_repositories_render_different_cards(self) -> None:
+        """Official / fine-tune / layer expansion differ in the title, the overview and the
+        introduction of the origins section — mixing up the renderers would swap the
+        attributions."""
+        renderers = [
+            OFFICIAL_PIPELINE.card_profiles["anima"].func,
+            EXTRA_PIPELINE.card_profiles["anima-extra"].func,
+            ANIMA_2_9B_PIPELINE.card_profiles["anima-2.9b"].func,
+        ]
+        assert len(set(renderers)) == 3
 
     def test_their_cards_refuse_another_pipelines_manifest(self) -> None:
         manifest = {"models": {"m": {"pipeline": "anima/0"}}}
-        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
+        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE, ANIMA_2_9B_PIPELINE):
             for render_card in pipeline.card_profiles.values():
                 with pytest.raises(ValueError):
                     render_card(manifest, "hdae/x")

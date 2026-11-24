@@ -66,7 +66,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 19 pipeline seats across 12 families with the core engine and passes
+that injection: it composes 17 pipeline seats across 11 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
@@ -74,6 +74,9 @@ cd tools/export-recipes
 uv run python dist.py --pipeline anima --model anima-turbo-v1.1 --model anima-v1.0 \
     --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 --model anima-aesthetic-v1.0 \
     --out ../../models/karume-anima                     # the 5 official variants
+uv run python dist.py --pipeline anima-2.9b \
+    --resolve-refs hf                                   # Anima-2.9B (references karume-anima;
+                                                        # not published)
 uv run python dist.py --pipeline irodori                # v4-small
 uv run python dist.py --pipeline irodori --model v4.1-small \
     --resolve-refs hf                                   # references karume-irodori-v4-small
@@ -86,7 +89,7 @@ uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
 
-The accepted set is `anima` / `anima-extra` / `sbv2` / `irodori` / `irodori-large` / `siglip2` / `birefnet` /
+The accepted set is `anima` / `anima-extra` / `anima-2.9b` / `sbv2` / `irodori` / `irodori-large` / `siglip2` / `birefnet` /
 `lucida` / `depth-anything` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan-ti2v` / `umt5` / `moss-image` / `embeddinggemma-2`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
@@ -98,8 +101,9 @@ render, and so does one from our own account (`hdae/`).
 **Cross-repository references** (ADR [0038](../../docs/decisions/0038-manifest-v1.md) §7, addendum
 2026-10-28). A pipeline declares which roles of a model are byte-identical to another distribution
 repository's and are referenced there instead of stored (`Pipeline.references` — today
-`anima-extra` → `karume-anima`, `wan-ti2v` → `karume-umt5-xxl`, and irodori `v4.1-small` →
-`karume-irodori-v4-small`). The driver reads the referenced repository's local mirror
+`anima-extra` and `anima-2.9b` → `karume-anima`, `wan-ti2v` → `karume-umt5-xxl`, irodori
+`v4.1-small` and `irodori-large` → `karume-irodori-v4-small`, and irodori `v4.1-small-mf` →
+`karume-irodori-v4-small` and `karume-irodori-v4.1-small`). The driver reads the referenced repository's local mirror
 (`models/<repository name>/`) and takes the commit from exactly one source; a build that declares
 references and gets none fails before writing anything:
 
