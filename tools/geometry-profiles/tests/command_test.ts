@@ -9,8 +9,12 @@ import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } fro
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assert, assertEquals } from "@std/assert";
-import { BUILTIN_GEOMETRY_PROFILES } from "@karume/runtime";
-import { deriveGeometryProfile, geometryProfileMismatch } from "@karume/runtime/tune";
+import { BUILTIN_GEOMETRY_PROFILES, type GeometryProfile } from "@karume/runtime";
+import {
+  deriveGeometryProfile,
+  geometryProfileMismatch,
+  geometrySweepCases,
+} from "@karume/runtime/tune";
 import { makeTempDir, remove } from "@karume/test-support/fs";
 import { afterEach, beforeEach, describe, it } from "vite-plus/test";
 import { formatTypeScript, REPOSITORY_ROOT } from "../format.ts";
@@ -21,7 +25,10 @@ import { INDEX_PATH, PROFILE_TEST_PATH } from "../registration.ts";
 import {
   ADAPTER,
   bytesOf,
+  CASE_ID,
   CONV2D_FIELDS_GEOMETRY,
+  DEFAULT_GEOMETRY,
+  FAST_GEOMETRY,
   fieldsSweepRecord,
   FORM_GEOMETRY,
   OTHER_ADAPTER,
@@ -350,5 +357,78 @@ describe("a shared table (--shared)", () => {
       geometryProfileMismatch(expected, { ...ADAPTER, device: "", description: "" }),
       undefined,
     );
+  });
+
+  describe("regenerated on its registered table, with a family each device covers only in part", () => {
+    // Each record holds one gemm case of the sweep's table, so both devices cover gemm only in part
+    const loaded = () =>
+      [RECORD_A, RECORD_OTHER].map((record) =>
+        loadRecord(readFileSync(join(root, record)), record, "records"),
+      );
+    const SHARED_TARGET = {
+      id: "test-shared",
+      vendor: ADAPTER.vendor,
+      architecture: ADAPTER.architecture,
+      minSpeedup: 1.05,
+      shared: true,
+    };
+    const registered = (): GeometryProfile =>
+      deriveGeometryProfile(loaded(), SHARED_TARGET).profile;
+    const onBase = (): CommandEnvironment => ({
+      ...environment(),
+      registered: [...BUILTIN_GEOMETRY_PROFILES, registered()],
+      lastCommit: () => "fedcba9876543210fedcba9876543210fedcba98",
+    });
+    const missing = (): string =>
+      geometrySweepCases()
+        .filter(({ id, op }) => ["linear", "matmul", "bmm"].includes(op) && id !== CASE_ID)
+        .map(({ id }) => `${id} (no row)`)
+        .join(", ");
+    const reason = (): string =>
+      `(Test GPU covers family gemm only in part: no usable row of the default geometry in ${missing()}; ` +
+      `Other GPU covers family gemm only in part: no usable row of the default geometry in ${missing()} ` +
+      "(regenerated on a base, a shared table takes a geometry for a family only where every device measured every case of its case set))";
+    const LARGEST = `- gemmRows > 512 (linear / matmul / bmm row count > 512; Test GPU 1 cases, Other GPU 1 cases): keeps the default reg128x128r8x8w16 `;
+
+    it("keeps the default in every gemm field, and the dry run prints the reason naming each device and the cases", async () => {
+      // Without a base the same records adopt a geometry in the bucket above 512 rows
+      assertEquals(registered().gemmRows.at(-1)?.geometry, FAST_GEOMETRY);
+      const code = await main(
+        ["test-shared", "--shared", `--records=${RECORD_A},${RECORD_OTHER}`, "--dry-run"],
+        onBase(),
+      );
+      assertEquals(code, 0, stderr.join("\n"));
+      assertEquals(stdout.includes(`${LARGEST}${reason()}`), true, stdout.join("\n"));
+      assertEquals(
+        stdout.filter((text) => text.startsWith("- gemmRows ") && text.endsWith(reason())).length,
+        7,
+        stdout.join("\n"),
+      );
+    });
+
+    it("writes the table with the default gemm fields, and its header states the rule and names the devices and the cases", async () => {
+      const code = await main(
+        ["test-shared", "--shared", `--records=${RECORD_A},${RECORD_OTHER}`],
+        onBase(),
+      );
+      assertEquals(code, 0, stderr.join("\n"));
+      const path = `${PROFILES_DIRECTORY}/test-shared.ts`;
+      const lines = readFileSync(join(root, path), "utf8").split("\n");
+      for (const expected of [
+        " * Regenerated on the registered table, a family some device covers only in part (a case of its",
+        " * case set with no usable row of the default geometry there) keeps the default in every field;",
+        ` * ${LARGEST}${reason()}`,
+      ]) {
+        assertEquals(lines.includes(expected), true, `${expected}\n${lines.join("\n")}`);
+      }
+      const expected = deriveGeometryProfile(loaded(), {
+        ...SHARED_TARGET,
+        base: registered(),
+      }).profile;
+      assertEquals(expected.gemmRows.at(-1)?.geometry, DEFAULT_GEOMETRY);
+      const module: unknown = await import(pathToFileURL(join(root, path)).href);
+      assert(typeof module === "object" && module !== null && "TEST_SHARED" in module);
+      assertEquals(module.TEST_SHARED, expected);
+    });
   });
 });

@@ -38,7 +38,7 @@ time.
 - The generator always works as **the registered table as base plus new records**: the op families the given records
   cover are derived from them, and every other family is carried over from the registered table unchanged. With a
   base, a covered family is derived from every case of its current case set, so a sweep of only some of a family's
-  ops is refused.
+  ops is refused (a shared table keeps the default for such a family instead — [below](#shared-tables)).
 - A new adapter's first table has no base and needs its adapter match on the command line.
 - A shared table is derived only when the command asks for one (`--shared`, [below](#shared-tables)). Without it the
   records must agree on all four adapter fields (vendor, architecture, device, description): records of two devices
@@ -154,20 +154,34 @@ matched without a description: the predicted table of [the three levels](#the-th
   mismatch, and `parseGeometryProfileJson` and the injection check refuse it, as they refuse a provenance that has
   both forms.
 - **Regenerating**: a registered shared table is the base of a shared derivation only, onto records of the same
-  adapters (as a set); each device's records cover a family they have a row of completely. A family the records cover
-  but one device has no row of keeps the default, so it is derived only where the base holds the default for it too,
-  and refused where the base holds another geometry (it would silently go back to the default). A measured table is
-  not the base of a shared derivation, nor a shared one of a measured derivation.
+  adapters (as a set). A family the records cover but one device has no row of keeps the default, so it is derived
+  only where the base holds the default for it too, and refused where the base holds another geometry (it would
+  silently go back to the default). A measured table is not the base of a shared derivation, nor a shared one of a
+  measured derivation.
+- **A family one device covers only in part** keeps the default on a base: when a device has a row of the family and
+  some case of the family's current case set has no usable row of the default geometry on that device — no row at all,
+  or only failed default rows (a case some record of the device has a default row of that did not fail is covered) —
+  every field of the family keeps the default, and each field's verdict line names the device and the cases, marking
+  each `no row` or `the default's row failed`. The generated header says so beside the adoption rule. A family every
+  device covers in full is derived as above, and a candidate's failure in a case a device did measure counts against
+  it as anywhere. The protection is the measured table's refusal of such records (no choice goes into a shape some
+  device did not measure), kept as a recorded default: a device can fail to give the case at all — the Apple M2's
+  default kernel of an `i8a8-conv3d` case exceeds Metal's command-buffer time limit. The rule is provisional until the
+  sweep survives such a device loss (ADR 0156 addendum 2026-11-24). Without a base, a shared derivation judges such a
+  family on the cases at hand, as a measured one does.
 - **The verdict lines** give, per field, each device's number of cases; for an adopted geometry its geometric mean
   over the devices and each device's geometric mean, smallest and largest ratio; for every geometry not taken each
   device's ratios or the reason it is not eligible there.
-- `apple-metal-3-shared` is derived from the Apple M5's full sweep of 2026-11-23 and three Apple M2 records of the same
-  day that time the geometries the M5 adopts (`i8a8-linear`, `conv2d`, and `gemm`). Of the nine fields the M5's own
-  table adopts, it takes four: `gemmRows` 33 to 64 rows `reg64x32r4x4w8:tas-tb-un` (M5 ×1.688, M2 ×1.337), both
-  `conv2d` fields `igemm64x64:wg16x8:tas-tb-un:dec` (×1.368, ×1.634) and `igemm32x64:wg16x8:tas-tb-un:dec` (×1.488,
-  ×1.722), and `i8a8.linear` up to 256 rows `tile16x64r4x4w16x4k32` (×2.188, ×2.274). The M5's other five are slower
-  than the default on the M2 in some case or screened out there by the quick look. The fused attention, the i8a8
-  attention and conv3d keep the default: the M2's records have no case of them.
+- `apple-metal-3-shared` is derived from the Apple M5's full sweep of 2026-11-23 and five Apple M2 records: three of the
+  same day that time the geometries the M5 adopts, and the M2's full sweep in two parts, both stopped by a device lost
+  to Metal's command-buffer time limit (2026-11-23: 39 of 78 cases; 2026-11-24: 35 of 37). It takes six
+  fields: `gemmRows` 17 to 32 rows `reg32x32r2x4w8` (M5 ×1.260, M2 ×1.309) and 33 to 64 rows `reg64x32r4x4w8` (×1.532,
+  ×1.485), the `conv2d` fields `igemm64x64:wg16x8:tas-tb-un:dec` (×1.368, ×1.622) and `igemm32x64:wg16x4:dec` (×1.434,
+  ×1.865), and `i8a8.linear` up to 256 rows `tile16x64r4x4w16x4k32` (×2.188, ×2.275) and 257 to 512 rows
+  `tile64x64r8x4w16x8k32` (×1.072, ×1.116). In every other field but one no geometry passes on both devices — the fused
+  attention and the i8a8 attention among them. `i8a8.conv3d` keeps the default because the M2 covers `i8a8-conv3d`
+  only in part: the default row of `i8a8-conv3d-cin1024-cout512-k333-in6x128x128` failed (the device was lost) and
+  `i8a8-conv3d-cin512-cout256-k333-in6x256x256` has no row.
 
 ## The GEMV choices of linear
 
@@ -543,7 +557,12 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   device has no case of keeps the default and names the device; the provenance's adapters and the family entries;
   the refusals (the records of one description only, a record without a description, records of one description
   with two device ids, a description, no architecture, an injection-only target, attention-bench records) and the
-  measured derivation still refusing records of two adapters; a shared table as base; matching, the JSON reader
+  measured derivation still refusing records of two adapters; a shared table as base; on a base, a family one device
+  covers only in part (a case without a row, or whose default row failed) keeping the default in every field with the
+  device and the cases named, a family covered in full derived as without a base, a failed default row covered by
+  another record of the device with the candidate's failure there still counted, the same records without a base
+  judged on the cases at hand, and the measured derivation still refusing them; the generator's dry run and header
+  naming them; matching, the JSON reader
   and the injection check of the several-adapter form, each refusing a list of fewer than two adapters, one that
   names one description twice and one with an adapter without a description; `deriveLinearGemvChoices` refusing a
   shared table; the generator's `--shared` refusals and a shared table written, its header and the module it exports. The Apple tables
