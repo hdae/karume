@@ -5,11 +5,17 @@
     "anima-2.9b-preview-v1-cfg": {
       "node-nvidia-geforce-rtx-3080-ti": "51f3525f998cfd150bf1b4536f5ae8cd68ec3fc2ddff2b79b1fda13a092f4697"
     },
+    "anima-2.9b-preview-v1-defaults": {
+      "node-nvidia-geforce-rtx-3080-ti": "fcf99e1b0ef860a1dbbbc5f13dfd99c8e86d896fa680346669dfbeaa07a47c49"
+    },
     "base-cfg": {
       "node-nvidia-geforce-rtx-3080-ti": "0f15a1034b4cd691d349fc95bae1b444c5c7537701c55ded3196964d1a0bd2b2"
     },
     "base-cfg-bf16": {
       "node-nvidia-geforce-rtx-3080-ti": "83ccb11f867b25330910f24247f2ca6e37a22bd0c2560ee6189aef767fd16782"
+    },
+    "base-cfg-bf16-c16": {
+      "node-nvidia-geforce-rtx-3080-ti": "32ef013655778c7599ed04364bf187259b9c363fff0e9980d1144e70ff5e397b"
     },
     "base-cfg-dpmpp": {
       "node-nvidia-geforce-rtx-3080-ti": "15daba7a71cf9d4c134c8818c74c6e2257d4bfb00fb6c8b724978d3b432aa12d"

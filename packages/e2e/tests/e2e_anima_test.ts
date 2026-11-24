@@ -624,20 +624,26 @@ type DistributionSource = {
 /**
  * Bakes one image with the {@link BASE_REFERENCE} knobs on a built base pipeline and compares the
  * sha.
+ *
+ * `pipelineDefaults` leaves the steps, the guidance scale and the negative prompt out of the request,
+ * so they come from the distribution's `pipelineConfig.defaults` (only the resolution and the seed
+ * stay pinned) — a change of those defaults then shows up as a changed digest.
  */
 const assertBasePng = async (
   label: string,
   pipeline: Pipeline,
-  options: { readonly sampler?: SamplerType; readonly twin?: string } = {},
+  options: {
+    readonly sampler?: SamplerType;
+    readonly twin?: string;
+    readonly pipelineDefaults?: boolean;
+  } = {},
 ): Promise<void> => {
   const { resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
   const started = performance.now();
   const image = await pipeline.generate({
     prompt: PROMPT,
     resolution,
-    steps,
-    guidanceScale,
-    negativePrompt,
+    ...(options.pipelineDefaults === true ? {} : { steps, guidanceScale, negativePrompt }),
     seed: SEED,
     ...(options.sampler === undefined ? {} : { sampler: options.sampler }),
   });
@@ -664,8 +670,8 @@ const assertBasePng = async (
  * `source` is the distribution served as the session repo (when omitted, the plain base of the
  * official repository). The cross-repository reference check (the "cross-repository references"
  * section below) uses it to run the extra variants with the same knobs. `quant` overrides the
- * preset (when omitted, the practical preset of {@link BASE_REFERENCE} — the check of the faithful
- * preset `bf16` uses it).
+ * preset (when omitted, the practical preset of {@link BASE_REFERENCE} — the checks of the faithful
+ * preset `bf16` and of `bf16-c16` use it). `pipelineDefaults` is passed on to {@link assertBasePng}.
  */
 const assertBaseReferencePng = async (
   label: string,
@@ -673,6 +679,7 @@ const assertBaseReferencePng = async (
     readonly sampler?: SamplerType;
     readonly source?: DistributionSource;
     readonly quant?: string;
+    readonly pipelineDefaults?: boolean;
   } = {},
 ): Promise<void> => {
   const { dir, manifest, model } = options.source ?? {
@@ -711,6 +718,16 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-bf16"))(
   `e2e(real GPU): the plain base's faithful preset bf16 / CFG ${BASE_REFERENCE.guidanceScale} / ` +
     `${BASE_REFERENCE.steps}step PNG matches the reference sha256`,
   () => assertBaseReferencePng("base-cfg-bf16", { quant: "bf16" }),
+);
+
+// The preset `bf16-c16`: the bf16 preset's files, with the transformer's linear layers and attention
+// computed in f16 (it needs the shader-f16 GPU feature). Its numbers differ from both the bf16 and
+// the i8 preset, so it holds its own row and is not a twin; it runs with the same knobs as the CFG
+// check, the cheapest configuration of the base presets.
+test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-bf16-c16"))(
+  `e2e(real GPU): the plain base's preset bf16-c16 (f16 transformer compute) / CFG ` +
+    `${BASE_REFERENCE.guidanceScale} / ${BASE_REFERENCE.steps}step PNG matches the reference sha256`,
+  () => assertBaseReferencePng("base-cfg-bf16-c16", { quant: "bf16-c16" }),
 );
 
 // --- Reading the split distribution through the whole-asset surface (fromAssets) ---------
@@ -797,18 +814,21 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-dpmpp"))(
 // mixes them up with the session repo, it fails with a 404.
 //
 // The knobs are the same as the CFG check of the plain base, passed explicitly (every extra variant
-// is a fine-tune that defaults to CFG; Anima-2.9B defaults to CFG 4 too, at 28 steps, but its check
-// keeps the base's 20 so it stays the same check at a lower cost).
+// is a fine-tune that defaults to CFG; Anima-2.9B defaults to CFG 4 too, at 28 steps, but its
+// cross-repository check keeps the base's 20 so it stays the same check at a lower cost — its own
+// defaults are run by the `-defaults` case after it).
 
 /**
  * Bakes one model of a referencing distribution (`dir`, its manifest text) with the CFG check's
  * knobs and compares the sha, after checking that its selection really crosses repositories.
+ * `pipelineDefaults` is passed on to {@link assertBasePng}.
  */
 const assertCrossRepositoryPng = async (
   label: string,
   dir: URL,
   manifestText: string,
   model: string,
+  options: { readonly pipelineDefaults?: boolean } = {},
 ): Promise<void> => {
   const manifest = parseManifest(manifestText);
   const sessionOrigin = originKey(REPO, REVISION_SHA);
@@ -822,7 +842,7 @@ const assertCrossRepositoryPng = async (
       `the selection of ${model} contains no cross-repository reference (the check loses its meaning)`,
     );
   }
-  await assertBaseReferencePng(label, { source: { dir, manifest, model } });
+  await assertBaseReferencePng(label, { source: { dir, manifest, model }, ...options });
 };
 
 /** The extra variants (case ID = `extra-<model>-cfg`). */
@@ -854,6 +874,28 @@ test.skipIf(!LAYERED_RUNNABLE || references.lacksReference(LAYERED_CASE))(
       LAYERED_ASSETS_DIR,
       layeredManifestText as string,
       LAYERED_MODEL,
+    ),
+);
+
+/**
+ * Anima-2.9B with its own defaults (case ID = `<model>-defaults`): the check above passes the base's
+ * 20 steps, so nothing else runs the steps, guidance scale and negative prompt of the distribution's
+ * `pipelineConfig.defaults` (28 steps / CFG 4). The preset is named explicitly (today's default one),
+ * so a change of `defaultQuant` is not what this case sees; 512² keeps it at the cost of one more
+ * 2.9B run.
+ */
+const LAYERED_DEFAULTS_CASE = `${LAYERED_MODEL}-defaults`;
+
+test.skipIf(!LAYERED_RUNNABLE || references.lacksReference(LAYERED_DEFAULTS_CASE))(
+  `e2e(real GPU): ${LAYERED_MODEL} (40 blocks) at the steps and guidance of its pipelineConfig ` +
+    "defaults PNG matches the reference sha256",
+  () =>
+    assertCrossRepositoryPng(
+      LAYERED_DEFAULTS_CASE,
+      LAYERED_ASSETS_DIR,
+      layeredManifestText as string,
+      LAYERED_MODEL,
+      { pipelineDefaults: true },
     ),
 );
 
@@ -1663,6 +1705,7 @@ const CASE_IDS: readonly string[] = [
   TURBO_DPMPP_CASE,
   "base-cfg",
   "base-cfg-bf16",
+  "base-cfg-bf16-c16",
   "base-cfg-fromAssets-shards",
   "base-cfg-dpmpp",
   "fromPretrained-512",
@@ -1670,7 +1713,7 @@ const CASE_IDS: readonly string[] = [
   // On a machine without the extra mirror the whole section SKIPs — not counted as missing
   // reference values; the same for Anima-2.9B's mirror.
   ...(EXTRA_RUNNABLE ? EXTRA_MODELS.map(extraCaseIdOf) : []),
-  ...(LAYERED_RUNNABLE ? [LAYERED_CASE] : []),
+  ...(LAYERED_RUNNABLE ? [LAYERED_CASE, LAYERED_DEFAULTS_CASE] : []),
 ];
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 
