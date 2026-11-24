@@ -121,6 +121,10 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/models/anima`: with guidance, the two DiT runs of a denoise step are queued in one batch and read back
+  together, one readback a step in place of two. The images are the same. `onRunDiagnostics` still gets one call per
+  run, but the diagnostics of these two carry no `lastRun` / `lastRunTiming`; on a device acquired with
+  `gpuTiming: true` the runs go one by one as before and keep them.
 - `@karume/runtime`: two embedded tables for Apple `metal-3` adapters. `apple-m5` is the Apple M5's measured table,
   matched by the description `Apple M5` (Chrome reports it with its developer-features flag). `apple-metal-3-shared`
   is a shared table of the M5 and the M2, matched by vendor and architecture: every Apple `metal-3` adapter that

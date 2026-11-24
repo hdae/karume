@@ -615,11 +615,13 @@ affected: its whole 5-frame case took 39 s (20 s at `vaeTile: 32`). Not checked:
   pipeline object: a fresh pipeline from the same WGSL runs at normal speed in that episode and slows in the next. Not
   seen on the RTX 5070 Ti. The mechanism is open, and which of the card, the Linux Vulkan driver and Node + Dawn it
   belongs to is not separated; the display was detached from the card on 2026-11-19 to see whether it stops (it did
-  not). In a generation it shows as single steps of 25–31 s: an Anima denoise with guidance at 1024² stalls so on the
-  presets whose DiT run takes under a second (int8 attention: about 0.83 s on Anima-2.9B, one or more stalled steps
-  per image, which makes the default preset slower per image than `bf16` on this machine), and `bf16+dit8-a8` stalls
-  the same way at 768² and not at 1024². The workbench entry `anima-step-timing` records it; on the RTX 5070 Ti
-  (Chrome 158 / D3D12) the same entry timed 228 steps with DiT runs of 0.43–0.99 s and no stalled step. The sequential
+  not). In a generation it shows as single steps of 13–33 s. An Anima denoise with guidance read each of a step's two
+  DiT runs back on its own until 2026-11-24, and stalled so wherever one run took under a second (the int8 attention
+  presets at 1024², about 0.83 s on Anima-2.9B; `bf16+dit8-a8` at 768² and on the base model). The two runs are now
+  queued in one batch with one readback, which roughly doubles the period: 285 steps over the same five conditions
+  ran without a stalled step, the shortest at 1.07 s a step, so a faster preset or a smaller image can still fall
+  under the second. The workbench entry `anima-step-timing` records it; on the RTX 5070 Ti (Chrome 158 / D3D12) the
+  entry timed 228 steps of the earlier loop with DiT runs of 0.43–0.99 s and no stalled step. The sequential
   GEMV and the GEMM also run in two timing modes on this card ([research 2026-11-18](research/2026-11-18-float-parallel-gemv.md)
   §6), which spreads the rounds of a GEMV sweep's baseline — in the turbo mode too (216 of 690 groups of two `full`
   records of 2026-11-20 beyond ×1.25), so it is not the thermal throttling below; the derivation reads a reference at its fastest time

@@ -62,6 +62,7 @@ import {
   acquireGpu,
   fitsHeadroom,
   type GpuContext,
+  type ResidentTensor,
   type Session,
   type SessionDiagnostics,
   type SessionOptions,
@@ -437,10 +438,16 @@ export type PipelineOptions = {
   /** Execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * Observation hook that receives the diagnostics of each `Session.run` (DiT: one step = one run,
-   * VAE: one tile = one run). For per-op GPU time (`lastRunTiming`), pass
+   * Observation hook that receives the diagnostics of each run (DiT: one run per step, two with
+   * guidance; VAE: one tile = one run). For per-op GPU time (`lastRunTiming`), pass
    * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — not measured by default). Exceptions
    * from the callback are not swallowed (fail loudly — the whole generation fails).
+   *
+   * NOTE: with guidance the two DiT runs of a step are queued in one batch (`Session.enqueue`, one
+   * fence for the pair), and their diagnostics arrive per enqueue with `lastRun` / `lastRunTiming`
+   * `undefined` (an enqueue creates neither an arena nor a timing window). On a device with
+   * measurement enabled the two runs go one by one through `Session.run` instead, so the breakdown
+   * stays available; the outputs are the same.
    */
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
   /**
@@ -883,6 +890,78 @@ const stageRun = (
     if (observe !== undefined) observe(session.diagnostics());
     return outputs[outputName];
   };
+};
+
+/**
+ * Runs one Session once per input set **back to back in one batch** and reads every output back at
+ * the batch's close: the runs are queued with `enqueue`, each graph output copied into its own
+ * resident tensor (`targets`, one per input set, in the same order), and the readback of
+ * `finishAndRead` is the only fence. The GPU queue does not empty between the runs. The command list
+ * is the one a backed run queues, so the outputs are those of the same runs issued one by one.
+ *
+ * MUST: nothing but these enqueues is issued on the device inside the section (no `run`, `dispose`
+ * or Session construction — the MUSTs of `GpuContext.beginBatch`).
+ * MUST: the section is always closed (left open, the device's section lock never returns and every
+ * later run waits forever). `finish` returns the settlement `finishAndRead` already produced, and
+ * closes the section when an earlier step failed before it.
+ * NOTE: a device with measurement enabled does not time a batch section, so the caller keeps the
+ * one-by-one runs there (the breakdown of {@link PipelineOptions.onRunDiagnostics}).
+ */
+const runInBatch = async (
+  gpu: GpuContext,
+  session: Session,
+  outputName: string,
+  runs: readonly Record<string, Tensor>[],
+  targets: readonly ResidentTensor[],
+  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
+): Promise<Float32Array<ArrayBuffer>[]> => {
+  const batch = await gpu.beginBatch();
+  try {
+    for (const [index, inputs] of runs.entries()) {
+      await session.enqueue(inputs, { batch, copyOutputs: { [outputName]: targets[index] } });
+      if (observe !== undefined) observe(session.diagnostics());
+    }
+    const read = await batch.finishAndRead(
+      Object.fromEntries(targets.map((target, index) => [String(index), target])),
+    );
+    return targets.map((_, index) => new Float32Array(read[String(index)]));
+  } finally {
+    await batch.finish();
+  }
+};
+
+/**
+ * Allocates `count` resident tensors of `byteLength` bytes, passes them to `body`, and always
+ * disposes them when done.
+ *
+ * MUST: a dispose failure does not overwrite the body's failure (the doc of `disposeSteps`) — a
+ * `GpuOutOfMemoryError` of the body reaches the residency's eviction as is.
+ */
+const withResidents = async <T>(
+  gpu: GpuContext,
+  count: number,
+  byteLength: number,
+  label: string,
+  body: (residents: readonly ResidentTensor[]) => Promise<T>,
+): Promise<T> => {
+  const residents: ResidentTensor[] = [];
+  let failure: { readonly error: unknown } | undefined;
+  try {
+    for (let index = 0; index < count; index += 1) {
+      residents.push(await gpu.createResident(byteLength, `${label}.${index}`));
+    }
+    return await body(residents);
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      ...residents.map((resident) => () => resident.dispose()),
+    ]);
+  }
 };
 
 /**
@@ -1615,69 +1694,102 @@ export class Pipeline {
               `Conditioner output width ${embeds[0].shape[2]} does not match the DiT's ${width}`,
             );
           }
-          /**
-           * Runs one latent through the DiT. It only wraps patchify at the entry and unpatchify at
-           * the exit, so the caller (CFG / Euler) sees only latents.
-           */
-          const predict = async (
+          /** The DiT inputs of one latent (patchify at the entry). */
+          const ditInputs = (
             current: Float32Array<ArrayBuffer>,
             proj: Tensor,
             embed: Float32Array<ArrayBuffer>,
-          ): Promise<Float32Array<ArrayBuffer>> => {
-            const output = await run({
-              tokens: {
-                dtype: "f32",
-                shape: plan.tokenShape,
-                data: patchifyLatents(current, plan.latentShape, plan.geometry),
-              },
-              timesteps_proj: proj,
-              encoder_hidden_states: { dtype: "f32", shape: embedShape, data: embed },
-              rope_cos: { dtype: "f32", shape: plan.ropeShape, data: plan.cos },
-              rope_sin: { dtype: "f32", shape: plan.ropeShape, data: plan.sin },
-            });
-            return unpatchifyTokens(
-              asF32(output, "DiT output (S form)"),
-              plan.latentShape,
-              plan.geometry,
-            );
-          };
+          ): Record<string, Tensor> => ({
+            tokens: {
+              dtype: "f32",
+              shape: plan.tokenShape,
+              data: patchifyLatents(current, plan.latentShape, plan.geometry),
+            },
+            timesteps_proj: proj,
+            encoder_hidden_states: { dtype: "f32", shape: embedShape, data: embed },
+            rope_cos: { dtype: "f32", shape: plan.ropeShape, data: plan.cos },
+            rope_sin: { dtype: "f32", shape: plan.ropeShape, data: plan.sin },
+          });
+          const toLatents = (tokens: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
+            unpatchifyTokens(tokens, plan.latentShape, plan.geometry);
           const padded = embeds.map((embed) => padSequence(embed, rows));
           const elements = plan.latentShape.reduce((a, b) => a * b, 1);
-          let current = new Randn(seed).normals(elements);
-          // The only history DPM++ 2M reads (absent at step 0). Always undefined on the Euler path.
-          let previousX0: Float32Array<ArrayBuffer> | undefined;
-          for (let index = 0; index < steps; index += 1) {
-            const proj: Tensor = {
-              dtype: "f32",
-              shape: [1, projWidth],
-              data: timestepsProj(
-                sigmas[index],
-                projWidth,
-                state.config.scheduler.numTrainTimesteps,
-              ),
-            };
-            const predictions: Float32Array<ArrayBuffer>[] = [];
-            for (const embed of padded) predictions.push(await predict(current, proj, embed));
-            const update = denoiseStep(sampler, {
-              sample: current,
-              cond: predictions[0],
-              uncond: predictions[1],
-              guidance,
-              sigmas,
-              index,
-              previousX0,
-            });
-            current = update.sample;
-            previousX0 = update.previousX0;
-            await emit({
-              kind: "denoise-step",
-              step: index + 1,
-              steps,
-              sigma: sigmas[index],
-              copyLatents: latentSnapshot(current, plan.latentShape),
-            });
-          }
-          return { latents: current, latentShape: plan.latentShape };
+          // With guidance a step runs the DiT twice (cond, uncond). Those two runs are queued back
+          // to back in one batch with one fence for the pair (`runInBatch`), so the GPU queue does
+          // not empty between them. A step without guidance (one run) and a device with
+          // measurement enabled (a batch section is not timed) run one by one.
+          const paired = padded.length > 1 && !state.gpu.gpuTimingEnabled;
+          // The DiT output (S form) has the latent's element count (`unpatchifyTokens` checks it);
+          // `copyOutputs` checks the byte count against the output's shape.
+          return await withResidents(
+            state.gpu,
+            paired ? padded.length : 0,
+            elements * Float32Array.BYTES_PER_ELEMENT,
+            "anima.dit_output",
+            async (targets) => {
+              /**
+               * Runs one latent through the DiT once per embedding (cond first). The caller (CFG /
+               * Euler) sees only latents.
+               */
+              const predict = async (
+                current: Float32Array<ArrayBuffer>,
+                proj: Tensor,
+              ): Promise<Float32Array<ArrayBuffer>[]> => {
+                if (paired) {
+                  const outputs = await runInBatch(
+                    state.gpu,
+                    session,
+                    model.graph.outputs[0],
+                    padded.map((embed) => ditInputs(current, proj, embed)),
+                    targets,
+                    observeTransformer,
+                  );
+                  return outputs.map(toLatents);
+                }
+                const predictions: Float32Array<ArrayBuffer>[] = [];
+                for (const embed of padded) {
+                  const output = await run(ditInputs(current, proj, embed));
+                  predictions.push(toLatents(asF32(output, "DiT output (S form)")));
+                }
+                return predictions;
+              };
+              let current = new Randn(seed).normals(elements);
+              // The only history DPM++ 2M reads (absent at step 0). Always undefined on the Euler
+              // path.
+              let previousX0: Float32Array<ArrayBuffer> | undefined;
+              for (let index = 0; index < steps; index += 1) {
+                const proj: Tensor = {
+                  dtype: "f32",
+                  shape: [1, projWidth],
+                  data: timestepsProj(
+                    sigmas[index],
+                    projWidth,
+                    state.config.scheduler.numTrainTimesteps,
+                  ),
+                };
+                const predictions = await predict(current, proj);
+                const update = denoiseStep(sampler, {
+                  sample: current,
+                  cond: predictions[0],
+                  uncond: predictions[1],
+                  guidance,
+                  sigmas,
+                  index,
+                  previousX0,
+                });
+                current = update.sample;
+                previousX0 = update.previousX0;
+                await emit({
+                  kind: "denoise-step",
+                  step: index + 1,
+                  steps,
+                  sigma: sigmas[index],
+                  copyLatents: latentSnapshot(current, plan.latentShape),
+                });
+              }
+              return { latents: current, latentShape: plan.latentShape };
+            },
+          );
         },
       });
       await emit({ kind: "stage", component: "transformer", at: "end" });
