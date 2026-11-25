@@ -1054,6 +1054,15 @@ class TestLegalText:
         assert "rounded to symmetric int8 with one float32 scale per row" in notice
         assert notice.count("quantiz") == 1
 
+    def test_the_notice_quotes_upstreams_sentence_on_the_use_policy(self, assembled) -> None:
+        out_dir, _ = assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        assert (
+            "\n> Deployments must adhere to the [Gemma Prohibited Use Policy]"
+            "(https://ai.google.dev/gemma/prohibited_use_policy).\n"
+        ) in notice
+
     def test_the_notice_names_exactly_the_storages_the_manifest_ships(self, assembled) -> None:
         """Both directions: a shipped form the notice leaves out, or a form it still describes
         after it was dropped, fails."""

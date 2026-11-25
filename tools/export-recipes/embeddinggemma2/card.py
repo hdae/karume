@@ -105,6 +105,15 @@ EMBEDDINGGEMMA2_UPSTREAM: Mapping[str, str] = {"text": "google/embeddinggemma-2"
 EMBEDDINGGEMMA2_LICENSE = "apache-2.0"
 EMBEDDINGGEMMA2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
+#: The sentence of the upstream card (its "Ethics & Safety" section, at the pinned revision) on the
+#: use policy, **verbatim, with upstream's own link**. The card and `NOTICE.md` quote this one
+#: value: the sentence is upstream's statement, so it is quoted and not paraphrased, and the policy
+#: is upstream's document, which can change, so it is linked and not copied.
+EMBEDDINGGEMMA2_USE_POLICY_SENTENCE = (
+    "Deployments must adhere to the"
+    " [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy)."
+)
+
 #: The storage of the upstream checkpoint's weights (BF16). The card states that the default preset
 #: ships exactly this one ({@link _storage_lines}).
 EMBEDDINGGEMMA2_CHECKPOINT_DTYPE = "bf16"
@@ -633,6 +642,11 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  evaluations and safety guidance — is documented on the upstream model card, and this",
         f"  repository does not restate it: read [{upstream}](https://huggingface.co/{upstream})",
         "  before using it.",
+        '- **The upstream use policy**: the upstream model card states, under "Ethics & Safety":',
+        "",
+        f"  > {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}",
+        "",
+        "  The policy is upstream's document: read it at that link. It is not reproduced here.",
     ]
     return lines
 

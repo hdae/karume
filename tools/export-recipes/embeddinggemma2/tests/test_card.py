@@ -270,6 +270,14 @@ class TestWhatTheCardSays:
         assert "licensed **Apache 2.0**" in card
         assert "a verbatim copy is in `LICENSE.md`" in card
 
+    def test_it_quotes_upstreams_sentence_on_the_use_policy_with_its_link(self) -> None:
+        card = _render()
+        assert (
+            "  > Deployments must adhere to the [Gemma Prohibited Use Policy]"
+            "(https://ai.google.dev/gemma/prohibited_use_policy).\n"
+        ) in card
+        assert "It is not reproduced here." in card
+
     def test_it_advertises_the_familys_entry_point_and_the_repository(self) -> None:
         card = _render()
         assert 'import { Pipeline } from "jsr:@karume/models/embeddinggemma";' in card

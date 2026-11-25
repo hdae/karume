@@ -108,6 +108,7 @@ from karume.dist import (
 from .card import (
     EMBEDDINGGEMMA2_LICENSE,
     EMBEDDINGGEMMA2_MODEL_ROLE,
+    EMBEDDINGGEMMA2_USE_POLICY_SENTENCE,
     render_embeddinggemma2_model_card,
 )
 
@@ -1328,7 +1329,8 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
 #: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_GRAPH_SERIES}), this
 #: text changes with it.
-EMBEDDINGGEMMA2_NOTICE_MARKDOWN = """# NOTICE
+EMBEDDINGGEMMA2_NOTICE_MARKDOWN = (
+    """# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
@@ -1368,6 +1370,13 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 
 No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
 """
+    + (
+        # The use policy: upstream's sentence quoted from the one value the card quotes too.
+        '\nThe upstream model card states, under "Ethics & Safety":\n\n'
+        f"> {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}\n\n"
+        "The policy is upstream's document: read it at that link. It is not reproduced here.\n"
+    )
+)
 
 
 def embeddinggemma2_root_files() -> dict[str, str]:
