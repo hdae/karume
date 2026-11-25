@@ -7,16 +7,26 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.23.0 release (released 2026-11-20)
+## now — after the 0.24.0 release (released 2026-11-25)
 
-0.23.0 is out: the five JSR packages (`@karume/runtime`, `@karume/hub`, `@karume/safetensors`, `@karume/convert`,
-`@karume/models`), every distribution repository published again as `karume/6` and pinned, and the published-smoke
-green on Node and on Deno (17 manifests and the sbv2 `fromPretrained`). What it shipped is the CHANGELOG's
-`[0.23.0]`. The uploads' fragmentation tables read no FAILED row; of the 568 files of 64 MiB or more one is below 10 MiB
-per term, a part of `karume-anima` that this release did not upload (the `later` item "Two anima parts read as
-fragmented"). The order of what comes next is the maintainer's; the items put after this release are the first group of
-`later`.
+0.24.0 is out: the five JSR packages, two new distribution repositories — `karume-embeddinggemma-2` (the first of
+the `embeddinggemma` family) and `karume-anima-2.9b` — published and pinned, the other pins unchanged, and the
+published-smoke green on Node and on Deno (19 manifests and the sbv2 `fromPretrained`). What it shipped is the
+CHANGELOG's `[0.24.0]`. The two uploads' fragmentation tables read no FAILED row, and every part of 64 MiB or more
+is above 10 MiB per term (the lowest reads 33.1). The order of what comes next is the maintainer's; the items put
+after this release are the first group of `later`.
 
+- **What the first publication of EmbeddingGemma 2 left open** (filed 2026-11-25):
+  - The series e2e of EmbeddingGemma 2 (`e2e_embeddinggemma2_test.ts`, its vision and audio twins, and the
+    full-vocabulary cases of `gemma4_tokenizer_test.ts`) still run only under `KARUME_SERIES=1` and still say the
+    distribution is unpublished. ADR [0139](decisions/0139-tests-on-distributions-and-test-assets.md) decision 6 keeps that gating
+    only until the publication; decision 8 is the move (goldens to the test-asset dataset, its pin, sha256 rows).
+  - The workbench's `embeddinggemma-preset-ab` still reads the mirror over the direct route, with a comment that no
+    published repository exists. The cached route as its default is the change `anima-step-timing` got in 0.24.0.
+  - `anima-step-timing` with its cached default, and the Playground's EmbeddingGemma page over the cached route,
+    have not been run in a browser.
+  - Whether model cards and `NOTICE.md` are written the same way across the distribution repositories (how an
+    upstream statement is quoted, what the licence ledger records) has not been reviewed as a whole.
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
