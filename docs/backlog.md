@@ -17,16 +17,27 @@ is above 10 MiB per term (the lowest reads 33.1). The order of what comes next i
 after this release are the first group of `later`.
 
 - **What the first publication of EmbeddingGemma 2 left open** (filed 2026-11-25):
-  - The series e2e of EmbeddingGemma 2 (`e2e_embeddinggemma2_test.ts`, its vision and audio twins, and the
-    full-vocabulary cases of `gemma4_tokenizer_test.ts`) still run only under `KARUME_SERIES=1` and still say the
-    distribution is unpublished. ADR [0139](decisions/0139-tests-on-distributions-and-test-assets.md) decision 6 keeps that gating
-    only until the publication; decision 8 is the move (goldens to the test-asset dataset, its pin, sha256 rows).
-  - The workbench's `embeddinggemma-preset-ab` still reads the mirror over the direct route, with a comment that no
-    published repository exists. The cached route as its default is the change `anima-step-timing` got in 0.24.0.
-  - `anima-step-timing` with its cached default, and the Playground's EmbeddingGemma page over the cached route,
-    have not been run in a browser.
-  - Whether model cards and `NOTICE.md` are written the same way across the distribution repositories (how an
-    upstream statement is quoted, what the licence ledger records) has not been reviewed as a whole.
+  - Done 2026-11-25: the shipped series of EmbeddingGemma 2 (text `i8`, vision and audio `bf16` / `i8`, the
+    pipeline tests and the tokenizer's full-vocabulary cases) run in the default lane from the mirror and the
+    test-asset dataset, with no sha256 row written or changed; the f32 series stay under `KARUME_SERIES=1`. The
+    workbench's `embeddinggemma-preset-ab` has the `source` parameter (default `cached`).
+  - Still reading `outputs/series/embeddinggemma-2-{vision,audio}/io.*` behind `KARUME_SERIES=1`:
+    `packages/models/tests/embeddinggemma2_image_input_test.ts` and `embeddinggemma2_audio_input_test.ts` (a digest
+    check and a frame-layout check). The `bf16` goldens of the dataset hold the same bytes.
+  - The parity cases of the three series e2e print their measured errors and write no results entry.
+  - Not run in a browser: `anima-step-timing` and `embeddinggemma-preset-ab` with their cached default, and the
+    Playground's EmbeddingGemma page over the cached route.
+  - Model cards, `NOTICE.md` and the licence ledgers were profiled across the recipe families on 2026-11-25 (the
+    profiles are under `outputs/misc/card-notice-review-2026-11-25/`); nothing was changed. What it found, for the
+    maintainer to order: every ledger still opens as a pre-release skeleton ("complete every row before anything
+    is published") while rows marked Unverified remain in the ledgers of published repositories (gemma4, irodori,
+    deberta, wan, anima, depth_anything); stale ledger lines (moss "not yet uploaded", gemma4_qat's old repository
+    name and its non-endorsement decision, the deberta ledger against the sbv2 one); cards and notices that
+    disagree on what a repository stores or what was changed (irodori's codec and backbone, sbv2's 22-layer
+    truncation, the regular Gemma 4 card's drafter); and wording that differs between families (`license_link`
+    set by the Gemma 4 cards only, "apache-2.0" against "Apache 2.0", fenced against unfenced licence texts, an
+    upstream sentence shared through one constant in some families and written twice in others). A change to a
+    card or a notice is a new upload of that repository.
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
