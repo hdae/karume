@@ -18,6 +18,7 @@ import {
 } from "@karume/runtime/tune";
 
 import {
+  choiceValue,
   type EntryResult,
   type GpuOptions,
   integerValue,
@@ -26,6 +27,7 @@ import {
   type RunContext,
   textValue,
 } from "../entry.ts";
+import { SOURCE_KINDS } from "../local-parameters.ts";
 import { armStepper } from "../session-ab/progress.ts";
 import { runnerEnvironment, runPositions, steppedArm } from "../session-ab/shared.ts";
 
@@ -39,9 +41,6 @@ import {
 import { PRESET_AB_MOUNT, presetAbData, presetAbRequest, presetAbResult } from "./data.ts";
 import { type GcObserver, type GcReading, globalPerformanceObserver, observeGc } from "./gc.ts";
 import { type CutText, cutText, GOLDEN_CASES, sourceCase } from "./text.ts";
-
-/** The mirror has the direct route only (no published repository behind `/hf/`). */
-const SOURCE = "direct";
 
 /** The device the arms share, and how a pipeline of one preset is built on it. */
 export type PresetAbDevice = {
@@ -78,7 +77,10 @@ export const runPresetAb = async (
   observe: ObserveGc = () => observeGc(globalPerformanceObserver()),
 ): Promise<EntryResult> => {
   const { parameters, gpuOptions, signal, progress, openDistribution, backend } = context;
-  const opened = await openDistribution(PRESET_AB_MOUNT, SOURCE);
+  const opened = await openDistribution(
+    PRESET_AB_MOUNT,
+    choiceValue(parameters, "source", SOURCE_KINDS),
+  );
   const loaded = await loadManifest(opened.ref, { signal });
   const request = presetAbRequest(loaded.manifest, {
     base: textValue(parameters, "base"),

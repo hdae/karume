@@ -145,6 +145,7 @@ describe("the entry's declaration", () => {
       tokens: 512,
       rounds: 9,
       minGain: 0.01,
+      source: "cached",
     });
   });
 
@@ -833,14 +834,18 @@ describe("the entry's run", () => {
     },
   });
 
-  const contextOf = (progressLines: string[]) => ({
-    parameters: parseParameters(presetAb.parameters, { tokens: "16", rounds: "3" }),
+  const contextOf = (
+    progressLines: string[],
+    opened: string[] = [],
+    given: Readonly<Record<string, string>> = {},
+  ) => ({
+    parameters: parseParameters(presetAb.parameters, { tokens: "16", rounds: "3", ...given }),
     gpuOptions: {},
     signal: new AbortController().signal,
     progress: (line: string) => {
       progressLines.push(line);
     },
-    openDistribution: memoryDistributions({ "embeddinggemma-2": MANIFEST_TEXT }),
+    openDistribution: memoryDistributions({ "embeddinggemma-2": MANIFEST_TEXT }, opened),
     openInput: () => Promise.reject(new Error("the entry reads no input file")),
     backend: "test",
   });
@@ -848,9 +853,11 @@ describe("the entry's run", () => {
   it("probes the base, then the compared preset, times both arms and keeps the data base first", async () => {
     const log: string[] = [];
     const progressLines: string[] = [];
-    const result = await runPresetAb(contextOf(progressLines), () =>
+    const opened: string[] = [];
+    const result = await runPresetAb(contextOf(progressLines, opened), () =>
       Promise.resolve(fakeDevice(log)),
     );
+    expect(opened).toEqual(["embeddinggemma-2:cached"]);
     expect(result.verdict).toBeUndefined();
     expect(result.data).toMatchObject({
       format: PRESET_AB_FORMAT,
@@ -892,6 +899,14 @@ describe("the entry's run", () => {
       "probing bf16: loading, cutting query-en to 16 tokens, two embeds",
       "probing i8: loading, two embeds",
     ]);
+  });
+
+  it("opens the mirror over the route the source parameter names", async () => {
+    const opened: string[] = [];
+    await runPresetAb(contextOf([], opened, { source: "direct" }), () =>
+      Promise.resolve(fakeDevice([])),
+    );
+    expect(opened).toEqual(["embeddinggemma-2:direct"]);
   });
 
   /** An observer that logs its steps and reads as `reading` gives. */

@@ -23,6 +23,7 @@ import { acquireGpu } from "@karume/runtime";
 import { type AcquirePresetAbDevice, runPresetAb } from "../../embeddinggemma-preset-ab/run.ts";
 import { LONGEST_CASE_TOKENS } from "../../embeddinggemma-preset-ab/text.ts";
 import type { Entry } from "../../entry.ts";
+import { sourceParameter } from "../../local-parameters.ts";
 import { MIN_GAIN_PARAMETER } from "../../session-ab/shared.ts";
 
 /** The device: `acquireGpu` with the host's options, each pipeline `Pipeline.fromPretrained` on it. */
@@ -70,6 +71,7 @@ const entry: Entry = {
       default: 9,
     },
     MIN_GAIN_PARAMETER,
+    sourceParameter("How a browser reads the distribution"),
   ],
   run: (context) => runPresetAb(context, acquireDevice),
 };
