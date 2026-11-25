@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-25
+
 ### Breaking
 
 - `@karume/runtime/tune`: `deriveLinearGemvChoices` and `planGemvMeasurements` read GEMV sweep records by two other
@@ -47,8 +49,8 @@ measurements in `docs/research/`.
 ### Added
 
 - `@karume/models/embeddinggemma` (barrel namespace `embeddinggemma`): sentence embeddings with the EmbeddingGemma
-  family, today the text model of EmbeddingGemma 2 (pipeline `embeddinggemma/1`; its distribution is not published —
-  a local one is passed as a source handle). `Pipeline.fromPretrained` / `fromAssets` build it with one resident
+  family, today the text model of EmbeddingGemma 2 (pipeline `embeddinggemma/1`), published as
+  `hdae/karume-embeddinggemma-2` (`embeddinggemma.SOURCES["embeddinggemma-2"]`). `Pipeline.fromPretrained` / `fromAssets` build it with one resident
   Session; `embed(input, { prompt, dimension, signal })` returns a unit vector (`Float32Array`). `input` is a string
   or an array of `EmbedContentPart`s (text parts, concatenated in order; image parts with `vision: true` and audio parts with `audio: true` — the next entries); `prompt` names a prompt of the
   manifest (`"query"`, `"document"`, …) whose prefix goes before the text; `dimension` is one of the declared widths
@@ -111,13 +113,12 @@ measurements in `docs/research/`.
   `geometryProfileMismatch` compares a shared table's vendor and architecture with the adapter's.
   `deriveLinearGemvChoices` and `planGemvMeasurements` refuse a shared table. Without `shared` nothing changes: records
   of two adapters are refused.
-- `karume-anima-2.9b` (not published yet): Anima-2.9B (model `anima-2.9b-preview-v1`, from HF
+- `karume-anima-2.9b` (`anima.SOURCES["anima-2.9b"]`): Anima-2.9B (model `anima-2.9b-preview-v1`, from HF
   `Gazingstars123/Anima-2.9B`), a third party's layer expansion of the Anima base model — its transformer deepened from
   28 to 40 blocks — gets a distribution repository of its own, read by `anima.Pipeline` like the other Anima models.
   Its presets are the Anima ones (`bf16`, `bf16+dit8`, `bf16+dit8-a8`, `bf16+dit8-a8-attn8`, `bf16+dit8-a8-attn8-s16`
   (default) and `bf16-c16`), and its defaults are 28 steps at guidance 4: the default preset downloads
-  4.02 GiB, `bf16` 6.61 GiB. Its text encoder, VAE decoder and tokenizers are referenced from `karume-anima`. Until it
-  is published it is a local mirror built with `dist.py --pipeline anima-2.9b`; `anima.SOURCES` has no entry for it.
+  4.02 GiB, `bf16` 6.61 GiB. Its text encoder, VAE decoder and tokenizers are referenced from `karume-anima`.
 
 ### Changed
 
@@ -3063,7 +3064,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/hdae/karume/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/hdae/karume/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/hdae/karume/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/hdae/karume/compare/v0.20.0...v0.21.0
