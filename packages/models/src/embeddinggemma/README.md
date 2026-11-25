@@ -33,10 +33,10 @@ const clip = await pipeline.embed([{ type: "audio", audio }]);
 await pipeline.dispose();
 ```
 
-The distribution is not published: the recipe `tools/export-recipes/embeddinggemma2/distribution.py`
-assembles a local mirror under `models/`, and there is no `SOURCES` table until the first
-publication (docs/release-runbook.md §3). A local distribution is passed to `fromPretrained` as a
-source handle (`nodeDirectory` / `denoDirectory`); `fromAssets` takes the manifest and the bytes.
+The distribution is published on Hugging Face as `SOURCES["embeddinggemma-2"]` (`config.ts`); the
+recipe `tools/export-recipes/embeddinggemma2/distribution.py` assembles it as a local mirror under
+`models/`. A local distribution is passed to `fromPretrained` as a source handle (`nodeDirectory` /
+`denoDirectory`, as above); `fromAssets` takes the manifest and the bytes.
 
 ## One call
 

@@ -1331,9 +1331,10 @@ export class Pipeline {
    * same role from another repository, use {@link FromPretrainedComponentOptions.components} (those
    * roles — the tokenizer is not replaced).
    *
-   * **`ref` is required** (there is no default source — the MUST in `src/hub/repo-ref.ts`; this
-   * family has no published distribution, so there is no pin table either). A string `ref` is read
-   * as `{ repo }` (= following `main`). A local distribution (`models/karume-embeddinggemma-2`) is
+   * **`ref` is required** (there is no default source — the MUST in `src/hub/repo-ref.ts`). The
+   * source this package version verified is `"embeddinggemma-2"` in {@link SOURCES}
+   * (`./config.ts`) — to pin reproducibility yourself, the caller gives `{ repo, revision }`
+   * explicitly. A string `ref` is read as `{ repo }` (= following `main`). A local distribution (`models/karume-embeddinggemma-2`) is
    * passed as a **source handle** (`nodeDirectory` of `@karume/hub/node`, `denoDirectory` of
    * `@karume/hub/deno`) — it bypasses the check of the HF `owner/name` spelling, the network and
    * CacheStorage (the HTTP-only knobs of {@link FromPretrainedOptions} have no effect).
@@ -1342,7 +1343,11 @@ export class Pipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: FromPretrainedOptions = {},
   ): Promise<Pipeline> {
-    const source = toManifestSource(ref, `${OWNER}.fromPretrained`);
+    const source = toManifestSource(
+      ref,
+      `${OWNER}.fromPretrained`,
+      'SOURCES["embeddinggemma-2"] (@karume/models/embeddinggemma)',
+    );
     const towers = wantedTowers(`${OWNER}.fromPretrained`, options);
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);

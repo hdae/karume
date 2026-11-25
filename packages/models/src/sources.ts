@@ -7,7 +7,7 @@
  *
  * It serves the side that "walks every published distribution repo" (connectivity smoke tests,
  * cache prefetch, listings); a consumer that uses only one family does better for tree-shaking by
- * looking up that family's table on its subpath (importing the barrel pulls in the config modules of 11
+ * looking up that family's table on its subpath (importing the barrel pulls in the config modules of 12
  * families).
  *
  * MUST: fold the family tables **as they are** — re-spelling them here would create a shape where
@@ -29,6 +29,7 @@ import * as birefnet from "./birefnet/config.ts";
 import * as umt5 from "./umt5/config.ts";
 import * as wan from "./wan/config.ts";
 import * as moss from "./moss/config.ts";
+import * as embeddinggemma from "./embeddinggemma/config.ts";
 
 // The spread sits in a pure-annotated arrow call: a bundler cannot prove an object spread free of
 // side effects (a getter could run), so a bare spread kept every family's table in any barrel
@@ -45,7 +46,8 @@ export const KARUME_SOURCES: typeof anima.SOURCES &
   typeof birefnet.SOURCES &
   typeof umt5.SOURCES &
   typeof wan.SOURCES &
-  typeof moss.SOURCES = /* @__PURE__ */ (() =>
+  typeof moss.SOURCES &
+  typeof embeddinggemma.SOURCES = /* @__PURE__ */ (() =>
   ({
     ...anima.SOURCES,
     ...irodori.SOURCES,
@@ -58,4 +60,5 @@ export const KARUME_SOURCES: typeof anima.SOURCES &
     ...umt5.SOURCES,
     ...wan.SOURCES,
     ...moss.SOURCES,
+    ...embeddinggemma.SOURCES,
   }) as const satisfies Record<string, HubRepoRef>)();

@@ -80,7 +80,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
 | `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | `hdae/karume-gemma4-qat-mobile` | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
-| `embeddinggemma-2` | `models/karume-embeddinggemma-2` | — (not published yet: no `SOURCES` entry, so direct only) | EmbeddingGemma |
+| `embeddinggemma-2` | `models/karume-embeddinggemma-2` | `hdae/karume-embeddinggemma-2` | EmbeddingGemma |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
 the pages show a disabled state naming the directory.
@@ -1052,7 +1052,7 @@ JSON.
 
 `embeddinggemma.Pipeline.embed` turns one text, image, audio or a mix into a sentence embedding: a
 **unit vector**, so the dot product of two results is their cosine similarity — an image or an audio
-row compares with a text row directly. Today the family serves EmbeddingGemma 2 (the local mirror
+row compares with a text row directly. Today the family serves EmbeddingGemma 2 (the mount of
 `models/karume-embeddinggemma-2`, model `text`, presets `bf16` — the default — and `i8`, each with
 the vision and audio towers in its own storage: bf16, or per-row int8). On a model whose weights
 include the role `vision` (`hasVisionTower` in `config.ts` — the Gemma 4 page's rule for its image
@@ -1060,8 +1060,8 @@ embedder), the page builds the pipeline with `vision: true`, so the tower's weig
 with `bf16`, 161 MiB with `i8`) are fetched with the text model's and every row offers an image; on
 one whose weights include the role `audio` (`hasAudioTower`), likewise with `audio: true` (about
 560 MiB more with `bf16`, 282 MiB with `i8`), and every row offers an audio file.
-The distribution is not published, so the mount has no HF-compatible route: the page reads it
-**direct** (plain `fetch` from `/models/embeddinggemma-2/`), and Cached is disabled with the reason.
+The mount is served on the HF-compatible route under the public name `hdae/karume-embeddinggemma-2`,
+so the page reads it **Cached** by default or **Direct** (plain `fetch` from `/models/embeddinggemma-2/`).
 
 The page embeds a list of rows, one `embed` call per row in order, all at one dimension, and shows
 the **similarity matrix** of the rows. It acquires the GPU once (`acquireGpu({ subgroups: "available"
@@ -1074,7 +1074,7 @@ disposes the old pipeline. A new GPU and leaving the page dispose it too.
 | Control | What it does |
 | --- | --- |
 | Model, Preset | The manifest's `models` and the chosen model's `quants` (today `text`, and `bf16` and `i8`), the defaults marked "(default)". The record carries the preset that ran. |
-| Source | **Direct** only for this mount (above). |
+| Source | **Cached** (default): the HF-compatible route (`/hf/`) through the hub's CacheStorage. **Direct**: `localDirectory` over plain `fetch` from `/models/`. |
 | Dimension | The widths the model's `pipelineConfig.dimensions` declares (768, 512, 256, 128); the first is the full width and the default. A shorter one is the leading slice re-normalised by the pipeline. One width for every row of a run. |
 | Rows | Each row is a text, a **Prompt** — "none" (no prefix) or one of the prompts `pipelineConfig.prompts` declares, shown with its prefix — and, on a model with the vision tower, an optional **Image** (the shared image field: any file the browser decodes, alpha dropped, with a preview; **Remove image** clears it), and on a model with the audio tower an optional **Audio** (any file the browser decodes: `decodeAudioData` on an `OfflineAudioContext` at the rate `pipelineConfig.audio.sampleRate` declares — 16 kHz — resamples it, and its channels are mixed to mono in f64 (`audio.ts`); the field then shows its name, duration and sample count; a file that does not decode shows the error and leaves the row without an audio; **Remove audio** clears it, and the field is emptied whenever the row holds no audio, so the same file can be chosen again). A row sends the text part, then the image part, then the audio part (`rowInput` in `request.ts`); an empty text with an image or an audio is that alone. The page does not cut an audio: one over 30 s is kept and refused by the pipeline with its own message. **Add row** appends an empty row; **Remove** drops a row (the last one stays). The page opens with a query and two documents. An empty text is sent as is (the pipeline embeds `<bos>` `<eos>` alone). Once a pipeline is built, each row shows its **token count** against the limit (`count / maxTokens tokens`, from `Pipeline.tokenize`: the prefix, `<bos>` and `<eos>` included, and an image's soft tokens — from its size alone, at most the model's soft-token budget — or an audio's — one per 40 ms, at most 750 — with its two markers), recomputed as its text, prompt, image or audio changes; a row over the limit is marked in red with a note before Run. A row the pipeline cannot tokenize (an undeclared prompt, an image or an audio on a pipeline without its tower, an audio over 30 s or at another rate) has no count and shows the pipeline's refusal under it, in the library's words (`rowTokens` in `request.ts`). There is no count before the first Run (the page does not build a pipeline to count) or while the held pipeline is another model's. |
 | Run / Cancel | Run builds the pipeline if needed, then embeds every row. Cancel stops the **fetch** at once; the **Session build** takes no signal, so Cancel is disabled during it. `embed` checks the signal before its run, so a Cancel during a row takes effect when that row ends: the rest are skipped and the run ends as cancelled with no result. |

@@ -83,7 +83,7 @@ uv run python dist.py --pipeline umt5                   # umT5-XXL encoder refer
 uv run python dist.py --pipeline wan-ti2v \
     --resolve-refs hf                                   # Wan2.2 TI2V 5B (references karume-umt5-xxl)
 uv run python dist.py --pipeline moss-image             # MOSS-Image-SFT
-uv run python dist.py --pipeline embeddinggemma-2       # EmbeddingGemma 2's text tower (not published)
+uv run python dist.py --pipeline embeddinggemma-2       # EmbeddingGemma 2's text tower
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```

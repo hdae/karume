@@ -311,6 +311,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "TokenizeOptions",
         "kind": "typeAlias"
       }

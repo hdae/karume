@@ -32,18 +32,13 @@ runs only with `KARUME_ALL_FAMILIES=1`.
 | `karume-wan2.2` | `ti2v-5b` (Wan2.2 TI2V 5B; the `text_encoder` is referenced from `karume-umt5-xxl`) | `./wan` | `i8-a8-attn8-online-conv8` | `models:wan-ti2v`, `models:wan` (yes) |
 | `karume-umt5-xxl` | `xxl` (the umT5-XXL encoder of Wan2.2 — see the components below) | `./umt5` | `i8` | `models:umt5` (yes) |
 | `karume-moss-image` | `sft` (MOSS-Image-SFT, with its Qwen3.5 text tower) | `./moss` | `f32+dit8-a8-attn8-online` | `models:moss`, `models:qwen3_5` (yes) |
+| `karume-embeddinggemma-2` | `text` (EmbeddingGemma 2's text tower) | `./embeddinggemma` | `bf16` | `models:embeddinggemma2` (yes) |
 
 ## Built but not yet published
 
-The recipe builds this repository and its e2e lane runs it on the local mirror, but no `SOURCES` entry pins it, so
-`fromPretrained` cannot resolve it from the Hub yet.
-
-| Repository | Models | Subpath | Default preset | Lane (runs by default) |
-| --- | --- | --- | --- | --- |
-| `karume-embeddinggemma-2` | `text` (EmbeddingGemma 2's text tower) | `./embeddinggemma` | `bf16` | `models:embeddinggemma2` (yes) |
-
-Its first publication is a checklist in §3 of the [release runbook](release-runbook.md) (EmbeddingGemma 2 follows
-"First publication of a family").
+None today. A repository the recipe builds and the e2e lanes run on the local mirror, with no `SOURCES` entry yet,
+belongs here until its first publication (a checklist in §3 of the [release runbook](release-runbook.md); a new family
+follows "First publication of a family").
 
 ## Components of another model
 

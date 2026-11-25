@@ -1878,7 +1878,7 @@ Every input-caused rejection is a `ModelInputError` before any GPU work.
 
 ## EmbeddingGemma 2 (`embeddinggemma.Pipeline`): one input per call, at most 8,192 tokens, text, images and 16 kHz audio of at most 30 s, no batch
 
-The model `text` of the local distribution `karume-embeddinggemma-2` (not published) — the text tower,
+The model `text` of the distribution `karume-embeddinggemma-2` — the text tower,
 the vision tower with `vision: true` and the audio tower with `audio: true` — through
 `@karume/models/embeddinggemma`:
 

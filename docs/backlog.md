@@ -708,10 +708,10 @@ maintainer's ruling of 2026-11-06).
   recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
   token length up to 8,192 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
   recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, presets `bf16` (default) and `i8`
-  since 2026-11-22, nothing published),
+  since 2026-11-22, published in 0.24.0),
   the series and its e2e, and step 1 of the order below: the TypeScript family `embeddinggemma`
-  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts, widths and token limit, no
-  `SOURCES` until the first publication) with its pipeline e2e over the mirror, all in the lane
+  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts, widths and token limit; its
+  `SOURCES` since the first publication) with its pipeline e2e over the mirror, all in the lane
   `models:embeddinggemma2`. Ruled 2026-11-21: one family `embeddinggemma` serves both models; a text holding an image,
   audio or video placeholder id is refused (the upstream composite model replaces such an id with the pad id;
   sentence-transformers refuses the text); an input is a string or an array of content parts, and placeholders are
@@ -732,9 +732,9 @@ maintainer's ruling of 2026-11-06).
        which stop at 5,461 tokens — accepted as is (2026-11-22), the graph's per-layer embedding not rewritten;
      - batch and key padding, through a valid-key range the score kernel checks beside the band, for both models;
      - measuring what batch would buy (throughput against one text per call) before building it.
-  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead). The publication
-     also gives the family its `SOURCES` table and turns the Playground's `embeddinggemma-2` mount into the object form
-     with `hfRepo` from it.
+  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead) — published in
+     0.24.0. The publication gave the family its `SOURCES` table (`embeddinggemma.SOURCES["embeddinggemma-2"]`) and
+     turned the Playground's `embeddinggemma-2` mount into the object form with `hfRepo` from it.
      - Stage A, the torch-CPU screening of i8 / i4 weight forms and i8 + a8: [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md).
      - Built 2026-11-22 (the maintainer's choice that day: one int8 preset, the default stays `bf16`): the preset `i8`
        — the token table and every linear (219 tensors) as per-row symmetric int8, f32 compute, empty session — from the
@@ -785,7 +785,8 @@ maintainer's ruling of 2026-11-06).
        investigated) — filed in [known issues](known-issues.md) with the fix candidates. The record now holds the
        host's GCs per timed visit (`karume-embeddinggemma-preset-ab/2`: major GCs and their summed pause, the other
        kinds apart), so a slow visit that held a major GC shows as one; the other candidates are not chosen.
-     - Left: the first publication, awaiting the maintainer's go-ahead.
+     - The first publication: published in 0.24.0 (the checklist "First publication of a family" in
+       [the release runbook](release-runbook.md) §3).
   4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
      `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is
      returned, not refused), and the Playground page `/embeddinggemma` shows each row's count against the limit once

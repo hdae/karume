@@ -23,9 +23,9 @@
  * prompt names, the widths and the token limit are the distribution's (`pipelineConfig`); the
  * source of truth for the input rules is the module doc of `src/embeddinggemma/input.ts`.
  *
- * The distribution is not published yet, so this subpath has no `SOURCES` table: a local
- * distribution is passed to `fromPretrained` with `nodeDirectory` of `@karume/hub/node` or
- * `denoDirectory` of `@karume/hub/deno`.
+ * The distribution `karume-embeddinggemma-2` is published on Hugging Face (`"embeddinggemma-2"` of
+ * {@link SOURCES}); a local distribution can be passed to `fromPretrained` instead with
+ * `nodeDirectory` of `@karume/hub/node` or `denoDirectory` of `@karume/hub/deno`.
  *
  * MUST: every module is free of side effects (no execution at import, no global mutable state —
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
@@ -37,6 +37,19 @@ export type {
   FromPretrainedOptions,
   PipelineOptions,
 } from "./src/embeddinggemma/pipeline.ts";
+/**
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092):
+ *
+ * - `SOURCES["embeddinggemma-2"]` = `hdae/karume-embeddinggemma-2` (read by
+ *   {@link Pipeline.fromPretrained}; self-contained — no cross-repository reference)
+ *
+ * **An opt-in for callers who want to follow the package version automatically** — pass the entry
+ * as is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility yourself,
+ * write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
+ */
+export { SOURCES } from "./src/embeddinggemma/config.ts";
 export type {
   EmbedContentPart,
   EmbedOptions,

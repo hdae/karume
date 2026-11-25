@@ -275,6 +275,7 @@ const SOURCE_TABLE_SUBPATHS: readonly string[] = [
   "./umt5",
   "./wan",
   "./moss",
+  "./embeddinggemma",
 ];
 
 /** Whether an export name is a family source table (the bare name — ADR 0136). */

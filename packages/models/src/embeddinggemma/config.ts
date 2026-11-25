@@ -42,12 +42,13 @@
  * intend).
  * MUST: maps are read only through `Object.hasOwn` / own entries (cross-cutting invariant).
  *
- * This family has no table of public distribution repositories: nothing of it is published yet, so
- * there is no `SOURCES` (docs/release-runbook.md §3 adds it at the first publication).
+ * The table of public distribution repositories ({@link SOURCES}) also lives here (ADR 0092 —
+ * a family's `config.ts` is where the table lives).
  *
  * MUST: modules are side-effect free (CLAUDE.md).
  */
 
+import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, isRecord, readNumber, readRecord } from "../config/readers.ts";
 import { type PipelineVisionConfig, parseVision } from "../gemma/config.ts";
 import {
@@ -60,6 +61,39 @@ import {
 /** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
 export const EMBEDDINGGEMMA_PIPELINE_NAME = "embeddinggemma";
 export const EMBEDDINGGEMMA_PIPELINE_MAJOR = 1;
+
+/**
+ * The EmbeddingGemma family's **table of public distribution repositories** (ADR 0092 — one table
+ * per family, **no default entry**). The values are **the sources this package version verified**
+ * (pinned commit SHAs — ADR 0073).
+ *
+ * A key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives back
+ * the basename — the check in `tests/sources_test.ts` holds this invariant). A generation gets its
+ * own repository (ADR 0092 decision 1):
+ *
+ * - `"embeddinggemma-2"` = `hdae/karume-embeddinggemma-2` (EmbeddingGemma 2 — the model `text`,
+ *   with its vision and audio towers as the weights roles `vision` / `audio`; self-contained — no
+ *   cross-repository reference; first published in 0.24.0)
+ *
+ * Pass it **as an opt-in to follow the package version automatically** — to pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no
+ * default).
+ *
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently at the network's convenience (an
+ * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline start
+ * with a full cache works at the same time (ADR 0038). A user who needs to follow main chooses
+ * `{ ...SOURCES["embeddinggemma-2"], revision: "main" }` explicitly.
+ */
+// NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
+// runbook check).
+export const SOURCES = {
+  "embeddinggemma-2": {
+    repo: "hdae/karume-embeddinggemma-2",
+    revision: "29186fee7a5964c07fb93f505cbd85f9b1cd36ca",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 /** The six fields, in the order the dist recipe writes them (`vision` and `audio` are optional). */
 const ROOT_KEYS: readonly string[] = [

@@ -41,12 +41,11 @@ questions it has to answer.
 - **Prompt prefixes** — read verbatim at run time from the snapshot's
   `config_sentence_transformers.json`.
 
-NOTE: this recipe has a distribution recipe (`distribution.py` / `card.py` —
-`karume-embeddinggemma-2`), built as a local mirror only; no weights derived from it are published
-today. The mirror carries the Apache-2.0 text (`LICENSE.md`) and a modification notice
-(`NOTICE.md` — upstream ships no `NOTICE` file), in the form of the Gemma 4 distribution. The
-inventory below still has to be settled before anything is published. Moving the pin to another
-commit needs this review again.
+NOTE: this recipe has a distribution recipe (`distribution.py` / `card.py` →
+`models/karume-embeddinggemma-2`, published as `hdae/karume-embeddinggemma-2`, first in 0.24.0).
+The distribution carries the Apache-2.0 text (`LICENSE.md`) and a modification notice
+(`NOTICE.md` — upstream ships no `NOTICE` file), in the form of the Gemma 4 distribution. Moving
+the pin to another commit needs this review again.
 
 ## Release-gate inventory
 
@@ -59,7 +58,7 @@ published.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/google/embeddinggemma-2>                                                                                                           |
 | Revision used            | `f9972ac22e696a105c482202646979e33e4b5a1e` (fetched 2026-11-21 into `inputs/embeddinggemma2/embeddinggemma-2`; pinned with per-file SHA-256 in `sources.py`) |
-| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes; the vision tower and its projector converted into local series (f32 upcast and bf16, its two position tables split from one, its RoPE folded into two tables), the bf16 one assembled into the mirror as the weights role `vision`; the audio tower and its projector converted into local series (f32 upcast and bf16, its chunked attention as a window of 12 keys, its relative position keys and per-dimension query scale folded into constants), the bf16 one assembled into the mirror as the weights role `audio`. Model outputs on synthetic inputs (the soft tokens and vectors of the goldens; the 768-wide vectors and the log-mel frames of `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`, tracked). Not distributed from this repository today. |
+| Form of copy             | Loaded and converted (the text tower) into local series — f32 (upcast), bf16 (the checkpoint's values) and i8 (the token table and every linear rounded to per-row int8) — and the bf16 and i8 ones assembled into the local mirror `karume-embeddinggemma-2` with a compiled tokenizer and the prompt prefixes; the vision tower and its projector converted into local series (f32 upcast, bf16 and i8, its two position tables split from one, its RoPE folded into two tables), the bf16 and i8 ones assembled into the mirror as the weights role `vision`; the audio tower and its projector converted into local series (f32 upcast, bf16 and i8, its chunked attention as a window of 12 keys, its relative position keys and per-dimension query scale folded into constants), the bf16 and i8 ones assembled into the mirror as the weights role `audio`. Model outputs on synthetic inputs (the soft tokens and vectors of the goldens; the 768-wide vectors and the log-mel frames of `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`, tracked). The mirror is re-distributed as `hdae/karume-embeddinggemma-2` (first published in 0.24.0). |
 | Code license             | n/a (weights, configs and tokenizer only)                                                                                                                  |
 | Weights license          | Apache-2.0 as declared by the model card's front matter (`license: apache-2.0`; the card body links its "License: Apache 2.0" line to <https://ai.google.dev/gemma/docs/gemma_4_license>) at the revision used; not gated; the repository has no LICENSE or NOTICE file. The card's "Ethics & Safety" section also states "Deployments must adhere to the Gemma Prohibited Use Policy" (<https://ai.google.dev/gemma/prohibited_use_policy>). Read against the revision used on 2026-11-25; the maintainer decided on 2026-11-25 to publish under Apache-2.0 with that sentence quoted. |
 | Attribution requirements | Apache 2.0 §4: `karume-embeddinggemma-2` bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) — the three towers extracted and re-expressed, the `bf16` and `i8` forms, the compiled tokenizer). No upstream NOTICE file (§4(d) does not apply). The card and `NOTICE.md` quote the upstream card's sentence on the Gemma Prohibited Use Policy verbatim with its link and do not reproduce the policy (maintainer decision 2026-11-25). |

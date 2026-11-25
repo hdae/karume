@@ -40,6 +40,7 @@ import * as birefnet from "../birefnet.ts";
 import * as umt5 from "../umt5.ts";
 import * as wan from "../wan.ts";
 import * as moss from "../moss.ts";
+import * as embeddinggemma from "../embeddinggemma.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
@@ -184,6 +185,14 @@ const FAMILIES: readonly Family[] = [
     keys: ["moss-image"],
     load: (ref, options) => moss.Pipeline.fromPretrained(ref, options),
   },
+  {
+    name: "embeddinggemma.SOURCES",
+    sources: embeddinggemma.SOURCES,
+    // First published in 0.24.0; a generation gets its own repository (ADR 0092 decision 1), and
+    // this one is self-contained (no cross-repository reference).
+    keys: ["embeddinggemma-2"],
+    load: (ref, options) => embeddinggemma.Pipeline.fromPretrained(ref, options),
+  },
 ];
 
 // Keys are derived mechanically from the repo name (`"karume-" + key` === basename), so check ①
@@ -200,7 +209,7 @@ for (const { name, sources, keys } of FAMILIES) {
 // The totals of families and public repositories are spelled out too. A new repository (birefnet-hr
 // / lucida in iteration b, umT5 / Wan2.2 in 0.14.0) fails this, so an entry missing from the merge
 // into `KARUME_SOURCES` cannot pass silently.
-test("11 families have a source table, with 18 published repositories", () => {
+test("12 families have a source table, with 19 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -215,9 +224,10 @@ test("11 families have a source table, with 18 published repositories", () => {
       "umt5.SOURCES",
       "wan.SOURCES",
       "moss.SOURCES",
+      "embeddinggemma.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 18);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 19);
 });
 
 for (const { name, sources } of FAMILIES) {

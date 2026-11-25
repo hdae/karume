@@ -28,8 +28,7 @@ is the source of truth of the accepted set.
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
     uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT
-    uv run python dist.py --pipeline embeddinggemma-2      # EmbeddingGemma 2's text tower (not
-                                                           # published)
+    uv run python dist.py --pipeline embeddinggemma-2      # EmbeddingGemma 2's text tower
 
 The default locations (`--series` / `--out`) are passed from here too — the repository's
 `outputs/series/` and `models/` are repository topology, and the core holds no spellings (ADR 0065
@@ -159,8 +158,7 @@ PIPELINES: Mapping[str, Pipeline] = {
     # MOSS-Image-SFT (ADR 0138 addendum of 2026-11-01 — self-contained: the Qwen3.5 text tower is
     # the checkpoint's own, stored in this repository).
     "moss-image": moss_distribution.PIPELINE,
-    # EmbeddingGemma 2 (the text tower — contract `embeddinggemma/1`; a local mirror, not
-    # published).
+    # EmbeddingGemma 2 (the text tower — contract `embeddinggemma/1`).
     "embeddinggemma-2": embeddinggemma2_distribution.PIPELINE,
     **CORE_PIPELINES,
 }

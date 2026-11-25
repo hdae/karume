@@ -2,8 +2,8 @@
 
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)); it writes series and the
-distribution `karume-embeddinggemma-2`, which is built as a local mirror only (nothing is
-published). The **text tower** of `google/embeddinggemma-2` is the distribution's one model, `text`;
+distribution `karume-embeddinggemma-2` (published as `hdae/karume-embeddinggemma-2` since 0.24.0;
+the pin is `embeddinggemma.SOURCES["embeddinggemma-2"]` of `@karume/models`). The **text tower** of `google/embeddinggemma-2` is the distribution's one model, `text`;
 the **vision tower** is exported as series of its own (`export_vision.py`) and ships in the same
 model as the weights role `vision` (since 2026-11-22), and the **audio tower** is exported as series
 of its own (`export_audio.py`) and ships in the same model as the weights role `audio` (since
@@ -405,8 +405,8 @@ does not (max abs 9.25e-5 on one such text; 0 once the pad id is substituted).
 
 ## The distribution (`distribution.py`, `card.py`)
 
-`dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (local only — no
-upload, no published pin): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
+`dist.py --pipeline embeddinggemma-2` assembles `models/karume-embeddinggemma-2/` (the directory
+`tools/release/hf-upload.zsh` uploads to `hdae/karume-embeddinggemma-2`): the model `text` (contract `embeddinggemma/1`, read by the TypeScript
 family `embeddinggemma`) with the graph as the weights `model` in two storages — `bf16` from the bf16 series and `i8`
 from the i8 series, each container checked to carry the bf16 one's graph —, the vision tower as the weights `vision` and
 the audio tower as the weights `audio` in the same two storages (`bf16` from the series `embeddinggemma-2-vision-bf16`

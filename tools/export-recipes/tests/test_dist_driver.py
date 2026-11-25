@@ -222,9 +222,8 @@ class TestDefaultPlaces:
 #: How each published repository is built (pipeline, the `--model` list, `--repo`) → the output
 #: directory `models/<name>/`. `tools/release/hf-upload.zsh` uploads this directory to
 #: `hdae/<name>`, so unless the card's Usage example names it, the published card points at
-#: another repository. A repository not published yet (`karume-embeddinggemma-2`) is not listed:
-#: the TS `SOURCES` it is matched against get its entry at the first publication
-#: (docs/release-runbook.md §3).
+#: another repository. A repository not published yet is not listed: the TS `SOURCES` it is
+#: matched against get its entry at the first publication (docs/release-runbook.md §3).
 RELEASE_REPOSITORIES = [
     (
         "anima",
@@ -259,6 +258,7 @@ RELEASE_REPOSITORIES = [
     ("umt5", ["xxl"], None, "karume-umt5-xxl"),
     ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
     ("moss-image", ["sft"], None, "karume-moss-image"),
+    ("embeddinggemma-2", ["text"], None, "karume-embeddinggemma-2"),
 ]
 
 
