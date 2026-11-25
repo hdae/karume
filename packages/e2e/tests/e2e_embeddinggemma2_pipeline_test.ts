@@ -11,22 +11,23 @@
 //    each preset's `requiredLimits` (256 MiB of binding for `bf16`, for its token table; none for
 //    `i8`, whose largest buffer — the int8 table, 128 MiB — is the WebGPU default), and the
 //    pipeline's ids for each golden text (its prompt name + its body — the ids `embed` runs) have
-//    the length the recipe pinned. With the series (`KARUME_SERIES=1`) the ids equal the golden's
-//    `input_ids`, which the recipe took from upstream's `tokenizers` over the prefix of
+//    the length the recipe pinned, and they equal the golden's `input_ids` (the bf16 series'
+//    goldens), which the recipe took from upstream's `tokenizers` over the prefix of
 //    `config_sentence_transformers.json` + the body: the prompt prefix the manifest carries, the
 //    concatenation and `<bos>` … `<eos>` are upstream's.
 // 2. **The ten golden texts through each preset** (real GPU): each vector is a unit vector and
 //    bit-for-bit equals this machine's sha256 row of that preset (rows per environment — ADR 0106;
-//    the row ID is `embeddinggemma-2/<preset>/<case>`); with the series it also equals the torch CPU
-//    golden of the preset's series within the tolerance of the series e2e
-//    (`e2e_embeddinggemma2_test.ts`). `bf16` is compared with `outputs/series/embeddinggemma-2-text/`
-//    (the distribution's bf16 weights are the f32 series' values bit for bit — the recipe proves it
-//    when it writes the bf16 series — so the same goldens hold); `i8` with
-//    `outputs/series/embeddinggemma-2-text-i8/` (the quantized model's own goldens).
+//    the row ID is `embeddinggemma-2/<preset>/<case>`); with `KARUME_UPSTREAM_PARITY=1` it also
+//    equals the torch CPU golden of the preset's series within the tolerance of the series e2e
+//    (`e2e_embeddinggemma2_test.ts`). `bf16` is compared with the goldens of
+//    `embeddinggemma-2-text-bf16` (the distribution's bf16 weights are the f32 series' values bit for
+//    bit — the recipe proves it when it writes the bf16 series — and its io files are the f32
+//    series' byte for byte); `i8` with those of `embeddinggemma-2-text-i8` (the quantized model's own
+//    goldens).
 // 3. **A shorter width**, per preset: `dimension` 256 of a short text and 128 of the 2,048-token
 //    text equal the leading slice of the full vector of the same call path re-normalised (bit for
-//    bit), each with its own sha256 row, and — with the series — the golden's slice re-normalised
-//    within the tolerance.
+//    bit), each with its own sha256 row, and — with `KARUME_UPSTREAM_PARITY=1` — the golden's slice
+//    re-normalised within the tolerance.
 // 4. **Timings** (recorded, not asserted), per preset: `fromPretrained` with a shared GPU, and the
 //    first and a repeated `embed` of a short, the 2,048-token and the 8,192-token text (the repeat
 //    must give the same bits — the sha rows stand on that), with each run's plan backing. The
@@ -49,12 +50,18 @@
 // `tools/export-recipes/embeddinggemma2/export.py`, pinned there by a recipe test), so the long
 // documents are not spelled a second time here. Every series has the same cases.
 //
-// Without the mirror every case SKIPs explicitly (the distribution gate owns that red —
-// `karume-embeddinggemma-2` is on its roster); without a GPU the GPU cases SKIP; without
-// `KARUME_SERIES=1` (or without a series' io) the golden comparisons SKIP and the sha rows still
-// run. Rows are created with `KARUME_REFERENCE=write` on the lane.
+// The goldens come from the test-asset root (`goldenDir(<series>)`, fetched with
+// `node tools/test-assets/fetch.ts` — ADR 0139). Without the mirror every case SKIPs explicitly (the
+// distribution gate owns that red — `karume-embeddinggemma-2` is on its roster); without a GPU the
+// GPU cases SKIP. A golden absent from a complete fetch of the pinned dataset
+// (`testAssetsFetched()`) FAILs the case that reads it; absent otherwise, the token-id check SKIPs
+// explicitly and the golden comparisons are left out (the sha rows still run). The golden
+// comparisons are upstream parity (helpers/upstream-parity.ts): without `KARUME_UPSTREAM_PARITY=1`
+// they are left out and the sha rows still run. Rows are created with `KARUME_REFERENCE=write` on
+// the lane.
 
 import { readTextFile, isNotFound, statSync, readFile } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, fail } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -83,7 +90,7 @@ import {
   mirrorRoot,
   readMirrorAsset,
 } from "../../models/tests/helpers/mirror.ts";
-import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
+import { UPSTREAM_PARITY } from "./helpers/upstream-parity.ts";
 import {
   compareTensors,
   formatAllclose,
@@ -204,7 +211,7 @@ const WEBGPU_DEFAULT_BINDING_BYTES = 128 * 2 ** 20;
 /** One preset of the mirror and what its checks compare with. */
 type PresetSpec = {
   readonly quant: string;
-  /** The series whose io goldens its vectors are compared with (under `outputs/series/`). */
+  /** The series whose io goldens its vectors are compared with (`goldenDir(series)`). */
   readonly series: string;
   readonly tolerance: Tolerance;
   /**
@@ -223,7 +230,7 @@ type PresetSpec = {
 const PRESETS: readonly PresetSpec[] = [
   {
     quant: "bf16",
-    series: "embeddinggemma-2-text",
+    series: "embeddinggemma-2-text-bf16",
     tolerance: PIPELINE_TOLERANCE,
     cappedBindingBytes: 256 * 2 ** 20,
     cappedMaxTokens: 5461,
@@ -259,9 +266,9 @@ if (!MIRROR) {
   );
 }
 
-/** The io golden of a case in a series (io files only — the container is not read). */
+/** The io golden of a case in a series (the test-asset root holds io files only). */
 const ioFile = (series: string, name: string): URL =>
-  new URL(`../../../outputs/series/${series}/io.${name}.safetensors`, import.meta.url);
+  new URL(`io.${name}.safetensors`, goldenDir(series));
 
 /** One golden text of the fixture. */
 type GoldenCase = {
@@ -279,7 +286,9 @@ const FIXTURE = JSON.parse(
   ),
 ) as { readonly series: string; readonly cases: readonly GoldenCase[] };
 const CASES = FIXTURE.cases;
-assertEquals(FIXTURE.series, "embeddinggemma-2-text", "the fixture's series is the one read here");
+// The fixture names the recipe's f32 series; the bf16 series' io files read here are its io files
+// byte for byte, and every series has the same cases.
+assertEquals(FIXTURE.series, "embeddinggemma-2-text", "the fixture's series is the recipe's");
 
 /** The options of a case's call (its prompt when it has one). */
 const optionsOf = (entry: GoldenCase): embeddinggemma.EmbedOptions =>
@@ -317,24 +326,49 @@ const exists = (url: URL): boolean => {
   }
 };
 
-/** Whether the golden of `name` in `series` is compared in this run (opt-in, and the io present). */
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pinned revision. Then a golden that
+ * is absent is a FAIL of the case that reads it (the dataset at the pin lacks it), not a SKIP.
+ */
+const FETCHED = testAssetsFetched();
+/** Whether the golden of `name` in `series` is read in this run (present, or due at the pin). */
+const goldenReadable = (series: string, name: string): boolean =>
+  FETCHED || exists(ioFile(series, name));
+/** Whether every golden of `series` is read in this run. */
+const goldensReadable = (series: string): boolean =>
+  CASES.every((entry) => goldenReadable(series, entry.name));
+/** Whether the golden of `name` in `series` is compared in this run (upstream parity, opt-in). */
 const goldenOf = (series: string, name: string): boolean =>
-  SERIES_CHECKS && exists(ioFile(series, name));
-/** Whether every golden of `series` is there (the token-id check reads the f32 series'). */
-const goldensOf = (series: string): boolean => CASES.every((entry) => goldenOf(series, entry.name));
+  UPSTREAM_PARITY && goldenReadable(series, name);
 for (const { series } of PRESETS) {
-  if (SERIES_CHECKS && !goldensOf(series)) {
+  if (!goldensReadable(series)) {
     console.warn(
-      `[karume] outputs/series/${series}/ lacks io goldens, so the EmbeddingGemma 2 pipeline's golden` +
-        " comparisons against it SKIP (the series e2e names what is missing)",
+      `[karume] ${goldenDir(series).pathname} lacks io goldens, so the EmbeddingGemma 2 pipeline's` +
+        " checks against them SKIP. Fetch: node tools/test-assets/fetch.ts",
     );
   }
 }
-const TOKEN_GOLDENS = goldensOf(presetOf(DEFAULT_PRESET).series);
+/** Whether the token-id check runs (it reads the default preset's goldens). */
+const TOKEN_GOLDENS = goldensReadable(presetOf(DEFAULT_PRESET).series);
 
-/** The io golden of a case, parsed. */
+/**
+ * The io golden of a case, parsed. A golden is read only when present or due at the pin, so its
+ * NotFound here is a file the dataset at the pin lacks — reported as such.
+ */
 const readGolden = async (series: string, name: string): Promise<SafetensorsFile> => {
-  const bytes = await readFile(ioFile(series, name));
+  const url = ioFile(series, name);
+  let bytes: Awaited<ReturnType<typeof readFile>>;
+  try {
+    bytes = await readFile(url);
+  } catch (cause) {
+    if (isNotFound(cause)) {
+      throw new Error(
+        `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+      );
+    }
+    throw cause;
+  }
   return parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );
@@ -453,7 +487,7 @@ describe.skipIf(!MIRROR)("EmbeddingGemma 2 mirror: the manifest and the tokenize
   });
 
   it.skipIf(!TOKEN_GOLDENS)(
-    `gives each golden text exactly the golden's input_ids (upstream's tokenizers over prefix + body)${SERIES_CHECKS_OPT_IN}`,
+    `gives each golden text exactly the golden's input_ids (upstream's tokenizers over prefix + body)${TOKEN_GOLDENS ? "" : " (SKIP: test assets not fetched)"}`,
     async () => {
       for (const entry of CASES) {
         const request = planEmbedRequest(rules, entry.text, optionsOf(entry));

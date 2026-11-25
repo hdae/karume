@@ -27,11 +27,13 @@
 //    Each case records maxAbs, maxRel and the cosine.
 // 3. **A text call on the vision pipeline** is the text call of the pipeline without it: its vector
 //    has the sha256 row the text pipeline e2e pins (`embeddinggemma-2/<preset>/query-en`).
-// 4. **The text graph's soft-row path alone** (real GPU, `bf16`, `KARUME_SERIES=1` with the vision
-//    series present): the embedder over the mirror's text graph, its tower a stand-in that answers
-//    with upstream's own soft tokens of each image (the vision series' goldens), against upstream's
-//    vectors within {@link SOFT_ROW_TOLERANCE} — the tower's GPU noise is out of the comparison, so
-//    an error where the soft rows enter the text graph is not hidden under it.
+// 4. **The text graph's soft-row path alone** (real GPU, `bf16`): the embedder over the mirror's
+//    text graph, its tower a stand-in that answers with upstream's own soft tokens of each image
+//    (the goldens of the `embeddinggemma-2-vision-bf16` series, from the test-asset root), takes
+//    every queued golden with the patch rows of its image; with `KARUME_UPSTREAM_PARITY=1` its
+//    vectors are held to upstream's within {@link SOFT_ROW_TOLERANCE} — the tower's GPU noise is
+//    out of the comparison, so an error where the soft rows enter the text graph is not hidden
+//    under it.
 // 5. **The tower within the preset's limits** (real GPU), per preset, on a device whose binding and
 //    buffer limits are capped at the preset's own need (`bf16` 256 MiB, `i8` the WebGPU default
 //    128 MiB): an image of 280 soft tokens — whose tower scores are 12 × 2,520² f32 = 290.7 MiB
@@ -44,9 +46,13 @@
 //    329.1 MiB without, on a 2 GiB binding — `pipeline.ts`).
 //
 // Without the mirror every case SKIPs explicitly (the distribution gate owns that red); without a
-// GPU the GPU cases SKIP. Rows are created with `KARUME_REFERENCE=write` on the lane.
+// GPU the GPU cases SKIP. Check 4's goldens are fetched with `node tools/test-assets/fetch.ts`
+// (ADR 0139): absent from a complete fetch of the pinned dataset (`testAssetsFetched()`) they FAIL
+// its cases; absent otherwise its cases SKIP explicitly. Rows are created with
+// `KARUME_REFERENCE=write` on the lane.
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, fail } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -74,7 +80,7 @@ import {
   openMirrorComponent,
   readMirrorAsset,
 } from "../../models/tests/helpers/mirror.ts";
-import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 import {
   compareTensors,
   formatAllclose,
@@ -297,9 +303,12 @@ const FULL_BUDGET_IMAGE: embeddinggemma.Rgb8Image = (() => {
 })();
 const FULL_BUDGET_TOKENS = 280;
 
-/** The f32 vision series (outside the repository): its io files hold upstream's soft tokens. */
-const VISION_SERIES = new URL("../../../outputs/series/embeddinggemma-2-vision/", import.meta.url);
-const goldenIo = (image: string): URL => new URL(`io.${image}.safetensors`, VISION_SERIES);
+/**
+ * The goldens of the bf16 vision series (the test-asset root): their io files hold upstream's soft
+ * tokens (the f32 series' io files byte for byte).
+ */
+const VISION_GOLDENS = goldenDir("embeddinggemma-2-vision-bf16");
+const goldenIo = (image: string): URL => new URL(`io.${image}.safetensors`, VISION_GOLDENS);
 
 /** Whether the file exists (anything but NotFound propagates). */
 const exists = (url: URL): boolean => {
@@ -311,21 +320,36 @@ const exists = (url: URL): boolean => {
   }
 };
 
-/** Whether check 4 can run: the vision series' io file of every image the fixture's inputs hold. */
+/**
+ * Whether check 4 can run: the golden io file of every image the fixture's inputs holds, or a
+ * complete fetch of the pin (a golden absent from it then FAILs the case that reads it).
+ */
 const GOLDEN_SOFT_TOKENS =
-  SERIES_CHECKS &&
+  testAssetsFetched() ||
   FIXTURE.cases.every((entry) => entry.imageBlocks.every(({ image }) => exists(goldenIo(image))));
-if (MIRROR && SERIES_CHECKS && !GOLDEN_SOFT_TOKENS) {
+if (MIRROR && !GOLDEN_SOFT_TOKENS) {
   console.warn(
-    `[karume] ${VISION_SERIES.pathname} lacks the io files of the fixture's images, so the check of` +
-      " the text graph fed upstream's soft tokens SKIPs. Generate: cd tools/export-recipes && uv run" +
-      " --with 'transformers==5.23.0' python -m embeddinggemma2.export_vision",
+    `[karume] ${VISION_GOLDENS.pathname} lacks the io files of the fixture's images, so the check of` +
+      " the text graph fed upstream's soft tokens SKIPs. Fetch: node tools/test-assets/fetch.ts",
   );
 }
 
-/** Upstream's soft tokens of an image (`output.0` `[1, n, 512]` of its io file in the vision series). */
+/** Upstream's soft tokens of an image (`output.0` `[1, n, 512]` of its golden io file). */
 const goldenSoftTokens = async (image: string): Promise<Float32Array<ArrayBuffer>> => {
-  const bytes = await readFile(goldenIo(image));
+  const url = goldenIo(image);
+  let bytes: Awaited<ReturnType<typeof readFile>>;
+  try {
+    bytes = await readFile(url);
+  } catch (cause) {
+    // Read only when present or due at the pin: a NotFound is a file the dataset at the pin lacks.
+    if (isNotFound(cause)) {
+      throw new Error(
+        `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+      );
+    }
+    throw cause;
+  }
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );
@@ -593,7 +617,7 @@ for (const preset of PRESETS) {
 }
 
 describe.skipIf(!RUNNABLE || !GOLDEN_SOFT_TOKENS)(
-  `EmbeddingGemma 2 image input: the bf16 text graph fed upstream's soft tokens (real GPU)${SERIES_CHECKS_OPT_IN}`,
+  `EmbeddingGemma 2 image input: the bf16 text graph fed upstream's soft tokens (real GPU)${GOLDEN_SOFT_TOKENS ? "" : " (SKIP: test assets not fetched)"}`,
   () => {
     let gpu: GpuContext;
     let embedder: Embedder;
@@ -660,37 +684,57 @@ describe.skipIf(!RUNNABLE || !GOLDEN_SOFT_TOKENS)(
       }
     });
 
+    /**
+     * Embeds a fixture input with the stand-in tower answering each image with its golden soft
+     * tokens; the stand-in checks each image's patch rows, and every queued golden is taken.
+     */
+    const embedWithGoldens = async (entry: FixtureCase): Promise<Float32Array<ArrayBuffer>> => {
+      // A case that failed mid-run leaves its goldens queued; they are not the next case's.
+      answers.length = 0;
+      for (const { image } of entry.imageBlocks) answers.push(await goldenSoftTokens(image));
+      const vector = await embedder.embed(partsOf(entry), optionsOf(entry));
+      assertEquals(answers.length, 0, "a queued golden was not taken");
+      return vector;
+    };
+
     for (const entry of FIXTURE.cases) {
-      it(`${entry.name} (T=${entry.tokens}): upstream's vector within ${SOFT_ROW_TOLERANCE.atol}`, async () => {
-        await runRecordedCase(
-          results,
-          { id: `embeddinggemma-2/bf16/image-golden-soft/${entry.name}` },
-          async ({ measurements }) => {
-            for (const { image } of entry.imageBlocks) answers.push(await goldenSoftTokens(image));
-            const vector = await embedder.embed(partsOf(entry), optionsOf(entry));
-            assertEquals(answers.length, 0, "a queued golden was not taken");
-            const upstream = fixtureVector(entry.name);
-            const report = compareTensors(
-              { dtype: "f32", data: vector },
-              { dtype: "f32", data: upstream },
-              SOFT_ROW_TOLERANCE,
-            );
-            measurements.push({
-              output: "embedding",
-              maxAbs: report.maxAbsError,
-              maxRel: report.maxRelError,
-              tolerance: SOFT_ROW_TOLERANCE,
-              stage: "karume",
-            });
-            const note =
-              `T=${entry.tokens}: the text graph fed upstream's soft tokens, maxAbs` +
-              ` ${report.maxAbsError.toExponential(3)}, cosine ${cosine(vector, upstream).toFixed(12)}`;
-            console.log(`[embeddinggemma2-image] bf16 ${entry.name} ${note}`);
-            assert(report.pass, `${entry.name}: ${formatAllclose(report)}`);
-            return { status: "pass", note };
-          },
-        );
+      // Default run: the soft-row path takes every golden with its image's patch rows.
+      it(`${entry.name} (T=${entry.tokens}): the stand-in tower is run once per image, with its patch rows`, async () => {
+        const vector = await embedWithGoldens(entry);
+        assertEquals(vector.length, 768, `${entry.name}: width`);
       });
+      // Opt-in: upstream parity (the vector against upstream's within the band).
+      it.skipIf(!UPSTREAM_PARITY)(
+        `${entry.name} (T=${entry.tokens}): upstream's vector within ${SOFT_ROW_TOLERANCE.atol}${UPSTREAM_PARITY_OPT_IN}`,
+        async () => {
+          await runRecordedCase(
+            results,
+            { id: `embeddinggemma-2/bf16/image-golden-soft/${entry.name}` },
+            async ({ measurements }) => {
+              const vector = await embedWithGoldens(entry);
+              const upstream = fixtureVector(entry.name);
+              const report = compareTensors(
+                { dtype: "f32", data: vector },
+                { dtype: "f32", data: upstream },
+                SOFT_ROW_TOLERANCE,
+              );
+              measurements.push({
+                output: "embedding",
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: SOFT_ROW_TOLERANCE,
+                stage: "karume",
+              });
+              const note =
+                `T=${entry.tokens}: the text graph fed upstream's soft tokens, maxAbs` +
+                ` ${report.maxAbsError.toExponential(3)}, cosine ${cosine(vector, upstream).toFixed(12)}`;
+              console.log(`[embeddinggemma2-image] bf16 ${entry.name} ${note}`);
+              assert(report.pass, `${entry.name}: ${formatAllclose(report)}`);
+              return { status: "pass", note };
+            },
+          );
+        },
+      );
     }
   },
 );

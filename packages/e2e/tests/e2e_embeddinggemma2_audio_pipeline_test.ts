@@ -28,20 +28,26 @@
 //    soft tokens) gives a unit vector and its own row (`…/audio/full-length`).
 // 3. **A text call on the audio pipeline** is the text call of the pipeline without it: its vector
 //    has the sha256 row the text pipeline e2e pins (`embeddinggemma-2/<preset>/query-en`).
-// 4. **The text graph's soft-row path alone** (real GPU, `bf16`, `KARUME_SERIES=1` with the tower
-//    series present): the embedder over the mirror's text graph, its towers stand-ins that answer
-//    with upstream's own soft tokens (the audio series' and the vision series' goldens), against
-//    upstream's vectors within {@link SOFT_ROW_TOLERANCE} — the towers' GPU noise and the host
-//    front end's difference to upstream's frames are out of the comparison.
+// 4. **The text graph's soft-row path alone** (real GPU, `bf16`): the embedder over the mirror's
+//    text graph, its towers stand-ins that answer with upstream's own soft tokens (the goldens of
+//    the `embeddinggemma-2-audio-bf16` and `embeddinggemma-2-vision-bf16` series, from the
+//    test-asset root), takes every queued golden with the rows of its block; with
+//    `KARUME_UPSTREAM_PARITY=1` its vectors are held to upstream's within
+//    {@link SOFT_ROW_TOLERANCE} — the towers' GPU noise and the host front end's difference to
+//    upstream's frames are out of the comparison.
 // 5. **The 30 s audio within the preset's limits** (real GPU), per preset, on a device whose binding
 //    and buffer limits are capped at the preset's own need (`bf16` 256 MiB, `i8` the WebGPU default
 //    128 MiB): it embeds to the same bits as on the uncapped device (that run is taken again when
 //    the uncapped block did not run first), so the audio tower adds no limit to the preset's.
 //
 // Without the mirror every case SKIPs explicitly (the distribution gate owns that red); without a
-// GPU the GPU cases SKIP. Rows are created with `KARUME_REFERENCE=write` on the lane.
+// GPU the GPU cases SKIP. Check 4's goldens are fetched with `node tools/test-assets/fetch.ts`
+// (ADR 0139): absent from a complete fetch of the pinned dataset (`testAssetsFetched()`) they FAIL
+// its cases; absent otherwise its cases SKIP explicitly. Rows are created with
+// `KARUME_REFERENCE=write` on the lane.
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, fail } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -76,7 +82,7 @@ import {
   openMirrorComponent,
   readMirrorAsset,
 } from "../../models/tests/helpers/mirror.ts";
-import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 import {
   compareTensors,
   formatAllclose,
@@ -295,9 +301,12 @@ const FULL_LENGTH_AUDIO: embeddinggemma.MonoAudio = (() => {
 })();
 const FULL_LENGTH_TOKENS = 750;
 
-/** The f32 tower series (outside the repository): their io files hold upstream's soft tokens. */
-const AUDIO_SERIES = new URL("../../../outputs/series/embeddinggemma-2-audio/", import.meta.url);
-const VISION_SERIES = new URL("../../../outputs/series/embeddinggemma-2-vision/", import.meta.url);
+/**
+ * The goldens of the bf16 tower series (the test-asset root): their io files hold upstream's soft
+ * tokens (the f32 series' io files byte for byte).
+ */
+const AUDIO_GOLDENS = goldenDir("embeddinggemma-2-audio-bf16");
+const VISION_GOLDENS = goldenDir("embeddinggemma-2-vision-bf16");
 const goldenIo = (series: URL, name: string): URL => new URL(`io.${name}.safetensors`, series);
 
 /** Whether the file exists (anything but NotFound propagates). */
@@ -310,26 +319,40 @@ const exists = (url: URL): boolean => {
   }
 };
 
-/** Whether check 4 can run: the io file of every audio and image the fixture's inputs hold. */
+/**
+ * Whether check 4 can run: the golden io file of every audio and image the fixture's inputs hold,
+ * or a complete fetch of the pin (a golden absent from it then FAILs the case that reads it).
+ */
 const GOLDEN_SOFT_TOKENS =
-  SERIES_CHECKS &&
+  testAssetsFetched() ||
   FIXTURE.audioCases.every(
     (entry) =>
-      entry.audioBlocks.every(({ audio }) => exists(goldenIo(AUDIO_SERIES, audio))) &&
-      entry.imageBlocks.every(({ image }) => exists(goldenIo(VISION_SERIES, image))),
+      entry.audioBlocks.every(({ audio }) => exists(goldenIo(AUDIO_GOLDENS, audio))) &&
+      entry.imageBlocks.every(({ image }) => exists(goldenIo(VISION_GOLDENS, image))),
   );
-if (MIRROR && SERIES_CHECKS && !GOLDEN_SOFT_TOKENS) {
+if (MIRROR && !GOLDEN_SOFT_TOKENS) {
   console.warn(
-    `[karume] ${AUDIO_SERIES.pathname} or ${VISION_SERIES.pathname} lacks the io files of the` +
+    `[karume] ${AUDIO_GOLDENS.pathname} or ${VISION_GOLDENS.pathname} lacks the io files of the` +
       " fixture's audios and images, so the check of the text graph fed upstream's soft tokens" +
-      " SKIPs. Generate: cd tools/export-recipes && uv run --with 'transformers==5.23.0' python -m" +
-      " embeddinggemma2.export_audio (and export_vision)",
+      " SKIPs. Fetch: node tools/test-assets/fetch.ts",
   );
 }
 
 /** Upstream's soft tokens of an io file (`output.0` `[1, n, 512]`). */
 const goldenSoftTokens = async (io: URL): Promise<Float32Array<ArrayBuffer>> => {
-  const bytes = await readFile(io);
+  let bytes: Awaited<ReturnType<typeof readFile>>;
+  try {
+    bytes = await readFile(io);
+  } catch (cause) {
+    // Read only when present or due at the pin: a NotFound is a file the dataset at the pin lacks.
+    if (isNotFound(cause)) {
+      throw new Error(
+        `${io.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+      );
+    }
+    throw cause;
+  }
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );
@@ -639,7 +662,7 @@ const goldenTower = (
 });
 
 describe.skipIf(!RUNNABLE || !GOLDEN_SOFT_TOKENS)(
-  `EmbeddingGemma 2 audio input: the bf16 text graph fed upstream's soft tokens (real GPU)${SERIES_CHECKS_OPT_IN}`,
+  `EmbeddingGemma 2 audio input: the bf16 text graph fed upstream's soft tokens (real GPU)${GOLDEN_SOFT_TOKENS ? "" : " (SKIP: test assets not fetched)"}`,
   () => {
     let gpu: GpuContext;
     let embedder: Embedder;
@@ -694,46 +717,67 @@ describe.skipIf(!RUNNABLE || !GOLDEN_SOFT_TOKENS)(
       }
     });
 
+    /**
+     * Embeds a fixture input with the stand-in towers answering each block with its golden soft
+     * tokens; each stand-in checks its block's rows, and every queued golden is taken.
+     */
+    const embedWithGoldens = async (entry: FixtureCase): Promise<Float32Array<ArrayBuffer>> => {
+      // A case that failed mid-run leaves its goldens queued; they are not the next case's.
+      audioAnswers.length = 0;
+      imageAnswers.length = 0;
+      for (const { audio } of entry.audioBlocks) {
+        audioAnswers.push(await goldenSoftTokens(goldenIo(AUDIO_GOLDENS, audio)));
+      }
+      for (const { image } of entry.imageBlocks) {
+        imageAnswers.push(await goldenSoftTokens(goldenIo(VISION_GOLDENS, image)));
+      }
+      const vector = await embedder.embed(partsOf(entry), optionsOf(entry));
+      assertEquals(
+        [audioAnswers.length, imageAnswers.length],
+        [0, 0],
+        "a queued golden was not taken",
+      );
+      return vector;
+    };
+
     for (const entry of FIXTURE.audioCases) {
-      it(`${entry.name} (T=${entry.tokens}): upstream's vector within ${SOFT_ROW_TOLERANCE.atol}`, async () => {
-        await runRecordedCase(
-          results,
-          { id: `embeddinggemma-2/bf16/audio-golden-soft/${entry.name}` },
-          async ({ measurements }) => {
-            for (const { audio } of entry.audioBlocks) {
-              audioAnswers.push(await goldenSoftTokens(goldenIo(AUDIO_SERIES, audio)));
-            }
-            for (const { image } of entry.imageBlocks) {
-              imageAnswers.push(await goldenSoftTokens(goldenIo(VISION_SERIES, image)));
-            }
-            const vector = await embedder.embed(partsOf(entry), optionsOf(entry));
-            assertEquals(
-              [audioAnswers.length, imageAnswers.length],
-              [0, 0],
-              "a queued golden was not taken",
-            );
-            const upstream = fixtureVector(entry.name);
-            const report = compareTensors(
-              { dtype: "f32", data: vector },
-              { dtype: "f32", data: upstream },
-              SOFT_ROW_TOLERANCE,
-            );
-            measurements.push({
-              output: "embedding",
-              maxAbs: report.maxAbsError,
-              maxRel: report.maxRelError,
-              tolerance: SOFT_ROW_TOLERANCE,
-              stage: "karume",
-            });
-            const note =
-              `T=${entry.tokens}: the text graph fed upstream's soft tokens, maxAbs` +
-              ` ${report.maxAbsError.toExponential(3)}, cosine ${cosine(vector, upstream).toFixed(12)}`;
-            console.log(`[embeddinggemma2-audio] bf16 ${entry.name} ${note}`);
-            assert(report.pass, `${entry.name}: ${formatAllclose(report)}`);
-            return { status: "pass", note };
-          },
-        );
+      // Default run: the soft-row path takes every golden with its block's rows.
+      it(`${entry.name} (T=${entry.tokens}): the stand-in towers are run once per block, with its rows`, async () => {
+        const vector = await embedWithGoldens(entry);
+        assertEquals(vector.length, 768, `${entry.name}: width`);
       });
+      // Opt-in: upstream parity (the vector against upstream's within the band).
+      it.skipIf(!UPSTREAM_PARITY)(
+        `${entry.name} (T=${entry.tokens}): upstream's vector within ${SOFT_ROW_TOLERANCE.atol}${UPSTREAM_PARITY_OPT_IN}`,
+        async () => {
+          await runRecordedCase(
+            results,
+            { id: `embeddinggemma-2/bf16/audio-golden-soft/${entry.name}` },
+            async ({ measurements }) => {
+              const vector = await embedWithGoldens(entry);
+              const upstream = fixtureVector(entry.name);
+              const report = compareTensors(
+                { dtype: "f32", data: vector },
+                { dtype: "f32", data: upstream },
+                SOFT_ROW_TOLERANCE,
+              );
+              measurements.push({
+                output: "embedding",
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: SOFT_ROW_TOLERANCE,
+                stage: "karume",
+              });
+              const note =
+                `T=${entry.tokens}: the text graph fed upstream's soft tokens, maxAbs` +
+                ` ${report.maxAbsError.toExponential(3)}, cosine ${cosine(vector, upstream).toFixed(12)}`;
+              console.log(`[embeddinggemma2-audio] bf16 ${entry.name} ${note}`);
+              assert(report.pass, `${entry.name}: ${formatAllclose(report)}`);
+              return { status: "pass", note };
+            },
+          );
+        },
+      );
     }
   },
 );

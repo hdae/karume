@@ -94,8 +94,10 @@ Moving the window by one position (511 or 513) moves the first three outputs by 
 (2026-11-21). Declaring the band left the seven earlier io files byte-identical and the f32 series
 is 1,134,785,941 bytes in 7 parts (f32 weights; 1,113,815,088 before, with the 2,048 bound). One run
 of the f32 export takes about 3 minutes on the development machine (CPU). The real-GPU check is
-`packages/e2e/tests/e2e_embeddinggemma2_test.ts` (lane `models:embeddinggemma2`, run with
-`KARUME_SERIES=1`).
+`packages/e2e/tests/e2e_embeddinggemma2_test.ts` (lane `models:embeddinggemma2`): the `i8` series runs
+in the default lane, its container from the distribution mirror and its goldens from the test-asset
+root (the comparison with the goldens under `KARUME_UPSTREAM_PARITY=1`); the f32 series runs with
+`KARUME_SERIES=1`.
 
 Adding the soft inputs (2026-11-22) left every output of the thirty io files (ten per storage)
 byte-identical, and every container part but the first (the one holding the graph descriptor,
@@ -177,11 +179,14 @@ left against the golden is upstream's own f32 run over 2,520 padded rows against
 (`gradient-strip` fills the budget, so it has no padding row — its difference is the processor's
 raster order against the block order). The
 tower is sensitive in f32: torch's own f32 run is up to 9.8e-5 from the same graph in f64. The real-GPU
-check is `packages/e2e/tests/e2e_embeddinggemma2_vision_test.ts` (lane `models:embeddinggemma2`,
-`KARUME_SERIES=1`): both series against the goldens at about three times each image's own error
+check is `packages/e2e/tests/e2e_embeddinggemma2_vision_test.ts` (lane `models:embeddinggemma2`;
+the `bf16` and `i8` series run in the default lane, their containers from the distribution mirror and
+their goldens from the test-asset root, the comparison with the goldens under
+`KARUME_UPSTREAM_PARITY=1`; the f32 series runs with `KARUME_SERIES=1`): each series against the
+goldens at about three times each image's own error
 (measured on the RTX 3080 Ti at 6.5e-5 to 3.35e-4, atol 2e-4 to 1e-3) with a floor on every soft
-token's cosine; its comment has the table against f64. The two series are bit-identical to each
-other, with sha256 rows per series.
+token's cosine; its comment has the table against f64. The f32 and the bf16 series are bit-identical
+to each other, with sha256 rows per series.
 
 Storage: the f32 series is 671,506,936 bytes in 5 parts; the bf16 series 336,093,696 bytes in 4 parts
 (116 initializers bf16 — the 114 linears and the two learned position tables, the checkpoint's own
@@ -283,7 +288,10 @@ tokens and a partial fifth chunk): every layer gives nonzero weight to exactly t
 returned attention weights do, and in f64 the wrapper's soft tokens equal upstream's within 1e-13
 (measured 3.6e-15; a window one key off past the first chunk moves them by 2.2e-2 or more). The
 real-GPU check is `packages/e2e/tests/e2e_embeddinggemma2_audio_test.ts` (lane
-`models:embeddinggemma2`, `KARUME_SERIES=1`): both series against the goldens, each waveform at
+`models:embeddinggemma2`; the `bf16` and `i8` series run in the default lane, their containers from
+the distribution mirror and their goldens from the test-asset root, the comparison with the goldens
+under `KARUME_UPSTREAM_PARITY=1`; the f32 series runs with `KARUME_SERIES=1`): the series against
+the goldens, each waveform at
 about three times its own measured error, as an atol (4.2e-5 for `sweep` to 1.75e-3 for `noise`;
 measured on the RTX 3080 Ti at 1.41e-5 to 5.82e-4, the GPU up to 5.0e-4 from f64) and as a floor on
 every soft token's cosine (measured `1 − 3.7e-12` to `1 − 7.0e-9`) — its comment has the table —,

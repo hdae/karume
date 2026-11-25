@@ -18,9 +18,8 @@
 //
 // When the real assets exist, it also checks that the **full vocabulary** gives the same id sequences (the check
 // that closes any gap between the subset and the full one). The gemma4 asset is the distribution's tokenizer
-// (`models/karume-gemma4/`, read through the manifest — ADR 0139 decision 1); EmbeddingGemma 2 has no published
-// distribution yet, so its full-vocabulary cases read the series (`outputs/series/embeddinggemma-2-tokenizer/`)
-// as implementation-time checks (decision 6 — KARUME_SERIES=1). Skipped in an environment without them. Uses no GPU.
+// (`models/karume-gemma4/`, read through the manifest — ADR 0139 decision 1), and so is EmbeddingGemma 2's
+// (`models/karume-embeddinggemma-2/`). Skipped in an environment without them. Uses no GPU.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { describe, it, test } from "vite-plus/test";
@@ -29,7 +28,6 @@ import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
-import { readFileIfPresent } from "./helpers/read-if-present.ts";
 import { mirrorHasModel, mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 import {
   GEMMA4_12B_IN_MIRROR,
@@ -99,12 +97,6 @@ const readFixture = async (name: string): Promise<Fixture> =>
     await readTextFile(new URL(`fixtures/gemma-text/${name}-parity.json`, import.meta.url)),
   ) as Fixture;
 
-/** The series-side real asset (undefined if absent = not compiled). */
-const readSeriesAsset = async (series: string): Promise<Uint8Array<ArrayBuffer> | undefined> =>
-  await readFileIfPresent(
-    new URL(`../../../outputs/series/${series}/tokenizer.json`, import.meta.url),
-  );
-
 const GEMMA4_MIRROR = mirrorRoot("karume-gemma4");
 
 /**
@@ -173,20 +165,19 @@ const GEMMA4_26B_ASSET: RealAsset = {
 };
 
 // EmbeddingGemma 2 (`tools/export-recipes/embeddinggemma2/tokenizer.py`): Gemma 4's pre-fix
-// tokenizer.json with a `<bos>` … `<eos>` post-processor. No distribution yet, so its full-vocabulary
-// cases read the series (without KARUME_SERIES=1 the series is not read at all).
-const EMBEDDINGGEMMA_2_SERIES = "embeddinggemma-2-tokenizer";
+// tokenizer.json with a `<bos>` … `<eos>` post-processor, read from the distribution
+// (`models/karume-embeddinggemma-2/`, model `text`, through the manifest).
+const EMBEDDINGGEMMA_2_MIRROR = mirrorRoot("karume-embeddinggemma-2");
 const EMBEDDINGGEMMA_2_ASSET: RealAsset = {
-  read: async () => (SERIES_CHECKS ? await readSeriesAsset(EMBEDDINGGEMMA_2_SERIES) : undefined),
-  ...(SERIES_CHECKS
-    ? {
-        absent:
-          `[karume] outputs/series/${EMBEDDINGGEMMA_2_SERIES}/tokenizer.json is missing, so ` +
-          "the EmbeddingGemma 2 real-asset comparison is skipped. Generate it: cd tools/export-recipes && uv run " +
-          "--with 'transformers==5.23.0' python -m embeddinggemma2.tokenizer",
-      }
-    : {}),
-  suffix: SERIES_CHECKS_OPT_IN,
+  read: async () =>
+    mirrorPresent(EMBEDDINGGEMMA_2_MIRROR)
+      ? await readMirrorAsset(EMBEDDINGGEMMA_2_MIRROR, "tokenizer", { model: "text" })
+      : undefined,
+  absent:
+    `[karume] the distribution mirror ${EMBEDDINGGEMMA_2_MIRROR.pathname} is absent (or not ` +
+    "karume/6), so the EmbeddingGemma 2 full-vocabulary tokenizer cases SKIP. Assemble: cd " +
+    "tools/export-recipes && uv run python dist.py --pipeline embeddinggemma-2",
+  suffix: "",
 };
 
 /** A deterministic pseudo-random generator (makes the draw of chunk splits the same every time). */
