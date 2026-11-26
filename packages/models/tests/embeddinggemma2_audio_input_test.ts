@@ -11,8 +11,8 @@
  *    (within a bound per waveform; their bits equal to upstream's arithmetic with an f64 FFT, the
  *    digests of the recipe's `audio-front-end.json`); the padding frames and the mask; the
  *    settings and the longest audio against that fixture, and against the snapshot's
- *    `preprocessor_config.json` (when present); and, with
- *    `KARUME_SERIES=1`, the layout against the audio series' io inputs.
+ *    `preprocessor_config.json` (when present); and the layout against the bf16 audio series'
+ *    golden io inputs of the test-asset dataset.
  * ③ The sequence of an input holding an audio (`planEmbedRequest` / `tokenizeEmbedInput`): the
  *    audio block, beside text and an image, the prompt before it, the limit counting its soft
  *    tokens, the placeholder refusal around it, the ids of three fixture inputs equal to
@@ -27,6 +27,7 @@
  */
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -73,7 +74,6 @@ import {
 import type { EmbeddingGemmaVisionContract } from "../src/embeddinggemma/vision.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
-import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "./helpers/series-checks.ts";
 import {
   parseIrDeclarationValue,
   partAssets,
@@ -396,9 +396,12 @@ const OFF_SETTINGS: Readonly<Record<string, unknown>> = {
 
 const FRONT_END = new AudioFrontEnd();
 
-/** The io file of a waveform in the f32 audio series (outside the repository). */
-const seriesIo = (name: string): URL =>
-  new URL(`../../../outputs/series/embeddinggemma-2-audio/io.${name}.safetensors`, import.meta.url);
+/**
+ * The golden io file of a waveform in the bf16 audio series (the test-asset root, fetched with
+ * `node tools/test-assets/fetch.ts`; the f32 series' io files byte for byte).
+ */
+const goldenIo = (name: string): URL =>
+  new URL(`io.${name}.safetensors`, goldenDir("embeddinggemma-2-audio-bf16"));
 
 /** The pinned snapshot's feature extractor settings (outside the repository). */
 const PREPROCESSOR = new URL(
@@ -412,6 +415,27 @@ const exists = (url: URL): boolean => {
     return statSync(url).isFile;
   } catch (cause) {
     if (isNotFound(cause)) return false;
+    throw cause;
+  }
+};
+
+/** Whether the test-asset root holds a complete fetch of the pin (a missing golden then FAILs). */
+const FETCHED = testAssetsFetched();
+
+/**
+ * Reads a golden io file. It is read only when present or when the fetch is complete (ADR 0139),
+ * so its NotFound here is a file the dataset at the pin lacks — reported as such.
+ */
+const readGolden = async (url: URL): Promise<Uint8Array<ArrayBuffer>> => {
+  try {
+    return await readFile(url);
+  } catch (cause) {
+    if (isNotFound(cause)) {
+      throw new Error(
+        `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+      );
+    }
     throw cause;
   }
 };
@@ -501,11 +525,18 @@ describe("AudioFrontEnd: the fixture's waveforms as the tower reads them", () =>
       );
     });
 
-    const io = seriesIo(entry.name);
-    it.skipIf(!SERIES_CHECKS || !exists(io))(
-      `${entry.name}: the mask is the series' io input's, the frames within its bound${SERIES_CHECKS_OPT_IN}`,
+    const io = goldenIo(entry.name);
+    const available = FETCHED || exists(io);
+    if (!available) {
+      console.warn(
+        `[karume] ${io.pathname} is absent, so the check of ${entry.name}'s frame layout against` +
+          " its golden io file SKIPs. Fetch: node tools/test-assets/fetch.ts",
+      );
+    }
+    it.skipIf(!available)(
+      `${entry.name}: the mask is the golden io input's, the frames within its bound (skipped without the test assets)`,
       async () => {
-        const file = parseFile(await readFile(io));
+        const file = parseFile(await readGolden(io));
         const input = FRONT_END.towerInput(fixtureAudio(entry.name).data);
         assertEquals(
           bytesOf(f32Of(tensorBytes(file, "input.frame_mask"))),

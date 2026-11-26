@@ -8,8 +8,8 @@
  * ② The host preprocessing (`imagePatchRows`) of the fixture's five images: the resize rule's sizes
  *    (the 1190 × 17 rounding edge and the 840-patch side included), the block order of the rows,
  *    and the bytes of the pixels and of both position arrays, equal to the vision series' io inputs
- *    (their sha256 pinned here; with `KARUME_SERIES=1` and the series present, read from the io
- *    files too).
+ *    (their sha256 pinned here, and read from the bf16 series' golden io files of the test-asset
+ *    dataset too).
  * ③ The sequence of an input holding images (`planEmbedRequest` / `tokenizeEmbedInput`): the image
  *    blocks, the text runs, the prompt's prefix before an image, the limit counting the soft tokens,
  *    and every refusal — an image part without the vision tower names how to build one with it; and
@@ -25,6 +25,7 @@
  */
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -67,7 +68,6 @@ import {
 } from "../src/embeddinggemma/vision.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
-import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "./helpers/series-checks.ts";
 import {
   parseIrDeclarationValue,
   partAssets,
@@ -281,10 +281,10 @@ describe("pipelineConfig.vision", () => {
 // ---- ② the host preprocessing -----------------------------------------------------------------
 
 /**
- * The sha256 of the vision series' io inputs (`outputs/series/embeddinggemma-2-vision/io.<image>`
- * — `input.pixels` f32, `input.position_x` / `input.position_y` i32, little-endian), taken from
- * those files on 2026-11-22 (the bf16 series' io files are byte-identical). The rows the recipe
- * built from upstream's processor in the graph's block order.
+ * The sha256 of the vision series' io inputs (`io.<image>.safetensors` — `input.pixels` f32,
+ * `input.position_x` / `input.position_y` i32, little-endian), taken from the f32 series' files on
+ * 2026-11-22; the bf16 series' io files, which the test-asset dataset holds, are byte-identical.
+ * The rows the recipe built from upstream's processor in the graph's block order.
  */
 const SERIES_DIGESTS: Readonly<
   Record<string, { readonly pixels: string; readonly x: string; readonly y: string }>
@@ -319,12 +319,12 @@ const SERIES_DIGESTS: Readonly<
 
 const BUDGET = 280;
 
-/** The io file of an image in the f32 vision series (outside the repository). */
-const seriesIo = (name: string): URL =>
-  new URL(
-    `../../../outputs/series/embeddinggemma-2-vision/io.${name}.safetensors`,
-    import.meta.url,
-  );
+/**
+ * The golden io file of an image in the bf16 vision series (the test-asset root, fetched with
+ * `node tools/test-assets/fetch.ts`).
+ */
+const goldenIo = (name: string): URL =>
+  new URL(`io.${name}.safetensors`, goldenDir("embeddinggemma-2-vision-bf16"));
 
 /** Whether the file exists (anything but NotFound propagates). */
 const exists = (url: URL): boolean => {
@@ -332,6 +332,27 @@ const exists = (url: URL): boolean => {
     return statSync(url).isFile;
   } catch (cause) {
     if (isNotFound(cause)) return false;
+    throw cause;
+  }
+};
+
+/** Whether the test-asset root holds a complete fetch of the pin (a missing golden then FAILs). */
+const FETCHED = testAssetsFetched();
+
+/**
+ * Reads a golden io file. It is read only when present or when the fetch is complete (ADR 0139),
+ * so its NotFound here is a file the dataset at the pin lacks — reported as such.
+ */
+const readGolden = async (url: URL): Promise<Uint8Array<ArrayBuffer>> => {
+  try {
+    return await readFile(url);
+  } catch (cause) {
+    if (isNotFound(cause)) {
+      throw new Error(
+        `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+      );
+    }
     throw cause;
   }
 };
@@ -366,11 +387,18 @@ describe("imagePatchRows: the fixture's images as the tower reads them", () => {
       );
     });
 
-    const io = seriesIo(entry.name);
-    it.skipIf(!SERIES_CHECKS || !exists(io))(
-      `${entry.name}: the pinned digests are the series' io file's${SERIES_CHECKS_OPT_IN}`,
+    const io = goldenIo(entry.name);
+    const available = FETCHED || exists(io);
+    if (!available) {
+      console.warn(
+        `[karume] ${io.pathname} is absent, so the check of ${entry.name}'s pinned digests against` +
+          " its golden io file SKIPs. Fetch: node tools/test-assets/fetch.ts",
+      );
+    }
+    it.skipIf(!available)(
+      `${entry.name}: the pinned digests are the golden io file's (skipped without the test assets)`,
       async () => {
-        const file = parseFile(await readFile(io));
+        const file = parseFile(await readGolden(io));
         const expected = SERIES_DIGESTS[entry.name];
         assertEquals(
           {

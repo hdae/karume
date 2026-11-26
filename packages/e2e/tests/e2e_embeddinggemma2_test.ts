@@ -599,13 +599,20 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
         await settleCase(spec, caseName, { compare: false });
       },
     );
-    // Opt-in: the comparison with the torch CPU golden under the series' tolerance. It writes no
-    // results entries: the case ID belongs to the default sha case above, and writing it here
-    // would overwrite that case's settlement.
+    // Opt-in: the comparison with the torch CPU golden under the series' tolerance. Its
+    // results.json entry is `<series>/<case>/parity` (the bare ID is the default sha case's).
     test.skipIf(!UPSTREAM_PARITY || !available || !GPU_AVAILABLE)(
       `EmbeddingGemma 2 golden parity: ${spec.name} ${caseName} (real GPU / torch CPU expectations)${UPSTREAM_PARITY_OPT_IN}`,
       async () => {
-        compareWithGolden(spec, await runGoldenCase(spec, caseName, { repeat: false }));
+        await runRecordedCase(
+          results,
+          { id: `${spec.name}/${caseName}/parity` },
+          async ({ measurements }) => {
+            const run = await runGoldenCase(spec, caseName, { repeat: false });
+            compareWithGolden(spec, run, measurements);
+            return { status: "pass", note: run.timing };
+          },
+        );
       },
     );
   }

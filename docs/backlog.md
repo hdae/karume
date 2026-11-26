@@ -20,11 +20,10 @@ after this release are the first group of `later`.
   - Done 2026-11-25: the shipped series of EmbeddingGemma 2 (text `i8`, vision and audio `bf16` / `i8`, the
     pipeline tests and the tokenizer's full-vocabulary cases) run in the default lane from the mirror and the
     test-asset dataset, with no sha256 row written or changed; the f32 series stay under `KARUME_SERIES=1`. The
-    workbench's `embeddinggemma-preset-ab` has the `source` parameter (default `cached`).
-  - Still reading `outputs/series/embeddinggemma-2-{vision,audio}/io.*` behind `KARUME_SERIES=1`:
-    `packages/models/tests/embeddinggemma2_image_input_test.ts` and `embeddinggemma2_audio_input_test.ts` (a digest
-    check and a frame-layout check). The `bf16` goldens of the dataset hold the same bytes.
-  - The parity cases of the three series e2e print their measured errors and write no results entry.
+    workbench's `embeddinggemma-preset-ab` has the `source` parameter (default `cached`). Done 2026-11-26: the
+    host tests' digest and frame-layout checks (`embeddinggemma2_image_input_test.ts`,
+    `embeddinggemma2_audio_input_test.ts`) read the `bf16` goldens of the dataset in the default lane, and the
+    parity cases of the three series e2e record their measurements in `results.json` (`<series>/<case>/parity`).
   - Not run in a browser: `anima-step-timing` and `embeddinggemma-preset-ab` with their cached default, and the
     Playground's EmbeddingGemma page over the cached route.
   - Model cards, `NOTICE.md` and the licence ledgers were profiled across the recipe families on 2026-11-25 (the

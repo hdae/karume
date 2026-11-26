@@ -518,14 +518,15 @@ const runGoldenCase = async (
 
 /**
  * The comparison with upstream's soft tokens: the allclose of the whole output and the floor of the
- * token cosine (measurements recorded when given).
+ * token cosine (measurements recorded when given). Returns the line the parity case keeps as its
+ * note (the token cosine has no field of a measurement).
  */
 const compareWithGolden = (
   spec: SeriesSpec,
   caseName: string,
   run: GoldenRun,
   measurements?: Measurement[],
-): void => {
+): string => {
   const check = spec.checks[caseName];
   const { name, where, output, golden } = run;
   const report = compareTensors(output, golden, check.tolerance);
@@ -538,15 +539,16 @@ const compareWithGolden = (
   });
   assert(output.dtype === "f32" && golden.dtype === "f32", `${where}: not f32`);
   const tokenCosine = minTokenCosine(output.data, golden.data, 512);
-  console.log(
-    `[embeddinggemma2-audio] ${spec.name} ${caseName} maxAbs ${report.maxAbsError.toExponential(3)},` +
-      ` min token cosine 1 - ${(1 - tokenCosine).toExponential(3)}`,
-  );
+  const measured =
+    `maxAbs ${report.maxAbsError.toExponential(3)},` +
+    ` min token cosine 1 - ${(1 - tokenCosine).toExponential(3)}`;
+  console.log(`[embeddinggemma2-audio] ${spec.name} ${caseName} ${measured}`);
   assert(report.pass, `${where}: ${formatAllclose(report)}`);
   assert(
     tokenCosine >= check.minTokenCosine,
     `${where}: a soft token's cosine to the golden's is ${tokenCosine}, under ${check.minTokenCosine}`,
   );
+  return measured;
 };
 
 /**
@@ -669,12 +671,20 @@ const registerSeries = (spec: SeriesSpec): readonly string[] => {
         await settleCase(spec, caseName, { compare: false });
       },
     );
-    // Opt-in: the comparison with upstream's soft tokens under the waveform's checks. It writes no
-    // results entries: the case ID belongs to the default sha case above.
+    // Opt-in: the comparison with upstream's soft tokens under the waveform's checks. Its
+    // results.json entry is `<series>/<waveform>/parity` (the bare ID is the default sha case's).
     test.skipIf(!UPSTREAM_PARITY || !available || !GPU_AVAILABLE)(
       `EmbeddingGemma 2 audio golden parity: ${spec.name} ${caseName} (real GPU / upstream's soft tokens in torch CPU)${UPSTREAM_PARITY_OPT_IN}`,
       async () => {
-        compareWithGolden(spec, caseName, await runGoldenCase(spec, caseName, { warmRuns: 0 }));
+        await runRecordedCase(
+          results,
+          { id: `${spec.name}/${caseName}/parity` },
+          async ({ measurements }) => {
+            const run = await runGoldenCase(spec, caseName, { warmRuns: 0 });
+            const measured = compareWithGolden(spec, caseName, run, measurements);
+            return { status: "pass", note: `${measured}; ${run.timing}` };
+          },
+        );
       },
     );
   }
