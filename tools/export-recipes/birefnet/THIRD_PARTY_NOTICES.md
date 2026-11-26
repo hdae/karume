@@ -119,7 +119,8 @@ GitHub implementation repository whose `LICENSE` states the line (checked 2026-1
 `Copyright (c) 2024 ZhengPeng` (<https://github.com/ZhengPeng7/BiRefNet>) and
 `Copyright (c) 2026 egeorcun` (<https://github.com/egeorcun/lucida>). `BIREFNET_COPYRIGHTS` in
 `distribution.py` writes exactly those lines (lucida's `LICENSE.md` carries both, as its card says
-"the original copyright notice is preserved"), each followed by the Swin Transformer line.
+"the original copyright notice is preserved"); each repository's list then ends with the Swin
+Transformer line, once, after its BiRefNet lines.
 
 ### The Swin Transformer notice in the distributions
 

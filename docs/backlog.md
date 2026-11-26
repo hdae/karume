@@ -13,24 +13,20 @@
 the `embeddinggemma` family) and `karume-anima-2.9b` — published and pinned, the other pins unchanged, and the
 published-smoke green on Node and on Deno (19 manifests and the sbv2 `fromPretrained`). What it shipped is the
 CHANGELOG's `[0.24.0]`. The two uploads' fragmentation tables read no FAILED row, and every part of 64 MiB or more
-is above 10 MiB per term (the lowest reads 33.1). The order of what comes next is the maintainer's; the items put
-after this release are the first group of `later`.
+is above 10 MiB per term (the lowest reads 33.1). The order of what comes next is the maintainer's; the item put
+after this release is the `later` item "The model cards and notices across repositories".
 
 - **What the first publication of EmbeddingGemma 2 left open** (filed 2026-11-25):
   - Not run in a browser: `anima-step-timing` and `embeddinggemma-preset-ab` with their cached default, and the
     Playground's EmbeddingGemma page over the cached route.
   - Licence ledgers, model cards and notices (profiled on 2026-11-25 — `outputs/misc/card-notice-review-2026-11-25/`;
-    the ledgers checked on 2026-11-26 — `outputs/misc/ledger-check-2026-11-26/`; both untracked). Every row marked
-    Unverified in the ledger of a published repository was settled on 2026-11-26 against the repository or the
-    upstream's public page, and the ledgers' headers (still the pre-release skeleton, "complete every row before
-    anything is published") are being brought up to date. The Gemma 4 rows wait for the maintainer's confirmation
-    of how the sign-off is recorded. The deberta ledger's attribution row (whether `deberta/patch.py` restates
-    transformers code) takes an in-place notice in the recipe, which uploads nothing. Stale ledger lines the
-    profile found: moss "not yet uploaded", gemma4_qat's old repository name and its non-endorsement decision, the
-    deberta ledger against the sbv2 one. Waiting for the maintainer's OK, because each is a new upload of that
-    repository: the cards and notices that disagree (Irodori's wording of what a repository stores, sbv2's 22-layer
-    truncation missing from its card, the regular Gemma 4 card's "Changes made here" leaving out the drafter's
-    int8) and the Swin Transformer notice for the two BiRefNet repositories. The wording that differs between
+    the ledgers checked on 2026-11-26 — `outputs/misc/ledger-check-2026-11-26/`; both untracked). The ledgers were
+    brought up to date by the commits of 2026-11-26 (the Gemma 4 rows, the stale moss, gemma4_qat and deberta-against-sbv2
+    lines, the in-place notice of `deberta/patch.py` and the Swin Transformer notice in the BiRefNet generator among
+    them). Left: the uploads, which the maintainer approved on 2026-11-26 and which are not done at the time of
+    writing — the two BiRefNet repositories with the Swin Transformer notice, and the repositories whose card and
+    notice disagree (Irodori's wording of what a repository stores, sbv2's 22-layer truncation missing from its card,
+    the regular Gemma 4 card's "Changes made here" leaving out the drafter's int8). The wording that differs between
     families is in the `later` item "The model cards and notices across repositories".
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
@@ -67,11 +63,11 @@ maintainer's ruling of 2026-11-06).
   - Put after the release by the maintainer's rulings of 2026-11-19: the bf16 shapes
     that could take a parallel row of the default profile — in item 6 of "The move to maintained specs (ADR 0152)" below.
   - Here without a ruling on their timing: the two items below.
-  - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
-    workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
-    (`GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`); it needs a drafter arm in that entry. The
-    maintainer's Playground chats with the drafter on the RTX 5070 Ti (2026-11-19) gave sound replies; they are not an
-    A/B.
+  - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): the workbench's `gemma4-bench`
+    entry has a drafter arm (built 2026-11-26), and the numbers of its first record (one run, RTX 3080 Ti) are in
+    perf-ledger K-110. Left: the Playground's gemma4-bench page still fixes `speculative` off, and whether E2B's
+    sentence on speed ("without the drafter" — `GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`)
+    changes is the maintainer's decision.
   - **Small checks found while preparing 0.23.0 (filed 2026-11-19; none approved yet)**:
     - The Wan recipe has no build from published containers pinned by digest, which Anima's and Irodori's have: a
       rebuild needs the series, or series folders laid out from a mirror by hand (0.23.0 did the latter). Filed
@@ -420,10 +416,23 @@ maintainer's ruling of 2026-11-06).
   M2 (the RTX under Dawn, D3D12), the decision to declare them in a preset (ADR 0147 decision 3 (2)), K-48 step 1, K-98, and QAT
   E4B's parallel-GEMV rows, which are unmeasured copies (K-59). The filed comparison with regular E2B's int4 presets
   ended when they were removed on 2026-11-04 (ADR 0128), so the baseline has to be chosen again.
-- **Regular E4B's MTP drafter (maintainer 2026-11-01)**: `karume-gemma4`'s E4B ships no drafter:
-  `google/gemma-4-E4B-it-assistant` is not exported, and `gemma4.export_drafter` accepts E2B only (the q4_0 QAT line's
-  E4B has its QAT drafter from 0.16.0). Scoping memo `.claude/reviews/2026-11-02_gemma4-expansion/e4b-drafter.md`
-  (local, untracked).
+- **Regular E4B's MTP drafter (maintainer 2026-11-01)**: built on 2026-11-26 as the series
+  `outputs/series/gemma4-e4b-drafter` (`google/gemma-4-E4B-it-assistant` at the pin of
+  `gemma4.sources.REGULAR_DRAFTER_PINS`; its parity, two sha256 rows and
+  `packages/e2e/tests/e2e_gemma4_e4b_drafter_test.ts`). Left:
+  - the upload of `karume-gemma4` with `e4b/drafter/` (approved by the maintainer on 2026-11-26), and at the next
+    release its pin in `gemma.SOURCES`;
+  - the drafter goldens into the test-asset dataset, and the e2e rooted at the mirror: extend
+    `e2e_gemma4_drafter_test.ts` to E4B, and flip `HAS_DRAFTER` in `e2e_gemma4_bf16_mirror_test.ts` when the mirror
+    gains the drafter;
+  - a fusion hit-count row for the E4B drafter, and the stale expectation of the series case in
+    `e2e_gemma4_fusion_counts_test.ts` (`rmsNormAdd`; it fails under `KARUME_SERIES=1`);
+  - an addendum to ADR [0096](decisions/0096-speculative-decoding.md), and the census rows;
+  - `docs/limitations.md` and the comment of `tools/export-recipes/gemma4/distribution.py` still describe the E2B
+    drafter only;
+  - the GEMV sweep's case table (`packages/runtime/src/tune/gemv-cases.ts`) lacks the E4B drafter's i8 `256 × 5120`
+    shape;
+  - whether E4B's sentence on speed gains "without the drafter" (the maintainer's wording).
 - **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
   heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real
   vision tower and causal attention, and need the product graph's input for image vectors but not the marking of which
@@ -852,10 +861,10 @@ maintainer's ruling of 2026-11-06).
 - Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook).
   The rows of the per-family ledgers (`tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`) that the interview of
   2026-09-25 and later publications left Unrecorded or Unverified — among them the revisions of modernbert-ja-310m and
-  Semantic-DACVAE-Japanese (parent), the Civitai permission fields of anima-wai-v1.0, depth_anything's weights licence
-  and the code licence of the deberta ledger's code-dependency block — were settled on 2026-11-26 against the
-  repository or the upstream's public page; what follows from that check (the deberta attribution row among it) is
-  the licence-ledger entry of `now`.
+  Semantic-DACVAE-Japanese (parent), the Civitai permission fields of anima-wai-v1.0, depth_anything's weights licence,
+  the code licence of the deberta ledger's code-dependency block and the Gemma 4 rows — were settled on 2026-11-26
+  against the repository, the local snapshot or the upstream's public page; the uploads that follow from that check
+  are the licence-ledger entry of `now`.
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
   ([container-v1](container-v1.md) §2.3). The recipes of anima and irodori (main and dacvae), and
   gemma4's `export.py`, still declare a `PROVENANCE` without it, so they **start filling it at their next re-export**

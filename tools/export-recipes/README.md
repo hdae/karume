@@ -139,9 +139,11 @@ uv run python -m migrate_series                          # every series a distri
 
 Every family directory carries a `THIRD_PARTY_NOTICES.md` recording what that recipe is known to
 derive from, next to the code it describes rather than in one repository-wide file (provenance is
-per family — ADR 0065 decision 2). They are skeletons for the pre-release provenance review (ADR
-0065 stage 6) and are **not** license determinations: the upstream-revision license interview is a
-release gate, and this reorganization only creates its precondition.
+per family — ADR 0065 decision 2). Each is the provenance record of its recipe directory and of the
+distributions it builds — for each upstream, where it comes from, the revision used, its license and
+what was checked — and is **not** a license determination. A record is updated at each publication of
+a distribution built from that recipe, by the license check of `docs/release-runbook.md` §1 (ADR 0065
+stage 6), and moving a pin needs the check again.
 
 ## Families
 
