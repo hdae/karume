@@ -56,6 +56,15 @@ SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
 SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
 
+#: The number of encoder layers left in the distributed text_encoder. It is the layer count that
+#: makes `hidden_states[-3]`, which SBV2 uses (`[0]` = embedding output, `[i+1]` = output of layer
+#: i, so the 22nd from the start = the output of layer 21), **the graph's final output**; the
+#: reference implementation's index is resolved into this one number. It lives here because the
+#: card states the truncation as a change (CC BY-SA 4.0 asks for the changes to be indicated); the
+#: assembly (`sbv2.distribution`) checks the series against the same number and its `NOTICE.md`
+#: states it too.
+SBV2_TEXT_ENCODER_LAYERS = 22
+
 #: Demo sentence of the usage snippet (an input of the Japanese TTS, so it stays Japanese — the
 #: language rule of CLAUDE.md).
 SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
@@ -176,12 +185,15 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         "  to the models. Redistribution here keeps it: credit the authors, name the source and",
         "  the license URL, state that the weights were **converted to another format and"
         " quantized**",
-        "  to `i8` (`i4` for the group-quantized weights),",
+        "  (the next bullet lists every change),",
         "  license any derivative work under CC BY-SA 4.0 as well, and impose no further",
         "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
         "  and modification are both allowed.",
-        "- **Changes made here**: conversion into the Karume container format and **quantization**",
-        "  of the weights — the voices in `f16` / `i8` / mixed, the text encoder in `i8` / mixed,",
+        "- **Changes made here**: conversion into the Karume container format, **truncation of the",
+        f"  text encoder to its first {SBV2_TEXT_ENCODER_LAYERS} encoder layers** (it now ends at"
+        " the hidden state",
+        "  Style-Bert-VITS2 reads; the layers after it were dropped) and **quantization** of the",
+        "  weights — the voices in `f16` / `i8` / mixed, the text encoder in `i8` / mixed,",
         "  where the mixed form stores the group-quantizable weights as `i4` and everything else",
         "  as `i8` (the quant table below says which storage each quant selects). No retraining,",
         "  no fine-tuning — the voices are the source checkpoints in a different storage form.",

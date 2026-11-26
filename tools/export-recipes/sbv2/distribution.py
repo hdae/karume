@@ -70,6 +70,7 @@ from sbv2.card import (
     SBV2_JVNV_CORPUS_PAPER_URL,
     SBV2_JVNV_LICENSE_URL,
     SBV2_JVNV_PROFILE,
+    SBV2_TEXT_ENCODER_LAYERS,
     SBV2_TEXT_ENCODER_MODEL,
     render_sbv2_model_card,
 )
@@ -113,12 +114,6 @@ SBV2_PIPELINE = "sbv2/1"
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_I4_SERIES = "deberta-i4"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
-
-#: The number of encoder layers left in the distributed text_encoder. It is the layer count that
-#: makes `hidden_states[-3]`, which SBV2 uses (`[0]` = embedding output, `[i+1]` = output of layer
-#: i, so the 22nd from the start = the output of layer 21), **the graph's final output**; the
-#: reference implementation's index is resolved into this one number.
-SBV2_TEXT_ENCODER_LAYERS = 22
 
 #: The number of graph outputs of the distributed text_encoder. SBV2 reads only one, and the
 #: runtime reads back **all** of `graph.outputs`, so shipping it with every layer as an output

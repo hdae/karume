@@ -1634,15 +1634,33 @@ class TestIrodoriLegalText:
         for role in IRODORI_CODEC_DIRS:
             assert f"`{role}`" in notice, role
 
-    def test_the_notice_holds_for_either_version_repository(self) -> None:
+    def test_the_notice_holds_for_every_repository_of_the_line(self) -> None:
         """MUST: the body's upstream repository is not named — one set of `root_files` goes into
-        both the v4 and v4.1 repositories, so naming a version would make one repository's notice
-        disagree with its contents.
+        the v4-small, v4.1-small and v4.1-small-mf repositories, so naming a version would make one
+        repository's notice disagree with its contents.
         """
         for upstream in IRODORI_UPSTREAMS.values():
             assert upstream.repo not in IRODORI_NOTICE_MARKDOWN
             assert upstream.display not in IRODORI_NOTICE_MARKDOWN
         assert "the Irodori-TTS checkpoint listed in `README.md`" in IRODORI_NOTICE_MARKDOWN
+
+    def test_the_notice_does_not_claim_to_store_what_a_repository_references(self) -> None:
+        """MUST: v4.1-small and v4.1-small-mf reference the text backbone and the codec in
+        v4-small's repository, and the same notice goes into all three — so it says that a
+        component is stored here or fetched from the repository `karume.json` references, and
+        leaves which to the card."""
+        referencing = [
+            model
+            for model in (IRODORI_V4_MODEL, IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL)
+            if irodori_references(model)
+        ]
+        assert referencing == [IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL]
+
+        assert "This repository redistributes" not in IRODORI_NOTICE_MARKDOWN
+        assert "fetched from that repository and not stored here" in IRODORI_NOTICE_MARKDOWN
+        assert "`README.md` says where the text backbone and the codec are stored" in (
+            IRODORI_NOTICE_MARKDOWN
+        )
 
 
 class TestIrodoriCli:
@@ -2684,10 +2702,23 @@ class TestIrodoriLargeLegalText:
         for component in irodori_weights(IRODORI_V4_LARGE_MODEL):
             assert f"`{component}`" in notice, component
         assert "every graph is stored as `f16` and `i8`" in notice
-        assert "No `f32`\n  series is distributed." in notice
+        assert "No `f32` series is\n  distributed." in notice
         assert IRODORI_LARGE_TEXT_ENCODER_MODEL in notice
         assert f"https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}" in notice
         assert "licensed under the Apache License, Version 2.0" in notice
+
+    def test_the_notice_says_the_codec_is_referenced_where_the_manifest_does(self) -> None:
+        """The card says this repository does not store the codec (it reads the manifest), so the
+        notice says the same, naming the repository the references point at."""
+        (reference,) = irodori_references(IRODORI_V4_LARGE_MODEL)
+        notice = IRODORI_LARGE_NOTICE_MARKDOWN
+
+        assert reference.repo == "hdae/karume-irodori-v4-small"
+        assert (
+            "This repository does not store them: `karume.json` references the\n"
+            f"containers `{reference.repo}` stores, and they are fetched from there."
+        ) in notice
+        assert f"(the codec's two in\n  `{reference.repo}`, as above)" in notice
 
     def test_the_notice_lists_the_same_codec_changes_as_the_mit_lines(self) -> None:
         """The codec containers are v4-small's own, so both notices list one set of changes."""

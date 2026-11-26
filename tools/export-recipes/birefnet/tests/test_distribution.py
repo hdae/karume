@@ -925,6 +925,7 @@ class TestBirefnetLegalText:
         _, notice = self._legal(tmp_path, checkpoint)
         assert "Swin Transformer\n(`microsoft/Swin-Transformer`)" in notice
         assert "its copyright notice is kept in `LICENSE.md`" in notice
+        assert "licensed under the MIT License as well;\n" in notice
 
 
 class TestBirefnetWeightDtypes:

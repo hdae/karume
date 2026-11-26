@@ -308,9 +308,53 @@ def _irodori_weights_line(upstream: IrodoriUpstream) -> list[str]:
     return [*lines, "  (as of retrieval). The training / inference implementation it comes with"]
 
 
-def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
+def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
+    """Where the text backbone lives (the end of its attribution bullet): stored here, or
+    referenced in the repository that stores it — read from the manifest."""
+    holder = _component_holder(model, ("backbone",))
+    if holder is None:
+        return [
+            "  licensed **MIT** (as of retrieval). It is redistributed here in the container"
+            " format as",
+            "  the `backbone` component, so that license travels with this repository too.",
+        ]
+    return [
+        "  licensed **MIT** (as of retrieval). This repository does not store it: the manifest",
+        f"  references the containers `{holder}` ships as the `backbone` component,",
+        "  and they are fetched from there. That license applies to the backbone this distribution",
+        "  runs.",
+    ]
+
+
+def _irodori_codec_lines(model: Mapping[str, Any]) -> list[str]:
+    """Where the codec lives (the middle of its attribution bullet, up to the link to its original
+    weights): stored here, or referenced in the repository that stores it — read from the
+    manifest."""
+    holder = _component_holder(model, IRODORI_CODEC_COMPONENTS)
+    origin = (
+        f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),"
+    )
+    if holder is None:
+        return [
+            "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed"
+            " here",
+            "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
+            f"  text-to-audio runs from this repository alone. Its weights derive from{origin}",
+        ]
+    return [
+        "  (as of retrieval). Upstream ships it as a separate repository. This repository does not",
+        f"  store it: the manifest references the containers `{holder}` ships as the",
+        "  `codec_decoder` / `codec_encoder` components, and they are fetched from there so that",
+        f"  text-to-audio runs from this distribution. Its weights derive from{origin}",
+    ]
+
+
+def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream) -> list[str]:
     """The attribution section. It claims conversion + quantization (producing the int8 series)
-    — no retraining or fine-tuning."""
+    — no retraining or fine-tuning. Where the text backbone and the codec live is read from the
+    manifest: a component this repository stores is redistributed here, one it references is
+    fetched from the repository named."""
+    model = default_model(manifest)
     return [
         "## Base weights and attribution",
         "",
@@ -322,14 +366,10 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
         "  reads these weights from its own container format.",
         f"- **Text backbone**: fine-tuned from"
         f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
-        "  licensed **MIT** (as of retrieval). It is redistributed here in the container format as",
-        "  the `backbone` component, so that license travels with this repository too.",
+        *_irodori_backbone_lines(model),
         f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
         " licensed **MIT**",
-        "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed here",
-        "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
-        "  text-to-audio runs from this repository alone. Its weights derive from"
-        f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
+        *_irodori_codec_lines(model),
         f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
         "  the Apache License 2.0 text is included in `LICENSE.md` for the codec components.",
         "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
@@ -517,7 +557,7 @@ def render_irodori_model_card(
             introduction(f"{upstream.display} — Karume", hf_upstreams(metadata.base_model)),
             _irodori_overview(manifest, upstream),
             [""],
-            _irodori_base_weights(upstream),
+            _irodori_base_weights(manifest, upstream),
             [""],
             models(manifest),
             [""],
@@ -579,31 +619,33 @@ def irodori_storage_series(model: Mapping[str, Any]) -> tuple[list[str], list[st
     return common, dit
 
 
-def _codec_holders(model: Mapping[str, Any]) -> set[str | None]:
-    """The repositories the codec components' parts live in (`None` = this repository) — read from
-    the manifest's part references (ADR 0038 §7)."""
-    return {
+def _component_holder(model: Mapping[str, Any], components: tuple[str, ...]) -> str | None:
+    """The repository the parts of `components` live in (`None` = this repository) — read from the
+    manifest's part references (ADR 0038 §7). Components split across places fail: the card
+    states one place for them."""
+    holders = {
         part.get("repo")
-        for role in IRODORI_CODEC_COMPONENTS
+        for role in components
         for entry in model["weights"][role].values()
         for part in entry["container"]["parts"]
     }
+    if len(holders) != 1:
+        raise ValueError(
+            f"the components {list(components)} are split across {sorted(map(str, holders))}"
+            " — a component lives in one place"
+        )
+    (holder,) = holders
+    return holder
 
 
 def _irodori_large_codec_line(model: Mapping[str, Any]) -> str:
     """Where the codec components live: referenced in another repository, or stored here."""
-    holders = _codec_holders(model)
-    if holders == {None}:
+    holder = _component_holder(model, IRODORI_CODEC_COMPONENTS)
+    if holder is None:
         return "  (as of retrieval). It is redistributed here in the container format as the"
-    if len(holders) == 1 and None not in holders:
-        (holder,) = holders
-        return (
-            f"  (as of retrieval). This repository does not store it: the manifest references the"
-            f" containers `{holder}` ships as"
-        )
-    raise ValueError(
-        f"the codec components are split across {sorted(map(str, holders))} — a component lives"
-        " in one place"
+    return (
+        f"  (as of retrieval). This repository does not store it: the manifest references the"
+        f" containers `{holder}` ships as"
     )
 
 

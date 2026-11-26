@@ -764,8 +764,8 @@ BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under
 the MIT License (see `LICENSE.md`). The model's backbone is Swin Transformer
-(`{swin}`), which is licensed under the MIT License as
-well; its copyright notice is kept in `LICENSE.md`.
+(`{swin}`), which is licensed under the MIT License as well;
+its copyright notice is kept in `LICENSE.md`.
 
 The following changes were made:
 

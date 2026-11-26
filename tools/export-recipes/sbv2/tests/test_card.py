@@ -651,6 +651,24 @@ class TestSbv2CardProfiles:
         ):
             assert required in card, required
 
+    def test_the_jvnv_changes_state_the_text_encoder_truncation(self) -> None:
+        """CC BY-SA 4.0 asks for the changes to be indicated: the card lists the truncation of the
+        text encoder that `NOTICE.md` lists, with the layer count the assembly checks."""
+        from sbv2.distribution import SBV2_JVNV_NOTICE_MARKDOWN, SBV2_TEXT_ENCODER_LAYERS
+
+        card = _profile_card(SBV2_JVNV_PROFILE)
+        truncation = f"text encoder to its first {SBV2_TEXT_ENCODER_LAYERS} encoder layers**"
+        assert f"**truncation of the\n  {truncation}" in card
+        assert f"first {SBV2_TEXT_ENCODER_LAYERS} encoder layers" in SBV2_JVNV_NOTICE_MARKDOWN
+
+    def test_the_jvnv_terms_do_not_narrow_the_storage_to_int8(self) -> None:
+        """The voices are also stored as `f16`, so the terms point at the list of changes instead
+        of naming `i8` / `i4` alone."""
+        card = _profile_card(SBV2_JVNV_PROFILE)
+        assert "to `i8` (`i4` for the group-quantized weights)" not in card
+        assert "**converted to another format and quantized**\n  (the next bullet lists" in card
+        assert "the voices in `f16` / `i8` / mixed" in card
+
     def test_the_jvnv_attribution_cites_the_corpus_and_the_training_implementation(
         self,
     ) -> None:

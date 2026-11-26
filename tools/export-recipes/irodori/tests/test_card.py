@@ -55,9 +55,15 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 MODEL = "v4.1-small"
 
 
-def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
+def _held(ref: dict[str, Any], holder: str | None) -> dict[str, Any]:
+    """`ref` as stored here (`holder` `None`) or referenced in the repository `holder`."""
+    return ref if holder is None else ref | {"repo": holder, "revision": "0" * 40}
+
+
+def _irodori_manifest(model: str = MODEL, holder: str | None = None) -> dict[str, Any]:
     """Minimal Irodori manifest (every value but the model name is fake and differs from the
-    real ones)."""
+    real ones). The text backbone and the codec are stored here, or referenced in the repository
+    `holder` (as v4.1-small and v4.1-small-mf reference v4-small's)."""
     return {
         "format": "karume/6",
         "generator": "karume/9.9.9",
@@ -67,15 +73,32 @@ def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
                 "pipeline": IRODORI_SUPPORTED_PIPELINE,
                 "weights": {
                     "backbone": {
-                        "f16": _container(_ref("ZA/backbone/model.f16-00001-of-00003.krm", 11, "a"))
+                        "f16": _container(
+                            _held(_ref("ZA/backbone/model.f16-00001-of-00003.krm", 11, "a"), holder)
+                        )
                     },
                     "dit": {
                         "f16": _container(_ref("ZA/dit/model.f16-00001-of-00003.krm", 13, "b"))
                     },
+                    **{
+                        name: {
+                            "f16": _container(
+                                _held(
+                                    _ref(f"ZA/{name}/model.f16-00001-of-00003.krm", 7, "c"), holder
+                                )
+                            )
+                        }
+                        for name in ("codec_decoder", "codec_encoder")
+                    },
                 },
                 "assets": {},
                 "quants": {
-                    "f16": {"weights": {"backbone": "f16", "dit": "f16"}, "session": {}},
+                    "f16": {
+                        "weights": dict.fromkeys(
+                            ("backbone", "dit", "codec_decoder", "codec_encoder"), "f16"
+                        ),
+                        "session": {},
+                    },
                 },
                 "defaultQuant": "f16",
                 "pipelineConfig": {
@@ -169,6 +192,58 @@ class TestIrodoriHouseSentence:
             " sbintuitions/modernbert-ja-310m and Aratako/Semantic-DACVAE-Japanese-32dim for"
             " Karume. It is not affiliated with or endorsed by Aratako and SB Intuitions."
         )
+
+
+class TestIrodoriStorageAttribution:
+    """Where the text backbone and the codec live is read from the manifest: a repository that
+    stores them says it redistributes them, one that references them names the repository they
+    are fetched from — and the attribution of both stays either way."""
+
+    HOLDER = "hdae/karume-irodori-v4-small"
+
+    def test_a_repository_that_stores_them_redistributes_them(self) -> None:
+        card = render_irodori_model_card(_irodori_manifest("v4-small"), REPO)
+
+        assert "It is redistributed here in the container format as\n  the `backbone`" in card
+        assert "it is redistributed here\n  in the container format as the `codec_decoder`" in card
+        assert "text-to-audio runs from this repository alone" in card
+        assert "does not store it" not in card
+
+    def test_a_repository_that_references_them_names_where_they_are_fetched_from(self) -> None:
+        card = render_irodori_model_card(_irodori_manifest(holder=self.HOLDER), REPO)
+
+        assert "redistributed here" not in card
+        assert "this repository alone" not in card
+        assert (
+            "This repository does not store it: the manifest\n"
+            f"  references the containers `{self.HOLDER}` ships as the `backbone` component,\n"
+            "  and they are fetched from there."
+        ) in card
+        assert (
+            "This repository does not\n"
+            f"  store it: the manifest references the containers `{self.HOLDER}` ships as the\n"
+            "  `codec_decoder` / `codec_encoder` components, and they are fetched from there"
+        ) in card
+
+    @pytest.mark.parametrize("holder", [None, HOLDER])
+    def test_the_attribution_of_both_upstreams_stays(self, holder: str | None) -> None:
+        card = render_irodori_model_card(_irodori_manifest(holder=holder), REPO)
+
+        assert "fine-tuned from [sbintuitions/modernbert-ja-310m]" in card
+        assert "- **Codec**: [Aratako/Semantic-DACVAE-Japanese-32dim]" in card
+        assert (
+            "Its weights derive from"
+            " [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked),\n"
+            "  licensed **Apache-2.0**"
+        ) in card
+
+    def test_a_component_split_across_repositories_fails(self) -> None:
+        manifest = _irodori_manifest()
+        parts = manifest["models"][MODEL]["weights"]["codec_encoder"]["f16"]["container"]["parts"]
+        parts[0] |= {"repo": self.HOLDER, "revision": "0" * 40}
+
+        with pytest.raises(ValueError, match="a component lives in one place"):
+            render_irodori_model_card(manifest, REPO)
 
 
 def _meanflow_manifest() -> dict[str, Any]:
