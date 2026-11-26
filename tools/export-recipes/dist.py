@@ -91,7 +91,7 @@ import re
 import sys
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -180,6 +180,14 @@ OUTPUT_CHECKS: Mapping[str, Callable[[Path, Sequence[str]], None]] = {
         anima_distribution.assert_output_keeps_mirrors,
         allowed=anima_distribution.ANIMA_2_9B_MODELS,
     ),
+}
+
+#: Pipeline name → the recipe's root files of a build of `models`, for the pipelines whose legal
+#: texts depend on the models built: `Pipeline.root_files` is one fixed set and the core does not
+#: pass it the models, so {@link main} replaces it with this result once the models are resolved
+#: (a build of E2B alone must not carry a NOTICE that names the E4B drafter).
+ROOT_FILES: Mapping[str, Callable[[Sequence[str]], Mapping[str, str]]] = {
+    "gemma4": gemma4_distribution.gemma4_root_files,
 }
 
 #: Keeps the UX of the old `karume dist` (no arguments) on the driver side.
@@ -561,6 +569,12 @@ def main(argv: Sequence[str] | None = None, *, get: HfGet = hf_get) -> None:
     # staging) and before the plans read several GB of series.
     pipeline = pipelines[args.pipeline]
     models = selected_models(pipeline, args.models)
+    root_files = ROOT_FILES.get(args.pipeline)
+    if root_files is not None:
+        # The core reads the models from the same arguments (`selected_models`), so the root files
+        # it writes are the ones of the models it builds.
+        pipeline = replace(pipeline, root_files=root_files(models))
+        pipelines = {**pipelines, args.pipeline: pipeline}
     check_output = OUTPUT_CHECKS.get(args.pipeline)
     # The output as the core resolves it (`karume.dist.main`); with `--repo` and no `--out` the
     # core refuses the build itself.

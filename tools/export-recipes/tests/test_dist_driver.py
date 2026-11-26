@@ -36,6 +36,7 @@ from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from embeddinggemma2.distribution import PIPELINE as EMBEDDINGGEMMA2_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
+from gemma4.distribution import gemma4_notice_markdown
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import LARGE_PIPELINE as IRODORI_LARGE_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
@@ -663,6 +664,62 @@ class TestCoreArguments:
                 "a=b",
             ]
         ) == ["--pipeline", "irodori", "--ref-revision", "a=b"]
+
+
+class TestRootFilesOfTheModelsBuilt:
+    """The root files the driver hands the core are those of the models built, for a pipeline whose
+    legal texts depend on them ({@link dist.ROOT_FILES}); the core writes them as given."""
+
+    @staticmethod
+    def _handed_to_core(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pipeline: str, models: list[str]
+    ) -> dict[str, str]:
+        handed: dict[str, Any] = {}
+
+        def core(arguments: list[str], **kwargs: Any) -> None:
+            handed["pipelines"] = kwargs["pipelines"]
+
+        monkeypatch.setattr(dist, "dist_main", core)
+        dist.main(
+            [
+                "--pipeline",
+                pipeline,
+                *(argument for model in models for argument in ("--model", model)),
+                "--out",
+                str(tmp_path / "out"),
+            ],
+            get=_no_hub,
+        )
+        return dict(handed["pipelines"][pipeline].root_files)
+
+    def test_a_gemma4_build_of_e2b_alone_names_the_e2b_drafter_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        notice = self._handed_to_core(monkeypatch, tmp_path, "gemma4", ["e2b"])["NOTICE.md"]
+
+        assert "google/gemma-4-E2B-it-assistant" in notice
+        assert "google/gemma-4-E4B-it-assistant" not in notice
+        assert notice == gemma4_notice_markdown(["e2b"])
+
+    def test_a_gemma4_build_of_both_models_names_both_drafters(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        notice = self._handed_to_core(monkeypatch, tmp_path, "gemma4", ["e2b", "e4b"])["NOTICE.md"]
+
+        assert "google/gemma-4-E2B-it-assistant" in notice
+        assert "google/gemma-4-E4B-it-assistant" in notice
+        assert notice == gemma4_notice_markdown(["e2b", "e4b"])
+
+    def test_a_pipeline_without_an_entry_keeps_its_fixed_root_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        assert "siglip2" not in dist.ROOT_FILES
+
+        root_files = self._handed_to_core(
+            monkeypatch, tmp_path, "siglip2", [SIGLIP2_PIPELINE.default_model]
+        )
+
+        assert root_files == dict(SIGLIP2_PIPELINE.root_files)
 
 
 #: The README sentence that spells out the accepted set (the names usable as `--pipeline` arguments,
