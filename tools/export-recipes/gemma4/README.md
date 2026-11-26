@@ -10,8 +10,9 @@ Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Two checkpoints are supported, chosen with `--model e2b|e4b` (default `e2b`): `google/gemma-4-E2B-it`
 and `google/gemma-4-E4B-it`. Every shape the scripts check (layer count, head counts, KV sharing,
 PLE size) is derived from the checkpoint's own `config.json`; the model name only picks the default
-input and output directories. In the regular line E4B ships **without an MTP drafter** (the q4_0 QAT
-line below ships one for every model). It has a compiled tokenizer
+input and output directories. Each has its MTP drafter (`export_drafter.py` — E4B's from
+`google/gemma-4-E4B-it-assistant`; the q4_0 QAT line below ships a QAT drafter for every model but
+26B). E4B has a compiled tokenizer
 asset of its own: E4B shared E2B's until Google's glitch-token fixes of 2026-11-03 gave the two
 upstream `tokenizer.json` files different merges (E2B drops 267 and renames id 249788, E4B drops
 253; the vocabulary is the same). The license notes below were established for E2B; E4B's snapshot
@@ -450,11 +451,12 @@ The reference holds about 16 GiB; the embedder itself takes about a second per i
 
 ## What `export_drafter.py` emits
 
-The **MTP drafter** series, `outputs/series/gemma4-e2b-drafter/` — a _borrower_ graph that cannot
-run on its own. It is the head from `google/gemma-4-E2B-it-assistant` (4 layers, hidden 256, no key
-or value projections at all), re-expressed so that it reads the _product_ series'
-(`gemma4-e2b-product-bf16`) state slots and embedding table instead of carrying its own. Three
-declarations in the container say so (ADR
+The **MTP drafter** series, `outputs/series/gemma4-<model>-drafter/` — a _borrower_ graph that
+cannot run on its own. It is the head from `google/gemma-4-E2B-it-assistant` or
+`google/gemma-4-E4B-it-assistant` (4 layers, hidden 256, no key or value projections at all; both
+read at the commits `sources.py` pins, `REGULAR_DRAFTER_PINS`), re-expressed so that it reads the
+_product_ series' (`gemma4-<model>-product-bf16`) state slots and embedding table instead of
+carrying its own. Three declarations in the container say so (ADR
 [0096](../../../docs/decisions/0096-speculative-decoding.md) stage 2):
 
 - the four state slots are **`external`** — the physical rings belong to the lender's
@@ -465,14 +467,21 @@ declarations in the container say so (ADR
   declaration names the lender's tensor key (`model.lm_head.weight`), which the recipe reads out of
   the product container's header rather than spelling it out
 
-The graph takes `token[1,1]`, `hidden[1,1536]` (the product graph's output 1, i.e. after the final
-norm and before `lm_head`) and the four rotary rows for position `P`, the position of the token
+The graph takes `token[1,1]`, `hidden[1,H]` (the product graph's output 1, i.e. after the final
+norm and before `lm_head`; `H` = 1536 for E2B, 2560 for E4B) and the four rotary rows for position `P`, the position of the token
 being handed in (see _Goldens_ below for the whole calling convention), and returns **k = 3**
 drafted token ids. The three steps are unrolled in Python because the only state carried between
 them is `(token, hidden)` — the drafter has no cache of its own. The clustered sparse output head of
 the upstream checkpoint is replaced by a dense projection over the full vocabulary, because the
 scatter back over the vocabulary has no IR op; `use_ordered_embeddings` is turned off **before** the
 checkpoint is read, since `masked_embedding` is built in `__init__`.
+
+E4B's assistant is E2B's at E4B's widths: its `config.json` differs from E2B's in exactly
+`backbone_hidden_size` (2560) and the drafter's `num_key_value_heads` (2, the KV heads of the target
+layers it reads — l22 / l23 instead of l13 / l14), and its tensors only in `pre_projection`
+(`[256, 5120]`) and `post_projection` (`[2560, 256]`). Before the trace the script checks both
+numbers against the target config and the lender's slots, and before the goldens that the lender
+series' record names the target checkpoint the goldens run (its weights and config digests).
 
 Storage is **int8 throughout** — every `nn.Linear` including the tied output head, all
 per-channel int8; only the norms and the layer scalars stay f32. The shared table is declared
@@ -515,11 +524,11 @@ record — it only changes what a fresh run would produce.
 
 #### What the goldens say about acceptance
 
-Two numbers per case, printed by the export run and stored in `reference.json` (2026-11-04, greedy
-bf16 target, k = 3, N = 200 cycles): the per-step hit rate of `d_j` against `tokens[t + j]`, and
-the sequentially accepted tokens per cycle, `1 + mean(a)` where `a` is the length of the leading
-run of hits. The second number is what a speculation cycle actually confirms — the bonus token
-always counts, so it never drops below 1.
+Two numbers per case, printed by the export run and stored in `reference.json` (greedy bf16 target,
+k = 3, N = 200 cycles): the per-step hit rate of `d_j` against `tokens[t + j]`, and the sequentially
+accepted tokens per cycle, `1 + mean(a)` where `a` is the length of the leading run of hits. The
+second number is what a speculation cycle actually confirms — the bonus token always counts, so it
+never drops below 1. E2B's series (2026-11-04):
 
 | case              | prompt | `d₁`  | `d₂`  | `d₃`  | tokens/cycle |
 | ----------------- | ------ | ----- | ----- | ----- | ------------ |
@@ -527,9 +536,20 @@ always counts, so it never drops below 1.
 | `readme-recipes`  | 2451   | 55.0% | 40.0% | 30.0% | 2.090        |
 | `readme-exporter` | 3690   | 63.5% | 46.0% | 29.0% | 2.250        |
 
-These are a property of the drafter against this target, not of the runtime. The acceptance test in
-`packages/models/tests/e2e_gemma4_drafter_test.ts` gates something else: that karume reproduces the
-**torch drafter's own draft ids** (1,800 of them) to within 1%. A perfect score there says the port
+The two documents have grown since, so a fresh run takes longer prompts. On the documents of
+2026-11-26 both drafters, each against its own target (E2B's from a scratch re-export whose container
+is byte-identical to its series'):
+
+| case              | prompt | E2B `d₁` / `d₂` / `d₃`  | E2B tokens/cycle | E4B `d₁` / `d₂` / `d₃`  | E4B tokens/cycle |
+| ----------------- | ------ | ----------------------- | ---------------- | ----------------------- | ---------------- |
+| `short-en`        | 25     | 39.0% / 22.0% / 13.5%   | 1.595            | 40.5% / 20.5% / 15.0%   | 1.585            |
+| `readme-recipes`  | 2657   | 61.0% / 47.5% / 30.5%   | 2.255            | 69.5% / 57.5% / 47.0%   | 2.660            |
+| `readme-exporter` | 4163   | 64.0% / 47.5% / 29.0%   | 2.300            | 66.5% / 51.0% / 35.0%   | 2.360            |
+
+These are a property of the drafter against this target, not of the runtime. The acceptance tests in
+`packages/e2e/tests/e2e_gemma4_drafter_test.ts` (E2B) and `packages/e2e/tests/e2e_gemma4_e4b_drafter_test.ts`
+(E4B, on its series and the next distribution staged from them) gate something else: that karume
+reproduces the **torch drafter's own draft ids** (1,800 of them) to within 1%. A perfect score there says the port
 is faithful; it says nothing about how often a draft is accepted.
 
 ### The q4_0 QAT drafters (`export_drafter_qat.py`)
@@ -658,17 +678,21 @@ uv run python -m gemma4.tokenizer   # tokenizer asset + parity fixture (no trans
 uv run --with 'transformers==5.14.1' python -m gemma4.chat   # chat parity fixture
 ```
 
-For E4B, pass `--model e4b` to the four graph scripts; the default input directory and output
-series (`outputs/series/gemma4-e4b-*`) follow the model, and `export_token.py`'s `--reference`
-defaults to the same model's decode series. The drafter borrows from the product series
-(`--product-dir`, default `gemma4-e2b-product-bf16`), so the product series has to exist first:
+For E4B, pass `--model e4b` to the four graph scripts and the drafter; the default input directory
+and output series (`outputs/series/gemma4-e4b-*`) follow the model, and `export_token.py`'s
+`--reference` defaults to the same model's decode series. The drafter borrows from the model's
+product series (`--product-dir`, default `gemma4-<model>-product-bf16`) and reads the model's pinned
+assistant snapshot (`--drafter-dir`, default the hub cache's snapshot of `REGULAR_DRAFTER_PINS`), so
+the product series has to exist first; E4B's F32 target does not fit a 12 GB GPU, so its goldens run
+on the CPU (about 12 minutes on the 64 GB development machine, 2026-11-26):
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b
+uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter --model e4b --device cpu
 ```
 
-`export_drafter.py` and `chat.py` have no E4B form: E4B has no drafter here, and its chat parity
-cases give E2B's ids on E4B's tokenizer too (checked when the tokenizers split). Its tokenizer
+`chat.py` has no E4B form: its chat parity cases give E2B's ids on E4B's tokenizer too (checked when
+the tokenizers split). Its tokenizer
 asset and parity fixture (`gemma4-e4b-parity.json`) come from:
 
 ```sh
@@ -705,8 +729,11 @@ rather than declared as a dependency group.
 ```sh
 cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B alone (~8.7 GiB)
-# both models (~22.6 GiB: each model's bf16 container, E2B's drafter, the tokenizers)
+# both models (~22.6 GiB: each model's bf16 container, its drafter, the tokenizers)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
+# the same, staged outside models/ for the implementation-time checks of a new role (models/ holds
+# what Hugging Face holds — e2e_gemma4_e4b_drafter_test.ts reads this one)
+uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../outputs/misc/local-dist/karume-gemma4
 # the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters, and 26B A4B) → models/karume-gemma4-qat/
 uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b --model 26b --out ../../models/karume-gemma4-qat
 ```
@@ -739,7 +766,7 @@ one `i4f16` storage (the grid's codes with f16 steps — ADR
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.
 
-The regular distribution folds **three series** per E2B into one HF repository (two per E4B). The
+The regular distribution folds **three series** per model into one HF repository. The
 product container (`gemma4-e2b-product-bf16`) holds the checkpoint's bf16 weights and the bf16 PLE
 assets (index schema 5) in one `krm`, split into parts of the default 256 MiB length, with every PLE
 block in a part of its own; it is the `model` role's one dtype, `bf16`, which both presets map. The
@@ -748,8 +775,11 @@ pipeline asks for `speculative`; both E2B presets name it. The last is the compi
 (`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the containers
 (`ple.probe.safetensors`, `greedy.*.safetensors`, `reference.json`, `drafter-golden.*.safetensors`)
 are not in the placement table and therefore never reach the output. An `e4b` entry reads
-`gemma4-e4b-product-bf16` and its own `gemma4-e4b-tokenizer`, and declares no `drafter` weights: a
-load that asks for `speculative` fails when the weights are resolved, before any part is fetched. Each model's tokenizer file sits under its own directory
+`gemma4-e4b-product-bf16`, `gemma4-e4b-drafter` and its own `gemma4-e4b-tokenizer`. A model outside
+the drafter table (`card.GEMMA4_DRAFTER_UPSTREAM`) would declare no `drafter` weights, and a load
+that asks for `speculative` would fail when the weights are resolved, before any part is fetched.
+The published `karume-gemma4` was built before E4B's drafter and has none; the next upload
+adds `e4b/drafter/`. Each model's tokenizer file sits under its own directory
 (`<model>/tokenizer/`); the assembly folds a file into `shared/` only when two models' bytes are
 the same.
 Layout inside the repository:
@@ -760,7 +790,7 @@ Layout inside the repository:
 | `weights.drafter.i8.container` | `e2b/drafter/model.i8-NNNNN-of-NNNNN.krm` |
 | `assets.tokenizer`             | `e2b/tokenizer/tokenizer.json`            |
 
-The `e4b` entry has the same rows under `e4b/` but the drafter's.
+The `e4b` entry has the same rows under `e4b/`.
 
 Each `container` seat carries `descriptor` (the expected length and sha256 of the two descriptors)
 and `parts` (every part, part 0 included — ADR
@@ -841,10 +871,11 @@ table as the checkpoint's bf16 bits, PLE index schema 5:
   description ends with one sentence on speed per model, each with a measurement behind it
   (`GEMMA4_SPEED_NOTE`, which records the protocol and the numbers of the three devices): a decode
   token of `bf16-fast` took less time than one of `bf16` on an RTX 3080 Ti, an RTX 5070 Ti and an
-  Apple M2 for both models. E2B's speculative decode (with the drafter) is not measured, and its
-  sentence says "without the drafter".
+  Apple M2 for both models. Neither model's speculative decode (with the drafter) is measured for
+  the card; E2B's sentence says "without the drafter", and E4B's keeps its wording of 2026-11-19.
 
-E2B's presets also name the int8 drafter, which borrows the bf16 target's `model.lm_head.weight`.
+Both models' presets also name their int8 drafter, which borrows the bf16 target's
+`model.lm_head.weight`.
 The int4 seats (`i4` and `i4-fast`) are the q4_0 QAT line's (`karume-gemma4-qat` —
 `distribution.py`, "The q4_0 QAT line").
 

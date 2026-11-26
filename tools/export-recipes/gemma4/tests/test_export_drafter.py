@@ -23,6 +23,7 @@ Only the cases that need transformers SKIP via `importorskip` (the 2-job setup o
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import replace
@@ -37,6 +38,8 @@ from gemma4 import distribution as gemma4_distribution
 from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
+from gemma4 import provenance, sources
+from gemma4.card import GEMMA4_DRAFTER_UPSTREAM
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from karume.container import canonical_json, container_parts, ir_v2_document
 from karume.dist import DistError
@@ -300,16 +303,42 @@ class TestTheCommandLine:
         assert not hasattr(args, "sym_max")
 
     def test_it_refuses_a_model_it_has_no_drafter_for(self, capsys):
-        """The drafter script is E2B only (both upstream and the lender's default are E2B) —
-        `--model e4b` fails at startup.
-
-        Accepting it would silently bake E2B's drafter against E4B's lender (E4B's drafter is not
-        supported).
-        """
+        """The drafter script takes only the models with a pinned regular drafter — `--model 12b`
+        fails at startup (12B's one line is the q4_0 QAT checkpoint, whose drafter is
+        `gemma4.export_drafter_qat`'s)."""
+        assert sorted(sources.REGULAR_DRAFTER_PINS) == ["e2b", "e4b"]
         with pytest.raises(SystemExit):
-            drafter.build_parser().parse_args(["--model", "e4b"])
+            drafter.build_parser().parse_args(["--model", "12b"])
 
         assert "--model" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_the_drafter_and_the_lender_follow_the_model(self, model, tmp_path, monkeypatch):
+        """Every default follows `--model`: the drafter snapshot is that model's pin, the lender
+        that model's product series and the output that model's drafter series — a default spelled
+        for one model would bake its drafter against another model's lender."""
+        constants = pytest.importorskip("huggingface_hub.constants")
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+        options = gx.resolve_series_args(drafter.build_parser().parse_args(["--model", model]))
+        pin = sources.regular_drafter_pin(model)
+
+        assert pin.repo == GEMMA4_DRAFTER_UPSTREAM[model]
+        assert options["drafter_dir"] == sources.regular_drafter_dir(model)
+        assert options["drafter_dir"].name == pin.revision
+        assert options["product_dir"].name == f"gemma4-{model}-product-bf16"
+        assert options["out"].name == f"gemma4-{model}-drafter"
+        assert options["model_dir"] == sources.checkpoint_dir(model)
+
+    def test_every_option_is_a_keyword_of_the_export(self):
+        """`main` hands the options to `export_series` by name — a knob it does not take would
+        fail only at the end of the parse of a real run."""
+        pytest.importorskip("huggingface_hub")
+        options = gx.resolve_series_args(drafter.build_parser().parse_args([]))
+        options.pop("model_dir")
+        options.pop("out")
+        accepted = set(inspect.signature(drafter.export_series).parameters)
+
+        assert set(options) | {"drafter_pin"} <= accepted
 
     def test_the_one_shot_skeleton_keeps_the_chunk_symbol_bound(self):
         """Only the drafter omits it — the default skeleton keeps `--sym-max`."""
@@ -408,6 +437,122 @@ class TestReadingTheLender:
                     num_kv_shared_layers=0,
                 ),
             )
+
+
+def _pairing_config(*, backbone: int = TINY_BACKBONE, kv_heads: int = TINY_KV_HEADS):
+    """The two drafter-config numbers the pairing reads (E2B's and E4B's assistants differ in
+    exactly these): the backbone width and the KV heads of its text config."""
+    text = SimpleNamespace(num_key_value_heads=kv_heads)
+    return SimpleNamespace(backbone_hidden_size=backbone, get_text_config=lambda: text)
+
+
+class TestThePairing:
+    """The drafter checkpoint, the target and the lender series belong together (E2B's assistant
+    against E4B's target or the reverse is caught before the trace)."""
+
+    def test_a_drafter_of_this_target_passes(self):
+        drafter.assert_drafter_pairing(_pairing_config(), _tiny_target_config(), _tiny_lender())
+
+    def test_a_drafter_of_another_width_is_rejected(self):
+        """E2B's assistant (backbone 1536) against E4B's target (hidden 2560)."""
+        with pytest.raises(AssertionError, match="backbone_hidden_size"):
+            drafter.assert_drafter_pairing(
+                _pairing_config(backbone=TINY_BACKBONE + 1),
+                _tiny_target_config(),
+                _tiny_lender(),
+            )
+
+    def test_a_drafter_reading_another_head_count_is_rejected(self):
+        """A drafter reading two KV heads against a lender holding one — nothing else compares the
+        trace's placeholders (the drafter's count) with the surgery's slots (the lender's)."""
+        with pytest.raises(AssertionError, match="KV head"):
+            drafter.assert_drafter_pairing(
+                _pairing_config(kv_heads=TINY_KV_HEADS + 1),
+                _tiny_target_config(),
+                _tiny_lender(),
+            )
+
+
+def _fingerprint(weights: str = "w", config: str = "c", tokenizer: str = "t") -> dict[str, Any]:
+    """A target fingerprint of `gemma4.provenance.checkpoint_fingerprint`'s shape."""
+    digests = {"model.safetensors": weights, "config.json": config, "tokenizer.json": tokenizer}
+    return {
+        "dir": "gemma-4-E4B-it",
+        "files": {name: {"bytes": 1, "sha256": digest} for name, digest in digests.items()},
+    }
+
+
+def _write_lender_record(product_dir: Path, checkpoint: dict[str, Any]) -> None:
+    product_dir.mkdir(parents=True, exist_ok=True)
+    record = {"schema": provenance.SCHEMA, "series": product_dir.name, "checkpoint": checkpoint}
+    (product_dir / provenance.REFERENCE_FILE).write_text(json.dumps(record), encoding="utf-8")
+
+
+class TestTheLenderCheckpoint:
+    """The goldens' target is the checkpoint the lender series was exported from."""
+
+    def test_the_lender_of_the_same_weights_passes(self, tmp_path):
+        _write_lender_record(tmp_path / "lender", _fingerprint())
+
+        drafter.assert_lender_checkpoint(tmp_path / "lender", _fingerprint())
+
+    def test_a_tokenizer_replaced_since_the_lender_was_exported_passes(self, tmp_path):
+        """The tokenizer decides only the golden prompts' ids, and the hand-placed checkpoints'
+        tokenizer moved after their product series were exported."""
+        _write_lender_record(tmp_path / "lender", _fingerprint(tokenizer="old"))
+
+        drafter.assert_lender_checkpoint(tmp_path / "lender", _fingerprint(tokenizer="new"))
+
+    @pytest.mark.parametrize("field", ["weights", "config"])
+    def test_a_lender_of_other_weights_is_rejected(self, tmp_path, field):
+        _write_lender_record(tmp_path / "lender", _fingerprint())
+
+        with pytest.raises(AssertionError, match="is not from the target checkpoint"):
+            drafter.assert_lender_checkpoint(tmp_path / "lender", _fingerprint(**{field: "x"}))
+
+    def test_a_lender_without_a_record_is_rejected(self, tmp_path):
+        with pytest.raises(AssertionError, match="export the lender product series first"):
+            drafter.assert_lender_checkpoint(tmp_path / "lender", _fingerprint())
+
+
+class TestTheDrafterPin:
+    """The regular drafters are read at pinned commits, and the record's full digests are held to
+    the pin."""
+
+    def test_each_regular_drafter_is_pinned_to_its_own_upstream(self):
+        assert set(sources.REGULAR_DRAFTER_PINS) == set(GEMMA4_DRAFTER_UPSTREAM)
+        for model, pin in sources.REGULAR_DRAFTER_PINS.items():
+            assert pin.repo == GEMMA4_DRAFTER_UPSTREAM[model], model
+            assert re.fullmatch(r"[0-9a-f]{40}", pin.revision), model
+            assert sorted(pin.sha256) == sorted(drafter.DRAFTER_FILES), model
+        # Two different checkpoints (their configs differ in two keys).
+        assert (
+            len({pin.sha256["config.json"] for pin in sources.REGULAR_DRAFTER_PINS.values()}) == 2
+        )
+
+    def test_a_model_without_a_regular_drafter_fails_loudly(self):
+        with pytest.raises(ValueError, match="no regular MTP drafter"):
+            sources.regular_drafter_pin("12b")
+
+    def test_the_record_of_the_pinned_files_passes(self):
+        pin = sources.regular_drafter_pin("e4b")
+        files = {name: {"bytes": 1, "sha256": digest} for name, digest in pin.sha256.items()}
+
+        drafter.assert_pinned_drafter(files, pin)
+
+    def test_another_drafter_is_rejected(self):
+        """E2B's files recorded against E4B's pin."""
+        e2b = sources.regular_drafter_pin("e2b")
+        files = {name: {"bytes": 1, "sha256": digest} for name, digest in e2b.sha256.items()}
+
+        with pytest.raises(sources.SourcePinError, match="is not google/gemma-4-E4B-it-assistant@"):
+            drafter.assert_pinned_drafter(files, sources.regular_drafter_pin("e4b"))
+
+    def test_a_record_naming_other_files_is_rejected(self):
+        pin = sources.regular_drafter_pin("e2b")
+
+        with pytest.raises(sources.SourcePinError, match="names"):
+            drafter.assert_pinned_drafter({"model.safetensors": {"sha256": "0"}}, pin)
 
 
 def _tiny_drafter_config():

@@ -11,7 +11,13 @@
     "e4b/bf16": {
       "node-nvidia-geforce-rtx-3080-ti": "dc7b1f48e0af02f9bab72c2e46186011b3394adf7b057abdc04f2a9aaf8293bf"
     },
+    "e4b/bf16+drafter": {
+      "node-nvidia-geforce-rtx-3080-ti": "dc7b1f48e0af02f9bab72c2e46186011b3394adf7b057abdc04f2a9aaf8293bf"
+    },
     "e4b/bf16-fast": {
+      "node-nvidia-geforce-rtx-3080-ti": "dc7b1f48e0af02f9bab72c2e46186011b3394adf7b057abdc04f2a9aaf8293bf"
+    },
+    "e4b/bf16-fast+drafter": {
       "node-nvidia-geforce-rtx-3080-ti": "dc7b1f48e0af02f9bab72c2e46186011b3394adf7b057abdc04f2a9aaf8293bf"
     }
   }

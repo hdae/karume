@@ -36,9 +36,17 @@ runs only with `KARUME_ALL_FAMILIES=1`.
 
 ## Built but not yet published
 
-None today. A repository the recipe builds and the e2e lanes run on the local mirror, with no `SOURCES` entry yet,
+No repository. A repository the recipe builds and the e2e lanes run on the local mirror, with no `SOURCES` entry yet,
 belongs here until its first publication (a checklist in §3 of the [release runbook](release-runbook.md); a new family
 follows "First publication of a family").
+
+One new role of a published repository:
+
+- **Regular Gemma 4 E4B's MTP drafter** (`google/gemma-4-E4B-it-assistant`, the `drafter` role of `karume-gemma4`'s
+  `e4b`) — built as the series `outputs/series/gemma4-e4b-drafter/` (`gemma4.export_drafter --model e4b`) and checked
+  on the next `karume-gemma4` staged from the series under `outputs/misc/local-dist/karume-gemma4/`
+  (`e2e_gemma4_e4b_drafter_test.ts`, an implementation-time check behind `KARUME_SERIES=1`). The published
+  `karume-gemma4` ships E4B without a drafter until its next upload.
 
 ## Components of another model
 

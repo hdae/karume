@@ -28,6 +28,9 @@ generation defaults the regular `google/gemma-4-E{2,4}B-it` at the revisions the
 checkpoints of `inputs/gemma4/` were fetched at. The hand-placed regular line is unaffected:
 {@link checkpoint_dir} / {@link tokenizer_dir} keep reading `inputs/gemma4/`.
 
+The regular MTP drafters ({@link REGULAR_DRAFTER_PINS} — `gemma4.export_drafter`) are pinned for
+E2B and E4B; each pairs with the regular line's product series of the same model.
+
 The q4_0 QAT MTP drafters ({@link QAT_DRAFTER_PINS} — `gemma4.export_drafter_qat`) are pinned for
 E2B, E4B and 12B; each pairs with the QAT target {@link QAT_TARGET_PINS} names (12B's is its one
 line, {@link HUB_PINS}).
@@ -59,6 +62,7 @@ from _shared.paths import INPUTS_ROOT, REPO_ROOT
 from _shared.upstream import hub_snapshot_dir
 
 from .card import (
+    GEMMA4_DRAFTER_UPSTREAM,
     GEMMA4_QAT_DRAFTER_UPSTREAM,
     GEMMA4_QAT_WEIGHTS_UPSTREAM,
     GEMMA4_UPSTREAM,
@@ -267,6 +271,39 @@ QAT_PINS: Mapping[str, ModelPins] = {
 }
 
 
+#: Model → the pinned snapshot of its regular MTP drafter (`gemma4.export_drafter`), both in the hub
+#: cache since 2026-11-03 (README front matter: `license: apache-2.0`, not gated): the LFS blob name
+#: of `model.safetensors` (E2B 157,565,344 B / E4B 159,138,208 B) and the SHA-256 of `config.json`'s
+#: bytes. E2B's is the snapshot its series was exported from (the series record names the same two
+#: digests). E4B's config differs from E2B's in exactly `backbone_hidden_size` (2560) and the
+#: drafter's `num_key_value_heads` (2) — the E4B target's width and KV heads; its tensors differ
+#: only in `pre_projection` (`[256, 5120]`) and `post_projection` (`[2560, 256]`). The files the
+#: provenance record fingerprints are these two (`gemma4.export_drafter.DRAFTER_FILES`).
+#:
+#: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
+REGULAR_DRAFTER_PINS: Mapping[str, HubPin] = {
+    "e2b": HubPin(
+        repo=GEMMA4_DRAFTER_UPSTREAM["e2b"],
+        revision="2d874ef7d29f9a30599a1e4b3c1cbc9595f005df",
+        sha256={
+            "model.safetensors": (
+                "93682eb1c97639d18f007704dc880bd74cbe530adaf7b1bb561213863fdad2a6"
+            ),
+            "config.json": "7f42f559a6a69ffaeaf6b61a1ece3a562a2ed5ad00b8d30f16917ba5ab1bcbe9",
+        },
+    ),
+    "e4b": HubPin(
+        repo=GEMMA4_DRAFTER_UPSTREAM["e4b"],
+        revision="8d0031ea8c2109e2b1e86bb9368a4539b537f80a",
+        sha256={
+            "model.safetensors": (
+                "12875062fc25c51e8fa9b62abd2de7ad48b7d63f8559d5d604fbd5a3d6bcff16"
+            ),
+            "config.json": "13cdf5418e5a89cf951717a953cd11cef4e5c2743c4767e9e5dd72802954f822",
+        },
+    ),
+}
+
 #: Model → the pinned snapshot of its q4_0 QAT drafter (`gemma4.export_drafter_qat`), all three in
 #: the hub cache on 2026-11-03 (README front matter: `license: apache-2.0`, `base_model` the regular
 #: `google/gemma-4-<model>-it-assistant`): the LFS blob name of `model.safetensors` (E2B
@@ -406,6 +443,25 @@ def qat_tokenizer_dir(model: str) -> Path:
     """The hub cache's snapshot model `model`'s QAT line reads its tokenizer, chat template and
     generation defaults from (the regular `-it` repository — {@link QAT_PINS})."""
     pin = qat_pins(model).tokenizer
+    return hub_snapshot_dir(pin.repo, pin.revision)
+
+
+def regular_drafter_pin(model: str) -> HubPin:
+    """The pinned snapshot of model `model`'s regular MTP drafter ({@link REGULAR_DRAFTER_PINS}); a
+    model without one fails loudly."""
+    pin = REGULAR_DRAFTER_PINS.get(model)
+    if pin is None:
+        raise ValueError(
+            f"gemma4 has no regular MTP drafter for model '{model}'"
+            f" (known: {' / '.join(sorted(REGULAR_DRAFTER_PINS))})"
+        )
+    return pin
+
+
+def regular_drafter_dir(model: str) -> Path:
+    """The hub cache's snapshot of model `model`'s regular drafter (a path only, like
+    {@link checkpoint_dir})."""
+    pin = regular_drafter_pin(model)
     return hub_snapshot_dir(pin.repo, pin.revision)
 
 

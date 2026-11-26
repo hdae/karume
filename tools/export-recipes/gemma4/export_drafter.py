@@ -1,13 +1,16 @@
-"""Writes Gemma 4 E2B's **MTP drafter** (HF `google/gemma-4-E2B-it-assistant`) as a borrower graph.
+"""Writes Gemma 4 E2B / E4B's **MTP drafter** (HF `google/gemma-4-E{2,4}B-it-assistant` at the
+commits `gemma4.sources.REGULAR_DRAFTER_PINS` pins) as a borrower graph.
 
 ADR [0096](../../../docs/decisions/0096-speculative-decoding.md) step 2.
 
-    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter --device cpu
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter --model e4b --device cpu
 
 ## What a borrower graph is (three declarations)
 
-The drafter owns no KV; it **reads the k/v of the target's (the product graph's) l13 (sliding,
-window 512) / l14 (full) as they are**. The embedding table it consumes before the output head is
+The drafter owns no KV; it **reads the k/v of the target's (the product graph's) last non-shared
+sliding layer (window 512) and full layer as they are** (E2B l13 / l14, E4B l22 / l23 —
+`gemma4.export_decode.kv_owner_layers`). The embedding table it consumes before the output head is
 also borrowed from the target's main table. So this graph cannot run on its own; at run time it is
 bound to the lender's Session / context:
 
@@ -23,13 +26,16 @@ At trace time the KV comes in as **ordinary input tensors** (torch.export cannot
 
 ## What one step contains, and the k-step unrolling
 
-    x       = cat(target_embed(token) * sqrt(1536), hidden)        [1,1,3072]
+    x       = cat(target_embed(token) * sqrt(H), hidden)           [1,1,2H]
     state   = pre_projection(x)                                    [1,1,256]
     4 layers = q_proj → q_norm → RoPE (one host-supplied row) → SDPA(q, K, V, scale=1.0, mask 0)
               → o_proj / 4 RMSNorm + residual + layer_scalar / MLP gelu_tanh
     state   = norm(state)
-    hidden  = post_projection(state)                               [1,1,1536]
+    hidden  = post_projection(state)                               [1,1,H]
     token   = argmax(lm_head(state))                               [1,1,1]
+
+(`H` = the drafter config's `backbone_hidden_size`, the target's `hidden_size`: E2B 1536, E4B
+2560.)
 
 This is unrolled **k = 3 steps** in a Python loop (the only state between steps is
 `(token, hidden)` — the drafter has no KV). Each step contributes one token, 3 in total, as graph
@@ -49,7 +55,7 @@ before loading** (`Gemma4AssistantForCausalLM.__init__`).
 | `target_embed` (shared, no bytes) | bf16, not rounded | declared as the lender stores it (MUST) |
 | norm / q_norm / layer_scalar | f32 | `fake_quant_int8` sees only the 5 types with a `weight` |
 
-**The drafter has no i4 option.** Measured on 2026-09-08 (E[a](k=3) taken from sequential
+**The drafter has no i4 option.** Measured on E2B on 2026-09-08 (E[a](k=3) taken from sequential
 acceptance on the same target trajectory, N = 200 cycles × 3 cases): dropping the drafter's linears
 (pre / post projection, q_proj, o_proj, gate/up/down = 22 tensors, 10.1M elements) to i4 g32
 lowered E[a] to **−33% / −21% / −15%** (in case order) relative to no rounding. The same 22 tensors
@@ -76,16 +82,27 @@ steps (`token` and "the hidden of the row that produced it"), and also the set t
 speculative loop passes in its first cycle. So `draft[t][j]` (`j` from 0) predicts
 `tokens[t + 1 + j]` — `d₁` predicts the token **after** the bonus token.
 
+## Pairing with the target
+
+E4B's drafter is the same graph at E4B's widths (backbone 2560, two KV heads — the two config keys
+in which its checkpoint differs from E2B's). The drafter checkpoint, the target checkpoint and the
+lender series must belong together, and each mispairing would otherwise surface only indirectly (a
+trace-time shape error, or nothing): {@link assert_drafter_pairing} checks the drafter's widths
+against the target config and the lender's slots before the trace, and
+{@link assert_lender_checkpoint} checks that the lender series was exported from the target
+checkpoint the goldens run (its provenance record's weights digests).
+
 ## Output layout
 
-    outputs/series/gemma4-e2b-drafter/model.krm                weights + 2 descriptors
-    outputs/series/gemma4-e2b-drafter/drafter-golden.<case>.safetensors  expected draft sequences
-    outputs/series/gemma4-e2b-drafter/reference.json           provenance (target / drafter)
+    outputs/series/gemma4-<model>-drafter/model.krm                weights + 2 descriptors
+    outputs/series/gemma4-<model>-drafter/drafter-golden.<case>.safetensors  expected drafts
+    outputs/series/gemma4-<model>-drafter/reference.json           provenance (target / drafter)
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -105,14 +122,15 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import export_unified as unified
-from gemma4 import ple, provenance
+from gemma4 import ple, provenance, sources
 from gemma4.distribution import (
     GEMMA4_CHUNK_LENGTH,
-    GEMMA4_DEFAULT_MODEL,
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_SUFFIX,
+    GEMMA4_PRODUCT_BF16_SUFFIX,
     gemma4_ple_dim,
 )
+from gemma4.sources import HubPin
 from karume.artifacts import staged_publication
 from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -124,25 +142,33 @@ from karume.pipeline import publish_model
 from karume.quantize import fake_quant_int8
 from karume.states import ExternalAttentionSpec, ExternalStatesPlan, to_external_states_form
 
-#: Default location of the outputs (a directory separate from the product series — a separate asset
-#: that cannot run on its own).
+#: Default location of the default model's (E2B) outputs (a directory separate from the product
+#: series — a separate asset that cannot run on its own). `--model` picks the model's own.
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-drafter"
 
-#: The lender's (target's) product series. The tensor key of the shared initializer and the real
-#: shapes of the external slots are **read from here** (copied by hand, only the borrower would go
-#: stale on the day the target is rebuilt).
+#: The default model's (E2B) lender (target) product series — `--model` picks the model's own
+#: ({@link lender_dir}). The tensor key of the shared initializer and the real shapes of the
+#: external slots are **read from here** (copied by hand, only the borrower would go stale on the
+#: day the target is rebuilt).
 DEFAULT_PRODUCT_DIR = product.DEFAULT_OUT_DIR
 
-#: The drafter's checkpoint (the HF hub — not hand-placed source files).
-ASSISTANT_REPO = "google/gemma-4-E2B-it-assistant"
+#: The drafter files the provenance record fingerprints — exactly the files its pin names
+#: (`gemma4.sources.REGULAR_DRAFTER_PINS`).
+DRAFTER_FILES = ("model.safetensors", "config.json")
+
+#: The target files whose digests the lender series' record must share with the target the goldens
+#: run ({@link assert_lender_checkpoint}): the weights and the config that shape them. Not the
+#: tokenizer — it decides only the golden prompts' ids, and the hand-placed checkpoints' tokenizer
+#: moved after their product series were exported (Google's glitch-token fixes of 2026-11-03).
+LENDER_CHECKPOINT_FILES = provenance.WEIGHTS_FILES
 
 #: Number of draft steps unrolled in one forward (the distributed drafter is baked with these 3
 #: steps. The run-time k can be chosen within `k <= 3`; more steps need a re-export — ADR 0096).
 DRAFT_STEPS = 3
 
-# NOTE: the layers whose KV the lender reads (E2B: sliding 13 / full 14) are **not held as
-# constants** — `decode.kv_owner_layers(target_config)` derives them from the upstream layer layout
-# ({@link lender_slots}).
+# NOTE: the layers whose KV the lender reads (E2B: sliding 13 / full 14, E4B 22 / 23) are **not
+# held as constants** — `decode.kv_owner_layers(target_config)` derives them from the upstream layer
+# layout ({@link lender_slots}).
 
 #: Row count of the K / V inputs placed for the trace. The surgery drops them together with the
 #: inputs, so they do not remain in the distribution — any small value works, but `1` could make
@@ -235,7 +261,7 @@ class DrafterWrapper(nn.Module):
     different spelling would leave the host unable to bind them).
     MUST: `hidden` is the target's one row **after the final norm** (output 1 of the product graph).
     Being the value before lm_head is the drafter side's input condition, and another intermediate
-    value would still match the shape `[1,1536]`.
+    value would still match the shape `[1, H]`.
     MUST: K / V are `[1, Hkv, T, D]` (the same physical shape as the lender's slots). They are
     trace inputs that the surgery replaces with external slots.
     MUST: the mask is **a 0 row allowing every column** (bidirectional with q_len 1 means "see every
@@ -372,16 +398,14 @@ def assistant_class(config: Any) -> type[nn.Module]:
     return found
 
 
-def load_drafter(
-    steps: int, model_dir: Path, *, source: str | Path = ASSISTANT_REPO
-) -> DrafterWrapper:
+def load_drafter(steps: int, model_dir: Path, *, source: Path) -> DrafterWrapper:
     """Read the drafter in f32 and return the wrapper with the sparse softmax removed and RoPE
     replaced by the hand-over inputs.
 
-    `source` is what `from_pretrained` reads the drafter from: the regular E2B assistant's
-    repository id by default, or a pinned snapshot directory (`gemma4.export_drafter_qat`). The
-    class is the one the config names ({@link assistant_class} — 12B's assistant is
-    `Gemma4UnifiedAssistantForCausalLM`).
+    `source` is the pinned snapshot directory `from_pretrained` reads the drafter from (the regular
+    assistant's — `gemma4.sources.REGULAR_DRAFTER_PINS` — or a QAT one,
+    `gemma4.export_drafter_qat`). The class is the one the config names ({@link assistant_class} —
+    12B's assistant is `Gemma4UnifiedAssistantForCausalLM`).
 
     MUST: switch `use_ordered_embeddings` off **before loading** (`masked_embedding` is created by
     `__init__` from the config, so deleting the attribute afterwards leaves the forward's branch on
@@ -572,6 +596,66 @@ def drafter_shared_storage(_config: Any) -> IrStorage:
     return IrStorage(dtype=product.BF16_STORAGE)
 
 
+def lender_dir(model: str) -> Path:
+    """Model `model`'s lender: the regular line's product series of the same model
+    (`outputs/series/gemma4-<model>-product-bf16/`)."""
+    return one_shot.series_dir(model, GEMMA4_PRODUCT_BF16_SUFFIX)
+
+
+def assert_drafter_pairing(config: Any, target_config: Any, lender: LenderSlots) -> None:
+    """The drafter checkpoint `config` is the one of this target: its backbone width is the
+    target's `hidden_size`, and its KV heads per layer type (`gemma4.export_decode.kv_heads`) are
+    the lender slots' (axis 1 of `[1, Hkv, capacity, D]`).
+
+    MUST: run before the trace. E2B's and E4B's assistants differ in exactly these two numbers;
+    paired with the other model's target, the first fails only as a shape error deep in the trace,
+    and the second not at all — the trace's K / V placeholders take the drafter's head count, the
+    surgery the lender's, and nothing else compares them.
+    """
+    backbone, hidden = int(config.backbone_hidden_size), int(target_config.hidden_size)
+    if backbone != hidden:
+        raise AssertionError(
+            f"the drafter's backbone_hidden_size {backbone} is not the target's hidden_size"
+            f" {hidden} (a drafter of another model)"
+        )
+    text = config.get_text_config()
+    for layer_type, (k_slot, _) in sorted(lender.slots.items()):
+        heads, lent = decode.kv_heads(text, layer_type), int(lender.shapes[k_slot][1])
+        if heads != lent:
+            raise AssertionError(
+                f"the drafter reads {heads} KV head(s) on its {layer_type} layers, the lender's"
+                f" '{k_slot}' holds {lent} (a drafter of another model)"
+            )
+
+
+def assert_lender_checkpoint(product_dir: Path, checkpoint: Mapping[str, Any]) -> None:
+    """The lender series was exported from the target checkpoint the goldens run: its provenance
+    record names the same digests of {@link LENDER_CHECKPOINT_FILES} as `checkpoint` (the target's
+    fingerprint, `gemma4.provenance.checkpoint_fingerprint`).
+
+    MUST: run before the goldens. The drafter borrows the lender's table and KV, so goldens taken
+    against other weights whose table happens to have the same form would compare two different
+    targets.
+    """
+    path = product_dir / provenance.REFERENCE_FILE
+    if not path.is_file():
+        raise AssertionError(
+            f"{path} is missing — export the lender product series first"
+            " (python -m gemma4.export_product)"
+        )
+    recorded = json.loads(path.read_text(encoding="utf-8"))["checkpoint"]["files"]
+    wrong = {
+        name: (recorded.get(name, {}).get("sha256"), checkpoint["files"][name]["sha256"])
+        for name in LENDER_CHECKPOINT_FILES
+        if recorded.get(name, {}).get("sha256") != checkpoint["files"][name]["sha256"]
+    }
+    if wrong:
+        raise AssertionError(
+            f"the lender series {product_dir.name} is not from the target checkpoint the goldens"
+            f" run (recorded, target): {wrong}"
+        )
+
+
 # ---- Surgery ---------------------------------------------------------------
 
 
@@ -699,7 +783,7 @@ def assert_ir_form_drafter(
     - the graph inputs are exactly `token` / `hidden` / the 4 RoPE inputs (if a K/V placeholder
       remained, no node would read the value the caller passes)
     - there are k outputs, each an i32 `[1,1,1]` from `argmax` (order = step order, MUST)
-    - the state slots are **all external**, matching the lender's l13 / l14 in name and shape
+    - the state slots are **all external**, matching the lender's KV owner layers in name and shape
     - **no** `state_append` (the borrower writes not a single row of the lender's ring)
     - every attention is in readonly form, `layer count × step count` of them
     - the initializers hold one shared declaration (no bytes) pointing at the lender's tensor key
@@ -981,7 +1065,7 @@ def draft_case(
     - `token` = `b` (**the last confirmed token** — at position `P` but not yet in the KV)
     - `hidden` = `h@(P−1)` (the post-final-norm hidden of the row that produced `b`)
     - one RoPE row = position **`P`** (the position of `b`)
-    - the lender's l13 / l14 columns `[P − min(P, W), P)` / `[0, P)`
+    - the lender's sliding / full owner layers' columns `[P − min(P, W), P)` / `[0, P)`
 
     This is the same pairing as the drafter's own recursion between steps (sending `token` and "the
     hidden of the row that produced it" to the next step), and also the set the speculative loop
@@ -1104,9 +1188,9 @@ def goldens_against(
     # goldens are about).
     wrapper.model.config._attn_implementation = "sdpa"
     specs = decode.rope_specs(wrapper.model.config)
-    # The 35 PLE tables (9.4GB) MUST stay on the CPU — on the GPU they do not fit a 12GB-class card
-    # even with the tower removed. Only `wrapper.model` is moved, so the sibling attribute
-    # `per_layer` stays.
+    # The PLE tables (E2B 35, 9.4GB / E4B 42, 11.3GB) MUST stay on the CPU — on the GPU they do not
+    # fit a 12GB-class card even with the tower removed. Only `wrapper.model` is moved, so the
+    # sibling attribute `per_layer` stays.
     wrapper.model.to(device)
     drafter.to(device)
 
@@ -1140,42 +1224,61 @@ def goldens_against(
 # ---- Series ----------------------------------------------------------------
 
 
-def drafter_reference(out_dir: Path, model_dir: Path, goldens: Mapping[str, Any]) -> dict[str, Any]:
+def drafter_reference(
+    out_dir: Path,
+    checkpoint: Mapping[str, Any],
+    drafter_dir: Path,
+    drafter_pin: HubPin,
+    goldens: Mapping[str, Any],
+) -> dict[str, Any]:
     """Provenance record (the fingerprints of **both** the target and the drafter + the digests of
     the goldens taken).
 
     The assets come from two checkpoints, the lender's and the borrower's, so both are named, so
     that a combination with only one of them replaced cannot be built (an extension of the
-    single-series {@link gemma4.provenance}).
+    single-series {@link gemma4.provenance}). `checkpoint` is the target's fingerprint; the drafter
+    is named by its pin, and its files' full digests are checked against it
+    ({@link assert_pinned_drafter}).
     """
-    assistant = _assistant_snapshot_dir()
+    files = {name: provenance.file_digest(drafter_dir / name) for name in DRAFTER_FILES}
+    assert_pinned_drafter(files, drafter_pin)
     return {
         "schema": provenance.SCHEMA,
         "series": out_dir.name,
-        "checkpoint": provenance.checkpoint_fingerprint(model_dir),
+        "checkpoint": dict(checkpoint),
         "drafter": {
-            "repo": ASSISTANT_REPO,
-            "dir": assistant.name,
-            "files": {
-                name: provenance.file_digest(assistant / name)
-                for name in ("model.safetensors", "config.json")
-            },
+            "repo": drafter_pin.repo,
+            "revision": drafter_pin.revision,
+            "dir": drafter_pin.label,
+            "files": files,
         },
         "goldens": dict(goldens),
     }
 
 
-def _assistant_snapshot_dir() -> Path:
-    """The drafter snapshot in the HF cache (where the fingerprinted data lives)."""
-    from huggingface_hub import snapshot_download
-
-    return Path(snapshot_download(ASSISTANT_REPO, allow_patterns=["*.json", "*.safetensors"]))
+def assert_pinned_drafter(files: Mapping[str, Any], pin: HubPin) -> None:
+    """The drafter files the record names (every byte hashed) are the pinned ones, and the pin
+    names exactly those files (a file the record names but the pin does not would go
+    unchecked)."""
+    if sorted(pin.sha256) != sorted(files):
+        raise sources.SourcePinError(
+            f"the drafter pin ({pin.label}) names {sorted(pin.sha256)}, the record {sorted(files)}"
+        )
+    wrong = {
+        name: (files[name]["sha256"], expected)
+        for name, expected in sorted(pin.sha256.items())
+        if files[name]["sha256"] != expected
+    }
+    if wrong:
+        raise sources.SourcePinError(f"the drafter read is not {pin.label} (actual, pin): {wrong}")
 
 
 def export_series(
     model_dir: Path,
     out_dir: Path,
     *,
+    drafter_dir: Path,
+    drafter_pin: HubPin,
     steps: int = DRAFT_STEPS,
     product_dir: Path = DEFAULT_PRODUCT_DIR,
     cycles: int = GOLDEN_CYCLES,
@@ -1184,17 +1287,23 @@ def export_series(
 ) -> dict[str, Any]:
     """Write the borrower container + goldens + provenance record, and return the summary.
 
+    `drafter_dir` is the drafter's pinned snapshot (`drafter_pin`), `product_dir` the lender (the
+    regular product series of the target in `model_dir` — {@link lender_dir}).
+
     MUST: the outputs are written into the staging directory and placed only after passing **every
-    gate** (the form check, the goldens) ({@link karume.artifacts.staged_publication}).
+    gate** (the pins, the pairing, the lender's checkpoint, the form check, the goldens)
+    ({@link karume.artifacts.staged_publication}).
     MUST: the rounding comes before taking the reference and the goldens (ADR 0006) — after it, only
     the goldens would run on the original weights.
     """
+    sources.assert_snapshot_pin(drafter_dir, drafter_pin)
     print(
         "[load] drafter (no sparse softmax) + the target's main table", file=sys.stderr, flush=True
     )
-    wrapper = load_drafter(steps, model_dir)
+    wrapper = load_drafter(steps, model_dir, source=drafter_dir)
     config = wrapper.drafter.config
     text = config.get_text_config()
+    target_config = one_shot.load_text_config(model_dir)
 
     print(
         "[quant] i8 per-channel (every nn.Linear; the shared table unrounded)",
@@ -1207,8 +1316,12 @@ def export_series(
         lender_graph(product_dir),
         read_layouts(lender_container(product_dir)),
         config,
-        one_shot.load_text_config(model_dir),
+        target_config,
     )
+    assert_drafter_pairing(config, target_config, lender)
+    print("[provenance] the target checkpoint's fingerprint", file=sys.stderr, flush=True)
+    checkpoint = provenance.checkpoint_fingerprint(model_dir)
+    assert_lender_checkpoint(product_dir, checkpoint)
     specs = decode.rope_specs(text)
     example = example_inputs(wrapper, specs)
 
@@ -1220,7 +1333,7 @@ def export_series(
         print("[export] surgery → shared declaration → write", file=sys.stderr, flush=True)
         surgical = to_external_states_form(graph, external_states_plan(graph, text, lender))
         shared_graph, remaining, shared_name = share_target_embedding(
-            surgical, tensors, lender, one_shot.load_text_config(model_dir)
+            surgical, tensors, lender, target_config
         )
         verified = publish_model(
             staged / one_shot.MODEL_FILE,
@@ -1240,8 +1353,11 @@ def export_series(
         if goldens:
             cases = build_cases(model_dir)
             golden_summary = write_goldens(wrapper, model_dir, cases, staged, cycles, device)
-        print("[provenance] checkpoint fingerprint → reference.json", file=sys.stderr, flush=True)
-        provenance.write_record(staged, drafter_reference(out_dir, model_dir, golden_summary))
+        print("[provenance] fingerprints → reference.json", file=sys.stderr, flush=True)
+        provenance.write_record(
+            staged,
+            drafter_reference(out_dir, checkpoint, drafter_dir, drafter_pin, golden_summary),
+        )
 
     return {
         "dir": str(out_dir),
@@ -1320,18 +1436,25 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # MUST: `--model` accepts E2B only — both the drafter's upstream ({@link ASSISTANT_REPO}) and
-    # the lender's default (`--product-dir`) are spelled for E2B only, so accepting another model
-    # would silently bake E2B's drafter against another model's lender (E4B's drafter is not
-    # supported).
+    """The CLI: the family's skeleton without `--sym-max` (the drafter has no chunk symbol), the
+    models with a pinned regular drafter, and the drafter snapshot and the lender defaulting to the
+    chosen model's.
+
+    MUST: `--model` accepts only the models of `gemma4.sources.REGULAR_DRAFTER_PINS`, and the
+    drafter and the lender follow it — a default spelled for one model would silently bake that
+    model's drafter against another model's lender.
+    """
     parser = one_shot.series_parser(
         __doc__.split("\n\n")[0],
         partial(one_shot.series_dir, suffix=GEMMA4_DRAFTER_SUFFIX),
         with_sym_max=False,
-        models=(GEMMA4_DEFAULT_MODEL,),
+        models=tuple(sorted(sources.REGULAR_DRAFTER_PINS)),
     )
+    parser.add_argument("--drafter-dir", type=Path, default=None)
+    one_shot.add_model_default(parser, "drafter_dir", sources.regular_drafter_dir)
+    parser.add_argument("--product-dir", type=Path, default=None)
+    one_shot.add_model_default(parser, "product_dir", lender_dir)
     parser.add_argument("--steps", type=int, default=DRAFT_STEPS)
-    parser.add_argument("--product-dir", type=Path, default=DEFAULT_PRODUCT_DIR)
     parser.add_argument("--cycles", type=int, default=GOLDEN_CYCLES)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--no-goldens", dest="goldens", action="store_false")
@@ -1339,7 +1462,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    one_shot.run_series_cli(build_parser(), export_series, argv)
+    args = build_parser().parse_args(argv)
+    model = args.model
+    options = one_shot.resolve_series_args(args)
+    model_dir = options.pop("model_dir")
+    summary = export_series(
+        model_dir,
+        options.pop("out"),
+        drafter_pin=sources.regular_drafter_pin(model),
+        **options,
+    )
+    print(json.dumps({"model_dir": str(model_dir), **summary}, indent=1, ensure_ascii=False))
 
 
 if __name__ == "__main__":

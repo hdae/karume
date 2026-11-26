@@ -46,6 +46,7 @@ from gemma4.distribution import (
     gemma4_series_name,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
+from gemma4.sources import REGULAR_DRAFTER_PINS
 from karume.container import BLOCK_MAX_BYTES, AssetInput, Provenance
 from karume.emit import stored_model
 from karume.ir import (
@@ -684,6 +685,21 @@ def tokenizer_asset(
     return asset
 
 
+def drafter_record_of(model: str = GEMMA4_DEFAULT_MODEL) -> dict[str, Any]:
+    """A drafter series' provenance record naming model `model`'s regular drafter pin, in the form
+    `gemma4/export_drafter.py` writes (`revision`, `dir` = the pin's label); the regular line holds
+    the series to that pin (`gemma4.distribution.assert_gemma4_drafter_record`)."""
+    pin = REGULAR_DRAFTER_PINS[model]
+    return {
+        "drafter": {
+            "repo": pin.repo,
+            "revision": pin.revision,
+            "dir": pin.label,
+            "files": {name: {"bytes": 1, "sha256": sha} for name, sha in pin.sha256.items()},
+        }
+    }
+
+
 def write_series(
     product: Path,
     tokenizer_dir: Path,
@@ -692,6 +708,7 @@ def write_series(
     container: Sequence[bytes] | None = None,
     drafter: Path | None = None,
     drafter_bytes: Sequence[bytes] | None = None,
+    drafter_record: Mapping[str, Any] | None = None,
     tokenizer: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
     text_config: Mapping[str, Any] | None = None,
@@ -702,7 +719,8 @@ def write_series(
     The product series also holds companions that **do not go into the distribution**
     (`ple.probe.safetensors` / a greedy golden / `reference.json`) — evidence that nothing outside
     the output path table gets mixed in. PLE is an **asset** of the product container, so it does
-    not appear as a separate file of the series (ADR 0109 decision 4).
+    not appear as a separate file of the series (ADR 0109 decision 4). The drafter series' record
+    is `drafter_record` (default: E2B's, {@link drafter_record_of}).
     """
     from container_series import write_component  # recipe-shared helper set up by conftest
 
@@ -722,7 +740,10 @@ def write_series(
     # Companions that do not go into the distribution (golden and provenance record) — evidence
     # that they are not in the output path table.
     (borrower / "drafter-golden.short-en.safetensors").write_bytes(b"not distributed")
-    (borrower / "reference.json").write_text("{}\n", encoding="utf-8")
+    (borrower / "reference.json").write_text(
+        json.dumps(dict(drafter_record if drafter_record is not None else drafter_record_of())),
+        encoding="utf-8",
+    )
     (product / "ple.probe.safetensors").write_bytes(b"not distributed")
     (product / "greedy.capital-en.safetensors").write_bytes(b"not distributed")
     (product / "reference.json").write_text("{}\n", encoding="utf-8")

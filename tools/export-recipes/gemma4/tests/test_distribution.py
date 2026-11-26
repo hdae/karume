@@ -48,13 +48,16 @@ from gemma4.distribution import (
     GEMMA4_TOKENIZER_ROLE,
     GEMMA4_WEIGHTS,
     Gemma4Sources,
+    gemma4_notice_markdown,
     gemma4_plan,
     gemma4_repo_name,
+    gemma4_root_files,
     gemma4_rope_input_name,
     gemma4_series_name,
     gemma4_sources,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
+from gemma4.sources import REGULAR_DRAFTER_PINS
 from gemma4.tests import product_fixture as fixture
 from karume.container import AssetInput, container_parts
 from karume.dist import (
@@ -171,7 +174,7 @@ def _assemble(root: Path, model: str = GEMMA4_DEFAULT_MODEL) -> tuple[Path, dict
         [gemma4_plan(sources, model)],
         out_dir,
         model,
-        root_files=gemma4_distribution.PIPELINE.root_files,
+        root_files=gemma4_root_files([model]),
     )
     return out_dir, manifest
 
@@ -887,7 +890,7 @@ class TestGemma4Card:
             out_dir,
             GEMMA4_DEFAULT_MODEL,
             render_card=partial(render_gemma4_model_card, repo="hdae/karume-gemma4"),
-            root_files=gemma4_distribution.PIPELINE.root_files,
+            root_files=gemma4_root_files([GEMMA4_DEFAULT_MODEL]),
         )
 
         card = (out_dir / "README.md").read_text(encoding="utf-8")
@@ -941,17 +944,21 @@ class TestGemma4Card:
     def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
         self, gemma4_assembled, tmp_path: Path
     ) -> None:
-        """`base_model_relation` comes from the manifest: E2B's int8 drafter is a quantized form,
-        while an E4B-only manifest stores nothing but the checkpoint's bf16 values — none of the
-        Hub's relations, so the field is left out."""
+        """`base_model_relation` comes from the manifest: each model's int8 drafter is a quantized
+        form, while a manifest without a drafter stores nothing but the checkpoint's bf16 values —
+        none of the Hub's relations, so the field is left out."""
         _, e2b = gemma4_assembled
-        _, e4b = _assemble_e4b(tmp_path)
+        _, e4b = _assemble_e4b(tmp_path / "with")
 
         def front_matter(manifest: Mapping[str, Any]) -> str:
             return render_gemma4_model_card(manifest, "hdae/karume-gemma4").split("---")[1]
 
         assert "base_model_relation: quantized\n" in front_matter(e2b)
-        assert "base_model_relation" not in front_matter(e4b)
+        assert "base_model_relation: quantized\n" in front_matter(e4b)
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            _without_e4b_drafter(monkeypatch)
+            _, bf16_only = _assemble_e4b(tmp_path / "without", drafter=False)
+            assert "base_model_relation" not in front_matter(bf16_only)
 
     def test_it_refuses_a_manifest_whose_main_model_is_not_bf16(self, gemma4_assembled) -> None:
         """The attribution states the checkpoint's bf16 values unchanged; a manifest whose `model`
@@ -1093,7 +1100,7 @@ class TestGemma4LegalText:
     def test_the_notice_names_no_model_outside_the_line(self) -> None:
         """12B ships in the q4_0 QAT line only (`karume-gemma4-qat`): a notice naming its
         checkpoint would claim a redistribution this repository does not make (§4(b))."""
-        notice = gemma4_distribution.GEMMA4_NOTICE_MARKDOWN
+        notice = gemma4_notice_markdown(GEMMA4_REGULAR_MODELS)
 
         for model, upstream in GEMMA4_UPSTREAM.items():
             if model not in GEMMA4_REGULAR_MODELS:
@@ -1105,23 +1112,84 @@ class TestGemma4LegalText:
         without exception.
 
         The notice is a `Pipeline.root_files` file (the core's type is `Mapping[str, str]`), so it
-        cannot be built from the manifest — the correspondence between the baked prose and the
-        models actually distributed can be checked only here.
+        is not built from the manifest — the correspondence between the prose and the models
+        actually distributed can be checked only here.
         """
         out_dir, manifest = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
         _assert_notice_names(notice, [GEMMA4_UPSTREAM[name] for name in manifest["models"]])
 
+    def test_the_notice_names_every_drafter_upstream(self) -> None:
+        """Every redistributed drafter checkpoint is named in the §4(b) notice — the drafter table
+        grows without the attribution table moving, so the gate below does not see it."""
+        _assert_notice_names(
+            gemma4_notice_markdown(GEMMA4_REGULAR_MODELS),
+            gemma4_card.GEMMA4_DRAFTER_UPSTREAM.values(),
+        )
+
+    @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
+    def test_a_one_model_build_names_that_models_drafter_alone(
+        self, tmp_path: Path, model: str
+    ) -> None:
+        """A build of one model ships one drafter, so its notice names that model's assistant
+        and no other — naming a drafter the repository does not carry would claim a
+        redistribution it does not make (§4(b))."""
+        out_dir, _ = _assemble(tmp_path, model) if model == "e2b" else _assemble_e4b(tmp_path)
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        flat = " ".join(notice.split())
+
+        assert f"For the `{model}` model only" in flat
+        assert f"`{gemma4_card.GEMMA4_DRAFTER_UPSTREAM[model]}` (the multi-token-prediction" in flat
+        assert "**The drafter's weights were quantized to int8 throughout**" in flat
+        for other, repo in gemma4_card.GEMMA4_DRAFTER_UPSTREAM.items():
+            if other != model:
+                assert repo not in notice, other
+
+    def test_a_two_model_build_names_each_drafter_with_its_model(self, tmp_path: Path) -> None:
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        out_dir = tmp_path / "models" / "both"
+        assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            out_dir,
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+        flat = " ".join((out_dir / "NOTICE.md").read_text(encoding="utf-8").split())
+
+        assert (
+            "drafter head — `google/gemma-4-E2B-it-assistant` for `e2b` and"
+            " `google/gemma-4-E4B-it-assistant` for `e4b` — which are licensed" in flat
+        )
+        assert "**The drafters' weights were quantized to int8 throughout**" in flat
+        assert "model only" not in flat
+
+    def test_a_build_without_a_drafter_has_no_drafter_paragraph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _without_e4b_drafter(monkeypatch)
+        out_dir, _ = _assemble_e4b(tmp_path, drafter=False)
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        assert "-it-assistant" not in notice
+        assert "int8" not in notice
+        assert notice.endswith("The original checkpoints are not distributed here.\n")
+
+    def test_the_pipelines_fixed_notice_is_the_whole_lines(self) -> None:
+        """`Pipeline.root_files` is one fixed set: the notice of a build of every regular
+        model."""
+        assert gemma4_distribution.PIPELINE.root_files == gemma4_root_files(GEMMA4_REGULAR_MODELS)
+
     def test_the_notice_covers_the_whole_attribution_table(self) -> None:
         """The gate that turns red the moment a model is added to the attribution table (the MUST
-        of `GEMMA4_NOTICE_MARKDOWN`).
+        of `gemma4_notice_markdown`).
 
         The prose can only be written by hand (the wording review of legal text assumes a person
         reads it), so forgetting it is caught here rather than at assembly time.
         """
         _assert_notice_names(
-            gemma4_distribution.GEMMA4_NOTICE_MARKDOWN,
+            gemma4_notice_markdown(GEMMA4_REGULAR_MODELS),
             [GEMMA4_UPSTREAM[model] for model in GEMMA4_REGULAR_MODELS],
         )
 
@@ -1146,11 +1214,13 @@ class TestGemma4LegalText:
 _UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer stand-in"}'
 
 
-def _e4b_sources(root: Path) -> Gemma4Sources:
-    """E4B's inputs — no drafter, its own tokenizer series (`GEMMA4_TOKENIZER_SERIES`)."""
+def _e4b_sources(root: Path, *, drafter: bool = True) -> Gemma4Sources:
+    """E4B's inputs — its own drafter series (`drafter=False`: none, for a line whose drafter table
+    does not list E4B — {@link _without_e4b_drafter}) and its own tokenizer series
+    (`GEMMA4_TOKENIZER_SERIES`)."""
     return Gemma4Sources(
         product=root / "series" / "gemma4-e4b-product-bf16",
-        drafter=None,
+        drafter=root / "series" / "gemma4-e4b-drafter" if drafter else None,
         tokenizer=root / "series" / "gemma4-e4b-tokenizer",
         model=root / "inputs" / "gemma-4-E4B-it",
         upstream_tokenizer=root / "inputs" / "gemma-4-E4B-it",
@@ -1168,19 +1238,40 @@ def _borrow_e2b_series(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _without_e4b_drafter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A line whose drafter table does not list E4B — the branch of a model that ships no drafter
+    (no regular model is one today; the branch stays the rule for the next model without an upstream
+    drafter). Both readers of the table are patched: the distribution (`gemma4_has_drafter`) and the
+    card."""
+    table = {
+        model: repo for model, repo in gemma4_card.GEMMA4_DRAFTER_UPSTREAM.items() if model != "e4b"
+    }
+    monkeypatch.setattr(gemma4_distribution, "GEMMA4_DRAFTER_UPSTREAM", table)
+    monkeypatch.setattr(gemma4_card, "GEMMA4_DRAFTER_UPSTREAM", table)
+
+
 def _build_e4b(
-    root: Path, *, upstream: bytes = _UPSTREAM_TOKENIZER, recorded: bytes | None = None
+    root: Path,
+    *,
+    upstream: bytes = _UPSTREAM_TOKENIZER,
+    recorded: bytes | None = None,
+    drafter: bool = True,
 ) -> Gemma4Sources:
     """E4B's minimal series (`recorded` = the bytes of the source the tokenizer asset states;
-    by default identical to upstream)."""
-    sources = _e4b_sources(root)
+    by default identical to upstream; `drafter` as {@link _e4b_sources})."""
+    sources = _e4b_sources(root, drafter=drafter)
     source_bytes = upstream if recorded is None else recorded
     fixture.write_series(
         sources.product,
         sources.tokenizer,
         sources.model,
-        # The fixture writes the borrower drafter series next to product by default (E4B's plan
-        # does not read it).
+        # Without a drafter entry the fixture writes the borrower series next to product under
+        # E2B's name (E4B's plan does not read it then).
+        **(
+            {}
+            if sources.drafter is None
+            else {"drafter": sources.drafter, "drafter_record": fixture.drafter_record_of("e4b")}
+        ),
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(source_bytes).hexdigest()},
@@ -1190,20 +1281,30 @@ def _build_e4b(
     return sources
 
 
-def _assemble_e4b(root: Path) -> tuple[Path, dict[str, Any]]:
-    sources = _build_e4b(root)
+def _assemble_e4b(root: Path, *, drafter: bool = True) -> tuple[Path, dict[str, Any]]:
+    sources = _build_e4b(root, drafter=drafter)
     out_dir = root / "models" / "e4b-only"
     manifest = assemble_family(
         [gemma4_plan(sources, "e4b")],
         out_dir,
         "e4b",
-        root_files=gemma4_distribution.PIPELINE.root_files,
+        root_files=gemma4_root_files(["e4b"]),
     )
     return out_dir, manifest
 
 
+def _changes_item(card: str) -> str:
+    """The card's "Changes made here" bullet, joined into one line (its closing sentence on
+    retraining left out)."""
+    lines = card.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("- **Changes made here**"))
+    end = next(i for i in range(start + 1, len(lines)) if not lines[i].startswith("  "))
+    item = " ".join(" ".join(lines[start:end]).split())
+    return item.removesuffix(" No retraining and no fine-tuning.")
+
+
 class TestGemma4E4B:
-    """E4B's model entry — no drafter, and the same presets as E2B (`bf16` the default)."""
+    """E4B's model entry — its own drafter, and the same presets as E2B (`bf16` the default)."""
 
     def test_the_upstream_and_the_series_names_follow_the_model(self, tmp_path: Path) -> None:
         assert GEMMA4_UPSTREAM["e4b"] == "google/gemma-4-E4B-it"
@@ -1211,9 +1312,9 @@ class TestGemma4E4B:
 
         assert sources.product == tmp_path / "gemma4-e4b-product-bf16"
         assert sources.model.name == "gemma-4-E4B-it"
-        # No drafter; its own tokenizer series (E2B's and E4B's upstream tokenizers differ since
-        # Google's fixes of 2026-11-03).
-        assert sources.drafter is None
+        # Its own drafter series, and its own tokenizer series (E2B's and E4B's upstream
+        # tokenizers differ since Google's fixes of 2026-11-03).
+        assert sources.drafter == tmp_path / "gemma4-e4b-drafter"
         assert sources.tokenizer == tmp_path / "gemma4-e4b-tokenizer"
 
     def test_every_model_declares_a_default_quant_and_a_tokenizer_series(self) -> None:
@@ -1225,14 +1326,29 @@ class TestGemma4E4B:
         for model, quant in gemma4_distribution.GEMMA4_DEFAULT_QUANT.items():
             assert quant in gemma4_distribution.gemma4_quants(model)
 
-    def test_the_entry_declares_no_drafter(self, tmp_path: Path) -> None:
+    def test_the_entry_declares_its_drafter_and_every_preset_loads_it(self, tmp_path: Path) -> None:
+        """E4B carries the int8 drafter of its own upstream (`google/gemma-4-E4B-it-assistant`)
+        under the same role as E2B's, and both presets name it."""
+        out_dir, manifest = _assemble_e4b(tmp_path)
+        entry = manifest["models"]["e4b"]
+
+        assert list(entry["weights"]) == [GEMMA4_ROLE, GEMMA4_DRAFTER_ROLE]
+        assert (out_dir / "e4b" / GEMMA4_DRAFTER_ROLE).is_dir()
+        for name, quant in entry["quants"].items():
+            assert quant["weights"] == {GEMMA4_ROLE: "bf16", GEMMA4_DRAFTER_ROLE: "i8"}, name
+            assert gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE in quant["description"], name
+
+    def test_a_model_outside_the_drafter_table_declares_no_drafter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The drafter role being absent from weights is the only expression of "no speculation
         possible".
 
         The reader rejects a load that specifies `speculative` at the resolution of weights (before
         fetching a single component).
         """
-        out_dir, manifest = _assemble_e4b(tmp_path)
+        _without_e4b_drafter(monkeypatch)
+        out_dir, manifest = _assemble_e4b(tmp_path, drafter=False)
         entry = manifest["models"]["e4b"]
 
         assert list(entry["weights"]) == [GEMMA4_ROLE]
@@ -1240,7 +1356,7 @@ class TestGemma4E4B:
         for name, quant in entry["quants"].items():
             # The preset loads the one storage of the main model alone.
             assert quant["weights"] == {GEMMA4_ROLE: "bf16"}, name
-            assert "drafter" not in quant["description"].lower()
+            assert gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE not in quant["description"], name
 
     def test_the_entry_carries_both_presets_with_bf16_as_the_default(self, tmp_path: Path) -> None:
         _, manifest = _assemble_e4b(tmp_path)
@@ -1252,15 +1368,31 @@ class TestGemma4E4B:
         # Both models default to the original weights (the maintainer's ruling of 2026-11-04).
         assert gemma4_distribution.GEMMA4_DEFAULT_QUANT == {"e2b": "bf16", "e4b": "bf16"}
 
-    def test_the_card_names_no_drafter_for_an_e4b_only_manifest(self, tmp_path: Path) -> None:
-        """The upstream of a drafter that is not distributed is not written as a source (base_model
-        is derived from the manifest)."""
+    def test_the_card_names_the_e4b_drafter_alone_for_an_e4b_only_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """base_model is derived from the manifest: an E4B-only manifest names E4B's checkpoint and
+        E4B's drafter, and not E2B's drafter, which it does not distribute."""
         _, manifest = _assemble_e4b(tmp_path)
 
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
 
         assert "google/gemma-4-E4B-it" in card
+        assert "google/gemma-4-E4B-it-assistant" in card
         assert "gemma-4-E2B-it-assistant" not in card
+
+    def test_the_card_names_no_drafter_for_a_manifest_without_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The upstream of a drafter that is not distributed is not written as a source (base_model
+        is derived from the manifest)."""
+        _without_e4b_drafter(monkeypatch)
+        _, manifest = _assemble_e4b(tmp_path, drafter=False)
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        assert "google/gemma-4-E4B-it" in card
+        assert "-it-assistant" not in card
         assert "drafter head" not in card
 
     def test_the_card_still_names_the_e2b_drafter_when_e2b_ships_it(self, gemma4_assembled) -> None:
@@ -1293,7 +1425,7 @@ class TestGemma4E4B:
             [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
             out_dir,
             "e2b",
-            root_files=gemma4_distribution.PIPELINE.root_files,
+            root_files=gemma4_root_files(["e2b", "e4b"]),
         )
 
         paths = {
@@ -1304,6 +1436,58 @@ class TestGemma4E4B:
         assert paths["e4b"].startswith("shared/")
         # E2B keeps carrying the drafter (adding E4B does not change E2B's entry).
         assert GEMMA4_DRAFTER_ROLE in manifest["models"]["e2b"]["weights"]
+
+    def test_the_card_names_each_drafter_by_its_model(self, tmp_path: Path) -> None:
+        """With both models' drafters in one manifest, each attribution bullet says whose drafter
+        it is (a label taken from the repository name would read `assistant` for both)."""
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        for model, repo in gemma4_card.GEMMA4_DRAFTER_UPSTREAM.items():
+            assert f"- **`{model}` drafter**: [{repo}](https://huggingface.co/{repo})" in card
+        assert "**`assistant`**" not in card
+
+    def test_the_changes_summary_states_the_drafters_int8_storage(self, tmp_path: Path) -> None:
+        """The card's "Changes made here" summary lists the drafter's int8 quantization as
+        `NOTICE.md` does — a summary saying only "bf16 values unchanged" would understate a change
+        to weights the repository ships."""
+        _, one = _assemble_e4b(tmp_path / "one")
+        e4b = _build_e4b(tmp_path / "two")
+        e2b = _build(tmp_path / "two")
+        both = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "two" / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+
+        assert _changes_item(render_gemma4_model_card(one, "hdae/karume-gemma4")).endswith(
+            "host-generated inputs; the drafter head's own weights are quantized to int8"
+            " throughout, linear layers included."
+        )
+        assert _changes_item(render_gemma4_model_card(both, "hdae/karume-gemma4")).endswith(
+            "host-generated inputs; the drafter heads' own weights are quantized to int8"
+            " throughout, linear layers included."
+        )
+
+    def test_the_changes_summary_has_no_drafter_clause_without_a_drafter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _without_e4b_drafter(monkeypatch)
+        _, manifest = _assemble_e4b(tmp_path, drafter=False)
+
+        item = _changes_item(render_gemma4_model_card(manifest, "hdae/karume-gemma4"))
+
+        assert item.endswith("rotary cos/sin arrive as host-generated inputs.")
+        assert "int8" not in item
 
     def test_it_refuses_a_borrowed_tokenizer_compiled_from_another_upstream(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1329,15 +1513,24 @@ class TestGemma4E4B:
             gemma4_plan(sources, "e4b")
 
     def test_it_refuses_a_drafter_series_for_a_model_without_a_drafter(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An entry for a model that distributes no drafter means a drafter for another model
         slipped in."""
-        sources = _build_e4b(tmp_path)
+        _without_e4b_drafter(monkeypatch)
+        sources = _build_e4b(tmp_path, drafter=False)
         smuggled = replace(sources, drafter=tmp_path / "series" / "gemma4-e2b-drafter")
 
         with pytest.raises(DistError, match="the drafter series is"):
             gemma4_plan(smuggled, "e4b")
+
+    def test_it_refuses_an_e4b_plan_whose_drafter_series_is_missing(self, tmp_path: Path) -> None:
+        """E4B distributes a drafter: an empty entry would silently make a distribution without
+        speculation."""
+        sources = replace(_build_e4b(tmp_path), drafter=None)
+
+        with pytest.raises(DistError, match="the drafter series is"):
+            gemma4_plan(sources, "e4b")
 
     def test_it_refuses_an_e2b_plan_whose_drafter_series_is_missing(self, tmp_path: Path) -> None:
         """An empty entry for a model that distributes a drafter is rejected, since it would
@@ -1345,6 +1538,89 @@ class TestGemma4E4B:
         sources = replace(_build(tmp_path), drafter=None)
 
         with pytest.raises(DistError, match="the drafter series is"):
+            gemma4_plan(sources, "e2b")
+
+
+def _write_drafter_record(sources: Gemma4Sources, record: Mapping[str, Any]) -> None:
+    assert sources.drafter is not None
+    (sources.drafter / "reference.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+class TestGemma4DrafterRecord:
+    """The regular line holds each drafter series to its pin (`REGULAR_DRAFTER_PINS`) through the
+    series' provenance record — its containers name no revision."""
+
+    def test_it_accepts_the_older_record_that_names_the_snapshot_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """A record written before the drafters were pinned has no `revision`; its `dir` is the
+        hub cache's snapshot directory, named by the commit — the E2B series' form."""
+        sources = _build(tmp_path)
+        record = fixture.drafter_record_of("e2b")
+        del record["drafter"]["revision"]
+        record["drafter"]["dir"] = REGULAR_DRAFTER_PINS["e2b"].revision
+        _write_drafter_record(sources, record)
+
+        assert GEMMA4_DRAFTER_ROLE in gemma4_plan(sources, "e2b").weights
+
+    def test_it_refuses_a_series_from_another_snapshot(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        record = fixture.drafter_record_of("e2b")
+        record["drafter"]["revision"] = "0" * 40
+        _write_drafter_record(sources, record)
+
+        with pytest.raises(DistError, match="exported from another snapshot"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_an_older_record_from_another_snapshot(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        record = fixture.drafter_record_of("e2b")
+        del record["drafter"]["revision"]
+        record["drafter"]["dir"] = "0" * 40
+        _write_drafter_record(sources, record)
+
+        with pytest.raises(DistError, match="exported from another snapshot"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_the_other_models_drafter(self, tmp_path: Path) -> None:
+        """E4B's series record under E2B's plan: another repository."""
+        sources = _build(tmp_path)
+        _write_drafter_record(sources, fixture.drafter_record_of("e4b"))
+
+        with pytest.raises(DistError, match="the drafter is 'google/gemma-4-E4B-it-assistant'"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_a_file_digest_other_than_the_pins(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        record = fixture.drafter_record_of("e2b")
+        record["drafter"]["files"]["config.json"]["sha256"] = "0" * 64
+        _write_drafter_record(sources, record)
+
+        with pytest.raises(DistError, match="the drafter files are not"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_a_record_naming_other_files(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        record = fixture.drafter_record_of("e2b")
+        del record["drafter"]["files"]["config.json"]
+        _write_drafter_record(sources, record)
+
+        with pytest.raises(DistError, match="the record names the drafter files"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_a_record_without_a_drafter_section(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        _write_drafter_record(sources, {})
+
+        with pytest.raises(DistError, match="no drafter section"):
+            gemma4_plan(sources, "e2b")
+
+    def test_it_refuses_a_series_without_its_record(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        assert sources.drafter is not None
+        (sources.drafter / "reference.json").unlink()
+
+        with pytest.raises(DistError, match="provenance record is missing"):
             gemma4_plan(sources, "e2b")
 
 
@@ -1384,9 +1660,35 @@ class TestGemma4ParallelPreset:
         # The drafter sentence follows the preset's own text; the speed sentence comes last.
         assert e2b["bf16"]["description"] == reference + note
         assert e2b["bf16-fast"]["description"] == declared + note + speed["e2b"]
-        assert e4b["bf16"]["description"] == reference
-        assert e4b["bf16-fast"]["description"] == declared + speed["e4b"]
-        assert "drafter" not in speed["e4b"].lower()
+        assert e4b["bf16"]["description"] == reference + note
+        assert e4b["bf16-fast"]["description"] == declared + note + speed["e4b"]
+
+    def test_a_model_without_a_drafter_gets_no_drafter_sentence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _without_e4b_drafter(monkeypatch)
+        quants = gemma4_distribution.gemma4_quants("e4b")
+
+        for name, quant in quants.items():
+            assert gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE not in quant["description"], name
+
+    def test_the_e2b_speed_sentence_names_the_decode_it_measured(self) -> None:
+        """E2B's speculative decode is not measured, so its sentence says its decode ran without
+        the drafter (`GEMMA4_SPEED_NOTE`)."""
+        assert gemma4_distribution.gemma4_has_drafter("e2b")
+        assert gemma4_distribution.GEMMA4_SPEED_NOTE["e2b"].endswith(" without the drafter.")
+
+    def test_the_e4b_speed_sentence_keeps_the_maintainers_wording(self) -> None:
+        """E4B's sentence is the maintainer's wording and is not rewritten here."""
+        assert (
+            gemma4_distribution.GEMMA4_SPEED_NOTE["e4b"]
+            == " Faster than bf16 on tested E4B devices."
+        )
+
+    @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
+    def test_every_description_fits_the_manifest_limit(self, model: str) -> None:
+        for name, quant in gemma4_distribution.gemma4_quants(model).items():
+            assert len(quant["description"]) <= 200, name
 
     def test_no_preset_states_a_speed_without_a_measurement(self) -> None:
         """The speed sentence enters per model with its measurement (`GEMMA4_SPEED_NOTE`): the
@@ -1447,7 +1749,7 @@ def _assemble_models(root: Path, plans: list[Any], default: str) -> tuple[Path, 
         out_dir,
         default,
         render_card=partial(render_gemma4_model_card, repo="hdae/karume-gemma4"),
-        root_files=gemma4_distribution.PIPELINE.root_files,
+        root_files=gemma4_root_files([plan.name for plan in plans]),
     )
     return out_dir, manifest
 

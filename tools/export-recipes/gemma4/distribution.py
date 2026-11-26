@@ -8,7 +8,7 @@ dtype label it is listed, and which quant is the default.
 
 Per model the regular line ships the product graph, the borrowing drafter for a model with an
 upstream drafter, and one asset kind (ADR 0084 decision 5 / 0096 step 2 / 0109 decision 4): E2B
-ships two graphs, E4B one, as it has no drafter ({@link gemma4_has_drafter}):
+and E4B ship two graphs each ({@link gemma4_has_drafter}):
 
 - `model` — the product graph's container (the `.krm` part sequence `gemma4/export_product.py`
   writes: the PLE out of the graph, the exit the selected rows' logits and hidden states). Every
@@ -98,7 +98,8 @@ from __future__ import annotations
 import copy
 import json
 import math
-from collections.abc import Callable, Mapping
+import textwrap
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,6 +163,7 @@ from .sources import (
     QAT_DRAFTER_PINS,
     QAT_LINE_PINS,
     QAT_PINS,
+    REGULAR_DRAFTER_PINS,
     HubPin,
     ModelPins,
     assert_model_pins,
@@ -473,9 +475,11 @@ GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: `bf16-fast`: RTX 3080 Ti (Node + Dawn, Vulkan; two runs) E2B 16.70 / 16.47 → 12.97 / 12.07 and
 #: E4B 32.23 / 29.68 → 18.28 / 21.35; RTX 5070 Ti (Chrome, D3D12) E2B 19.12 → 9.96 and E4B
 #: 32.71 → 16.57; Apple M2 (Chrome, Metal) E2B 65.36 → 60.77 and E4B 119.90 → 113.89 — the browser
-#: records with each adapter's own geometry table. E2B's speculative decode (with the drafter) is
-#: not measured, so its sentence names the decode that is; with the drafter sentence before it the
-#: E2B description is exactly at the manifest's limit of 200 characters.
+#: records with each adapter's own geometry table. Neither model's speculative decode (with the
+#: drafter) is measured. E2B's sentence names the decode that is, and with the drafter sentence
+#: before it the E2B description is exactly at the manifest's limit of 200 characters. E4B's
+#: sentence is the maintainer's wording of 2026-11-19, kept as written; with the drafter sentence
+#: before it the E4B description is 179 characters.
 GEMMA4_SPEED_NOTE: Mapping[str, str] = {
     "e2b": " Faster than bf16 on tested E2B devices without the drafter.",
     "e4b": " Faster than bf16 on tested E4B devices.",
@@ -1442,6 +1446,47 @@ def assert_gemma4_drafter_graph(
         )
 
 
+def assert_gemma4_drafter_record(series: Path, pin: HubPin) -> None:
+    """The drafter series' provenance record ({@link GEMMA4_REFERENCE_FILE}) names the drafter's
+    pin: its repository, its commit, and the SHA-256 of exactly the files the pin names.
+
+    The record states the commit in one of two forms, and both are read: `revision` (the form
+    `gemma4/export_drafter.py` writes now, with `dir` = `<repo>@<revision>`), or `dir` alone — a
+    record written before the drafters were pinned names the hub cache's snapshot directory, which
+    the cache names by the commit it resolved. A series from another snapshot, or a record without
+    a drafter section, fails: the distribution would otherwise ship a drafter whose source no pin
+    vouches for.
+    """
+    path = series / GEMMA4_REFERENCE_FILE
+    record = _read_json(path, "the drafter series' provenance record")
+    drafter = record.get("drafter") if isinstance(record, dict) else None
+    if not isinstance(drafter, dict):
+        raise DistError(
+            f"{path}: no drafter section — export the series with python -m gemma4.export_drafter"
+        )
+    if drafter.get("repo") != pin.repo:
+        raise DistError(f"{path}: the drafter is {drafter.get('repo')!r}, the pin {pin.label}")
+    revision = drafter.get("revision", drafter.get("dir"))
+    if revision != pin.revision:
+        raise DistError(
+            f"{path}: the drafter was read at {revision!r}, the pin is {pin.label} — a series"
+            " exported from another snapshot"
+        )
+    files = drafter.get("files")
+    if not isinstance(files, dict) or sorted(files) != sorted(pin.sha256):
+        named = sorted(files) if isinstance(files, dict) else files
+        raise DistError(
+            f"{path}: the record names the drafter files {named!r}, the pin {sorted(pin.sha256)}"
+        )
+    wrong = {
+        name: (files[name].get("sha256") if isinstance(files[name], dict) else None, expected)
+        for name, expected in sorted(pin.sha256.items())
+        if not isinstance(files[name], dict) or files[name].get("sha256") != expected
+    }
+    if wrong:
+        raise DistError(f"{path}: the drafter files are not {pin.label}'s (recorded, pin): {wrong}")
+
+
 def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
     """Check that every block the index names exists as an asset of that container with **the
     same role and the same length**.
@@ -1826,12 +1871,18 @@ class Gemma4Line:
     #: for every model, pinned or not.)
     pins: Mapping[str, ModelPins]
     #: Model → the pin of its drafter, whose revision the drafter container must name (absent =
-    #: the drafter container is not held to a revision — the regular E2B drafter records none).
+    #: the drafter container is not held to a revision — the regular drafters' containers record
+    #: none, and the regular line holds them through {@link drafter_record_pins}).
     drafter_pins: Mapping[str, HubPin]
+    #: Model → the pin of its drafter, which the drafter series' provenance record must name
+    #: ({@link assert_gemma4_drafter_record}; absent = the record is not read).
+    drafter_record_pins: Mapping[str, HubPin]
 
 
 #: The regular line (`karume-gemma4` — {@link PIPELINE}): the tables above. Its checkpoints are
-#: hand-placed (`inputs/gemma4/` — `gemma4.sources.checkpoint_dir`), so it has no pins.
+#: hand-placed (`inputs/gemma4/` — `gemma4.sources.checkpoint_dir`), so it has no pins; its
+#: drafters are read from pinned hub snapshots (`gemma4.sources.REGULAR_DRAFTER_PINS`), and their
+#: series' records are held to those pins.
 GEMMA4_REGULAR_LINE = Gemma4Line(
     models=GEMMA4_REGULAR_MODELS,
     has_drafter=gemma4_has_drafter,
@@ -1844,6 +1895,7 @@ GEMMA4_REGULAR_LINE = Gemma4Line(
     default_quant=GEMMA4_DEFAULT_QUANT,
     pins={},
     drafter_pins={},
+    drafter_record_pins=REGULAR_DRAFTER_PINS,
 )
 
 
@@ -1960,6 +2012,12 @@ def gemma4_plan(
         assert_upstream_provenance(
             drafter_container, license=GEMMA4_LICENSE, revision=drafter_pin.revision
         )
+    drafter_record_pin = line.drafter_record_pins.get(model)
+    if sources.drafter is not None and drafter_record_pin is not None:
+        # The regular exporter (`gemma4/export_drafter.py`) bakes no revision into the container,
+        # so the drafter is held to its pin through the series' record, as the QAT line's is
+        # through the container above.
+        assert_gemma4_drafter_record(sources.drafter, drafter_record_pin)
     generation = gemma4_generation_defaults(sources.upstream_tokenizer)
     if generation.suppress_tokens is not None:
         assert_gemma4_suppress_tokens(
@@ -2009,27 +2067,17 @@ def gemma4_plan(
 def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     """Build one gemma4 model's plan from the parent of `--series` (the CLI's dispatch target).
 
-    The regular line reads hand-placed checkpoints only ({@link GEMMA4_REGULAR_LINE} has no pins),
-    so there is no snapshot to check here; the q4_0 QAT line's entry
-    ({@link gemma4_qat_q4_0_dist_plan}) checks its pinned snapshots first.
+    The regular line reads hand-placed checkpoints ({@link GEMMA4_REGULAR_LINE} has no checkpoint
+    pins), so there is no snapshot to check here (the plan holds its drafter series' records to
+    their pins); the q4_0 QAT line's entry ({@link gemma4_qat_q4_0_dist_plan}) checks its pinned
+    snapshots first.
     """
     return gemma4_plan(gemma4_sources(series_dir, model), model)
 
 
-#: The modification notice (Apache 2.0 §4(b)). It lists **the changes this repository made to the
-#: upstream weights**.
-#:
-#: MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
-#: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-#:
-#: MUST: **on the day a model is added to `GEMMA4_UPSTREAM`, a line naming it is added here too** —
-#: the §4(b) notice must state "the modifications of every redistributed upstream", so a text left
-#: unchanged while the models grow lacks the notice for one model. This field is
-#: `Pipeline.root_files` (the core's type is `Mapping[str, str]`) and cannot see the manifest being
-#: assembled — the prose cannot be derived by machine, so a check covers it instead
-#: (`tests/test_distribution.py::TestGemma4LegalText` checks it against both the attribution table
-#: and the manifest, and turns red the moment a second entry comes in).
-GEMMA4_NOTICE_MARKDOWN = """# NOTICE
+#: The modification notice's opening and its list of the changes to the main models (Apache 2.0
+#: §4(b)); {@link gemma4_notice_markdown} adds the drafter paragraph of the models built.
+_GEMMA4_NOTICE_HEAD = """# NOTICE
 
 This repository redistributes modified forms of `google/gemma-4-E2B-it` and
 `google/gemma-4-E4B-it`, which are licensed under the Apache License, Version 2.0 (see
@@ -2048,22 +2096,74 @@ The following changes were made:
   gathers.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
+"""
 
-For the `e2b` model only, this repository also redistributes a modified form of
-`google/gemma-4-E2B-it-assistant` (the multi-token-prediction drafter head), which is licensed
+_GEMMA4_NOTICE_TAIL = """
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+"""
+
+
+def _gemma4_notice_drafters(models: Sequence[str]) -> str:
+    """The drafter paragraph for the models built that ship a drafter ({@link gemma4_has_drafter}):
+    one names that model's assistant alone, several name each with its model, and none has no
+    paragraph."""
+    drafters = [model for model in models if gemma4_has_drafter(model)]
+    if not drafters:
+        return ""
+    if len(drafters) == 1:
+        model = drafters[0]
+        return f"""
+For the `{model}` model only, this repository also redistributes a modified form of
+`{GEMMA4_DRAFTER_UPSTREAM[model]}` (the multi-token-prediction drafter head), which is licensed
 under the same Apache License, Version 2.0.
 Its graph was re-expressed in the Karume container format as well, with these further changes: the
 drafter's clustered sparse output head was replaced by a dense projection over the full
 vocabulary, and the drafter reads the key/value states and the embedding table of the main model
 instead of carrying its own. **The drafter's weights were quantized to int8 throughout**, linear
 layers included; its values are therefore not bit-identical to the source checkpoint.
-
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+"""
+    pairs = [f"`{GEMMA4_DRAFTER_UPSTREAM[model]}` for `{model}`" for model in drafters]
+    listed = ", ".join(pairs[:-1]) + " and " + pairs[-1]
+    # Wrapped like the rest of the notice (lines of at most 100 characters).
+    opening = textwrap.fill(
+        "For each model, this repository also redistributes a modified form of its"
+        f" multi-token-prediction drafter head — {listed} — which are licensed under the same"
+        " Apache License, Version 2.0.",
+        width=100,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return f"""
+{opening}
+Their graphs were re-expressed in the Karume container format as well, with these further changes:
+each drafter's clustered sparse output head was replaced by a dense projection over the full
+vocabulary, and the drafter reads the key/value states and the embedding table of its main model
+instead of carrying its own. **The drafters' weights were quantized to int8 throughout**, linear
+layers included; their values are therefore not bit-identical to the source checkpoints.
 """
 
 
-def gemma4_root_files() -> dict[str, str]:
-    """The legal texts placed at the distribution repository's root
+def gemma4_notice_markdown(models: Sequence[str]) -> str:
+    """The modification notice (Apache 2.0 §4(b)) of a build of `models`. It lists **the changes
+    this repository made to the upstream weights**, the drafters of the models built included.
+
+    MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
+    `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
+    The drafter paragraph is therefore derived from the models built: a build of one model names
+    that model's assistant alone, never a drafter the build does not ship.
+
+    MUST: **on the day a model is added to `GEMMA4_UPSTREAM`, a line naming it is added to the
+    opening too** — the §4(b) notice must state "the modifications of every redistributed
+    upstream", so a text left unchanged while the models grow lacks the notice for one model. That
+    prose cannot be derived by machine, so a check covers it instead
+    (`tests/test_distribution.py::TestGemma4LegalText` checks it against both the attribution table
+    and the manifest, and turns red the moment a second entry comes in).
+    """
+    return _GEMMA4_NOTICE_HEAD + _gemma4_notice_drafters(models) + _GEMMA4_NOTICE_TAIL
+
+
+def gemma4_root_files(models: Sequence[str]) -> dict[str, str]:
+    """The legal texts placed at the root of a distribution repository built from `models`
     (`karume.dist.Pipeline.root_files`).
 
     Upstream is Apache License 2.0 (the license policy at the top of `gemma4/README.md` — the
@@ -2072,11 +2172,11 @@ def gemma4_root_files() -> dict[str, str]:
     them". The license text is the original shared across families
     ({@link _shared.licenses.apache_license_2_0}), read **verbatim** — reformatting or replacing it
     would make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
-    `NOTICE.md` holds the §4(b) modification notice only.
+    `NOTICE.md` holds the §4(b) modification notice only ({@link gemma4_notice_markdown}).
     """
     return {
         "LICENSE.md": apache_license_2_0(),
-        "NOTICE.md": GEMMA4_NOTICE_MARKDOWN,
+        "NOTICE.md": gemma4_notice_markdown(models),
     }
 
 
@@ -2088,9 +2188,11 @@ PIPELINE = Pipeline(
     # Attribution is **determined by the model name alone** (`GEMMA4_UPSTREAM`), so it is not an
     # axis to choose.
     card_profiles={"gemma4": render_gemma4_model_card},
-    # The upstream license's redistribution terms (§4) apply to the one distribution repository, so
-    # they are read once here, however many times the assembly runs.
-    root_files=gemma4_root_files(),
+    # The upstream license's redistribution terms (§4) apply to the one distribution repository.
+    # `Pipeline.root_files` is one fixed set per pipeline and the core does not pass it the models
+    # built, so this is the notice of the whole line (both drafters); a build of one model gets its
+    # own notice only once the dispatch passes `gemma4_root_files(models)` for the models built.
+    root_files=gemma4_root_files(GEMMA4_REGULAR_MODELS),
 )
 
 
@@ -2301,6 +2403,7 @@ GEMMA4_QAT_Q4_0_LINE = Gemma4Line(
     default_quant=GEMMA4_QAT_Q4_0_DEFAULT_QUANT,
     pins=QAT_LINE_PINS,
     drafter_pins=QAT_DRAFTER_PINS,
+    drafter_record_pins={},
 )
 
 
@@ -2382,7 +2485,7 @@ def _qat_q4_0_notice_sources() -> str:
 
 
 #: The line's modification notice (Apache 2.0 §4(b)). MUST: the text matches the distribution's
-#: content ({@link GEMMA4_NOTICE_MARKDOWN}'s MUST — valid prose passes every machine check), and
+#: content ({@link gemma4_notice_markdown}'s MUST — valid prose passes every machine check), and
 #: it names every upstream of the line's attribution tables (built from them — tests).
 GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN = (
     """# NOTICE

@@ -1,9 +1,9 @@
 """The export recipe of Gemma 4 E2B / E4B (causal LM) (ADR 0065 decision 2 — outside the wheel,
 repository only).
 
-The export scripts pick the model with `--model e2b|e4b` (default e2b). The MTP drafter and the
-tokenizer asset compile exist for E2B only (E4B has no drafter, and its tokenizer is the same
-upstream, so it shares E2B's series — {@link gemma4.distribution}).
+The export scripts pick the model with `--model e2b|e4b` (default e2b), the MTP drafter
+({@link gemma4.export_drafter}) and the tokenizer asset compile included (each model has its own
+drafter upstream and its own tokenizer series — {@link gemma4.distribution}).
 
 Only what **cannot sit in the general-purpose exporter core** lives here: five export scripts
 (the one-shot {@link gemma4.export}, the states-form decode {@link gemma4.export_decode}, the

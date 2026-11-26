@@ -152,12 +152,15 @@ GEMMA4_VISION_ROLE = "vision"
 GEMMA4_MODEL_ROLE = "model"
 
 #: Model name → the upstream of its MTP drafter (ADR 0096 step 2). Kept apart from the attribution
-#: table (model name → upstream) — the one model `e2b` is built from two upstream checkpoints.
+#: table (model name → upstream) — one model is built from two upstream checkpoints.
 #: **A model not in this table ships no drafter** (`gemma4.distribution` decides from this table
-#: whether the drafter role exists — E4B's drafter is not supported). Being redistributed, it falls
-#: under the Apache 2.0 §4(b) notice, and this is the one place of the canonical spelling (the same
-#: one as `gemma4.export_drafter.ASSISTANT_REPO` / the prose of `NOTICE.md`).
-GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {"e2b": "google/gemma-4-E2B-it-assistant"}
+#: whether the drafter role exists). Being redistributed, it falls under the Apache 2.0 §4(b)
+#: notice, and this is the one place of the canonical spelling (read by the pins
+#: `gemma4.sources.REGULAR_DRAFTER_PINS` and the prose of `NOTICE.md`).
+GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {
+    "e2b": "google/gemma-4-E2B-it-assistant",
+    "e4b": "google/gemma-4-E4B-it-assistant",
+}
 
 #: License (checked first-hand on 2026-09-01 — the README frontmatter of the checkpoint snapshot
 #: says `license: apache-2.0`, and its `license_link` target carries the Apache 2.0 text).
@@ -216,17 +219,23 @@ def _gemma4_relation(manifest: Mapping[str, Any]) -> str | None:
 
 def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
     """The drafter upstreams of the models whose manifest entry **actually carries** a drafter
-    (in the models' order).
+    (in the models' order — {@link _gemma4_drafters})."""
+    return [upstream for _, upstream in _gemma4_drafters(manifest)]
 
-    Whether a drafter exists differs per model (E4B has none), so it is read from the manifest's
-    `weights` (the MUST that the card's numbers and facts come from the manifest — module
-    docstring).
+
+def _gemma4_drafters(manifest: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """(model, drafter upstream) for every model whose manifest entry **actually carries** a
+    drafter (in the models' order).
+
+    Whether a drafter exists differs per model (one outside the table ships none), so it is read
+    from the manifest's `weights` (the MUST that the card's numbers and facts come from the
+    manifest — module docstring).
 
     MUST: do not render for a model that carries a drafter but is not in the upstream table — it
     would be a redistribution that cannot name its source (the same reason as the attribution
     table's check in {@link _gemma4_metadata}).
     """
-    upstream: list[str] = []
+    drafters: list[tuple[str, str]] = []
     for name, model in manifest["models"].items():
         if GEMMA4_DRAFTER_ROLE not in model["weights"]:
             continue
@@ -236,8 +245,8 @@ def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
                 f" (known: {sorted(GEMMA4_DRAFTER_UPSTREAM)}) — a card that cannot name its source"
                 " is not drawn"
             )
-        upstream.append(GEMMA4_DRAFTER_UPSTREAM[name])
-    return upstream
+        drafters.append((name, GEMMA4_DRAFTER_UPSTREAM[name]))
+    return drafters
 
 
 def _gemma4_upstream_spellings(
@@ -428,18 +437,20 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
             f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
         )
-    for drafter in _gemma4_drafter_upstreams(manifest):
+    # Each drafter is labelled by its model (the q4_0 QAT card's form): with more than one, a label
+    # taken from the repository name would read `assistant` for every one of them.
+    for name, drafter in _gemma4_drafters(manifest):
         lines.append(
-            f"- **`{drafter.rsplit('-', 1)[-1]}`**:"
+            f"- **`{name}` drafter**:"
             f" [{drafter}](https://huggingface.co/{drafter}), the"
             " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
             " It is redistributed here with its clustered sparse output head replaced by a dense"
             " projection over the full vocabulary, and it reads the key/value states and embedding"
-            " table of the main model rather than carrying its own. Its own weights are quantized"
+            " table of its main model rather than carrying its own. Its own weights are quantized"
             " to int8 throughout, linear layers included."
         )
     lines += [
-        *_GEMMA4_CHANGES,
+        *_gemma4_changes(manifest),
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model card, and this",
@@ -449,14 +460,30 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-#: The "Changes made here" item (the regular line's models all carry per-layer embeddings).
+#: The "Changes made here" item up to its last line (the regular line's models all carry
+#: per-layer embeddings); {@link _gemma4_changes} ends it.
 _GEMMA4_CHANGES: tuple[str, ...] = (
     "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
     "  decoder was extracted and re-expressed in the Karume container format; the weights keep",
     "  the checkpoint's bf16 values unchanged; the per-layer embeddings were moved out of the",
     "  graph into container assets that the host gathers; the exit was narrowed to the selected",
-    "  rows' logits and hidden states; rotary cos/sin arrive as host-generated inputs.",
 )
+
+
+def _gemma4_changes(manifest: Mapping[str, Any]) -> list[str]:
+    """The "Changes made here" item. A manifest that ships a drafter ({@link _gemma4_drafters})
+    gets the drafter's int8 clause, the one rounded form `NOTICE.md` lists — without it the summary
+    would state every weight as the checkpoint's bf16 values."""
+    drafters = _gemma4_drafters(manifest)
+    last = "  rows' logits and hidden states; rotary cos/sin arrive as host-generated inputs"
+    if not drafters:
+        return [*_GEMMA4_CHANGES, last + "."]
+    heads = "the drafter head's" if len(drafters) == 1 else "the drafter heads'"
+    return [
+        *_GEMMA4_CHANGES,
+        f"{last};",
+        f"  {heads} own weights are quantized to int8 throughout, linear layers included.",
+    ]
 
 
 def _gemma4_usage(

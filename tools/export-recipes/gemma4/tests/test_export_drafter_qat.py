@@ -199,7 +199,9 @@ class TestThePins:
 
     def test_the_regular_assistant_is_not_a_qat_drafter(self) -> None:
         """Google's card: a QAT target needs a QAT drafter of the same precision."""
-        assert drafter.ASSISTANT_REPO not in GEMMA4_QAT_DRAFTER_UPSTREAM.values()
+        regular = {pin.repo for pin in sources.REGULAR_DRAFTER_PINS.values()}
+        assert regular
+        assert not regular & set(GEMMA4_QAT_DRAFTER_UPSTREAM.values())
 
     def test_a_model_without_a_qat_drafter_fails_loudly(self) -> None:
         with pytest.raises(ValueError, match="no q4_0 QAT drafter"):
@@ -740,9 +742,12 @@ class TestTheRegularDrafterIsUnchanged:
         assert drafter.drafter_shared_storage(None) == IrStorage(dtype="bf16")
 
     def test_the_regular_drafter_still_loads_the_regular_e2b_assistant(self) -> None:
+        """The regular script's default model is still E2B with its regular assistant; the loader
+        takes no default source (every caller names its pinned snapshot)."""
         source = inspect.signature(drafter.load_drafter).parameters["source"]
 
-        assert source.default == drafter.ASSISTANT_REPO == "google/gemma-4-E2B-it-assistant"
+        assert source.default is inspect.Parameter.empty
+        assert sources.regular_drafter_pin("e2b").repo == "google/gemma-4-E2B-it-assistant"
         assert drafter.DEFAULT_OUT_DIR.name == "gemma4-e2b-drafter"
 
     def test_the_regular_lender_check_still_refuses_an_i4_table(self) -> None:

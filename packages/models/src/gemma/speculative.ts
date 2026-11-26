@@ -16,7 +16,8 @@
  * - The drafter Session **borrows** one embedding table of the lender Session (`sharedWeights` —
  *   not a single byte is copied). The binding is done by construction in `pipeline.ts`; this file
  *   only runs it.
- * - The borrowing context binds the lender context's KV slots (l13 sliding / l14 full) **by name**.
+ * - The borrowing context binds the lender context's KV slots (its last non-shared sliding / full
+ *   layer — E2B l13 / l14, E4B l22 / l23) **by name**.
  *   The draft's query is at logical position `P` (= `context.pastLength`) — the token the lender
  *   committed last is the frontier not yet in the KV and sits at that position. The one RoPE row
  *   the host passes is at the same position.
