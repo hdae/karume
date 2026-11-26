@@ -17,26 +17,21 @@ is above 10 MiB per term (the lowest reads 33.1). The order of what comes next i
 after this release are the first group of `later`.
 
 - **What the first publication of EmbeddingGemma 2 left open** (filed 2026-11-25):
-  - Done 2026-11-25: the shipped series of EmbeddingGemma 2 (text `i8`, vision and audio `bf16` / `i8`, the
-    pipeline tests and the tokenizer's full-vocabulary cases) run in the default lane from the mirror and the
-    test-asset dataset, with no sha256 row written or changed; the f32 series stay under `KARUME_SERIES=1`. The
-    workbench's `embeddinggemma-preset-ab` has the `source` parameter (default `cached`). Done 2026-11-26: the
-    host tests' digest and frame-layout checks (`embeddinggemma2_image_input_test.ts`,
-    `embeddinggemma2_audio_input_test.ts`) read the `bf16` goldens of the dataset in the default lane, and the
-    parity cases of the three series e2e record their measurements in `results.json` (`<series>/<case>/parity`).
   - Not run in a browser: `anima-step-timing` and `embeddinggemma-preset-ab` with their cached default, and the
     Playground's EmbeddingGemma page over the cached route.
-  - Model cards, `NOTICE.md` and the licence ledgers were profiled across the recipe families on 2026-11-25 (the
-    profiles are under `outputs/misc/card-notice-review-2026-11-25/`); nothing was changed. What it found, for the
-    maintainer to order: every ledger still opens as a pre-release skeleton ("complete every row before anything
-    is published") while rows marked Unverified remain in the ledgers of published repositories (gemma4, irodori,
-    deberta, wan, anima, depth_anything); stale ledger lines (moss "not yet uploaded", gemma4_qat's old repository
-    name and its non-endorsement decision, the deberta ledger against the sbv2 one); cards and notices that
-    disagree on what a repository stores or what was changed (irodori's codec and backbone, sbv2's 22-layer
-    truncation, the regular Gemma 4 card's drafter); and wording that differs between families (`license_link`
-    set by the Gemma 4 cards only, "apache-2.0" against "Apache 2.0", fenced against unfenced licence texts, an
-    upstream sentence shared through one constant in some families and written twice in others). A change to a
-    card or a notice is a new upload of that repository.
+  - Licence ledgers, model cards and notices (profiled on 2026-11-25 — `outputs/misc/card-notice-review-2026-11-25/`;
+    the ledgers checked on 2026-11-26 — `outputs/misc/ledger-check-2026-11-26/`; both untracked). Every row marked
+    Unverified in the ledger of a published repository was settled on 2026-11-26 against the repository or the
+    upstream's public page, and the ledgers' headers (still the pre-release skeleton, "complete every row before
+    anything is published") are being brought up to date. The Gemma 4 rows wait for the maintainer's confirmation
+    of how the sign-off is recorded. The deberta ledger's attribution row (whether `deberta/patch.py` restates
+    transformers code) takes an in-place notice in the recipe, which uploads nothing. Stale ledger lines the
+    profile found: moss "not yet uploaded", gemma4_qat's old repository name and its non-endorsement decision, the
+    deberta ledger against the sbv2 one. Waiting for the maintainer's OK, because each is a new upload of that
+    repository: the cards and notices that disagree (Irodori's wording of what a repository stores, sbv2's 22-layer
+    truncation missing from its card, the regular Gemma 4 card's "Changes made here" leaving out the drafter's
+    int8) and the Swin Transformer notice for the two BiRefNet repositories. The wording that differs between
+    families is in the `later` item "The model cards and notices across repositories".
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
@@ -65,18 +60,12 @@ maintainer's ruling of 2026-11-06).
    - paying a miss as a transfer rather than a re-run (the PoC of
      [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md) paid it with one fence; the `later`
      item "MoE page-fault").
-2. **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07; ADR
-   [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real vision tower and causal attention, and
-   need the product graph's input for image vectors but not the marking of which rows are one image). 12B's vision
-   shipped with 0.18.0.
 
 ## later
 
 - **After the 0.23.0 release (filed together on 2026-11-19; the order among them is not ruled)**:
   - Put after the release by the maintainer's rulings of 2026-11-19: the bf16 shapes
-    that could take a parallel row of the default profile — in item 6 of "The move to maintained specs (ADR 0152)" below; the first
-    publication of Anima-2.9B ("Anima-2.9B" below);
-    and EmbeddingGemma 2 ("EmbeddingGemma 2" below).
+    that could take a parallel row of the default profile — in item 6 of "The move to maintained specs (ADR 0152)" below.
   - Here without a ruling on their timing: the two items below.
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): not measured, because the
     workbench's `gemma4-bench` entry has no drafter arm, so E2B's sentence on speed says "without the drafter"
@@ -97,9 +86,8 @@ maintainer's ruling of 2026-11-06).
     - The public-surface helper (`packages/runtime/tests/helpers/public-surface.ts`) writes
       `tests/fixtures/public-surface.json` under `KARUME_SURFACE=write` without creating `tests/fixtures/` when it is
       missing.
-    - `tools/lang/check-doc-links.ts` accepts an absolute filesystem path as a link target when the file exists on the
-      machine that runs it; such a link resolves nowhere else (CI went red on one, 2026-11-19). Proposed: reject
-      absolute targets.
+    - `tools/lang/check-doc-links.ts` accepts an absolute filesystem path as a link target: the facts and the fix
+      candidate are in [known issues](known-issues.md) (the section on the link check).
   - **Found while adding EmbeddingGemma 2 (filed 2026-11-21; none approved yet)**:
     - The Families table of `tools/export-recipes/README.md` and `docs/assets-layout.md` have no row for the
       `embeddinggemma2` recipe and its upstream snapshot under `inputs/embeddinggemma2/`.
@@ -320,9 +308,6 @@ maintainer's ruling of 2026-11-06).
     base's only.
   - A browser check in the Playground (RTX 5070 Ti, M2): the default preset downloads 4.02 GiB, its DiT weights are
     2,666 MiB.
-  - Publication with the maintainer's explicit OK and the pin: published in 0.24.0 and pinned as
-    `anima.SOURCES["anima-2.9b"]` (the checklist "First publication of `karume-anima-2.9b`" in
-    [the release runbook](release-runbook.md) §3).
   - `tools/export-recipes/anima/eval_dist.py` (the evaluation distribution of the rejected i4 experiment — perf-ledger
     Q-9) no longer runs: it reads every role from series under `outputs/series/`, and the base text stack, the
     tokenizers and the published models' series are no longer kept there (distribution builds read the published
@@ -334,19 +319,19 @@ maintainer's ruling of 2026-11-06).
   upstream is named and pinned, what is quoted and what is stated in the recipe's own words, where the reader is sent
   for the upstream's own description) and write the rules down where the recipes can point at them. The 2.9B card set
   one precedent: an upstream's statement that the recipe cannot measure is quoted verbatim, and the notice refers to the
-  upstream card for it.
+  upstream card for it. The profile of 2026-11-25 (`outputs/misc/card-notice-review-2026-11-25/`, untracked) found
+  wording that differs between families: `license_link` set by the Gemma 4 cards only, "apache-2.0" against
+  "Apache 2.0", fenced against unfenced licence texts, an upstream sentence shared through one constant in some
+  families and written twice in others. Each change is a new upload of that repository.
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
   preset does not quantize to integers is stored as bf16, the upstream bits, instead of being rounded to f16: what a
   preset does not ask to quantize follows the precision of the source (bf16 execution: ADR
   [0131](decisions/0131-bf16-weight-execution.md)). Anima follows it in the recipe, the TypeScript side, the local mirrors
-  and the RTX 3080 Ti's sha256 rows (CHANGELOG, Unreleased); the maintainer approved the default preset's images, the
+  and the RTX 3080 Ti's sha256 rows (CHANGELOG 0.23.0); the maintainer approved the default preset's images, the
   notice text and the preset labels and descriptions on 2026-11-19. The numerics check of bf16 storage computed in f16
   (`packages/runtime/tests/gpu_f16_compute_test.ts`) has not run on D3D12 or Metal.
-  - Anima's two repositories were published as the bf16 builds on 2026-11-20. Anima-2.9B was built under the new names on
-    2026-11-24 and published in 0.24.0 (its own repository, `karume-anima-2.9b`); what is left of it is the item
-    "Anima-2.9B" above.
   - MOSS-Image (its BF16 DiT and text encoder ship only as int8), the Gemma 4 E2B drafter (int8 only) and the families
     whose upstream is F32 (Irodori, Wan, Lucida — stored as f16): bf16 presets for them are, in the maintainer's position,
     probably not done — they run well quantized, and bf16 for them would be too heavy for a browser.
@@ -439,6 +424,10 @@ maintainer's ruling of 2026-11-06).
   `google/gemma-4-E4B-it-assistant` is not exported, and `gemma4.export_drafter` accepts E2B only (the q4_0 QAT line's
   E4B has its QAT drafter from 0.16.0). Scoping memo `.claude/reviews/2026-11-02_gemma4-expansion/e4b-drafter.md`
   (local, untracked).
+- **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
+  heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real
+  vision tower and causal attention, and need the product graph's input for image vectors but not the marking of which
+  rows are one image). 12B's vision shipped with 0.18.0.
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
   - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
     one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed). No scoring run since the schema 4 / 5 reader (local `inputs/`
@@ -461,7 +450,7 @@ maintainer's ruling of 2026-11-06).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
   The acceptance of Qwen3 / MiniCPM5 / E4B / gemma4-qat and the adoption records of K-25 to K-44 are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Remaining = the cost study of sharing the gate/up input (perf-ledger K-50, whose step 0 measurement has not run); isolating the cause of the GPU Instance loss in Chrome;
-  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
+  transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
 - **Continued verification of the 9/11 review** (investigation 2026-09-10, [follow-up record](research/2026-09-10-codex-mtp-optimization.md)):
   Decide whether `artifacts.staged_publication` allows several writers to the same final, and if needed design locking and recovery from interruption.
   The follow-up tests of the GPU edge-channel protection on M2 / browsers and whole-model performance measurement remain.
@@ -490,11 +479,6 @@ maintainer's ruling of 2026-11-06).
   results of users running a sample collection on several environments (**filed only** — the items collected, the
   location and the opt-in form are not designed; the per-run JSON records of `apps/workbench` and `apps/playground` are
   the nearest existing pieces).
-- Re-assessing `err.cause` on Pixel (8 GB class Android Chrome): loading anima turbo `i4` failed there and the true
-  cause is not identified. The reported "BodyStreamBuffer was aborted" is the text Chrome substitutes for a collateral
-  abort; the hub has surfaced the true cause since 0.7.0, and the distribution has since moved to block-level fetching.
-  The leading hypothesis is memory pressure (about 2.56 GiB resident at completion), which a connection drop or an
-  app-side abort cannot be told from until `err.cause` is read on the hardware. Left: that one observation.
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
   2026-10-29)**.
   - Geometry sweep identity check for a bf16-stored linear at M > 1 (ADR 0131 open point 2, low priority; the GEMV sweep
@@ -506,16 +490,17 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as browser apps (ADR
     0127 decision 5; a measurement or check is an `apps/workbench` entry and a model page an `apps/playground` page —
     [spec/workbench.md](spec/workbench.md)): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`,
-    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the example
-    `qwen3`. `fusion-hints`' search itself is back as the fusion candidate search of
+    `llm-speed`, `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`. `fusion-hints`' search itself is back as the fusion candidate search of
     `packages/e2e` (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
     `e2e_fusion_candidates_report_test.ts`); only its entry is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
   - Small doc edits: `packages/e2e/README.md` names `outputs/series/` but not `outputs/test-assets/` (ADR
-    [0139](decisions/0139-tests-on-distributions-and-test-assets.md)), where the goldens now live; ADR 0120's pointer at
-    `WAN_DEFAULT_QUANT` in `tools/export-recipes/wan/distribution.py` carries a line number that has drifted again —
-    drop the number.
+    [0139](decisions/0139-tests-on-distributions-and-test-assets.md)), where the goldens now live; ADR 0120 points at
+    `WAN_DEFAULT_QUANT` in `tools/export-recipes/wan/distribution.py` (with a line number) for Wan2.1's practical
+    preset `f16+dit8-a8-attn8-s16`, but that constant left with the Wan2.1 distribution (`491d0a8a`) and the file's
+    default is now Wan2.2's `WAN22_DEFAULT_QUANT` (`i8-a8-attn8-online-conv8`), so the pointer leads nowhere — an
+    addendum that says so (an ADR is not edited to follow the code).
 - **Bundle-size remainders after the models barrel fix (filed 2026-11-04 — ADR [0037](decisions/0037-karume-monorepo.md) §4 addendum)**:
   - A bare import of the `@karume/runtime` barrel still keeps a large bundle under Rolldown (not investigated — the size is in the ADR).
   - esbuild still keeps part of the `@karume/models` barrel that Rolldown drops.
@@ -648,9 +633,10 @@ maintainer's ruling of 2026-11-06).
 - **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
   stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
   would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
-  umT5, BiRefNet, Depth Anything, SigLIP2, Qwen3.5 (MOSS-Image's text encoder), regular Gemma 4 E4B,
-  Gemma 4 26B and the q4_0 QAT line, and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report
-  already binds and plans those with a local mirror.
+  umT5, BiRefNet (Lucida included), Depth Anything, SigLIP2, Qwen3.5 (MOSS-Image's text encoder), EmbeddingGemma 2
+  (text, vision and audio), Gemma 4 26B and the q4_0 QAT line, the mobile QAT line's E4B (its check counts E2B only),
+  and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report already binds and plans those with
+  a local mirror.
 
 - **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
   blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
@@ -666,7 +652,6 @@ maintainer's ruling of 2026-11-06).
   - Wan small items (filed 2026-10-03, diff review of the ADR 0118 wave — the IDs in parentheses are items of `.claude/reviews/2026-10-03_diff-review-wan/` and `2026-10-03_codex-review-wan/` (not tracked by git)):
     ① measuring the GPU time per submit with the submit layout of normal execution (M8) (the "1 submit ≤ 1 s" check and its recorded values come from timing mode (`gpuTiming`, 1 dispatch = 1 pass), and the chunk boundaries after backing can differ from normal execution — ADR 0118 stage 8 result "scope of the submit check"; needs a GPU)
     ③ a fourth case in golden `conv3d_block` that exercises the v4 and m-tile 64 variants (F4) (the current 3 cases are Wout 5 / 5 / 6 and Cout 6 / 3 / 2 and hit only the scalar variant and m 32. v4 and m 64 are exercised only by the GPU parity tests; needs golden regeneration and confirmation on the GPU)
-    ⑤ the CPU-only DiT host test reads and copies the whole 2.6 GB reference (TG-11) (`reference.full-{band,accept}-s14040-t0999` are 2,598,638,524 B each; `ArrayBuffer.slice` in `readBuffer` temporarily doubles it; RSS not measured)
     ⑥ the note separator " / " in results.json collides with " / " inside labels (TG-18) (labels in general, such as `formatNormalized`; no consumer splits it today; a fix would go on the separator side)
     ⑦ narrow the entity-candidate check of `prompt_clean` into an exact check that "rejects only when the string actually changes", using the name table (Python's `html.entities.html5`, 2,231 names) (accepting sequences that do not form an entity, such as `R&D` — ADR 0119 ruling 2026-10-03, maintainer: "a workaround if it can be avoided"; once someone asks for it).
 - **Remaining small items of the Wan2.2 acceptance (ADR [0121](decisions/0121-wan22-ti2v-5b.md))**:
@@ -677,7 +662,6 @@ maintainer's ruling of 2026-11-06).
   (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in `tools/export-recipes/wan/` (`text_embeds.py`, `vae_tiling.py`, `ti2v_few_step_ref.py`, `export_vae.py`, `export_vae_encoder.py`) → into `_shared`
   (c) the existing 5 DiT inputs have no dtype check (only the 2 inputs added for 2.2 check the dtype)
   (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
-  (f) the 2.2 T2V and I2V end-to-end e2e tests (`e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`)
   (g) there is no host test combining the admission of the gpu path (`admitWanText`) with the 48 ch, 7-input DiT (stage 6 results)
   (i) `planWanRequest` checks only the element count of the injected `latents`, not the shape (stage 6 results)
   **Adjacent small items of stage 4 (filed 2026-10-05, deferred in review)**:
@@ -698,17 +682,6 @@ maintainer's ruling of 2026-11-06).
   **umT5 / Wan2.2 small items (filed 2026-10-04)**: (a) the original's index (`pytorch_model.bin.index.json`) and `config.json` are not pinned by sha256 (if the index disagrees with the actual files,
   it fails with a bare `KeyError` — there is no path by which values get swapped; ADR 0122 addendum "stage a results") (b) umT5's `write --check` opens a temporary directory inside the series
   (`.check-*`) — it remains if the process is killed (c) loading `ContainerDitWeights` (the layer-sequential entry point that reads the DiT weights from the container) takes 25 s per forward.
-- **Quality improvement of anima base i4 (filed 2026-08-24 — the revival lever of the ruling to skip distribution)**:
-  what remains is only **the list of possibilities left unverified** for the i4 preset of the old fused turbo (dedicated
-  geometry, g16, calibration amount, one more degradation mechanism — all of them "not tried", not "tried and failed"),
-  and the source of truth is [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)
-  §8. g16 remains as one revival lever in parked "anima g16 evaluation". Making adaLN i8 was rejected by a ruling after
-  a visual sweep (perf-ledger Q-9); for locating the places with high quantization sensitivity, the source of truth is
-  item ④ of "3 known issues + anima base i4 sensitivity" in the
-  [archived completed section](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md), to which the same ruling
-  attaches "the anima DiT i4 line is on hold for a while". The calibrated `*-i4-dyn` series are no longer under
-  `outputs/` on the development machine, so a revival starts from a new calibrated export (source of truth for the
-  measurements = [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5).
 - **irodori adaLN i8 A/B on the shipping rig (filed 2026-08-24)**: whether adaLN i8, which helped in the sim, also improves
   the reading on the shipping rig is unverified ([research 2026-08-24](research/2026-08-24-gptq-expansion-quality.md) §1 /
   §2 — the cost and the sim → shipping transfer limit). Revival = dissatisfaction with the quality of the `i8+dit4` preset (formerly `w4`), or real demand for size optimization.
@@ -723,202 +696,39 @@ maintainer's ruling of 2026-11-06).
   two need ops outside the vocabulary. The point-in-time record of the candidate survey is
   [recon-2](research/2026-08-14-model-expansion-recon-2.md).
 - **Performance candidates**: the 🚧 rows of [perf-ledger](perf-ledger.md) are the source of truth for filing, adoption and order.
-- **EmbeddingGemma 2** (`google/embeddinggemma-2`, Apache-2.0; the text tower only — the maintainer's go-ahead of
-  2026-11-21). Built: the
-  recipe `tools/export-recipes/embeddinggemma2/` (source pin, tokenizer asset, the export of one graph with a symbolic
-  token length up to 8,192 and its bf16 series, the opt-in comparison with sentence-transformers, the distribution
-  recipe with its local mirror `models/karume-embeddinggemma-2/` — model `text`, presets `bf16` (default) and `i8`
-  since 2026-11-22, published in 0.24.0),
-  the series and its e2e, and step 1 of the order below: the TypeScript family `embeddinggemma`
-  (`@karume/models/embeddinggemma` — `Pipeline.embed` with the manifest's prompts, widths and token limit; its
-  `SOURCES` since the first publication) with its pipeline e2e over the mirror, all in the lane
-  `models:embeddinggemma2`. Ruled 2026-11-21: one family `embeddinggemma` serves both models; a text holding an image,
-  audio or video placeholder id is refused (the upstream composite model replaces such an id with the pad id;
-  sentence-transformers refuses the text); an input is a string or an array of content parts, and placeholders are
-  never written in text; a later video input is an array of frames, the frame type (`VideoFrame` or `ImageBitmap`)
-  to be decided then. Left, in order:
-  1. ~~The TypeScript pipeline and the distribution recipe~~ — built (above).
-  2. ~~The model's 8K context~~ — built 2026-11-22 (the maintainer's approval of that day). Stage 4a: the optional
-     attr `band` of plain attention, checked inside ①QK from positions with no mask tensor, its kernel check
-     `attention-band` and the exporter's `karume.band.to_band_form` (ADR [0155](decisions/0155-attention-band.md)).
-     Stage 4b: the recipe declares the band 512 on the 20 sliding layers and feeds no mask, the bound is 8,192 (upstream's
-     context; golden cases at 3,062, 5,935 and 8,192 tokens, every existing sha256 row unchanged), the family opens its
-     Session with a 128 MiB row-block budget for the attention scores (plan backing 944 MiB instead of 1,648 MiB at
-     8,192 tokens on the RTX 3080 Ti) and refuses, before the run, an input longer than the device's buffer limit holds
-     (docs/limitations.md). Left from it, unordered:
-     - skipping the work outside the band (①QK and ③PV still compute every `T × T` score; each row sees at most 1,025
-       keys) — filed as [perf-ledger](perf-ledger.md) K-114, not measured;
-     - the per-layer-embedding intermediate (`[1, T, 12288]` f32, 49,152 B per token) on devices with 256 MiB limits,
-       which stop at 5,461 tokens — accepted as is (2026-11-22), the graph's per-layer embedding not rewritten;
-     - batch and key padding, through a valid-key range the score kernel checks beside the band, for both models;
-     - measuring what batch would buy (throughput against one text per call) before building it.
-  3. Quant presets and their evidence, then the first publication (on the maintainer's go-ahead) — published in
-     0.24.0. The publication gave the family its `SOURCES` table (`embeddinggemma.SOURCES["embeddinggemma-2"]`) and
-     turned the Playground's `embeddinggemma-2` mount into the object form with `hfRepo` from it.
-     - Stage A, the torch-CPU screening of i8 / i4 weight forms and i8 + a8: [research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md).
-     - Built 2026-11-22 (the maintainer's choice that day: one int8 preset, the default stays `bf16`): the preset `i8`
-       — the token table and every linear (219 tensors) as per-row symmetric int8, f32 compute, empty session — from the
-       series `embeddinggemma-2-text-i8` (`export.py --dtype i8`: rounded before the reference and the goldens, the same
-       graph, band, cases and bound); the mirror carries `bf16`★ and `i8` (323,958,008-byte container against
-       592,932,727; no `requiredLimits` for `i8`, whose int8 table is exactly the WebGPU default 128 MiB); the series
-       e2e of the i8 series against its own goldens (maxAbs at most 2.87e-7), the pipeline e2e over both presets with
-       sha256 rows per preset, and the GPU check that each golden text's `i8` vector keeps a cosine of at least 0.999 to
-       its `bf16` one at every width (measured 0.99940 to 0.99993 at 768, the screening's values to the seventh digit).
-       The card states the screening's numbers with their source.
-     - Built 2026-11-23, stage 1 of 2 (the maintainer's decision that day: the preset `i8` takes int8 towers, `bf16`
-       does not change in any byte, no new preset name): the series `embeddinggemma-2-vision-i8`
-       (`export_vision.py --dtype i8`: the 114 linears and the two learned position tables as per-row int8, the RoPE
-       tables f32; 169,138,366 bytes against 336,093,696) and `embeddinggemma-2-audio-i8` (`export_audio.py --dtype
-       i8`: the 123 linears and the 12 depthwise convolutions as per-row int8, the two subsampling convolutions and the
-       window selector kept bf16 — rounded, the two convolutions alone moved single soft tokens of speech to a
-       cosine of 0.20; 295,640,914 bytes against 587,590,521), each rounded before its reference and goldens with the
-       other series' graph and cases. The exporter's `fake_quant_int8` takes `functional_weights` (a table read by
-       `functional.embedding` rounded as an `embedding` weight), and the tower wrappers share every weight with
-       upstream's modules, so the goldens are upstream's forward on the rounded weights; the bf16 series exported again
-       byte-identical. The distribution maps each preset's towers to its own storage; the mirror carries both forms of
-       each tower with every file of the `bf16` preset byte-identical (the `i8` preset downloads 798,296,220 bytes with
-       both towers), and the card states the audio exception. The torch-CPU screening was run again on the shipped form
-       ([research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-quant-screen.md): `all-i8` lowest cosine
-       0.999648 over 32 generated images, 0.999493 over 32 clips), writing its clips at 16 kHz to
-       `inputs/embeddinggemma2/quality-set-16k/`.
-     - Built 2026-11-23, stage 2 of 2: the TypeScript and GPU side over the new mirror, with no change to the
-       pipeline's code (each preset's mapping already picks each tower's storage). The series e2e of the two i8 tower
-       series against their own goldens, each image and waveform held at about three times its measured error (vision
-       5.15e-5 to 3.56e-4, audio 1.03e-5 to 2.49e-4 max abs — the f32 series' order) with new sha256 rows per series;
-       the pipeline e2e checks that each preset fetches its own storage of every role, and the `i8` preset's image and
-       audio rows were recorded again (the 11 rows of the maintainer's approval of that day; every other row
-       unchanged), its cosine to upstream's vectors now 0.999627 to 0.999881 (images) and 0.999762 to 0.999907 (audio)
-       against the unchanged floor 0.999; the int8 towers need no `requiredLimits` (the 128 MiB device). The quality
-       set through the real pipeline (`tools/embeddinggemma2-quality-set/compare-presets.ts`,
-       [research 2026-11-23](research/2026-11-23-embeddinggemma2-tower-i8-gpu.md)): every item's cosine of `i8` to
-       `bf16` equals the screening's to within 4.4e-8 (lowest 0.999648 over the images and 0.999493 over the clips at
-       768), the same top-1 hits as `bf16` in both directions, and median times per item within 3% for images and clips.
-     - Left unbuilt, by the same choice: the activation-int8 preset `i8-a8` (the screening: lowest cosine 0.99563 and
-       2.39% of the ranking triples inverted at 768, against 0.99940 and 0.74% for `i8`), and every 4-bit preset (lowest
-       0.960 to 0.966, 8.2 to 8.5% inverted).
-     - Left as is: the folded RoPE tables, a fixed 48 MiB of f32 constants in every preset (cos and sin of
-       `[8192, 256]` and `[8192, 512]` — what bounds T at 8,192).
-     - Left: the two slow patterns the preset A/B measured on the RTX 3080 Ti — at 8,192 tokens one visit per round
-       about 1.8× slower, found the same day to be a major GC of the Node process (the Dawn binding's polling while a
-       readback waits), not the `bf16` preset (both presets take the same GPU time); at 2,048 tokens periodic
-       stretches about 11× slower in both presets, in the GPU time itself (the slow mode's signature, cause not
-       investigated) — filed in [known issues](known-issues.md) with the fix candidates. The record now holds the
-       host's GCs per timed visit (`karume-embeddinggemma-preset-ab/2`: major GCs and their summed pause, the other
-       kinds apart), so a slow visit that held a major GC shows as one; the other candidates are not chosen.
-     - The first publication: published in 0.24.0 (the checklist "First publication of a family" in
-       [the release runbook](release-runbook.md) §3).
-  4. ~~The token count per row~~ — built 2026-11-22 (the maintainer chose `Pipeline.tokenize` that day):
-     `Pipeline.tokenize` returns the ids `embed` would run (a sequence over the limit or holding a placeholder id is
-     returned, not refused), and the Playground page `/embeddinggemma` shows each row's count against the limit once
-     the pipeline is built and records it per row. The page (built 2026-11-21) was checked by the maintainer in Chrome
-     on an Apple M2 on 2026-11-22: a run of the three sample rows at 768 and at 256 dimensions, and the refusal of a
-     row holding the image placeholder. Not checked in a browser yet: Cancel, the downloads, GPU timing, a row over the
-     limit and the token count.
-  5. Image input (approved by the maintainer 2026-11-22; the upstream facts in the untracked investigation notes
-     `outputs/diag/eg2-multimodal-2026-11-22/`). Stage 1 built 2026-11-22:
-     - the text graph takes the soft rows of a tower — `soft_embeds` `[1, T, 512]` f32 and `soft_mask` `[1, T, 1]`
-       bool, merged by one `where` after the scaled token lookup (the Gemma 4 12B product graph's names and form;
-       the recipe checks the merge's form and, on every long case, that no soft row is the `input_ids` path bit
-       for bit). Every series was exported again: all thirty io outputs and every container part but the
-       descriptor's byte-identical, and the lane green with every existing sha256 row and golden untouched. The
-       pipeline binds zeros and false for a text (no public API change); on the RTX 3080 Ti under Node that costs a
-       `bf16` text call nothing measurable at 16 tokens (fastest visit 12.8 → 12.8 / 13.0 ms) and about 2 ms at
-       2,048 (114.9 → 117.2 / 117.4 ms; the workbench's `embeddinggemma-preset-ab`, 31 rounds, two runs after);
-     - `export_vision.py`: the vision tower with `embed_vision` as one graph `vision` — `pixels` `[1, 9n, 768]`,
-       `position_x` / `position_y` `[1, 9n]` → soft tokens `[1, n, 512]`, the real patches only, in block order (the
-       io contract in the recipe README), the 2-D RoPE folded into two `[840, 32]` tables gathered by the positions;
-       no new op, kernel or runtime change. Series `embeddinggemma-2-vision` (f32) and `-bf16`, goldens from
-       upstream on four synthetic images (139 soft tokens is the resize rule's smallest count — a rounding edge),
-       the wrapper within 3.9e-5 of upstream in torch, the series e2e on the GPU within atol 1e-3 (measured 6.5e-5
-       to 3.35e-4 — the tower is that sensitive in f32: torch f32 is up to 9.8e-5 from f64) with sha256 rows;
-     - `multimodal_reference.py`: upstream SentenceTransformer's token ids and vectors of five whole inputs holding an
-       image, as the fixture `packages/models/tests/fixtures/embeddinggemma2/multimodal-reference.*`; Karume's two
-       graphs composed in torch reproduce them to 1.8e-6.
-     Stage 2 built 2026-11-22 (the maintainer's approval of that day):
-     - `embeddinggemma.Pipeline` takes image parts (`{ type: "image", image }`, decoded RGB8 — the Gemma chat shape)
-       when built with `vision: true` (the Gemma family's option and manifest shape for its image embedder; without it
-       an image part is a `ModelInputError` that says how to build one, and a text call is unchanged — its vector keeps
-       the text pipeline's sha256 row). The sequence is upstream's sentence-transformers one: `<bos>`, each run of
-       adjacent text (the prefix glued to the first) tokenized as one string, each image as `<|image>` + n × 258880 +
-       `<image|>`, `<eos>`; the ids of the fixture's five inputs equal upstream's exactly, and `tokenize` returns them
-       (an image counts n + 2 toward both limits). The host preprocessing (`vision.ts`: the Gemma family's
-       `imageTargetSize`, the torch uint8 bicubic port, the patch rows in block order) equals the vision series' io
-       inputs byte for byte on its four images. One tower run per image, read back into `soft_embeds` with the mask set,
-       then the text graph once; the tower's Session takes the family's row-block budget (plan 135.1 MiB against
-       329.1 MiB at 280 soft tokens on the RTX 3080 Ti). The budget is upstream's default 280, fixed.
-     - The distribution carries the tower as the weights role `vision`, bf16 in both presets until 2026-11-23 (step 3) (series
-       `embeddinggemma-2-vision-bf16`; no rounded tower was screened — the card says so), and `pipelineConfig.vision`
-       (`softTokenBudget`, the three image ids, `hiddenSize`; the TS reader is the Gemma 4 family's); the recipe checks
-       the processor settings against what the host implements, the tower graph and its position tables against the
-       budget, and the vision series' record. The mirror was assembled again (the text containers byte-identical).
-     - The pipeline e2e over the mirror on the RTX 3080 Ti: `bf16` within 5.44e-6 of upstream's vectors (atol 2e-5; the
-       text graph fed upstream's own soft tokens is within 9.8e-7 — the rest is the tower's GPU noise), `i8` at a cosine
-       of 0.99976 to 0.99991 (floor 0.999), with sha256 rows per preset.
-     - The Playground page `/embeddinggemma`: an optional image per row on a model with the tower, the row's count with
-       its soft tokens, the record `karume-playground-embeddinggemma/2` (each image's name, size and RGB8 sha256). Not
-       checked in a browser yet.
-     Review follow-ups (2026-11-22): per-image tolerances and a per-token cosine floor in the series e2e, a fifth
-     golden image whose side is the longest the resize rule gives (`gradient-strip`, 840 × 3 → 13,440 × 48 px:
-     positions up to 839, the tables' last row), the text graph's soft-row path checked alone against upstream's
-     vectors (the text graph fed upstream's soft tokens, atol 3e-6), seven id-only cases of upstream's ids at run
-     boundaries (spaces, newlines, tabs, an empty text between images, Japanese, a prompt before an image) checked
-     on the host without the mirror, and the distribution's checks that both position axes are gathered and the
-     folded RoPE tables are stored f32.
-     Left: video (frames through the same tower); unordered and not chosen: the tower's runs in
-     `onRunDiagnostics` (reported for the text graph only) and other soft-token budgets (they would need longer position
-     tables). The int8 tower is step 3's (built 2026-11-23). Open couplings, not built: (a) a manifest whose
-     `pipelineConfig.vision.softTokenBudget` is below the traced range is admitted — the reader takes 70 or 140,
-     the tower was traced and checked for n in 139 to 280 only (the IR records no symbol range to check against), so
-     such a hand-made manifest runs the tower at counts no golden covers (560 and 1120 are refused by the position
-     extent check; the distribution writes 280); (b) the tower's Session takes the text preset's session options
-     and GPU features, and the dist recipe folds the tower's demand into every preset's `requiredLimits` — both
-     presets have an empty session and the tower's largest tensor is about 15.7 MB, so nothing changes today, but a
-     preset with a knob screened for the text tower alone would apply it to the bf16 tower unscreened, and a
-     text-only pipeline inherits the tower's limits.
-  6. Audio input (the checkpoint's audio tower is Gemma 4 E2B / E4B's, unchanged; the upstream facts in the untracked
-     investigation notes `outputs/diag/eg2-multimodal-2026-11-22/`). Stage 1 built 2026-11-22:
-     - `export_audio.py`: the audio tower with `embed_audio` as one graph `audio` — `features` `[1, 4n, 128]` (the audio's
-       valid log-mel frames zero-padded to `4n`) and `frame_mask` `[1, 4n]` → soft tokens `[1, n, 512]`, `n` = the
-       valid frames / 4 rounded up, 1 to 750 (upstream's front end truncates at 30 s); the mask matters only when the
-       valid frames are 2 mod 4 (the io contract in the recipe README). The chunked local attention is rewritten as a
-       window of 12 keys per query (a one-hot depthwise `conv1d` copies the keys, `bmm` for both score terms, the
-       relative keys folded), the clipped linears clamp by scalars; no new op, kernel or runtime change. 1,202 nodes.
-       Series `embeddinggemma-2-audio` (f32, 1,173,714,150 bytes) and `-bf16` (587,590,521), goldens from upstream's
-       feature extractor and tower on six synthetic waveforms (every residue of the frame count mod 4, 1 s, 10 s and the
-       30 s maximum); the wrapper within 1.01e-4 of upstream in torch (in f64 within 1.3e-12 — exact arithmetic; torch's
-       own f32 run is up to 3.0e-4 from f64), the series e2e on the GPU within atol 2e-3 (measured 1.41e-5 to 5.82e-4)
-       with sha256 rows, the 30 s golden bit-identical on a device capped at the WebGPU default 128 MiB. On the RTX 3080
-       Ti under Node a warm run takes 16.5 / 33.3 / 94.2 ms at 1 / 10 / 30 s (bf16; plan backing 4.2 / 42.0 /
-       126.0 MiB), the Session builds in about 0.55 s (bf16) or 1.15 s (f32);
-     - `multimodal_reference.py`: four whole inputs holding an audio (an audio alone, a text then an audio, an audio with
-       the `query` prompt, an image then an audio) as `audioCases` of the same fixture, with the samples and upstream's
-       valid log-mel frames of each audio; the five image cases unchanged byte for byte; Karume's graphs composed in
-       torch reproduce the audio cases to 1.2e-7.
-     Stage 2 built 2026-11-22:
-     - `embeddinggemma.Pipeline` takes audio parts `{ type: "audio", audio }` (`MonoAudio`, 16 kHz mono f32) with
-       `audio: true` (the weights role `audio`, fetched only then; `vision` and `audio` may be on together). The host
-       front end (`src/embeddinggemma/audio.ts`) computes the log-mel frames with the FFT moved to `src/audio/fft.ts`
-       (first written for the vowel detector): the windowed product in f32 as upstream's (since 2026-11-23 — the
-       review found that the 5.12e-4 gap of the first build was upstream's f32 product, not its f32 FFT), the FFT and
-       the rest in f64; its frames are within one ulp (4.77e-7) of upstream's f32 frames, and their bits equal
-       upstream's arithmetic with an f64 FFT (the recipe's `audio-front-end.json`). Refused, never adjusted:
-       another rate, over 30 s (upstream truncates silently), at most 160 samples, a non-finite sample.
-     - The distribution carries the tower as the weights role `audio`, bf16 in both presets until 2026-11-23 (step 3) (series
-       `embeddinggemma-2-audio-bf16`), and `pipelineConfig.audio` (the three audio ids, `hiddenSize`, `maxSoftTokens`
-       750, `sampleRate` 16000); the recipe holds the feature extractor's settings in `preprocessor_config.json` and
-       `processor_config.json` to the host's, the tower graph and its bound, and the audio series' record. The mirror
-       was assembled again (the text and vision containers byte-identical).
-     - The pipeline e2e over the mirror on the RTX 3080 Ti: upstream's ids for the four audio cases, `bf16` within
-       2.44e-7 of upstream's vectors (atol 7.5e-7; 2.45e-5 and atol 7.5e-5 with the product in f64), the text graph
-       fed upstream's soft tokens within 1.12e-7 (atol 3.5e-7), `i8` at a cosine of 0.99982 to 0.99991 (floor 0.999),
-       a 30 s audio bit-identical on capped devices, ten sha256 rows (re-recorded on 2026-11-23 for the f32 product).
-     - The Playground page `/embeddinggemma`: an optional audio per row on a model with the tower (decoded, resampled
-       to 16 kHz and mixed to mono by the browser), its soft tokens in the row's count, the library's refusal of the
-       row shown under it, the record `karume-playground-embeddinggemma/3`. Not checked in a browser yet.
-     Left, unordered and not chosen: a resampler or decoder in the library (the caller resamples today), audio longer
-     than 30 s (upstream truncates; splitting is the caller's), the tower's runs in `onRunDiagnostics` and an
-     upstream-bit front end (numpy's complex64 FFT is not copied — one ulp). The int8 audio tower is step 3's (built
-     2026-11-23).
+- **EmbeddingGemma 2 — what its first publication left** (`google/embeddinggemma-2`, Apache-2.0; the family
+  `embeddinggemma`, lane `models:embeddinggemma2`; published in 0.24.0 as `karume-embeddinggemma-2` with text, image
+  and audio input and the presets `bf16` (default) and `i8`). What is built is in the family's README
+  (`packages/models/src/embeddinggemma/README.md`), the recipe's README (`tools/export-recipes/embeddinggemma2/README.md`),
+  ADR [0155](decisions/0155-attention-band.md), [limitations](limitations.md) and the research records of 2026-11-22 and
+  2026-11-23. Left, unordered:
+  - Skipping the attention work outside the band (①QK and ③PV still compute every `T × T` score; each row sees at most
+    1,025 keys) — [perf-ledger](perf-ledger.md) K-114, not measured.
+  - Batch and key padding, through a valid-key range the score kernel checks beside the band, for both models; first
+    measure what batch would buy (throughput against one text per call).
+  - Video input: an array of frames through the same vision tower; the frame type (`VideoFrame` or `ImageBitmap`) is
+    decided then (the maintainer's ruling of 2026-11-21).
+  - Open couplings, not built: (a) a manifest whose `pipelineConfig.vision.softTokenBudget` is below the traced range is
+    admitted — the reader takes 70 or 140, the tower was traced and checked for n in 139 to 280 only (the IR records no
+    symbol range to check against), so such a hand-made manifest runs the tower at counts no golden covers (560 and
+    1120 are refused by the position extent check; the distribution writes 280); (b) the vision tower's Session takes
+    the text preset's session options and GPU features, and the dist recipe folds the tower's demand into every
+    preset's `requiredLimits` — both presets have an empty session and the tower's largest tensor is about 15.7 MB, so
+    nothing changes today, but a preset with a knob screened for the text tower alone would apply it to the bf16 tower
+    unscreened, and a text-only pipeline inherits the tower's limits.
+  - Browser checks of the Playground page `/embeddinggemma`: Cancel, the downloads, GPU timing, a row over the limit,
+    the token count, and the image and audio rows (the maintainer's run in Chrome on an Apple M2 on 2026-11-22 covered
+    three text rows at 768 and 256 dimensions and the refusal of a row holding the image placeholder).
+  - Not chosen: the towers' runs in `onRunDiagnostics` (reported for the text graph only); other soft-token budgets
+    (they would need longer position tables); a resampler or decoder in the library (the caller resamples today); audio
+    longer than 30 s (upstream truncates; splitting is the caller's); an upstream-bit audio front end (numpy's complex64
+    FFT is not copied — one ulp).
+  - Not built, by the maintainer's choice of 2026-11-22: the activation-int8 preset `i8-a8` and every 4-bit preset
+    ([research 2026-11-22](research/2026-11-22-embeddinggemma2-quant-screen.md)).
+  - Measured values with no other record yet (to move into a research record): the soft-row inputs of the text graph
+    cost a `bf16` text call nothing measurable at 16 tokens (fastest visit 12.8 → 12.8 / 13.0 ms) and about 2 ms at
+    2,048 (114.9 → 117.2 / 117.4 ms; the workbench's `embeddinggemma-preset-ab` on the RTX 3080 Ti under Node,
+    31 rounds, two runs after, 2026-11-22).
 - **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
   regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
   the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
@@ -1039,13 +849,13 @@ maintainer's ruling of 2026-11-06).
   (ruling 2026-09-03 — replaced with a form whose Status line alone says it is a stub). Revival condition = 1.0 or
   a public announcement**, and starting requires re-measuring the bundle size (the gzip measurement of 2026-08-16
   is outdated by the additions of the gemma4 generation API, the GEMV family and the tokenizer)
-- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open (the per-family ledgers,
-  `tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`, hold more `Unverified` rows than this list — for example
-  Irodori v4-Large's):
-  rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
-  Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
-  The Code license of the code-dependency block is still Unverified in the deberta ledger
-  (its Attribution too).
+- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook).
+  The rows of the per-family ledgers (`tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`) that the interview of
+  2026-09-25 and later publications left Unrecorded or Unverified — among them the revisions of modernbert-ja-310m and
+  Semantic-DACVAE-Japanese (parent), the Civitai permission fields of anima-wai-v1.0, depth_anything's weights licence
+  and the code licence of the deberta ledger's code-dependency block — were settled on 2026-11-26 against the
+  repository or the upstream's public page; what follows from that check (the deberta attribution row among it) is
+  the licence-ledger entry of `now`.
   The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
   ([container-v1](container-v1.md) §2.3). The recipes of anima and irodori (main and dacvae), and
   gemma4's `export.py`, still declare a `PROVENANCE` without it, so they **start filling it at their next re-export**
@@ -1094,10 +904,6 @@ maintainer's ruling of 2026-11-06).
   Style-Bert-VITS2 semantics (LCS diff + 1..6 clamp, the residue raises), not the fork that AivisSpeech
   pins, which "forces consistency by even increments and decrements" (no silent approximation).
   Revival = real demand for reading edits that cannot be expressed with overlays.
-- **anima g16 evaluation** (deferred 2026-08-23 — maintainer ruling to prioritize extending GPTQ. SBV2's
-  g-axis ruling does not generalize across model lines (research 2026-08-22), so the evaluation itself keeps its value.
-  Revival = quality dissatisfaction in the visual check of base i4. Bringing it forward as a background run that does not collide with the main work is allowed
-  (maintainer ruling of the same day))
 - hub Range parallel + prefetch — revival = fragmented repositories coming back (perf L-3)
 - Making GPU timestamps an estimation source, full f16 (option γ), SBV2's engine-dependent NFC
   (`packages/models/src/sbv2/text/tokenizer.ts` uses plain `normalize("NFC")`; first check that DeBERTa's normalizer
