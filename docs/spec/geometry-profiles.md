@@ -436,6 +436,10 @@ measures nothing and changes no default value.
   quick look screened out, or one the sweep skipped because the same record's M = 1 group left the candidate
   unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is refused). The
   candidate's gain in it is the reference's time ÷ the row's `perDispatch` (the minimum of its rounds ÷ `reps`).
+- **A record of the `explore` set** ([workbench.md](workbench.md#the-explore-set)) is read by these rules alone, as
+  any record that holds part of the candidates: its rows — every candidate of a sentinel at M = 1, the predicted
+  candidates of another case, what M = 1 carries at M = 4 and 8 — are evidence as the rules say, and a candidate
+  without a row in it has none. It measures no row-block height.
 - **Adoption**: a candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at least
   two different records are evidence for it, it is at least ×1.10 faster than that choice in every one, and its check
   held in every current group, evidence or not (identical class: its words equal the record's baseline's; reorder
@@ -472,7 +476,8 @@ measures nothing and changes no default value.
   - The class changes the numbers of Sessions at `reorder`, inside the band, where it changes a row's lanes; a
     change of the staged flag or of the row block alone changes none.
 - **Not derived**: the row-block thread target (one number for every shape, while the `full` and `row-blocks` sets
-  measure a row-block height per case and row count, and no rule turns those into it) and the general sequential
+  measure a row-block height per case and row count — the `quick` and `explore` sets measure none —, and no rule
+  turns those into it) and the general sequential
   variant (it also sets the row blocks' columns and read-ahead).
 - **Output**: the field (absent when nothing is adopted), the default profile's choices, one decision per sequential
   key, per parallel row and for the thread target (adopted or kept, the default's choice and the derived one, the gains
@@ -494,7 +499,11 @@ gates (subgroups, grid limit; records whose gates differ are refused) — that f
 for: a current group, usable for the candidate's class, whose reference's time is repeated, with a current row of the
 candidate. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
 does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would skip it again); a row
-that failed does not. A record made under older default choices counts where it timed the current reference. The
+that failed does not. Of an `explore` record only the rows it timed count: that set carries fewer candidates from
+M = 1 than a run of the `full` set, which would measure a row it skipped, and screens at ×1.10 where the `full` set
+screens at ×1.25, so the `full` set may time a row it screened. The plan lists what the `full` set lacks, so
+`explore` records do not complete it: a candidate an explore record did not time is missing there as in any record
+without its row. A record made under older default choices counts where it timed the current reference. The
 default's choice at `reorder` is no candidate of the list, and neither is the baseline: every measurement of a group
 takes both (a narrowed `gemv-sweep` step measures the references whatever candidates it names). So where a
 reference's fastest time is not repeated, every candidate read against it at that case and row count is missing, and

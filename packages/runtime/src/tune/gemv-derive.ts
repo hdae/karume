@@ -39,9 +39,13 @@
  *   fastest time a slow record can only lower a gain.
  * - A group is evidence for a candidate when it is current, usable for the candidate's class, the
  *   reference's time is repeated, and the candidate's row is current and timed (not screened out by
- *   the quick look, not skipped because the same record's M = 1 group already left it unadoptable)
- *   with its check held. A row that failed or whose check failed in a current group, evidence or
+ *   the quick look, not skipped — because the same record's M = 1 group already left it
+ *   unadoptable, or, in an `explore` record, because that set's M = 1 group did not carry it) with
+ *   its check held. A row that failed or whose check failed in a current group, evidence or
  *   not, rules the candidate out: correctness does not depend on timing.
+ * - A record of the `explore` set is read by these rules alone: it holds rows of the kernels it
+ *   measured (the sentinels' whole grid, the predicted candidates elsewhere), and a candidate
+ *   without a row has no evidence in it, as in any record that holds part of the candidates.
  *
  * Groups whose case is not current are reported (the verdict lines, the provenance's counts and
  * {@link LinearGemvDerivation.stale}), and so are the current groups without a usable reference;
@@ -108,6 +112,7 @@ import {
 } from "../kernels/linear-gemv.ts";
 import { formatRatio } from "./derive.ts";
 import {
+  GEMV_CANDIDATE_SETS,
   GEMV_MIN_SPEEDUP,
   GEMV_REFERENCE_REPEAT,
   type GemvCandidateClass,
@@ -397,7 +402,7 @@ const parseGemvSweepRecord = (
   const candidateSet = objectAt(record.settings, `${where} settings`).candidateSet;
   if (typeof candidateSet !== "string" || !isGemvCandidateSet(candidateSet)) {
     throw new Error(
-      `${where}: settings.candidateSet ${JSON.stringify(candidateSet)} is none of quick, full, row-blocks`,
+      `${where}: settings.candidateSet ${JSON.stringify(candidateSet)} is none of ${GEMV_CANDIDATE_SETS.join(", ")}`,
     );
   }
   const adapterAt = objectAt(record.adapter, `${where} adapter`);
@@ -1640,7 +1645,10 @@ const threadTargetDecision = (
   records: readonly Labelled[],
   defaults: LinearGemvChoices,
 ): LinearGemvDecision => {
-  const rowBlocks = records.filter(({ source }) => source.candidateSet !== "quick");
+  // The quick and explore sets measure no row-block height
+  const rowBlocks = records.filter(
+    ({ source }) => source.candidateSet === "full" || source.candidateSet === "row-blocks",
+  );
   const target = String(defaults.rowsThreadTarget);
   return {
     class: "identical",
@@ -1915,7 +1923,11 @@ export type PlanGemvMeasurementsOptions = {
  * that the candidate did not come near enough to matter; measuring it again would screen it again),
  * or skipped because the record's M = 1 group of the case already left it unadoptable
  * (gemv-candidates.ts's `gemvCarriedFromM1`; a run that measures M = 1 again would skip it again). A
- * row that failed is missing. A case and row count no record has a current group of misses every
+ * row that failed is missing, and so is a skipped or screened row of an `explore` record: that set
+ * skips by a narrower rule of its own (`gemvExploreCarriedFromM1`) and screens at a narrower margin
+ * (measurement.ts's `EXPLORE_QUICK_LOOK_MARGIN`), and a run of the `full` set would measure, or
+ * time, the candidate — so of an explore record only the rows it timed count. A case and row count
+ * no record has a current group of misses every
  * candidate, and so does one whose reference has no repeated time: every measurement of a group
  * takes the references, so measuring the candidates measures the reference again. A candidate whose
  * reference the sweep does not measure (a row with packed activations) is not listed: no
@@ -1958,7 +1970,7 @@ export const planGemvMeasurements = (
           kernels.has(referenceName(gemvCase, m, levelOf(candidate.class))),
       );
       const covered = ({ name, class: candidateClass }: (typeof read)[number]): number =>
-        records.filter(({ states }) => {
+        records.filter(({ source, states }) => {
           const state = states.get(groupKey(gemvCase.id, m));
           if (state?.kind !== "current") return false;
           if (state.references[levelOf(candidateClass)].kind !== "timed") return false;
@@ -1966,6 +1978,12 @@ export const planGemvMeasurements = (
           return (
             row !== undefined &&
             row.error === undefined &&
+            // The explore set skips by its own narrower rule and screens at a narrower margin: the
+            // full set would measure, or time, the row
+            !(
+              source.candidateSet === "explore" &&
+              (row.skipped === true || row.screened === true)
+            ) &&
             rowStaleness(row, state.kernels) === undefined
           );
         }).length;

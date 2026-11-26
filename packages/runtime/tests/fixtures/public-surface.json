@@ -689,6 +689,22 @@
         "kind": "typeAlias"
       },
       {
+        "name": "EXPLORE_QUICK_LOOK_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_SENTINEL_COUNT",
+        "kind": "variable"
+      },
+      {
+        "name": "GemvExploreEvidence",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvExploreRow",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvMeasurementPlanning",
         "kind": "typeAlias"
       },
@@ -737,6 +753,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvSweepPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepPlannedRowCount",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvSweepProgress",
         "kind": "typeAlias"
       },
@@ -746,6 +770,10 @@
       },
       {
         "name": "GemvSweepRow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepStep",
         "kind": "typeAlias"
       },
       {
@@ -933,11 +961,39 @@
         "kind": "function"
       },
       {
+        "name": "gemvCaseDistance",
+        "kind": "function"
+      },
+      {
+        "name": "gemvExploreOrder",
+        "kind": "function"
+      },
+      {
+        "name": "gemvExploreSelection",
+        "kind": "function"
+      },
+      {
+        "name": "gemvGridNeighbours",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSentinels",
+        "kind": "function"
+      },
+      {
         "name": "gemvSweepCandidateNames",
         "kind": "function"
       },
       {
         "name": "gemvSweepCases",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSweepExploreEvidence",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSweepQuickLookMargin",
         "kind": "function"
       },
       {

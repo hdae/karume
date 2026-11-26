@@ -6,9 +6,11 @@
  */
 
 import {
+  type GemvExploreEvidence,
   type GemvSweepOptions,
   type GemvSweepProgress,
   type GemvSweepReport,
+  gemvSweepExploreEvidence,
   type GeometrySweepTimingUnit,
   runGemvSweep,
 } from "@karume/runtime/tune";
@@ -44,26 +46,33 @@ export type GemvRunDeps = {
 
 /**
  * Sweeps the plan's cases one `runGemvSweep` call each with the plan's candidate set, row counts,
- * candidates, quick-look margin and rounds, idling before every case but the first (`runPerCase` — its cancel and device-loss rules). Never
- * rejects: the records so far come back with the reason the run ended.
+ * candidates, quick-look margin and rounds, idling before every case but the first (`runPerCase` — its cancel and device-loss rules). An `explore`
+ * call takes the sentinels the earlier calls measured (`sentinelEvidence`), as one call over the
+ * cases predicts a case from the sentinels it measured before it. Never rejects: the records so far
+ * come back with the reason the run ended.
  */
 export const runGemvPlan = (plan: GemvSweepPlan, deps: GemvRunDeps): Promise<GemvRunOutcome> => {
   const sweep = deps.sweep ?? runGemvSweep;
+  const evidence: GemvExploreEvidence[] = [];
   return runPerCase<GemvSweepReport, GemvSweepProgress>(plan.caseIds, plan.idleSeconds, {
     signal: deps.signal,
     onEvent: deps.onEvent,
-    sweep: (caseId, signal, onProgress) =>
-      sweep({
+    sweep: async (caseId, signal, onProgress) => {
+      const report = await sweep({
         ...(deps.gpu === undefined ? {} : { gpu: deps.gpu }),
         candidateSet: plan.candidateSet,
         cases: [caseId],
         ...(plan.rows.length === 0 ? {} : { rows: plan.rows }),
         ...(plan.candidates.length === 0 ? {} : { candidates: plan.candidates }),
+        ...(plan.candidateSet === "explore" ? { sentinelEvidence: [...evidence] } : {}),
         quickLookMargin: plan.quickLookMargin,
         rounds: plan.rounds,
         signal,
         onProgress,
-      }),
+      });
+      evidence.push(...gemvSweepExploreEvidence(report));
+      return report;
+    },
     ...(deps.wait === undefined ? {} : { wait: deps.wait }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
   });

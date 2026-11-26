@@ -135,9 +135,14 @@ export const runPerCase = async <R extends PerCaseRecord, P>(
   }
 };
 
-/** The progress both sweeps report; the payload of `started` is each sweep's own. */
+/**
+ * The progress both sweeps report; the payload of `started` is each sweep's own. The GEMV sweep's
+ * `plan` and `step` events (a case's row counts, a unit of a row count) leave the live line as it is.
+ */
 export type PerCaseProgress =
   | { readonly kind: "started" }
+  | { readonly kind: "plan" }
+  | { readonly kind: "step" }
   | { readonly kind: "status"; readonly message: string }
   | { readonly kind: "row" }
   | { readonly kind: "case" }
@@ -182,6 +187,9 @@ export const foldPerCaseEvent = <L extends PerCaseLive, P extends PerCaseProgres
       switch (progress.kind) {
         case "started":
           return onStarted(live, event.progress);
+        case "plan":
+        case "step":
+          return live;
         case "status":
           return { ...live, phase: { kind: "sweeping", status: progress.message } };
         case "row":

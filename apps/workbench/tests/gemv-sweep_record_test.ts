@@ -1,3 +1,4 @@
+import type { GemvSweepReport } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mergeGemvSweepReports } from "../src/gemv-sweep/record.ts";
@@ -247,6 +248,84 @@ describe("the summary", () => {
       "1 of 2 planned cases finished · 3 rows · 0 screened by the quick look (margin ×1.25) · 0 with an error · 0 not identical to the baseline · 0 outside the band · stopped: cancelled",
     );
     expect(cancelled.data?.aborted).toBe(true);
+  });
+});
+
+describe("an explore run's record and summary", () => {
+  const SENTINELS = [CASE_C];
+  /** An explore per-case record: its sentinels, and `narrowedTo` on the M = 1 summary of a case that is none. */
+  const explore = (caseId: string, rows = gemvPerCase(caseId).rows): GemvSweepReport => {
+    const report = gemvPerCase(caseId, { rows });
+    return {
+      ...report,
+      settings: {
+        ...report.settings,
+        candidateSet: "explore",
+        sentinels: SENTINELS,
+        quickLookMargin: 1.1,
+      },
+      summaries: report.summaries.map((summary) =>
+        SENTINELS.includes(caseId) ? summary : { ...summary, narrowedTo: ["c64u8", "c32u8"] },
+      ),
+    };
+  };
+  const PLANNED_EXPLORE: GemvSweepPlan = {
+    ...PLAN,
+    caseIds: [CASE_C, CASE_A],
+    candidateSet: "explore",
+    quickLookMargin: 1.1,
+  };
+
+  it("merges into the record one call over the cases writes: the sentinels in the settings, each group's narrowed names", () => {
+    const merged = mergeGemvSweepReports([explore(CASE_C), explore(CASE_A)], {
+      plannedCaseIds: [CASE_C, CASE_A],
+      cancelledBetweenCases: false,
+    });
+    expect(merged.settings.sentinels).toEqual(SENTINELS);
+    expect(merged.cases.map(({ id }) => id)).toEqual([CASE_C, CASE_A]);
+    expect(merged.summaries.map(({ caseId, narrowedTo }) => [caseId, narrowedTo])).toEqual([
+      [CASE_C, undefined],
+      [CASE_A, ["c64u8", "c32u8"]],
+    ]);
+    // Records of other sentinels are not of one sweep
+    const other = explore(CASE_A);
+    expect(() =>
+      mergeGemvSweepReports(
+        [explore(CASE_C), { ...other, settings: { ...other.settings, sentinels: [CASE_A] } }],
+        { plannedCaseIds: [CASE_C, CASE_A], cancelledBetweenCases: false },
+      ),
+    ).toThrow(/Record 1 differs from record 0/);
+  });
+
+  it("says how many candidates a group was narrowed to, and that the kernels it skipped were not carried from M = 1 (fault: the full set's words, not adoptable)", () => {
+    const {
+      perDispatch: _time,
+      reps: _reps,
+      rounds: _rounds,
+      speedupVsBaseline: _speed,
+      maxAbsError: _error,
+      bandUse: _use,
+      withinBand: _within,
+      nonFiniteOutputs: _nonFinite,
+      ...reorder
+    } = gemvRow(CASE_A, "reorder", { m: 4 });
+    const result = gemvSweepResult(PLANNED_EXPLORE, {
+      reports: [
+        explore(CASE_C),
+        explore(CASE_A, [
+          ...gemvPerCase(CASE_A).rows,
+          gemvRow(CASE_A, "baseline", { m: 4 }),
+          { ...reorder, candidate: "staged-l32", skipped: true as const },
+        ]),
+      ],
+      stop: COMPLETED,
+    });
+    expect(result.summary[0]).toContain(
+      "0 screened by the quick look (margin ×1.1) · 1 skipped (not carried from M = 1)",
+    );
+    expect(result.summary[1]).not.toContain("narrowed");
+    expect(result.summary[2]).toContain("· narrowed to 2 predicted candidates");
+    expect(result.verdict).toBe("pass");
   });
 });
 

@@ -218,19 +218,54 @@ export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
  * timed in interleaved rounds, and the spread of the baseline's rounds says how steady the device
  * was. At M = 4 and 8 the reorder candidates that the same run's M = 1 group of the case leaves
  * unadoptable are skipped (a row without a measurement). The options narrow it by case, row count and candidate (the references are measured either
- * way). It derives no table and changes no choice.
+ * way). The `explore` set measures a short run: the whole grid on a few sentinel cases, first, and
+ * on every other case the candidates the sentinels predict. Before the screening every kernel's
+ * check is read, and only a kernel whose check held, and that is no subgroup form (no table row
+ * holds one), sets its class's bar. It derives no table and changes no choice.
  */
 export { runGemvSweep } from "./src/tune/gemv-sweep.ts";
 /**
  * The quick look's default margin of both sweeps (`GeometrySweepOptions.quickLookMargin`,
- * `GemvSweepOptions.quickLookMargin`): ×1.25.
+ * `GemvSweepOptions.quickLookMargin`): ×1.25; ×1.10 for the GEMV sweep's `explore` set
+ * ({@link EXPLORE_QUICK_LOOK_MARGIN}). {@link gemvSweepQuickLookMargin} is the margin a GEMV sweep
+ * of a set runs with.
  */
-export { QUICK_LOOK_MARGIN } from "./src/tune/measurement.ts";
-export type { GemvSweepOptions, GemvSweepProgress } from "./src/tune/gemv-sweep.ts";
+export { EXPLORE_QUICK_LOOK_MARGIN, QUICK_LOOK_MARGIN } from "./src/tune/measurement.ts";
+export { gemvSweepQuickLookMargin } from "./src/tune/gemv-sweep.ts";
+/**
+ * The GEMV sweep's options and progress: besides its status lines, a `plan` event when a case
+ * starts (its row counts and their kernels) and a `step` event per unit of a row count's
+ * measurement (a phase and its done / total), for a two-level progress display.
+ */
+export type {
+  GemvSweepOptions,
+  GemvSweepPhase,
+  GemvSweepPlannedRowCount,
+  GemvSweepProgress,
+  GemvSweepStep,
+} from "./src/tune/gemv-sweep.ts";
+/**
+ * The `explore` set's exploration: the sentinels of a case table (measured with every candidate,
+ * first), the candidates another case measures at M = 1 (the winners of its nearest sentinels of
+ * the same storage and their grid neighbours), the distance between two cases' shapes, the grid neighbours of a candidate, and
+ * the measuring order of a run. {@link gemvSweepExploreEvidence} reads the sentinels a record
+ * measured, which a later sweep takes as `GemvSweepOptions.sentinelEvidence`.
+ */
+export {
+  GEMV_SENTINEL_COUNT,
+  gemvCaseDistance,
+  gemvExploreOrder,
+  gemvExploreSelection,
+  gemvGridNeighbours,
+  gemvSentinels,
+} from "./src/tune/gemv-explore.ts";
+export type { GemvExploreEvidence, GemvExploreRow } from "./src/tune/gemv-explore.ts";
+export { gemvSweepExploreEvidence } from "./src/tune/gemv-sweep.ts";
 /**
  * The GEMV sweep's candidate set: `"quick"` (M = 1, a small identical grid), `"full"` (M = 1, 4
- * and 8 — every row count a derivation rule reads —, the whole grid) or `"row-blocks"` (M = 16 and
- * 64, which no rule reads yet).
+ * and 8 — every row count a derivation rule reads —, the whole grid), `"row-blocks"` (M = 16 and
+ * 64, which no rule reads yet) or `"explore"` (the row counts of `"full"`: the whole grid on the
+ * sentinels, the predicted candidates on the other cases).
  */
 export type { GemvCandidateSet as GemvSweepCandidateSet } from "./src/tune/gemv-candidates.ts";
 /** Every case of the GEMV sweep's table (the ids `GemvSweepOptions.cases` takes). A new array on every call. */

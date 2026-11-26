@@ -14,7 +14,11 @@
 //
 // The GEMV sweep's skipping at M = 4 and 8: a reorder candidate its M = 1 group leaves unadoptable is
 // not measured there (faults: a candidate ×1.05 the default's choice at M = 1, one screened at M = 1);
-// a run narrowed to M = 4 skips nothing.
+// a run narrowed to M = 4 skips nothing. With the explore set's rule, M = 4 prepares only the three
+// fastest rows of M = 1 and the row-blocked form of their lanes (fault: the full set's rule).
+//
+// The GEMV sweep's progress steps: each phase of a row count counts from 0 to its total (fault: a
+// kernel screened, so the calibration counts one kernel fewer than the quick look).
 //
 // The fake device's passes take the time the test gives them: a timed pass's timestamp difference
 // (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the wall clock a pass takes to
@@ -34,6 +38,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
+import type { Tolerance } from "../src/reference/allclose.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
 import { SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
 import {
@@ -41,6 +46,7 @@ import {
   type GemvGates,
   gemvBaseline,
   gemvCandidates,
+  gemvExploreCarriedFromM1,
   type GemvMeasurementPlan,
   gemvProfileChoice,
   gemvProgram,
@@ -48,7 +54,7 @@ import {
 import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
 import { gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
 import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
-import { gemvLaunch, sweepGemvCase } from "../src/tune/gemv-sweep.ts";
+import { gemvLaunch, type GemvSweepStep, sweepGemvCase } from "../src/tune/gemv-sweep.ts";
 import {
   calibrate,
   candidatesFor,
@@ -856,6 +862,137 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
     );
     // staged-l32 (×1.05 at M = 1) is timed at M = 4: M = 1 ruled nothing out
     assertEquals(rowAt(result.rows, 4, "staged-l32").rounds?.length, 2);
+  });
+});
+
+describe("the GEMV sweep's progress steps", () => {
+  /** The steps of one sweep of `plans`, and its result. */
+  const stepsOf = (
+    gemvCase: GemvCase,
+    plans: readonly GemvMeasurementPlan[],
+    timing: FakeTiming,
+    settings: {
+      readonly margin: number;
+      readonly tolerance?: Tolerance;
+      readonly explore?: boolean;
+    },
+  ) =>
+    withContext(timing, async (context) => {
+      const steps: GemvSweepStep[] = [];
+      const result = await sweepGemvCase(
+        context,
+        gemvCase,
+        plans,
+        {
+          rounds: 2,
+          tolerance: settings.tolerance ?? opTolerance("linear"),
+          quickLookMargin: settings.margin,
+          ...(settings.explore === true ? { carriedFromM1: gemvExploreCarriedFromM1 } : {}),
+        },
+        { onStep: (step) => steps.push(step) },
+      );
+      return { steps, result };
+    });
+
+  /** Per row count, each phase's total and the counts it reported, in the order they came. */
+  const phasesOf = (steps: readonly GemvSweepStep[], m: number) =>
+    steps
+      .filter((step) => step.m === m)
+      .reduce<{ phase: string; total: number; done: number[] }[]>((phases, step) => {
+        const last = phases.at(-1);
+        if (last !== undefined && last.phase === step.phase && last.total === step.total) {
+          last.done.push(step.done);
+        } else {
+          phases.push({ phase: step.phase, total: step.total, done: [step.done] });
+        }
+        return phases;
+      }, []);
+
+  const upTo = (total: number): number[] => Array.from({ length: total + 1 }, (_, index) => index);
+
+  it("counts each phase of a row count from 0 to its total: the kernels prepared and looked at, the warm start, the kernels that went on, every pass of the rounds (fault: c64u8 screened at ×1.3)", async () => {
+    const plan = planOf(["c16u2", "c64u8", "c16u8"]);
+    const times = new Map([[keyOf(plan.candidates[1]), 6_500]]);
+    const { steps, result } = await stepsOf(
+      GEMV_CASE,
+      [plan],
+      { gpuNs: byKey(times) },
+      {
+        margin: QUICK_LOOK_MARGIN,
+      },
+    );
+    assertEquals(rowOf(result.rows, "c64u8").screened, true);
+    assertEquals(phasesOf(steps, 1), [
+      { phase: "prepare", total: 4, done: upTo(4) },
+      { phase: "warm-start", total: 1, done: upTo(1) },
+      { phase: "quick-look", total: 4, done: upTo(4) },
+      { phase: "calibrate", total: 3, done: upTo(3) },
+      { phase: "rounds", total: 6, done: upTo(6) },
+    ]);
+    assert(steps.every((step) => step.caseId === GEMV_CASE.id));
+  });
+
+  it("reports no quick look at a margin of 0, and calibrates and times every kernel", async () => {
+    const plan = planOf(["c16u2", "c64u8"]);
+    const { steps } = await stepsOf(GEMV_CASE, [plan], { gpuNs: byKey(new Map()) }, { margin: 0 });
+    assertEquals(
+      phasesOf(steps, 1).map(({ phase, total }) => [phase, total]),
+      [
+        ["prepare", 3],
+        ["warm-start", 1],
+        ["calibrate", 3],
+        ["rounds", 6],
+      ],
+    );
+  });
+
+  it("prepares at M = 4 only the kernels its M = 1 group carries: with the explore set's rule, the three fastest rows and the row-blocked form of their lanes (fault: the full set's rule)", async () => {
+    // At M = 1 every row is adoptable over the default's parallel-l4 (×1.25 to ×2); parallel-l16
+    // is the fourth fastest. A parallel kernel's key does not hold M: the same times at M = 4.
+    const named = ["parallel-l8", "staged-l8", "staged-l16", "parallel-l16"];
+    const one = namedPlan(PLE_CASE, 1, ["parallel-l4", ...named]);
+    const four = namedPlan(PLE_CASE, 4, [...named, "staged-l8r4"]);
+    const keyIn = (plan: GemvMeasurementPlan, name: string): string => {
+      const candidate = plan.candidates.find((candidate) => candidate.name === name);
+      if (candidate === undefined) throw new Error(name);
+      return keyAt(PLE_CASE, plan.m, candidate);
+    };
+    const times = new Map([
+      [keyIn(one, "parallel-l4"), 10_000],
+      [keyIn(one, "parallel-l8"), 5_000],
+      [keyIn(one, "staged-l8"), 6_000],
+      [keyIn(one, "staged-l16"), 7_000],
+      [keyIn(one, "parallel-l16"), 8_000],
+    ]);
+    const settings = { margin: 0, tolerance: { atol: 1e30, rtol: 0 } };
+    const explore = await stepsOf(
+      PLE_CASE,
+      [one, four],
+      { gpuNs: byKey(times) },
+      {
+        ...settings,
+        explore: true,
+      },
+    );
+    const rowAt4 = (rows: readonly GemvSweepRow[], name: string) =>
+      rows.find((row) => row.m === 4 && row.candidate === name);
+    assertEquals(rowAt4(explore.result.rows, "parallel-l16")?.skipped, true);
+    for (const name of ["parallel-l8", "staged-l8", "staged-l16", "staged-l8r4"]) {
+      assertEquals(rowAt4(explore.result.rows, name)?.rounds?.length, 2, name);
+    }
+    assertEquals(
+      explore.result.summaries.map(({ m, skipped }) => [m, skipped]),
+      [
+        [1, 0],
+        [4, 1],
+      ],
+    );
+    // The baseline and the four carried kernels
+    assertEquals(phasesOf(explore.steps, 4)[0], { phase: "prepare", total: 5, done: upTo(5) });
+    // The control: the full set's rule carries the fourth row too
+    const full = await stepsOf(PLE_CASE, [one, four], { gpuNs: byKey(times) }, settings);
+    assertEquals(rowAt4(full.result.rows, "parallel-l16")?.skipped, undefined);
+    assertEquals(phasesOf(full.steps, 4)[0]?.total, 6);
   });
 });
 

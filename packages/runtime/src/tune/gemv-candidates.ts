@@ -61,11 +61,15 @@ import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
 
 /**
  * The candidate sets: `quick` (M = 1, a small identical grid), `full` (every row count a derivation
- * rule reads — the parallel GEMV's range, M = 1, 4 and 8 —, the whole grid) and `row-blocks` (the
+ * rule reads — the parallel GEMV's range, M = 1, 4 and 8 —, the whole grid), `row-blocks` (the
  * row-block form's row counts beyond that range, M = 16 and 64, which only a future row-block rule
- * would read).
+ * would read) and `explore` (the row counts of `full` with the kernels a short run needs: the whole
+ * grid on a few sentinel cases, their winners and those winners' grid neighbours on the others —
+ * gemv-explore.ts —, at M = 4 and 8 the few parallel rows M = 1 puts first
+ * ({@link gemvExploreCarriedFromM1}) and no row-block height of the identical class, which no rule
+ * reads).
  */
-export const GEMV_CANDIDATE_SETS = ["quick", "full", "row-blocks"] as const;
+export const GEMV_CANDIDATE_SETS = ["quick", "full", "row-blocks", "explore"] as const;
 export type GemvCandidateSet = (typeof GEMV_CANDIDATE_SETS)[number];
 
 export const isGemvCandidateSet = (value: string): value is GemvCandidateSet =>
@@ -100,14 +104,14 @@ export type GemvGates = {
   readonly maxComputeWorkgroupsPerDimension: number;
 };
 
-/** The lane counts of the parallel GEMV (`LinearGemvParallelLanes`). */
-const GEMV_LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
+/** The lane counts of the parallel GEMV (`LinearGemvParallelLanes`), ascending. */
+export const GEMV_LANES: readonly LinearGemvParallelLanes[] = [2, 4, 8, 16, 32];
 
-/** The columns per workgroup of the sequential M = 1 kernel's grid. */
-const GEMV_COLS: readonly number[] = [16, 32, 64, 128, 256];
+/** The columns per workgroup of the sequential M = 1 kernel's grid, ascending. */
+export const GEMV_COLS: readonly number[] = [16, 32, 64, 128, 256];
 
-/** The words read ahead of the sequential M = 1 kernel's grid. */
-const GEMV_UNROLLS: readonly number[] = [1, 2, 4, 8, 16];
+/** The words read ahead of the sequential M = 1 kernel's grid, ascending. */
+export const GEMV_UNROLLS: readonly number[] = [1, 2, 4, 8, 16];
 
 /** The profile the baseline and the profile's choices are read from. */
 const PROFILE: ResolvedGeometryProfile = DEFAULT_GEOMETRY_PROFILE;
@@ -128,6 +132,12 @@ export const gemvParallelName = (
   rows?: LinearGemvParallelRows,
 ): string => `${form}-l${lanes}${rows === undefined ? "" : `r${rows}`}`;
 
+/**
+ * The name of a sequential M = 1 variant: `c<columns per workgroup>u<words read ahead>`. The one
+ * spelling, as {@link gemvParallelName} is the parallel rows'.
+ */
+export const gemvSequentialName = (cols: number, unroll: number): string => `c${cols}u${unroll}`;
+
 /** The candidate's name (the class and the shape are the row's own fields). */
 const gemvChoiceName = (choice: GemvKernelChoice): string => {
   // One name whatever the tile geometry: the kernel's fingerprint tells two GEMMs apart
@@ -135,7 +145,7 @@ const gemvChoiceName = (choice: GemvKernelChoice): string => {
   const { cols, unroll } = choice.variant;
   switch (choice.id) {
     case "gemv-m1":
-      return `c${cols}u${unroll}`;
+      return gemvSequentialName(cols, unroll);
     case "gemv-rows":
       return `c${choice.rowsVariant?.cols ?? cols}u${choice.rowsVariant?.unroll ?? unroll}r${choice.rowsVariant?.rows ?? 1}`;
     case "gemv-parallel":
@@ -224,15 +234,15 @@ export const gemvBaseline = (gemvCase: GemvCase, m: number): GemvCandidate =>
 
 /**
  * The row counts a set measures of a case: M = 1 for `quick`, the case's row counts of the parallel
- * range for `full`, the ones beyond it for `row-blocks`.
+ * range for `full` and `explore`, the ones beyond it for `row-blocks`.
  */
 export const gemvRowCountsIn = (gemvCase: GemvCase, set: GemvCandidateSet): readonly number[] =>
   gemvCase.rows.filter((m) =>
     set === "quick"
       ? m === 1
-      : set === "full"
-        ? m <= LINEAR_GEMV_PARALLEL_MAX_ROWS
-        : m > LINEAR_GEMV_PARALLEL_MAX_ROWS,
+      : set === "row-blocks"
+        ? m > LINEAR_GEMV_PARALLEL_MAX_ROWS
+        : m <= LINEAR_GEMV_PARALLEL_MAX_ROWS,
   );
 
 /**
@@ -375,6 +385,60 @@ const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
   return reference === undefined || reference / row.perDispatch >= GEMV_MIN_SPEEDUP;
 };
 
+/**
+ * How many parallel rows of a case's M = 1 group the `explore` set carries on to M = 4 and 8. Replayed
+ * on the GEMV sweep records of two devices (2026-11-19, two runs each, the derivation's decisions
+ * against those of the full records): carrying the fastest three leaves 0 of 116 decisions different
+ * on the RTX 5070 Ti and 9 of 214 on the Apple M2, the fastest one 1 and 23 — a class often holds
+ * several rows a few percent apart, and the derivation needs the same row in two records.
+ */
+export const GEMV_EXPLORE_CARRIED_ROWS = 3;
+
+/** The plain and staged parallel rows without a row block, by name, with their lanes. */
+const PARALLEL_ROW_LANES: ReadonlyMap<string, number> = new Map(
+  GEMV_LANES.flatMap((lanes): [string, number][] => [
+    [gemvParallelName("parallel", lanes), lanes],
+    [gemvParallelName("staged", lanes), lanes],
+  ]),
+);
+
+/**
+ * {@link gemvCarriedFromM1} for the `explore` set: of the reorder candidates that rule carries to a
+ * `no-regression` row count, only the {@link GEMV_EXPLORE_CARRIED_ROWS} fastest plain or staged rows
+ * of the M = 1 group — a row a table can hold; the subgroup form is a Session option the derivation
+ * only notes — and the row-blocked forms of their lanes. The references, the default's choice at
+ * M = 1 and the row-blocked forms of its lanes are measured as that rule measures them: the
+ * derivation moves a kept row between row blocks by them.
+ */
+export const gemvExploreCarriedFromM1: typeof gemvCarriedFromM1 = (
+  m,
+  candidate,
+  references,
+  first,
+) => {
+  if (!gemvCarriedFromM1(m, candidate, references, first)) return false;
+  if (first === undefined || gemvGroupRole(m, candidate.class) !== "no-regression") return true;
+  if (candidate.name === references.exact || candidate.name === references.reorder) return true;
+  if (candidate.name === first.profile.reorder) return true;
+  const fastest = first.rows
+    .filter((row) => PARALLEL_ROW_LANES.has(row.candidate) && carriedByItsRow(row.candidate, first))
+    .toSorted((a, b) => (a.perDispatch ?? 0) - (b.perDispatch ?? 0))
+    .slice(0, GEMV_EXPLORE_CARRIED_ROWS)
+    .map((row) => row.candidate);
+  if (PARALLEL_ROW_LANES.has(candidate.name)) return fastest.includes(candidate.name);
+  const { choice } = candidate;
+  const lanes =
+    choice !== undefined && "parallelRows" in choice && choice.parallelRows !== undefined
+      ? choice.lanes
+      : undefined;
+  // Neither a plain or staged row nor a row-blocked form: the subgroup form
+  if (lanes === undefined) return false;
+  return (
+    PARALLEL_ROW_LANES.get(first.profile.reorder) === lanes ||
+    fastest.some((name) => PARALLEL_ROW_LANES.get(name) === lanes)
+  );
+};
+
 /** The value of `grid` next below and next above `value`, and `value` itself. */
 const around = (grid: readonly number[], value: number): number[] => {
   const below = grid.filter((entry) => entry < value).at(-1);
@@ -382,7 +446,7 @@ const around = (grid: readonly number[], value: number): number[] => {
   return [below, value, above].filter((entry): entry is number => entry !== undefined);
 };
 
-/** The sequential M = 1 variants of a set: around the baseline's for `quick`, the whole grid for `full`. */
+/** The sequential M = 1 variants of a set: around the baseline's for `quick`, the whole grid otherwise. */
 const m1Variants = (baseline: LinearGemvVariant, set: GemvCandidateSet): LinearGemvVariant[] => {
   const cols = set === "quick" ? around(GEMV_COLS, baseline.cols) : GEMV_COLS;
   const unrolls = set === "quick" ? around(GEMV_UNROLLS, baseline.unroll) : GEMV_UNROLLS;
@@ -393,7 +457,9 @@ const m1Variants = (baseline: LinearGemvVariant, set: GemvCandidateSet): LinearG
  * The identical class at `m` rows: at M = 1 the column form's variants, at M ≥ 2 the row-block heights
  * (powers of two up to the tallest the selection can choose for the shape — `linearGemvRowsForShape`
  * with a target it always meets), with the profile's columns and read-ahead. A float-stored weight
- * has no row-block form, so its identical class at M ≥ 2 is its baseline alone (the GEMM).
+ * has no row-block form, so its identical class at M ≥ 2 is its baseline alone (the GEMM). The
+ * `explore` set measures no row-block height: no rule of the derivation reads one
+ * ({@link gemvGroupRole}'s `unread`), so at M ≥ 2 its identical class is the baseline alone too.
  */
 const identicalChoices = (
   gemvCase: GemvCase,
@@ -413,6 +479,7 @@ const identicalChoices = (
       rowsVariant: undefined,
     }));
   }
+  if (set === "explore") return [];
   const general = defaultLinearGemvVariant(PROFILE.linearGemv);
   const tallest = linearGemvRowsForShape(PROFILE.linearGemv, storage, m, n, 1);
   const heights: number[] = [];

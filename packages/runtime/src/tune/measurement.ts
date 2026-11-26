@@ -97,7 +97,9 @@ export const CALIBRATION_ATTEMPTS = 3;
  * the references and the kernels whose quick time is at most this many times the bar of their class
  * go on to the calibration's check, the correctness check and the rounds. The bar is what the
  * derivation compares the class's kernels with in that group: the fastest quick time of the class
- * where it picks a winner (the GEMV sweep at M = 1), the quick time of the reference where it asks
+ * where it picks a winner (the GEMV sweep at M = 1, among the kernels whose check, read right after
+ * their quick look, held, the subgroup form, which no table row holds, left out: a kernel the
+ * derivation can never adopt sets no bar), the quick time of the reference where it asks
  * only whether a kernel clears a threshold over it (the parallel GEMV's other row counts, which must
  * not be slower than the default's choice; every case of the geometry sweep, where a geometry must
  * be `minSpeedup` faster than the default in every case of its class). `0` turns the quick look off.
@@ -118,12 +120,25 @@ export const CALIBRATION_ATTEMPTS = 3;
 export const QUICK_LOOK_MARGIN = 1.25;
 
 /**
- * A sweep's quick-look margin: {@link QUICK_LOOK_MARGIN} when not given; 0 (off) or a finite number
- * of at least 1 otherwise (below 1 would screen out every kernel but the references, the fastest
- * included). Throws for any other value — before a sweep touches the GPU.
+ * The quick look's default margin of the GEMV sweep's `explore` set ({@link QUICK_LOOK_MARGIN} is
+ * every other set's).
+ *
+ * Source: replayed on the GEMV sweep records of 2026-11-18/19, a margin of ×1.10 left the
+ * derivation's decisions unchanged on the RTX 5070 Ti (0 of 116) and changed 2 of 214 on the Apple
+ * M2, each within 2 %; ×1.05 lost adoptions on both.
  */
-export const quickLookMarginOf = (margin: number | undefined): number => {
-  if (margin === undefined) return QUICK_LOOK_MARGIN;
+export const EXPLORE_QUICK_LOOK_MARGIN = 1.1;
+
+/**
+ * A sweep's quick-look margin: `fallback` (default {@link QUICK_LOOK_MARGIN}) when not given; 0
+ * (off) or a finite number of at least 1 otherwise (below 1 would screen out every kernel but the
+ * references, the fastest included). Throws for any other value — before a sweep touches the GPU.
+ */
+export const quickLookMarginOf = (
+  margin: number | undefined,
+  fallback: number = QUICK_LOOK_MARGIN,
+): number => {
+  if (margin === undefined) return fallback;
   if (margin === 0 || (Number.isFinite(margin) && margin >= 1)) return margin;
   throw new Error(
     `quickLookMargin must be 0 (the quick look off) or a number of at least 1 (${margin})`,

@@ -1,4 +1,6 @@
 import {
+  EXPLORE_QUICK_LOOK_MARGIN,
+  gemvSentinels,
   type GemvSweepOptions,
   type GemvSweepReport,
   gemvSweepCases,
@@ -25,7 +27,7 @@ import {
 } from "../src/gemv-sweep/settings.ts";
 import { gemvProgressLine } from "../src/gemv-sweep/summary.ts";
 import { idle } from "../src/per-case-sweep.ts";
-import { CASE_A, CASE_B, gemvPerCase } from "./helpers/gemv-sweep-report.ts";
+import { CASE_A, CASE_B, CASE_C, gemvPerCase, gemvRow } from "./helpers/gemv-sweep-report.ts";
 
 const PLAN: GemvSweepPlan = {
   caseIds: [CASE_A, CASE_B],
@@ -89,6 +91,42 @@ describe("the gemv-sweep entry's settings", () => {
     const order = GEMV_CASE_IDS.filter((id) => id === CASE_A || id === CASE_B);
     expect(plan.caseIds).toEqual(order);
     expect(plan.candidateSet).toBe("full");
+  });
+
+  it("put the table's sentinels first for the explore set, each part in the table's order, at the set's margin of ×1.10 (fault: the table's order, ×1.25)", () => {
+    // CASE_C (i8-n2560-k256) is a sentinel of the table, CASE_A and CASE_B are not
+    const sentinels = gemvSentinels(gemvSweepCases());
+    expect([CASE_A, CASE_B, CASE_C].map((id) => sentinels.includes(id))).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    const plan = planGemvSweep(
+      gemvSweepSelection(
+        parseParameters(entry.parameters, {
+          candidateSet: "explore",
+          cases: `${CASE_A},${CASE_C},${CASE_B}`,
+        }),
+      ),
+    );
+    expect(plan.caseIds).toEqual([
+      CASE_C,
+      ...GEMV_CASE_IDS.filter((id) => id === CASE_A || id === CASE_B),
+    ]);
+    expect(plan.quickLookMargin).toBe(EXPLORE_QUICK_LOOK_MARGIN);
+  });
+
+  it("take an empty margin as the set's default and a margin given as it is, whatever the set; refuse a margin that is no number and candidates for the explore set", () => {
+    const planOf = (given: Record<string, string>) =>
+      planGemvSweep(gemvSweepSelection(parseParameters(entry.parameters, given)));
+    expect(planOf({ candidateSet: "full" }).quickLookMargin).toBe(QUICK_LOOK_MARGIN);
+    expect(planOf({ candidateSet: "explore", quickLookMargin: "1.25" }).quickLookMargin).toBe(1.25);
+    expect(planOf({ candidateSet: "explore", quickLookMargin: "0" }).quickLookMargin).toBe(0);
+    expect(planOf({ candidateSet: "full", quickLookMargin: "1.1" }).quickLookMargin).toBe(1.1);
+    expect(() => planOf({ quickLookMargin: "wide" })).toThrow(/Parameter quickLookMargin/);
+    expect(() => planOf({ candidateSet: "explore", candidates: "c64u8" })).toThrow(
+      /Parameter candidates: the explore set chooses its candidates/,
+    );
   });
 
   it("refuse a case the table does not have and a set that does not exist", () => {
@@ -157,6 +195,39 @@ describe("runGemvPlan", () => {
       expect(call).toMatchObject({ rows: [4], candidates: ["staged-l8"], quickLookMargin: 0 });
     }
     expect(outcome.stop).toEqual({ kind: "completed" });
+  });
+
+  it("hands each explore call the sentinels the earlier calls measured, and no evidence to another set (fault: every call without it)", async () => {
+    const sentinels = gemvSentinels(gemvSweepCases());
+    const explore = (caseId: string): GemvSweepReport => {
+      const report = gemvPerCase(caseId);
+      return {
+        ...report,
+        settings: { ...report.settings, candidateSet: "explore", sentinels },
+        rows: [...report.rows, gemvRow(caseId, "reorder", { m: 4, candidate: "staged-l8" })],
+      };
+    };
+    const calls: GemvSweepOptions[] = [];
+    const outcome = await runGemvPlan(
+      { ...PLAN, caseIds: [CASE_C, CASE_A, CASE_B], candidateSet: "explore", idleSeconds: 0 },
+      {
+        signal: new AbortController().signal,
+        onEvent: () => undefined,
+        sweep: async (options) => {
+          calls.push(options);
+          return explore(options.cases?.[0] ?? "");
+        },
+      },
+    );
+    expect(outcome.stop).toEqual({ kind: "completed" });
+    expect(calls.map(({ sentinelEvidence }) => sentinelEvidence?.length)).toEqual([0, 1, 1]);
+    const [evidence] = calls[2]?.sentinelEvidence ?? [];
+    expect(evidence?.gemvCase.id).toBe(CASE_C);
+    // The rows of its M = 1 group, as one call over the cases predicts from
+    expect(evidence?.rows).toEqual(explore(CASE_C).rows.filter((row) => row.m === 1));
+    const run = harness();
+    await runGemvPlan(PLAN, run.deps(new AbortController().signal));
+    for (const call of run.calls) expect(Object.keys(call)).not.toContain("sentinelEvidence");
   });
 
   it("stops after the case the device was lost in (the shared loop's rule)", async () => {

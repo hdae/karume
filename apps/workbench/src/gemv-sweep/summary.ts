@@ -3,12 +3,13 @@
  * line per case and row count — the baseline's time and the spread of its rounds (how steady the
  * device was), the fastest identical candidate and the fastest reorder candidate with their speed
  * against the baseline, what the default profile chooses at each level with its share of the
- * fastest of its class's speed, how many kernels the quick look screened out, and how many were
- * skipped because the run's M = 1 group of the case left them unadoptable. Pure, over the per-case
- * records the record body is merged from.
+ * fastest of its class's speed, how many candidates an `explore` group was narrowed to, how many
+ * kernels the quick look screened out, and how many were skipped because the run's M = 1 group of
+ * the case did not carry them. Pure, over the per-case records the record body is merged from.
  */
 
 import type {
+  GemvSweepCandidateSet,
   GemvSweepCaseSummary,
   GemvSweepReport,
   GemvSweepRow,
@@ -102,14 +103,19 @@ const choiceText = (
     : `${level} ${name} ${ratioText(share)} of the fastest ${row.class}`;
 };
 
-/** Why a kernel was skipped, as the lines say it. */
-const SKIPPED_REASON = "not adoptable from M = 1";
+/**
+ * Why a kernel was skipped, as the lines say it: the explore set carries only the fastest rows of
+ * M = 1, so its skipped kernels may be adoptable.
+ */
+const skippedReason = (candidateSet: GemvSweepCandidateSet): string =>
+  candidateSet === "explore" ? "not carried from M = 1" : "not adoptable from M = 1";
 
 /** The line of one case at one row count. */
 const caseLine = (
   summary: GemvSweepCaseSummary,
   rows: readonly GemvSweepRow[],
   unit: GeometrySweepTimingUnit,
+  candidateSet: GemvSweepCandidateSet,
 ): string => {
   const baseline = rows.find((row) => row.isBaseline);
   const candidates = rows.filter((row) => !row.isBaseline && passed(row));
@@ -126,8 +132,13 @@ const caseLine = (
     fastestText("reorder", fastest(candidates.filter((row) => row.class === "reorder"))),
     choiceText("exact", summary.profile.exact, rows, baseline),
     choiceText("reorder", summary.profile.reorder, rows, baseline),
+    summary.narrowedTo === undefined
+      ? undefined
+      : `narrowed to ${summary.narrowedTo.length} predicted candidates`,
     summary.screened === 0 ? undefined : `${summary.screened} screened`,
-    summary.skipped === 0 ? undefined : `${summary.skipped} skipped (${SKIPPED_REASON})`,
+    summary.skipped === 0
+      ? undefined
+      : `${summary.skipped} skipped (${skippedReason(candidateSet)})`,
   ])}`;
 };
 
@@ -138,6 +149,7 @@ export const gemvCaseLines = (report: GemvSweepReport): string[] =>
       summary,
       report.rows.filter((row) => row.caseId === summary.caseId && row.m === summary.m),
       report.gpuTiming.unit,
+      report.settings.candidateSet,
     ),
   );
 
@@ -161,7 +173,7 @@ const totalsLine = (
     plan.quickLookMargin === 0
       ? "quick look off"
       : `${rows.filter((row) => row.screened === true).length} screened by the quick look (margin ×${plan.quickLookMargin})`,
-    skipped === 0 ? undefined : `${skipped} skipped (${SKIPPED_REASON})`,
+    skipped === 0 ? undefined : `${skipped} skipped (${skippedReason(plan.candidateSet)})`,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.class === "identical" && row.identicalToBaseline === false).length} not identical to the baseline`,
     `${rows.filter((row) => row.class === "reorder" && row.withinBand === false).length} outside the band`,

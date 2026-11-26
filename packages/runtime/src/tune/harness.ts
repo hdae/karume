@@ -40,7 +40,10 @@
  *    ({@link quickLookOrder}). Only the references (the default geometry; the GEMV baseline and the
  *    default profile's choice at `reorder`) and the kernels whose quick time is within the margin of
  *    their class's bar ({@link quickLookGoesOn}) go on to the calibration's check (from the probe's
- *    reps), the correctness check and the rounds. A kernel that does not go on is a row with its
+ *    reps), the correctness check and the rounds. The GEMV sweep reads each kernel's check on its
+ *    output right after its quick look (the probe starts from a zeroed output), and only a kernel
+ *    the derivation could adopt — its check held, and it is a form a table row holds (not the
+ *    subgroup form) — sets a fastest bar. A kernel that does not go on is a row with its
  *    quick time and `screened: true`: no rounds, no correctness verdict, never evidence for a
  *    derivation. A margin of 0 turns the quick look off.
  * 5. At the end of a case, measure the default geometry once more and keep the ratio to the first
@@ -1434,11 +1437,23 @@ type Probe = {
  * also take timestamps (the quick look reads its last one); the estimate reads the wall clock either
  * way.
  */
-const probe = async (context: SweepContext, ready: ReadyLaunch, timed: boolean): Promise<Probe> => {
+const probe = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  timed: boolean,
+  clear?: GPUBuffer,
+): Promise<Probe> => {
   let reps = 1;
   let previous: { readonly reps: number; readonly wallNs: number } | undefined;
   for (;;) {
-    const sample = await runPass(context, ready, reps, timed);
+    // Only the first pass starts from the cleared buffer: the later ones write the same outputs
+    const sample = await runPass(
+      context,
+      ready,
+      reps,
+      timed,
+      previous === undefined ? clear : undefined,
+    );
     const { wallNs } = sample;
     if (wallNs >= PROBE_MIN_NS || reps >= SWEEP_MAX_REPS) {
       const average = wallNs / reps;
@@ -1477,10 +1492,16 @@ export type QuickLook = {
  * The quick look at one kernel (protocol rule 4): the calibration's probe with timestamps on its
  * passes, its last pass — at least half the target long by the wall clock, or at the reps bound —
  * read as the kernel's time. A kernel that goes on calibrates from the probe's reps
- * ({@link calibrate}), so it pays for no second probe.
+ * ({@link calibrate}), so it pays for no second probe. With `clear` (the kernel's output), the
+ * probe's first pass starts from that buffer reset to 0, so what the buffer holds after the quick
+ * look is the kernel's own output — the GEMV sweep reads its check there before the screening.
  */
-export const quickLook = async (context: SweepContext, ready: ReadyLaunch): Promise<QuickLook> => {
-  const { reps, last } = await probe(context, ready, context.unit !== "wall");
+export const quickLook = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  clear?: GPUBuffer,
+): Promise<QuickLook> => {
+  const { reps, last } = await probe(context, ready, context.unit !== "wall", clear);
   const { sample, dispatches } = last;
   return sample.clamped
     ? { reps }
@@ -1496,12 +1517,22 @@ export type QuickLookKernel = {
   readonly perDispatch?: number;
   /** A reference of the group (the baseline, a default's choice, the default geometry): it always goes on. */
   readonly reference: boolean;
+  /**
+   * Whether the derivation could adopt it, as far as the sweep knows before the screening (the GEMV
+   * sweep: its check, read on its output right after its quick look, held, and it is a form a table
+   * row holds — gemv-sweep.ts's `gemvQuickLookAdoptable`). A kernel it can never adopt sets no
+   * fastest bar — a time of its own must not screen out the kernels it could adopt — and still goes
+   * on or is screened by its own time. Absent where a sweep reads nothing of the kind before the
+   * screening (the geometry sweep, whose bar is its reference).
+   */
+  readonly adoptable?: boolean;
 };
 
 /**
- * What the margin multiplies for a class: the fastest quick time of the class (the derivation picks
- * a winner among them), or the quick time of the kernel named (the derivation asks only whether a
- * kernel clears a threshold over that reference; the fastest when the reference has no quick time).
+ * What the margin multiplies for a class: the fastest quick time of the class among the kernels
+ * the derivation could adopt (it picks a winner among them), or the quick time of the kernel
+ * named (the derivation asks only whether a kernel clears a threshold over that reference, whatever
+ * the reference's own check; the fastest as above when the reference has no quick time).
  */
 export type QuickLookBar =
   | { readonly against: "fastest" }
@@ -1509,8 +1540,9 @@ export type QuickLookBar =
 
 /**
  * Which kernels go on after the quick look (protocol rule 4), in the order given: every reference,
- * every kernel without a quick time, and every kernel whose quick time is at most `margin` times its
- * class's bar (`barOf`). A margin of 0 lets every kernel go on (the quick look is off). Pure.
+ * every kernel without a quick time, every kernel whose quick time is at most `margin` times its
+ * class's bar (`barOf`), and every kernel of a class that has no bar (no kernel of it that could be
+ * adopted has a quick time). A margin of 0 lets every kernel go on (the quick look is off). Pure.
  */
 export const quickLookGoesOn = (
   kernels: readonly QuickLookKernel[],
@@ -1520,7 +1552,7 @@ export const quickLookGoesOn = (
   if (margin === 0) return kernels.map(() => true);
   const fastest = new Map<string, number>();
   for (const kernel of kernels) {
-    if (kernel.perDispatch === undefined) continue;
+    if (kernel.perDispatch === undefined || kernel.adoptable === false) continue;
     const best = fastest.get(kernel.class);
     if (best === undefined || kernel.perDispatch < best) {
       fastest.set(kernel.class, kernel.perDispatch);

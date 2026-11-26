@@ -11,11 +11,23 @@
 // differ from the baseline's); a band of zero width (every reordering row and the baseline must read
 // outside it); a case that starts after 10 s of idle (the cold device the warm start exists for:
 // measured without it, the baseline of i4g512-n256-k1536 got 8 and 7 reps where most kernels after
-// it got thousands, in both quick runs of 2026-11-17 on an RTX 3080 Ti).
+// it got thousands, in both quick runs of 2026-11-17 on an RTX 3080 Ti); a fast kernel whose words
+// differ (it must not set its class's bar: the baseline's own kernel goes on).
+//
+// One explore run over a sentinel and a predicted case: its order, its narrowing at M = 1, its
+// skipping at M = 4 and the progress it reports, each read against the record it returns.
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { runGemvSweep } from "../tune.ts";
+import {
+  EXPLORE_QUICK_LOOK_MARGIN,
+  gemvExploreSelection,
+  gemvSentinels,
+  gemvSweepExploreEvidence,
+  type GemvSweepProgress,
+  QUICK_LOOK_MARGIN,
+  runGemvSweep,
+} from "../tune.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import {
@@ -29,6 +41,7 @@ import {
   type GemvGates,
   gemvBaseline,
   gemvCandidates,
+  gemvExploreCarriedFromM1,
   type GemvMeasurementPlan,
   gemvProfileChoice,
   gemvProgram,
@@ -307,6 +320,159 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
     for (const row of result.rows) {
       assertEquals(row.error, undefined, rowLabel(row));
       assertEquals(row.withinBand, false, rowLabel(row));
+    }
+  });
+
+  it("lets only a kernel whose check held set its class's bar: a faster kernel whose words differ does not screen out the baseline's own kernel (fault: parallel-l32 put into the identical class)", async () => {
+    // k = 16384 over 100 columns: the sequential kernel loops 4096 words a column on a few
+    // workgroups, the parallel one spreads them over 32 lanes — far faster
+    const gemvCase: GemvCase = {
+      id: "test-i8-n100-k16384",
+      storage: "i8",
+      n: 100,
+      k: 16384,
+      rows: [],
+      source: "test",
+    };
+    const baseline = gemvBaseline(gemvCase, 1);
+    const result = await sweepWith(
+      gemvCase,
+      (gates) => {
+        const [reordered] = pick(gemvCase, 1, gates, ["parallel-l32"]);
+        return [
+          planOf(gemvCase, 1, [
+            { ...baseline, name: "baseline-again" },
+            { ...reordered, name: "wrong-words", class: "identical" },
+          ]),
+        ];
+      },
+      { quickLookMargin: QUICK_LOOK_MARGIN },
+    );
+    const again = result.rows.find((row) => row.candidate === "baseline-again");
+    const wrong = result.rows.find((row) => row.candidate === "wrong-words");
+    assert(again?.quickPerDispatch !== undefined && wrong?.quickPerDispatch !== undefined);
+    // Precondition: the wrong kernel's quick time alone would screen the baseline's own kernel out
+    assert(
+      wrong.quickPerDispatch * QUICK_LOOK_MARGIN < again.quickPerDispatch,
+      `quick ${wrong.quickPerDispatch} against ${again.quickPerDispatch}: the fault would not bite`,
+    );
+    assertEquals(
+      [again.screened, again.rounds?.length, again.identicalToBaseline],
+      [undefined, 1, true],
+    );
+    // The wrong kernel goes on by its own time, and its row records step 4's check
+    assertEquals([wrong.screened, wrong.identicalToBaseline], [undefined, false]);
+  });
+
+  it("measures an explore run over a sentinel and a predicted case: the sentinel first with every candidate, the other narrowed at M = 1 to its prediction, M = 4 to what M = 1 carries; its progress counts what the record holds", async () => {
+    const sentinelId = "i8-n2560-k256";
+    const otherId = "i8-n1536-k256";
+    const progress: GemvSweepProgress[] = [];
+    const record = await runGemvSweep({
+      candidateSet: "explore",
+      cases: [otherId, sentinelId],
+      rows: [1, 4],
+      rounds: 1,
+      onProgress: (event) => progress.push(event),
+    });
+    assertEquals(record.format, "karume-gemv-sweep/4");
+    assertEquals(record.deviceLost, null);
+    assertEquals(record.settings.candidateSet, "explore");
+    assertEquals(record.settings.sentinels, gemvSentinels(GEMV_CASES));
+    assertEquals(record.settings.quickLookMargin, EXPLORE_QUICK_LOOK_MARGIN);
+    assertEquals(
+      record.cases.map(({ id }) => id),
+      [sentinelId, otherId],
+    );
+    // In measuring order, as the workbench's merged record holds them
+    assertEquals(record.settings.cases, [sentinelId, otherId]);
+    const gates: GemvGates = {
+      subgroups: record.gates.subgroups,
+      maxComputeWorkgroupsPerDimension: record.gates.maxComputeWorkgroupsPerDimension,
+    };
+    const rowsOf = (caseId: string, m: number) =>
+      record.rows.filter((row) => row.caseId === caseId && row.m === m);
+    const summaryOf = (caseId: string, m: number) => {
+      const found = record.summaries.find(
+        (summary) => summary.caseId === caseId && summary.m === m,
+      );
+      if (found === undefined) throw new Error(`no summary of ${caseId} M=${m}`);
+      return found;
+    };
+    const caseOf = (id: string): GemvCase => {
+      const found = GEMV_CASES.find((one) => one.id === id);
+      if (found === undefined) throw new Error(`no case ${id}`);
+      return found;
+    };
+    // The sentinel measures every candidate at M = 1
+    const sentinel = caseOf(sentinelId);
+    assertEquals(
+      rowsOf(sentinelId, 1).map(({ candidate }) => candidate),
+      [gemvBaseline(sentinel, 1), ...gemvCandidates(sentinel, 1, "explore", gates)].map(
+        ({ name }) => name,
+      ),
+    );
+    assertEquals(summaryOf(sentinelId, 1).narrowedTo, undefined);
+    // The other case: narrowed to what the sentinel of its storage predicts (its references always
+    // go on, so it has a winner of each class)
+    const other = caseOf(otherId);
+    const selection = gemvExploreSelection(other, gemvSweepExploreEvidence(record));
+    assert(selection !== undefined, `${sentinelId} predicts nothing for ${otherId}`);
+    assertEquals(summaryOf(otherId, 1).narrowedTo, selection);
+    const reorderReference = summaryOf(otherId, 1).profile.reorder;
+    for (const row of rowsOf(otherId, 1)) {
+      if (row.isBaseline || row.candidate === reorderReference) continue;
+      assert(selection.includes(row.candidate), `${row.candidate} is not in ${selection.join()}`);
+    }
+    // M = 4: a reorder candidate is measured exactly when the case's M = 1 group carries it
+    for (const caseId of [sentinelId, otherId]) {
+      const first = { ...summaryOf(caseId, 1), rows: rowsOf(caseId, 1) };
+      const references = summaryOf(caseId, 4).profile;
+      const four = gemvCandidates(caseOf(caseId), 4, "explore", gates);
+      for (const row of rowsOf(caseId, 4)) {
+        const candidate = four.find(({ name }) => name === row.candidate);
+        if (row.isBaseline || candidate === undefined) continue;
+        assertEquals(
+          row.skipped === true,
+          !gemvExploreCarriedFromM1(4, candidate, references, first),
+          rowLabel(row),
+        );
+      }
+      assert(summaryOf(caseId, 4).skipped > 0, `${caseId}: nothing skipped at M = 4`);
+    }
+    for (const row of record.rows) {
+      assertEquals(row.error, undefined, rowLabel(row));
+      if (row.screened === true || row.skipped === true || row.isBaseline) continue;
+      if (row.class === "identical") assertEquals(row.identicalToBaseline, true, rowLabel(row));
+      else assertEquals(row.withinBand, true, rowLabel(row));
+    }
+    // The progress: one plan per case in measuring order, and steps whose totals are the record's
+    const plans = progress.filter((event) => event.kind === "plan");
+    assertEquals(
+      plans.map(({ caseId, index, rowCounts }) => [caseId, index, rowCounts.map(({ m }) => m)]),
+      [
+        [sentinelId, 0, [1, 4]],
+        [otherId, 1, [1, 4]],
+      ],
+    );
+    const steps = progress.filter((event) => event.kind === "step");
+    for (const plan of plans) {
+      for (const { m, kernels } of plan.rowCounts) {
+        const rows = rowsOf(plan.caseId, m);
+        assertEquals(kernels, rows.length, `${plan.caseId} M=${m} kernels`);
+        const totalOf = (phase: string) =>
+          steps.find((step) => step.caseId === plan.caseId && step.m === m && step.phase === phase)
+            ?.total;
+        const measured = rows.filter((row) => row.skipped !== true).length;
+        const timed = rows.filter((row) => row.skipped !== true && row.screened !== true).length;
+        assertEquals(
+          [totalOf("prepare"), totalOf("quick-look"), totalOf("calibrate"), totalOf("rounds")],
+          [measured, measured, timed, timed],
+          `${plan.caseId} M=${m}`,
+        );
+        const last = steps.filter((step) => step.caseId === plan.caseId && step.m === m).at(-1);
+        assertEquals([last?.phase, last?.done, last?.total], ["rounds", timed, timed]);
+      }
     }
   });
 

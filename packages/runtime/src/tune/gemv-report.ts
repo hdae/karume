@@ -13,6 +13,14 @@
  * candidates and row counts. `/4` replaced `/3` when a row gained a state: a reorder candidate that
  * the same run's M = 1 group of the case leaves unadoptable is not measured at M = 4 and 8, and its
  * row there carries the `skipped` mark, its summary a count of skipped kernels.
+ *
+ * A record of the `explore` set is a `/4` record: it adds two optional fields no reader needs — the
+ * sentinel ids in the settings and, in the M = 1 summary of a case that is no sentinel, the names
+ * its group was narrowed to — and holds rows only of the kernels it measured, which the readers take
+ * as they take any record that holds part of the candidates. Its skipped rows follow the set's own
+ * rule of what M = 1 carries (gemv-candidates.ts's `gemvExploreCarriedFromM1`) and its screened rows
+ * its own margin, so the plan of missing measurements counts only the rows it timed. A reader that predates the set refuses
+ * such a record by its candidate set.
  */
 
 import type { LinearGemvParallelLanes, LinearGemvParallelRows } from "../kernels/linear-gemv.ts";
@@ -93,10 +101,12 @@ export type GemvSweepRow = {
   readonly screened?: true;
   /**
    * The kernel was not measured: a reorder candidate at a row count the derivation reads only for a
-   * regression (M = 4 and 8) whose row in the same run's M = 1 group of the case leaves it
-   * unadoptable (gemv-candidates.ts's `gemvCarriedFromM1`). The row has its kernel, its keys and its
-   * workgroups, and no quick time, no rounds and no check; it is never a baseline, and no derivation
-   * reads it as evidence.
+   * regression (M = 4 and 8) that the set's rule of what the same run's M = 1 group of the case
+   * carries leaves out — its row there leaves it unadoptable (gemv-candidates.ts's
+   * `gemvCarriedFromM1`), or, in the `explore` set, it is also not among the fastest rows that set
+   * carries (`gemvExploreCarriedFromM1`). The row has its kernel, its keys and its workgroups, and no
+   * quick time, no rounds and no check; it is never a baseline, and no derivation reads it as
+   * evidence.
    */
   readonly skipped?: true;
   /** Dispatches stacked in one pass. */
@@ -160,9 +170,16 @@ export type GemvSweepCaseSummary = {
   readonly screened: number;
   /**
    * How many kernels of the row count were skipped because the same run's M = 1 group of the case
-   * leaves them unadoptable (0 at M = 1, and when the run did not measure M = 1).
+   * does not carry them (0 at M = 1, and when the run did not measure M = 1).
    */
   readonly skipped: number;
+  /**
+   * The `explore` set only, at M = 1 of a case that is no sentinel: the candidate names the group was
+   * narrowed to (gemv-explore.ts's `gemvExploreSelection` — the winners of the nearest sentinels of
+   * its storage and their grid neighbours; the references are measured besides, and a name that is no candidate of
+   * the case on the device selects nothing). Absent when the group measured every candidate.
+   */
+  readonly narrowedTo?: readonly string[];
 };
 
 /** A planned case as the record lists it. */
@@ -223,7 +240,13 @@ export type GemvSweepReport = {
   };
   readonly settings: {
     readonly candidateSet: GemvCandidateSet;
-    /** When narrowed by case id. */
+    /**
+     * The `explore` set only: the sentinels of the whole case table, by id (gemv-explore.ts's
+     * `gemvSentinels` — the same whatever the sweep was narrowed to): the cases measured with every
+     * candidate, before the others.
+     */
+    readonly sentinels?: readonly string[];
+    /** When narrowed by case id: the cases in measuring order (the sentinels first for `explore`). */
     readonly cases?: readonly string[];
     /** When narrowed by row count (of the set's). */
     readonly rows?: readonly number[];

@@ -35,7 +35,10 @@
 // replaced (a current group without a usable reference); the formats /3, /2 and /1, the unit, the
 // quantized flag and the adapter changed; a failed row, a group without a usable reference and a
 // reference whose fastest time one record holds (missing in the plan), a screened or skipped row and
-// records made under older defaults (not missing).
+// records made under older defaults (not missing); a record of the explore set read as one that holds
+// part of the candidates, whose thread target names no row-block heights and whose skipped row the
+// plan still lists (faults: the earlier readers, which took any set but quick for row blocks and
+// every skipped row as looked at).
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -1496,6 +1499,127 @@ describe("planGemvMeasurements: what the records lack", () => {
     ]);
     const one = missingAt(differing, PLE, 1) ?? [];
     assert(one.includes("c64u8") && !one.includes("staged-l8"), one.join(", "));
+  });
+});
+
+describe("a record of the explore set", () => {
+  /** A record of the explore set: its candidate set and sentinels, and only the rows `keep` keeps. */
+  const explore =
+    (keep: (row: GemvSweepReport["rows"][number]) => boolean = () => true) =>
+    (record: GemvSweepReport): GemvSweepReport => ({
+      ...record,
+      settings: {
+        ...record.settings,
+        candidateSet: "explore",
+        sentinels: ["i8-n2560-k256"],
+      },
+      rows: record.rows.filter(keep),
+    });
+  /** The same rows under the full set's name (a record that holds part of the candidates). */
+  const partial =
+    (keep: (row: GemvSweepReport["rows"][number]) => boolean = () => true) =>
+    (record: GemvSweepReport): GemvSweepReport => ({ ...record, rows: record.rows.filter(keep) });
+  const specs: GemvCaseSpec[] = [
+    {
+      caseId: PLE,
+      rows: PARALLEL_ROWS,
+      times: at1({ c64u8: faster(1.2), "staged-l8": faster(1.3) }),
+    },
+  ];
+  /** The rows an explore group of PLE would hold at M = 1: the references and a few predicted ones. */
+  const predicted = (row: GemvSweepReport["rows"][number]): boolean =>
+    row.m !== 1 ||
+    [
+      "c32u4",
+      "parallel-l4",
+      "c64u8",
+      "c32u8",
+      "c64u4",
+      "staged-l8",
+      "staged-l4",
+      "parallel-l8",
+    ].includes(row.candidate);
+  const withoutThreadTarget = (derivation: LinearGemvDerivation) =>
+    derivation.decisions.filter((decision) => decision.field !== "rowsThreadTarget");
+
+  it("is read exactly as a record that holds part of the candidates: the rows it has are evidence, a candidate without a row has none (control: the same rows under the full set's name)", () => {
+    const asExplore = deriveLinearGemvChoices(
+      [input("a.json", specs, explore(predicted)), input("bb.json", specs, explore(predicted))],
+      { table: TABLE },
+    );
+    const asPartial = deriveLinearGemvChoices(
+      [input("a.json", specs, partial(predicted)), input("bb.json", specs, partial(predicted))],
+      { table: TABLE },
+    );
+    assertEquals(withoutThreadTarget(asExplore), withoutThreadTarget(asPartial));
+    assertEquals(decisionOf(asExplore, "sequential.shapes", PLE).derivedChoice, "c64u8");
+    assertEquals(
+      asExplore.provenance.records.map(({ candidateSet }) => candidateSet),
+      ["explore", "explore"],
+    );
+    // A winner one explore record did not measure is not adopted: one record is not evidence
+    const once = deriveLinearGemvChoices(
+      [
+        input("a.json", specs, explore(predicted)),
+        input(
+          "bb.json",
+          specs,
+          explore((row) => predicted(row) && row.candidate !== "c64u8"),
+        ),
+      ],
+      { table: TABLE },
+    );
+    assertEquals(decisionOf(once, "sequential.shapes", PLE).outcome, "kept");
+  });
+
+  it("measures no row-block height: the thread target's reason says no record of the full or row-blocks set is given (fault: read as one that measured them)", () => {
+    const derivation = deriveLinearGemvChoices(
+      [input("a.json", specs, explore()), input("bb.json", specs, explore())],
+      { table: TABLE },
+    );
+    const target = derivation.decisions.find(({ field }) => field === "rowsThreadTarget");
+    assertStringIncludes(target?.reason ?? "", "none is given");
+  });
+
+  it("does not complete the plan with its skipped or screened rows: the explore set skips by its own rule and screens at its own margin, so the plan still lists the candidate (fault: counted as looked at)", () => {
+    const plan = (change: (record: GemvSweepReport) => GemvSweepReport) =>
+      planGemvMeasurements([input("a.json", specs), input("bb.json", specs, change)], {
+        table: TABLE,
+      });
+    const missingAt = (planning: ReturnType<typeof plan>, m: number) =>
+      planning.missing.find((entry) => entry.caseId === PLE && entry.m === m)?.candidates;
+    const skipped: GemvCaseSpec[] = [
+      { ...specs[0], fields: { 4: { "staged-l8": { skipped: true } } } },
+    ];
+    const skippedExplore = planGemvMeasurements(
+      [input("a.json", specs), input("bb.json", skipped, explore())],
+      { table: TABLE },
+    );
+    assertEquals(missingAt(skippedExplore, 4), ["staged-l8"]);
+    // The control: the same skipped row in a record of the full set counts as looked at
+    const skippedFull = planGemvMeasurements([input("a.json", specs), input("bb.json", skipped)], {
+      table: TABLE,
+    });
+    assertEquals(missingAt(skippedFull, 4), undefined);
+    // Its screened rows do not count either (it screens at a narrower margin: the full set may
+    // time the row), and the candidates it did not measure are missing
+    const screened: GemvCaseSpec[] = [
+      { ...specs[0], fields: { 1: { c64u8: { screened: true } } } },
+    ];
+    const screenedExplore = planGemvMeasurements(
+      [input("a.json", specs), input("bb.json", screened, explore())],
+      { table: TABLE },
+    );
+    assertEquals(missingAt(screenedExplore, 1), ["c64u8"]);
+    // The control: the same screened row in a record of the full set counts as looked at
+    const screenedFull = planGemvMeasurements(
+      [input("a.json", specs), input("bb.json", screened)],
+      { table: TABLE },
+    );
+    assertEquals(missingAt(screenedFull, 1), undefined);
+    const narrowed = plan(explore(predicted));
+    const one = missingAt(narrowed, 1) ?? [];
+    assert(one.includes("c16u1") && !one.includes("c64u8"), one.join(", "));
   });
 });
 

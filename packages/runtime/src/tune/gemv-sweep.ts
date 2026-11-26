@@ -11,15 +11,21 @@
  * (gemv-candidates.ts — all, or those the caller names) together, through harness.ts's primitives
  * (its measurement protocol). A case's row counts are measured in ascending order, so at M = 4 and 8
  * the run has the case's M = 1 group (when it measured it): a reorder candidate whose row there
- * leaves it unadoptable is skipped (gemv-candidates.ts's `gemvCarriedFromM1`) — its program and
- * fingerprint are built, it takes none of the steps below, and its row says `skipped`.
+ * leaves it unadoptable is skipped (gemv-candidates.ts's `gemvCarriedFromM1`; the `explore` set's
+ * narrower `gemvExploreCarriedFromM1`) — its program and fingerprint are built, it takes none of
+ * the steps below, and its row says `skipped`.
  * 1. the pipelines of every kernel are made first, so no compile leaves the device idle later;
  * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady;
- * 3. the quick look (harness.ts's protocol rule 4 — skipped at a margin of 0): every kernel's
- *    calibration probe, with timestamps, in a shuffled order (`quickLook`); the references and the
- *    kernels within the margin of their class's bar go on (`quickLookGoesOn` — the bar is the
- *    fastest of the class where the derivation picks a winner, the default's choice at `reorder`
- *    where it only checks for a regression: `gemvGroupRole`), the others become screened rows;
+ * 3. the quick look (harness.ts's protocol rule 4 — skipped at a margin of 0): the baseline is run
+ *    once into its buffer from a zeroed output; then every kernel's calibration probe, with
+ *    timestamps, in a shuffled order (`quickLook` — a candidate's from a zeroed output), each
+ *    followed by its check on the output the probe left (the comparison of step 4); the references
+ *    and the kernels within the margin of their class's bar go on (`quickLookGoesOn` — the bar is
+ *    the fastest of the class among the kernels whose check held where the derivation picks a
+ *    winner, the subgroup form, which no table row holds, setting none (`gemvQuickLookAdoptable`),
+ *    the default's choice at `reorder` where it only checks for a regression:
+ *    `gemvGroupRole`), the others become screened rows (a kernel whose check failed goes on or is
+ *    screened by its own time; its row records step 4's check);
  * 4. every kernel that goes on, the baseline first, is run once from a zeroed output, calibrated
  *    (`calibrate`, from its quick look's reps: done again after more load when its pass comes out
  *    far below the target) and checked while its output is still in the buffer;
@@ -33,6 +39,12 @@
  * (the geometry sweep's protocol rule 3): after the warm start, the calibrations and the rounds keep
  * the device loaded. The inputs are the harness's seeded fills, one buffer set per case at the
  * case's largest row count.
+ *
+ * The `explore` set (gemv-explore.ts) measures the sentinels of the whole case table first, each
+ * with every candidate; every other case measures at M = 1 the references and the candidates its
+ * nearest sentinels of its storage predict (`gemvExploreSelection` over the sentinels the caller measured earlier,
+ * `sentinelEvidence`, and those this call measured so far), and at M = 4 and 8 what its own M = 1
+ * group carries.
  *
  * Correctness, per row:
  * - identical class: every output word equals the baseline's (`compareBufferWords`); a difference
@@ -59,6 +71,7 @@ import {
   type GemvMeasurementPlan,
   GEMV_CANDIDATE_SETS,
   gemvCarriedFromM1,
+  gemvExploreCarriedFromM1,
   gemvGroupRole,
   gemvKernelsAt,
   gemvMeasurementPlans,
@@ -69,6 +82,12 @@ import {
 } from "./gemv-candidates.ts";
 import { isFloatStorage } from "../kernels/linear-gemv.ts";
 import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
+import {
+  type GemvExploreEvidence,
+  gemvExploreOrder,
+  gemvExploreSelection,
+  gemvSentinels,
+} from "./gemv-explore.ts";
 import { gemvCaseFingerprint, gemvProgramKernelId } from "./gemv-fingerprint.ts";
 import { bandAgainstOracle, gemvOracle } from "./gemv-oracle.ts";
 import {
@@ -109,6 +128,8 @@ import {
 } from "./harness.ts";
 import {
   CALIBRATION_ATTEMPTS,
+  EXPLORE_QUICK_LOOK_MARGIN,
+  QUICK_LOOK_MARGIN,
   quickLookMarginOf,
   RECALIBRATE_BELOW,
   ROUNDS,
@@ -126,11 +147,41 @@ import {
 } from "./report.ts";
 import { acquireSweepGpu, timestampUnitFor } from "./sweep.ts";
 
+/** The phases of a row count's measurement (the module doc's steps 1–5), in their order. */
+export type GemvSweepPhase = "prepare" | "warm-start" | "quick-look" | "calibrate" | "rounds";
+
 /**
- * Sweep progress: `started` once the device and the measurement context exist; `status` — what is
- * measured now; `row` — one row is final (the rows of a row count come together once its rounds are
- * done, its baseline first); `case` — a case is measured, with its summaries (one per row count);
- * `deviceLost`.
+ * Where a row count's measurement stands: `done` of the `total` units of a phase — a kernel's
+ * pipeline (`prepare`), the warm start (one unit), a kernel's quick look and check, a kernel's
+ * calibration and check, a kernel's pass in a round (`rounds`: rounds × the kernels timed). A phase
+ * reports 0 of its total when it begins and each unit when it ends (a unit that failed counts as
+ * done). The quick look is absent at a margin of 0, and a phase with nothing to do reports nothing.
+ */
+export type GemvSweepStep = {
+  readonly caseId: string;
+  readonly m: number;
+  readonly phase: GemvSweepPhase;
+  readonly done: number;
+  readonly total: number;
+};
+
+/** A row count of a case as the case's `plan` event states it. */
+export type GemvSweepPlannedRowCount = {
+  readonly m: number;
+  /**
+   * The kernels planned: the baseline, the default profile's choice at `reorder` and the candidates.
+   * At M = 4 and 8 those the case's M = 1 group does not carry are skipped and not prepared — that
+   * row count's `prepare` step says how many it prepares.
+   */
+  readonly kernels: number;
+};
+
+/**
+ * Sweep progress: `started` once the device and the measurement context exist; `plan` — a case
+ * starts, with its row counts and their kernels; `step` — a unit of a row count's measurement
+ * ({@link GemvSweepStep}); `status` — what is measured now, as a line; `row` — one row is final (the
+ * rows of a row count come together once its rounds are done, its baseline first); `case` — a case
+ * is measured, with its summaries (one per row count); `deviceLost`.
  */
 export type GemvSweepProgress =
   | {
@@ -141,6 +192,14 @@ export type GemvSweepProgress =
       readonly subgroups: boolean;
       readonly caseCount: number;
     }
+  | {
+      readonly kind: "plan";
+      readonly caseId: string;
+      /** The case's place among the planned cases of the call, from 0. */
+      readonly index: number;
+      readonly rowCounts: readonly GemvSweepPlannedRowCount[];
+    }
+  | ({ readonly kind: "step" } & GemvSweepStep)
   | { readonly kind: "status"; readonly message: string }
   | { readonly kind: "row"; readonly row: GemvSweepRow }
   | {
@@ -157,7 +216,9 @@ export type GemvSweepOptions = {
   /**
    * `quick` (the default: M = 1, every reorder candidate, the identical class at a small grid around
    * the baseline), `full` (every row count a derivation rule reads — M = 1, 4 and 8 —, the whole
-   * grid) or `row-blocks` (M = 16 and 64: the row-block heights, which no rule reads yet).
+   * grid), `row-blocks` (M = 16 and 64: the row-block heights, which no rule reads yet) or `explore`
+   * (the row counts of `full`: the sentinels of the case table with every candidate, first, and the
+   * other cases with the candidates the sentinels predict — gemv-explore.ts).
    */
   readonly candidateSet?: GemvCandidateSet;
   /** Narrows by case id (default: every case of the table). */
@@ -167,15 +228,23 @@ export type GemvSweepOptions = {
   /**
    * Narrows by candidate name (`c32u4`, `parallel-l4`, …; default: every candidate of the set). The
    * references — the baseline and the default profile's choice at `reorder` — are measured either
-   * way. A name that is no candidate of any planned case and row count throws.
+   * way. A name that is no candidate of any planned case and row count throws, and so does the
+   * option with the `explore` set, which chooses its candidates itself.
    */
   readonly candidates?: readonly string[];
+  /**
+   * The `explore` set only: sentinels measured by earlier calls (`gemvSweepExploreEvidence` of their
+   * records — the workbench measures one case per call), each a sentinel of the case table at most
+   * once and none this call measures. A case that is no sentinel is predicted from these and from the
+   * sentinels this call has measured before it. Given with another set, it throws.
+   */
+  readonly sentinelEvidence?: readonly GemvExploreEvidence[];
   /** Measurement rounds per kernel (default 5 — the min is kept). */
   readonly rounds?: number;
   /**
-   * The quick look's margin (default measurement.ts's `QUICK_LOOK_MARGIN`, ×1.25; harness.ts's
-   * protocol rule 4). 0 turns the quick look off (every kernel is timed); any other value below 1
-   * throws.
+   * The quick look's margin (harness.ts's protocol rule 4; default measurement.ts's
+   * `QUICK_LOOK_MARGIN`, ×1.25, and `EXPLORE_QUICK_LOOK_MARGIN`, ×1.10, for the `explore` set). 0
+   * turns the quick look off (every kernel is timed); any other value below 1 throws.
    */
   readonly quickLookMargin?: number;
   /**
@@ -183,6 +252,11 @@ export type GemvSweepOptions = {
    * row count it stopped in leaves no row (its kernels are measured together, so none was finished).
    */
   readonly signal?: AbortSignal;
+  /**
+   * Each progress event ({@link GemvSweepProgress}). The step callback runs synchronously between
+   * timed passes, so it MUST stay cheap (a page should only store the event and paint on its own
+   * schedule).
+   */
   readonly onProgress?: (progress: GemvSweepProgress) => void;
 };
 
@@ -278,6 +352,15 @@ export const gemvLaunch = (
 const describeCause = (cause: unknown): string =>
   cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
 
+/**
+ * Whether the derivation could adopt a kernel of a group, as the quick look's fastest bar reads it
+ * (harness.ts's `QuickLookKernel.adoptable`): its check held on the output its quick look left, and
+ * it is a form a table row holds — the subgroup form is a Session option the derivation only notes,
+ * so a faster time of its own must not screen out a plain or staged row. Pure.
+ */
+export const gemvQuickLookAdoptable = (candidate: GemvCandidate, checkHeld: boolean): boolean =>
+  checkHeld && candidate.choice.id !== "gemv-parallel-subgroup32";
+
 const ALL_ROUNDS_NEGATIVE =
   "timestamp negative in every round (only samples clamped to 0, so no min can be taken)";
 
@@ -288,10 +371,16 @@ export type GemvCaseSettings = {
   readonly tolerance: Tolerance;
   /** The quick look's margin (0: off). */
   readonly quickLookMargin: number;
+  /**
+   * Which candidates a row count of the `no-regression` role measures, given the case's M = 1 group
+   * (default `gemvCarriedFromM1`; the `explore` set's `gemvExploreCarriedFromM1`).
+   */
+  readonly carriedFromM1?: typeof gemvCarriedFromM1;
 };
 
 export type GemvCaseHooks = {
   readonly onProgress?: (message: string) => void;
+  readonly onStep?: (step: GemvSweepStep) => void;
   readonly onRow?: (row: GemvSweepRow) => void;
   readonly signal?: AbortSignal;
 };
@@ -418,6 +507,8 @@ type KernelState =
       readonly launch: Launch;
       readonly ready: ReadyLaunch;
       readonly quick?: QuickLook;
+      /** Whether its check held on the output its quick look left (the screening's bar reads it). */
+      readonly checkHeld?: boolean;
     }
   | { readonly kind: "screened"; readonly launch: Launch; readonly quick?: QuickLook }
   /** Left out by the M = 1 group of the same run: its launch for the row, nothing measured. */
@@ -494,6 +585,7 @@ export const sweepGemvCase = async (
   // The profile a Session on this device runs with: the GEMM reference takes its geometry
   const reference = sessionGeometryProfile(gpu);
   const weightScale = !isFloatStorage(gemvCase.storage);
+  const carriedFromM1 = settings.carriedFromM1 ?? gemvCarriedFromM1;
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
   const emit = (row: GemvSweepRow): void => {
@@ -541,11 +633,16 @@ export const sweepGemvCase = async (
   /**
    * The correctness fields of a kernel whose output is in its buffer: the baseline's band reading
    * at a row count with reorder rows; a candidate's words against the baseline's (identical class)
-   * or its band reading (reorder class) — none when the baseline has no output to compare with.
+   * or its band reading (reorder class) — none when the baseline has no output to compare with
+   * (`baselineWritten` false).
    */
-  const checksOf = async (kernel: Kernel, m: number, baseline: Kernel): Promise<CheckFields> => {
+  const checksOf = async (
+    kernel: Kernel,
+    m: number,
+    baselineWritten: boolean,
+  ): Promise<CheckFields> => {
     if (kernel.head.isBaseline) return m <= oracleRows ? await band("reference", m) : {};
-    if (baseline.state.kind !== "calibrated") return {};
+    if (!baselineWritten) return {};
     if (kernel.head.class === "reorder") return await band("out", m);
     const words = await compareBufferWords(
       context,
@@ -554,6 +651,24 @@ export const sweepGemvCase = async (
       m * gemvCase.n * 4,
     );
     return identicalFields(words);
+  };
+  /**
+   * Whether a kernel's check held on the output in its buffer (the comparison of
+   * {@link checksOf}): the baseline's always (its words are the reference, and its band reading is
+   * shown, not judged); a candidate's when its words are the baseline's (identical class) or it is
+   * inside the band without a non-finite output (reorder class) — not when the baseline has no
+   * output to compare with.
+   */
+  const checkHeldOf = async (
+    kernel: Kernel,
+    m: number,
+    baselineWritten: boolean,
+  ): Promise<boolean> => {
+    if (kernel.head.isBaseline) return true;
+    const checks = await checksOf(kernel, m, baselineWritten);
+    return kernel.head.class === "identical"
+      ? checks.identicalToBaseline === true
+      : checks.withinBand === true && (checks.nonFiniteOutputs ?? 0) === 0;
   };
   /** Read afresh each time: the signal is aborted from outside while the case awaits the GPU. */
   const abortRequested = (): boolean => hooks.signal?.aborted === true;
@@ -575,9 +690,14 @@ export const sweepGemvCase = async (
       state: { kind: "planned" },
     }));
     const [baseline] = kernels;
+    const step = (phase: GemvSweepPhase, done: number, total: number): void =>
+      hooks.onStep?.({ caseId: gemvCase.id, m, phase, done, total });
+    /** The kernels in `kind` now. */
+    const countIn = (kind: KernelState["kind"]): number =>
+      kernels.filter((kernel) => kernel.state.kind === kind).length;
     // The kernels M = 1 leaves out: their row keeps the kernel and its launch, which take no GPU work
     for (const kernel of kernels.slice(1)) {
-      if (gemvCarriedFromM1(m, kernel.candidate, plan.profile, m1Group)) continue;
+      if (carriedFromM1(m, kernel.candidate, plan.profile, m1Group)) continue;
       try {
         const program = gemvProgram(gemvCase, m, kernel.candidate.choice, reference);
         kernel.head = { ...kernel.head, kernel: gemvProgramKernelId(program) };
@@ -596,6 +716,9 @@ export const sweepGemvCase = async (
       hooks.onProgress?.(
         `${label}: preparing ${kernels.length - skipped} kernels${skipped === 0 ? "" : ` (${skipped} skipped: not adoptable from M = 1)`}`,
       );
+      const toPrepare = countIn("planned");
+      if (toPrepare > 0) step("prepare", 0, toPrepare);
+      let preparedCount = 0;
       for (const kernel of kernels) {
         if (abortRequested()) return undefined;
         if (gpu.lost !== undefined) break;
@@ -610,8 +733,12 @@ export const sweepGemvCase = async (
         } catch (cause) {
           kernel.state = { kind: "failed", cause };
         }
+        preparedCount += 1;
+        step("prepare", preparedCount, toPrepare);
       }
       // 2. The warm start, on the baseline unless it failed (then on the next kernel that did not)
+      const warming = countIn("prepared") > 0 && gpu.lost === undefined;
+      if (warming) step("warm-start", 0, 1);
       for (const kernel of kernels) {
         if (abortRequested()) return undefined;
         const { state } = kernel;
@@ -625,9 +752,26 @@ export const sweepGemvCase = async (
           kernel.state = { kind: "failed", cause };
         }
       }
-      // 3. The quick looks, in an order that does not follow the plan's, and the screening
+      if (warming) step("warm-start", 1, 1);
+      // 3. The quick looks, in an order that does not follow the plan's, each with its check, and
+      // the screening
       if (settings.quickLookMargin > 0) {
+        if (abortRequested()) return undefined;
+        // The baseline's words first, so that every candidate's check reads against them
+        let baselineWritten = false;
+        const first = baseline.state;
+        if (first.kind === "prepared" && gpu.lost === undefined) {
+          try {
+            await runLaunchOnce(context, first.ready, buffer(baseline.output));
+            baselineWritten = true;
+          } catch (cause) {
+            baseline.state = { kind: "failed", cause };
+          }
+        }
         const looked = quickLookOrder(kernels, label);
+        const toLook = countIn("prepared");
+        if (toLook > 0 && gpu.lost === undefined) step("quick-look", 0, toLook);
+        let lookedCount = 0;
         for (const [position, kernel] of looked.entries()) {
           if (abortRequested()) return undefined;
           const { state } = kernel;
@@ -635,10 +779,20 @@ export const sweepGemvCase = async (
           if (state.kind !== "prepared") continue;
           hooks.onProgress?.(`${label}: quick look ${position + 1}/${looked.length}`);
           try {
-            kernel.state = { ...state, quick: await quickLook(context, state.ready) };
+            // A candidate's probe starts from a zeroed output, so the buffer then holds its own
+            // output; the baseline's rewrites the words its first run left
+            const quick = await quickLook(
+              context,
+              state.ready,
+              kernel.head.isBaseline ? undefined : buffer(kernel.output),
+            );
+            const checkHeld = await checkHeldOf(kernel, m, baselineWritten);
+            kernel.state = { ...state, quick, checkHeld };
           } catch (cause) {
             kernel.state = { kind: "failed", cause };
           }
+          lookedCount += 1;
+          step("quick-look", lookedCount, toLook);
         }
         const goesOn = quickLookGoesOn(
           kernels.map((kernel) => ({
@@ -648,6 +802,10 @@ export const sweepGemvCase = async (
               ? { perDispatch: kernel.state.quick.perDispatch }
               : {}),
             reference: kernel.head.isBaseline || kernel.head.candidate === plan.profile.reorder,
+            adoptable: gemvQuickLookAdoptable(
+              kernel.candidate,
+              kernel.state.kind === "prepared" && kernel.state.checkHeld === true,
+            ),
           })),
           settings.quickLookMargin,
           // A winner is picked among the fastest; a regression is read against the default's choice
@@ -667,6 +825,9 @@ export const sweepGemvCase = async (
         });
       }
       // 4. Every kernel's calibration and check
+      const toCalibrate = countIn("prepared");
+      if (toCalibrate > 0 && gpu.lost === undefined) step("calibrate", 0, toCalibrate);
+      let calibratedCount = 0;
       for (const [index, kernel] of kernels.entries()) {
         if (abortRequested()) return undefined;
         const { state } = kernel;
@@ -678,14 +839,19 @@ export const sweepGemvCase = async (
         try {
           await runLaunchOnce(context, state.ready, buffer(kernel.output));
           const reps = await calibrate(context, state.ready, state.quick?.reps);
-          const checks = await checksOf(kernel, m, baseline);
+          const checks = await checksOf(kernel, m, baseline.state.kind === "calibrated");
           kernel.state = { ...state, kind: "calibrated", reps, checks, samples: [] };
         } catch (cause) {
           kernel.state = { kind: "failed", cause };
         }
+        calibratedCount += 1;
+        step("calibrate", calibratedCount, toCalibrate);
       }
       // 5. The rounds, interleaved
       const timed = kernels.filter((kernel) => kernel.state.kind === "calibrated");
+      const passes = settings.rounds * timed.length;
+      if (passes > 0 && gpu.lost === undefined) step("rounds", 0, passes);
+      let passCount = 0;
       for (
         let round = 0;
         round < settings.rounds && timed.length > 0 && gpu.lost === undefined;
@@ -696,12 +862,16 @@ export const sweepGemvCase = async (
           if (abortRequested()) return undefined;
           const { state } = kernel;
           if (gpu.lost !== undefined) break;
-          if (state.kind !== "calibrated") continue;
-          try {
-            state.samples.push(await measurePass(context, state.ready, state.reps));
-          } catch (cause) {
-            kernel.state = { kind: "failed", cause };
+          // A kernel that failed in an earlier round takes no more passes; its places count as done
+          if (state.kind === "calibrated") {
+            try {
+              state.samples.push(await measurePass(context, state.ready, state.reps));
+            } catch (cause) {
+              kernel.state = { kind: "failed", cause };
+            }
           }
+          passCount += 1;
+          step("rounds", passCount, passes);
         }
       }
     } finally {
@@ -821,21 +991,66 @@ export const gemvSweepGates = (
 };
 
 /** The options checked and the cases chosen. */
-type GemvSweepPlan = {
+export type GemvSweepPlan = {
   readonly candidateSet: GemvCandidateSet;
+  /**
+   * The case ids the sweep was narrowed to, in measuring order (`settings.cases` of its record;
+   * empty: every case).
+   */
   readonly caseIds: readonly string[];
   readonly selection: GemvSelection;
   readonly rounds: number;
   readonly quickLookMargin: number;
+  /** In measuring order: the table's, the sentinels first for the `explore` set. */
   readonly cases: readonly GemvCase[];
+  /** The `explore` set only: the sentinels of the whole case table, by id. */
+  readonly sentinels?: readonly string[];
+  /** The sentinels measured earlier (`GemvSweepOptions.sentinelEvidence`; empty: none). */
+  readonly sentinelEvidence: readonly GemvExploreEvidence[];
 };
 
 /** The first value given twice, if any. */
 const givenTwice = <T>(values: readonly T[]): T | undefined =>
   values.find((value, index) => values.indexOf(value) !== index);
 
+/**
+ * The quick look's margin a GEMV sweep of `candidateSet` runs with: `margin` when given (0 or at
+ * least 1, else it throws), otherwise the set's default — `EXPLORE_QUICK_LOOK_MARGIN` (×1.10) for
+ * `explore`, `QUICK_LOOK_MARGIN` (×1.25) for every other set.
+ */
+export const gemvSweepQuickLookMargin = (candidateSet: GemvCandidateSet, margin?: number): number =>
+  quickLookMarginOf(
+    margin,
+    candidateSet === "explore" ? EXPLORE_QUICK_LOOK_MARGIN : QUICK_LOOK_MARGIN,
+  );
+
+/** Checks the sentinel evidence of an `explore` sweep that measures `cases` (before the GPU is touched). */
+const checkSentinelEvidence = (
+  evidence: readonly GemvExploreEvidence[],
+  sentinels: readonly string[],
+  cases: readonly GemvCase[],
+): void => {
+  const ids = evidence.map(({ gemvCase }) => gemvCase.id);
+  const twice = givenTwice(ids);
+  if (twice !== undefined) throw new Error(`Sentinel ${twice} is given twice in sentinelEvidence`);
+  for (const { gemvCase } of evidence) {
+    const table = GEMV_CASES.find(({ id }) => id === gemvCase.id);
+    if (table === undefined || !sentinels.includes(gemvCase.id)) {
+      throw new Error(
+        `sentinelEvidence holds ${gemvCase.id}, which is no sentinel of the case table (${sentinels.join(", ")})`,
+      );
+    }
+    if (gemvCaseFingerprint(gemvCase) !== gemvCaseFingerprint(table)) {
+      throw new Error(`sentinelEvidence holds ${gemvCase.id} with another shape than the table's`);
+    }
+    if (cases.some(({ id }) => id === gemvCase.id)) {
+      throw new Error(`sentinelEvidence holds ${gemvCase.id}, which this sweep measures itself`);
+    }
+  }
+};
+
 /** Checks the options and chooses the cases (before the GPU is touched). */
-const planGemvSweep = (options: GemvSweepOptions): GemvSweepPlan => {
+export const planGemvSweep = (options: GemvSweepOptions): GemvSweepPlan => {
   const candidateSet = options.candidateSet ?? "quick";
   if (!isGemvCandidateSet(candidateSet)) {
     throw new Error(`Candidate set ${candidateSet} is none of ${GEMV_CANDIDATE_SETS.join(" / ")}`);
@@ -848,10 +1063,23 @@ const planGemvSweep = (options: GemvSweepOptions): GemvSweepPlan => {
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
-  const quickLookMargin = quickLookMarginOf(options.quickLookMargin);
-  const cases = GEMV_CASES.filter(
+  const quickLookMargin = gemvSweepQuickLookMargin(candidateSet, options.quickLookMargin);
+  const explore = candidateSet === "explore";
+  if (explore && options.candidates !== undefined && options.candidates.length > 0) {
+    throw new Error(
+      "The explore set chooses its candidates from its sentinels: candidates cannot narrow it",
+    );
+  }
+  const sentinelEvidence = options.sentinelEvidence ?? [];
+  if (!explore && sentinelEvidence.length > 0) {
+    throw new Error(`sentinelEvidence is read by the explore set only, not by ${candidateSet}`);
+  }
+  const table = GEMV_CASES.filter(
     (gemvCase) => caseIds.length === 0 || caseIds.includes(gemvCase.id),
   );
+  const cases = explore ? gemvExploreOrder(table) : table;
+  const sentinels = explore ? gemvSentinels(GEMV_CASES) : undefined;
+  if (sentinels !== undefined) checkSentinelEvidence(sentinelEvidence, sentinels, cases);
   const rows = options.rows === undefined || options.rows.length === 0 ? undefined : options.rows;
   if (rows !== undefined) {
     const twice = givenTwice(rows);
@@ -895,7 +1123,8 @@ const planGemvSweep = (options: GemvSweepOptions): GemvSweepPlan => {
   }
   return {
     candidateSet,
-    caseIds,
+    // In measuring order, as the workbench's merged record of the same cases holds them
+    caseIds: caseIds.length === 0 ? [] : cases.map(({ id }) => id),
     selection: {
       ...(rows === undefined ? {} : { rows }),
       ...(candidates === undefined ? {} : { candidates }),
@@ -903,7 +1132,46 @@ const planGemvSweep = (options: GemvSweepOptions): GemvSweepPlan => {
     rounds,
     quickLookMargin,
     cases,
+    ...(sentinels === undefined ? {} : { sentinels }),
+    sentinelEvidence,
   };
+};
+
+/**
+ * The measurement plans of a case: the set's (narrowed by the plan's row counts and candidates)
+ * and, where `narrowedTo` is given (an `explore` case that is no sentinel), the M = 1 group
+ * narrowed to those names and the references.
+ */
+const casePlans = (
+  gemvCase: GemvCase,
+  plan: GemvSweepPlan,
+  gates: GemvGates,
+  narrowedTo: readonly string[] | undefined,
+): GemvMeasurementPlan[] =>
+  gemvMeasurementPlans(gemvCase, plan.candidateSet, gates, plan.selection).map((one) =>
+    narrowedTo === undefined || one.m !== 1
+      ? one
+      : {
+          ...one,
+          candidates: one.candidates.filter(
+            ({ name }) => name === one.profile.reorder || narrowedTo.includes(name),
+          ),
+        },
+  );
+
+/**
+ * The sentinel evidence a record holds: the cases of an `explore` record that are its sentinels,
+ * each with the rows of its M = 1 group (none for another set). A later sweep takes it as
+ * `GemvSweepOptions.sentinelEvidence` — the workbench measures one case per call.
+ */
+export const gemvSweepExploreEvidence = (report: GemvSweepReport): GemvExploreEvidence[] => {
+  const sentinels = report.settings.sentinels ?? [];
+  return report.cases
+    .filter(({ id }) => sentinels.includes(id))
+    .map(({ fingerprint: _fingerprint, ...gemvCase }) => ({
+      gemvCase,
+      rows: report.rows.filter((row) => row.caseId === gemvCase.id && row.m === 1),
+    }));
 };
 
 /** What the record is assembled from. */
@@ -918,6 +1186,8 @@ export type GemvSweepParts = {
   readonly gates: GemvSweepGates;
   readonly timing: { readonly feature: boolean; readonly unit: TimingUnit };
   readonly candidateSet: GemvCandidateSet;
+  /** The `explore` set only: the sentinels of the whole case table, by id. */
+  readonly sentinels?: readonly string[];
   /** The case ids the sweep was narrowed to (empty: every case). */
   readonly caseIds: readonly string[];
   /** The row counts and candidates it was narrowed to (absent: all). */
@@ -949,6 +1219,7 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
   },
   settings: {
     candidateSet: parts.candidateSet,
+    ...(parts.sentinels === undefined ? {} : { sentinels: parts.sentinels }),
     ...(parts.caseIds.length === 0 ? {} : { cases: parts.caseIds }),
     ...(parts.selection.rows === undefined ? {} : { rows: parts.selection.rows }),
     ...(parts.selection.candidates === undefined ? {} : { candidates: parts.selection.candidates }),
@@ -1032,26 +1303,51 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
         subgroups: gates.subgroups,
         caseCount: plan.cases.length,
       });
-      for (const gemvCase of plan.cases) {
+      // What a case that is no sentinel is predicted from: the sentinels measured earlier, then
+      // those of this call as each is measured (the plan puts them first)
+      const evidence: GemvExploreEvidence[] = [...plan.sentinelEvidence];
+      const carriedFromM1 =
+        plan.candidateSet === "explore" ? gemvExploreCarriedFromM1 : gemvCarriedFromM1;
+      for (const [index, gemvCase] of plan.cases.entries()) {
         if (gpu.lost !== undefined) break;
         if (options.signal?.aborted === true) {
           aborted = true;
           break;
         }
+        const sentinel = plan.sentinels?.includes(gemvCase.id) === true;
+        const narrowedTo =
+          plan.sentinels === undefined || sentinel
+            ? undefined
+            : gemvExploreSelection(gemvCase, evidence);
+        const plans = casePlans(gemvCase, plan, candidateGates, narrowedTo);
+        notify?.({
+          kind: "plan",
+          caseId: gemvCase.id,
+          index,
+          rowCounts: plans.map(({ m, candidates }) => ({ m, kernels: 1 + candidates.length })),
+        });
         const result = await sweepGemvCase(
           context,
           gemvCase,
-          gemvMeasurementPlans(gemvCase, plan.candidateSet, candidateGates, plan.selection),
-          { rounds: plan.rounds, tolerance, quickLookMargin: plan.quickLookMargin },
+          plans,
+          { rounds: plan.rounds, tolerance, quickLookMargin: plan.quickLookMargin, carriedFromM1 },
           {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             onProgress: (message) => notify?.({ kind: "status", message }),
+            onStep: (step) => notify?.({ kind: "step", ...step }),
             onRow: (row) => notify?.({ kind: "row", row }),
           },
         );
+        const caseSummaries =
+          narrowedTo === undefined
+            ? result.summaries
+            : result.summaries.map((summary) =>
+                summary.m === 1 ? { ...summary, narrowedTo } : summary,
+              );
         rows.push(...result.rows);
-        summaries.push(...result.summaries);
-        notify?.({ kind: "case", caseId: gemvCase.id, summaries: result.summaries });
+        summaries.push(...caseSummaries);
+        if (sentinel) evidence.push({ gemvCase, rows: result.rows.filter(({ m }) => m === 1) });
+        notify?.({ kind: "case", caseId: gemvCase.id, summaries: caseSummaries });
         if (result.aborted) {
           aborted = true;
           break;
@@ -1070,6 +1366,7 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
       gates,
       timing: { feature: gpu.gpuTimingEnabled, unit: context.unit },
       candidateSet: plan.candidateSet,
+      ...(plan.sentinels === undefined ? {} : { sentinels: plan.sentinels }),
       caseIds: plan.caseIds,
       selection: plan.selection,
       rounds: plan.rounds,

@@ -8,15 +8,15 @@
  * enough to matter; at M = 4 and 8 the reorder candidates that the case's M = 1 group of the same run
  * leaves unadoptable are skipped. One call per case with idle time before every case but the first,
  * the per-case records merged into one `karume-gemv-sweep/4` record — what
- * `deriveLinearGemvChoices` reads.
+ * `deriveLinearGemvChoices` reads. The `explore` set's sentinels go first, and each later call takes
+ * the sentinels the earlier calls measured, so the merged record is what one call over the cases
+ * writes.
  *
  * The run concludes a verdict from its rows (`gemvSweepVerdict` of `../gemv-sweep/summary.ts`): an
  * identical candidate whose words differ, a reorder candidate outside the band, or a row that errored
  * is a `fail`. `runGemvSweep` acquires and destroys a dedicated device per call, so this entry
  * acquires none.
  */
-
-import { QUICK_LOOK_MARGIN } from "@karume/runtime/tune";
 
 import type { Entry } from "../entry.ts";
 import { foldGemvEvent, INITIAL_GEMV_LIVE, runGemvPlan } from "../gemv-sweep/run.ts";
@@ -35,13 +35,13 @@ const entry: Entry = {
   id: "gemv-sweep",
   title: "GEMV sweep",
   description:
-    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing, M = 4 and 8 only for the reorder candidates M = 1 leaves adoptable), merged into one karume-gemv-sweep/4 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
+    "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing, M = 4 and 8 only for the reorder candidates M = 1 leaves adoptable; the explore set measures the whole grid on a few sentinel cases first and the candidates they predict on the others), merged into one karume-gemv-sweep/4 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
   parameters: [
     {
       kind: "choice",
       name: "candidateSet",
       label:
-        "Candidate set (quick: M = 1; full: M = 1, 4 and 8, the whole grid; row-blocks: M = 16 and 64)",
+        "Candidate set (quick: M = 1; full: M = 1, 4 and 8, the whole grid; row-blocks: M = 16 and 64; explore: M = 1, 4 and 8, the whole grid on the sentinels, the predicted candidates elsewhere)",
       options: GEMV_CANDIDATE_SETS,
       default: "quick",
     },
@@ -62,17 +62,18 @@ const entry: Entry = {
     {
       kind: "choices",
       name: "candidates",
-      label: "Candidates besides the references (none: every candidate)",
+      label:
+        "Candidates besides the references (none: every candidate; the explore set takes none)",
       options: GEMV_CANDIDATE_NAMES,
       default: [],
     },
     {
-      kind: "number",
+      // Text, so that empty can mean the set's default (×1.25; ×1.10 for explore)
+      kind: "text",
       name: "quickLookMargin",
-      label: "Quick look margin (0: off — every kernel is timed in full)",
-      min: 0,
-      max: 1000,
-      default: QUICK_LOOK_MARGIN,
+      label:
+        "Quick look margin (empty: the set's default, ×1.25 and ×1.10 for explore; 0: off — every kernel is timed in full)",
+      default: "",
     },
     {
       kind: "integer",

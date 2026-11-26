@@ -296,6 +296,7 @@
 | quick look (sweeps) △ | 予備計測 | ウォームアップの後にグループの全カーネルを短く 1 回測り、参照（既定の幾何・GEMV のベースラインと既定の選択）と、クラスの目安から既定 ×1.25 以内のカーネルだけを本計測に回す工程 | — | spec/workbench.md |
 | screened (sweep row) △ | 予備計測で外れた行 | 予備計測で本計測に進まなかった行。ラウンドの時間も出力のチェックも持たないので、採用の根拠にならない | — | spec/workbench.md |
 | skipped (GEMV sweep row) △ | 測らなかった行 | 同じ run の M = 1 の結果から採用できないと決まった reorder の候補を、M = 4 / 8 で測らずに残した行 | — | spec/geometry-profiles.md |
+| sentinel (GEMV sweep's `explore` set) △ | 代表ケース | `explore` の掃引が最初に全候補で測る、ケース表全体から選んだ 12 ケース。ほかのケースは M = 1 で、同じ格納型のいちばん近い代表ケースの最速の候補とその格子上の隣だけを測る | — | spec/workbench.md |
 | GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る。利得は基準の再現された最速の時間に対して読む） | — | spec/geometry-profiles.md |
 | steadiness bound (GEMV sweep) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えた M = 1 のグループは、掃引が M = 4 / 8 で測らない候補を決める根拠にしない。導出はこの値を読まない | — | glossary.md |
 | reference (GEMV derivation) △ | 基準（のカーネル） | 候補の利得を読む相手。今の既定プロファイルがその形状・行数で走らせるカーネル（出力の語が同じ種類の候補は `exact` の選択、加算順が違う種類の候補は `reorder` の選択）。記録がどの既定の下で作られたかは問わず、その記録が計時していれば使う | 参照（sha256 の参照値と混ぜない） | spec/geometry-profiles.md |
