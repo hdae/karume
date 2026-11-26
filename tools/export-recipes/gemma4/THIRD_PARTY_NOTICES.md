@@ -1,16 +1,17 @@
 # Third-party notices — Gemma 4 (E2B / E4B / 12B / 26B A4B)
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distributions it builds (`karume-gemma4`,
+`karume-gemma4-qat`): for each upstream, where it comes from, the revision used, its license and
+what was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/gemma4/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
@@ -67,16 +68,17 @@ questions it has to answer.
   and renames id 249788, E4B drops 253). The README front matter at both commits is unchanged
   (`license: apache-2.0`, not gated — HF API, 2026-11-04).
 
-NOTE: this recipe **does** have two distribution seats (`distribution.py` / `card.py` →
-`models/karume-gemma4`, the regular line, and `models/karume-gemma4-qat`, the q4_0 QAT line). The
+NOTE: this recipe builds two distributions (`distribution.py` / `card.py`): `models/karume-gemma4`,
+the regular line (`hdae/karume-gemma4`), and `models/karume-gemma4-qat`, the q4_0 QAT line
+(`hdae/karume-gemma4-qat`). The
 verbatim Apache 2.0 text is vendored once for every family that
 needs it as `../_shared/licenses/apache_license_2_0.txt` and shipped as each distribution's
 `LICENSE.md`, alongside a `NOTICE.md` that lists the modifications required by Apache 2.0 §4(b).
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### google/gemma-4-E2B-it
 
@@ -87,7 +89,8 @@ published.
 | Form of copy             | Loaded, not copied. The text decoder is re-distributed in `models/karume-gemma4` unchanged as the checkpoint's bf16 values, the per-layer embedding table included (the presets `bf16` and `bf16-fast` — `e2b/model/model.bf16-*`), re-expressed in the Karume container format.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Weights license          | **Apache 2.0** — the snapshot's own `README.md` frontmatter says `license: apache-2.0` and its `license_link` page carries the plain Apache 2.0 text. Checked against `3e22461f65e89153144f8adb70e3b8c2cc9845a7` (the weights' revision) on 2026-09-01. (An earlier claim that the Gemma Terms of Use applied was Gemma 3 knowledge carried over; it was retracted.) Re-checked 2026-09-25: `license: apache-2.0` on the HF API at this revision (`refs/main` in the HF cache is the same commit — local fetch record, 2026-09-25), and the model page states no additional terms; the README ends with a BibTeX citation, an academic citation format rather than a redistribution condition (interview 2026-09-25). Re-checked 2026-11-04 on the HF API at both `3e22461f…` and `4adf1574…` (`/api/models/google/gemma-4-E2B-it/revision/<sha>`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `gated` false, and the same `model.safetensors` LFS oid at both (`2db5482b…`, the SHA-256 the series' `reference.json` records). |
-| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — text-decoder extraction, container re-expression, the drafter's int8 quantization, PLE as host-read container assets, host-built RoPE). The card carries the Apache 2.0 attribution and links to the upstream model card for the usage guidance this project does not curate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — text-decoder extraction, container re-expression, the drafter's int8 quantization, PLE as host-read container assets, host-built RoPE). The card carries the Apache 2.0 attribution and links to the upstream model card for the usage guidance this project does not curate. `karume-gemma4-qat`'s `NOTICE.md` and card name this checkpoint as the tokenizer source of `e2b` (`karume-gemma4-qat-mobile`: `../gemma4_qat/THIRD_PARTY_NOTICES.md`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Published in             | `karume-gemma4` (`hdae/karume-gemma4`; uploaded again 2026-11-20 with 0.23.0): `e2b/model/`, `e2b/tokenizer/`; the tokenizer also as `e2b/tokenizer/` of `karume-gemma4-qat` (first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0); the attribution in the `README.md` and `NOTICE.md` of both. |
 
 ### google/gemma-4-E4B-it
 
@@ -98,7 +101,8 @@ published.
 | Form of copy             | Loaded, not copied. As for `google/gemma-4-E2B-it`: the text decoder is re-distributed in `models/karume-gemma4` unchanged as bf16 (the presets `bf16` and `bf16-fast`, the per-layer embedding table included — `e4b/model/model.bf16-*`). `tokenizer.json` is compiled into `e4b/tokenizer/`. No drafter is shipped for E4B in this line.                                                                        |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Weights license          | **Apache 2.0** — HF API at both commits, 2026-11-04 (`/api/models/google/gemma-4-E4B-it/revision/<sha>`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license` (the same link as E2B's), `base_model` `google/gemma-4-E4B`, `gated` false. Unverified by a human review.                                                                                                                                                         |
-| Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-E2B-it`: `karume-gemma4`'s `NOTICE.md` names this checkpoint and the changes; the card names it as the base model of `e4b`.                                                                                                                                                                                                                                                                                                      |
+| Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-E2B-it`: `karume-gemma4`'s `NOTICE.md` names this checkpoint and the changes, and the card names it as the base model of `e4b`; `karume-gemma4-qat`'s `NOTICE.md` and card name it as the tokenizer source of `e4b` (`karume-gemma4-qat-mobile`: `../gemma4_qat/THIRD_PARTY_NOTICES.md`). |
+| Published in             | `karume-gemma4` (`hdae/karume-gemma4`; uploaded again 2026-11-20 with 0.23.0): `e4b/model/`, `e4b/tokenizer/`; the tokenizer also as `e4b/tokenizer/` of `karume-gemma4-qat` (first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0); the attribution in the `README.md` and `NOTICE.md` of both. |
 
 ### google/gemma-4-12B-it
 
@@ -110,6 +114,7 @@ published.
 | Code license             | n/a (tokenizer and configuration only)                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Weights license          | **Apache 2.0** — the snapshot's own `README.md` frontmatter says `license: apache-2.0` (`license_link` as for E2B), read at this revision on 2026-11-02. Unverified by a human review.                                                                                                                                                                                                                                                                        |
 | Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-E2B-it`: `NOTICE.md` names this checkpoint and its changes (no per-layer embeddings to move); the card names it as the base model and the tokenizer source.                                                                                                                                                                                                                                                     |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `12b/tokenizer/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-12B-it-qat-q4_0-unquantized (12B weights)
 
@@ -121,6 +126,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Weights license          | **Apache 2.0** — the snapshot's own `README.md` frontmatter says `license: apache-2.0` (`license_link` as for E2B) and names `google/gemma-4-12B-it` as `base_model`, read at this revision on 2026-11-03; re-read on the HF API on 2026-11-04 (`license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `gated` false, `model.safetensors` LFS oid `26f2cee4…` = the pin). Unverified by a human review.                                                                                                               |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the 12B weights — open for the human review.                                                                                                                                                                                                                                                                                                                                |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; the vision embedder 2026-11-08 with 0.18.0; uploaded again 2026-11-20 with 0.23.0): `12b/model/`, `12b/vision/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-26B-A4B-it
 
@@ -132,6 +138,7 @@ published.
 | Code license | n/a (tokenizer and configuration only) |
 | Weights license | **Apache 2.0** — HF API at this revision, 2026-11-08: `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-26B-A4B`, `gated` false. Unverified by a human review. |
 | Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-12B-it`: the q4_0 QAT line's `NOTICE.md` names this checkpoint and its changes; the card names it as the base model and the tokenizer source. |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`; 26B A4B first uploaded 2026-11-08 with 0.19.0; uploaded again 2026-11-20 with 0.23.0): `26b/tokenizer/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-26B-A4B-it-qat-q4_0-unquantized (26B A4B weights)
 
@@ -143,6 +150,7 @@ published.
 | Code license | n/a (weights only) |
 | Weights license | **Apache 2.0** — HF API at this revision, 2026-11-08: `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-26B-A4B-it`, `gated` false. Unverified by a human review. |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the 26B weights — open for the human review. |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`; 26B A4B first uploaded 2026-11-08 with 0.19.0; uploaded again 2026-11-20 with 0.23.0): `26b/model/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-E2B-it-qat-q4_0-unquantized (E2B q4_0 QAT weights)
 
@@ -154,6 +162,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Weights license          | **Apache 2.0** — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-E2B-it-qat-q4_0-unquantized/revision/6befbaca7398925921802abd1f277b495b78b738`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-E2B-it`, `gated` false. Unverified by a human review.                                                                                                                                                                                                                 |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the E2B weights — open for the human review.                                                                                                                                                                                                                                                                                                                                                                        |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `e2b/model/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-E4B-it-qat-q4_0-unquantized (E4B q4_0 QAT weights)
 
@@ -165,6 +174,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Weights license          | **Apache 2.0** — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-E4B-it-qat-q4_0-unquantized/revision/476025a01dbf99361c062bbeca3d6a76bb4c4566`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-E4B-it`, `gated` false. Unverified by a human review.                                                                                                                                                                                                                 |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the E4B weights — open for the human review.                                                                                                                                                                                                                                                                                                                                                                        |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `e4b/model/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-E2B-it-assistant (MTP drafter)
 
@@ -176,6 +186,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                    |
 | Weights license          | **Apache 2.0** — `license: apache-2.0` on the HF API at this revision (HF API at revision, 2026-09-25; the user confirmed the model page the same day — interview 2026-09-25). Re-read on the HF API on 2026-11-04: `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `gated` false. |
 | Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-E2B-it`: the distribution's `LICENSE.md` / `NOTICE.md` bundle the license text and the statement of changes (interview 2026-09-25).                                                                                                                     |
+| Published in             | `karume-gemma4` (`hdae/karume-gemma4`; uploaded again 2026-11-20 with 0.23.0): `e2b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant (E2B q4_0 QAT MTP drafter)
 
@@ -187,6 +198,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Weights license          | **Apache 2.0** — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant/revision/ebc7e1a211354561464cb82ed6d886792138dcb6`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-E2B-it-assistant`, `gated` false. Unverified by a human review.                                                     |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's `NOTICE.md` names this repository as E2B's drafter, and the card lists it — open for the human review.                                                                                                                                                                                                                                                                                         |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `e2b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant (E4B q4_0 QAT MTP drafter)
 
@@ -198,6 +210,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Weights license          | **Apache 2.0** — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant/revision/27f8d204f09f2be353d6ff0bf0d012792b13c79f`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-E4B-it-assistant`, `gated` false. Unverified by a human review.                                                     |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's `NOTICE.md` names this repository as E4B's drafter, and the card lists it — open for the human review.                                                                                                                                                                                                                                                                                         |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `e4b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### google/gemma-4-12B-it-qat-q4_0-unquantized-assistant (12B q4_0 QAT MTP drafter)
 
@@ -209,6 +222,7 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Weights license          | **Apache 2.0** — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-12B-it-qat-q4_0-unquantized-assistant/revision/18934064dd4c5c6cc3621f6381e7d377fc8cb7bd`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-12B-it-assistant`, `gated` false. Unverified by a human review.                                                     |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's `NOTICE.md` names this repository as 12B's drafter, and the card lists it — open for the human review.                                                                                                                                                                                                                                                                                         |
+| Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `12b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### transformers (model implementation)
 

@@ -1,16 +1,17 @@
 # Third-party notices — SigLIP2 vision tower
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distribution it builds (`karume-siglip2`): for
+each upstream, where it comes from, the revision used, its license and what was checked. **It is
+not a license determination.**
 
 This directory (`tools/export-recipes/siglip2/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
@@ -26,10 +27,10 @@ questions it has to answer.
 - **Preprocessing reference** — `preprocess.py` treats `AutoImageProcessor` as the source of truth
   and generates parity fixtures from it rather than copying its code.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### google/siglip2-base-patch16-224 and google/siglip2-so400m-patch14-384
 
@@ -39,7 +40,7 @@ published.
 | Revision used            | base-patch16-224: `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2` / so400m-patch14-384: `e8e487298228002f3d8a82e0cd5c8ea9c567f57f` (HF cache `refs/main` — local fetch record, 2026-09-25)                                                                                                                                                                                                                                                        |
 | Form of copy             | Loaded, not copied. The vision tower is re-distributed in converted storage form.                                                                                                                                                                                                                                                                                                                                                            |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Weights license          | Apache 2.0, unchanged (interview 2026-09-25). `card.py` records `apache-2.0` (checked on the model page, 2026-08-13).                                                                                                                                                                                                                                                                                                                        |
+| Weights license          | Apache 2.0, unchanged (interview 2026-09-25). `card.py` records `apache-2.0` (checked on the model page, 2026-08-13); the card data at both revisions used says `apache-2.0` (HF models API, checked 2026-11-26).                                                                                                                                                                                                                                                                                                                        |
 | Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — vision-tower extraction, container re-expression, the two bit-exact shape rewrites, the non-bit-exact MAP head rewrite, no quantization). The model page also gives a BibTeX citation, an academic citation format rather than a redistribution condition (interview 2026-09-25). |
 
 ### transformers (model implementation)

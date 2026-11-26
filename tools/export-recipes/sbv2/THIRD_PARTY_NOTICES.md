@@ -1,33 +1,36 @@
 # Third-party notices — Style-Bert-VITS2 (SBV2)
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distribution it builds (`karume-sbv2-jvnv`):
+for each upstream, where it comes from, the revision used, its license and what was checked. **It
+is not a license determination.**
 
 This directory (`tools/export-recipes/sbv2/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
 - **Voice weights** — the JVNV family (one card profile per voice family):
   [litagin/style_bert_vits2_jvnv](https://huggingface.co/litagin/style_bert_vits2_jvnv).
 - **Text encoder weights** — [ku-nlp/deberta-v2-large-japanese-char-wwm](https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm),
-  re-distributed in every SBV2 repository (exported by `../deberta/`).
+  re-distributed in `karume-sbv2-jvnv`, truncated to its first 22 encoder layers (exported by
+  `../deberta/`).
 - **Model implementation** — the `style-bert-vits2` package (pinned `==2.5.0`; upstream project
   <https://github.com/litagin02/Style-Bert-VITS2>). `patch.py` replaces class attributes on
   imported classes and re-implements `transforms.py`'s spline in a branch-free equivalent form; the
   installed package is not modified and no file is copied here.
 - **Corpus** — the JVNV profile cites <https://arxiv.org/abs/2310.06072> in the model card.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves. The JVNV corpus has no block of its own: its
+license is the one the voices carry, and the voice block's attribution covers its citation.
 
 ### litagin/style_bert_vits2_jvnv (JVNV voice family)
 
@@ -38,7 +41,7 @@ published.
 | Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                        |
 | Code license             | n/a (weights only)                                                                                                                                                   |
 | Weights license          | `cc-by-sa-4.0`, unchanged (interview 2026-09-25). `card.py` records the same (checked 2026-08-09).                                                                   |
-| Attribution requirements | CC BY-SA 4.0 attribution and the JVNV corpus citation, carried by the model card. The upstream gives no citation format (interview 2026-09-25).                      |
+| Attribution requirements | CC BY-SA 4.0 attribution and the JVNV corpus citation, carried by the model card and `NOTICE.md`. The upstream gives no citation format (interview 2026-09-25).      |
 
 ### ku-nlp/deberta-v2-large-japanese-char-wwm (text encoder)
 
@@ -46,10 +49,10 @@ published.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm>                                                                                      |
 | Revision used            | `547b0e8b044fba3f9b84d0ab9f990440bd130c8b` — the revision the export pins; the HF cache snapshot and `refs/main` agree (local fetch record, 2026-09-25) |
-| Form of copy             | Re-distributed in every SBV2 repository (see `../deberta/`).                                                                                            |
+| Form of copy             | Re-distributed in `karume-sbv2-jvnv`, truncated to its first 22 encoder layers and in converted storage form (see `../deberta/`).                        |
 | Code license             | n/a (weights only)                                                                                                                                      |
 | Weights license          | `cc-by-sa-4.0`, unchanged (interview 2026-09-25). `card.py` records the same (checked 2026-08-07).                                                      |
-| Attribution requirements | CC BY-SA 4.0 attribution, carried by the model card. The upstream gives no citation format (interview 2026-09-25).                                      |
+| Attribution requirements | CC BY-SA 4.0 attribution, carried by the model card and `NOTICE.md`. The upstream gives no citation format (interview 2026-09-25).                       |
 
 ### style-bert-vits2 (model implementation)
 

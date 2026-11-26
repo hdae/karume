@@ -1,16 +1,17 @@
 # Third-party notices — EmbeddingGemma 2
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distribution it builds
+(`karume-embeddinggemma-2`): for each upstream, where it comes from, the revision used, its license
+and what was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/embeddinggemma2/`) is repo-only: it is never published to PyPI
 and none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
@@ -47,10 +48,10 @@ The distribution carries the Apache-2.0 text (`LICENSE.md`) and a modification n
 (`NOTICE.md` — upstream ships no `NOTICE` file), in the form of the Gemma 4 distribution. Moving
 the pin to another commit needs this review again.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### google/embeddinggemma-2
 
@@ -62,6 +63,7 @@ published.
 | Code license             | n/a (weights, configs and tokenizer only)                                                                                                                  |
 | Weights license          | Apache-2.0 as declared by the model card's front matter (`license: apache-2.0`; the card body links its "License: Apache 2.0" line to <https://ai.google.dev/gemma/docs/gemma_4_license>) at the revision used; not gated; the repository has no LICENSE or NOTICE file. The card's "Ethics & Safety" section also states "Deployments must adhere to the Gemma Prohibited Use Policy" (<https://ai.google.dev/gemma/prohibited_use_policy>). Read against the revision used on 2026-11-25; the maintainer decided on 2026-11-25 to publish under Apache-2.0 with that sentence quoted. |
 | Attribution requirements | Apache 2.0 §4: `karume-embeddinggemma-2` bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) — the three towers extracted and re-expressed, the `bf16` and `i8` forms, the compiled tokenizer). No upstream NOTICE file (§4(d) does not apply). The card and `NOTICE.md` quote the upstream card's sentence on the Gemma Prohibited Use Policy verbatim with its link and do not reproduce the policy (maintainer decision 2026-11-25). |
+| Published in             | `karume-embeddinggemma-2` (`hdae/karume-embeddinggemma-2`, first uploaded 2026-11-25 with 0.24.0): `text/model/`, `text/vision/`, `text/audio/`, `text/tokenizer/`, and the attribution in its `README.md` and `NOTICE.md`. |
 
 ### transformers (model implementation)
 

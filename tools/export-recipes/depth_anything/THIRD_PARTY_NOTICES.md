@@ -1,16 +1,17 @@
 # Third-party notices — Depth Anything V2
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distribution it builds
+(`karume-depth-anything-v2`): for each upstream, where it comes from, the revision used, its license
+and what was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/depth_anything/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
@@ -23,10 +24,10 @@ questions it has to answer.
   normalization for the synthetic goldens.
 - **Paper** — Depth Anything V2, <https://arxiv.org/abs/2406.09414>.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### depth-anything/Depth-Anything-V2-Small-hf
 
@@ -36,7 +37,7 @@ published.
 | Revision used            | `5426e4f0f36572d16453bbda7a8389317b1bef99` (fetched 2026-08-16 into `inputs/depth-anything/Depth-Anything-V2-Small-hf`)                                                                                                                                                             |
 | Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                                                                                                                                       |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                  |
-| Weights license          | `card.py` records `apache-2.0` (checked on the HF model API, 2026-08-14). Unverified against the revision used.                                                                                                                                                                     |
+| Weights license          | Apache-2.0. `card.py` records `apache-2.0` (checked on the HF model API, 2026-08-14); the model card front matter at the revision used (`5426e4f0`) says `license: apache-2.0` (checked 2026-11-26). Base and Large are CC BY-NC 4.0 and are not shipped (`card.py`).                |
 | Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, the two bit-exact rewrites, the non-bit-exact transposed-convolution rewrite, no quantization). |
 
 ### transformers (model implementation)

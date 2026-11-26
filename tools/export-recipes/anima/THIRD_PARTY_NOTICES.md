@@ -1,16 +1,17 @@
 # Third-party notices — Anima
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distributions it builds (`karume-anima`,
+`karume-anima-extra`, `karume-anima-2.9b`): for each upstream, where it comes from, the revision
+used, its license and what was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/anima/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again.
 
 ## Upstream sources
 
@@ -44,10 +45,10 @@ questions it has to answer.
   kept for possible future fine-tune intake, and the conversion to diffusers naming uses the
   diffusers-supplied function.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### circlestone-labs/Anima-Base-v1.0-Diffusers (weights)
 
@@ -101,7 +102,7 @@ published.
 | Revision used            | version 2983680 — `inputs/anima/civitai-2983680/` with `civitai.json`; file `waiANIMA_v10Base10.safetensors`, sha256 `9d5a1e1393c2978d6a979fab38fb0dee00bc2a94e354196c9f3cf2f6f56d5fbf` (byte-matched)                                                                                                                                                                 |
 | Form of copy             | Loaded, not copied. Re-distributed in converted storage form (`karume-anima-extra`).                                                                                                                                                                                                                                                                                   |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                     |
-| Weights license          | Derivative of the CircleStone base, so the CircleStone Non-Commercial License flows through. Civitai permissions as of 2026-08-22 (re-checked 2026-09-01, unchanged): `allowNoCredit` true / `allowCommercialUse` Image, RentCivit / `allowDerivatives` true / `allowDifferentLicense` true. Whether those page fields can broaden the upstream license is Unverified. |
+| Weights license          | Derivative of the CircleStone base, so the CircleStone Non-Commercial License flows through. Civitai permissions as of 2026-08-22 (re-checked 2026-09-01 and 2026-11-26 through the Civitai public API, unchanged): `allowNoCredit` true / `allowCommercialUse` Image, RentCivit / `allowDerivatives` true / `allowDifferentLicense` true. Those fields do not broaden the upstream license: the CircleStone license governs the weights, and the card says so ("those permissions do not widen the base model's license", `card.py`, since 2026-08-22). |
 | Attribution requirements | The card lists the source page, author and the four permission fields with an "as of" date (`card.py`). Base-model obligations are covered by the bundled `LICENSE.md` / `NOTICE.md`.                                                                                                                                                                                  |
 
 ### anima-copycat-20260610 (third-party fine-tune)
@@ -120,7 +121,7 @@ published.
 | Item | Value |
 | --- | --- |
 | Upstream repository | <https://huggingface.co/Gazingstars123/Anima-2.9B> (author `Gazingstars123`). Its card calls the model "a fine-tune and layer-expansion of circlestone-labs/Anima": the transformer expanded from 28 to 40 blocks, each new block a copy of a neighbouring one with its output projections zeroed, then trained further ("As of preview v1, only the new layers have been trained"). `expand_manifest.json` beside the weights records `old_block_count` 28, `new_block_count` 40 and the source checkpoint `models/anima_base.safetensors`. Read from the local copy on 2026-11-24. |
-| Revision used | `9f9cb502dbae7a616c3cc5a530633427fe735665` (`inputs/anima/anima-2.9b-original/REVISION.txt`, fetched 2026-11-17). File `Anima-2.9B-preview-v1.safetensors`, sha256 `0b3020d1b906155f7eb30667622723e87160632c8c7a5f1c93bdce685f2a346d` of the local copy — not compared with the Hub's LFS oid (Unverified). Its header holds 928 tensors, all BF16, in 40 blocks (read 2026-11-24). |
+| Revision used | `9f9cb502dbae7a616c3cc5a530633427fe735665` (`inputs/anima/anima-2.9b-original/REVISION.txt`, fetched 2026-11-17). File `Anima-2.9B-preview-v1.safetensors`, sha256 `0b3020d1b906155f7eb30667622723e87160632c8c7a5f1c93bdce685f2a346d`, 5,843,204,206 B — equal to the Hub's LFS oid and size for that file at this revision (`paths-info` API, checked 2026-11-26). Its header holds 928 tensors, all BF16, in 40 blocks (read 2026-11-24). |
 | Form of copy | Loaded, not copied. Re-distributed in converted storage form (`karume-anima-2.9b`): its transformer (bf16 and int8) and its text conditioner, whose weights differ from the base's. The text encoder, the VAE decoder and the tokenizers are the official base's files, referenced across repositories from `karume-anima` (pinned by the sha256 of their published part 0 and checked part by part at build time). |
 | Code license | n/a (weights only) |
 | Weights license | The card's front matter declares `license: other` / `license_name: circlestone-labs-non-commercial-license` and links CircleStone's `LICENSE.md` on `main`; its License section says the weights are released under the CircleStone Labs Non-Commercial License, "falling under derivative model category". The `LICENSE.md` beside the weights is the v1.2 text as it stood at `circlestone-labs/Anima@f973fc41` (sha256 `ee956174…`, the digest the base block above records for that commit): it differs from the bundled `circlestone_license.txt` (`6e0b2da2`) only in the two section references upstream fixed on 2026-11-12 — §4(a)(i) "as per 2(d)" where the bundled text says "2(e)", and the survival list of §8(c) "2(c), 2(d), 4-11" where it says "2(e), 2(f), 4-11". The recipe bundles the `6e0b2da2` text, as for the other two repositories (the maintainer's ruling of 2026-11-24: the licensor is CircleStone, its fix changes two references and no term, and the author's card links CircleStone's current text, so the current text is the one to attach and the author is not asked). The author attaches no condition beyond the CircleStone license: the card states none and says the weights follow that license (the same ruling). The NVIDIA Open Model License Agreement applies through the Anima base (the card's acknowledgements name `nvidia/Cosmos-Predict2-2B-Text2Image` and `circlestone-labs/Anima`). |

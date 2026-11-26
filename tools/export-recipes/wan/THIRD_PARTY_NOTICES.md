@@ -1,17 +1,18 @@
 # Third-party notices — Wan2.1 / Wan2.2 / umT5-XXL
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distributions it builds (`karume-wan2.2`,
+`karume-umt5-xxl`): for each upstream, where it comes from, the revision used, its license and what
+was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/wan/`) is repo-only: it is never published to PyPI and none of
 it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to the recipe
 that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer. A field that names a review date records that the human review was
-completed on that date.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again. A field that names a review date
+records that the human review was completed on that date.
 
 ## Upstream sources
 
@@ -49,21 +50,21 @@ completed on that date.
   commit-pinned source URL.
 - **Technical report** — Wan: <https://arxiv.org/abs/2503.20314>.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 
 | Item                     | Value                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers>                                                                                                                                                                                                                                                                                                                                                                                      |
-| Revision used            | `0fad780a534b6463e45facd96134c9f345acfa5b` (`sources.py`; the containers' `provenance.upstreamRevision` carries the same value and `distribution.py` checks it)                                                                                                                                                                                                                                                                                |
-| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (f16-rounded weights; the transformer additionally as per-output-channel int8 weights — ADR 0120). The `text_encoder` folder itself is not re-distributed (`karume-umt5-xxl` converts the bit-identical encoder of `google/umt5-xxl` instead — see the next block); its outputs for the fixed prompts are re-distributed, and so is the tokenizer, converted into one JSON table. |
+| Revision used            | `0fad780a534b6463e45facd96134c9f345acfa5b` (`sources.py`; the text-embedding asset's and the tokenizer asset's `source.revision` carry the same value and `distribution.py` checks both)                                                                                                                                                                                                                                                       |
+| Form of copy             | Loaded, not copied. Its `transformer` and `vae` are not re-distributed (the scripts that read them write test fixtures only), nor is its `text_encoder` folder (`karume-umt5-xxl` converts the bit-identical encoder of `google/umt5-xxl` — see below). `karume-wan2.2` re-distributes two assets made from it: the tokenizer, converted into one JSON table, and the umT5-XXL outputs for the fixed prompts. |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Weights license          | `apache-2.0` — `sources.py` records it from the model card front matter (HF API, 2026-10-02); the repository has no LICENSE file. Reviewed by a human against the revision used on 2026-10-15.                                                                                                                                                                        |
-| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the text encoder referenced from `karume-umt5-xxl`, the precomputed text embeddings, the converted tokenizer).                                                                       |
+| Attribution requirements | Apache 2.0 §4: `karume-wan2.2` bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and its `NOTICE.md` lists the two assets made from this checkpoint (§4(b) — the precomputed text embeddings and the converted tokenizer with the prompt-cleaning tables).                                                                                                                                          |
 | Published in             | `karume-wan2.2` redistributes two assets made from this checkpoint: the converted tokenizer (its files are identical to the `tokenizer` folder of Wan2.2 TI2V 5B — next block) with the prompt-cleaning tables, and the precomputed text embeddings computed with this checkpoint's umT5-XXL in bfloat16. Its `NOTICE.md` lists both.                                                                        |
 
 ### Wan-AI/Wan2.2-TI2V-5B-Diffusers
@@ -95,7 +96,7 @@ published.
 | Upstream repository      | <https://github.com/huggingface/diffusers>                                                                                                                                                                                                |
 | Revision used            | `diffusers==0.39.0` (pinned in `pyproject.toml`, group `wan`)                                                                                                                                                                             |
 | Form of copy             | Imported classes, plus adapted functions in `dit_patch.py`, `vae_patch.py`, `vae_tiling.py` (`blend_v` / `blend_h` verbatim) and `ti2v_few_step_ref.py`, each marked with a "Third-party code notice".                                         |
-| Code license             | Apache-2.0 — the installed wheel's metadata (`diffusers 0.39.0`, checked 2026-10-03); the adapted files carry "Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved." Unverified against the repository's `LICENSE`. |
+| Code license             | Apache-2.0 — the installed wheel's metadata (`diffusers 0.39.0`, checked 2026-10-03); its `LICENSE` is identical to the `LICENSE` at the `v0.39.0` tag (checked 2026-11-26); the adapted files carry "Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved." |
 | Weights license          | n/a                                                                                                                                                                                                                                       |
 | Attribution requirements | Apache 2.0 §4(a)/(b) attaches to the adapted functions, which live only in this repo-only directory and are attributed in place. Nothing from `diffusers` code enters the published distribution.                                         |
 
@@ -106,7 +107,7 @@ published.
 | Upstream repository      | <https://github.com/huggingface/transformers> / <https://github.com/rspeer/python-ftfy>                                                                                                                                                                                                                                                                                                                             |
 | Revision used            | `transformers==5.14.1` / `ftfy==6.3.1` (pinned in `pyproject.toml`, group `wan`)                                                                                                                                                                                                                                                                                                                                    |
 | Form of copy             | Import-time dependencies. No code is copied; the Wan tokenizer asset carries ftfy-derived data — character tables evaluated from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database, and a JavaScript translation of ftfy's `BADNESS_RE` pattern (`prompt_clean.py`).                                                                                                                        |
-| Code license             | Apache-2.0 for both — the installed wheels' metadata (checked 2026-10-03). Unverified against the repositories' `LICENSE` files.                                                                                                                                                                                                                                                                                    |
+| Code license             | Apache-2.0 for both — the installed wheels' metadata (checked 2026-10-03); their license files are identical to `LICENSE` at transformers `v5.14.1` and `LICENSE.txt` at ftfy `v6.3.1` (checked 2026-11-26).                                                                                                                                                                                                       |
 | Weights license          | n/a                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Attribution requirements | None for this directory (no code copy). The ftfy-, `regex`- and Unicode-derived tables and the translated pattern in the Wan tokenizer asset (redistributed in `karume-wan2.2`) are listed in its `NOTICE.md`; the human review of these derived tables was completed on 2026-10-15. Nothing from `transformers` enters the distribution (the `karume-umt5-xxl` tokenizer asset carries no prompt-cleaning tables). |
 

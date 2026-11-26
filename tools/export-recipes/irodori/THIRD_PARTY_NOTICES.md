@@ -1,17 +1,20 @@
 # Third-party notices — Irodori-TTS v4 / v4.1 / v4.1 MF / v4 Large
 
-Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
-directory is known to derive from. **It is not a license determination.**
+Provenance record of this recipe directory and of the distributions it builds
+(`karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`,
+`karume-irodori-v4-large`): for each upstream, where it comes from, the revision used, its license
+and what was checked. **It is not a license determination.**
 
 This directory (`tools/export-recipes/irodori/`) is repo-only: it is never published to PyPI and
 none of it enters the `karume` wheel (ADR 0065 decision 1). Upstream-derived code lives next to
 the recipe that needs it so its provenance travels with the code.
 
-`Unverified` marks a field nobody has checked against the upstream revision actually used.
-Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
-questions it has to answer. `Unrecorded` marks a field whose value was checked for but has no local
-record; the reason is given in the field.
+`Unverified` marks a field nobody has checked against the upstream revision actually used. This
+record is updated at each publication of a distribution built from this recipe, by the license
+check of `docs/release-runbook.md` §1 ("License check"); a field that names a date records the
+check made on that date, and moving a pin needs the check again. "Interview <date>" and "reviewed
+… on <date>" record the maintainer's review. `Unrecorded` marks a field whose value was checked
+for but has no local record; the reason is given in the field.
 
 ## Upstream sources
 
@@ -30,8 +33,9 @@ record; the reason is given in the field.
   `irodori_tts/token_split.py` (its rule and its `KEEP_TOKENS` / `FORCE_SPLITS` lists), written
   into the distribution's tokenizer asset by `tokenizer_ref.py` (ADR 0149; its own block below).
 - **Text backbone** — [sbintuitions/modernbert-ja-310m](https://huggingface.co/sbintuitions/modernbert-ja-310m),
-  the ModernBERT-ja checkpoint the text encoder was built from, re-distributed inside the Irodori
-  distribution repositories. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
+  the ModernBERT-ja checkpoint the text encoder was built from, stored in `karume-irodori-v4-small`;
+  `karume-irodori-v4.1-small` and `-v4.1-small-mf` reference that container. Its modeling code
+  comes from `transformers` (pinned `transformers==5.14.1`).
 - **Text encoder and tokenizer of v4-Large** — [google/t5gemma-2-1b-1b](https://huggingface.co/google/t5gemma-2-1b-1b),
   the T5Gemma 2 checkpoint upstream fine-tuned v4-Large's text encoder from, and whose tokenizer
   upstream ships in the v4-Large repository; both are re-distributed inside the v4-Large
@@ -41,7 +45,8 @@ record; the reason is given in the field.
   `GEMMA_PROHIBITED_USE_POLICY.md` and `NOTICE` from the v4-Large snapshot (block below); the
   v4-Large distribution's `LICENSE.md` / `NOTICE.md` carry them.
 - **Codec weights** — [Aratako/Semantic-DACVAE-Japanese-32dim](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim),
-  also re-distributed. Its weights derive from
+  stored in `karume-irodori-v4-small`; `karume-irodori-v4.1-small`, `-v4.1-small-mf` and
+  `-v4-large` reference those containers. Its weights derive from
   [Aratako/Semantic-DACVAE-Japanese](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese)
   (MIT), whose weights in turn derive from
   [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked) (Apache-2.0) —
@@ -50,10 +55,10 @@ record; the reason is given in the field.
   `414c20785fc3a28373073ea8ef7a1316eeeaca6e` (`dacvae/export.py`), imported from a local clone
   through `sys.path`; no copy lives here.
 
-## Release-gate inventory
+## Upstream inventory
 
-One block per upstream above. Complete every row before anything built from this recipe is
-published.
+One block per upstream above. A block is completed before a distribution that carries its upstream
+is published, and checked again when its pin moves.
 
 ### Aratako/Irodori-TTS-v4-Small (weights)
 
@@ -83,10 +88,10 @@ published.
 | ------------------------ | ----- |
 | Upstream repository      | <https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF> |
 | Revision used            | `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e` (published 2026-09-12; the snapshot in `inputs/irodori/v4.1-small-mf`, 2026-11-14). The card names this revision. |
-| Form of copy             | Loaded, not copied. Its DiT pair (`dit` / `dit_context`) and its tokenizer asset are re-distributed in converted storage form; every other component is the published v4-small / v4.1-small container, referenced across repositories rather than copied (ADR 0150). |
+| Form of copy             | Loaded, not copied. Its DiT pair (`dit` / `dit_context`) is re-distributed in converted storage form; every other component and the tokenizer asset are the published v4-small / v4.1-small containers and file, referenced across repositories rather than copied (ADR 0150). |
 | Code license             | n/a (weights only) |
 | Weights license          | MIT — `license: mit` in the frontmatter of the upstream model card at the revision above (read 2026-11-14). It is upstream's MeanFlow distillation of Irodori-TTS-v4.1-Small (`base_model` in the same frontmatter). |
-| Attribution requirements | Unverified — the same MIT notice as the v4 / v4.1 blocks ("Copyright (c) 2026 Aratako" in the distribution's `LICENSE.md`) is assumed; whether the distilled weights carry any further condition is for the release review. |
+| Attribution requirements | The MIT copyright notice — the distribution's `LICENSE.md` carries "Copyright (c) 2026 Aratako" (generated from `distribution.py`'s `IRODORI_COPYRIGHTS`). The upstream card at the revision above (read 2026-11-26) states MIT and no further license condition; like the v4 / v4.1 cards it adds ethical restrictions and a BibTeX citation, the form the interview of 2026-09-25 judged covered for v4 / v4.1 by naming the upstream as `base_model` and stating the license in the card. |
 
 ### Aratako/Irodori-TTS-v4-Large (weights)
 
@@ -104,11 +109,11 @@ published.
 | Item                     | Value |
 | ------------------------ | ----- |
 | Upstream repository      | <https://huggingface.co/google/t5gemma-2-1b-1b> |
-| Revision used            | Unverified — not loaded: the repository is gated, and the export builds the text encoder from the config embedded in the v4-Large checkpoint. That checkpoint's `config_json` names `text_encoder_revision` `dd0a2683227859151b1730ca3a63087df5b5f39b` and `text_tokenizer_repo` / `caption_tokenizer_repo` `google/t5gemma-2-1b-1b` (read 2026-11-14); nobody has looked that revision up on the Hub. |
-| Form of copy             | Not copied directly. Upstream fine-tuned its text encoder (the `backbone` component — "the fine-tuned text encoder from google/t5gemma-2-1b-1b", upstream's model card) and ships the tokenizer in the v4-Large repository's `tokenizer/`; both reach the distribution through the v4-Large block above. Whether that `tokenizer/` is byte-identical to this repository's tokenizer at the revision above is Unverified. |
+| Revision used            | `dd0a2683227859151b1730ca3a63087df5b5f39b` — not loaded: the repository is gated, and the export builds the text encoder from the config embedded in the v4-Large checkpoint, whose `config_json` names this `text_encoder_revision` and `text_tokenizer_repo` / `caption_tokenizer_repo` `google/t5gemma-2-1b-1b` (read 2026-11-14). The revision exists on the Hub and is its `main` (HF models API, 2026-11-26). |
+| Form of copy             | Not copied directly. Upstream fine-tuned its text encoder (the `backbone` component — "the fine-tuned text encoder from google/t5gemma-2-1b-1b", upstream's model card) and ships its own copy of the tokenizer in the v4-Large repository's `tokenizer/`; both reach the distribution through the v4-Large block above. The distribution's tokenizer asset is converted from that copy: `tokenizer/tokenizer.json` of `Aratako/Irodori-TTS-v4-Large` at `2e0c55428ce97268a507f1feeb2478f8d9148e8b`, 33,384,387 bytes, sha256 `f5b325224482ec441ec5fbe2a5ac08c3758e0f9605f6e54368e31f736fcfb01d` (the download record and the asset's `source` name the same). That copy is this repository's `tokenizer.json` at the revision above (33,384,388 bytes, sha256 `4c76318660cc87c3029535cc1596717df67132d231ce4ecf088ba2a8ec07c098`) with one value changed: the added token `<mask>` (id 4) is marked `"special": true` instead of `false`, the one byte between the two sizes; the vocabulary, the merges, the normalizer, the pre-tokenizer, the decoder and the other 6,413 added tokens are the same, and setting that one value makes the files byte-identical (compared 2026-11-26). In the asset the value only puts id 4 into `specialIds`, which only decoding reads. The copy's `tokenizer_config.json` (802 bytes) is a re-save of this repository's (830 bytes); no distribution carries either. |
 | Code license             | n/a (weights only; modeling code is `transformers`) |
-| Weights license          | Unverified at the revision used. The Gemma Terms of Use upstream ships list "T5Gemma 2" in their Appendix, and upstream's model card names this model as the reason those terms apply to v4-Large. |
-| Attribution requirements | Unverified — assumed covered by the v4-Large block's (the same Gemma Terms of Use); the card lists this repository in `base_model` and in the attribution. |
+| Weights license          | `gemma` — the `license` of this repository's card data at the revision above (HF models API, 2026-11-26). The Gemma Terms of Use upstream ships list "T5Gemma 2" in their Appendix, and upstream's model card names this model as the reason those terms apply to v4-Large. |
+| Attribution requirements | Covered by the v4-Large block's: the same Gemma Terms of Use, whose wording in the distribution the maintainer reviewed on 2026-11-14. The card lists this repository in `base_model` and in the attribution. |
 
 ### Aratako/Irodori-TTS (model implementation)
 
@@ -130,15 +135,15 @@ published.
 | Form of copy             | Neither code nor the lists are copied: `tokenizer_ref.py` imports upstream's `RareTokenSplitter`, runs it on the real tokenizer, and writes what it did into the tokenizer asset's `rareTokenSplit` key (the ids whose score it replaced, the replaced score, and the token id → piece ids map of the `FORCE_SPLITS` words). The asset therefore carries a table derived from upstream's rule and lists, in id form. The parity fixture (`packages/models/tests/fixtures/irodori-text/parity.json`) carries the same table cut to its vocabulary subset. |
 | Code license             | MIT — the same repository and `LICENSE` as the model implementation block above ("Copyright (c) 2026 Aratako").                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Weights license          | n/a                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Attribution requirements | Unverified — the distribution's `LICENSE.md` carries Aratako's MIT notice for the weights; whether that also covers this derived table or the table needs its own line is for the release review. The asset key is documented in ADR 0149 and in `tokenizer_ref.py`.                                                                                                                                                                                                                                                                                     |
+| Attribution requirements | Aratako's MIT notice. The table is stored only in `karume-irodori-v4-small`'s tokenizer asset (`v4.1-small` and `v4.1-small-mf` reference that file; the v4-Large tokenizer carries no table), whose `LICENSE.md` opens with the MIT License and "Copyright (c) 2026 Aratako" and covers every component except the codec pair. The table derives from code under the same notice and license, so it needs no line of its own (checked 2026-11-26). The asset key is documented in ADR 0149 and in `tokenizer_ref.py`. |
 
 ### sbintuitions/modernbert-ja-310m (text backbone)
 
 | Item                     | Value                                                                                                                                                                                                                                                                                                             |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/sbintuitions/modernbert-ja-310m>                                                                                                                                                                                                                                                          |
-| Revision used            | Unrecorded (fetched before the local cache kept a record; main checked 2026-09-25) — the HF cache has no `refs/main` for this repository (local fetch record, 2026-09-25)                                                                                                                                         |
-| Form of copy             | Re-distributed inside the Irodori distribution.                                                                                                                                                                                                                                                                   |
+| Revision used            | `77675fc96a7e445e982e2ba90246b816efc74ec6` — the `text_encoder_revision` the `config_json` of the v4-small, v4.1-small and v4.1-small-MF checkpoints names (read 2026-11-26); the export builds from that embedded config and does not fetch this repository. The revision exists on the Hub with `license: mit` (HF models API, 2026-11-26). |
+| Form of copy             | Stored in `karume-irodori-v4-small`; `karume-irodori-v4.1-small` and `-v4.1-small-mf` reference that container.                                                                                                                                                                                                   |
 | Code license             | n/a (weights only; modeling code is `transformers`)                                                                                                                                                                                                                                                               |
 | Weights license          | MIT (interview 2026-09-25). `card.py` records `mit` (checked on the HF models API, 2026-08-12).                                                                                                                                                                                                                   |
 | Attribution requirements | The MIT copyright notice, plus a BibTeX citation on the card (interview 2026-09-25). The BibTeX citation on the card is an academic citation format, not a redistribution condition; naming the upstream as `base_model` on HF and stating the license in the card were judged sufficient (interview 2026-09-25). |
@@ -149,7 +154,7 @@ published.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim>                                                                                                                                                                                                                                            |
 | Revision used            | `47376ee24834d7a05a48ebabfe3cde29b3c5e214` (HF cache `refs/main` — local fetch record, 2026-09-25)                                                                                                                                                                                                         |
-| Form of copy             | Re-distributed inside the Irodori distribution.                                                                                                                                                                                                                                                            |
+| Form of copy             | Stored in `karume-irodori-v4-small`; `karume-irodori-v4.1-small`, `-v4.1-small-mf` and `-v4-large` reference those containers.                                                                                                                                                                             |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                         |
 | Weights license          | MIT (interview 2026-09-25). `card.py` records MIT (checked in `docs/research/2026-08-11-irodori-source-recon.md`). The weights derive from the two blocks below, and the chain ends in Apache-2.0.                                                                                                         |
 | Attribution requirements | The MIT copyright notice, plus a citation on the card (interview 2026-09-25). The BibTeX citation on the card is an academic citation format, not a redistribution condition; naming the upstream as `base_model` on HF and stating the license in the card were judged sufficient (interview 2026-09-25). |
@@ -159,7 +164,7 @@ published.
 | Item                     | Value                                                                                                                                                                                                                                                                                                      |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/Aratako/Semantic-DACVAE-Japanese>                                                                                                                                                                                                                                                  |
-| Revision used            | Unrecorded (not fetched locally; parent of the 32dim checkpoint) — `card.py` separately records the revision seen on the HF models API (`96adcf19…`, checked 2026-09-24).                                                                                                                                  |
+| Revision used            | n/a — not loaded and not redistributed (parent of the 32dim checkpoint, whose revision is the one above); `card.py` records the revision seen on the HF models API (`96adcf19…`, checked 2026-09-24).                                                                                                      |
 | Form of copy             | Not copied directly. It is the `base_model` of the codec weights above.                                                                                                                                                                                                                                    |
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                         |
 | Weights license          | MIT (interview 2026-09-25). `card.py` records `mit` (HF models API, checked 2026-09-24). Its README says the weights derive from `facebook/dacvae-watermarked`.                                                                                                                                            |
