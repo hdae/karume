@@ -36,8 +36,9 @@ family names).
 
 This is why the public surface is split into **2 Pipelines** (the same shape as anima's official /
 fine-tuned): `root_files` (`LICENSE.md` / `NOTICE.md` at the root of the distribution repository)
-is one set fixed per Pipeline, and the MIT copyright lines differ per repository (HR has the one
-ZhengPeng line, Lucida has 2 lines, the fine-tune's and the upstream's). Folding them into one would
+is one set fixed per Pipeline, and the MIT copyright lines differ per repository (HR has the
+ZhengPeng line, Lucida the fine-tune's line before it; both end with the Swin Transformer backbone's
+line). Folding them into one would
 make one of the repositories **claim a copyright that is not its own** or drop the upstream's
 copyright notice — both stay plausible prose, so they pass `verify_dist` and the manifest checks,
 and nobody could notice until after shipping. The card's attribution comes in through the same entry
@@ -718,19 +719,35 @@ def birefnet_dist_plan(series_dir: Path, model: str, checkpoint: str) -> ModelPl
 #: frontmatter), so the text is built from the shared template (`_shared.licenses.mit_license`) and
 #: the holder lines live here.
 #:
-#: MUST: Lucida has 2 lines (the fine-tune's and the upstream's). MIT's "include the copyright
-#: notice and permission notice" means a derivative cannot drop the upstream's notice either, and
-#: the upstream card itself declares "the original copyright notice is preserved".
+#: MUST: Lucida has 3 lines (the fine-tune's, the upstream's and the backbone's). MIT's "include
+#: the copyright notice and permission notice" means a derivative cannot drop the upstream's notice
+#: either, and the upstream card itself declares "the original copyright notice is preserved".
 #:
-#: NOTE: upstream does not state the years (neither repository has a `LICENSE` file). For ZhengPeng
-#: the year of the BiRefNet paper (2024) was taken, for egeorcun the year the upstream card itself
-#: gives the current weights (2026) — the manual license review before release (ADR 0065 decision 7)
-#: has the final say.
+#: The ZhengPeng and egeorcun lines are those of the `LICENSE` of the implementation repository each
+#: HF card links (GitHub `ZhengPeng7/BiRefNet`, `egeorcun/lucida` — checked 2026-11-26).
+#:
+#: MUST: both repositories carry the Swin Transformer line ({@link SWIN_TRANSFORMER_COPYRIGHT}) —
+#: the backbone is Swin Transformer, whose shifted-window mask generation the recipe ports
+#: verbatim (`birefnet.patch._build_attn_mask`), so its notice travels with the distributions
+#: (maintainer ruling of 2026-11-26). Ordered closest to the distribution first, per the convention
+#: of `mit_license`, so the backbone's line comes last.
+SWIN_TRANSFORMER_UPSTREAM = "microsoft/Swin-Transformer"
+
+#: The copyright line of the `LICENSE` of GitHub `microsoft/Swin-Transformer` (verbatim; checked on
+#: `main` at `f82860bf`, 2026-11-26 — the file last changed in `77409a45`, 2021-03-25). Its
+#: permission notice is the MIT text of `_shared/licenses/mit.txt` (the upstream file indents it by
+#: four spaces and ends without the final period).
+SWIN_TRANSFORMER_COPYRIGHT = "Copyright (c) Microsoft Corporation."
+
 BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
-    BIREFNET_HR_CHECKPOINT: ("Copyright (c) 2024 ZhengPeng",),
+    BIREFNET_HR_CHECKPOINT: (
+        "Copyright (c) 2024 ZhengPeng",
+        SWIN_TRANSFORMER_COPYRIGHT,
+    ),
     BIREFNET_LUCIDA_CHECKPOINT: (
         "Copyright (c) 2026 egeorcun",
         "Copyright (c) 2024 ZhengPeng",
+        SWIN_TRANSFORMER_COPYRIGHT,
     ),
 }
 
@@ -746,7 +763,11 @@ BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
 BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under
-the MIT License (see `LICENSE.md`). The following changes were made:
+the MIT License (see `LICENSE.md`). The model's backbone is Swin Transformer
+(`{swin}`), which is licensed under the MIT License as
+well; its copyright notice is kept in `LICENSE.md`.
+
+The following changes were made:
 
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors, followed by the weight parts they name).
@@ -777,6 +798,7 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
         "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[checkpoint]),
         "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(
             repo=BIREFNET_UPSTREAM[checkpoint],
+            swin=SWIN_TRANSFORMER_UPSTREAM,
             storage="\n".join(birefnet_storage_lines(checkpoint, birefnet_seat_dtypes(checkpoint))),
         ),
     }

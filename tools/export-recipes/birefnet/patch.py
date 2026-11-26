@@ -326,6 +326,18 @@ def _swin_block_forward(
 MAX_MASK_WINDOW_KINDS = 4
 
 
+# Third-party code notice (`birefnet/THIRD_PARTY_NOTICES.md`).
+# `_build_attn_mask` below is ported from the mask generation of `BasicLayer.forward` in the
+# `models/backbones/swin_v1.py` section of the `birefnet.py` that `ZhengPeng7/BiRefNet_HR` ships,
+# which is Swin Transformer's code (microsoft/Swin-Transformer). It is verbatim except that `Hp` /
+# `Wp` are python ints and `window_partition` is `_window_partition`. License: MIT License
+# (https://github.com/microsoft/Swin-Transformer/blob/main/LICENSE). Upstream copyright notice,
+# copied verbatim from the header of that section:
+#
+#   Swin Transformer
+#   Copyright (c) 2021 Microsoft
+#   Licensed under The MIT License [see LICENSE for details]
+#   Written by Ze Liu, Yutong Lin, Yixuan Wei
 def _build_attn_mask(
     padded_height: int,
     padded_width: int,
